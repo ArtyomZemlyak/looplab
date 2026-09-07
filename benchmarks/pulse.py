@@ -9,9 +9,16 @@ batches; the tool obeyed and the operator did not. Same shape as everything else
 breakage, a quiet mismatch between what I thought I was doing and what I was doing.
 
 Point 2 never needed the value. It needs: did new nodes arrive, were any of them ZERO, and if so is
-that zero a ruler refusal or a solver failure. The discriminator is `eval_seconds` -- a zero in under
-five seconds is the harness declining, a zero at 45 s is an evaluation that ran and failed -- and all
-12 zeros in the corpus are the second kind, at 41-47 s, carrying `violations`.
+that zero a ruler refusal or a solver failure. The discriminator WAS `eval_seconds` -- a zero in
+under five seconds is the harness declining, a zero at 45 s is an evaluation that ran and failed --
+and all 12 zeros in the corpus are the second kind, at 41-47 s, carrying `violations`.
+
+The bridge, though, says why by name: `looplab_eval` classifies every refusal
+(`baseline_measured_in_pass`, `regime_not_scorable_for_task`, `evaluator_timeout`, twelve more) and
+the reason travels in the node's `stdout_tail`. That is read now, and the stopwatch is the fallback
+for a node whose stdout the record did not keep -- because the heuristic is exactly wrong about the
+costliest refusal: `evaluator_timeout` returns its zero AFTER the full timeout, so a 900-second
+arena failure read as "the evaluation ran and came back invalid".
 
 So this prints counts, seconds, violations, spend, log age and `wchan`, and never a metric. The
 test that matters is behavioural: a probe whose node scores 123456.789 must not have that number
@@ -25,6 +32,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -37,6 +45,32 @@ import lanes  # noqa: E402
 
 DEFAULT_BENCH = "/var/tmp/looplab-bench"
 REFUSAL_SECONDS = 5.0     # a zero faster than this is the ruler declining, not the solver failing
+
+
+# THE BRIDGE SAYS WHY, AND THIS TOOL WAS GUESSING FROM A STOPWATCH. `looplab_eval` classifies every
+# refusal by name -- `baseline_measured_in_pass`, `regime_not_scorable_for_task`,
+# `evaluator_timeout`, twelve more -- and `compare_arms` keeps a partition of that vocabulary into
+# the solver's fault and the arena's. None of it reached here: the reason travels in the node's
+# `stdout_tail` (the bridge's own JSON line, kept to 4,000 chars by `evaluate.py`), and this file
+# inferred "refusal" from `eval_seconds < 5`.
+#
+# That heuristic is right for the refusals that cost no time and WRONG for the one that costs the
+# most: `evaluator_timeout` returns a zero after the full timeout, so the tool an operator watches
+# live called an arena failure a solver's zero -- the same misclassification `compare_arms`'
+# NOT_SOLVERS_FAULT list exists to prevent, arriving through the other door.
+_REASON = re.compile(r'"no_speedup"\s*:\s*\{[^{}]*?"reason"\s*:\s*"([a-z_]+)"')
+
+
+def refusal_reason(data: dict) -> str | None:
+    """The bridge's own name for why this node has no speedup, or None if it did not say."""
+    for field in ("stdout_tail", "stderr_tail", "error_evidence"):
+        text = data.get(field)
+        if not isinstance(text, str):
+            continue
+        got = _REASON.search(text)
+        if got:
+            return got.group(1)
+    return None
 
 
 def pulse(events_path: str) -> dict:
@@ -59,9 +93,13 @@ def pulse(events_path: str) -> dict:
             else:
                 zeros += 1
                 secs = data.get("eval_seconds")
+                why = refusal_reason(data)
                 bad.append({"node_id": data.get("node_id"), "eval_seconds": secs,
-                            "violations": data.get("violations"),
-                            "refusal": isinstance(secs, (int, float)) and secs < REFUSAL_SECONDS})
+                            "violations": data.get("violations"), "reason": why,
+                            # The stopwatch stays as the FALLBACK, for a node whose stdout the
+                            # record did not keep; a reason that was said outranks it either way.
+                            "refusal": bool(why) if why else
+                            (isinstance(secs, (int, float)) and secs < REFUSAL_SECONDS)})
         elif kind in ("error", "developer_crash", "build_interrupted"):
             errors += 1
     return {"spend": spend, "nodes": nodes, "zeros": zeros, "errors": errors, "bad": bad}
@@ -190,7 +228,12 @@ def main(argv=None) -> int:
             # declined to measure -- a regime mismatch, an unloadable solver -- and blaming the
             # model for it sends the next hour in the wrong direction. All 12 corpus zeros are the
             # other kind: 41-47 s of real evaluation that came back invalid.
-            what = ("RULER REFUSAL -- the harness declined, the solver was never the question"
+            # AND THE BRIDGE'S OWN NAME WHERE IT SAID ONE. The seconds are the fallback now, not
+            # the diagnosis: `evaluator_timeout` is a refusal that costs the FULL timeout, so the
+            # rule "a zero at 45 s is the solver's" gets that one exactly backwards.
+            what = (f'RULER REFUSAL ({z["reason"]}) -- the harness declined, the solver was never '
+                    "the question" if z.get("reason") else
+                    "RULER REFUSAL -- the harness declined, the solver was never the question"
                     if z["refusal"] else "the evaluation ran and came back invalid")
             print(f'      zero at node {z["node_id"]}: eval_seconds={z["eval_seconds"]}, '
                   f'violations={z["violations"]} -- {what}')

@@ -13572,3 +13572,28 @@ ahead of it, and the local `rnd-merge` / `rnd-merged` are 367 and 429 behind. Th
 merging that is the operation the branch's own history calls "merge: origin/master into the rnd
 branch", it has resolved ten to fifteen conflicts each time it was done, and it changes the arm
 under measurement — so it is not something to do in passing.
+
+## §323 — the bridge says why, and the tool an operator watches was guessing from a stopwatch
+
+Two campaign links checked first, both already closed and both driven rather than read: `run_one` is
+backgrounded per task (`run_one "$T" ... &`), so §321's per-task `export ALGOTUNE_EVAL_WORKERS`
+cannot leak into the next task on the same lane; and `regime_not_scorable_for_task` is inside
+`compare_arms`' `NOT_SOLVERS_FAULT`, verified by deleting it — two tests go red, one of them the
+partition test that requires every reason in the bridge's vocabulary to be classified.
+
+The third link was open. `looplab_eval` names every refusal (`baseline_measured_in_pass`,
+`regime_not_scorable_for_task`, `evaluator_timeout`, twelve more) and the name travels into the run
+log inside the node's `stdout_tail` — measured: `data.metric_provenance.unbound_reason` is the only
+`reason`-shaped field the event carries, so nothing structured reaches a reader. `pulse` therefore
+decided "ruler refusal or solver failure" from `eval_seconds < 5`.
+
+That heuristic is right for the refusals which cost no time and **exactly wrong about the costliest
+one**: `evaluator_timeout` returns its zero after the full timeout, so a 900-second arena failure
+printed as "the evaluation ran and came back invalid" — the misclassification `compare_arms`'
+partition exists to prevent, arriving through the door the operator actually looks at.
+
+`pulse` now reads the bridge's own reason and names it; the stopwatch stays as the fallback for a
+node whose stdout the record did not keep, which is the case the heuristic was written for. Three
+mutations red: the stopwatch alone, a regex loose enough to match the word `no_speedup` in prose
+(these logs contain it — the model writes about it), and reading the reason without putting it in
+the row.
