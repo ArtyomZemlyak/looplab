@@ -62,14 +62,37 @@ def _start(tmp_path, cpus):
     return subprocess.run(["bash", str(START)], env=env, capture_output=True, text=True, timeout=120)
 
 
-def test_the_meter_lands_on_the_cores_the_box_profile_named(tmp_path, meter):
-    result = _start(tmp_path, "44-45")
+def _two_cores_this_box_has() -> str:
+    """A `taskset` spec built from THIS process's own affinity mask.
+
+    The literal `44-45` stood here and was never read from the box profile — it is a hand-picked
+    subset of that profile's `44-47,92-95`, so the test's name overstated what it checked. On the
+    bench stand it passed; on a 4-core box `taskset -c 44-45` fails with `Invalid argument`, the
+    meter never comes up, and the assertion reddens for a reason it is not about. Whether those
+    particular cores are off the lanes is a different claim and is already driven, without any box,
+    by `test_the_pinned_cores_are_not_in_any_lane_the_campaign_would_hand_out` below.
+    """
+    cores = sorted(os.sched_getaffinity(0))
+    assert cores, "no CPU in this process's affinity mask"
+    picked = cores[-2:]
+    return f"{picked[0]}-{picked[1]}" if len(picked) == 2 and picked[1] == picked[0] + 1 \
+        else ",".join(str(c) for c in picked)
+
+
+def test_the_meter_lands_on_the_cores_it_was_given(tmp_path, meter):
+    """The launcher's half: what it is handed is what the process ends up on, and it says so.
+
+    Asserted against `/proc/<pid>/status` rather than the command line, because the 2026-08-31
+    failure is precisely that a correct-looking invocation left the meter on `0-95`.
+    """
+    cpus = _two_cores_this_box_has()
+    result = _start(tmp_path, cpus)
     pids = _pids()
     assert pids, result.stdout + result.stderr
-    assert _affinity(pids[0]) == "44-45", (
-        "the meter is on cores the box profile did not give it; on this box that means a lane\n"
+    assert _cpus(_affinity(pids[0])) == _cpus(cpus), (
+        f"the meter is on cores it was not given ({cpus}); on the bench box that means a lane\n"
         + result.stdout)
-    assert "pinned to 44-45" in result.stdout
+    assert f"pinned to {cpus}" in result.stdout
 
 
 def test_an_unpinned_meter_says_so_instead_of_going_quietly(tmp_path, meter):

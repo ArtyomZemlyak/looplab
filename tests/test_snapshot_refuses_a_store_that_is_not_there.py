@@ -25,13 +25,35 @@ from pathlib import Path
 
 import pytest
 
+from _bench_fixtures import bench_root
+
 REPO = Path(__file__).resolve().parents[1]
 SNAPSHOT = REPO / "benchmarks" / "snapshot.sh"
 
 
-def _run(dest, env=None, timeout=600):  # noqa: D401 - timeout is raised by the lock tests
+# The SOURCE every test here snapshots, built once per session and never the box's own.
+# `os.environ.setdefault("BENCH_ROOT", "/var/tmp/looplab-bench")` stood here until 2026-09-07 and it
+# is why eleven of these tests were red on any machine without an arena: with no such root the
+# script reported six MISSING sources and exited 1, so eleven assertions about REFUSALS, locks and
+# the environment record failed for a reason none of them is about. A test whose subject is what a
+# script refuses has to own its inputs. The builder is shared with
+# `test_snapshot_carries_the_repo_and_the_runs.py` rather than copied — see `tests/_bench_fixtures.py`.
+_SOURCE: list = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _synthetic_bench_source(tmp_path_factory):
+    _SOURCE.append(bench_root(tmp_path_factory.mktemp("bench-source")))
+    yield
+    _SOURCE.clear()
+
+
+def _run(dest, env=None, timeout=600, src=None):  # noqa: D401 - timeout is raised by the lock tests
     e = dict(os.environ)
-    e.setdefault("BENCH_ROOT", "/var/tmp/looplab-bench")
+    # SET, not `setdefault`: an operator running the suite on the bench stand has BENCH_ROOT
+    # exported, and inheriting it would put these tests back on the box's live tree — the exact
+    # dependency this removes, and invisibly, since it would still pass there.
+    e["BENCH_ROOT"] = str(src or _SOURCE[0])
     if env:
         e.update(env)
     return subprocess.run(
@@ -198,7 +220,24 @@ def test_b2_a_taken_stamp_does_not_become_a_shared_directory():
 # 2026-08-29 failure -- an empty backup under a success code -- reintroduced by its own repair.
 
 
+# OPEN[unwritable-destination-refusal-undriven-as-root] the "NOTHING WAS WRITTEN" refusal is the
+# one rung here with no falsifier a root suite can run: `chmod 0555` refuses root nothing, and the
+# root-respecting alternatives (an immutable attribute, a read-only bind mount) need privileges a
+# container may not have, while making the store a FILE tests ENOTDIR rather than permission. Until
+# one is found this property is asserted only where the suite runs unprivileged.
+# proof:present:os.geteuid()@tests/test_snapshot_refuses_a_store_that_is_not_there.py
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the write bit, so there is no refusal")
 def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
+    """FALSELY GREEN UNTIL 2026-09-07, and only on a box with no arena.
+
+    Root bypasses directory write permission, so `chmod 0555` refuses this process nothing and the
+    snapshot writes happily. It passed anyway because `_run` was pointed at the box's own
+    `/var/tmp/looplab-bench`: with no such tree the script exited 1 for six MISSING sources, and the
+    `returncode != 0` below read that as the permission refusal it is about. Giving the tests their
+    own source removed the second cause and left the first visible. Same rule as
+    `test_read_fence.py`'s write-bit falsifier: a permission test cannot be run by the user that
+    has none.
+    """
     store = tmp_path / "looplab-bench"
     store.mkdir()
     (store / ".persistent-store-id").write_text("test")
