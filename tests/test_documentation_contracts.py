@@ -113,6 +113,28 @@ def test_index_mentions_every_numbered_document():
     assert "| 09 |" in index and "No document was allocated" in index
 
 
+def test_claude_md_does_not_grow():
+    """A RATCHET, not a target: `CLAUDE.md` may shrink freely and may not grow.
+
+    It is read in full at the head of every agent turn in this repository — 247,023 bytes here,
+    about 58,000 tokens, paid again on every turn of every session. The 2026-09-02 whole-tree
+    review named the absence of any bound on it (`claude-md-has-no-size-budget`); this is that
+    bound, in the only form that costs nothing to adopt. It deliberately does NOT prescribe a
+    smaller size — half the file is measurements that belong in `docs/` and moving them is real
+    work with real judgement in it — it only stops the file getting worse while nobody is looking.
+
+    RAISING THE NUMBER IS THE THING THIS EXISTS TO MAKE DELIBERATE. A row that genuinely belongs
+    here (a new package, a rule an agent must not rediscover) is worth its bytes; a paragraph of
+    measurement is worth a doc and a one-line pointer. If you are about to raise it, ask which of
+    the two you have — and if it is the first, raise it and say in the note below what bought it.
+    """
+    size = (ROOT / "CLAUDE.md").stat().st_size
+    assert size <= 247_023, (
+        f"CLAUDE.md grew to {size:,} bytes (the ratchet is 247,023). Every agent turn in this "
+        "repository pays for it. Move the measurement into docs/ and leave a pointer, or raise "
+        "the ratchet here and say what bought the bytes.")
+
+
 def test_all_relative_markdown_links_resolve():
     # `.ipynb_checkpoints` is EXCLUDED, and not as tidiness: this repo is edited on a JupyterHub
     # box, where saving any doc mints `docs/guide/.ipynb_checkpoints/<name>-checkpoint.md`. Its
