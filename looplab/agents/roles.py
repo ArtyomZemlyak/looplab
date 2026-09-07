@@ -1742,6 +1742,13 @@ class WrapsDeveloper:
         self.last_seed = getattr(self._wrapped, "last_seed", None)
         self.last_run = getattr(self._wrapped, "last_run", None)
         self.last_patch = getattr(self._wrapped, "last_patch", None)
+        # …and `last_budget_facts`, the tenth member, which was NOT mirrored until 2026-09-07 —
+        # the same omission this docstring records for the three before it, in the same shape. The
+        # inner `LLMRepoDeveloper` writes it when a session is cut off by its money or time ceiling;
+        # under the shipped `unified_agent` default the engine's developer is THIS facade, so the
+        # envelope capture read None and every build recorded "the session was never cut" — the
+        # falsy default, on the corpus meant to settle whether the ceiling ever fires.
+        self.last_budget_facts = getattr(self._wrapped, "last_budget_facts", None)
 
 
 # --------------------------------------------------------------------------- #

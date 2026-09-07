@@ -33,7 +33,6 @@ from looplab.core.run_deletion import (
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import EventStore
-from looplab.cli.token_report import echo_card_and_build_tables
 from looplab.events.readmodel import (
     STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status)
 from looplab.events.replay import fold
@@ -46,9 +45,10 @@ from looplab.cli import (
 # The rendering half of `timings` and `tokens` (doc 25 CT-01's line cap, doc 52 row 31):
 # printing and the shared span vocabulary, extracted so a new diagnostic does not have to buy
 # its room by deleting why-comments.
-from looplab.cli.run_report import (echo_containments, echo_reconciliation, echo_section,
-                                    minutes, output_fingerprint, span_category,
-                                    span_seconds, stage_identity_rows, traced_seconds)
+from looplab.cli.run_report import (echo_card_and_build_tables, echo_containments,
+                                    echo_reconciliation, echo_section, minutes,
+                                    output_fingerprint, span_category, span_seconds,
+                                    stage_identity_rows)
 
 
 @app.command()
@@ -139,8 +139,7 @@ def tokens(run_dir: Path = typer.Argument(...),
     import json as _json
 
     from looplab.events.eventstore import read_jsonl_lenient_with_health
-    from looplab.events.token_spend import (CARD_UNATTRIBUTED, token_spend_by_build,
-                                            token_spend_by_card, token_spend_by_phase)
+    from looplab.events.token_spend import token_spend_by_phase
 
     ev_path = run_dir / "events.jsonl"
     sp_path = run_dir / "spans.jsonl"
@@ -243,14 +242,12 @@ def tokens(run_dir: Path = typer.Argument(...),
         typer.echo(f"residual   : {out['residual']:>14,} tokens "
                    f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
 
-    # THE PER-CARD HALF, in `cli/token_report.py`. Phase answers "which KIND of work spent it";
+    # THE PER-CARD HALF, in `cli/run_report.py`. Phase answers "which KIND of work spent it";
     # that module answers "which EXPERIMENT spent it, and was that experiment ever evaluated" — the
     # question a run cannot otherwise ask, because the durable ledger carries no card and no node.
     # It is printed by DEFAULT rather than behind a flag: the defect it closes is that nobody could
     # see it, and an opt-in view is not seen.
-    echo_card_and_build_tables(rows, state=state, ev_path=ev_path, ledger_total=ledger_total,
-                               by_card_fold=token_spend_by_card, by_build_fold=token_spend_by_build,
-                               unattributed=CARD_UNATTRIBUTED)
+    echo_card_and_build_tables(rows, state=state, ev_path=ev_path, ledger_total=ledger_total)
     # `read_jsonl_lenient_with_health` returns a plain DICT, and its damage key is `invalid_lines`.
     # `getattr(health, "damaged", 0)` was therefore always 0 by two independent routes — a dict has
     # no such attribute and there is no such key — so an unreadable `spans.jsonl` (the routine shape
@@ -310,7 +307,6 @@ def timings(run_dir: Path = typer.Argument(...),
     # `spans.jsonl` is a high-volume sidecar (the reason `events/span_index.py` exists). It is read
     # WHOLE, so peak memory tracks the file: the accelerated index is deliberately not used here
     # because building it WRITES `spans.index.jsonl`, and this command is read-only.
-    from looplab.events.eval_occupancy import eval_occupancy
     import json as _json
     from collections import defaultdict
 

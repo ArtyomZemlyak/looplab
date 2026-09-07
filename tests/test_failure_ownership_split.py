@@ -1356,3 +1356,37 @@ def test_an_older_duck_typed_seam_is_a_diagnostician_that_did_not_answer():
                                                       REASON_SOURCE_UNDIAGNOSED)
     # …but an ENGINE-FINAL reason is still untouched by any of it.
     assert diagnosed_failure_reason("timeout", out) == ("timeout", REASON_SOURCE_ENGINE)
+
+
+def test_a_citation_counts_wherever_it_sits_in_the_findings():
+    """`OVERRIDE_EVIDENCE_REQUIRED` asks "did the verdict cite a LOG"; it must not ask "in the first
+    six findings".
+
+    `cited_sources` read `coerce_findings`, which truncates at `FINDINGS_CAP` because that cap
+    bounds the durable ROW. Reading it here made the answer POSITIONAL: driven, a `not_learning`
+    verdict with six `code` findings and a seventh naming `train.log:9` was refused `log` — the node
+    kept the engine's `check_failed` instead of the repairable `not_learning`, and the durable row
+    recorded `reason_override_refused: log` about a verdict that did cite a log.
+
+    MUTATION: read the capped list again -> the sixth case below refuses while the first does not,
+    for a verdict whose evidence is identical.
+    """
+    from looplab.engine.failure_diagnosis import FINDINGS_CAP, cited_sources, reason_override_refused
+
+    def verdict(code_findings: int) -> dict:
+        return {"failure_kind": "not_learning",
+                "findings": [{"source": "code", "locator": f"a.py:{i}", "quote": "x"}
+                             for i in range(code_findings)]
+                            + [{"source": "log", "locator": "train.log:9", "quote": "loss flat"}]}
+
+    for leading in (0, 1, FINDINGS_CAP, FINDINGS_CAP + 3):
+        assert "log" in cited_sources(verdict(leading)), leading
+        assert reason_override_refused("check_failed", verdict(leading)) == "", (
+            f"an override citing a log was refused because the citation sat behind {leading} other "
+            "findings")
+
+    # …and going wide did not make the rule laxer: a `log` finding that points NOWHERE is still not
+    # a citation, exactly as the capped coercion treats it on the row.
+    no_locator = {"failure_kind": "not_learning",
+                  "findings": [{"source": "log", "quote": "loss flat"}]}
+    assert reason_override_refused("check_failed", no_locator) == "log"

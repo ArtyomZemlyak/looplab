@@ -1071,7 +1071,6 @@ class SpeculationMixin:
         idea = reservation.idea.model_copy(deep=True)
         kind = reservation.kind
         try:
-            self._reset_developer_footprint(developer)
             # THE ENVELOPE (doc 52 row 12): the build's outputs are read off the `DeveloperResult`
             # the call returned, never off the instance afterwards — see `agents/roles.py`.
             if kind == "draft":
@@ -1330,8 +1329,17 @@ class SpeculationMixin:
                 # the build and let the next speculative action proceed -- no crash record, no
                 # circuit breaker, which is the distinction `core/models.py::DEVELOPER_STUCK_PREFIX` draws and which
                 # the crash branch below would erase.
+                # `created.attempt`, and NOT a bare `generation`: the only binding of that name in
+                # this method is a generator-expression variable a hundred lines up, which Python 3
+                # scopes to the comprehension, so the name was UNBOUND here and this branch raised
+                # `NameError` instead of writing the terminal it exists to write. On the shipped
+                # default (`card_driven_selection`), a Developer session that produced no code
+                # reached it through `empty_build_refusal` and the reserved node got no terminal at
+                # all — an unexplained engine crash on the one path the stuck/crash split was added
+                # for. `created` is bound thirteen lines up and its `attempt` is the node's real
+                # generation, which is what the crash branch below already identifies it by.
                 self.store.append(EV_NODE_FAILED, {
-                    "node_id": node_id, "generation": generation,
+                    "node_id": node_id, "generation": created.attempt,
                     "error": result.code, "reason": "developer_stuck", "eval_seconds": 0.0,
                 })
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)

@@ -959,6 +959,77 @@ def test_a_node_cannot_rewrite_the_fence_that_fences_it(tmp_path):
                for line in read_fence.violations(run_dir))
 
 
+_SELF_ESCAPE = """
+    import os
+    fence = os.environ[{marker!r}] + "/sitecustomize.py"
+    try:
+        open({target!r}).read()
+        print("STAGE1 read ALLOWED")
+    except Exception as exc:
+        print("STAGE1 refused", type(exc).__name__)
+    for label, attempt in (
+        ("chmod", lambda: os.chmod(fence, 0o644)),
+        ("unlink", lambda: os.remove(fence)),
+        ("unlink-dir-fd", lambda: os.remove("sitecustomize.py",
+                                            dir_fd=os.open(os.path.dirname(fence), os.O_RDONLY))),
+        ("rename-away", lambda: os.rename(fence, fence + ".bak")),
+        ("truncate", lambda: os.truncate(fence, 0)),
+        ("symlink-over", lambda: os.symlink("/etc/hosts", fence)),
+    ):
+        try:
+            attempt()
+            print("STAGE2 ESCAPED", label)
+        except Exception as exc:
+            print("STAGE2 blocked", label, type(exc).__name__)
+"""
+
+
+def test_the_hook_rung_refuses_a_mutation_of_the_fences_own_file_at_any_uid(tmp_path):
+    """`_SELF`, on its own, with no kernel write bit in the claim — so this runs as root too.
+
+    The sibling test above asserts BOTH rungs and skips under root, correctly, because its kernel
+    half (`_harden`'s 0444) is ignored by DAC-override. But the six attempts below are refused by
+    the AUDIT HOOK, which does not know what uid it is running as — so a uid-scoped skip was
+    retiring a uid-independent property, and this box runs as root: measured, `pytest -rs` reported
+    `SKIPPED [1] running as root` and zero failures while `_SELF` had ZERO CALLERS in the module (a
+    merge resolved the hook's mutation branch to a path that skipped it) and the escape reproduced
+    end to end. Four green shards could not see it.
+
+    Deliberately NOT the seven-attempt template: `open-w` is the kernel rung's attempt, it succeeds
+    under DAC-override, and it would clobber the fence file before the six below ever ran. This test
+    makes no claim about it — that is the sibling's, under its own precondition.
+
+    NOT a duplicate of `test_the_hook_refuses_a_mutation_of_the_fences_own_file_whatever_the_uid`,
+    and the difference is measured rather than asserted. That one drives the RENDERED template's
+    `_hook` in-process and binds `_SELF` by hand, which is what lets it be a per-event truth table;
+    this one goes through the real `install()`, a real child and real syscalls. Two mutations
+    separate them: calling `_prefixed(r)` in the mutation branch (the 2026-09-07 merge regression)
+    is caught by BOTH, while `_SELF = ()` in the template — the fence no longer knowing where it
+    lives — is caught by THIS ONE ONLY, because the sibling supplies the value the mutation
+    removes. Keep both; deleting either leaves a live escape green.
+    """
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    generated = Path(fence) / "sitecustomize.py"
+
+    rc, out, _err, timed_out = _run(
+        _SELF_ESCAPE.format(target=str(target), marker=read_fence.FENCE_DIR_ENV), wd, fence)
+    assert not timed_out and rc == 0, out
+
+    # Non-vacuity, the same ladder the sibling spells out: the child must have REACHED the fence.
+    # A crash, a swallowed argv or an unfenced world fails here rather than passing quietly.
+    assert "STAGE1 refused LoopLabSourceReadRefused" in out, out
+    assert "STAGE2 ESCAPED" not in out, out
+    for label in ("chmod", "unlink", "unlink-dir-fd", "rename-away", "truncate", "symlink-over"):
+        assert f"STAGE2 blocked {label} LoopLabSourceReadRefused" in out, out
+
+    # …and the file the hook was protecting is still the fence, byte-wise and mode-wise.
+    assert "LoopLab source-tree READ FENCE" in generated.read_text(encoding="utf-8")
+    assert any(str(generated) in line and "os.chmod" in line
+               for line in read_fence.violations(run_dir))
+
+
 def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(tmp_path):
     """The control for the test above: the capability it denies has to exist to be worth denying.
 
@@ -1359,3 +1430,150 @@ def test_a_grant_under_a_root_is_kept_because_that_is_the_sanctioned_carve_out(t
     _tier, root = _tier_with_a_root_inside(tmp_path)
     grants, refused = read_fence.confine_grants([str(root / "corpus")], [str(root)])
     assert refused == () and grants == (str(root / "corpus") + os.sep,)
+
+
+def test_the_open_branch_uses_the_same_rule_as_every_other_event():
+    """THE MERGE LOST CONFINEMENT ON THE READ PATH, and only on the read path.
+
+    One parent's `open` branch called `_fenced(args[0])` — the whole policy; the other inlined
+    `p.startswith(_ROOTS) and not _ALLOW…` so it could keep the resolved path for its own record
+    check, and the merge kept the inline. That copy has no `_CONFINE` clause, so a confined probe
+    (`developer_probe_confine`) refused only reads under the editable roots and let every other
+    read through — the opposite of what confinement means, on the one event a probe actually makes.
+
+    Driven over the RENDERED launcher, in both directions and both modes, because the rule that
+    matters is the one the generated hook carries, not the one this module can state.
+
+    MUTATION: inline the root test in the open branch again -> the first assertion flips and a
+    confined probe reads the whole filesystem.
+    """
+    def rule(confine):
+        src = read_fence.render(("/src/repo",), ("/tmp/work",), policy="deny", confine=confine)
+        # UNDER `_PROBE_NAME`, which is the seam that yields the predicate and installs NOTHING.
+        # The first cut of this exec'd the launcher bare: that installs the audit hook in THIS
+        # interpreter, irreversibly, and pytest's own tmp cleanup was then refused by it.
+        ns: dict = {"__name__": read_fence._PROBE_NAME}
+        exec(compile(src, "<fence>", "exec"), ns)
+        assert "bad = _fenced_resolved(p)" in src, (
+            "the open branch stopped using the shared rule; a second copy is how confinement was "
+            "lost the first time")
+        return ns["_fenced_resolved"]
+
+    confined = rule(True)
+    assert confined("/usr/lib/python3.11/json/__init__.py") is not None, (
+        "a confined fence must refuse a read outside its allow-list")
+    assert confined("/tmp/work/solver.py") is None, "…and admit one inside it"
+
+    plain = rule(False)
+    assert plain("/src/repo/train.py") is not None, "an unconfined fence still refuses the source"
+    assert plain("/usr/lib/python3.11/json/__init__.py") is None, "…and nothing else"
+
+
+def test_the_hook_refuses_a_mutation_of_the_fences_own_file_whatever_the_uid():
+    """THE RUNG THE ROOT SKIP RETIRED, and it is uid-INDEPENDENT.
+
+    `test_a_node_cannot_rewrite_the_fence_that_fences_it` asserts TWO independent rungs in one body
+    — the kernel write bit (0444, which DAC-override ignores, hence the root skip) and the audit
+    hook's `_SELF` refusal, which is a Python-level raise and does not care about euid. Bundling
+    them behind a uid-scoped skip retired the second along with the first, and this container runs
+    as root: that is why the merge could drop `_SELF` entirely and stay green through two follow-up
+    review rounds.
+
+    What was dropped: the mutation branch called `_prefixed(r)` instead of going through
+    `_fenced_target`, leaving `_fenced_target` with ZERO callers and `_SELF` — the only rule
+    protecting the generated `sitecustomize.py` from chmod/unlink/rename — dead. `install()` passes
+    the fence dir as `writable`, so the record rung deliberately permits writes there, and the file
+    is outside every editable root by construction; `_SELF` was the whole protection. A node could
+    chmod the fence back to 0644, rewrite it, and every later process of the run would run
+    unfenced — the checkpoint-read incident, re-enabled run-wide.
+
+    Driven on the RENDERED template through the real `_hook`, under `_PROBE_NAME` so nothing is
+    installed in this interpreter.
+
+    MUTATION: call `_prefixed(r)` in the mutation branch again -> all three come back ALLOWED.
+    """
+    src = read_fence.render(("/src/repo",), (), policy="deny", confine=False)
+    ns: dict = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)
+    # As `install()` binds it: the directory holding the generated fence, with a trailing separator.
+    ns["_SELF"] = ("/run/.looplab-fence/",)
+    target = "/run/.looplab-fence/sitecustomize.py"
+
+    for event, args in (("os.chmod", (target, 0o777)),
+                        ("os.remove", (target,)),
+                        ("os.rename", (target, "/tmp/elsewhere"))):
+        with pytest.raises(Exception) as caught:
+            ns["_hook"](event, args)
+        assert type(caught.value).__name__ == "LoopLabSourceReadRefused", (
+            f"{event} on the fence's own file was permitted ({caught.value!r}) — the hook's `_SELF` "
+            "rung is not consulted, and the kernel rung beside it is void wherever the eval runs "
+            "privileged")
+
+    # …and the rule is still NARROW: an ordinary mutation outside the fence is untouched.
+    ns["_hook"]("os.remove", ("/tmp/some/other/file",))
+
+
+@pytest.mark.parametrize("event,args,fenced", [
+    ("os.rename", ("/src/repo/a.py", "/src/repo/b.py", None, None), 2),
+    ("os.link", ("/src/repo/a.py", "/src/repo/b.py", None, None), 2),
+    ("os.symlink", ("/src/repo/a.py", "/src/repo/b.py", None), 2),
+    ("os.rename", ("/tmp/outside.py", "/src/repo/b.py", None, None), 1),
+    ("os.remove", ("/src/repo/a.py", None), 1),
+])
+def test_warn_records_every_fenced_slot_of_a_two_sided_mutation(event, args, fenced):
+    """Under `warn` the violations log is the WHOLE product, and it was losing a rename's other end.
+
+    Three events carry two path slots — `os.rename`, `os.link`, `os.symlink` (source AND
+    destination) — and the mutation loop `return`ed after reporting the first. Under `deny` that is
+    unreachable (`_report` raises out of the hook, so the statement after it is dead), which is why
+    it read as correct; under `warn` `_report` returns, and returning abandoned the remaining slots.
+    Driven on the shipped code: `os.rename` with BOTH sides inside a fenced root recorded ONE
+    violation, so the destination — the file that would have been created in the operator's tree —
+    was absent from the log the operator reads to decide whether to tighten the policy.
+
+    Parametrised over both slot counts and both orders on purpose: the case that already worked
+    (only the DESTINATION fenced, slot 0 clean so the loop reached slot 1) is the one a `continue`
+    could regress into a double report.
+
+    WHAT THIS DOES NOT COVER, stated rather than implied: the `continue` also keeps a slot to at
+    most ONE report, and removing it does not redden this test — in these worlds a path under an
+    editable root is never also a record-write (that needs the run dir INSIDE a fenced root, which
+    is why run dirs are allow-listed in the first place), so the second rung stays silent either
+    way. The per-slot bound is the code's behaviour here, not a property this asserts.
+    """
+    src = read_fence.render(("/src/repo",), (), policy="warn", confine=False)
+    ns: dict = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)
+    ns["_SELF"] = ()                      # isolate the ordinary root rung from the self rung
+    recorded: list = []
+    ns["_record"] = lambda path, _policy, ev: recorded.append((ev, path))
+
+    stderr, sys.stderr = sys.stderr, io.StringIO()
+    try:
+        ns["_hook"](event, args)          # warn: reports and returns, never raises
+    finally:
+        sys.stderr = stderr
+
+    assert [path for _ev, path in recorded] == [
+        a for a in args if isinstance(a, str) and a.startswith("/src/repo")][:fenced], recorded
+    assert len(recorded) == fenced, (
+        f"{event} under warn recorded {len(recorded)} of {fenced} fenced slots — a two-sided "
+        "mutation must put BOTH ends in the log, since under warn the log is all there is")
+
+
+def test_deny_still_raises_on_the_first_fenced_slot_and_examines_no_further():
+    """The other half of the `continue`: under deny NOTHING changes, and that is the whole safety
+    argument for the change. The hook must still raise out of slot 0 — a mutation fence that
+    surveyed both ends before refusing would be doing work after it had already decided."""
+    src = read_fence.render(("/src/repo",), (), policy="deny", confine=False)
+    ns: dict = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)
+    ns["_SELF"] = ()
+    recorded: list = []
+    ns["_record"] = lambda path, _policy, ev: recorded.append((ev, path))
+
+    with pytest.raises(Exception) as caught:
+        ns["_hook"]("os.rename", ("/src/repo/a.py", "/src/repo/b.py", None, None))
+    assert type(caught.value).__name__ == "LoopLabSourceReadRefused"
+    assert [p for _e, p in recorded] == ["/src/repo/a.py"], (
+        f"deny examined a slot past the one it refused on: {recorded}")

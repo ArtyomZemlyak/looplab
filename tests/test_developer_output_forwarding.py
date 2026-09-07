@@ -176,3 +176,33 @@ def test_every_parameter_KIND_that_can_take_a_parent_gets_one():
         inner = cls()
         _Facade(inner).bind_state("STATE", "PARENT")
         assert inner.got == ("STATE", "PARENT"), f"{cls.__name__} did not receive the parent"
+
+
+def test_every_REGISTERED_channel_survives_the_wrapper_too():
+    """The guard above derives its list from the engine's `getattr(self.developer, …)` sites, and
+    the engine has been moving OFF those onto the `DeveloperResult` envelope — so a registered
+    channel the facade drops is invisible to it.
+
+    `last_budget_facts` is what that cost: master added the member, this branch's envelope capture
+    read it off the ACTIVE developer, and under the shipped `unified_agent` default the active
+    developer is this facade — which did not mirror it. Every build recorded "the session was never
+    cut off", the falsy default, on the corpus meant to settle whether the money ceiling ever fires.
+    The same shape `_sync_audit`'s own docstring records for the three members before it.
+
+    MUTATION: drop a `self.last_X = getattr(self._wrapped, "last_X", …)` line -> that channel reads
+    as its default through the facade and this test names it.
+    """
+    from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS
+
+    facade = _Facade(_Inner())
+    facade._sync_audit()
+
+    # Read-through members are legitimate: `last_report` is a property on the wrapper by design
+    # (see `WrapsDeveloper`'s docstring), so what must hold is that the VALUE arrives, not that a
+    # particular mechanism carries it.
+    lost = sorted(attr for attr in DEVELOPER_OUTPUT_ATTRS
+                  if getattr(facade, attr, None) != getattr(facade.inner, attr, None))
+    assert lost == [], (
+        f"{lost} are registered side channels that do not survive the facade — under the shipped "
+        "`unified_agent` default the engine's developer IS this wrapper, so each reads as its own "
+        "falsy default on every node")

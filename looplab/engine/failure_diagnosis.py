@@ -621,10 +621,34 @@ def cited_sources(verdict) -> frozenset:
     locator is `none` here exactly as it is on the row. Empty for a non-dict; never raises.
 
     Unredacted on purpose: only the SOURCE words are read, never the locator or the quote, so
-    nothing model-authored passes through here on its way anywhere durable."""
+    nothing model-authored passes through here on its way anywhere durable.
+
+    UNCAPPED, and that is the difference from `coerce_findings`. That cap is a bound on the durable
+    ROW — six findings is what a `node_repaired` may carry — while this answers a different
+    question, "what did the verdict cite", which the seventh finding answers as well as the first.
+    Reading the capped list made `OVERRIDE_EVIDENCE_REQUIRED` refuse a correctly-evidenced override
+    whose `log` citation merely sat past the sixth: driven, a `not_learning` verdict with six `code`
+    findings and a seventh naming `train.log:9` was refused `log`, keeping the node on the engine's
+    `check_failed` instead of the REPAIRABLE `not_learning`, and stamping `reason_override_refused:
+    log` about a verdict that did cite a log. There is no size hazard in going wide here: a source
+    is a word from a closed vocabulary and neither the locator nor the quote is touched."""
     if not isinstance(verdict, dict):
         return frozenset()
-    return frozenset(item["source"] for item in coerce_findings(verdict, None))
+    out = {item["source"] for item in coerce_findings(verdict, None)}
+    raw = verdict.get("findings")
+    for item in (raw if isinstance(raw, (list, tuple)) else ()):
+        if not isinstance(item, dict):
+            continue
+        src = str(item.get("source", "") or "").strip().lower()
+        if src not in EVIDENCE_SOURCES:
+            continue
+        # The same "points nowhere" rule the capped coercion applies, so a `log` finding with no
+        # locator is `none` here exactly as it is on the row.
+        if src in (EVIDENCE_SOURCE_CODE, EVIDENCE_SOURCE_LOG) and not str(
+                item.get("locator", "") or "").strip():
+            continue
+        out.add(src)
+    return frozenset(out)
 
 
 def reason_override_refused(deterministic: str, verdict) -> str:

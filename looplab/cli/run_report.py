@@ -11,15 +11,24 @@ raise refused.
 What lives here is the printing and the span vocabulary the two commands SHARE — nothing decides
 anything. The folds stay where they were (`events/token_spend.py`, `engine/*`), the commands stay in
 `inspect_cmds.py`, and every function here takes what it prints as an argument.
+
+ONE rendering module, not two. Both sides of the 2026-09-07 merge extracted one for this same cap,
+citing this same guard docstring — master this file, the branch a `cli/token_report.py` holding
+`echo_card_and_build_tables` — and the merge kept both, so two siblings had overlapping charters and
+this header claimed a `tokens` half that lived in the other file. `token_report.py` is folded in
+here; a second rendering module would need a charter this one does not already cover.
 """
 from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Optional
 
 import typer
 
 from looplab.events.eventstore import EventStore
+from looplab.events.token_spend import (CARD_UNATTRIBUTED, token_spend_by_build,
+                                        token_spend_by_card)
 
 
 def span_category(sp: dict) -> str:
@@ -149,7 +158,7 @@ def echo_reconciliation(*, wall, intervals: list, attributed: float, durable_eve
         # showing more concurrent evals than it declared is itself worth seeing.
         occ = eval_occupancy(durable_events)
         if occ["span_seconds"] > 0:
-            typer.echo(f"\neval occupancy (from events.jsonl, not spans):")
+            typer.echo("\neval occupancy (from events.jsonl, not spans):")
             typer.echo(f"  bootstrap  {minutes(occ['bootstrap_seconds']):>6} min  "
                        f"before the first evaluation could start — not starvation")
             typer.echo(f"  dead       {minutes(occ['dead_seconds']):>6} min  "
@@ -203,3 +212,73 @@ def output_fingerprint(outputs) -> Optional[str]:
             return None                       # an unbound output names nothing anybody may compare
         parts.append(f"{row.get('path')}={row.get('digest_mode')}:{row.get('digest')}")
     return "|".join(sorted(parts))
+
+
+def echo_card_and_build_tables(rows, *, state, ev_path: Path, ledger_total: Optional[int]) -> None:
+    """Print the per-card table and, under it, the two prices a card table alone cannot show.
+
+    The folds were injected as three parameters when this lived in its own module, on the reasoning
+    that the caller and the renderer must not read two different `events/token_spend.py` surfaces.
+    They cannot: an import resolves to the same module object, so the seam bought a paragraph of
+    justification and nothing else. `ledger_total` stays an argument because it IS the caller's —
+    the same denominator the phase table one screen up was reconciled against.
+    """
+    # Suppressed when no card resolves at all, which is every serial-path run — a lone `(no card)`
+    # row states nothing and would push the phase table off a terminal for no reader's benefit.
+    card_nodes = {}
+    if state is not None:
+        from looplab.core.models import is_unevaluated_speculative_discard
+        for node in (state.nodes or {}).values():
+            card = getattr(getattr(node, "idea", None), "card_id", None)
+            if not isinstance(card, str) or not card.strip():
+                continue
+            owned = card_nodes.setdefault(card, {"nodes": [], "discarded": []})
+            owned["nodes"].append(node.id)
+            # The run's SINGLE answer to "did this node spend budget", not a second spelling of it.
+            if is_unevaluated_speculative_discard(state, node):
+                owned["discarded"].append(node.id)
+    by_card = token_spend_by_card(rows, card_nodes=card_nodes, ledger_total=ledger_total)
+    real = [r for r in by_card["rows"] if r["card"] != CARD_UNATTRIBUTED]
+    if real:
+        typer.echo("")
+        typer.echo(f"{'tokens':>14}  {'share':>6}  {'calls':>6}  nodes                 card")
+        for row in by_card["rows"]:
+            nodes = ",".join(str(n) for n in row["nodes"]) or "-"
+            if row["wholly_discarded"]:
+                nodes += " DISCARDED"
+            typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
+                       f"{nodes:<21} {row['card']}")
+        # A build that minted NO node is invisible to the rule above, which needs the card to OWN
+        # one — measured on v9, that hid 40.1M tokens (card-2's first build and card-5's only one,
+        # both `skipped: stale`), while card-2's row read as a healthy 97.6M. Priced from the
+        # durable log's own `card_build_requested` -> `card_build_done` windows rather than by
+        # widening `wholly_discarded`, which answers a different question and answers it correctly.
+        builds = []
+        if state is not None:
+            open_req = {}
+            for ev in EventStore(ev_path).read_all():
+                kind = getattr(ev, "type", None) or (ev.get("type") if isinstance(ev, dict) else None)
+                data = getattr(ev, "data", None) or (ev.get("data") if isinstance(ev, dict) else None) or {}
+                ts = getattr(ev, "ts", None) or (ev.get("ts") if isinstance(ev, dict) else None)
+                cid = data.get("card_id")
+                if kind == "card_build_requested":
+                    open_req[cid] = ts
+                elif kind == "card_build_done":
+                    builds.append({"card": cid, "start": open_req.pop(cid, None), "end": ts,
+                                   "skipped": data.get("skipped"), "node_id": data.get("node_id")})
+        by_build = token_spend_by_build(rows, builds)
+        if by_build["skipped_builds"]:
+            share = (100 * by_build["skipped_tokens"] / by_card["attributed"]) if by_card["attributed"] else 0.0
+            typer.echo(f"{by_build['skipped_tokens']:>14,}  {share:>5.1f}%  {'':>6}  "
+                       f"built and SKIPPED as stale, minting no node "
+                       f"({by_build['skipped_builds']} of {by_build['builds']} builds)")
+        lost = [r for r in by_card["rows"] if r["wholly_discarded"]]
+        if lost:
+            spent = sum(r["tokens"] for r in lost)
+            share = 100 * sum(r["share"] for r in lost)
+            # Stated as what it IS — a build that was paid for and never evaluated — and NOT as
+            # waste: the freshness gate discards a prefetch whose selection no longer holds, which
+            # is the machinery working. What the number buys the operator is the ability to weigh
+            # that trade, which until now had no visible price at all.
+            typer.echo(f"{spent:>14,}  {share:>5.1f}%  {'':>6}  "
+                       f"built and never evaluated ({len(lost)} card(s) discarded before dispatch)")

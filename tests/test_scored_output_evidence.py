@@ -346,3 +346,23 @@ def test_it_stays_off_the_always_on_prompt():
     assert route.channel == "pull" and route.folded_into == "Node.stderr_tail"
     assert "stderr_tail" not in inspect.getsource(digest), \
         "the always-on digest must not grow by the eval's own text"
+
+
+def test_a_zero_window_keeps_nothing_rather_than_everything():
+    """`[-0:]` IS `[0:]`, in the one helper whose whole job is bounding a durable row.
+
+    `_SCORED_EVIDENCE_CHARS` reads as a tunable window and is quoted in three docstrings as the knob
+    to move. Setting it to 0 to switch the column off — the convention every sibling byte knob here
+    uses (`read_loop_nudge_after`, `context_budget_chars`) — carried the ENTIRE ~64 KB capture of
+    every scored node onto `node_evaluated.stdout_tail`/`stderr_tail`, into `events.jsonl`, the
+    trace, the UI and every export. The exact opposite of off.
+
+    MUTATION: drop the `chars <= 0` guard -> the first assertion returns the whole stream, and a
+    negative window inverts the slice the same way.
+    """
+    from looplab.engine import evaluate as ev
+
+    plain = "line one\nline two\nthe tail that matters\n"
+    assert ev._redacted_tail(lambda t: t, plain, 0) == ""
+    assert ev._redacted_tail(lambda t: t, plain, -5) == ""
+    assert ev._redacted_tail(lambda t: t, plain, 12) == plain[-12:], "a real window still bounds"

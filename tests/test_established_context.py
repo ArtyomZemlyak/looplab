@@ -518,3 +518,43 @@ def test_the_deep_researcher_joins_the_runs_store_rather_than_minting_one():
     settings = Settings()
     runs_store = established_context_from_settings(settings)
     assert established_context_from_settings(settings) is runs_store
+
+
+def test_the_note_registry_covers_every_note_the_loop_can_append():
+    """DERIVED, because a hand-written tuple fell behind once already.
+
+    The 2026-09-07 merge brought `_DEADLINE_NOTE` from one parent and this registry from the other,
+    so a page ending `…wall-clock budget remain — finish and call `done` now)` was stored, hashed
+    and rendered as the file's first page verbatim — the exact defect the registry exists to
+    prevent, reintroduced by the merge that added it.
+
+    Pinned as a DERIVATION over the module's own constants, and driven beside it: a name-only check
+    would pass on a registry that listed the right names and stripped nothing.
+
+    MUTATION: list the notes by hand again -> the next note added to the loop is carried into every
+    later chain root as if it were the file's own bytes.
+    """
+    from looplab.agents import tool_loop
+
+    appendable = {name for name, value in vars(tool_loop).items()
+                  if name.startswith("_") and name.endswith(("_NOTE", "_NOTE_UNPAGED"))
+                  and isinstance(value, str) and value.startswith("\n")}
+    assert appendable, "no note constants found — the naming convention moved"
+    heads = {head for head, _trunc in tool_loop._note_heads()}
+    for name in appendable:
+        template = getattr(tool_loop, name)
+        assert template.split("{", 1)[0] in heads, f"{name} can be appended and is not stripped"
+
+    # …and the store really removes each one, rather than merely knowing its name.
+    body = "def solve():\n    return 1\n"
+    for name in sorted(appendable):
+        rendered = getattr(tool_loop, name)
+        for field, value in (("n", 9), ("k", 3), ("remaining", 118.0), ("budget", 600.0),
+                             ("emit", "done"), ("path", "a.py"), ("tool", "read_file"),
+                             ("slot", "path"), ("page", 3600), ("fit", ""), ("n", 9)):
+            rendered = rendered.replace("{" + field + "}", str(value))
+            rendered = rendered.replace("{" + field + ":.0f}", str(value))
+        store = EstablishedContext()
+        store.record("read_file", {"path": "solver.py"}, body + rendered)
+        carried = store.items()[0]["content"]
+        assert carried in (body, None), f"{name} survived into the carried page: {carried!r}"

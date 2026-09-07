@@ -204,6 +204,12 @@ def _redacted_tail(redact, raw, chars: int) -> str:
     text = "" if raw is None else str(raw)
     if not text.strip():
         return ""
+    # `[-0:]` IS `[0:]`. A `chars` of 0 read as "off" — the convention every sibling byte knob in
+    # this tree uses — and returned the ENTIRE redacted stream onto a durable row, which is the
+    # exact opposite, in the one helper whose whole job is bounding what lands there. A negative
+    # value inverts the slice the same way. The bound belongs here, not in each caller's constant.
+    if chars <= 0:
+        return ""
     return redact(text)[-chars:]
 
 

@@ -743,9 +743,16 @@ def _cwd_reaches_root():
     return not (_ALLOW and d.startswith(_ALLOW))
 
 
-def _fenced(p):
-    """The path this fence refuses, or None. The whole policy, in three string operations."""
-    p = _resolve(p)
+def _fenced_resolved(p):
+    """The policy over an ALREADY-RESOLVED path: the refused path, or None.
+
+    ONE rule, two callers. The `open` branch needs the resolved path for its own record check and
+    therefore cannot use `_fenced`'s return alone, and the 2026-09-07 merge answered that by
+    INLINING the rule there — which silently dropped the `_CONFINE` clause, so a confined probe
+    (`developer_probe_confine`) refused only reads under the editable roots and let everything else
+    through, the opposite of what confinement means. Split rather than duplicated, so the open path
+    keeps `p` and the rule stays in one place.
+    """
     if p is None:
         return None
     if _CONFINE:
@@ -755,6 +762,11 @@ def _fenced(p):
     if _ALLOW and p.startswith(_ALLOW):
         return None
     return p
+
+
+def _fenced(p):
+    """The path this fence refuses, or None. The whole policy, in three string operations."""
+    return _fenced_resolved(_resolve(p))
 
 
 def _record_write(p):
@@ -897,8 +909,20 @@ def _fenced_target(path, dir_fd):
     mount source. The residual — a symlinked final component under `chmod`/`utime`, which do
     follow — is the same class as the documented read-side one."""
     r = _mutation_path(path, dir_fd)
-    if r is None:
-        return None
+    return None if r is None else _mutation_fenced(r)
+
+
+def _mutation_fenced(r):
+    """The mutation POLICY over an already-resolved path: the refused path, or None.
+
+    Split from `_fenced_target` for the reason `_fenced_resolved` is split from `_fenced` one
+    branch over, and after the same defect: the hook's mutation branch needs `r` for its record
+    check, and the 2026-09-07 merge answered that by calling `_prefixed(r)` there directly —
+    which skips `_SELF` and left `_fenced_target` with ZERO callers, i.e. the fence's own
+    self-protection dead. Driven end to end: a fenced child could `chmod` and then `unlink` the
+    generated `sitecustomize.py`, disarming the fence for every process the run started afterwards.
+    One rule, and the branch keeps its resolved path.
+    """
     # BEFORE the root/allow policy, and deliberately not expressible through it: `_SELF` is
     # refused for every caller, allow-list included. See `_SELF`. A run dir is allow-listed on
     # purpose (a run may be `--out`-ed inside the repo it edits) and, far more often, this file
@@ -998,9 +1022,7 @@ def _hook(event, args):
     if event == "open":
         try:
             p = _resolve(args[0])
-            bad = None
-            if p is not None and p.startswith(_ROOTS) and not (_ALLOW and p.startswith(_ALLOW)):
-                bad = p
+            bad = _fenced_resolved(p)
         except Exception:
             return                   # a bug in the fence must never break an unrelated open
         if bad is not None:
@@ -1034,17 +1056,26 @@ def _hook(event, args):
         for path_i, fd_i in slots:
             try:
                 r = _mutation_path(args[path_i], _dir_fd(args, fd_i))
-                bad = _prefixed(r) if r is not None else None
+                bad = _mutation_fenced(r) if r is not None else None
             except Exception:
                 r = bad = None       # a bug in the fence must never break an unrelated call
             if bad is not None:
                 _report(bad, event, _MUTATION_MESSAGE)   # outside the try: deny RAISES from here
-                return
+                continue        # …so this is the WARN path only — see the CONTINUE note below
             # THE RECORD, on the same resolved path: a mutation under the run dir outside the
             # writable prefixes — a rename INTO it, a link OF it, a truncate, a chmod, an rmdir.
             if r is not None and _record_write(r) is not None:
                 _report(r, event, _RECORD_MESSAGE)
-                return
+                continue
+            # CONTINUE, NOT RETURN, and it matters at exactly one policy. Three events carry TWO
+            # slots (`os.rename`, `os.symlink`, `os.link`: source AND destination), and under deny
+            # neither `continue` nor `return` is reachable — `_report` raises out of the hook. Under
+            # WARN it reports and returns, and returning here ABANDONED the remaining slots: driven,
+            # `os.rename` with both sides inside a fenced root recorded ONE violation instead of
+            # two, so the destination — the file that would have been created in the operator's
+            # tree — was missing from the very log that is warn's whole product. At most one report
+            # per slot is still the rule: a path that is both fenced and a record-write is one
+            # incident, and the mutation rung is the one that names it.
         return
     # `_CWD_REACHES_ROOT` is what keeps `_resolve`'s relative fast bail correct rather than merely
     # asserted, so a chdir has to be able to TURN IT ON: under `warn` the chdir proceeds, and a

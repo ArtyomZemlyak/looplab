@@ -788,3 +788,32 @@ def bind_run_client_cost(client: object, store: object) -> object:
     ledger = _RunClientLedger(client, store)
     bind_cost_accountants(ledger)
     return ledger
+
+
+def budget_facts(owner) -> "dict | None":
+    """`{spent, limit, remaining, pct}` for the run's spend, or None when there is nothing to say.
+
+    ONE derivation for what is rendered in two sentences. `repo_developer.py::_budget_note` and
+    `deep_research.py::_budget_note` carried byte-identical 14-line bodies differing only in the
+    template constant, which is the shape §0.8 records: two copies of one money reading, and the
+    one that drifts is the one nobody re-reads. The SENTENCES stay at their call sites, because
+    they are contracts of the prompt that speaks them (`serve/durable_op.py`'s rule).
+
+    None for every reason a caller might want one — no client, no accountant, no limit, a
+    non-finite or unparseable figure — because this is an EXTRA rung and no phase may fail over it.
+    A run with no ceiling therefore gets a byte-identical prompt to before.
+    """
+    import math
+
+    acct = getattr(getattr(owner, "client", None), "accountant", None)
+    if acct is None:
+        return None
+    try:
+        limit = float(getattr(acct, "limit", None) or 0.0)
+        spent = float(getattr(acct, "spent", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if limit <= 0 or not math.isfinite(limit) or not math.isfinite(spent) or spent < 0:
+        return None
+    return {"spent": spent, "limit": limit, "remaining": max(0.0, limit - spent),
+            "pct": min(100.0, 100.0 * spent / limit)}
