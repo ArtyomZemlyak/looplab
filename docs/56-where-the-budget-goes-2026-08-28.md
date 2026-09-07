@@ -13424,3 +13424,45 @@ So the cache may hold either of the two regimes this box measures in, per task; 
 from a four-worker run on a twenty-two-wide lane — is still a stray, and that is what the test now
 pins. Which regime a task is JUDGED in stays `scoring_regime`'s business, and the second attempt at
 this rule, which keyed the allowance on that, still flagged the four rulers §318 had just used.
+
+## §319 — not thread sensitivity either, and what the denominator is actually made of
+
+**Prediction 12, refuted.** The regime gap splits the four constant tasks in two (`pde_heat1d`
+−4.5 %, `discrete_log` −2.5 %, `edge_expansion` and `pagerank` +0.3 %), so the obvious candidate was
+thread sensitivity: a reference that spawns BLAS work behaves differently when twenty-two of it run
+at once. Timed alone, warm, three instances × five repeats, with and without
+`OMP/OPENBLAS/MKL_NUM_THREADS=1`:
+
+| task | unrestricted | one thread | |
+|---|---|---|---|
+| pde_heat1d (n=8) | 72.4 ms | 71.8 ms | +0.8 % |
+| edge_expansion (n=4408) | 30.4 ms | 30.9 ms | −1.5 % |
+| discrete_log (n=20) | 0.248 ms | 0.244 ms | +1.6 % |
+| pagerank (n=20) | 0.505 ms | 0.517 ms | −2.4 % |
+
+No separation, and the first two rows are at **the dataset's own instance sizes**, read off the file
+names (`_n8_`, `_n4408_`) rather than guessed — the first attempt used n=60 for `pde_heat1d`, which
+is a five-second solve against the dataset's 146 ms, and would have refuted the wrong thing. A sixth
+wall: it is not the solver's threads.
+
+### What the ruler's number is made of
+
+Timing the reference in a plain process at the dataset's own size, under the bench interpreter,
+against the cached per-instance median it divides by:
+
+| task | cached | in-process | overhead |
+|---|---|---|---|
+| pde_heat1d | 146.5 ms | 75.4 ms | **49 %** |
+| edge_expansion | 45.4 ms | 30.4 ms | **33 %** |
+
+Between a third and a half of what the ruler calls "the reference's time" is not the reference
+solving anything. That is not a defect — isolation, warmups and validation are what make the number
+reproducible — but it is the denominator every speedup on this box divides by, and it had never been
+separated into its parts. A reader comparing a candidate against "the reference's time" on
+`pde_heat1d` was comparing it against roughly twice that.
+
+`ruler_selfcheck` now prints the split beside every reading, timed under `bench_python()` for §299's
+reason, and only when the in-process number is the smaller of the two — a direct timing above the
+cached one means the comparison failed, not that the harness has negative overhead. Four mutations
+red, including one that takes the first integer in the file name (`_T100ms_` → 100 instead of
+`_n8_` → 8) and one that times it under whichever interpreter happens to be running.

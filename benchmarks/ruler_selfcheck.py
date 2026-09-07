@@ -90,6 +90,60 @@ def dataset_target_ms(task: str, root: str = f"{BENCH}/AlgoTune"):
     return None
 
 
+def dataset_n(task: str, root: str = f"{BENCH}/AlgoTune"):
+    """The instance size the dataset was built at, off the same file name (`..._n8_...`).
+
+    Needed to time the reference OUTSIDE the harness at the size the harness uses. Measured
+    2026-09-07 at these very sizes, three generated instances each, five repeats, one lane, warm:
+
+        task             cached per-instance   in-process   cached / in-process
+        pde_heat1d            146.4 ms           72.4 ms          2.02
+        edge_expansion         45.4 ms           30.4 ms          1.49
+
+    So between a third and a half of what the ruler calls "the reference's time" is not the
+    reference solving anything. That is not a defect -- isolation, warmups and validation are what
+    make the number reproducible -- but it is the denominator every speedup on this box is divided
+    by, and it had never been separated into its parts.
+    """
+    for path in glob.glob(f"{root}/.hf_datasets/*/data/{task}/{task}*_T*ms_*"):
+        got = re.search(r"_n(\d+)_", os.path.basename(path))
+        if got:
+            return int(got.group(1))
+    return None
+
+
+def in_process_ms(task: str, n: int, root: str = f"{BENCH}/AlgoTune", repeats: int = 3,
+                  instances: int = 3, timeout: float = 240.0):
+    """Median ms to solve one generated instance of size `n`, in a plain process, warm.
+
+    Run in a SUBPROCESS under the bench interpreter, for §299's reason: this box has two Pythons and
+    the one that scores is `AlgoTune/.venv/bin/python`. A number timed under the other interpreter
+    is the mistake that cost a week.
+    """
+    code = (
+        "import importlib.util,json,statistics,sys,time\n"
+        f"spec=importlib.util.spec_from_file_location('t','{root}/AlgoTuneTasks/{task}/{task}.py')\n"
+        "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+        "cls=[o for o in vars(mod).values() if isinstance(o,type)"
+        " and getattr(o,'__module__','')==mod.__name__"
+        " and hasattr(o,'solve') and hasattr(o,'generate_problem')]\n"
+        "if not cls: print('{}'); raise SystemExit\n"
+        "inst=cls[-1]()\n"
+        f"ps=[inst.generate_problem(n={n}, random_seed=s) for s in range({instances})]\n"
+        "for p in ps: inst.solve(p)\n"
+        "ts=[]\n"
+        f"for _ in range({repeats}):\n"
+        "    for p in ps:\n"
+        "        t=time.perf_counter(); inst.solve(p); ts.append((time.perf_counter()-t)*1000)\n"
+        "print(json.dumps({'ms': statistics.median(ts)}))\n")
+    try:
+        got = subprocess.run([bench_python(), "-c", code], capture_output=True, text=True,
+                             timeout=timeout, cwd=root)
+        return json.loads(got.stdout.strip().splitlines()[-1]).get("ms")
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
 def _cached_median_ms(task: str, subset: str, key: str = "w22x1r3"):
     """The median of the cached per-instance timings this reading is divided by."""
     path = f"{baseline_dir()}/{task}__{subset}__{key}.json"
@@ -465,6 +519,20 @@ def main(argv=None) -> int:
         print(f"  (the dataset name says the reference took {target:.0f} ms per instance on the "
               f"machine that BUILT it; our cached baseline says {cached:.1f} ms, "
               f"{target / cached:.1f}x that machine's speed)")
+    # WHAT THE DENOMINATOR IS MADE OF. Every speedup on this box divides by the cached per-instance
+    # time, and that number is not the reference solving anything: measured 2026-09-07 at the
+    # dataset's own instance size, pde_heat1d reads 146.4 ms cached against 77.0 ms in a plain
+    # process, edge_expansion 45.4 against 30.4. Isolation, warmups and validation are what make the
+    # cached number reproducible, so this is not a defect -- but it had never been separated into
+    # its parts, and a reader comparing a candidate's speedup against "the reference's time" was
+    # comparing it against something roughly twice that.
+    n_size = dataset_n(args.task)
+    direct = in_process_ms(args.task, n_size) if (n_size and cached) else None
+    if direct and cached and direct < cached:
+        print(f"  (the cached per-instance median is {cached:.1f} ms; the same reference timed "
+              f"in-process at the dataset's own n={n_size} reads {direct:.1f} ms, so "
+              f"{100 * (cached - direct) / cached:.0f} % of the denominator is harness overhead)")
+
     if share:
         # RESTORED. Moving the cache line in dropped this guard for one edit, and without it a run
         # whose `instance_share` came back empty prints "per-instance work is 0 %" -- a measurement
