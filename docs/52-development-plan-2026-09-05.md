@@ -513,10 +513,17 @@ the budget or two minutes. `tests/test_agent_clock.py` drives it. Not done: the 
 the Strategist's time cues still state the budget once in prose (the tool is how they ask again).
 Deleted per the index rule.*
 
-OPEN[no-trace-to-training-data-export] Frontis-MA1 (39.39 → 60.61 % from execution-grounded SFT / RL
-on operator traces) and SandMLE (+20–67 % relative) train operators from exactly the corpus
-`spans.jsonl` holds; `cli/export_cmds.py` exports MLflow and a notebook only. Enabling work, ranked
-late. proof:absent:sft@looplab/cli/export_cmds.py
+*Closed 2026-09-07 (row 33 shipped, the S item): the marker `no-trace-to-training-data-export`
+stood here. `looplab export-sft` writes one JSONL row per ANSWERED generation span — the messages the
+role was handed (hydrated through the `input_from` chain) and what it answered — with the OUTCOME of
+the node that turn belongs to on every row: metric, status, feasibility, failure reason. That join is
+the point rather than a convenience: Frontis-MA1's number comes from execution-GROUNDED training, and
+a corpus without it teaches an operator to sound like this run instead of to succeed at it
+(`--only-successful` is the filter that grounding makes possible). It refuses to pad: a generation
+with an input and no answer — a budget cut, a transport failure, a refusal — is counted, not
+exported; a turn whose input chain could not be reconstructed carries `input_partial`; a run with
+tracing off exits 2 rather than writing an empty file (`tests/test_export_sft.py`). Deleted per the
+index rule.*
 
 *Closed 2026-09-07 (row 32 shipped): the marker `memo-synthesis-statements-have-no-provenance-coverage`
 stood here. `trust/memo_verify.py::provenance_coverage` counts, per section — `summary` (split into

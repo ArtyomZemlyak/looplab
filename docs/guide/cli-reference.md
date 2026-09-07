@@ -60,6 +60,7 @@ looplab ui              Serve the live React UI (needs the [ui] extra)
 looplab tui             Terminal control plane: start/steer runs by chat (no browser)
 looplab export-mlflow   Log the champion to MLflow
 looplab export-notebook Export the champion as a runnable .ipynb
+looplab export-sft      This run's model turns as execution-grounded SFT rows, each carrying its node's outcome (doc 52 row 33)
 looplab harden          Grow the reward-hack exploit ruleset (hacker–fixer–solver)
 looplab tensorboard     Serve TensorBoard over per-node training logs
 looplab build-ui        Build the React UI bundle (ui/dist)
@@ -1116,6 +1117,47 @@ node that was evaluated anyway (a re-run, an injection), and the report counts t
 
 `proxy_kill_fraction=0` (the default) turns the kill off and keeps the score as an audit signal;
 this command is what that decision should be made on.
+
+---
+
+## `export-sft`
+
+Read-only, no model. This run's model turns as **execution-grounded** SFT rows.
+
+```bash
+looplab export-sft RUN_DIR [--out sft.jsonl] [--only-successful] [--op implement]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (reads its `spans.jsonl` and folds its `events.jsonl` for the outcomes) |
+| `--out` | `<run>/sft.jsonl` | Where to write the corpus |
+| `--only-successful` | off | Keep only turns whose node produced a usable metric AND stayed feasible |
+| `--op` | *(all)* | Keep only one operation (`propose`, `implement`, …) |
+
+One JSONL row per answered generation span:
+
+```json
+{"messages": [...], "completion": "...", "op": "implement", "model": "...", "phase": "build",
+ "run_id": "...", "task_id": "...", "direction": "min",
+ "outcome": {"node_id": 7, "metric": 0.2249, "status": "evaluated", "feasible": true, "error_reason": ""}}
+```
+
+**Why the outcome rides with every row.** Frontis-MA1 (39.39 → 60.61 %) and SandMLE (+20–67 %
+relative) train operators from exactly this corpus, and what makes it worth anything is the
+grounding: a turn is a training example only in company with what the node it belongs to actually
+produced. Without it, a corpus teaches an operator to sound like this run rather than to succeed
+at it.
+
+**What it refuses to pretend.** A generation with an input and no answer — a budget cut, a transport
+failure, a refusal — is not a row and is counted separately, because a corpus that keeps those
+teaches an operator to answer nothing. A turn whose input chain could not be reconstructed carries
+`input_partial: true` (the same stamp `traceview.hydrate_inputs` sets), so a short retained
+projection is never presented as a complete prompt. A run with tracing off exits 2 rather than
+writing an empty file.
+
+The text is the run's own trace projection: capture-time redaction and projection caps already
+applied. This copies that record; it re-reads no prompt from anywhere.
 
 ---
 

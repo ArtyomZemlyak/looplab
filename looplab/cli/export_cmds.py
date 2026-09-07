@@ -150,6 +150,102 @@ def export_notebook(
     typer.echo(f"wrote {dest}")
 
 
+@app.command(name="export-sft")
+def export_sft(
+    run_dir: Path = typer.Argument(..., help="Run dir to export the trajectories from."),
+    out: Optional[Path] = typer.Option(None, help="Output .jsonl (default: <run>/sft.jsonl)."),
+    only_successful: bool = typer.Option(
+        False, help="Keep only turns whose node produced a usable metric and stayed feasible."),
+    op: Optional[str] = typer.Option(None, help="Keep only this operation (propose, implement, …)."),
+):
+    """Export this run's model turns as EXECUTION-GROUNDED SFT rows (read-only, no model).
+
+    Frontis-MA1 (39.39 -> 60.61 %) and SandMLE (+20-67 % relative) train operators from exactly the
+    corpus `spans.jsonl` already holds — the messages a role was handed and what it answered — and
+    LoopLab exported MLflow and a notebook only. What makes the corpus worth anything is the
+    GROUNDING: every row carries the outcome of the node the turn belongs to, so a consumer can
+    train on what worked rather than on what was said.
+
+    The text is the run's own trace projection: capture-time redaction and projection caps already
+    applied, `input_partial` carried through where the chain could not be reconstructed. This copies
+    that record; it does not re-read a prompt from anywhere.
+    """
+    from looplab.events.traceview import hydrate_inputs, load_spans
+
+    store = _require_run_dir(run_dir)
+    spans_path = run_dir / "spans.jsonl"
+    if not spans_path.exists():
+        typer.echo(f"no spans.jsonl in {run_dir} — this run was traced with tracing off, so there "
+                   "are no turns to export.")
+        raise typer.Exit(2)
+    state = fold(store.read_all())
+    spans = hydrate_inputs(load_spans(spans_path))
+    generations = [s for s in spans if s.get("kind") == "generation"]
+    rows, skipped_no_output, skipped_ungrounded = [], 0, 0
+    for span in generations:
+        attributes = span.get("attributes") or {}
+        if op and str(attributes.get("op") or "") != op:
+            continue
+        messages = attributes.get("input")
+        completion = attributes.get("output")
+        # A turn with no answer is not a training example. It is also not a defect: a budget cut, a
+        # transport failure and a refusal all end a generation with an input and nothing after it.
+        if not isinstance(messages, list) or not messages or not completion:
+            skipped_no_output += 1
+            continue
+        node_id = attributes.get("node_id")
+        node = state.nodes.get(node_id) if isinstance(node_id, int) else None
+        outcome = {"node_id": node_id, "metric": None, "status": None, "feasible": None,
+                   "error_reason": None}
+        if node is not None:
+            status = getattr(node, "status", "")
+            outcome = {"node_id": node.id, "metric": node.metric,
+                       # The VALUE, not the enum's repr: a corpus row that says
+                       # `NodeStatus.evaluated` makes every consumer parse Python's spelling of a
+                       # fact this file exists to hand over as data.
+                       "status": str(getattr(status, "value", status) or ""),
+                       "feasible": bool(node.feasible),
+                       # `error_reason` is the node's own field name for why it failed — the
+                       # vocabulary `FAILURE_REASONS` holds. There is no `reason` on a Node, and a
+                       # `getattr(node, "reason", None)` would have written a silent `null` into
+                       # every row of a corpus whose whole value is the outcome.
+                       "error_reason": getattr(node, "error_reason", None)}
+        if only_successful:
+            # THE GROUNDING IS THE POINT, so the filter is the outcome and not the absence of an
+            # error: a node that failed for an unrelated reason after a good proposal is still a
+            # turn nobody should train on as if it had worked.
+            if node is None or node.metric is None or not node.feasible:
+                skipped_ungrounded += 1
+                continue
+        rows.append({
+            "messages": messages,
+            "completion": completion,
+            "op": attributes.get("op"),
+            "model": attributes.get("model"),
+            "phase": attributes.get("phase"),
+            "run_id": state.run_id,
+            "task_id": state.task_id,
+            "direction": state.direction,
+            # Carried, not dropped: a reader must be able to tell a complete retained projection
+            # from a truncated one, which is the same rule `hydrate_inputs` stamps it for.
+            **({"input_partial": True} if attributes.get("input_partial") else {}),
+            "outcome": outcome,
+        })
+    dest = out or (run_dir / "sft.jsonl")
+    atomic_write_text(dest, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
+    typer.echo(f"wrote {dest}: {len(rows)} turn(s) from {len(generations)} generation span(s)")
+    if skipped_no_output:
+        typer.echo(f"  {skipped_no_output} generation(s) had no answer to learn from (budget cut, "
+                   "transport failure, refusal) — not an error, and not a training example")
+    if skipped_ungrounded:
+        typer.echo(f"  {skipped_ungrounded} turn(s) dropped by --only-successful: their node "
+                   "produced no usable metric or was flagged infeasible")
+    grounded = sum(1 for row in rows if row["outcome"]["metric"] is not None)
+    typer.echo(f"  {grounded} of {len(rows)} turn(s) are joined to a node that produced a metric; "
+               "the rest carry the outcome they have (a failure, or no node at all — a run-level "
+               "turn such as the Strategist's).")
+
+
 @app.command()
 def harden(
     memory_dir: Path = typer.Argument(..., help="Memory dir; the exploit suite lives at "
