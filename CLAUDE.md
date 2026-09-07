@@ -42,7 +42,7 @@ The suite runs fully offline in ~1-2 minutes; live-LLM tests auto-skip (opt in w
 `LOOPLAB_LIVE_SCENARIOS=1`). There is no formatter and ONE lint rule, and that rule is a CENSUS, not a
 style: `[tool.ruff]` selects `BLE` only (doc 52 row 14), so `python -m ruff check looplab` lists every
 blind `except Exception`/`BaseException`/bare `except` that carries no `# noqa: BLE001 — <why this is
-safe to contain>`. Containment is the house posture (715 such handlers), so the rule is not "do not
+safe to contain>`. Containment is the house posture (718 such handlers), so the rule is not "do not
 write one" but "say why"; `tests/test_containment_census.py` re-derives the same census by AST with no
 `ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 103 pre-existing
 reason-less sites as a shrink-only backlog in `tests/data/containment_unreviewed.txt` (review one =
