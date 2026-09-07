@@ -89,6 +89,11 @@ class _RunHost:
     # never enters a run, so the shipped early-return is the branch taken. A no-op stub would have
     # asserted the same thing without proving the latch is what decides it.
     _record_run_loop_exit = Engine._record_run_loop_exit
+    # The phase-event SINK `run` installs for `core/phase_events.py` (doc 52 row 16). Bound
+    # REAL for the same reason as the receipt above: `run`'s frame installs and removes it,
+    # and a host missing it turns that structural step into an AttributeError instead of
+    # exercising it. It writes nothing here — this host has no store and never enters a run.
+    _append_phase_event = Engine._append_phase_event
 
     def __init__(self, failure: BaseException):
         self._failure = failure

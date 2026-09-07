@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from typing import Optional
 
 from looplab.engine.comparability import SAME, comparability_notice, comparability_status
@@ -297,6 +298,265 @@ def _resolved_as(record, key: str) -> str:
     return "(not declared by this node)"
 
 
+# ---------------------------------------------------------------- WHAT KIND OF EDIT WAS IT (row 31)
+#
+# A diff says WHICH lines changed. It does not say what KIND of change was made, and the field
+# measured that the kind is where the gains are: EvoTrace classified committed edits across 121
+# agent runs into nine types and found the improvements concentrated in three of them — while ~30 %
+# of ADDED lines were lines the same lineage had already DELETED, a share that rose over time in
+# 118 of the 121 runs. An agent that cannot see either fact re-proposes a deletion it already
+# undid, and an operator cannot tell a run that is exploring from one that is cycling.
+#
+# The taxonomy is Python's, not a paper's, because the classification has to be DETERMINISTIC and
+# free — no model, no import of the file, one regex pass over the line. It is a CLOSED vocabulary
+# (`EDIT_TYPES`) with an explicit residue (`other`), so a line is never silently uncounted, and the
+# precedence is fixed and stated: a line is asked the questions in `EDIT_TYPES` order and takes the
+# first that answers yes. That order matters — `lr = 3e-4  # tuned` is a hyperparameter edit with a
+# comment on it, and `# lr = 3e-4` is a comment — so the code part is separated from the trailing
+# comment before anything else is asked.
+EDIT_TYPES: tuple[str, ...] = (
+    "comment",          # a comment or docstring line — no behaviour changed
+    "import",           # a dependency appeared or left
+    "definition",       # `def` / `class` / a decorator: the program's shape
+    "control_flow",     # if / for / while / try / with / return / raise: the program's path
+    "hyperparameter",   # an assignment whose right-hand side is a literal — the tuning knobs
+    "data_io",          # reading or writing data / checkpoints — where leakage and cost live
+    "logging",          # print / logger / tqdm / wandb: observation, not behaviour
+    "call_argument",    # a call whose keyword arguments changed
+    "whitespace",       # blank or indentation-only
+    "other",            # the residue, named rather than dropped
+)
+
+_RE_IMPORT = re.compile(r"^\s*(?:import\s+[\w.]|from\s+[\w.]+\s+import\b)")
+_RE_DEFINITION = re.compile(r"^\s*(?:async\s+def\s|def\s|class\s|@\w)")
+_RE_CONTROL = re.compile(
+    r"^\s*(?:if|elif|else|for|while|try|except|finally|with|return|yield|break|continue|raise|"
+    r"assert|match|case)\b")
+_RE_LITERAL_ASSIGN = re.compile(
+    r"^\s*[\w.\[\]'\"]+\s*(?::[^=]+)?=\s*"
+    r"(?:-?\d[\d_]*(?:\.\d*)?(?:[eE][-+]?\d+)?|True|False|None|\[[^\]]*\]|\([^)]*\)|"
+    r"\{[^}]*\}|'[^']*'|\"[^\"]*\")\s*,?\s*$")
+# `.*?` and not `[^()]*`: the keyword that changed is routinely behind a nested call —
+# `Adam(model.parameters(), lr=1e-4)` is the canonical tuning line, and a paren-free scan
+# classifies it as `other`. `(?!=)` keeps `==` out.
+_RE_KWARG = re.compile(r"[\w.]+\s*\(.*?\b\w+\s*=(?!=)")
+_RE_KWARG_ROW = re.compile(r"^\s*\w+\s*=\s*[^=].*,\s*$")     # one argument per line, mid-call
+_RE_DATA_IO = re.compile(
+    r"\b(?:read_csv|read_parquet|read_json|read_pickle|to_csv|to_parquet|to_json|open|np\.load|"
+    r"np\.save|torch\.load|torch\.save|load_dataset|from_pretrained|save_pretrained|json\.load|"
+    r"json\.dump|pickle\.(?:load|dump)|Dataset|DataLoader|glob\.|Path\()")
+_RE_LOGGING = re.compile(
+    r"\b(?:print|logger|logging|tqdm|wandb|mlflow|tensorboard|writer\.add_|typer\.echo)\b")
+
+
+def _code_part(line: str) -> str:
+    """The line without its trailing comment, when the `#` is not inside a string.
+
+    Deliberately a scan and not a tokenizer: this runs over every changed line of every node and
+    must never raise on a fragment that is not valid Python on its own — half a call, a line from a
+    YAML file, a diff of a shell script.
+    """
+    quote = None
+    for index, char in enumerate(line):
+        if quote is not None:
+            if char == quote and (index == 0 or line[index - 1] != "\\"):
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "#":
+            return line[:index]
+    return line
+
+
+def classify_line(line: str) -> str:
+    """Which of `EDIT_TYPES` one changed line is. Total: every line gets exactly one answer."""
+    text = str(line or "")
+    if not text.strip():
+        return "whitespace"
+    code = _code_part(text)
+    if not code.strip():
+        return "comment"
+    stripped = code.strip()
+    # A docstring line, or a line that is ENTIRELY one string: prose, not behaviour. The whole-line
+    # test is what keeps a config row (`"lr": 3e-4,`) out of this bucket — that line starts with a
+    # quote too, and calling it a comment would hide the tuning edits in a JSON or YAML file.
+    if stripped.startswith(('"""', "'''")):
+        return "comment"
+    if len(stripped) >= 2 and stripped[0] in "\"'" and stripped[-1] == stripped[0]:
+        return "comment"
+    if _RE_IMPORT.match(code):
+        return "import"
+    if _RE_DEFINITION.match(code):
+        return "definition"
+    if _RE_CONTROL.match(code):
+        return "control_flow"
+    if _RE_LITERAL_ASSIGN.match(code):
+        return "hyperparameter"
+    # BEFORE `call_argument`, and that order IS the classification: `print(f"loss={loss}")`
+    # and `pd.read_csv(path, sep=";")` both carry a keyword-looking `=`, and calling either
+    # a keyword-argument edit describes the syntax instead of the change.
+    if _RE_DATA_IO.search(code):
+        return "data_io"
+    if _RE_LOGGING.search(code):
+        return "logging"
+    if _RE_KWARG.search(code) or _RE_KWARG_ROW.match(code):
+        return "call_argument"
+    return "other"
+
+
+def _changed_lines(before: str, after: str) -> tuple[list[str], list[str]]:
+    """`(lines only in `after`, lines only in `before`)` for one file, in file order."""
+    matcher = difflib.SequenceMatcher(None, before.splitlines(), after.splitlines(), autojunk=False)
+    added, removed = [], []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "insert"):
+            added.extend(after.splitlines()[j1:j2])
+        if tag in ("replace", "delete"):
+            removed.extend(before.splitlines()[i1:i2])
+    return added, removed
+
+
+def classify_edits(left: dict, right: dict) -> dict:
+    """`{"added": {type: n}, "removed": {type: n}, "files": n, "added_lines": [...]}` for one pair.
+
+    Counts LINES, not hunks, because that is the unit the field's number is in (~30 % of added
+    lines) and the unit an operator can check by hand against the diff the same tool prints.
+    """
+    lrec, rrec = left.get("files") or {}, right.get("files") or {}
+    # THE MODULE'S HEADLINE PROPERTY, one level down: a node whose file set is not in the
+    # record must not read as a node that deleted everything. Counting `'' -> text` would
+    # report a whole file as added and put a fabricated number in the run's own diagnostic.
+    if not lrec or not rrec:
+        return {"added": {}, "removed": {}, "files": 0, "added_lines": [],
+                "recoverable": False}
+    added_counts: dict[str, int] = {}
+    removed_counts: dict[str, int] = {}
+    added_lines: list[tuple[str, str]] = []
+    files = 0
+    for name in sorted(set(lrec) | set(rrec)):
+        if _is_noise(name):
+            continue
+        before, after = lrec.get(name, ""), rrec.get(name, "")
+        if before == after:
+            continue
+        files += 1
+        added, removed = _changed_lines(before, after)
+        for line in added:
+            added_counts[classify_line(line)] = added_counts.get(classify_line(line), 0) + 1
+            added_lines.append((name, line))
+        for line in removed:
+            removed_counts[classify_line(line)] = removed_counts.get(classify_line(line), 0) + 1
+    return {"added": added_counts, "removed": removed_counts, "files": files,
+            "added_lines": added_lines, "recoverable": True}
+
+
+def lineage(state, node_id: int, *, max_depth: int = 64) -> list[int]:
+    """The node's ancestry, root FIRST, following the first parent at each step.
+
+    First-parent only, and that is a statement about what a re-introduction IS: the question is
+    whether THIS line of descent already deleted the line, not whether any node in the run ever did.
+    An ensemble's second parent is a different lineage and its deletions are not this one's history.
+    Depth-bounded and cycle-safe: a hand-edited log can name a parent that names it back.
+    """
+    chain: list[int] = []
+    seen: set[int] = set()
+    current = node_id
+    while current is not None and current not in seen and len(chain) < max_depth:
+        seen.add(current)
+        chain.append(current)
+        node = (getattr(state, "nodes", None) or {}).get(current)
+        parents = [p for p in (getattr(node, "parent_ids", None) or ())
+                   if isinstance(p, int) and not isinstance(p, bool)]
+        current = parents[0] if parents else None
+    return list(reversed(chain))
+
+
+def reintroduced_lines(state, node_id: int, *, max_lines: int = 20_000) -> dict:
+    """Lines this node ADDS that its own lineage DELETED earlier, byte for byte.
+
+    `{"count": n, "added": n, "examples": [{path, line, deleted_between}], "depth": n}`. A trivial
+    line is not evidence of cycling — `)`, `pass`, a blank — so only lines with at least four
+    non-space characters are eligible, on both sides.
+    """
+    chain = lineage(state, node_id)
+    records = {nid: node_record(state, nid) for nid in chain}
+    deleted: dict[tuple[str, str], str] = {}
+    examples: list[dict] = []
+    scanned = 0
+    count = 0
+    added_total = 0
+    for index in range(1, len(chain)):
+        parent, child = records.get(chain[index - 1]), records.get(chain[index])
+        if parent is None or child is None:
+            continue
+        lrec, rrec = parent.get("files") or {}, child.get("files") or {}
+        for name in sorted(set(lrec) | set(rrec)):
+            if _is_noise(name) or scanned >= max_lines:
+                continue
+            before, after = lrec.get(name, ""), rrec.get(name, "")
+            if before == after:
+                continue
+            added, removed = _changed_lines(before, after)
+            scanned += len(added) + len(removed)
+            if chain[index] == node_id:
+                for line in added:
+                    key = (name, line.strip())
+                    if len(key[1].replace(" ", "")) < 4:
+                        continue
+                    added_total += 1
+                    where = deleted.get(key)
+                    if where is not None:
+                        count += 1
+                        if len(examples) < 8:
+                            examples.append({"path": name, "line": line.strip()[:160],
+                                             "deleted_between": where})
+            for line in removed:
+                key = (name, line.strip())
+                if len(key[1].replace(" ", "")) >= 4:
+                    deleted.setdefault(key, f"node {chain[index - 1]} -> node {chain[index]}")
+    return {"count": count, "added": added_total, "examples": examples, "depth": len(chain)}
+
+
+def diff_edits(left: dict, right: dict, state=None) -> list[str]:
+    """The EDITS section: what KIND of change this is, and whether it undoes an earlier one."""
+    counts = classify_edits(left, right)
+    out: list[str] = []
+    if not counts["recoverable"]:
+        out.append(f"edit types: {NOT_RECOVERABLE} — a file set is missing from the record, "
+                   "so the kind of change cannot be classified. This is NOT 'no change'.")
+        return out
+    if not counts["files"]:
+        out.append(f"edit types: {NO_DIFFERENCE} — no experiment file differs, so there is "
+                   "no edit to classify.")
+        return out
+    added, removed = counts["added"], counts["removed"]
+    total_added, total_removed = sum(added.values()), sum(removed.values())
+    out.append(f"edit types: {total_added} line(s) added, {total_removed} removed across "
+               f"{counts['files']} file(s)")
+    for kind in EDIT_TYPES:
+        if added.get(kind) or removed.get(kind):
+            out.append(f"    {kind}: +{added.get(kind, 0)} / -{removed.get(kind, 0)}")
+    if state is None:
+        out.append("re-introduced lines: not computed — this section needs the run's lineage.")
+        return out
+    cycle = reintroduced_lines(state, right["node_id"])
+    if not cycle["added"]:
+        out.append("re-introduced lines: none to check — this node adds no substantive line.")
+        return out
+    share = 100.0 * cycle["count"] / cycle["added"]
+    out.append(f"re-introduced lines: {cycle['count']} of {cycle['added']} added lines "
+               f"({share:.0f}%) were DELETED earlier in this node's own lineage "
+               f"(depth {cycle['depth']}) and have come back byte for byte")
+    for example in cycle["examples"][:4]:
+        out.append(f"    {example['path']}: {example['line']}  "
+                   f"(deleted at {example['deleted_between']})")
+    if cycle["count"]:
+        out.append("    a re-introduction is not automatically wrong — but it means this lineage "
+                   "has already tried the other side of this line, and the metric it got is in "
+                   "the record.")
+    return out
+
+
 def diff_metrics(left: dict, right: dict) -> list[str]:
     """The METRIC section, with the comparability verdict ATTACHED rather than offered separately.
 
@@ -330,8 +590,8 @@ def diff_metrics(left: dict, right: dict) -> list[str]:
     return out
 
 
-def render_diff(left: dict, right: dict, *, sections=("code", "params", "metric"),
-                max_answer: int = _MAX_ANSWER) -> str:
+def render_diff(left: dict, right: dict, *, sections=("code", "params", "metric", "edits"),
+                max_answer: int = _MAX_ANSWER, state=None) -> str:
     """One assembled answer, bounded, saying at the end what the bound cost."""
     head = (f"=== node {left['node_id']} -> node {right['node_id']} ===\n"
             f"showing node {left['node_id']}'s "
@@ -344,6 +604,11 @@ def render_diff(left: dict, right: dict, *, sections=("code", "params", "metric"
         body += diff_metrics(left, right)
     if "params" in sections:
         body += diff_params(left, right)
+    # The KIND of change before the change itself: a reader who sees "9 hyperparameter lines, 40 %
+    # of them re-introduced" reads the unified diff below differently, and an agent that stops at
+    # the first section has still been told the fact that decides whether to re-propose.
+    if "edits" in sections:
+        body += diff_edits(left, right, state)
     if "code" in sections:
         body += diff_files(left, right)
     text = head + "\n" + "\n".join(body)
@@ -382,8 +647,10 @@ class NodeDiffTools:
         return [fn_spec(
             "diff_nodes",
             "HOW DOES ONE NODE DIFFER FROM ANOTHER — the experiment's own source, the parameters "
-            "PROPOSED, the parameters that actually RAN, and the two metrics with the "
-            "comparability verdict attached.\n"
+            "PROPOSED, the parameters that actually RAN, the two metrics with the comparability "
+            "verdict attached, and WHAT KIND of edit this is (imports, control flow, "
+            "hyperparameters, call arguments, data I/O …) with the lines this lineage already "
+            "deleted once and has now put back.\n"
             "ASK THIS BEFORE YOU ATTRIBUTE A METRIC TO A PARAMETER. A node's recorded `params` is "
             "a PROPOSAL: under params_style=\"none\" the engine applies nothing and the Developer "
             "realises the idea by EDITING THE REPO, so the number in the record is not necessarily "
@@ -394,8 +661,11 @@ class NodeDiffTools:
             "nothing changed.",
             {"left": {"type": "integer", "description": "The node you are comparing FROM."},
              "right": {"type": "integer", "description": "The node you are comparing TO."},
-             "section": {"type": "string", "enum": ["all", "code", "params", "metric"],
-                         "description": "Default 'all'. Narrow it when the answer was truncated."}},
+             "section": {"type": "string",
+                         "enum": ["all", "code", "params", "metric", "edits"],
+                         "description": "Default 'all'. 'edits' is the classification of the "
+                                        "change by KIND plus the lines this lineage already "
+                                        "deleted once. Narrow it when the answer was truncated."}},
             ["left", "right"])]
 
     def execute(self, name: str, args: dict) -> str:
@@ -424,8 +694,8 @@ class NodeDiffTools:
                         "This is 'no such node', NOT 'no difference'.)")
             recs[nid] = rec
         section = str(args.get("section") or "all").strip().lower()
-        if section not in ("all", "code", "params", "metric"):
-            return f"(no section named {section!r}; ask for all, code, params or metric)"
-        sections = ("code", "params", "metric") if section == "all" else (section,)
+        if section not in ("all", "code", "params", "metric", "edits"):
+            return f"(no section named {section!r}; ask for all, code, params, metric or edits)"
+        sections = (("code", "params", "metric", "edits") if section == "all" else (section,))
         return render_diff(recs[left_id], recs[right_id], sections=sections,
-                           max_answer=self.max_answer)
+                           max_answer=self.max_answer, state=self.state)

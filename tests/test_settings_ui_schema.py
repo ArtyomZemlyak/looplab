@@ -100,7 +100,24 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 197
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 207
+    # 206 + 1 -> 207 on 2026-09-07, at the SECOND merge with master: master's ten rows had
+    # already met this branch's ten, and this is the one row this branch authored after
+    # that merge — `agent_read_loop_nudge_after`. Verified by intersection as every entry
+    # below prescribes: 206 keys common to master's file plus exactly that one, no
+    # duplicate and none removed.
+    # 196 + 196 -> 206 on 2026-09-07, at the MERGE with master, and BOTH histories below are
+    # real: each side grew its own copy from a common 186 and neither literal was measured
+    # against a tree holding the other's rows. Verified as every entry below prescribes —
+    # by INTERSECTION, never by adding the integers: 186 keys are common to the two files,
+    # this branch adds ten (diagnosis_hypotheses, endgame_reserve_frac, evidence_envelope,
+    # llm_cost_limit, llm_token_limit, mcts_cost_weight, novelty_literature,
+    # stage_check_tools, steady_state_build, syscall_fence) and master ten
+    # (developer_crash_pause_after, developer_probe_confine, developer_stage_guidance,
+    # developer_step_feedback_command, established_context, established_context_bytes,
+    # hide_empty_tools, llm_budget_usd, llm_stream_stall_fallback,
+    # node_open_budget_floor_usd), giving 206 with no duplicate key. The keyset revision is
+    # RE-DERIVED over the merged keyset for the same reason.
     # 196 + 1 -> 197 on 2026-09-07: `agent_read_loop_nudge_after`, found by review. The A9 read-loop
     # nudge shipped ON with a threshold of 25 and NO Settings field, so `loop_opts_from_settings`
     # never populated the bundle and `drive_tool_loop`'s literal was the only value that could ever
@@ -142,6 +159,34 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # Verified as the paragraph prescribes rather than by bumping the number: master's file
     # carried 184 keys, ours 188, the intersection 183, and re-adding exactly those five to
     # master's catalogue gives 189 with no duplicate key.
+    # 195 -> 196 on 2026-09-07: `steady_state_build`, the build fan-out as a refilling lane
+    # (doc 52 row 33). A row because it changes how many provider calls a build batch makes.
+    # 194 -> 195 on 2026-09-07: `diagnosis_hypotheses`, the competing explanations the crash
+    # diagnostician considered (doc 52 row 32). A row for the same reason as the one below
+    # it: it changes what a paid call is asked, and an operator has to be able to see that.
+    # 193 -> 194 on 2026-09-07: `novelty_literature`, the retrieved papers reaching the
+    # novelty gates (doc 52 row 32). A row because it changes what the re-proposal prompt
+    # says, which is the kind of switch an operator has to be able to see and turn off.
+    # 192 -> 193 on 2026-09-07: `mcts_cost_weight`, the cost term of the cost-constrained
+    # MCTS (doc 52 row 31). A row rather than an omission for the same reason the spend caps
+    # are rows: it is a number an operator types to trade speed against score, and it is
+    # meaningless to anyone who cannot see its unit (relative to the run's mean eval second).
+    # 190 -> 191 on 2026-09-06: `endgame_reserve_frac`, the plan's endgame reserve (doc 52 row 18).
+    # 188 -> 190 catalogued rows on 2026-09-06: `llm_cost_limit` + `llm_token_limit`, the run's LLM
+    # spend caps reserved at the broker's permit (`core/llm_budget.py`, doc 52 row 15). Rows beside
+    # `max_seconds` / `max_eval_seconds`: a spend ceiling is exactly the operator-typed knob a form
+    # exists for, and until then the run had no LLM cap at all.
+    # 187 -> 188 catalogued rows on 2026-09-06: `evidence_envelope`, the ONE untrusted-evidence
+    # envelope (`core/evidence.py`, doc 52 row 13) on the Strategist, the crash-triage judge, the
+    # repair critic and the arXiv / web tools. A row for the reason the three rows below are:
+    # it changes what a paid, decision-moving role is TOLD about its evidence and marks that
+    # evidence, i.e. it changes a PROMPT, and the operator must be able to see the switch that
+    # restores the historical bytes.
+    # 186 -> 187 catalogued rows on 2026-09-06: `stage_check_tools`, whether the INTER-STAGE
+    # CHECKER — the one judge whose verdict can end a node — may query the checked stage's own
+    # log instead of deciding from `run.out[-4000:]` (doc 52 row 9). A row for the reason
+    # `train_monitor_tools` / `repair_log_tools` are: it changes what the evidence for a paid,
+    # node-ending judgement IS, buys round trips when on, and restores a PROMPT when off.
     # 185 -> 186 catalogued rows on 2026-09-03: `agent_timeout`, the wall on ONE external
     # coding-agent invocation. A ROW because none of the four honest omission clauses holds — the
     # key set is closed, it is not a legacy alias, it is exactly operator-typed, and its parent
@@ -257,15 +302,32 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 218 -> 219 Settings on 2026-09-03: `agent_timeout`. See the catalogue note above for why it
     # is a form row; the reason it is a Settings field at ALL is that it previously was not, and the
     # constructor default it replaced was therefore the only value a composed run could ever have.
+    # 230 + 230 -> 241 on 2026-09-07, at the MERGE with master: re-derived from the
+    # MERGED model, not added — an AST scan of `Settings` against both parents reports
+    # exactly the twenty catalogued additions above plus each side's uncatalogued ones,
+    # and none removed.
     # 229 + 1 -> 230 on 2026-09-06, at the MERGE with master: master's `agent_timeout`
     # meeting this branch's ten. Re-derived from the merged model, not added: an AST scan
     # of `Settings` against both parents reports exactly those eleven added and none
     # removed.
+    # 219 -> 220 Settings on 2026-09-06: `stage_check_tools`. See the catalogue note above.
+    # 220 -> 221 Settings on 2026-09-06: `evidence_envelope`. See the catalogue note above.
+    # 221 -> 223 Settings on 2026-09-06: `llm_cost_limit` + `llm_token_limit`. See the catalogue note.
+    # 223 -> 224 Settings on 2026-09-06: `endgame_reserve_frac`, the plan's endgame reserve (doc 52 row 18).
+    # 224 -> 225 Settings on 2026-09-06: `model_arms`, the operator x model router's arms (doc 52 row 19; uncurated, open-keyed).
+    # 225 -> 226 Settings on 2026-09-06: `syscall_fence`, the kernel syscall policy beside `landlock` (doc 52 row 28; a row).
+    # 226 -> 227 Settings on 2026-09-07: `mcts_cost_weight`, the cost term of the cost-constrained MCTS (doc 52 row 31; a row).
+    # 227 -> 228 Settings on 2026-09-07: `novelty_literature` (doc 52 row 32; a row).
+    # 228 -> 229 Settings on 2026-09-07: `diagnosis_hypotheses` (doc 52 row 32; a row).
+    # 229 -> 230 Settings on 2026-09-07: `steady_state_build` (doc 52 row 33; a row).
     # 230 + 1 -> 231 on 2026-09-07: `agent_read_loop_nudge_after` — see the catalogue note above;
     # the two counts move together because it is a curated row.
     # 227 -> 229 Settings on 2026-09-06: A5's `established_context` / `established_context_bytes`,
     # the pair whose catalogue entry was also missing until 2026-09-07.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 231
+    # 241 + 1 -> 242 on 2026-09-07, at the SECOND merge: `agent_read_loop_nudge_after`,
+    # the one field this branch added after master already carried its ten. The two counts
+    # move together because it is a curated row.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 242
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

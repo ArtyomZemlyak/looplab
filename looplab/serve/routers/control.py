@@ -38,6 +38,7 @@ from looplab.serve.launch import (
     launch_request_digest,
     preflight_response,
     preflight_start,
+    validate_launch,
     safe_run_dir,
     validate_idempotency_key,
 )
@@ -220,6 +221,13 @@ def build_router(srv) -> APIRouter:
     # `/commands` is schedulable and its progress readable; what is open is doing it and deleting
     # the route.
     # proof:`present:async def control(@looplab/serve/routers/control.py`
+    # Measured 2026-09-07 (doc 52 row 29, its two sibling markers shipped around this one): 62 call
+    # sites in 9 test files — test_server 27, test_fork_from_seq 17, test_run_command_service 9,
+    # test_review_fixes 3, test_strategist_developer_switch 2, one each in test_review_capabilities,
+    # test_legacy_control_deprecation, test_concept_tag_command, test_collaboration — and no
+    # first-party client. Each site is a contract to RE-VERIFY under `/commands`, not a URL to
+    # rewrite: the durable path applies asynchronously and refuses with coded records, so the
+    # 400/409/401/403 properties those sites guard need their own port.
     @router.post("/api/runs/{run_id}/control")
     async def control(run_id: str, request: Request, response: Response):
         rd = _run_dir(run_id)
@@ -765,6 +773,23 @@ def build_router(srv) -> APIRouter:
                 "field_errors": {},
             }) from exc
         return preflight_response(await anyio.to_thread.run_sync(lambda: preflight_start(srv, body)))
+
+    @router.post("/api/validate")
+    async def validate_run_launch(request: Request):
+        """Is this launch proposal launchable, and if not, why — the same `preflight_start` funnel
+        as `/api/start` and `/api/start/preflight`, answered as a 200 verdict (`launch.py::
+        validate_launch`). The TUI asks it on every draft render and before every launch, which is
+        what let its own `spec_ready` copy of the rules be deleted (doc 52 row 8). A body that is not
+        JSON is not a proposal at all and gets the siblings' 400."""
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, {
+                "code": "invalid_launch_request",
+                "message": "validate body must be valid JSON",
+                "field_errors": {},
+            }) from exc
+        return await anyio.to_thread.run_sync(lambda: validate_launch(srv, body))
 
     @router.post("/api/start")
     async def start_run(request: Request):

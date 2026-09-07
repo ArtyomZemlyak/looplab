@@ -688,7 +688,7 @@ def build_router(srv) -> APIRouter:
                         client, [{"role": "user", "content": prompt}],
                         IdeaEmission, s.llm_parser).to_idea())
                     return {"ok": True, "idea": durable_idea_payload(idea), "parsed": True}
-                except Exception:  # small models can fumble strict output; fall back to editable text
+                except Exception:  # noqa: BLE001 — small models can fumble strict output; fall back to editable text
                     text = await anyio.to_thread.run_sync(lambda: client.complete_text([
                         {"role": "system", "content": "Reply with a one-line experiment suggestion: "
                          "the operator (improve/draft), suggested params, and why — plain text."},
@@ -782,14 +782,14 @@ def build_router(srv) -> APIRouter:
                 plan = None
                 try:
                     plan = _route_with_tools(client)
-                except Exception:  # model can't tool-call / loop error -> single-call route
+                except Exception:  # noqa: BLE001 — model can't tool-call / loop error -> single-call route
                     plan = None
                 if plan is None:
                     try:
                         plan = parse_structured(
                             client, [{"role": "system", "content": sys_prompt}, *evidence,
                                      {"role": "user", "content": user}], _Plan, s.llm_parser)
-                    except Exception:  # parse fumble -> fall through to advisory reply
+                    except Exception:  # noqa: BLE001 — parse fumble -> fall through to advisory reply
                         plan = None
                 if plan is not None:
                     actions = _plan_to_actions(plan, st)

@@ -345,7 +345,7 @@ class _RunCommandAdapter:
         try:
             get = getattr(self.service, "get", None)
             value = get(rd, command_id) if callable(get) else None
-        except Exception:  # accepted is durable; a failed observation is not command failure
+        except Exception:  # noqa: BLE001 — accepted is durable; a failed observation is not command failure
             return record
         observed = _command_record(value)
         return observed or record
@@ -408,7 +408,7 @@ class _RunCommandAdapter:
         try:
             record = _command_record(self.service.submit(
                 rd, key, event_type, data, expected_generation=generation))
-        except Exception as exc:  # never expose internals or retry a possibly accepted submission
+        except Exception as exc:  # noqa: BLE001 — never expose internals or retry a possibly accepted submission
             # HTTP 409 from the service names the already-authoritative command. A transport failure
             # may have happened after acceptance, in which case the id is deterministic from our key.
             detail = getattr(exc, "detail", "")

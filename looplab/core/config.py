@@ -180,6 +180,15 @@ RUN_START_PINNED_FIELDS = frozenset({
     "select_verifier",
     "select_verifier_samples",
     "verifier_ci_tie",
+    # The HITL gate (I21). Pinned since 2026-09-06: it was read LIVE off `Settings`, so a snapshot
+    # EDIT — as opposed to the deletion `cli/__init__.py::load_run_settings(require_snapshot=True)`
+    # refuses — could still finish a paused approval-pending run with no approval; the one setting
+    # that gates a paid finish was the one invariant #6 did not cover. Recorded on every
+    # `run_started` since then; a log written before carries no record and its snapshot stays the
+    # authority (`RunState.require_approval is None`), the same legacy rule `holdout_fraction`
+    # follows, because folding "absent" to False would turn the gate OFF on the resume of every
+    # older run that had it on — the exact defect the pin exists to stop.
+    "require_approval",
 })
 
 
@@ -211,8 +220,8 @@ def run_start_pinned_disagreement(field: str, value, pinned) -> bool:
 def run_start_pinned_settings(state) -> dict:
     """Return the effective Settings names committed by a folded run-start record.
 
-    Pre-pin legacy logs have no recorded holdout fraction, so their snapshot remains authoritative
-    for both holdout knobs. Verifier fields, however, have always been re-pinned from the legacy-safe
+    Pre-pin legacy logs have no recorded holdout fraction (nor, before 2026-09-06, an approval
+    gate), so their snapshot remains authoritative for those knobs. Verifier fields, however, have always been re-pinned from the legacy-safe
     fold defaults whenever a valid ``run_started`` identity exists.
 
     Every value here must be one ``run_started`` ACTUALLY CARRIED. That is not a tautology for
@@ -241,6 +250,10 @@ def run_start_pinned_settings(state) -> dict:
             "holdout_fraction": holdout_fraction,
             "holdout_select": bool(getattr(state, "holdout_select", False)),
         })
+    # Tri-state on purpose: only a RECORDED gate is a pin. See the registry comment above.
+    require_approval = getattr(state, "require_approval", None)
+    if require_approval is not None:
+        values["require_approval"] = bool(require_approval)
     if not values.keys() <= RUN_START_PINNED_FIELDS:
         raise RuntimeError("folded run-start pinned settings contract drifted")
     return values
@@ -321,6 +334,9 @@ DEFAULT_AGENT_CONTROL: dict[str, list[str]] = {
     "merge_mode": ["strategist"],
     "complexity_cue": ["strategist"],
     "ablate_code_blocks": ["strategist"],
+    # The plan's endgame sweep (doc 52 row 18): the Strategist may keep the reserve for the
+    # ensemble alone; the reserve itself is the plan's and no role may move it.
+    "endgame_sweep": ["strategist"],
     "prefer_sweep": ["strategist"],
     "novelty_stance": ["strategist"],
     "developer": ["strategist"],
@@ -609,6 +625,25 @@ class Settings(BaseSettings):
     # cost 7 ms (a `read_log` tail) to 525 ms (a whole-run hourly scan of the real 10.0 MB log).
     # Paid once per FAILED ATTEMPT, not on a timer like the watchdog's.
     repair_log_tools: bool = True
+    # THE FOURTH ROLE THAT MAY LOOK (doc 52 row 9): the INTER-STAGE CHECKER — the judge that decides,
+    # between two stages, whether a `check`-flagged stage physically succeeded and may END A NODE on
+    # a named hard kind — queries the stage's own log (`tools/log_tools.py`'s `read_log` +
+    # `metric_series`, over the same `monitor_log_sources` derivation as the three rows above)
+    # instead of only being handed `run.out[-4000:]` of a `run.out` that is itself a 64,000-byte tail
+    # clamp. It was the LAST judge in the engine working from a blind slice, and it is the one whose
+    # slice cost the most: `docs/BACKLOG.md` §0.9 records the 2.33 GPU-h re-train a verdict drawn
+    # from ~38 log lines of a 1.4-hour training bought, and `train_monitor.py`'s
+    # `STAGE_CHECK_TRAJECTORY_KIND` block the ten `rubertlite-dense-retrieval` nodes condemned for
+    # "no learning" from a tail that held three of 11,248 loss points. The deterministic vetoes
+    # (`epoch_floor_acquits`, `trajectory_acquits_stage_check`) are untouched and still only ACQUIT;
+    # this widens what the model SEES, and the closed verdict vocabulary
+    # (`parse_stage_check_reply` -> `STAGE_CHECK_HARD_KINDS`) is exactly what it was, so nothing read
+    # here can end a node that the one-line contract could not. OFF restores the historical single
+    # completion byte for byte, prompt included (`eval_stages.STAGE_CHECK_LOOK_INVITATION` is the
+    # ONE conditional block). Cost: up to `eval_stages.STAGE_CHECK_LOOK_TURNS` extra round trips per
+    # CHECKED STAGE — paid once per stage, on the eval-blocking path between stages, never on a
+    # timer — plus the log reads (2.4 ms for a default `read_log`, ~10 ms/MB for a search).
+    stage_check_tools: bool = True
     # ASHA live-curve watchdog (sibling of the training monitor): reads the latest INTERMEDIATE value of
     # the objective metric off the live log (reusing the eval's OWN metric reader). Finished-endpoint rank
     # remains advisory. An opt-in KILL additionally requires an operator-declared metric.resource_key and
@@ -778,6 +813,13 @@ class Settings(BaseSettings):
     # recombination is the strongest single merge (removing it costs ~9 pp), so it is the default
     # wherever it can work. Falls back to mean when the Developer can't ensemble.
     merge_mode: str = "auto"
+    # THE ENDGAME RESERVE (doc 52 row 18; `engine/plan.py`): the fraction of `max_nodes` the run's
+    # PLAN keeps for the endgame — the top-2 ensemble once, then champion sweeps proposed by the k-NN
+    # surrogate — and which the dispatcher honours instead of opening breadth until the budget dies.
+    # 0 = no plan, the historical dispatch. Product default 0.2 = the Strategist's old 80 % rule,
+    # now a durable `plan` row rather than a consult that may never fire; `EngineOptions` keeps 0.0
+    # so a bare `Engine(...)` gains no dispatch authority it did not ask for.
+    endgame_reserve_frac: float = Field(default=0.2, ge=0.0, le=0.9)
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False
@@ -1068,6 +1110,23 @@ class Settings(BaseSettings):
     # Off by default (the cadences are well-tested and the bandit has no direct published
     # ablation); `thorough` turns it on.
     operator_bandit: bool = False
+    # COST-CONSTRAINED SELECTION (doc 52 row 31): how much a subtree's measured expense counts
+    # against its UCB1 score in the `mcts` policy. `0.0` = off and is the historical behaviour
+    # exactly — `search/policy.py::eval_cost_penalty` returns 0.0 and the score expression is
+    # unchanged. The unit is RELATIVE to this run's own mean eval second, so `0.5` means "a subtree
+    # that costs twice this run's average pays half a reward unit" on a toy and a repo run alike;
+    # a subtree nobody has measured counts as average, never as free. Only the `mcts` policy reads
+    # it (greedy/evolutionary/asha ignore it, as they ignore `c`).
+    mcts_cost_weight: float = 0.0
+    # THE MODEL ARMS of the operator x model router (doc 52 row 19): `{arm: "model-id[@cost]"}` —
+    # the models the bandit branch may route a BUILD to beside the configured Developer model (the
+    # implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because it is a
+    # fact about the box's endpoints the run cannot measure. The pick is `_bandit_pick`'s UCB over
+    # per-arm yield with the gain divided by the cost — the iso-budget lever LEVI / DEI / cross-tier
+    # routing / ShinkaEvolve's bandit all measured. INERT without `operator_bandit` (the pick lives
+    # in its branch) and without a declared arm; a routed build runs under
+    # `core/llm.py::model_override` and records its arm on `node_created`.
+    model_arms: dict = {}
     # P1 hypothesis ledger: ask the Researcher to state the one-line hypothesis each experiment tests,
     # register deep-research directions as hypotheses, and track them to a verdict on the board. ON by
     # default. The board is shown to the Researcher and can be foresight-ordered, so it can
@@ -1139,7 +1198,7 @@ class Settings(BaseSettings):
     redact_output: bool = True
     # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
-    # audit event in the Trust panel. Off by default. Whether a flag CHANGES selection is governed by
+    # audit event in the Trust panel. Off by default until 2026-08-23. Whether a flag CHANGES selection is governed by
     # `trust_gate` below (default: audit-only, never changes selection).
     # ON by default since 2026-08-23 (operator). Audit-only by construction: whether a flag changes
     # selection is `trust_gate`'s decision, and that still defaults to audit, so this buys VISIBILITY
@@ -1198,6 +1257,30 @@ class Settings(BaseSettings):
     # unsupported about the CITATION, so suppression would drop real findings over bad footnotes.
     # It reaches no metric, champion, selectability decision or violation (docs/36).
     memo_verdict_cue: bool = True
+    # THE UNTRUSTED-EVIDENCE ENVELOPE (`core/evidence.py`, doc 52 row 13; doc 50 XP-05). May the
+    # three decision-moving roles that read text they did not write be TOLD so, at system
+    # authority, and have that text MARKED? ON: the Strategist's system prompt ends with the guard
+    # sentence and every result its tool loop returns is fenced between `UNTRUSTED_RUN_EVIDENCE`
+    # and `END UNTRUSTED_RUN_EVIDENCE`; the crash-triage judge's stderr tail, repair history and
+    # code tail ride inside the same fence under the same guard, and so does the repair critic's
+    # trajectory; the arXiv and web tools stamp their own results, so the Researcher and the
+    # Deep-Research loop see the marker too. It is the sentence the Boss and the assistant already
+    # carried, built by the ONE builder, with each role's own `powers` clause — a Strategist that
+    # cannot be talked into a policy or a timeout, a judge that cannot be talked into a verdict, a
+    # critic that cannot be talked into ending a chain.
+    #
+    # Measured (doc 50 XP-05): 3 of 9 in-scope system prompts carried a rule, none of them the
+    # surfaces whose answer sets `eval_parallel` / `policy` / `timeout` or a node's terminal; the
+    # triage and critic prompts spliced the candidate's stderr verbatim, and the web / arXiv
+    # results arrived unmarked in every loop that held those tools.
+    #
+    # `false` reproduces every one of those prompts BYTE FOR BYTE (the `developer_probe` /
+    # `memo_verdict_cue` same-position pattern; `tests/test_evidence_envelope.py` pins each
+    # surface both ways). It takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row on `developer_probe`'s
+    # ground — a DIFFERENT PROMPT — because a resumed pre-field run must keep the prompts it was
+    # launched with. It ANNOTATES and withholds nothing: no metric, champion, selectability
+    # decision or violation can move on it (docs/36).
+    evidence_envelope: bool = True
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
     # surfaced in the Trust panel. Broad findings are advisory; `critic:hardcoded_metric` can gate under
@@ -1313,6 +1396,21 @@ class Settings(BaseSettings):
     # runs), separate from wall-clock. Survives resume (summed from the event log). The real
     # guard against a silent multi-hour sweep when an eval is a minutes-hours training run.
     max_eval_seconds: float | None = None
+    # THE RUN'S LLM SPEND, AS A RESERVE-COMMIT BUDGET (`core/llm_budget.py`, doc 52 row 15; doc 27's
+    # `no-shared-reserve-commit-run-budget`). Until 2026-09-06 there was no run-level cap on model
+    # spend at all: `CostAccountant.limit` was per CLIENT and nothing set it, and the accountant only
+    # learns a call's cost when the response lands — so N callers in flight under any cap would
+    # overshoot it by up to N calls (the fan-out overshoot Token Budgets measured at 30 of 30).
+    # These two caps are checked at the broker's `borrow()`, BEFORE a request is queued, against
+    # committed + reserved + this call's estimate, where the estimate is the run's own mean per
+    # committed call (so nothing is reserved before the first call lands). A refusal raises
+    # `BudgetExceeded` — the same hard stop the accountant raises, through the same funnels.
+    # `llm_cost_limit` is in the provider's own currency (USD for every priced gateway here) and is
+    # a FLOOR on a gateway that reports no prices; `llm_token_limit` counts total tokens and is the
+    # one that holds against a local model. 0 = no cap. Neither takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`
+    # row: a cap can only REMOVE calls, and a pre-field snapshot resumes at 0 = today's behaviour.
+    llm_cost_limit: float = Field(default=0.0, ge=0.0)
+    llm_token_limit: int = Field(default=0, ge=0)
     # Cross-run memory (I19, ADR-10): if set, the best result of each run is stored as
     # a case here, and the cases become retrievable knowledge for future runs.
     memory_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "memory"))
@@ -1380,6 +1478,33 @@ class Settings(BaseSettings):
     # because a pre-gate whose only power is to bypass a gate that is not running cannot change the
     # answer (`engine/novelty.py::_apply_novelty_gate`).
     graded_novelty: bool = True
+    # THE NOVELTY MIRAGE (doc 52 row 32): let the novelty gates SEE the papers this run retrieved
+    # (`RunState.literature`). Both gates grade a proposal against this run's own history alone, so
+    # an idea reads as new because nothing here tried it while the run's own reading describes it —
+    # the form RQ-Bench measured. On, the deterministic overlap (`engine/novelty.py::
+    # literature_overlap`, lexical, no model, no call) rides on the novelty audit rows AND is named
+    # in the re-proposal the gate was already buying. It NEVER rejects: running an experiment a
+    # paper describes is often exactly right, so the overlap is evidence, not a verdict. Off by
+    # default because the second half changes a prompt.
+    novelty_literature: bool = False
+    # THE BUILD FAN-OUT AS A LANE, NOT A BARRIER (doc 52 row 33). The parallel build joins a whole
+    # chunk before anything moves, so the loop pays the SLOWEST build of every chunk and a fast
+    # worker cannot propose from a completed sibling's evidence — AIRA₂ dispatches into a pool as
+    # soon as any worker is free. On, the proposal and the reservation stay on the main task exactly
+    # as before, and the next one happens when a LANE frees, against a fold that already holds every
+    # finished sibling AND the receipts of the lanes still running. Off by default because the shape
+    # of the paid call changes: the researcher is asked for ONE idea per lane rather than `_fan`
+    # distinct ideas per chunk, so the diversity comes from the fold rather than from the ask.
+    steady_state_build: bool = False
+    # COMPETING HYPOTHESES (doc 52 row 32): ask the crash diagnostician for the OTHER explanations
+    # that fit what it read, each with its own confidence and with what would tell it apart from the
+    # primary answer. SAGE's multi-hypothesis attribution moved metrics-bearing outputs 42 -> 92 %,
+    # and this run's own classifier scores 88/118 on `failure_triage.v1` — roughly a quarter of its
+    # answers are wrong and nothing records what else it considered. Recorded on the failure row
+    # (`reason_hypotheses`), read by nothing that decides: the repair still follows the ONE
+    # `failure_kind`. No extra provider call — the same triage call answers one more field — but it
+    # changes that call's prompt, so it ships off.
+    diagnosis_hypotheses: bool = False
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint
@@ -1594,7 +1719,11 @@ class Settings(BaseSettings):
     # to read the operator's editable SOURCE tree. "deny" (default) raises in the child and the
     # refusal — which names the fix — lands in the node's stderr; "warn" logs one line per distinct
     # path to stderr and to `<run>/.looplab-fence/violations.log` and lets the read through; "off"
-    # installs nothing. No-op for a non-repo task: with no editable source there is nothing to fence.
+    # installs nothing. Since 2026-09-06 it is installed for EVERY task, not only a repo task: the
+    # same hook refuses any WRITE under the run's own RECORD (events.jsonl, the snapshots, the
+    # traces) outside the launch's workdir and the fence directory, because a candidate could
+    # otherwise append its own `node_evaluated` row and elect itself (doc 52,
+    # `eval-may-write-the-run-record`). `runtime/read_allowlist.py` is the kernel-side twin.
     #
     # WHY DENY IS THE DEFAULT, and not warn. The failure this closes does not announce itself.
     # `runs/rubertlite-dr-unified-v6` node 4 trained a genuinely good model (train.log RECALL@100
@@ -1729,6 +1858,18 @@ class Settings(BaseSettings):
     # derived allow-list, with `looplab landlock-check <run_dir>` reporting zero skipped rules. Until
     # that exists this rung is opt-in and the audit hook is the shipped boundary.
     landlock: str = "off"
+    # SYSCALL FENCE (`runtime/seccomp.py`, doc 52 row 28): a kernel syscall policy for the eval
+    # process and everything it spawns, on Sandlock's shape — a classic-BPF filter installed by an
+    # exec'd launcher, no root, no libseccomp. "off" (default) installs nothing; "mutators" makes
+    # `mknod`/`mknodat` answer EPERM (the two mutators the audit hook cannot see and RLIMIT_FSIZE
+    # cannot bound); "egress" also refuses `socket(AF_INET|AF_INET6)` — LOOPBACK INCLUDED, because
+    # a filter sees register arguments and never the address a later `connect()` would dial, so a
+    # `torchrun`/NCCL rendezvous over 127.0.0.1 does not run under it (the address-aware rungs are
+    # Landlock TCP at ABI 4 and a network namespace; neither is measured). Off for the reason
+    # `landlock` is: `egress` breaks a download inside the eval and a loopback rendezvous, and
+    # neither policy has been through a real GPU eval. The probe carries `mutators` always.
+    # Validate on the box with `python -m looplab.runtime.seccomp egress`.
+    syscall_fence: str = "off"
     llm_model: str = "qwen3:8b"
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
@@ -2511,6 +2652,8 @@ class Settings(BaseSettings):
         # nothing above itself. `tests/test_metric_subject.py` pins all three pairs equal.
         ("metric_subject", ("off", "audit", "require")),
         ("landlock", ("off", "enforce")),
+        # Same reason again — `runtime/seccomp.py::POLICIES`; `tests/test_syscall_fence.py` pins them equal.
+        ("syscall_fence", ("off", "mutators", "egress")),
         ("backend", ("toy", "llm")),
         ("developer_backend", lambda: DEVELOPER_BACKENDS),
         ("llm_parser", lambda: _parser_names()),
@@ -2705,6 +2848,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `Settings` fields, and a snapshot written between the two changes carries `train_monitor_tools`
     # explicitly (so no `setdefault` fires for it) while genuinely predating this one.
     "repair_log_tools": False,
+    # And the stage checker's look, on the same ground and with its own row for the same reason: a
+    # pre-2026-09-06 run resumes with the single completion it was launched with.
+    "stage_check_tools": False,
     "asha_live": False,
     "asha_live_kill": False,
     "asha_live_quantile": 0.5,
@@ -2916,6 +3062,16 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # already states that `developer_probe=false` restores the old prompt BYTE FOR BYTE — which is
     # what makes this row a restoration rather than a guess.
     "developer_probe": False,
+    # doc 52 row 18: a resumed pre-plan run keeps its historical dispatch — no reserve appears
+    # mid-run under a rule its first half never had.
+    "endgame_reserve_frac": 0.0,
+    # THE UNTRUSTED-EVIDENCE ENVELOPE, added 2026-09-06 defaulting ON (doc 52 row 13). (a) holds.
+    # (b) is `developer_probe`'s DIFFERENT-PROMPT ground exactly: the Strategist, triage and critic
+    # system prompts gain a guard sentence and their user turns gain a fence around the candidate's
+    # own text, and the Strategist's tool results arrive fenced — so the two values produce two
+    # different prompts for three roles. (c) is `False`, pointable at every commit before this one,
+    # and the field's own comment states that `false` restores every prompt byte for byte.
+    "evidence_envelope": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

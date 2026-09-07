@@ -155,17 +155,22 @@ def test_the_engine_hands_the_critic_the_same_verdicts_the_judge_read():
 
     ev = __import__("looplab.engine.evaluate", fromlist=["x"])
     src = inspect.getsource(ev)
-    assert "monitor_verdicts=_monitor_verdicts)" in src
+    assert "monitor_verdicts=a._monitor_verdicts)" in src   # the judge's read, boxed on the attempt
 
     # ONE READ PER ATTEMPT, and counted as CALLS rather than as an assignment spelling — a second
     # `_durable_monitor_verdicts(...)` inlined at the critic's call site would re-read the whole
     # event log on a path that already has the answer in a local, and an assignment-shaped pin
     # cannot see it. `read_all()` on a long run is not free, and the two readers must also be
     # looking at the SAME rows: a second read taken moments later can differ.
+    from tests._source_scan import EVAL_PHASES
+
+    # The driver and its `_eval_*` phases (the read is DECIDE_REPAIR's since the EvalAttempt split),
+    # scanned together so a second read in ANY phase is still a red test.
     tree = ast.parse(src)
-    evaluate = next(n for n in ast.walk(tree)
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and n.name == "_evaluate")
-    calls = [n for n in ast.walk(evaluate)
+    loop = [n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name in ("_evaluate",) + EVAL_PHASES]
+    assert len(loop) == 1 + len(EVAL_PHASES)
+    calls = [n for fn in loop for n in ast.walk(fn)
              if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_durable_monitor_verdicts"]
     assert len(calls) == 1, f"the verdicts must be read once per attempt, found {len(calls)} calls"

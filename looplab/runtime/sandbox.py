@@ -21,13 +21,36 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
 
 from looplab.core.errors import ConfigRefusal
-from looplab.runtime.read_fence import FENCE_DIR_ENV, prepend_pythonpath
+from looplab.runtime.read_fence import FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath
 from looplab.runtime import landlock as _landlock
+from looplab.runtime import seccomp as _seccomp
+
+# THE EVAL PROCESS'S OWN CLOCK (doc 52 row 15; the doc 52 marker `eval-process-is-not-told-its-deadline`).
+# The runtime exported the seed, the fence, the Landlock ruleset and the image, and never the one
+# number a training script needs to size its last epoch: when it will be killed. `run_argv` sets
+# both for every launch — the wall as a Unix timestamp and the ceiling it was derived from — and
+# `command_eval` forwards the same pair into a container, where `docker run` inherits nothing.
+# `setdefault`, so a caller that already declared either (a test, an operator's `eval_env`) wins.
+EVAL_DEADLINE_ENV = "LOOPLAB_EVAL_DEADLINE"
+EVAL_TIMEOUT_ENV = "LOOPLAB_EVAL_TIMEOUT_S"
+
+
+def eval_deadline_env(timeout: float, *, now: Optional[float] = None) -> dict[str, str]:
+    """The two variables for a launch that will be killed `timeout` seconds from `now` (wall time)."""
+    try:
+        ceiling = float(timeout)
+    except (TypeError, ValueError):
+        return {}
+    if not (ceiling > 0) or ceiling == float("inf"):
+        return {}
+    start = time.time() if now is None else float(now)
+    return {EVAL_DEADLINE_ENV: f"{start + ceiling:.3f}", EVAL_TIMEOUT_ENV: f"{ceiling:.3f}"}
 
 # THE secret screen — MOVED to `core/envsafe.py`, re-exported here and NOT copied. Every existing
 # `from looplab.runtime.sandbox import is_secret_env` (eight modules, `tests/test_secret_env_pattern.py`)
@@ -530,6 +553,15 @@ class RunResult:
     # stops the record attributing a number to parameters the node never used. It gates nothing and
     # cannot fail a node. None when the node declares no comparable coordinate or no carrier read.
     applied_params: Optional[dict] = None
+    # HOST-SIDE SCORING (doc 52 row 10a, `adapters/repo_task.py::HostScorerSpec`): when the task
+    # declared a host scorer, `metric` above is ITS number and these two carry what the candidate
+    # said about itself. `self_metric` is the candidate's own printed number, read off the last
+    # candidate-side stage's stdout with the task's own reader — recorded, never selected on — and
+    # `host_scorer` is the receipt of the program that produced `metric`: `{argv, program,
+    # program_sha256, program_size}`, taken at the score stage's start, so a reader can prove the
+    # scorer was held constant across every node of the run. None on every other path.
+    self_metric: Optional[float] = None
+    host_scorer: Optional[dict] = None
 
     # SETUP: True when the run's SETUP command — the one the engine itself ran, before the eval —
     # exited non-zero or timed out. The out-of-band twin of `timed_out`/`stalled`/`diverged`, and it
@@ -862,6 +894,8 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # and always keep what the engine explicitly passes in `env` (e.g. LOOPLAB_EVAL_SEED).
     base = {k: v for k, v in os.environ.items() if not is_secret_env(k, v)}
     full_env = {**base, **{k: str(v) for k, v in (env or {}).items()}}
+    for _k, _v in eval_deadline_env(timeout).items():
+        full_env.setdefault(_k, _v)      # the eval's own clock; an explicit declaration wins
     # SOURCE-TREE READ FENCE (runtime/read_fence.py). The engine hands a fenced launch the fence
     # directory in `LOOPLAB_READ_FENCE_DIR`; prepending it to PYTHONPATH is what makes CPython import
     # the generated `sitecustomize` at startup and install the audit hook that refuses reads of the
@@ -881,6 +915,13 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # container that the run had a fence.
     if not _docker_run:
         prepend_pythonpath(full_env, full_env.get(FENCE_DIR_ENV) or "")
+        # THE LAUNCH'S OWN WORKDIR, for the fence's record rule (2026-09-06): the one directory
+        # under the run record this process may write. Set, never defaulted — `wd` is per LAUNCH
+        # (a node's workdir, a confirm-phase workdir, the metric adapter's exec in the node
+        # workdir, the repo root for `setup`) and one generated fence serves all of them. Only
+        # beside the marker, so an unfenced launch's env stays byte-identical.
+        if full_env.get(FENCE_DIR_ENV):
+            full_env[WORKDIR_ENV] = str(wd)
         # KERNEL READ ALLOW-LIST (runtime/landlock.py), the rung the audit hook above cannot reach:
         # `safetensors`, a Rust `File::open`, a child `cat` and a `torchrun` rank raise no `open`
         # audit event at all. The engine hands a launch its derived allow-list in `LOOPLAB_LANDLOCK_ALLOWLIST`
@@ -904,6 +945,14 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
                 sys.executable,
                 _landlock.format_env([(str(wd), "readwrite")] + _landlock.parse_env(_ll)),
                 argv)
+        # THE SYSCALL FENCE (runtime/seccomp.py, doc 52 row 28), outermost so its filter is in force
+        # for the allow-list launcher too: the engine stamps the policy name in `LOOPLAB_SYSCALL_FENCE`
+        # (`engine/resources.py::_fenced_env`); absent — the default, `Settings.syscall_fence="off"` —
+        # nothing here changes. A launcher, not a `preexec_fn`, for the reason recorded above; the
+        # kernel inherits the filter across `exec`, so one application covers the process tree.
+        _sc = full_env.get(_seccomp.SECCOMP_ENV) or ""
+        if _sc:
+            argv = _seccomp.launch_argv(sys.executable, _sc, argv)
     # Run the child in UTF-8 mode so its `open()`/stdio default to UTF-8 even on Windows (whose
     # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8 and
     # routinely crash with a cp1252 UnicodeDecodeError on the Windows host path. (The Docker/untrusted
@@ -1301,7 +1350,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                             logf.flush()
                     if scan and text:
                         _observe_health(key, text)
-        except Exception:
+        except Exception:  # noqa: BLE001 — a pump thread's write/scan error must not kill the drain; the child's exit is the signal
             pass
         finally:
             if decoder is not None:
@@ -1313,11 +1362,11 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                             logf.flush()
                     if scan:
                         _observe_health(key, text, final=True)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the final flush is best-effort; the exit code carries the outcome
                     pass
             try:
                 stream.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 — closing a dead pipe is best-effort
                 pass
 
     t_out = threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True)
@@ -1344,7 +1393,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the tree is already killed; a wait timeout must not block the watchdog
                     pass
                 break
             if (stall_timeout and not stalled.is_set()
@@ -1360,7 +1409,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the tree is already killed; a wait timeout must not block the watchdog
                     pass
                 break
             if cancel is not None and cancel.is_set():
@@ -1368,7 +1417,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the tree is already killed; a wait timeout must not block the watchdog
                     pass
                 timed_out = True
                 break
@@ -1415,7 +1464,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the tree is already killed; a wait timeout must not block the watchdog
                     pass
                 timed_out = True
                 break
@@ -1440,12 +1489,12 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
         try:
             logf.write(active_marker)
             logf.flush()
-        except Exception:
+        except Exception:  # noqa: BLE001 — the marker is a diagnostic aid; the kill is the decision
             pass
     if logf is not None:
         try:
             logf.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — closing the log is best-effort after the child exited
             pass
     rc = proc.returncode if proc.returncode is not None else -1
     out = b"".join(bufs["out"]).decode("utf-8", "replace")
@@ -1633,7 +1682,7 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
         except psutil.NoSuchProcess:
             pass
         return
-    except Exception:
+    except Exception:  # noqa: BLE001 — the psutil walk is best-effort; the killpg fallback below still runs
         pass
     # Last-resort fallback (no psutil, or the group kill above failed): OS-branched WHOLE-TREE kill.
     # Plain proc.kill() on Windows ends only the direct child, orphaning grandchildren
@@ -1663,10 +1712,10 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
             proc.kill()
         else:
             os.killpg(os.getpgid(proc.pid), 9)
-    except Exception:
+    except Exception:  # noqa: BLE001 — killpg/taskkill failed; fall through to a direct kill
         try:
             proc.kill()
-        except Exception:
+        except Exception:  # noqa: BLE001 — last-resort kill; nothing left to escalate to
             pass
 
 

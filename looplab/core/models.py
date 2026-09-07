@@ -1301,6 +1301,23 @@ BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
     "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen",
 })
 
+# THE RUN-LEVEL STOP WORD (doc 52 §5.1 row 6). `run_finished.reason` / `RunState.stop_reason` was
+# decided at ELEVEN sites by `str(x or "").lower() == "error"` against a word no registry held —
+# the two registries above cover NODE terminals. One site WRITES it (`cli/run_cmds.py`'s guarded
+# abort) and the others read it to answer "did this run finish cleanly, or does it still owe a
+# finalize?" (`serve/run_commands.py`, `serve/appstate.py`, `engine/orchestrator.py`,
+# `engine/finalize.py`, `events/finalize_scope.py`, `cli/run_cmds.py`), so a drifted spelling at
+# one site silently changed that answer there and nowhere else. `is_error_stop` is the ONE
+# comparison, case-folded exactly as every site was; `tests/test_run_stop_word.py` scans the tree
+# for the literal comparison and pins the reader set in both directions.
+RUN_STOP_ERROR = "error"
+
+
+def is_error_stop(reason) -> bool:
+    """Whether a run-level stop reason is the guarded-abort word — a run that finished with an
+    error still owes its finalize, so every reader treats it as NOT finished cleanly."""
+    return str(reason or "").lower() == RUN_STOP_ERROR
+
 
 def is_developer_error(code) -> bool:
     """True when `code` is the in-band Developer-crash sentinel rather than real solution code."""
@@ -1442,6 +1459,14 @@ class Node(BaseModel):
     # overperformed on the signal the search optimized — the overfitting indicator the Trust
     # panel surfaces. Audit-only.
     generalization_gap: Optional[float] = None
+    # HOST-SIDE SCORING (doc 52 row 10a): on a node scored by the task's host scorer, `metric` is
+    # the HOST's number and `self_metric` is what the candidate's own scorer printed — recorded,
+    # never selected on. `self_report_gap` is DERIVED by the fold, direction-aware like the gap
+    # above: positive = the candidate reported better than the host measured (the over-reporting
+    # indicator; a large one is a hack signal, a small one is noise between two scorers). Both
+    # None on every node an old log or a self-scored task produced.
+    self_metric: Optional[float] = None
+    self_report_gap: Optional[float] = None
     # R1-c: a calibrated §12-verifier soundness score in [0,1] for THIS node's realized result. New writers
     # publish the complete tie atomically in `verifier_group_scored`; legacy `node_verified` remains readable.
     # Used ONLY as a tie-break among metric-EQUAL/CI-tied feasible nodes (SearchFitness)
@@ -1531,6 +1556,16 @@ class Node(BaseModel):
     # describes a superseded attempt (`stage_row_superseded`).
     stages: list = Field(default_factory=list)
     failed_stage: Optional[str] = None
+    # EVERY `stage_finished` row this node recorded, in log order: the per-ATTEMPT ledger (doc 52
+    # row 27; BACKLOG §6 D5). `stages` above is the per-NAME projection every surface reads —
+    # last-wins, `repairs`-stamped — and after an inline repair it cannot show the attempt the
+    # repair replaced: the attempt that spent the training wall-clock left no row at all. Each row
+    # here is that attempt's OWN statement (`name`/`status`/`exit_code`/`seconds`, the repair epoch
+    # it ran in, the lifecycle `generation`, its `seq`), appended by `replay._on_stage_finished`
+    # BEFORE the per-name merge and never rewritten by it; append-only across resets, so the
+    # wall-clock a node spent is summable (`stage_wall_clock`). Additive (invariant #5): a legacy
+    # log folds to `[]`, and nothing that DECIDES reads it — accounting only.
+    stage_attempts: list = Field(default_factory=list)
     # Inline repairs applied to THIS lifecycle generation — the count of folded `node_repaired`
     # rows, which is `engine/evaluate.py::_durable_repair_ledger`'s `attempt` seen from the fold
     # side (a `salvage_cause_fix` row re-states the ordinal it FOLLOWS rather than opening a new
@@ -1575,6 +1610,9 @@ class Node(BaseModel):
     # directions were the active steering). {"at_node","trigger"} of the memo. None otherwise. Audit/UI
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
     research_origin: Optional[dict] = None
+    # doc 52 row 19: the model ARM the bandit routed this build to (`search/policy.py::META_MODEL`);
+    # "" for a build that was not routed, which the yield fold reads as the default arm.
+    model_arm: str = ""
     # Fold-internal receipt that the Developer finalized this lifecycle's quantitative footprint.
     # Excluded from model dumps so Layer 4 does not perturb snapshots/public DTOs; the append-only
     # node_created/node_repaired event remains the durable authority.
@@ -1631,6 +1669,36 @@ class Node(BaseModel):
         @property (not a pydantic field/computed_field): excluded from model_dump, so event/snapshot
         serialization is byte-identical."""
         return self.confirmed_mean if self.confirmed_mean is not None else self.metric
+
+    def stage_wall_clock(self) -> dict[str, dict]:
+        """Per stage NAME, what EVERY attempt in `stage_attempts` spent (doc 52 row 27).
+
+        `{name: {"attempts", "seconds", "reused", "generations"}}` — the attempt count, the summed
+        `seconds` over every row that recorded a finite number, how many of those attempts REUSED
+        the stage rather than ran it (a `reused` row spent nothing and says so), and the lifecycle
+        generations the attempts span. The accounting `stages` cannot give: its last-wins row for
+        `train` after a repair is the attempt that passed, and the 120 minutes the failed attempt
+        spent before it are on no row there. `{}` for a legacy log. A plain method, so nothing about
+        `model_dump` or the event envelope moves.
+        """
+        out: dict[str, dict] = {}
+        for row in self.stage_attempts:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                continue
+            entry = out.setdefault(row["name"],
+                                   {"attempts": 0, "seconds": 0.0, "reused": 0, "generations": []})
+            entry["attempts"] += 1
+            if row.get("status") == "reused":
+                entry["reused"] += 1
+            seconds = row.get("seconds")
+            if (isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+                    and math.isfinite(seconds)):
+                entry["seconds"] += float(seconds)
+            generation = row.get("generation")
+            if (isinstance(generation, int) and not isinstance(generation, bool)
+                    and generation not in entry["generations"]):
+                entry["generations"].append(generation)
+        return out
 
 
 def stage_row_superseded(row, repairs) -> bool:
@@ -1714,6 +1782,18 @@ class ResearchMemo(BaseModel):
     # state/golden projections stay byte-compatible; the research event writer forwards it explicitly.
     claims_receipt: Optional[dict] = Field(default=None, exclude=True)
     sources: list[dict] = Field(default_factory=list)   # {title, url} consulted (web/arXiv)
+    # THE DURABLE RESEARCH RECORD (doc 52 row 16; `core/research_record.py`). `plan` is the stage's
+    # own last `update_plan` — the ResearchPlan and its ProgressLedger, `{plan, todos:[{item,
+    # status}], updates}` — which used to survive only inside one tool-loop context. `evidence` is
+    # the exact-span ledger: one immutable item per tool result the stage read (id over kind +
+    # locator + sha256 of the whole result, the quote as the first 600 chars, the turn it was read
+    # on), which claims are BOUND to deterministically (`claims[*].evidence_ids`) so a verifier
+    # verdict can be re-checked later against the bytes it was drawn from. `literature` is the
+    # papers an `arxiv_search` rendered, each with a stable id and an abstract hash; the engine also
+    # appends them as `literature_retrieved`. All three are additive: an old memo reads as none.
+    plan: Optional[dict] = None
+    evidence: list[dict] = Field(default_factory=list)
+    literature: list[dict] = Field(default_factory=list)
     recommended_directions: list[str] = Field(default_factory=list)  # what to try next (steer hints)
     # THE SPLIT, and it exists because the FIELD NAME contradicted its own description. The prompt
     # asked for `recommended_directions` and defined them as "(specific next experiments to try)",
@@ -1974,6 +2054,13 @@ class RunState(BaseModel):
     # Complete verifier treatment pinned by run_started so resume cannot mix sampling/criteria policies.
     select_verifier_samples: int = 3
     select_verifier_contract: str = "selection-criteria:v1"
+    # The HITL approval gate (I21) as `run_started` recorded it — pinned since 2026-09-06 (engine
+    # invariant #6; `core/config.py::RUN_START_PINNED_FIELDS`). Tri-state ON PURPOSE: None is a log
+    # written before the pin existed, and for it the snapshot stays the authority
+    # (`Engine._reentry_repin` adopts only a recorded value), because folding "absent" to False
+    # would turn the gate OFF on the resume of every older approval-pending run — the exact
+    # finish-without-approval the pin exists to stop.
+    require_approval: Optional[bool] = None
     nodes: dict[int, Node] = Field(default_factory=dict)
     # Fold-internal current-failure threshold state. Keeping the causal crossing seq prevents a
     # reset/abort from regrouping old failures into a brand-new browser notification identity.
@@ -2294,6 +2381,11 @@ class RunState(BaseModel):
     # the engine applies before consulting the Strategist (human-wins parity with pause/hint).
     active_strategy: Optional[dict] = None
     strategy_history: list[dict] = Field(default_factory=list)
+    # THE PLAN (doc 52 row 18; `engine/plan.py`): the latest folded `plan` row — phases with node
+    # counts and the endgame reserve (`endgame_start`, `reserve`, `kinds`) the dispatcher reads —
+    # and the timeline of re-plans. Additive: an old log folds to None / [] (invariant #5).
+    plan: Optional[dict] = None
+    plan_history: list[dict] = Field(default_factory=list)
     pending_strategy: Optional[dict] = None
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)
@@ -2339,6 +2431,18 @@ class RunState(BaseModel):
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
+    # THE DURABLE RESEARCH RECORD, folded (doc 52 row 16). `research_plan` is the LATEST memo's
+    # ResearchPlan / ProgressLedger (its last `update_plan`: `{plan, todos:[{item, status}],
+    # updates}`), `research_evidence` every exact-span evidence item any memo of this run cited,
+    # by id, and `literature` every paper an `arxiv_search` returned (`literature_retrieved`).
+    # Additive: a log written before 2026-09-06 folds to None / {} / [] (invariant #5).
+    # `research_evidence` is an INDEX over the memo rows (each memo's own `evidence` list already
+    # rides `research` and therefore the state payload), so it is `exclude=True` like
+    # `Node.resource_curve`: 64 items x ~1 KB per memo, duplicated on every /state poll, is pure
+    # transfer — the in-process readers (the verifier's by-id lookup) fold and never dump.
+    research_plan: Optional[dict] = None
+    research_evidence: dict[str, dict] = Field(default_factory=dict, exclude=True)
+    literature: list[dict] = Field(default_factory=list)
     # Paid-attempt receipts for the Deep-Research stage (`research_attempted`), each
     # `{attempt_id, trigger, at_node, manual}`. The gates read attempts as well as memos, so a kill
     # between "the provider answered" and "the memo is durable" does NOT re-spend on resume; the

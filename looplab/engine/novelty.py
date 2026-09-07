@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -31,6 +32,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
 from looplab.agents.roles import researcher_budget_exhausted
 from looplab.engine.card_reservation import discarded_proposal_receipt
 from looplab.engine.shared import effective_researcher_eval_timeout
+from looplab.core.text import tokenize
 from looplab.core.tracing import current_ids
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
@@ -223,6 +225,82 @@ def _canonical_action_identity(idea, *, operator: str,
     return identity, bool(params or space or profile is not None or eval_timeout is not None)
 
 
+
+# ---------------------------------------------- IS THIS PROPOSAL ALREADY IN THE LITERATURE (row 32)
+#
+# Both novelty gates grade a proposal against THIS RUN'S history and nothing else. RQ-Bench named
+# the resulting failure a "novelty mirage": an idea reads as new because the run has not tried it,
+# while the papers the run itself retrieved describe it. LoopLab has had the retrieval half durable
+# since doc 52 row 16 (`literature_retrieved` -> `RunState.literature`) and no gate ever read it.
+#
+# THIS NEVER REJECTS, and that is a decision rather than a caution. Running an experiment a paper
+# describes is often exactly right — replication, adaptation to this dataset, a stronger baseline —
+# so an overlap is EVIDENCE, not a verdict: it rides on the audit rows the gates already write and,
+# when the flag is on, into the re-proposal prompt the gate was going to send anyway. What it makes
+# possible is the measurement that does not exist today: how often a proposal this run called novel
+# overlaps a paper this run had already read.
+#
+# Deterministic and free: token overlap, no model, no provider call, no network.
+_LITERATURE_STOPWORDS = frozenset("""
+a an and are as at be but by for from has have how in into is it its of on or that the their then
+this to use used using was were what when where which while with within without we our
+""".split())
+_LITERATURE_MIN_TOKEN = 3
+LITERATURE_OVERLAP_FLOOR = 0.18       # Jaccard over content tokens; below it the pair shares stopwords
+LITERATURE_OVERLAP_LIMIT = 3
+
+
+def _content_tokens(text: str) -> set[str]:
+    """`core/text.py::tokenize` minus stopwords and one- and two-character tokens.
+
+    THE SHARED TOKENIZER AND NOT A LOCAL `[a-z0-9_]+`, for the reason its own module docstring
+    gives: an ASCII class silently reduces a Cyrillic or CJK idea to NOTHING, and this function's
+    empty answer means "no overlap found", which the caller's docstring then reads as evidence
+    that the run's reading does not describe the proposal. Driven: a Russian idea against a
+    Russian paper scored zero on every pair. NFKC + casefold also fold the compatibility spellings
+    a title and a prose sentence differ by, and underscore stays a separator there — `train_loss`
+    matching a prose "training loss" is the shape this measure exists to catch.
+    """
+    return {token for token in tokenize(text)
+            if len(token) >= _LITERATURE_MIN_TOKEN and token not in _LITERATURE_STOPWORDS}
+
+
+def literature_overlap(text: str, literature, *, floor: float = LITERATURE_OVERLAP_FLOOR,
+                       limit: int = LITERATURE_OVERLAP_LIMIT) -> list[dict]:
+    """The retrieved papers this proposal most resembles: `[{id, title, similarity}, …]`, best first.
+
+    Jaccard over content tokens of the idea against each item's title + snippet. Deliberately a
+    LEXICAL measure and not an embedding one: this runs inside the proposal path on every idea, it
+    must be free and deterministic (the fold and the audit row have to agree on replay), and the
+    question it answers — "does the run's own reading already describe this?" — is answered well
+    enough by shared terminology to be worth recording. It is evidence for a reader, never a gate.
+
+    ITS RECALL IS A FLOOR, AND THAT IS WRITTEN DOWN RATHER THAN HIDDEN: no stemming and no synonyms,
+    so "sample difficult examples" and "hard negative mining" share no content token at all and a
+    paraphrase of the same idea can fall under the threshold entirely. A
+    reported overlap is therefore evidence that the run's reading describes the proposal; an empty
+    result is NOT evidence that it does not. That asymmetry is why nothing may reject on this — and
+    also why a crude suffix stripper was refused: it would trade a stated floor for an unstated
+    false-positive rate on a signal that reaches a prompt.
+    """
+    tokens = _content_tokens(text)
+    if not tokens:
+        return []
+    out = []
+    for item in (literature or ())[:200]:
+        if not isinstance(item, dict):
+            continue
+        other = _content_tokens(f"{item.get('title', '')} {item.get('snippet', '')}")
+        if not other:
+            continue
+        similarity = len(tokens & other) / len(tokens | other)
+        if similarity >= floor:
+            out.append({"id": str(item.get("id") or "")[:64],
+                        "title": str(item.get("title") or "")[:200],
+                        "similarity": round(similarity, 4)})
+    out.sort(key=lambda row: (-row["similarity"], row["title"]))
+    return out[:limit]
+
 class NoveltyGateMixin:
     """The engine's novelty/dedup gate cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -368,6 +446,23 @@ class NoveltyGateMixin:
     def _effective_researcher_eval_timeout(self, idea) -> Optional[float]:
         """Return the finite per-node timeout override that the evaluator will actually honor."""
         return effective_researcher_eval_timeout(self, idea)
+
+    def _literature_note(self, state: RunState, idea) -> dict:
+        """`{"literature": [...]}` when this proposal overlaps a paper THIS RUN read, else `{}`.
+
+        Empty — and therefore byte-identical to the historical audit row — with the flag off, with
+        no retrieved literature, or with no overlap above the floor. Never raises into the proposal
+        path: an audit annotation may not be the reason a run stops proposing.
+        """
+        if not getattr(self, "_novelty_literature", False):
+            return {}
+        try:
+            rows = literature_overlap(self._idea_text(idea), getattr(state, "literature", None))
+        except Exception as exc:  # noqa: BLE001 — an annotation, never a gate; contained and counted
+            from looplab.core.containment import contain
+            contain("literature overlap", exc)
+            return {}
+        return {"literature": rows} if rows else {}
 
     def _proposal_binding(self, state: RunState, idea: Idea, prospective_node_id=None) -> dict:
         """Exact card-sidecar subject: reserved slot, lifecycle, and normalized durable Idea."""
@@ -584,9 +679,26 @@ class NoveltyGateMixin:
             **self._proposal_binding(state, original, prospective_node_id),
             **self._near_binding(state, dup.id), "kind": kind, **payload,
             "stance": self._novelty_stance,
+            # The papers this run READ that describe the same thing (doc 52 row 32). On the audit row
+            # rather than in the decision: the gate rejected a duplicate of a NODE, and whether the
+            # literature also describes it is a separate fact a reader needs and the gate must not act
+            # on — running an experiment a paper describes is often exactly the right move.
+            **self._literature_note(state, original),
         }
         if callable(repropose):
             try:
+                # THE PROMPT HALF, and the only one behind the flag: when the run's own reading
+                # already describes this idea, the re-proposal it was about to buy anyway is told
+                # so. Appended to the duplicate hint rather than replacing it — the reason for the
+                # re-propose is still the near-duplicate NODE — and phrased as a fact, not an
+                # instruction to avoid the topic, because a paper describing an idea is a reason to
+                # adapt it, not to abandon it.
+                titles = [row["title"] for row in audit.get("literature") or () if row.get("title")]
+                if titles:
+                    hint = (f"{hint}\nThe papers this run retrieved already describe something "
+                            "close to this: " + "; ".join(titles)
+                            + ". That is not a reason to drop the direction — say what your "
+                              "proposal does differently, or make it a deliberate adaptation.")
                 idea = self._repropose_with_feedback(repropose, hint, idea, researcher=researcher)
             except BudgetExceeded:
                 self._append_proposal_event(
@@ -1202,6 +1314,7 @@ class NoveltyGateMixin:
             return None
         self._append_proposal_event(EV_NOVELTY_GRADED, {
             **self._proposal_binding(state, idea, prospective_node_id),
+            **self._literature_note(state, idea),
             "level": grade.level, "grade": grade.name,
             "recommendation": grade.recommendation,
             **self._near_binding(state, grade.near_node),
@@ -1400,6 +1513,7 @@ class NoveltyGateMixin:
             self._append_proposal_event(EV_CROSS_RUN_PRIOR, {
                 "v": 2,
                 **self._proposal_binding(state, idea, prospective_node_id),
+                **self._literature_note(state, idea),
                 "matched_concepts": matched, "prior_runs": returned_runs,
                 "prior_runs_total": len(runs),
                 "prior_runs_omitted": len(runs) - len(returned_runs),

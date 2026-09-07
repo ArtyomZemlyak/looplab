@@ -127,6 +127,10 @@ JOB_UNKNOWN = "unknown"
 # Run stream (/api/runs/{id}/events): a state tick per change, then done once terminal-ready
 # (run_finished is folded and the engine has released its singleton lock).
 SSE_STATE = "state"
+# A DELTA against the previous frame on the SAME connection (doc 52 row 29): `{version, base_seq,
+# seq, generation, event_count, ops}` — `events/state_delta.py` writes the ops, `ui/src/stateDelta.js`
+# applies them, and a client whose held seq is not `base_seq` reconnects for a full `state` frame.
+SSE_STATE_DELTA = "state_delta"
 SSE_DONE = "done"      # also ends the assistant stream (carrying the full result dict)
 # Assistant stream (.../message_stream): live turn progress.
 SSE_TOKEN = "token"    # final-answer token pieces

@@ -103,6 +103,24 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               calibrated before it is genuinely different: every chain root now opens with
 #               bytes the old one did not carry, so a speculation receipt issued against the
 #               old prompts should stop verifying.)
+#   2026-09-06  + llm_cost_limit + llm_token_limit (doc 52 row 15: the run's LLM spend caps, reserved
+#               at the broker's permit — `core/llm_budget.py`). The "field set changed too" branch,
+#               218 -> 220, verified by diffing the field set against the previous pin (exactly
+#               [llm_cost_limit, llm_token_limit] added, [] removed). Both default to 0 = no cap, so
+#               no calibration evidence moves; the envelope is the Settings schema and old receipts
+#               stop verifying, as for every field below.
+#   2026-09-06  + evidence_envelope           (doc 52 row 13: the ONE untrusted-evidence envelope on
+#               the Strategist, the crash-triage judge, the repair critic and the arXiv / web
+#               tools). The "field set changed too" branch again, 217 -> 218, verified by DIFFING
+#               the field set against the previous pin (exactly [evidence_envelope] added, []
+#               removed). A calibration run's Strategist is the rule baseline and its toy evals
+#               never reach triage, so no receipt's EVIDENCE moves; the envelope is the Settings
+#               schema and old receipts stop verifying, as for `stage_check_tools` below.
+#   2026-09-06  + stage_check_tools           (doc 52 row 9: may the inter-stage checker query the
+#               checked stage's own log instead of judging from `run.out[-4000:]`). The "field
+#               set changed too" branch again, 216 -> 217: a calibration run never reaches a
+#               checked stage, so no receipt's EVIDENCE moves, but the envelope is the Settings
+#               schema and old receipts stop verifying — the same shape as `agent_timeout` below.
 #   2026-09-03  + agent_timeout               (the wall on ONE external coding-agent invocation).
 #               This is the "field set changed too" branch: 215 -> 216, so the calibration envelope
 #               really is different and old receipts SHOULD stop verifying. It is also the clearest
@@ -116,7 +134,15 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:05743b6a31255b56b51fd0b295dd6095d051388079c15e5b8fce86abb83ec617"
+_EXPECTED_DIGEST = "sha256:e52ed9295f43ebe0a22007ed040641edc0c25c041f15bebe40f1d254d8211a68"
+#   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
+#               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
+#               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
+#               0.0, so no replicate's dispatch moves; the envelope moves regardless, because the
+#               digest binds the complete non-variant map.
+#   2026-09-06  + model_arms (doc 52 row 19: the operator x model router's arms, uncurated and
+#               open-keyed). 221 -> 222, both pins re-set. Inert for a calibration replicate —
+#               the profile's `EngineOptions` declares no arm and the toy policy runs no bandit.
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -490,7 +516,65 @@ _EXPECTED_DIGEST = "sha256:05743b6a31255b56b51fd0b295dd6095d051388079c15e5b8fce8
 #               precisely what a speculation receipt asserts about.
 #   2026-09-06  MERGE with master, same rule as the 2026-08-29 entry above: the count is
 #               RE-DERIVED from the merged profile, never added, and the digest with it.
-_EXPECTED_FIELD_COUNT = 228
+#   2026-09-06  + syscall_fence  (doc 52 row 28: the kernel SYSCALL policy beside `landlock`). The
+#               'field set changed too' branch. Inert for a calibration replicate exactly as
+#               `landlock` is — it ships `off` and the toy profile turns no rung on — and the guard
+#               is deliberately not clever enough to exempt an inert knob: the digest binds the
+#               COMPLETE non-variant envelope. `_EXPECTED_FIELD_COUNT` goes 222 -> 223 and both pins
+#               are re-set.
+#   2026-09-07  + mcts_cost_weight  (doc 52 row 31: the cost term of a cost-constrained MCTS). The
+#               'field set changed too' branch again, and inert for a calibration replicate twice
+#               over: it ships 0.0, where `search/policy.py::eval_cost_penalty` returns 0.0 and the
+#               UCB expression is byte-identical to the one every issued receipt was calibrated
+#               under, and the calibration profile runs `greedy`, which never reads it. The guard is
+#               deliberately not clever enough to exempt either fact — the digest binds the COMPLETE
+#               non-variant envelope, which is what makes it a receipt rather than a summary.
+#               `_EXPECTED_FIELD_COUNT` goes 223 -> 224 and both pins are re-set.
+#   2026-09-07  + novelty_literature  (doc 52 row 32: the retrieved papers reach the novelty gates).
+#               The 'field set changed too' branch. Ships off, and the calibration profile retrieves
+#               no literature at all, so a replicate is unaffected either way — but the digest binds
+#               the COMPLETE non-variant envelope on purpose, and the flag's ON path changes a
+#               re-proposal prompt, which is exactly the kind of difference a receipt must not span.
+#               `_EXPECTED_FIELD_COUNT` goes 224 -> 225 and both pins are re-set.
+#   2026-09-07  + diagnosis_hypotheses  (doc 52 row 32: the alternatives the crash diagnostician
+#               considered). The 'field set changed too' branch. Ships off, and a calibration
+#               replicate's toy failures never reach the triage judge at all — but the flag's ON
+#               path changes what a PAID call is asked and therefore what its answer costs, which
+#               is exactly the kind of difference a speculation receipt must not span.
+#               `_EXPECTED_FIELD_COUNT` goes 225 -> 226 and both pins are re-set.
+#   2026-09-07  + steady_state_build  (doc 52 row 33: the build fan-out as a refilling lane rather
+#               than a chunk barrier). The 'field set changed too' branch, and the one entry in this
+#               block whose ON path a replicate would genuinely notice: it changes how many
+#               proposals a build batch buys and therefore the run's whole paid shape. It ships off
+#               and the calibration profile builds serially, so nothing moves at rest.
+#               `_EXPECTED_FIELD_COUNT` goes 226 -> 227 and both pins are re-set.
+#   2026-09-07  MERGE with master. Both sides grew the schema independently and the merge keeps
+#               both, so BOTH pins are RECOMPUTED from the merged module rather than carried or
+#               added: neither literal was ever measured against a tree containing the other
+#               side's fields. Verified the way every entry above prescribes — the field set is
+#               DIFFED against both parents rather than counted: master contributed ten catalogued
+#               fields (developer_crash_pause_after, developer_probe_confine,
+#               developer_stage_guidance, developer_step_feedback_command, established_context,
+#               established_context_bytes, hide_empty_tools, llm_budget_usd,
+#               llm_stream_stall_fallback, node_open_budget_floor_usd) and this branch ten
+#               (diagnosis_hypotheses, endgame_reserve_frac, evidence_envelope, llm_cost_limit,
+#               llm_token_limit, mcts_cost_weight, novelty_literature, stage_check_tools,
+#               steady_state_build, syscall_fence), with NOTHING removed by either side. Every
+#               issued receipt stops verifying, which is the correct answer: a replicate
+#               calibrated under either parent ran under a schema this one is not.
+#   2026-09-07  SECOND MERGE with master, + agent_read_loop_nudge_after (238 -> 239 profile rows).
+#               Master had already absorbed this branch's earlier ten fields; this is the one field
+#               it added afterwards — the A9 read-loop nudge's threshold, which shipped ON with no
+#               Settings field at all, so the loop's literal 25 was the only value that could ever
+#               apply. Verified the way this history prescribes and NOT by adding the integers: an
+#               AST scan of `Settings`' annotated assignments against `origin/master` reports
+#               exactly `['agent_read_loop_nudge_after']` added and `[]` removed. BOTH pins are
+#               RECOMPUTED from the merged module, because neither parent's digest describes it.
+#               Old receipts SHOULD stop verifying: the nudge appends a note to a tool result at a
+#               threshold, so the prompt bytes a replicate's Developer sees are now a function of a
+#               value the envelope did not record. The default matching the former literal makes
+#               today's behaviour identical; it does not make the envelope the same.
+_EXPECTED_FIELD_COUNT = 239
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

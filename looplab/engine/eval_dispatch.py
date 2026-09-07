@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.errors import EnvironmentRefusal
 from looplab.core.models import (EXTRA_METRIC_AUTO, apply_engine_extra_metric_channels,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.engine.evaluate import _redacted_tail
@@ -473,8 +474,15 @@ class EvalDispatchMixin:
             # apply or did not help, which is exactly when the operator needs the name most.
             unsat = deps.unsatisfied_requirements((err or "") + (out or ""))
             named = ("; no distribution for: " + ", ".join(sorted(unsat))) if unsat else ""
-            raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}){named}; see {log}\n"
-                               + _redacted_tail(self._redact, err or out, 500))
+            # An `EnvironmentRefusal` (doc 52 §5.1 row 6), not a bare RuntimeError: this is the
+            # operator's own setup command failing on the operator's own box — a refusal about the
+            # environment, which the CLI boundary prints as one sentence naming the fix instead of
+            # the 42-frame traceback that reads as an engine crash. Same base class, so every
+            # `except RuntimeError` on the way up still catches it.
+            raise EnvironmentRefusal(
+                f"run_setup failed (exit={rc}, timed_out={timed}){named}; see {log}. Fix the "
+                f"`eval.setup` command or the declared requirements it installs, then resume.\n"
+                + _redacted_tail(self._redact, err or out, 500))
 
     def _retry_without_unsatisfiable(self, declared, out, err, cwd, to, log):
         """Retry the DERIVED declaration install once, minus the lines pip could not resolve.
@@ -678,8 +686,16 @@ class EvalDispatchMixin:
             # does for the subject: the engine's own reuse must not make the reused stage's config
             # read as `stale`.
             _attempt_started = time.time()
+            # HOST-SIDE SCORING (doc 52 row 10a): when the task declares a host scorer, the final
+            # stage's stdout is the HOST's, read with the host scorer's own reader (the task's when
+            # it declares none), and the task's reader is handed over as `self_metric` to read the
+            # candidate's own number off the stage before it. Without one, byte-identical.
+            _host = es.get("host_scorer") if isinstance(es.get("host_scorer"), dict) else None
+            _primary = ((_host.get("metric") if isinstance(_host.get("metric"), dict) else None)
+                        or es["metric"]) if _host else es["metric"]
             res = command_eval.run_command_eval(
-                cmd, cwd, timeout, es["metric"], env,
+                cmd, cwd, timeout, _primary, env,
+                self_metric=(es["metric"] if _host else None),
                 setup=es.get("setup") or None, setup_timeout=es.get("setup_timeout", 600.0),
                 setup_cwd=root,                               # deps install at the repo root
                 cross_check=es.get("cross_check"),            # Phase 4 drift cross-check …
@@ -696,8 +712,11 @@ class EvalDispatchMixin:
                              if start_stage is _UNSET else start_stage),  # Phase 2: re-run from a stage
                 stall_cap=self.eval_stall_timeout_s,          # #6: operator-set silence-before-kill cap (0 = off)
                 # The single-command path's deterministic divergence stop (Settings; see the field's
-                # comment for the 0-of-110 scorer measurement that decided the default).
-                divergence_watch=bool(getattr(self, "single_command_divergence_watch", False)),
+                # comment for the 0-of-110 scorer measurement that decided the default). Read off the
+                # DECLARED attribute: until 2026-09-06 this was `getattr(self,
+                # "single_command_divergence_watch", False)` on a name no `__init__` ever assigned,
+                # so the watchdog never armed on this path whatever the setting said.
+                divergence_watch=bool(self._single_command_divergence_watch),
                 check_fn=check_fn,                            # Phase 3: optional inter-stage agentic verify
                 # THE STAGE IDENTITY INSTRUMENT. Derives each stage's reuse key before it runs and
                 # its outputs' content identity when its artifact contract passes; both ride on the

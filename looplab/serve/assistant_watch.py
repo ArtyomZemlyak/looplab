@@ -535,7 +535,7 @@ class WatchStore:
     # ---- arming ---------------------------------------------------------------------------
     def arm(self, *, session: str, instruction: str, trigger: dict, mode: str = DEFAULT_MODE,
             waiting_for: str = "", max_wakeups=None, lifetime_s=None,
-            now: Optional[float] = None) -> dict:
+            now: Optional[float] = None, principal: str = "anonymous") -> dict:
         """Create an armed watch, or refuse with one sentence saying why.
 
         `mode` is PINNED here and never re-derived at wake time (module docstring, property 2): a
@@ -560,6 +560,10 @@ class WatchStore:
             "id": secrets.token_hex(8),
             "session": str(session),
             "mode": normalize_mode(mode),
+            # THE PARTY THAT ARMED IT, pinned like the mode (doc 52 row 29): a wake-up has no
+            # request to read a principal off, so it runs as whoever consented to the instruction —
+            # and a record that pins nothing runs as `anonymous`, i.e. with no portfolio tools.
+            "principal": str(principal or "anonymous"),
             "instruction": instruction,
             "trigger": trigger,
             "status": "armed",
@@ -945,10 +949,11 @@ class SessionWatches:
         self.on_arm = on_arm
 
     def arm(self, *, instruction: str, trigger: dict, waiting_for: str = "",
-            max_wakeups=None, lifetime_s=None) -> dict:
+            max_wakeups=None, lifetime_s=None, principal: str = "anonymous") -> dict:
         record = self.store.arm(session=self.session, instruction=instruction, trigger=trigger,
                                 mode=self.mode, waiting_for=waiting_for,
-                                max_wakeups=max_wakeups, lifetime_s=lifetime_s)
+                                max_wakeups=max_wakeups, lifetime_s=lifetime_s,
+                                principal=principal)
         if self.on_arm is not None:
             try:
                 self.on_arm()

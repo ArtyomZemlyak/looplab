@@ -102,7 +102,7 @@ which capability fields are present (`looplab/adapters/tasks.py::normalize_task`
 |---|---|
 | `repo` | Absolute path to an **editable codebase** — the agent may edit any file within it (`protect: [...]` for exceptions; default edit surface is everything). |
 | `dataset` | Data / model weights that live outside the repo, as `{ "<mount>": "<abs path>" }` (a bare path mounts as `./dataset`). Read-only by default; a value may be an object with [per-source permissions](#per-source-data-permissions). They appear at `./<mount>` in the workdir. |
-| `cmd` | **How to run + score** one experiment — either a bare argv `["python","test.py"]` or an object `{ "command"\|"stages", "metric": {"reader","key"}, "timeout" }`. This is the operator's **authoritative, non-rewritable** scorer. |
+| `cmd` | **How to run + score** one experiment — either a bare argv `["python","test.py"]` or an object `{ "command"\|"stages"\|"host_scorer", "metric": {"reader","key"}, "timeout" }`. This is the operator's **authoritative, non-rewritable** scorer; `host_scorer` is the [host-side](#host-side-scoring-cmdhost_scorer) form of it. |
 | `kaggle` | A Kaggle / MLE-bench competition slug (the official grader scores a submission — no `cmd` needed). |
 | `benchmark` | A built-in synthetic task (`quadratic`, `regression`, …) for testing the loop. |
 
@@ -144,6 +144,54 @@ validated by ONE shared rule set (`runtime/command_eval.py::validate_stages`) at
 phase's `declare_stages` emit), submit (`cmd.stages`) and consume time (the engine re-validates even a
 hand-written `looplab_stages.json`; `score` is reserved in a Developer manifest, and an invalid manifest
 falls back to the single command instead of half-running).
+
+### Host-side scoring (`cmd.host_scorer`)
+
+A protected `cmd` freezes the scorer's **entry file** — and nothing else. Everything it imports,
+every config it reads and the split it scores on live inside the editable tree the candidate
+rewrites, so on the repo family the number every candidate was ranked by was, in the end, a number
+the candidate's own code printed. `cmd.host_scorer` (2026-09-06, doc 52 row 10a — AIRA₂'s
+"consistent scoring") is the other half of the contract:
+
+```jsonc
+"cmd": {
+  "command": ["python", "-m", "vectorsearch.test"],             // optional: the candidate's own scorer
+  "host_scorer": {
+    "command": ["python", "/opt/scorers/score_dr.py", "%subject%"],   // an ABSOLUTE path, outside the repo
+    "timeout": 1800,
+    "env": {"SCORER_DATA": "/data/dr-eval"},                     // optional, operator-only
+    "metric": {"reader": "stdout_json", "key": "recall@100"}     // optional: defaults to cmd.metric
+  },
+  "metric": {"reader": "stdout_json", "key": "recall@100", "subject_glob": ["**/final/model.safetensors"]}
+}
+```
+
+* **Where it runs.** The engine appends it as the final protected `score` stage of every pipeline
+  shape (an operator `cmd.stages` list, a Developer manifest, or a bare `command`), in the node
+  workdir, under the eval's declared environment plus its own `env`. Its stdout is read with its
+  `metric` reader (the task's when absent) and **that number is the node's `metric`** — the one the
+  search ranks, selects and breeds on.
+* **What it must be.** `command` names its program by an **absolute path** that `RepoTask` refuses
+  at submit unless it lies **outside every `repo` / `editables` root** and exists as a file
+  (`adapters/repo_task.py::host_scorer_outside_editables`). A relative path would resolve inside the
+  candidate's copy and `-m module` names no file the record can digest; both are refused. A
+  `cmd.stages` entry named `score` is refused too — the host scorer *is* the score stage.
+* **What the candidate's own scorer becomes.** When `command` is also given it still runs, as the
+  candidate-side `self_score` stage just before the host's; its printed number is recorded on the
+  node as **`self_metric`** and the fold derives **`self_report_gap`** (direction-aware, positive =
+  the candidate reported better than the host measured). Neither is ever selected on; both are the
+  audit that makes over-reporting visible.
+* **The receipt.** At the score stage's start the runtime digests the program
+  (`metric_provenance.host_scorer = {argv, program, program_sha256, program_size}`), so two nodes
+  scored by different bytes are distinguishable after the fact — the fact a "consistent scoring"
+  claim rests on. `%subject%` in the argv expands to the ONE artifact `cmd.metric.subject` /
+  `subject_glob` declared and the pipeline produced (absolute path); a subject that did not bind
+  fails the host stage as `needs_failed`, exactly like a missing `needs` input. `%params%` expands
+  as in every stage.
+* **What it does not do.** It does not withhold a split: a host scorer that reads a test set the
+  candidate can also read is *consistent*, not hidden. The withheld-split half (a host-held split
+  scored at finish, selection through `holdout_select`) is doc 52's slice (b) and waits on the
+  run-record fence and the Landlock validation.
 
 ### Operator-pinned Developer commands
 
@@ -265,6 +313,18 @@ spent rather than after.
 
 ### Declaring an eval's environment
 
+**What every stage's environment carries without being asked (since 2026-09-06, doc 52 row 15).**
+Beside `LOOPLAB_EVAL_SEED` (the seed the confirm phase varies) the runtime now exports the eval's
+own clock: `LOOPLAB_EVAL_DEADLINE`, the Unix time (seconds, with millis) at which THIS stage is
+killed, and `LOOPLAB_EVAL_TIMEOUT_S`, the ceiling it was derived from. `sandbox.run_argv` sets the
+pair for every host launch from the stage's own `timeout` (so each stage of a pipeline sees its own
+wall, not a pool), and `command_eval` forwards the same pair into a container, where `docker run`
+inherits nothing. A training script can read them to decide whether another epoch fits, or to
+checkpoint and score before the kill instead of being killed mid-step with no metric; the
+Developer's own time-budget note tells it they exist. A value you declare yourself (an `eval_env`
+entry, a stage `env`) wins over the derived one, and a deadline-grace extension the judge may grant
+at the wall is NOT in the number — plan on the declared ceiling.
+
 **A stage can declare what it needs SET, and so can the task and the run.** `expect` states what a
 stage writes and `needs` what it reads; until 2026-08-13 nothing could say what it needs in its
 *environment*, so an environment variable's only home was CODE. What that cost, measured: on
@@ -382,7 +442,9 @@ before the next stage runs, and has two halves:
   artifact plausible — a stage that "succeeds" without rewriting its output hands the next stage a
   previous attempt's file.
 * **`assert`** — one line stating the condition, in the declarer's own words, checked against what the
-  stage **prints** by the inter-stage checker. Declaring it opts that stage's check in (`check: true` is
+  stage **prints** by the inter-stage checker (which, since 2026-09-06, may read the stage's whole log
+  through `read_log` / `metric_series` rather than only its last 4,000 characters — `stage_check_tools`).
+  Declaring it opts that stage's check in (`check: true` is
   not additionally required) and is the ONLY thing that unlocks the checker's
   `declared_condition_violated` verdict — without a declaration that verdict is refused and degrades to
   `inconclusive`, because a checker may not invoke a contract that does not exist. State the
@@ -397,6 +459,24 @@ before the next stage runs, and has two halves:
   of 50) is still refused, and so is one whose trainer never wrote a summary at all. Note this needs
   the stage to declare `files` as well — the acquittal rests on the artifact half of the declaration
   having already been checked on disk.
+* **`numeric`** — since 2026-09-06 (doc 52 row 24), the model-free form: a list of relations the
+  ENGINE evaluates against the last value the stage **printed** for a named key, after the stage
+  exits 0 and before the next stage runs — CapCode's cap and Arbor's margin are the shape:
+
+  ```jsonc
+  "expect": {"numeric": [{"key": "params", "op": "<=", "value": 2000000},
+                         {"key": "val_ndcg", "op": ">=", "value": 0.71}]}
+  ```
+
+  `op` is one of `<`, `<=`, `>`, `>=`, `==`, `!=`; at most 8 relations; the value is read in the
+  three spellings the log tools read (`key: v`, `key=v`, `'key': v`, case-insensitive) or off a
+  JSON line carrying the key, the LAST occurrence winning (the end-of-stage summary). It fails the
+  stage exactly as `files` does — `expect_failed`, the same repair loop — and it fails **closed**: a
+  key the stage never printed is an unmet relation. Unlike an artifact failure it is **never
+  salvaged**: a number produced past the declared bound is not a measurement of the intended
+  protocol. The `stage_finished` row records the relations and the values read on a pass too.
+  Declared by the operator on `cmd.stages` or by the Developer in `looplab_stages.json` (the
+  `declare_stages` tool validates it; its prompt does not yet advertise the key).
 
 **The metric must say what it is ABOUT — `eval.metric.subject`.** `expect` and `needs` describe a
 stage's files; `subject` describes the *number*. It names the workdir-relative artifact the metric is a
@@ -485,7 +565,8 @@ What binding does and does not buy, stated plainly:
   refusal fires before the scorer runs) and not coverage. It is a `require` effect and not an `audit`
   one because the rungs are ordered: `audit` is what you turn on to find out whether `require` is
   affordable, so it records and never gates. What makes "read elsewhere" impossible is the read boundary
-  — `read_fence` (on by default) and, opt-in, the kernel allow-list `landlock`.
+  — `read_fence` (on by default) and, opt-in, the kernel rungs: the read allow-list `landlock` and the
+  syscall policy `syscall_fence` (`mutators` / `egress`, `runtime/seccomp.py`).
 
 When that derived contract does fail, the refusal says whose failure it is. The `needs` on the `score`
 stage is written by the engine, not by the Developer, and the Developer may edit neither that stage nor
@@ -732,6 +813,18 @@ champion carries a hard reward-hack/leakage signal a `trust_gate: audit` run enf
 is the complementary half of the same two families the cross-run exclusion joins — salvaged-and-admitted
 rather than salvaged-and-excluded, flagged-and-not-enforced rather than flagged-and-enforced — and it is
 derived from those same two predicates, never re-read off the rows (`engine/champion_caveats.py`).
+
+**And since 2026-09-06 the row also says HOW MUCH of the number the intended protocol supports**
+(doc 52 row 22): `mislead_gap` is Protocol Validity's pair — `exploit` (the champion, crowned under
+whatever rungs the run was configured with) beside `intended` (the best node the record says nothing
+against: feasible, no hard reward-hack/leakage signal, measured rather than salvaged) and their `gap`
+in the run's direction, positive when the published number is better than the intended protocol
+supports and `0` when the champion is itself an intended node. `excluded` counts the scored nodes
+the filter dropped, so a clean run (`gap: 0`, `excluded: 0`) reads differently from a run whose
+champion happened to be clean while half its population was flagged; `intended`/`gap` are `null`
+when no node survives the filter, and the whole record is `null` without a champion. It is derived
+from the same two predicates as the caveats (`hard_flagged_ids`, `metric_unmeasured`), for the same
+reason.
 Measured over the 46 preserved runs when it shipped: 37 carry a best metric and none of them is
 caveated by either, so those two fence a reachable state rather than describing the corpus.
 
@@ -1047,10 +1140,21 @@ raises `open`, so until 2026-08-13 a node's eval code could delete or rename you
 every read of it was refused — `shutil.rmtree` of the source root included. The same twelve events are
 now refused, with a message that says so. `warn` still lets them through and logs them.
 
-What stays readable — and writable: the node workdir, the run directory, `/tmp`, site-packages, the
-model/HF cache, and every `dataset`/`data`/`references` mount **source** — a mount is the sanctioned
-read channel and is allow-listed even when it lives inside the editable tree. The fence is a no-op for
-a non-repo task and for the Docker tiers (the source is never bind-mounted into a container).
+**And it refuses to write the run's RECORD (2026-09-06).** The run directory holds what your node is
+scored INTO — `events.jsonl`, the snapshots, the traces — and the node's workdir lives inside it, so
+until then a training script could append a well-formed `node_evaluated` row naming its own node and
+elect itself. Now a write-flagged `open` or any of the twelve mutation events whose target is under
+the run directory is refused unless it is under the launch's own workdir (the launcher hands it to the
+child in `LOOPLAB_EVAL_WORKDIR`) or the fence's own directory; reads of the record stay legal. This
+rule holds on **every** task, not only a repo task — a toy or dataset node's `solution.py` is
+model-written code with the same reach — so a non-repo run carries a fence with no source roots and
+the record rule alone.
+
+What stays readable: the node workdir, the run directory, `/tmp`, site-packages, the model/HF cache,
+and every `dataset`/`data`/`references` mount **source** — a mount is the sanctioned read channel and
+is allow-listed even when it lives inside the editable tree. What stays writable: the node workdir,
+`/tmp`, an `edit: true` mount, and nothing else under the run directory. The fence is a no-op for the
+Docker tiers (neither the source tree nor the run dir is bind-mounted into a container).
 
 **Except the fence's own file, which is the one thing in the run directory a node may not touch.**
 `<run>/.looplab-fence/sitecustomize.py` sits in that writable run directory, and until 2026-08-25 a
@@ -1143,6 +1247,28 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
   of a giant `predictions.json` if you are near that bound.
 - For a **dataset**-kind task (no repo), permission objects are flattened to their `path` — the
   mount/edit machinery is repo-task infrastructure; the dataset kind reads data by absolute path.
+
+### What the run SEES of your data (the perception hook)
+
+Since 2026-09-06 (doc 52 row 17) a repo task exposes the same two perception hooks the dataset
+kind always had, so the grounding pre-phase is no longer off for the family every real GPU run
+uses:
+
+- **`columns()`** reads the *primary table* of each declared data mount — the file itself when it
+  is tabular (`.csv` / `.tsv` / `.json` / `.jsonl` / `.parquet`, the last only when `pyarrow` is
+  importable), else a top-level `train*` table inside a directory mount, else the first tabular
+  file there — and returns `{"<mount>:<column>": values}` over the first 200 rows, at most 4 tables
+  and 64 columns in declaration order. The engine profiles it at setup (`data_profiled`), the fold
+  keeps it on `RunState.data_profile`, and `search/foresight.py::verified_report` primes
+  predict-before-execute with it. A mount that holds nothing tabular (a checkpoint, a corpus of
+  shards) profiles as `{}` — recorded, not guessed.
+- **`data_samples()`** gives the Researcher's `read_asset` / `data_schema` / `data_profile` tools a
+  bounded preview of every mount: a directory's entry listing (100 entries) and its primary
+  table's head (64 KiB, whole lines), a file's head, or a binary file's size.
+
+Both read only the declared mounts — the sources `runtime/read_allowlist.py` already sanctions —
+never execute anything, and never raise; the bounds live in `adapters/perception.py`, which the
+dataset kind now reads through too.
 
 Every legacy spelling still works — `{"kind":"repo","editable_path":...,"eval":{...,"metric":{"kind":...}},"onboard":...}`
 parses unchanged, so old task files and snapshots keep running (`examples/repo_task.json` is the
@@ -1326,6 +1452,14 @@ the engine provides the official `public/` split, the solution writes `submissio
 **host** scores it with MLE-bench's real grader against held-out answers — producing the genuine
 MLE-bench metric plus the official medal / above-median report.
 
+**The search never sees the private grade (2026-09-06).** A `holdout_fraction` slice of the public
+train rows is hidden from the agent — out of its `train.csv`, into its `test.csv` without the label,
+listed in its `sample_submission.csv` — and the search is scored on that slice with the competition's
+own grader; the private answers grade the search champion **once**, at finish (`holdout_evaluated`,
+with the medal report). `holdout_fraction: 0` is the explicit legacy protocol (every node graded on
+the private answers), and `host_grading.protocol` in the log says which one ran. See the
+[runbook](../MLEBENCH.md).
+
 ```jsonc
 { "competition": "spooky-author-identification" }
 ```
@@ -1393,6 +1527,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `eval.metrics` | Extra **named** readers reported alongside the primary, for audit/observability: `{"latency_ms": {"kind": "stdout_json", "key": "latency"}}`. A `file_*` reader here needs its own `path` — without one it is silently dropped and the node just reports no value under that name. **This is not the only way a value reaches `extra_metrics`, and the difference is now on the record.** Every OTHER numeric key on the primary metric's own stdout JSON line is AUTO-CAPTURED too — no declaration, no reader spec, no `adapter` refusal — which is how all 1,642 secondary metrics in this box's preserved runs got there, 1,636 of them the four keys of a CUDA probe (one a schema VERSION number). `node_evaluated` now carries `extra_metrics_provenance` (`{name: "declared"|"auto"|"engine"}`) beside the values, and every surface that shows a secondary metric says which channel it came through; a value with no tag is from a run recorded before 2026-08-14 and reads `unknown`, never `declared`. **A LABEL NEEDS A VALUE (2026-08-29).** The node metrics table lists the UNION of every node's extras keys, so a key THIS node never reported answered `unknown` too — the same word — and rendered a warn *provenance unknown* beside an EMPTY cell: a caveat about a value that does not exist, which is the invented-caveat shape `objectiveMetricSource` forbids, and it fed `anyUnverified` so a phantom row could summon the whole self-reported footnote. The channel is now `null` where the node holds no value and the source cell renders nothing; the `best #N` column gained its own read against the CHAMPION's record, since until then only the ★ row consulted `champObjective` and a self-reported champion extra sat unlabelled beside this node's labelled one. `engine` names a key the engine's OWN spliced instrumentation declared and its source authenticates — trustworthy, and still a diagnostic rather than a result. Set `auto_extra_metrics: false` to record only what YOUR readers produced (plus that engine instrumentation, which was never the candidate's) |
 | `eval.constraints` | Reader specs carrying a `max`/`min` bound. A node that violates any (or whose constraint value can't be read) is still measured but **excluded from best-selection** — "optimize the metric subject to `latency_ms <= 100`". Operator-owned (trust boundary). A `file_*` reader here needs its own `path`: an unverifiable constraint counts as a violation, so a pathless one excludes *every* node |
 | `eval.inputs` | The files whose CONTENT decides the metric independently of the model — the test set, the product index, an id map. Bound to their content identity at the metric read and digested into `metric_provenance.comparability`, the **comparability key** every ranking surface consults before it orders two numbers. Paths may be ABSOLUTE (the opposite rule to `metric.subject`: an input is by definition not produced by this node), there is no freshness floor, and no globs. Empty is not "comparable by default" — it records `unknown`, which is never read as agreement |
+| `eval.host_scorer` | The operator's **host-side scorer** — `{command, timeout, env, metric}`, its program named by an absolute path outside every editable root — appended by the engine as the final protected `score` stage; its number is the node's `metric`, the candidate's own printed number rides beside it as `self_metric`, and the program's sha256 lands on `metric_provenance.host_scorer`. See [Host-side scoring](#host-side-scoring-cmdhost_scorer) |
 | `eval.cross_check` | An INDEPENDENT built-in reader (`stdout_json`/`stdout_regex`/`file_json`/`file_regex` — never `adapter`) that re-reads the same metric from a source the agent can't forge. Used by `eval_trust_mode="ratify_freeze_drift"`; `None` disables it. A `file_*` reader here needs its own `path`: the drift check fails closed, so a pathless one discards *every* node's metric |
 | `eval.drift_tolerance` | Tolerance for the `cross_check` comparison (default `1e-6`; must be finite and ≥ 0) |
 

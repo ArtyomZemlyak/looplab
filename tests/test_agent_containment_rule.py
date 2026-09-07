@@ -180,13 +180,17 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
 
     def spy(_self, messages, emit_spec, finalize, fallback, *, state=None, bind_state=True,
             transport_fallback=None, extra_tools=None, extra_turns=0, wall_when_unbounded=0.0,
-            on_budget=None):
+            on_budget=None, tool_result_label=""):
         # `on_budget=` arrived with the triage budget-cutoff stamp (`45f87d34`) and this double was
         # not re-pointed with it, so the real call raised TypeError here. A spy whose signature the
         # production call site cannot satisfy tests nothing; it is listed rather than swallowed with
         # `**_` so the next added argument is a decision instead of a silent hole.
+        # `tool_result_label` joined the helper's signature with the untrusted-evidence envelope
+        # (doc 52 row 13) and is listed here on exactly that rule — the second argument to arrive
+        # this way, which is what the paragraph above predicted.
         seen.update(state=state, bind_state=bind_state, extra_tools=extra_tools,
-                    extra_turns=extra_turns, wall=wall_when_unbounded, on_budget=on_budget)
+                    extra_turns=extra_turns, wall=wall_when_unbounded, on_budget=on_budget,
+                    tool_result_label=tool_result_label)
         # Fire the observer the way the loop would when a bound cuts the emit short. Recording the
         # kwarg alone would pass for a caller that forwards `None`, and the cutoff key is stamped
         # from THIS callable — a model cannot emit it — so the wiring is the whole property.

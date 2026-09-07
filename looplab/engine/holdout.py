@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from looplab.core.errors import ConfigRefusal
 from looplab.core.models import RunState
 from looplab.engine.triage import _holdout_indices
 from looplab.events.types import EV_HOLDOUT_EVALUATED
@@ -93,11 +94,27 @@ class HoldoutGrader:
         # and feeds the node's Pareto objectives (see the branch's own note below). This comment used
         # to say extra_metrics, sending anyone looking for medal data to the wrong place.
         if g.get("kind") == "mlebench":
-            from looplab.adapters.mlebench_grade import grade_in_subprocess
+            from looplab.adapters.mlebench_grade import (grade_in_subprocess,
+                                                         grade_search_split_in_subprocess)
             # Resolve so the grader subprocess (run from the repo root) reads the submission from the
             # node workdir regardless of whether run_dir was relative — but through the confused-deputy
             # guard, so a candidate-planted symlink can't aim the HOST grader at the private answer CSV.
             sub = _candidate_output(workdir, g.get("submission", ""), "submission.csv")
+            answers = getattr(self._e, "_search_answers", None)
+            if self._e._holdout_idx and answers:
+                # THE SEARCH PROTOCOL (doc 52 §5.1 row 3; AIRA₂'s D_search). The number the search
+                # sees is the HIDDEN slice's score under the competition's own grader; the private
+                # answers are not consulted, no medal report is written, and `holdout_phase` grades
+                # the search champion ONCE at finish. Until 2026-09-06 this branch graded every node
+                # on the private answers, so the champion was a max over N private draws.
+                res.metric = (grade_search_split_in_subprocess(
+                    g["competition"], sub, answers, self._e._search_hidden_ids, g.get("data_dir"),
+                    timeout=float(g.get("timeout", 300.0))) if sub is not None else None)
+                return res
+            # LEGACY PROTOCOL — `holdout_fraction=0`, recorded as `host_grading.protocol =
+            # "private_per_node"`: every node graded on the private answers. Explicit, never a
+            # silent fallback (an undecidable split REFUSES the run instead; see
+            # `apply_search_split`).
             metric, report = (None, None)
             if sub is not None:
                 metric, report = grade_in_subprocess(
@@ -159,17 +176,67 @@ class HoldoutGrader:
             return None
         return _to_float(host_score(g.get("scorer", "rmse"), yp2, yt2))
 
+    def _public_assets(self) -> dict:
+        """The assets as the task handed them over — never the carved ones, or a re-carve on re-entry
+        would draw over a shrunken train file and name different rows than the launch did."""
+        public = getattr(self._e, "_assets_public", None)
+        return public if public is not None else (self._e._assets or {})
+
     def build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
         """D1: the reserved holdout partition for a given fraction (+ search epoch, P0-2), or empty
-        when holdout doesn't apply (no host grader, real MLE-bench, non-list labels, or fraction<=0)."""
-        if (self._e._host_grader is None or self._e._host_grader.get("kind") == "mlebench"
-                or float(fraction) <= 0):
+        when holdout doesn't apply (no host grader, non-list labels, or fraction<=0).
+
+        For real MLE-bench the partition is the SEARCH SPLIT over the public train rows (doc 52
+        §5.1 row 3): until 2026-09-06 this returned empty for the kind, which is exactly how the
+        search came to hill-climb the private grade."""
+        if self._e._host_grader is None or float(fraction) <= 0:
             return frozenset()
+        if self._e._host_grader.get("kind") == "mlebench":
+            from looplab.adapters import mlebench_split
+            n = mlebench_split.train_row_count(self._public_assets())
+            return _holdout_indices(n, float(fraction), epoch) if n >= 2 else frozenset()
         from looplab.runtime.command_eval import _LABEL_KEYS, _as_list
         yt = _as_list(self._e._host_grader.get("labels"), self._e._host_grader.get("key"), _LABEL_KEYS)
         if isinstance(yt, list) and len(yt) >= 2:
             return _holdout_indices(len(yt), float(fraction), epoch)
         return frozenset()
+
+    def apply_search_split(self) -> None:
+        """Carve the pinned partition out of the PUBLIC assets for a real MLE-bench run: what every
+        node is materialized from becomes the carved files, and the engine keeps the hidden slice's
+        answers (`_search_answers`) and ids (`_search_hidden_ids`) in memory. Called wherever
+        `_holdout_idx` is (re)built — `Engine.__init__`, the in-process epoch rebuild, `_reentry_repin`
+        — so a reopened run re-carves the epoch's own split from the original files.
+
+        A slice that cannot be carved in the private format is a `ConfigRefusal` at run start, naming
+        the two ways out; it is never a silent fall-through to grading on the private answers, because
+        that is the defect this exists to end and the log must be able to tell the protocols apart."""
+        e = self._e
+        g = e._host_grader
+        if not g or g.get("kind") != "mlebench":
+            return
+        if getattr(e, "_assets_public", None) is None:
+            e._assets_public = dict(e._assets or {})
+        public = e._assets_public
+        if not e._holdout_idx:
+            e._assets = dict(public)
+            e._search_answers = None
+            e._search_hidden_ids = frozenset()
+            return
+        from looplab.adapters import mlebench_split
+        try:
+            carved = mlebench_split.carve(public, e._holdout_idx)
+        except mlebench_split.SplitUndecidable as exc:
+            raise ConfigRefusal(
+                f"MLE-bench competition {g.get('competition')!r}: the search split cannot be carved "
+                f"from the public files ({exc}). The search may not be scored on the private answers "
+                "(doc 52 row 3), so either set holdout_fraction=0 to run the explicit legacy "
+                "protocol — every node graded on the private answers, recorded as "
+                "`host_grading.protocol = private_per_node` — or run a competition whose "
+                "train/test/sample_submission layout decides the answers' format.") from exc
+        e._assets = carved.assets
+        e._search_answers = carved.answers_csv
+        e._search_hidden_ids = frozenset(carved.hidden_ids)
 
     def holdout_topk(self, state: RunState) -> list[int]:
         """The val-leaders that get a holdout evaluation: top-k feasible by the robust search
@@ -189,6 +256,11 @@ class HoldoutGrader:
         # (feasible_nodes + flagged) is a different-but-agreeing spelling of the same eligibility.
         fit = SearchFitness(state.direction, verifier_tiebreak=state.select_verifier_tiebreak)
         pool = fit.rank_promotion(promotion_eligible_nodes(state))
+        if self._e._host_grader is not None and self._e._host_grader.get("kind") == "mlebench":
+            # ONE private grade, by protocol: the search champion alone. Grading the top-k and
+            # letting `holdout_select` pick among them is the test-selection the split exists to
+            # end, one order of magnitude smaller.
+            return [n.id for n in pool[:1]]
         return [n.id for n in pool[: self._e._holdout_top_k]]
 
     def holdout_pending(self, state: RunState) -> bool:
@@ -209,6 +281,18 @@ class HoldoutGrader:
             if nid in state.holdout_evaluated_ids:
                 continue
             n = state.nodes[nid]
+            if g.get("kind") == "mlebench":
+                # THE ONE PRIVATE GRADE (doc 52 §5.1 row 3): the search champion's public-test rows
+                # against the private answers, once, at finish — its medal report beside it.
+                m, gap = self._private_grade(n, state)
+                async with self._e._write_lock:
+                    self._e.store.append(EV_HOLDOUT_EVALUATED, {
+                        "node_id": nid, "generation": n.attempt,
+                        "search_epoch": state.search_epoch,
+                        "metric": m, "gap": gap,
+                        "n_holdout": len(self._e._search_hidden_ids),
+                        "protocol": "private_grade"})
+                continue
             preds = None
             # Same host confused-deputy boundary as `apply_host_grade` — this file is named by the
             # task config but WRITTEN by untrusted candidate code, and `read_text` follows symlinks.
@@ -235,3 +319,44 @@ class HoldoutGrader:
                     "search_epoch": state.search_epoch,
                     "metric": m, "gap": gap,
                     "n_holdout": len(self._e._holdout_idx)})
+
+    def _private_grade(self, n, state: RunState) -> tuple:
+        """Grade ONE node's submission, restricted to the public test ids, against the private
+        answers; write its official report beside it. `(metric, gap)`, gap = search score minus
+        private grade in the run's direction (how much better the search signal looked)."""
+        import json as _json
+        import shutil
+        import tempfile
+
+        from looplab.adapters.mlebench_grade import grade_in_subprocess
+        from looplab.adapters.mlebench_split import filter_submission
+        g = self._e._host_grader
+        workdir = self._e.run_dir / "nodes" / f"node_{n.id}"
+        sub = _candidate_output(workdir, g.get("submission", ""), "submission.csv")
+        metric, report = None, None
+        if sub is not None:
+            tmp = Path(tempfile.mkdtemp(prefix="looplab-private-grade-"))
+            try:
+                public_only = tmp / "submission.csv"
+                try:
+                    public_only.write_text(filter_submission(
+                        sub.read_text(encoding="utf-8-sig", errors="replace"),
+                        self._e._search_hidden_ids, keep=False), encoding="utf-8")
+                except (OSError, ValueError):
+                    public_only = None
+                if public_only is not None:
+                    metric, report = grade_in_subprocess(
+                        g["competition"], public_only, g.get("data_dir"),
+                        timeout=float(g.get("timeout", 300.0)))
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+        if report is not None:
+            try:
+                (workdir / "mlebench_report.json").write_text(_json.dumps(report), encoding="utf-8")
+            except OSError:
+                pass
+        gap = None
+        if metric is not None and n.metric is not None:
+            gap = (n.metric - metric) if state.direction == "max" else (metric - n.metric)
+        return metric, gap
+

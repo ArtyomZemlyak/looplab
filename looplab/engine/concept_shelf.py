@@ -114,12 +114,19 @@ def state_concepts(state, node_ids=None, *, limit: int = MAX_ROW_CONCEPTS) -> li
 
 
 def run_concept_index(summaries: Iterable[dict], *, limit: int = MAX_ROW_CONCEPTS) -> dict:
-    """`{run_id: [concept ids]}` from the run-list summaries' `concepts` rollup.
+    """`{run_id | run_uid: [concept ids]}` from the run-list summaries' `concepts` rollup.
 
     A run PRESENT with an empty list is a distinct fact from a run that is absent: present-and-empty
     means the run was folded and carries no concept membership (untagged), absent means the run is gone
     from the workspace entirely and nothing can be said about the rows that cite it. Callers that
     collapse the two report deleted runs' lessons as untagged, which is a stronger claim than they hold.
+
+    KEYED BY INCARNATION AS WELL AS BY NAME (doc 50 EK-03; doc 52 row 4): a summary carrying
+    `run_uid` is indexed under it too, and `attribute_row` looks a uid-bearing row up by its uid ONLY
+    — a row written by a deleted incarnation of `demo` inherits nothing from the live `demo`, where it
+    used to inherit the wrong run's concepts. The name key stays for uid-less rows, the asymmetry
+    `core/run_identity.py::row_belongs_to_run` keeps; one workspace holds one directory per name, so
+    the name key is never ambiguous here.
     """
     index: dict[str, list[str]] = {}
     for summary in summaries or ():
@@ -129,8 +136,12 @@ def run_concept_index(summaries: Iterable[dict], *, limit: int = MAX_ROW_CONCEPT
         if not isinstance(run_id, str) or not run_id:
             continue
         rollup = summary.get("concepts")
-        index[run_id] = bounded_row_concepts(
+        concepts = bounded_row_concepts(
             list(rollup) if isinstance(rollup, dict) else rollup, limit=limit)
+        index[run_id] = concepts
+        run_uid = summary.get("run_uid")
+        if isinstance(run_uid, str) and run_uid.strip():
+            index[run_uid.strip()] = list(concepts)
     return index
 
 
@@ -148,9 +159,12 @@ def attribute_row(row, run_index: Optional[dict] = None) -> tuple[list[str], Opt
     direct = bounded_row_concepts(row.get("concepts"))
     if direct:
         return direct, ATTRIBUTION_RECORD
-    run_id = row.get("run_id")
-    if isinstance(run_id, str) and run_id:
-        inherited = (run_index or {}).get(run_id)
+    # A uid-bearing row is looked up by its uid ONLY; a uid-less row by its name — `run_identity`'s
+    # asymmetry. `run_concept_index` indexes a live summary under both.
+    run_uid = row.get("run_uid")
+    key = run_uid.strip() if isinstance(run_uid, str) and run_uid.strip() else row.get("run_id")
+    if isinstance(key, str) and key:
+        inherited = (run_index or {}).get(key)
         if inherited:
             return list(inherited), ATTRIBUTION_RUN
     return [], None

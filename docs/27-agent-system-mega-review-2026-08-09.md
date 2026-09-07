@@ -182,17 +182,27 @@ Research only.
 >
 > - **OPEN[prompt-bundle-unpinned-across-hot-reload]** the PromptStore is still re-read on every use
 >   with no run/phase-pinned revision; the only run-start pins are the `run_started` settings and the
->   two `core/setup_identity.py` digests. proof:present:(hot-reload)@looplab/core/prompts.py
-> - **OPEN[inner-agent-phases-not-event-sourced]** none of `agent_phase_started` /
->   `agent_checkpointed` / `agent_phase_completed` exists; the inner trajectory lives only in
->   `spans.jsonl`, which replay does not read. proof:absent:agent_phase_started@looplab/events/types.py
+>   two `core/setup_identity.py` digests. proof:absent:revision@looplab/core/prompts.py
+> - **[closed 2026-09-06 (doc 52 row 16) — `agent_phase_started` / `agent_checkpointed` /
+>   `agent_phase_completed` are registered `DIAGNOSTIC_EVENTS` (`events/types.py`), reported by
+>   `drive_tool_loop` through `core/phase_events.py::emit_phase_event` and written by the sink
+>   `Engine.run` installs for the run's lifetime (`Engine._append_phase_event`: membership asserted
+>   at the append site, every string redacted); fold-ignored and fence-excluded on purpose, a no-op
+>   outside a run. The Deep Researcher's plan itself is folded (`RunState.research_plan`), which is
+>   doc 52's `deep-research-plan-is-not-durable`. `tests/test_research_record.py` drives the sink,
+>   the fallback exit and the redaction. The marker `inner-agent-phases-not-event-sourced` stood
+>   here; deleted per the index rule.]**
 > - **OPEN[paid-eval-has-no-attempt-scoped-receipt]** the ENGINE half of the receipt item — the
 >   serve/governance half shipped. `EV_NODE_EVAL_STARTED` carries only `node_id`+`generation`: no
 >   attempt-scoped invocation id and no completed receipt.
 >   proof:absent:eval_invocation_id@looplab/engine/evaluate.py
-> - **OPEN[no-shared-reserve-commit-run-budget]** `CostAccountant` still takes a per-client limit,
->   `llm_broker` is concurrency ADMISSION with no reserve, and `engine/costs.py` commits post hoc, so
->   concurrent roles cannot reserve against one cap. proof:present:dollar-cap@looplab/core/llm.py
+> - **[closed 2026-09-06 (doc 52 row 15) — `core/llm_budget.py::RunBudget` is ONE reserve-commit
+>   budget per run, attached to the broker: `LLMConcurrencyBroker.borrow()` reserves a call's
+>   estimate (the run's own mean per committed call) before queuing and refuses with
+>   `BudgetExceeded` when committed + reserved + estimate would cross `Settings.llm_cost_limit` /
+>   `llm_token_limit`; the durable ledger's sink commits and a resume seeds from the `llm_usage`
+>   rows. `tests/test_run_budget.py` drives it. The marker `no-shared-reserve-commit-run-budget`
+>   stood here; deleted per the index rule.]**
 > - **OPEN[research-cap-counts-passes-not-provider-calls]** the cap is still incremented once per
 >   research PASS in the spine, not debited at the provider broker, so the named ceiling undercounts
 >   real spend. proof:absent:concurrent_research_max_calls@looplab/core/llm_broker.py
@@ -200,9 +210,12 @@ Research only.
 >   `cur.total_eval_seconds`, i.e. already-COMPLETED time, so several can enter under one remaining
 >   allowance; the spine carries a live annotation prescribing the reservation.
 >   proof:present:cur.total_eval_seconds@looplab/engine/orchestrator.py
-> - **OPEN[developer-output-has-no-immutable-envelope]** Developer output is still `str` plus the
->   mutable `DEVELOPER_OUTPUT_ATTRS` side channels; no `DeveloperResult` envelope exists.
->   proof:absent:DeveloperResult@looplab/agents/roles.py
+> - **[closed 2026-09-06 (doc 52 row 12) — `agents/roles.py::DeveloperResult` is the frozen
+>   envelope of one Developer call (its field set IS `DEVELOPER_OUTPUT_ATTRS` plus `code`),
+>   captured by `engine/node_build.py::_run_developer` under the instance's own lock in the same
+>   step as the call; every build and repair site reads the envelope and none reads the shared
+>   instance afterwards, which is what let those calls leave the loop thread.
+>   `tests/test_developer_result.py` drives it.]**
 > - **OPEN[cancel-not-propagated-into-provider-request]** two of the three legs: nothing reaches an
 >   in-flight provider request (`core/llm.py` has no `cancel_check` at all) and the external CLI is
 >   killed on TIMEOUT rather than on a cancel token. The MCP leg shipped 2026-08-17.

@@ -28,6 +28,8 @@ from looplab.tools.patch import SurfacePolicy, apply_patch as _apply_patch, gate
 from looplab.tools.perm_modes import (
     DEFAULT_PROTECT, DEFAULT_PROTECT_EXCEPTIONS, authorize, default_approver)
 from looplab.core.jsonutil import valid_digest_ref
+from looplab.core.atomicio import same_file_entry
+from looplab.core.pathsafe import is_reparse
 
 _MAX_PREVIEW = 4000
 _BACKUP_STACK_LOCK = threading.RLock()
@@ -455,31 +457,27 @@ class FileBackups:
     @staticmethod
     def _restore_preimage(path: Path, payload: bytes, preimage: dict,
                           expected_postimage: dict, expected_postimage_mode,
-                          mode: Optional[int] = None) -> bool:
-        """Stage a complete pre-image, recheck the live CAS value, then replace in one filesystem op."""
+                          mode: Optional[int] = None, *, root: Optional[Path] = None,
+                          root_identity=None) -> bool:
+        """Stage a complete pre-image, recheck the live CAS value, then replace in one filesystem op
+        — through the root walk when `root` is given (`_publish_bytes`)."""
         if (not _valid_mode_for_state(preimage, mode)
                 or not _valid_mode_for_state(expected_postimage, expected_postimage_mode)):
             return False
         temp = None
         try:
             if preimage["exists"]:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                temp = path.with_name(f".{path.name}.assistant-undo-{secrets.token_hex(8)}.tmp")
-                temp.write_bytes(payload)
-                if type(mode) is int:
-                    os.chmod(temp, mode)
-                # Preparing a large pre-image can take time. Recheck immediately before replace so a
-                # concurrent non-Assistant edit during staging is refused instead of overwritten.
-                if not FileBackups._exact_state_matches(
-                        path, expected_postimage, expected_postimage_mode):
-                    return False
-                os.replace(temp, path)
-                temp = None
+                # Preparing a large pre-image can take time. `_publish_bytes` rechecks the live CAS
+                # immediately before the replace, so a concurrent non-Assistant edit during staging
+                # is refused (an `OSError`, below) instead of overwritten.
+                _publish_bytes(path, payload, mode=mode, expected_state=expected_postimage,
+                               expected_mode=expected_postimage_mode, root=root,
+                               root_identity=root_identity, marker="undo")
             else:
                 if not FileBackups._exact_state_matches(
                         path, expected_postimage, expected_postimage_mode):
                     return False
-                path.unlink()
+                _unlink_within(root, root_identity, path)
             return FileBackups._exact_state_matches(path, preimage, mode)
         except (OSError, OverflowError, TypeError, ValueError):
             return False
@@ -493,7 +491,8 @@ class FileBackups:
     @_backup_stack_locked
     def revert_exact(self, path, snapshot_id: str, expected_postimage: dict,
                      expected_postimage_mode, *,
-                     allow_uncommitted: bool = False) -> Optional[str]:
+                     allow_uncommitted: bool = False, root: Optional[Path] = None,
+                     root_identity=None) -> Optional[str]:
         """Restore one exact snapshot, durably idempotent across retries and lost HTTP responses.
 
         ``reverted`` means this call applied the restore; ``already_reverted`` means the same opaque
@@ -625,7 +624,8 @@ class FileBackups:
         except OSError:
             return None
         if not self._restore_preimage(
-                p, payload, preimage, expected_postimage, expected_postimage_mode, mode):
+                p, payload, preimage, expected_postimage, expected_postimage_mode, mode,
+                root=root, root_identity=root_identity):
             # Keep the restoring journal: a retry can distinguish an applied pre-image from a live
             # conflict even if this process lost the result after the filesystem operation.
             return None
@@ -638,7 +638,8 @@ class FileBackups:
         return "reverted"
 
     @_backup_stack_locked
-    def revert(self, path, *, discard_phantoms: bool = True) -> bool:
+    def revert(self, path, *, discard_phantoms: bool = True, root: Optional[Path] = None,
+               root_identity=None) -> bool:
         p = Path(path)
         d = self._key(p)
         if not d.is_dir():
@@ -690,17 +691,12 @@ class FileBackups:
             if not _valid_permission_mode(mode):
                 return False
             if preimage["exists"]:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                temp = p.with_name(f".{p.name}.assistant-revert-{secrets.token_hex(8)}.tmp")
-                temp.write_bytes(payload)
-                if type(mode) is int:
-                    os.chmod(temp, mode)
-                os.replace(temp, p)
-                temp = None
+                _publish_bytes(p, payload, mode=mode, expected_state=None, expected_mode=None,
+                               root=root, root_identity=root_identity, marker="revert")
             elif p.exists() or p.is_symlink():
                 if p.is_dir() and not p.is_symlink():
                     return False
-                p.unlink()
+                _unlink_within(root, root_identity, p)
             last.unlink(missing_ok=True)
             (d / f"{last.stem}.meta").unlink(missing_ok=True)
             return True
@@ -725,33 +721,182 @@ def _write_text_bytes(text: str) -> bytes:
     return text.replace("\n", os.linesep).encode("utf-8")
 
 
-def _atomic_replace_text(path: Path, text: str, preserve_mode,
-                         expected_preimage: dict, expected_preimage_mode) -> int:
-    """Publish text with a mode chosen before the target pathname becomes externally visible.
+# --- descriptor-relative publication (doc 52 row 27) --------------------------------------------
+# Containment is PROVED on a resolved pathname before approval (`WriteTools._check` →
+# `pathsafe.resolve_within`), and until 2026-09-06 every publish then reopened the path BY NAME —
+# the temp sibling, the pre-image re-check and the `os.replace` each resolved the pathname again —
+# so an ancestor swapped for a symlink (a junction on Windows) between the proof and the replace
+# redirected an APPROVED write outside the allowed root. A publish now walks from the approved ROOT
+# to the target's directory one component at a time with `O_NOFOLLOW|O_DIRECTORY` (a component that
+# became a link is refused, never followed), creates missing components with `mkdir(dir_fd=…)`,
+# stages the temp, reads the pre-image and replaces THROUGH that descriptor (`src_dir_fd` /
+# `dst_dir_fd`), and re-identifies the root against the `(st_dev, st_ino)` captured when the roots
+# were resolved. No pathname is resolved again after the proof. POSIX has every primitive; Windows
+# has no `dir_fd` at all, so there the by-name publish stays and `_ancestors_are_plain` re-checks
+# every component for a reparse point immediately before staging and again before the replace — a
+# narrower window, stated rather than papered over. The patch tool is outside this: it publishes
+# through `git apply`, which refuses a path beyond a symbolic link itself.
+_DESCRIPTOR_RELATIVE = (
+    {os.open, os.stat, os.mkdir, os.rename, os.unlink} <= os.supports_dir_fd
+    and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY"))
+_O_BINARY = getattr(os, "O_BINARY", 0)
 
-    Existing writes preserve the exact pre-mutation mode. New files inherit the process' ordinary
-    create/umask mode on an unguessable sibling temp; that mode is recorded before ``os.replace``.
-    A later chmod therefore cannot be absorbed into the Assistant recovery receipt.
+
+def _root_identity(root: Path) -> Optional[tuple[int, int]]:
+    """The identity a root had when it was resolved, or None for a root that does not exist yet
+    (nothing to re-check against; the first publish creates it by name, as it always did)."""
+    try:
+        info = os.stat(root)
+    except OSError:
+        return None
+    return same_file_entry(info) if stat.S_ISDIR(info.st_mode) else None
+
+
+def _open_directory_within(root: Path, root_identity, directory: Path, *, create: bool) -> int:
+    """A descriptor for `directory`, reached from `root` one plain component at a time.
+
+    Every step is `O_NOFOLLOW|O_DIRECTORY` relative to the previous descriptor, so a component that
+    is no longer a plain directory — a symlink swapped in after approval — is a refusal (`ELOOP`),
+    not a redirection. Missing components are created THROUGH the descriptor when `create`. The
+    caller owns the descriptor. `ValueError` when `directory` is not under `root` at all.
     """
-    temp = path.with_name(f".{path.name}.assistant-write-{secrets.token_hex(8)}.tmp")
+    relative = directory.relative_to(root)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if root_identity is not None and same_file_entry(os.fstat(fd)) != tuple(root_identity):
+            raise OSError("the allowed root is not the directory it was when the roots were resolved")
+        for part in relative.parts:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            try:
+                nxt = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o777, dir_fd=fd)
+                nxt = os.open(part, flags, dir_fd=fd)
+            except OSError as exc:
+                raise OSError(f"{part!r} is no longer a plain directory under the allowed root "
+                              f"({exc.strerror})") from exc
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _state_at(dir_fd: int, name: str) -> tuple[Optional[dict], Optional[int]]:
+    """`(_current_postimage, _current_mode)` of `name` read THROUGH `dir_fd`, never by pathname.
+    A link where a file should be is `None` on both — fail closed, as the by-name readers do."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"exists": False, "digest": None}, None
+    except OSError:
+        return None, None
+    if not stat.S_ISREG(info.st_mode):
+        return None, None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | _O_BINARY, dir_fd=dir_fd)
+        with os.fdopen(fd, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        return None, None
+    mode = stat.S_IMODE(info.st_mode)
+    return {"exists": True, "digest": digest}, (mode if _valid_permission_mode(mode) else None)
+
+
+def _exact_state_matches_at(dir_fd: int, name: str, state, mode) -> bool:
+    current, current_mode = _state_at(dir_fd, name)
+    return _valid_mode_for_state(state, mode) and current == state and current_mode == mode
+
+
+def _ancestors_are_plain(root: Path, directory: Path) -> bool:
+    """The by-name fallback's re-check: every component from `root` down to `directory` is a real
+    directory and not a reparse point, read with `lstat` immediately before the publish."""
+    try:
+        relative = directory.relative_to(root)
+    except ValueError:
+        return False
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return False
+        if is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            return False
+    return True
+
+
+def _publish_bytes(path: Path, payload: bytes, *, mode, expected_state, expected_mode,
+                   root: Optional[Path] = None, root_identity=None, marker: str = "write") -> int:
+    """Stage `payload` beside `path` and replace the target in one filesystem operation.
+
+    The published mode is chosen before the pathname becomes visible — `mode` when given (an
+    existing file keeps its exact pre-mutation bits), else the process' ordinary create/umask mode
+    on the unguessable sibling temp — and returned. `expected_state`/`expected_mode` is the
+    pre-image CAS re-checked immediately before the replace (`None` = no CAS: the legacy revert).
+    With `root`, every open is relative to a descriptor walk from that root (the note above);
+    without it, or on a platform without `dir_fd`, by name with the ancestor re-check.
+    """
+    temp_name = f".{path.name}.assistant-{marker}-{secrets.token_hex(8)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY
+    if root is not None and _DESCRIPTOR_RELATIVE:
+        dir_fd = _open_directory_within(root, root_identity, path.parent, create=True)
+        try:
+            fd = os.open(temp_name, flags, 0o666, dir_fd=dir_fd)
+            published = False
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(payload)
+                    if type(mode) is int:
+                        os.fchmod(handle.fileno(), mode)
+                    intended_mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
+                if not 0 <= intended_mode <= 0o7777:
+                    raise OSError("invalid file mode after write staging")
+                # Staging can take arbitrarily long for a large file. Recheck immediately before
+                # publish so an external edit/chmod/create in that window is preserved, not replaced.
+                if expected_state is not None and not _exact_state_matches_at(
+                        dir_fd, path.name, expected_state, expected_mode):
+                    raise OSError("target changed during write staging")
+                os.replace(temp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                published = True
+                return intended_mode
+            finally:
+                if not published:
+                    try:
+                        os.unlink(temp_name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+        finally:
+            os.close(dir_fd)
+    if root is not None and not _ancestors_are_plain(root, path.parent):
+        raise OSError("an ancestor of the target is no longer a plain directory under the allowed root")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(temp_name)
     fd = None
     published = False
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
         fd = os.open(temp, flags, 0o666)
         with os.fdopen(fd, "wb") as handle:
             fd = None
-            handle.write(_write_text_bytes(text))
-        if type(preserve_mode) is int:
-            os.chmod(temp, preserve_mode)
+            handle.write(payload)
+        if type(mode) is int:
+            os.chmod(temp, mode)
         intended_mode = stat.S_IMODE(temp.stat().st_mode)
         if type(intended_mode) is not int or not 0 <= intended_mode <= 0o7777:
             raise OSError("invalid file mode after write staging")
         # Staging can take arbitrarily long for a large file. Recheck immediately before publish so
         # an external edit/chmod/create in that window is preserved instead of replaced.
-        if not FileBackups._exact_state_matches(
-                path, expected_preimage, expected_preimage_mode):
+        if expected_state is not None and not FileBackups._exact_state_matches(
+                path, expected_state, expected_mode):
             raise OSError("target changed during write staging")
+        if root is not None and not _ancestors_are_plain(root, path.parent):
+            raise OSError("an ancestor of the target is no longer a plain directory under the allowed root")
         os.replace(temp, path)
         published = True
         return intended_mode
@@ -768,10 +913,44 @@ def _atomic_replace_text(path: Path, text: str, preserve_mode,
                 pass
 
 
+def _unlink_within(root: Optional[Path], root_identity, path: Path) -> None:
+    """Delete `path` through the same walk a publish takes; by name, with the ancestor re-check,
+    where `dir_fd` is unavailable. Only a regular file or a link entry itself is ever removed."""
+    if root is not None and _DESCRIPTOR_RELATIVE:
+        dir_fd = _open_directory_within(root, root_identity, path.parent, create=False)
+        try:
+            info = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                raise OSError(f"{path.name!r} is not a regular file")
+            os.unlink(path.name, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+        return
+    if root is not None and not _ancestors_are_plain(root, path.parent):
+        raise OSError("an ancestor of the target is no longer a plain directory under the allowed root")
+    path.unlink()
+
+
+def _atomic_replace_text(path: Path, text: str, preserve_mode,
+                         expected_preimage: dict, expected_preimage_mode, *,
+                         root: Optional[Path] = None, root_identity=None) -> int:
+    """Publish text with a mode chosen before the target pathname becomes externally visible.
+
+    Existing writes preserve the exact pre-mutation mode. New files inherit the process' ordinary
+    create/umask mode on an unguessable sibling temp; that mode is recorded before the replace.
+    A later chmod therefore cannot be absorbed into the Assistant recovery receipt.
+    """
+    return _publish_bytes(path, _write_text_bytes(text), mode=preserve_mode,
+                          expected_state=expected_preimage, expected_mode=expected_preimage_mode,
+                          root=root, root_identity=root_identity)
+
+
 class WriteTools:
     def __init__(self, roots, mode: str = "plan", protect: Optional[list] = None,
                  approver: Optional[Callable[[dict], str]] = None, repo_root=None, backup_dir=None):
         self._roots = _pathsafe.resolve_roots(roots)
+        # What each root WAS when it was resolved, re-checked by every publish (`_publish_bytes`).
+        self._root_identities = {root: _root_identity(root) for root in self._roots}
         self.mode = mode
         self.protect = list(protect if protect is not None else DEFAULT_PROTECT)
         # F11: only the DEFAULT protect list carries the broad grader globs, so its migration-script
@@ -829,6 +1008,16 @@ class WriteTools:
             return f"(error: {e})"
 
     # --- gating -------------------------------------------------------------
+    def _root_of(self, p: Path) -> tuple[Optional[Path], Optional[tuple[int, int]]]:
+        """The allowed root `p` was proved to be under, and that root's identity when resolved."""
+        for root in self._roots:
+            try:
+                p.relative_to(root)
+            except ValueError:
+                continue
+            return root, self._root_identities.get(root)
+        return None, None
+
     def _rel(self, p: Path) -> str:
         for r in self._roots:
             try:
@@ -894,6 +1083,7 @@ class WriteTools:
                                     preimage_mode, mutation: Callable[[], Optional[int]],
                                     exact_postimage: Optional[dict] = None) -> Optional[str]:
         """Revalidate, snapshot, mutate, and publish one action under the same process-local lock."""
+        root, root_identity = self._root_of(path)
         with _BACKUP_STACK_LOCK:
             if not FileBackups._exact_state_matches(path, preimage_state, preimage_mode):
                 return "(refused: the file changed before the approved operation; retry with its current contents)"
@@ -930,7 +1120,8 @@ class WriteTools:
                         else:
                             # Phantom cleanup is disabled: traversing to an older entry here could
                             # undo an unrelated prior mutation instead of this failed operation.
-                            self.backups.revert(path, discard_phantoms=False)
+                            self.backups.revert(path, discard_phantoms=False,
+                                                root=root, root_identity=root_identity)
                     except OSError:
                         pass
                 raise
@@ -950,7 +1141,8 @@ class WriteTools:
                                    and self.backups.revert_exact(
                                        path, recovery_id, exact_postimage,
                                        mutation_postimage_mode,
-                                       allow_uncommitted=True) is not None)
+                                       allow_uncommitted=True, root=root,
+                                       root_identity=root_identity) is not None)
                     if rolled_back:
                         return ("(refused: could not finalize the recovery receipt; "
                                 "the file change was rolled back)")
@@ -988,14 +1180,14 @@ class WriteTools:
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
-        # CODEX AGENT: containment was proved on a resolved pathname before approval, but the path is
-        # reopened here by name. A concurrent symlink/junction ancestor swap can redirect the approved
-        # write outside the allowed root; use descriptor-relative no-follow opens and revalidate the
-        # final file identity immediately before the atomic replacement.
+        # Published THROUGH a descriptor walk from the approved root, never by re-resolving the
+        # pathname the containment proof was made on (`_publish_bytes` and the note above it).
+        root, root_identity = self._root_of(p)
+
         def apply_write() -> int:
-            p.parent.mkdir(parents=True, exist_ok=True)
             return _atomic_replace_text(
-                p, content, preimage_mode, preimage_state, preimage_mode)
+                p, content, preimage_mode, preimage_state, preimage_mode,
+                root=root, root_identity=root_identity)
         failure = self._apply_recoverable_mutation(
             p, action, preimage_state, preimage_mode, apply_write, expected_postimage)
         if failure:
@@ -1044,10 +1236,12 @@ class WriteTools:
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
+        root, root_identity = self._root_of(p)
         failure = self._apply_recoverable_mutation(
             p, action, preimage_state, preimage_mode,
             lambda: _atomic_replace_text(
-                p, new_text, preimage_mode, preimage_state, preimage_mode),
+                p, new_text, preimage_mode, preimage_state, preimage_mode,
+                root=root, root_identity=root_identity),
             expected_postimage)
         if failure:
             return failure
@@ -1156,8 +1350,10 @@ class WriteTools:
         # Absence has no observable generation: create-then-delete by another process is an ABA state
         # that cannot be proven exact. Keep legacy recovery for model rollback, but do not mint the
         # browser receipt that would offer a misleading one-click resurrection.
+        root, root_identity = self._root_of(p)
         failure = self._apply_recoverable_mutation(
-            p, action, preimage_state, preimage_mode, p.unlink, exact_postimage=None)
+            p, action, preimage_state, preimage_mode,
+            lambda: _unlink_within(root, root_identity, p), exact_postimage=None)
         if failure:
             return failure
         return f"(deleted {rel})"
@@ -1179,7 +1375,8 @@ class WriteTools:
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
-        ok = self.backups.revert(p)
+        root, root_identity = self._root_of(p)
+        ok = self.backups.revert(p, root=root, root_identity=root_identity)
         if ok:
             self.applied.append(action)
             return f"(reverted {rel})"
@@ -1200,8 +1397,10 @@ class WriteTools:
         p, rel, err = self._check(path)
         if err or not self.backups:
             return None
+        root, root_identity = self._root_of(p)
         status = self.backups.revert_exact(
-            p, recovery_id, expected_postimage, expected_postimage_mode)
+            p, recovery_id, expected_postimage, expected_postimage_mode,
+            root=root, root_identity=root_identity)
         if status is None:
             return None
         return {"status": status, "message": f"(reverted {rel})"}

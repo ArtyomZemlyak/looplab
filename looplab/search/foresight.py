@@ -37,6 +37,7 @@ from looplab.agents.roles import (
     BOARD_SEED_CHARS_MAX, WrapsResearcher, bind_idea_to_board_card, forward_hints,
     next_board_prompt_cards,
 )
+from looplab.core.llm import BudgetExceeded
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus
 from looplab.core.parse import parse_structured
@@ -215,6 +216,8 @@ def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = ""
         got = _sanitize_ranking(box.get("out"), len(items))
         return got if got is not None else rank(client, report, items, goal=goal, direction=direction,
                                                 parser=parser, prompts=prompts, kind=kind)
+    except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+        raise
     except Exception:  # noqa: BLE001 — agentic path is best-effort; fall back to the one-shot predictor
         return rank(client, report, items, goal=goal, direction=direction, parser=parser,
                     prompts=prompts, kind=kind)

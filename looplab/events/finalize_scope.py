@@ -16,6 +16,7 @@ from looplab.events.finalize_protocol import (
     FINALIZE_STEP_BEGUN,
     FINALIZE_STEP_COMPLETE,
 )
+from looplab.core.models import RUN_STOP_ERROR
 from looplab.events.types import (
     EV_BUDGET,
     EV_CARD_ENRICHED,
@@ -154,7 +155,11 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
 # same exception. All route through `is_guarded_abort` now, and
 # `tests/test_budget_exhausted_is_not_an_error.py` bans every literal spelling over the whole
 # `looplab/` tree -- which is what would have caught this on the day.
-GUARDED_ABORT_REASONS = ("error", "budget_exhausted")
+# Built FROM `core/models.py::RUN_STOP_ERROR` rather than repeating its literal (doc 52 row 6):
+# the write site in `cli/run_cmds.py` names that constant, and after the 2026-09-07 merge this
+# tuple is the only other place the word appears — two registries for one word is how the
+# eleven literals row 6 collected got there in the first place.
+GUARDED_ABORT_REASONS = (RUN_STOP_ERROR, "budget_exhausted")
 
 
 def is_guarded_abort(reason) -> bool:

@@ -1676,6 +1676,33 @@ def test_missing_run_start_calibration_profile_pins_fail_closed(tmp_path, field,
         quality.analyze_speculation_run(run)
 
 
+def test_a_calibration_log_written_before_the_approval_pin_is_still_admitted(tmp_path):
+    """`require_approval` joined `RUN_START_PINNED_FIELDS` on 2026-09-06, AFTER calibration receipts
+    had been issued, and the reader compares run_started's key SET for equality — so the pin would
+    have revoked every issued receipt (six GPU runs each). `_CALIBRATION_PINS_ADDED_AFTER_RECEIPTS`
+    admits the pre-pin writer's key set and reads the profile's value for the absent key. MUTATION:
+    drop that tolerance -> this pre-pin log is a "non-writer payload schema"."""
+    run = _make_run(tmp_path / "pre-pin", treatment=False, seed=0,
+                    omit_pins=("require_approval",))
+    assert quality.analyze_speculation_run(run)["metrics"]
+
+
+def test_any_other_absent_pin_is_still_the_non_writer_refusal(tmp_path):
+    """The tolerance is for exactly the pins added after receipts, never a general leniency."""
+    run = _make_run(tmp_path / "no-holdout-select", treatment=False, seed=0,
+                    omit_pins=("holdout_select",))
+    with pytest.raises(ValueError, match="non-writer payload schema"):
+        quality.analyze_speculation_run(run)
+
+
+def test_a_recorded_approval_gate_that_disagrees_with_the_config_is_refused(tmp_path):
+    """A log that CARRIES the key is compared against the config exactly like every other pin."""
+    run = _make_run(tmp_path / "gate-on", treatment=False, seed=0,
+                    pin_overrides={"require_approval": True})
+    with pytest.raises(ValueError, match="require_approval authority differs"):
+        quality.analyze_speculation_run(run)
+
+
 def test_missing_immutable_profile_setting_fails_closed(tmp_path):
     run = _make_run(tmp_path / "missing-setting", treatment=False, seed=0)
     path = run / "config.snapshot.json"

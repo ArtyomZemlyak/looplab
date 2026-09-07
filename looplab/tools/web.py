@@ -223,7 +223,7 @@ def task_web_deny(task) -> tuple:
         return ()
 
 
-def build_web_tools(task) -> "WebTools":
+def build_web_tools(task, *, envelope: bool = False) -> "WebTools":
     """The ONE constructor of the Researcher-side web tool, carrying the task's `EvalSpec.web_deny`.
 
     Two sites compose `WebTools` (`agents/factory.py::build_strategist_tools` and
@@ -232,8 +232,10 @@ def build_web_tools(task) -> "WebTools":
     AlgoTune runs fetched their own task's published solver (docs/56 §150 #13). It lives HERE and
     not in the factory because it is the fence's own composition rule and `agents/factory.py`
     holds a line ceiling whose guard prescribes extraction (`tests/test_agent_factory_split.py`).
-    A task with no spec fences nothing (`task_web_deny`)."""
-    return WebTools(enabled=True, deny=task_web_deny(task))
+    A task with no spec fences nothing (`task_web_deny`). `envelope` rides along because this
+    is the ONE constructor: a second composition site spelling it by hand is how the deny-list
+    came to miss both callers in the first place."""
+    return WebTools(enabled=True, deny=task_web_deny(task), envelope=bool(envelope))
 
 
 class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -269,6 +271,7 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 _SSRF_OPENER = urllib.request.build_opener(_SSRFRedirectHandler)
 
+from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted
 from looplab.tools._base import ToolResult, fn_spec
 
 _DDG = "https://html.duckduckgo.com/html/"
@@ -376,7 +379,7 @@ class WebTools:
     place — the spec text, the opener, the answers."""
 
     def __init__(self, enabled: bool = True, max_results: int = 5, timeout: float = 8.0,
-                 max_bytes: int = 4000, deny=()):
+                 max_bytes: int = 4000, deny=(), envelope: bool = False):
         self.enabled = enabled
         self.max_results = max_results
         self.timeout = timeout
@@ -387,6 +390,13 @@ class WebTools:
         # deny-list otherwise, so the redirect re-check can see the declaration.
         self._opener = (_SSRF_OPENER if not self.deny
                         else urllib.request.build_opener(_SSRFRedirectHandler(deny=self.deny)))
+        # THE UNTRUSTED-EVIDENCE ENVELOPE — see `tools/literature.py::LiteratureTools.__init__`:
+        # a fetched page is the least trustworthy text any role here reads, and it reached the
+        # Strategist's and the Deep-Research loop's prompts bare. OFF by default (prompt contract);
+        # `agents/factory.py` and `agents/deep_research.py` thread `Settings.evidence_envelope`.
+        # ORTHOGONAL to `deny`: that one decides what may be FETCHED, this one how what came back
+        # is LABELLED, so a run can want either, both or neither.
+        self.envelope = bool(envelope)
 
     def specs(self) -> list[dict]:
         return [
@@ -425,21 +435,28 @@ class WebTools:
                                       "grounding)", is_error=True, retryable=False,
                               provenance={"source": "web"})
         if name == "web_search":
-            return ToolResult(content=self._search(str((args or {}).get("query", "")).strip()),
-                              provenance={"source": "web"})
+            return ToolResult(content=self._deliver(self._search(
+                str((args or {}).get("query", "")).strip())), provenance={"source": "web"})
         if name == "web_fetch":
             url = str((args or {}).get("url", "")).strip()
             try:
                 text = self._fetch(url)
             except WebDenyRefusal as refused:
+                # The refusal is the ENGINE's own sentence, not a peer's, so it is NOT fenced —
+                # `_deliver` exists for text a stranger wrote.
                 return ToolResult(
                     content=str(refused), is_error=True, retryable=False,
                     structured={"refused": "web_deny", "web_fetch_refused": refused.prefix,
                                 "url": refused.url},
                     provenance={"source": "web", "fence": "web_deny"})
-            return ToolResult(content=text, provenance={"source": "web"})
+            return ToolResult(content=self._deliver(text), provenance={"source": "web"})
         return ToolResult(content=f"(unknown tool: {name})", is_error=True, retryable=False,
                           provenance={"source": "web"})
+
+    def _deliver(self, text: str) -> str:
+        # Everything a search or a fetch answers, refusals included: "(blocked: …)" and
+        # "(unavailable: …)" carry a peer's or a server's own words in their tail.
+        return fence_untrusted(text, EVIDENCE_LABEL) if self.envelope else text
 
     def _get(self, url: str, data: bytes | None = None) -> str:
         req = urllib.request.Request(url, data=data, headers={"User-Agent": _UA})

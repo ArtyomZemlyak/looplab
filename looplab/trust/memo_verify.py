@@ -20,12 +20,16 @@ rather than blocking the memo; `BudgetExceeded` remains the global hard stop.
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
 from looplab.core.advisory_payloads import (
     MAX_RESEARCH_CLAIMS,
+    PROVENANCE_COVERAGE_MAX_STATEMENTS,
+    PROVENANCE_COVERAGE_SECTIONS,
+    PROVENANCE_COVERAGE_VERSION,
     MAX_RESEARCH_NODE_REFS,
     MAX_RESEARCH_URL_REFS,
     RESEARCH_RECEIPT_VERSION,
@@ -566,3 +570,103 @@ def verify_memo(memo: dict, state: RunState, client=None,
     return {"verdicts": verdicts, "method": method, "unsupported": bad,
             "total_verdicts": claim_receipt["total"],
             "omitted_verdicts": claim_receipt["total"] - len(verdicts)}
+
+
+# ------------------------------------------------- WHAT SHARE OF THE MEMO IS BOUND (doc 52 row 31/32)
+#
+# Everything above checks the memo's CLAIMS. A memo is mostly not claims: `summary`, `findings` and
+# `recommended_directions` are the synthesis statements Kosmos's expert evaluation found ~57.9 %
+# accurate (against ~85 % for per-analysis statements), and nothing here counted them, bound them to
+# evidence, or could say what share of them cited anything at all. AAR's first measure is exactly
+# that share, and it cannot be computed for a LoopLab memo without this.
+#
+# DETERMINISTIC AND FREE: no model, one pass of string work over a memo the run already holds. The
+# binding vocabulary is the MEMO'S OWN — the node ids its claims cite, the evidence ids they are
+# bound to, the URLs it lists as sources — so "bound" means "names something this memo can resolve",
+# never "sounds like a citation". A statement that mentions node 12 in a memo whose claims cite no
+# node 12 is UNBOUND, which is the honest reading: the number exists to be low when the memo is
+# unsupported, and a lenient matcher would report the opposite of the thing being measured.
+_MIN_STATEMENT_CHARS = 20              # "Yes." and a list bullet are not synthesis statements
+_MIN_TITLE_CHARS = 12                  # a source title short enough to appear by accident is not a cite
+# THE SAME RULE, APPLIED TO THE OTHER TWO LITERALS, because the memo writes them and the coverage
+# is read as a measurement of it. `_is_bound` asks whether a statement CONTAINS one of these, so a
+# one-character evidence id binds every statement with that letter in it: `{"evidence_ids": ["e"]}`
+# beside two ordinary sentences measured 1.0 coverage for a memo that cites nothing. A real id is
+# `ev-` + 24 hex (`core/research_record.py::evidence_item`) and a real URL is longer than its
+# scheme, so neither floor can refuse an honest cite — they refuse an accidental one.
+_MIN_EVIDENCE_ID_CHARS = 8
+_MIN_URL_CHARS = 12
+_NODE_REFERENCE = re.compile(r"(?:#|\bnode\s+|\bexperiment\s+)(\d{1,6})", re.I)
+
+
+def _statements(memo: dict, section: str) -> list[str]:
+    """The section's synthesis statements. `summary` is prose and is split into sentences; the
+    others are already lists. Short fragments are dropped rather than counted as unbound — a
+    denominator inflated with "Yes." would make the coverage look worse than the memo is."""
+    value = memo.get(section)
+    if section == "summary":
+        text = value if isinstance(value, str) else ""
+        raw = re.split(r"(?<=[.!?])\s+|\n+", text)
+    else:
+        raw = [row for row in (value or ()) if isinstance(row, str)]
+    out = [row.strip() for row in raw if isinstance(row, str) and len(row.strip()) >= _MIN_STATEMENT_CHARS]
+    return out[:PROVENANCE_COVERAGE_MAX_STATEMENTS]
+
+
+def _binding_vocabulary(memo: dict) -> tuple[set[int], set[str], list[str]]:
+    """`(node ids, evidence ids, literal strings)` this memo can resolve a reference against."""
+    nodes: set[int] = set()
+    evidence: set[str] = set()
+    literals: list[str] = []
+    for claim in (memo.get("claims") or ()):
+        if not isinstance(claim, dict):
+            continue
+        nodes.update(n for n in (claim.get("node_ids") or ()) if type(n) is int)
+        evidence.update(e for e in (claim.get("evidence_ids") or ())
+                        if isinstance(e, str) and len(e.strip()) >= _MIN_EVIDENCE_ID_CHARS)
+        literals.extend(u for u in (claim.get("urls") or ())
+                        if isinstance(u, str) and len(u.strip()) >= _MIN_URL_CHARS)
+    for item in (memo.get("evidence") or ()):
+        if (isinstance(item, dict) and isinstance(item.get("id"), str)
+                and len(item["id"].strip()) >= _MIN_EVIDENCE_ID_CHARS):
+            evidence.add(item["id"])
+    for source in (memo.get("sources") or ()):
+        if not isinstance(source, dict):
+            continue
+        url = source.get("url")
+        title = source.get("title")
+        if isinstance(url, str) and len(url.strip()) >= _MIN_URL_CHARS:
+            literals.append(url)
+        if isinstance(title, str) and len(title.strip()) >= _MIN_TITLE_CHARS:
+            literals.append(title.strip())
+    return nodes, evidence, literals
+
+
+def _is_bound(statement: str, nodes: set[int], evidence: set[str], literals: list[str]) -> bool:
+    for match in _NODE_REFERENCE.finditer(statement):
+        if int(match.group(1)) in nodes:
+            return True
+    return any(token in statement for token in evidence) or any(t in statement for t in literals)
+
+
+def provenance_coverage(memo: dict) -> dict:
+    """What share of the memo's synthesis statements name evidence the memo itself can resolve.
+
+    `{"v": 1, "<section>": {"statements": n, "bound": n}, …, "statements": n, "bound": n,
+      "coverage": float | None}` — `coverage` is None when the memo has no statement to measure,
+    which is not 0.0 and must not read as "nothing was bound".
+    """
+    memo = memo if isinstance(memo, dict) else {}
+    nodes, evidence, literals = _binding_vocabulary(memo)
+    out: dict = {"v": PROVENANCE_COVERAGE_VERSION}
+    total = bound_total = 0
+    for section in PROVENANCE_COVERAGE_SECTIONS:
+        rows = _statements(memo, section)
+        bound = sum(1 for row in rows if _is_bound(row, nodes, evidence, literals))
+        out[section] = {"statements": len(rows), "bound": bound}
+        total += len(rows)
+        bound_total += bound
+    out["statements"] = total
+    out["bound"] = bound_total
+    out["coverage"] = (bound_total / total) if total else None
+    return out

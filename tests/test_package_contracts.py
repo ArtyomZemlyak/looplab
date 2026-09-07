@@ -54,6 +54,10 @@ def test_runtime_holds_only_process_execution_modules():
                      # POLICY over all three — which rung, whether a violation is minted — lives in
                      # `engine/`, which is the split this package boundary exists to hold.
                      "metric_subject", "read_allowlist", "landlock",
+                     # `seccomp` (2026-09-06, doc 52 row 28) is `landlock` one question over: WHICH
+                     # SYSCALLS the launched child may make, applied by the same exec'd-launcher
+                     # shape; the policy that chooses it lives in `engine/`.
+                     "seccomp",
                      # `stage_identity` (2026-08-17) is the same kind of fact one question over:
                      # WHAT a stage ran on and WHAT it produced, both derived from bytes at the
                      # instants the eval path already has them (before the command, and when the
@@ -61,6 +65,12 @@ def test_runtime_holds_only_process_execution_modules():
                      # nothing — every POLICY that could read it (a reuse cache, a duplication
                      # report) lives above, which is the same split `metric_subject` is here for.
                      "stage_identity",
+                     # `numeric_contract` (2026-09-06, doc 52 row 24) is the `expect.numeric` half of
+                     # the stage contract: a declared relation held to the last value the stage
+                     # PRINTED, evaluated by the eval path right where `expect.files` is, importing
+                     # nothing above `core`. It decides one thing — did the stage satisfy its own
+                     # declared bound — which is a property of the launch's output, not a policy.
+                     "numeric_contract",
                      # `metric_inputs` (2026-08-20) is `metric_subject`'s MIRROR and belongs here by
                      # the same clause: it is a stat and a digest the eval path takes at the metric
                      # read, over the operator's declared `eval.inputs`, and it imports nothing above

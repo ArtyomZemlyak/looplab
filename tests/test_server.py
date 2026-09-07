@@ -24,6 +24,28 @@ from looplab.events.replay import fold  # noqa: E402
 from looplab.events.eventstore import EventStore, iter_event_jsonl, iter_jsonl  # noqa: E402
 from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
+
+
+def _sse_payloads(text: str) -> list:
+    """`(event, payload)` per SSE frame, with every `state_delta` APPLIED to the payload before it
+    (doc 52 row 29): the stream sends a full `state` frame first and deltas after, so a test that
+    reads the raw frame text for a field is reading the wire encoding, not the state."""
+    from looplab.events.state_delta import apply as _apply_delta
+    out, held = [], None
+    for frame in [f for f in text.split("\n\n") if f.strip()]:
+        event, data = "", []
+        for line in frame.split("\n"):
+            if line.startswith("event: "):
+                event = line[7:]
+            elif line.startswith("data: "):
+                data.append(line[6:])
+        payload = json.loads("\n".join(data)) if data else None
+        if event == "state_delta":
+            payload = _apply_delta(held, payload["ops"])
+        if event in ("state", "state_delta"):
+            held = payload
+        out.append((event, payload))
+    return out
 from looplab.adapters.toytask import ToyTask  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2686,6 +2708,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
         "select_verifier_samples": 7,
         "card_driven_selection": True,
         "speculation_depth": 4,
+        "require_approval": True,
     })
     # Every pinned field must actually DRIFT from the run_started pin above, or the mismatch/heal
     # assertions below silently stop covering it. `card_driven_selection` is spelled False here for
@@ -2694,7 +2717,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
     snapshot = Settings(
         timeout=30.0, holdout_fraction=0.1, holdout_select=False,
         select_verifier=False, verifier_ci_tie=False, select_verifier_samples=1,
-        card_driven_selection=False, speculation_depth=0,
+        card_driven_selection=False, speculation_depth=0, require_approval=False,
     ).masked_snapshot()
     (rd / "config.snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
     client = TestClient(make_app(tmp_path))
@@ -2705,6 +2728,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
     assert shown["select_verifier_samples"] == 7
     assert shown["card_driven_selection"] is True
     assert shown["speculation_depth"] == 4
+    assert shown["require_approval"] is True
     meta = shown["_looplab_config_meta"]
     assert set(meta["run_start_pinned_fields"]) == RUN_START_PINNED_FIELDS
     assert set(meta["snapshot_mismatch_fields"]) == RUN_START_PINNED_FIELDS
@@ -2790,6 +2814,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
         "select_verifier_samples": 7,
         "card_driven_selection": True,
         "speculation_depth": 4,
+        "require_approval": True,
     })
     (rd / "config.snapshot.json").write_text(
         json.dumps(Settings().masked_snapshot()), encoding="utf-8")
@@ -2802,6 +2827,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
         "select_verifier_samples": 2,
         "card_driven_selection": False,
         "speculation_depth": 0,
+        "require_approval": False,
     }
 
     assert set(attempted) == RUN_START_PINNED_FIELDS
@@ -3246,14 +3272,14 @@ def test_sse_done_waits_for_finished_engine_to_exit(tmp_path, monkeypatch):
 
     response = client.get("/api/runs/demo/events")
     assert response.status_code == 200
-    frames = [frame for frame in response.text.split("\n\n") if frame]
-    state_frames = [frame for frame in frames if "event: state" in frame]
-    done_index = next(i for i, frame in enumerate(frames) if "event: done" in frame)
+    frames = _sse_payloads(response.text)
+    states = [payload for event, payload in frames if event in ("state", "state_delta")]
+    done_index = next(i for i, (event, _) in enumerate(frames) if event == "done")
 
-    assert len(state_frames) == 2
-    assert '"engine_running": true' in state_frames[0]
-    assert '"engine_running": false' in state_frames[1]
-    assert done_index > frames.index(state_frames[1])
+    assert len(states) == 2
+    assert states[0]["state"]["engine_running"] is True
+    assert states[1]["state"]["engine_running"] is False
+    assert done_index > max(i for i, (event, _) in enumerate(frames) if event != "done")
 
 
 def test_sse_done_waits_for_error_finalize_recovery(tmp_path, monkeypatch):
@@ -3295,12 +3321,12 @@ def test_sse_done_waits_for_error_finalize_recovery(tmp_path, monkeypatch):
     monkeypatch.setattr(AppState, "state_payload", payload_then_recover)
     response = TestClient(make_app(tmp_path)).get("/api/runs/recovering/events")
     assert recovered.is_set() and response.status_code == 200
-    frames = [frame for frame in response.text.split("\n\n") if frame]
-    states = [frame for frame in frames if "event: state" in frame]
-    done_index = next(i for i, frame in enumerate(frames) if "event: done" in frame)
-    assert any('"phase": "finalizing"' in frame for frame in states[:-1])
-    assert '"phase": "finished"' in states[-1]
-    assert done_index > frames.index(states[-1])
+    frames = _sse_payloads(response.text)
+    states = [payload for event, payload in frames if event in ("state", "state_delta")]
+    done_index = next(i for i, (event, _) in enumerate(frames) if event == "done")
+    assert any(payload["state"]["phase"] == "finalizing" for payload in states[:-1])
+    assert states[-1]["state"]["phase"] == "finished"
+    assert done_index > max(i for i, (event, _) in enumerate(frames) if event != "done")
 
 
 def test_scoped_incomplete_finalize_is_visible_and_blocks_reset_and_legacy_control_resume(

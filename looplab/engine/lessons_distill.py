@@ -21,6 +21,7 @@ from typing import Optional
 
 import orjson
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
 from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
@@ -384,6 +385,45 @@ class LessonDistillMixin:
                 receipt["accepted"] = False
                 receipt["reason"] = "write_failed"
 
+        # THE CONTRADICTION EDGE of the skill lifecycle (doc 52 row 17): a card whose claim the shared
+        # lessons store now records as reversed is demoted here, by code, from the same recorded
+        # outcomes the priors are read from — the store's bounded recent window, the same reader
+        # the prompt-side prior uses (`core/memory_window.py`). Receipted below, never silent.
+        skills_demoted: list[dict] = []
+        try:
+            from looplab.core.memory_window import read_memory_jsonl_window
+            _rows, _receipt = read_memory_jsonl_window(base / "lessons.jsonl", loads=orjson.loads)
+            skills_demoted = _memory.reconcile_auto_skill_statuses(
+                sk_dir, [row for _, row in _rows if isinstance(row, dict)])
+        except Exception as exc:  # noqa: BLE001 — skill hygiene is best-effort, never fails finalize
+            from looplab.core.containment import contain
+            contain("auto-skill status reconcile at finalize", exc)
+            skills_demoted = []
+
+        # THE READ-SIDE UTILITY LEDGER (doc 52 row 17): this run's own citation report — which
+        # lessons its prompt prior showed and which its proposals cited (`events/prior_citations.py`)
+        # — appended as one row per lesson to the shared `lesson_utility.jsonl`, which the next
+        # run's prior scan folds onto each lesson as its `utility`. Append-only, under the ledger's
+        # own lock, inside this pass's own finish-seq idempotency; the rows are receipted below.
+        prior_citations: dict = {}
+        try:
+            from looplab.events.prior_citations import prior_citation_report, utility_rows
+            _report = prior_citation_report(self._e.store.read_all())
+            _rows_out = utility_rows(_report, run_id=final.run_id, run_uid=final.run_uid)
+            if _rows_out:
+                _upath = base / "lesson_utility.jsonl"
+                with _interprocess_lock(Path(str(_upath) + ".lock"), required=True):
+                    append_jsonl_bytes_locked(
+                        _upath, b"".join(orjson.dumps(row) + b"\n" for row in _rows_out))
+            prior_citations = {
+                "proposals": _report["proposals"], "shown": _report["shown_pairs"],
+                "cited": _report["cited_pairs"], "lessons": len(_rows_out),
+                "rate": _report["citation_rate"]}
+        except Exception as exc:  # noqa: BLE001 — the ledger is best-effort, never fails finalize
+            from looplab.core.containment import contain
+            contain("lesson utility ledger at finalize", exc)
+            prior_citations = {}
+
         # Audit the run-end distillation in the event log (diagnostic sidecar — fold ignores it). These
         # LLM artifacts (the causal note, the generalizable lessons, the auto-promoted skills) shape
         # FUTURE runs' priors/skills yet otherwise leave no trace in THIS run's events.jsonl — only in
@@ -395,6 +435,8 @@ class LessonDistillMixin:
             "coverage_digest": coverage_digest,
             "n_lessons": len(lessons), "n_skills": len(skills),
             "n_skill_candidates": len(skill_candidates),
+            "n_skills_demoted": len(skills_demoted), "skills_demoted": skills_demoted[:12],
+            "prior_citations": prior_citations,
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}
@@ -545,6 +587,8 @@ class LessonDistillMixin:
             out = agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
                                loop_opts=self._reflect_loop_opts(),
                                answer_desc="generalizable lessons, one theme per line, each tagged [GOOD]/[BAD]") or ""
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:   # noqa: BLE001 - best-effort; a real run writes NO templated fallback
             return []
         from looplab.engine.memory import distilled_claim_stance, parse_credit_lessons
@@ -612,6 +656,8 @@ class LessonDistillMixin:
                    or "").strip()
             return (f"{out[:1800]}\n\n_Verified on `{final.task_id}` (Δ={h.best_delta:+.4g})._"
                     if out else base)
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:   # noqa: BLE001 - best-effort
             return base
 
@@ -653,5 +699,7 @@ class LessonDistillMixin:
                                 answer_desc="a 2-3 sentence reusable causal note on WHY the winner won")
                    or "").strip()
             return out[:700] or None
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:   # noqa: BLE001 - reflection is best-effort
             return None

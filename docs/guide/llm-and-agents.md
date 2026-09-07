@@ -186,6 +186,21 @@ one wrong variable is one problem, not seven.
 The client (`OpenAICompatibleClient`) runs on the **openai SDK over an httpx transport** (migrated from the old stdlib-urllib transport for reliable timeouts + a streaming idle-guard); `openai`/`httpx` are declared deps but import-guarded so offline/replay still imports. A LiteLLM client is also available. Structured
 output uses tool-calling with an automatic text-parse fallback, so weaker models still work.
 
+### The run's spend cap: a reserve-commit budget
+
+Until 2026-09-06 a run had no cap on model spend at all: `CostAccountant.limit` was per client and
+nothing set it, and an accountant only learns a call's cost when the response lands — so N callers
+in flight under any post-hoc cap overshoot it by up to N calls. `llm_cost_limit` (the provider's
+own currency) and `llm_token_limit` (total tokens; the one that holds against a local model that
+prices nothing) are checked at the broker's permit, BEFORE a request is queued
+(`core/llm_budget.py::RunBudget`): committed + reserved + this call's estimate — the run's own mean
+per committed call, so nothing is reserved before the first call lands — may not exceed the cap. A
+refusal raises `BudgetExceeded`, the same hard stop the accountant raises, through the same funnels
+(`tests/test_containment_census.py` pins them), so the run ends the way a tripped ceiling always
+has. The committed half is fed by the durable `llm_usage` ledger and seeded from it on a resume, so
+the cap survives a restart; `looplab tokens` reconciles against that same ledger. Both default to
+0 = no cap (doc 52 row 15).
+
 ## Reasoning / thinking
 
 `llm_reasoning` controls the chain-of-thought sent in the request (defaults to `high` — the agent
@@ -576,6 +591,13 @@ attempt N cannot read attempt N-1's curve as its own. That snapshot is why the l
 at the top of every attempt rather than lazily at the failure — by then there is no "before" left to
 take.
 
+Since 2026-09-06 what the judge reads is also **marked**: with `evidence_envelope` on, the stderr
+tail, the repair history and the code tail ride between `UNTRUSTED_RUN_EVIDENCE` and its closing
+fence, every tool result its loop returns is fenced the same way, and the system prompt ends with
+the guard sentence naming what that text must not be able to do — pick the verdict, relabel the
+failure kind the engine tagged, or buy a dependency install. See
+[the untrusted-evidence envelope](#the-untrusted-evidence-envelope).
+
 ### Why the kill bar is a bar and not a ladder
 
 `train_monitor_kill_confidence` is 0.8, and a `broken` verdict under it does nothing. That looks
@@ -647,6 +669,17 @@ their "no turn cap" into a cap. And it is **not a lost verdict**: `drive_tool_lo
 announces the budget through its `on_budget` observer — so the operator is told the investigation was
 cut short, and `node_repaired.budget_exhausted` records which bound ended it — and then forces the
 emit from everything gathered. The triage still answers; it stops browsing.
+
+**And since 2026-09-06 the session can read the clock it runs under** (doc 52 row 15;
+`tools/clock.py`). Every agentic loop — the Developer's stages / plan / implement / repair sessions,
+the Researcher's propose, the Strategist, the triage judge — carries a `remaining_time` tool that
+answers elapsed, remaining and the turn count from the loop's own clock, published by
+`drive_tool_loop` before every tool execution (so a nested phase reads its own numbers and the
+outer loop its own again afterwards). The PUSH half is a deadline note appended ONCE to a tool
+result when the remaining wall drops under a fifth of the budget or two minutes, whichever is
+larger, naming the emit to call — a role that was told its budget once, in prose, at the start and
+then killed at the wall now hears about the wall while it can still act. It reads; the loop still
+decides, and the kill is still the kill.
 
 A session-scoped *"this exact call+result has been served m times"* rung was measured and **refused**,
 recorded here so it is not re-proposed: over 2,472 tool-using sessions the max-serve distribution is
@@ -801,6 +834,79 @@ bucket are explicitly labelled. The prompt also states how many active experimen
 External, repository, memory, prior-run, and free-form current-run text (including
 rationales/errors/logs) is always covered by an immutable untrusted-data boundary, even when an
 operator hot-overrides the rest of the Deep Research system prompt.
+
+### The durable research record
+
+Until 2026-09-06 a Deep-Research pass left three things behind that nothing could re-check: its
+plan (one `update_plan` reminder inside one tool-loop context), its evidence (a URL plus a
+200-character snippet on `ResearchMemo.sources`) and the papers it had read (rendered into one
+prompt and gone). Doc 52 row 16 makes each a record, and the rule for all three is the same one the
+eval's metric salvage draws: **the record is bytes the engine observed a tool return, never what a
+model said about them.**
+
+- **The plan.** The loop's `update_plan` hands its structured arguments to the stage's `on_plan`
+  observer; the last one wins, counted, on `ResearchMemo.plan` (`{plan, todos:[{item, status}],
+  updates}`), and the fold applies it to `RunState.research_plan`. A junk `emit` keeps it: the
+  record lives on the memo from the first turn, so the summary-only fallback loses the prose and
+  not the plan.
+- **The evidence.** Every tool result the stage reads becomes one immutable `EvidenceItem`
+  (`core/research_record.py::evidence_item`): `id` = a digest over the kind, the locator identity
+  and the sha256 of the *whole* result text — the same bytes from the same place get the same id
+  in any run — plus the tool, a bounded locator, an exact-span `quote` (the first 600 characters,
+  redacted at this boundary because it is persisted verbatim), the `sha256`, the byte count and
+  the loop turn it was read on (`tools/clock.py`'s clock). At most 64 items per memo, on
+  `ResearchMemo.evidence`, folded onto `RunState.research_evidence` keyed by id. Each claim then
+  carries `evidence_ids`, stamped by `bind_claims_to_evidence`: a claim citing a URL is bound to
+  every item read from that URL's identity, a claim citing a node id to every item read from that
+  experiment. The model never names an evidence id — an empty list on a new memo *says* the claim
+  cites something the pass never read, which a pre-record memo (no key) could not say.
+- **The literature.** The papers an `arxiv_search` answer rendered (`parse_literature`: id over
+  the title, sha256 and length of the abstract, the query), at most 32 per memo on
+  `ResearchMemo.literature`; the recorder appends them as their own `literature_retrieved` event
+  beside the memo (`BACKGROUND_APPENDABLE`, so the concurrent research task may write it), and
+  `RunState.literature` is the run's deduplicated reading list with the node each paper was first
+  read at.
+- **The phases.** `drive_tool_loop` reports `agent_phase_started` (label, turn and time budgets),
+  `agent_checkpointed` (each plan update, with the plan) and `agent_phase_completed` (how the
+  phase ended: `emitted` / `salvaged` / `fallback`, turns and tool calls) through
+  `core/phase_events.py`. They are `DIAGNOSTIC_EVENTS` — fold-ignored, excluded from every
+  seq-equality fence, never authority — and the ENGINE decides whether they are written: it
+  installs the sink for the run's lifetime and redacts every string, and outside a run (the
+  assistant, a test, a script) the report is a no-op.
+
+Old logs carry none of it and read as `None` / `{}` / `[]` (invariant #5); the memo sanitizer
+bounds every field on the same pass as the memo's prose. `research_evidence` is a fold-internal
+index (`exclude=True`, like `Node.resource_curve`): each memo's own `evidence` list already rides
+the state payload, and duplicating up to 64 KB per memo on every poll would be pure transfer. The
+dumped state therefore gains exactly two fields, `research_plan` and `literature`.
+
+### The untrusted-evidence envelope
+
+Every role above reads text it did not write — a candidate's stderr, a sibling run's rationale, an
+arXiv abstract, a fetched page — and until 2026-09-06 the rule about how to read it lived in three
+hand-written copies: the two Researcher prompts' `_UNTRUSTED_MEMORY_RULE`, the Boss's
+`BOSS_EVIDENCE_GUARD` and the assistant's twin, plus a result fence only the assistant asked for.
+The roles whose answer moves an engine decision — the Strategist (`policy` / `timeout` /
+`eval_parallel`), the crash-triage judge (a node's verdict) and the repair critic (whether a repair
+chain ends) — read the same text with no rule at all, and the arXiv / web results arrived unmarked
+in every loop that held those tools.
+
+`looplab/core/evidence.py` is now the one place the three parts live: the label
+`UNTRUSTED_RUN_EVIDENCE`, the guard-sentence builder `untrusted_evidence_guard(lead, powers=…)`
+(the fixed clauses are shared; each role names what is untrusted for it and what it must not be
+talked into), and the fence `fence_untrusted(text, label)` that opens and closes a block and
+neutralizes any spelling of its own markers inside it. `serve/llm_context.py` and
+`agents/tool_loop.py` re-export their historical names, so the Boss and the assistant are unchanged.
+
+`evidence_envelope` (on for new runs; a snapshot written before the field resumes with it **off**)
+switches the three new consumers together: the Strategist's system prompt ends with its guard and
+its agent variant fences every tool result; the triage judge's stderr tail, repair history and code
+tail, and the critic's trajectory, ride inside the fence under their own guard, and their pilot loop
+fences its tool results; `LiteratureTools` and `WebTools` stamp their own results, so the Researcher
+and the Deep-Research loop see the marker too (the fence is idempotent, so a tool-stamped result
+inside a loop that stamps everything is not double-marked). `false` reproduces every one of those
+prompts byte for byte — a prompt is a contract — and nothing here reaches a metric, a champion,
+selectability or a violation. `tests/test_evidence_envelope.py` drives each surface both ways.
 
 ## Knowledge, skills & prompts
 

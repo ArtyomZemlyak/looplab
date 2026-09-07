@@ -89,12 +89,14 @@ def test_the_developer_carries_the_count_out_of_the_session():
 def test_the_engine_snapshots_it_rather_than_reading_it_late():
     """The developer is SHARED across concurrent evals. Reading the attribute after another await
     would attribute a sibling node's edits to this row — the hazard the neighbouring
-    `last_budget_exhausted` comment already spells out."""
+    `last_budget_exhausted` comment already spells out. Since 2026-09-06 (doc 52 row 12) the count
+    comes off the frozen `DeveloperResult` the offloaded repair returned, so the snapshot IS the
+    call; what stays pinned is that the row is built from that envelope and after it."""
     import inspect
 
     from looplab.engine.evaluate import EvaluateMixin
     src = inspect.getsource(EvaluateMixin)
-    snap = src.index("_edit_calls = int(getattr(self.developer")
+    snap = src.index("_edit_calls = int(repaired.last_edit_calls")
     use = src.index('"edit_calls": _edit_calls')
     assert snap < use, "the snapshot must precede every use of it"
 

@@ -28,6 +28,7 @@ import anyio
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from looplab.serve.principal import coerce as _coerce_principal, request_principal
 from looplab.serve.assistant import (
     ForkActionConflictError, ForkActionDeletedError, ForkActionDeletingError,
     REPO_ROOT as _ASSISTANT_REPO_ROOT, SHARE_DEFAULT_TTL_SECONDS, SHARE_MAX_RECORDS,
@@ -1734,6 +1735,9 @@ def build_router(srv) -> APIRouter:
             res = _assistant_run_turn(
                 client, root, history, instruction, mode,
                 alive_fn=_engine_alive, settings=s, approver=approver,
+                # THE PARTY THAT ARMED THE WATCH, pinned on the record at arming (like its mode): a
+                # wake-up has no request, and a legacy record with no pin runs as `anonymous`.
+                principal=_coerce_principal(record.get("principal")),
                 on_step=_on_step, on_todos=_on_todos, cancel_check=cancel_ev.is_set,
                 command_service=srv.commands,
                 command_key_namespace=f"{sid}:{turn_id}",
@@ -1819,6 +1823,7 @@ def build_router(srv) -> APIRouter:
         try:
             record = _session_watches(sid, mode).arm(
                 instruction=str(body.get("instruction") or body.get("goal") or ""), trigger=trigger,
+                principal=request_principal(request).kind,
                 waiting_for=str(body.get("waiting_for") or ""),
                 max_wakeups=(body.get("max_wakeups")
                              if body.get("max_wakeups") is not None else body.get("max_cycles")),
@@ -1843,6 +1848,7 @@ def build_router(srv) -> APIRouter:
         JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
         504ing), then persists the assistant reply. Soft-fails offline."""
         body = await json_object(request)
+        principal = request_principal(request)     # captured on the request thread; the turn runs off it
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
          turn_epoch, begin_live_ids) = _begin_turn(sid, body)
         try:
@@ -1867,6 +1873,7 @@ def build_router(srv) -> APIRouter:
             try:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
+                                          principal=principal,
                                           on_step=_on_step, on_todos=_on_todos,
                                            cancel_check=cancel_ev.is_set,
                                            command_service=srv.commands,
@@ -1893,6 +1900,7 @@ def build_router(srv) -> APIRouter:
         action pauses the worker on the permission registry while the client polls /permissions."""
         import queue as _queue
         body = await json_object(request)
+        principal = request_principal(request)     # captured on the request thread; the turn runs off it
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
          turn_epoch, begin_live_ids) = _begin_turn(sid, body)
         q: "_queue.Queue" = _queue.Queue()
@@ -1948,6 +1956,7 @@ def build_router(srv) -> APIRouter:
             try:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
+                                          principal=principal,
                                           on_step=_on_step, on_todos=_on_todos, on_text=_on_text,
                                           reply_sink=_reply_sink,
                                            cancel_check=cancel_ev.is_set,

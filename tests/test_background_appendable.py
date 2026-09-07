@@ -20,7 +20,8 @@ from looplab.core.models import Event, card_ownership_receipt
 from looplab.events.replay import fold
 from looplab.events.types import (ALL_EVENT_TYPES, BACKGROUND_APPENDABLE,
                                    EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_HINT,
-                                   EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED, EV_LLM_USAGE,
+                                   EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED, EV_LITERATURE_RETRIEVED,
+                                   EV_LLM_USAGE,
                                    EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED,
                                    NON_CARD_SELECTION_BACKGROUND_APPENDABLE)
 
@@ -53,6 +54,10 @@ def _payload(etype: str) -> dict:
     if etype == EV_LLM_USAGE:
         return {"cost": 0.001, "calls": 1, "prompt_tokens": 10,
                 "completion_tokens": 2, "total_tokens": 12}
+    if etype == EV_LITERATURE_RETRIEVED:
+        return {"memo_id": None, "at_node": 0, "items": [
+            {"id": "lit-" + "a" * 24, "title": "A paper", "abstract_sha256": "b" * 64,
+             "abstract_chars": 12, "query": "q", "tool": "arxiv_search"}]}
     raise AssertionError(f"add a payload builder for new background type {etype!r}")
 
 
@@ -63,6 +68,9 @@ def test_registry_sane():
     # and must pass the splice test below. This assertion forces that edit to happen here.
     assert BACKGROUND_APPENDABLE == frozenset({
         EV_RESEARCH_COMPLETED, EV_RESEARCH_ATTEMPTED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
+        # The papers a Deep-Research pass read (doc 52 row 16): appended by the same gated
+        # recorder as the memo, folded into `RunState.literature`, read by nothing that selects.
+        EV_LITERATURE_RETRIEVED,
     })
     assert NON_CARD_SELECTION_BACKGROUND_APPENDABLE == frozenset({EV_HYPOTHESIS_MERGED})
     assert NON_CARD_SELECTION_BACKGROUND_APPENDABLE <= ALL_EVENT_TYPES

@@ -175,6 +175,7 @@ to spend them.
 """
 from __future__ import annotations
 
+import os
 import re
 
 from pathlib import Path
@@ -824,6 +825,79 @@ def coerce_findings(verdict, redact=None) -> list:
     return out
 
 
+# ------------------------------------------------ THE OTHER EXPLANATIONS (doc 52 row 32)
+#
+# The diagnostician answers ONE `failure_kind` with a findings trail behind it, and a wrong answer
+# is therefore indistinguishable from a right one until the repair built on it fails. SAGE's
+# multi-hypothesis attribution — carry the alternatives, each with its OWN severity, and say what
+# would tell them apart — moved metrics-bearing outputs 42 -> 92 %. LoopLab's live classifier scores
+# 88/118 on `failure_triage.v1`, i.e. roughly a quarter of its answers are wrong, and nothing in the
+# record says what else it considered.
+#
+# A hypothesis is NOT a ranked restatement of the answer. Each carries its own `confidence`
+# (independent — two explanations can both be likely, which is the whole point) and a
+# `discriminator`: what a reader or the next repair could look at to tell it from the primary. A
+# hypothesis with no discriminator is an opinion; with one it is the next thing to check.
+HYPOTHESES_CAP = 3
+HYPOTHESIS_CAUSE_CAP = 240
+HYPOTHESIS_DISCRIMINATOR_CAP = 240
+
+
+def coerce_hypotheses(verdict, redact=None) -> list:
+    """The alternative explanations, bounded: `[{cause, kind, confidence, discriminator}, …]`.
+
+    Never raises, drops what cannot be read, and keeps the model's ORDER rather than sorting by
+    confidence — the diagnostician's own ranking of what it considered is information, and sorting
+    it away would make a confidently-wrong second hypothesis look like a considered one.
+
+    `kind` is validated against `DIAGNOSED_FAILURE_REASONS` and dropped when it is not one, for the
+    same reason `coerce_failure_kind` refuses: a hypothesis may not smuggle in a label the engine's
+    own vocabulary does not contain, because a reader downstream would take it for a diagnosis.
+    """
+    raw = verdict.get("hypotheses") if isinstance(verdict, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list = []
+    seen: set = set()
+    for item in raw:
+        if len(out) >= HYPOTHESES_CAP:
+            break
+        if not isinstance(item, dict):
+            continue
+        cause = _screened(item.get("cause", ""), HYPOTHESIS_CAUSE_CAP, redact)
+        if not cause or cause.lower() in seen:
+            continue
+        discriminator = _screened(item.get("discriminator", ""), HYPOTHESIS_DISCRIMINATOR_CAP,
+                                  redact)
+        raw_confidence = item.get("confidence")
+        # A missing or unreadable confidence is 0.0 and NOT 0.5: an alternative nobody scored is
+        # not a coin flip, and a reader deciding whether to act on it must not be handed a number
+        # the model never produced.
+        confidence = (round(min(1.0, max(0.0, float(raw_confidence))), 3)
+                      if isinstance(raw_confidence, (int, float))
+                      and not isinstance(raw_confidence, bool)
+                      and float(raw_confidence) == float(raw_confidence)   # NaN is not a confidence
+                      else 0.0)
+        kind = str(item.get("kind", "") or "").strip().lower()
+        row = {"cause": cause, "confidence": confidence, "discriminator": discriminator}
+        if kind in DIAGNOSED_FAILURE_REASONS:
+            row["kind"] = kind
+        seen.add(cause.lower())
+        out.append(row)
+    return out
+
+
+def hypotheses_enabled(settings) -> bool:
+    """`Settings.diagnosis_hypotheses` as the constructor argument the triage judge takes.
+
+    ONE reader, for the reason `core/evidence.py::envelope_enabled` gives: the flag reaches the
+    agent through a factory and the engine through its own settings, and a `getattr` default
+    re-typed at each site is how the two come to disagree. Absent means OFF, which is the
+    byte-identical historical prompt.
+    """
+    return bool(getattr(settings, "diagnosis_hypotheses", False))
+
+
 def evidence_citation_resolves(evidence, workdir) -> bool | None:
     """Does the cited file actually exist inside the node's workdir? `None` when there is nothing
     checkable to resolve (no citation, or a citation into the error text it was handed anyway).
@@ -1026,6 +1100,71 @@ def engine_observed_facts(res) -> str:
             "No watchdog of ours claimed this run: the stall, divergence and training monitors all "
             "report out of band, and a kill by any of them would have been classified without "
             "asking you. So whatever ended this process, it was not us.\n")
+
+
+# The two kernel refusal shapes as CPython prints them. `EACCES` -> `PermissionError: [Errno 13]`
+# is Landlock's answer to a read outside the allow-list; `EPERM` -> `[Errno 1] Operation not
+# permitted` is the seccomp filter's answer to a policed syscall.
+_EACCES_RE = re.compile(r"PermissionError: \[Errno 13\] Permission denied: '([^'\n]{1,512})'")
+_EPERM_RE = re.compile(r"\[Errno 1\] Operation not permitted")
+
+
+def fence_refusal_note(res, *, landlock: str = "off", syscall_fence: str = "off",
+                       exists=os.path.exists) -> str:
+    """The fence's OWN sentence for a kernel refusal in `res.stderr`, or `""` (doc 52 row 28).
+
+    WHY THIS EXISTS. `runtime/read_fence.py` refuses with a non-`OSError` carrying its fix, and that
+    is deliberate: `except OSError: <fall back>` is the silent-skip shape. The two kernel rungs
+    cannot do that — Landlock answers `EACCES` and seccomp answers `EPERM`, both `OSError`s — so
+    under `landlock="enforce"` a refused read reached the triage judge and the repair Developer as
+    `PermissionError: [Errno 13] Permission denied: '/data/x.pt'`, which reads as a missing or
+    unreadable file and invites exactly the wrong repair (retry, another path, a permissions fix,
+    an `except OSError`). ActPlane names this class "opaque errors that confuse the agent". This
+    rewrites nothing in the record: it APPENDS the fence's sentence beside the engine's other
+    observed facts, at the triage intake (`engine_facts`) and in the repair headline, so both
+    readers see the refusal for what it is.
+
+    IT DECIDES NOTHING, like `failure_headline`: the reason stays `crash`, the diagnostician is still
+    asked, and it fires only when the engine KNOWS the rung was on — a `PermissionError` on an
+    unfenced run is a permissions problem and says so by this function's silence. `exists` is the
+    one fact it adds about the path (present on the box vs absent), injectable for tests.
+    """
+    err = getattr(res, "stderr", None)
+    if not isinstance(err, str) or not err:
+        return ""
+    lines = []
+    if str(landlock or "off") == "enforce":
+        paths = sorted(set(_EACCES_RE.findall(err)))[:4]
+        if paths:
+            described = []
+            for path in paths:
+                try:
+                    present = bool(exists(path))
+                except (OSError, ValueError, TypeError):
+                    present = False
+                described.append(
+                    f"`{path}` exists on this box and is outside what this eval may read" if present
+                    else f"`{path}` is outside what this eval may read (and is not present on this box)")
+            lines.append(
+                "KERNEL READ ALLOW-LIST (`landlock=enforce`): the `EACCES` / `PermissionError "
+                "[Errno 13]` is the fence, not a missing or unreadable file — "
+                + "; ".join(described)
+                + ". The fix is a DECLARATION that names it (a `data:`/`references:` mount or "
+                "`eval.inputs`), never a retry, another path, a chmod or an `except OSError`.")
+    policy = str(syscall_fence or "off")
+    if policy in ("mutators", "egress") and _EPERM_RE.search(err):
+        what = ("`mknod`/`mkfifo`" if policy == "mutators"
+                else "`mknod`/`mkfifo` and any IPv4/IPv6 `socket()` — a download, a client, a "
+                     "listener, loopback included")
+        lines.append(
+            f"SYSCALL FENCE (`syscall_fence={policy}`): the `EPERM` / `[Errno 1] Operation not "
+            f"permitted` from {what} is the fence, not a permissions problem on the box. The fix is "
+            "to stop needing the call — stage data through the task's declared inputs and keep local "
+            "IPC to files or Unix sockets; a retry or another library makes the same syscall.")
+    if not lines:
+        return ""
+    return ("--- A KERNEL FENCE REFUSED SOMETHING (the engine's own boundary, stated so it is not "
+            "read as a missing file) ---\n" + "\n".join(lines) + "\n")
 
 
 def diagnosis_code_tools(engine, workdir):

@@ -284,6 +284,7 @@
       "chars": 830
     }
   ],
+  "literature": [],
   "llm_cost": null,
   "node_concept_deltas": {},
   "node_concept_materialization_receipts": {},
@@ -337,6 +338,7 @@
       },
       "metric": 53.054167369999995,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -344,6 +346,9 @@
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
+      "self_metric": null,
+      "self_report_gap": null,
+      "stage_attempts": [],
       "stages": [],
       "status": "evaluated",
       "stderr_tail": "",
@@ -399,6 +404,7 @@
       },
       "metric": 35.66064084999999,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -406,6 +412,9 @@
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
+      "self_metric": null,
+      "self_report_gap": null,
+      "stage_attempts": [],
       "stages": [],
       "status": "evaluated",
       "stderr_tail": "",
@@ -461,6 +470,7 @@
       },
       "metric": 8.51019194,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -471,6 +481,9 @@
         "at_node": 2,
         "trigger": "cadence"
       },
+      "self_metric": null,
+      "self_report_gap": null,
+      "stage_attempts": [],
       "stages": [],
       "status": "evaluated",
       "stderr_tail": "",
@@ -526,6 +539,7 @@
       },
       "metric": 9.73679185,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -538,6 +552,9 @@
         "at_node": 2,
         "trigger": "cadence"
       },
+      "self_metric": null,
+      "self_report_gap": null,
+      "stage_attempts": [],
       "stages": [],
       "status": "evaluated",
       "stderr_tail": "",
@@ -593,6 +610,7 @@
       },
       "metric": 17.17538701,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -602,6 +620,9 @@
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
+      "self_metric": null,
+      "self_report_gap": null,
+      "stage_attempts": [],
       "stages": [],
       "status": "evaluated",
       "stderr_tail": "",
@@ -657,6 +678,7 @@
       },
       "metric": 5.57026258,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -669,6 +691,9 @@
         "at_node": 5,
         "trigger": "cadence"
       },
+      "self_metric": null,
+      "self_report_gap": null,
+      "stage_attempts": [],
       "stages": [],
       "status": "evaluated",
       "stderr_tail": "",
@@ -724,6 +749,7 @@
       },
       "metric": 6.688963449999999,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "merge",
       "origin": null,
       "parent_ids": [
@@ -737,6 +763,9 @@
         "at_node": 5,
         "trigger": "cadence"
       },
+      "self_metric": null,
+      "self_report_gap": null,
+      "stage_attempts": [],
       "stages": [],
       "status": "evaluated",
       "stderr_tail": "",
@@ -792,6 +821,7 @@
       },
       "metric": 4.482711760000001,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -801,6 +831,9 @@
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
+      "self_metric": null,
+      "self_report_gap": null,
+      "stage_attempts": [],
       "stages": [],
       "status": "evaluated",
       "stderr_tail": "",
@@ -820,6 +853,8 @@
   "paused": false,
   "pending_hints": [],
   "pending_strategy": null,
+  "plan": null,
+  "plan_history": [],
   "policy_chosen": 5,
   "policy_reason": "exploit best",
   "policy_scores": {
@@ -838,6 +873,7 @@
   "repair_ledger": [],
   "repair_ledger_omitted": {},
   "report": null,
+  "require_approval": null,
   "research": [
     {
       "at_node": 2,
@@ -885,6 +921,7 @@
       "trigger": "cadence"
     }
   ],
+  "research_plan": null,
   "research_requests": [],
   "research_served": 0,
   "reward_hacks": [],

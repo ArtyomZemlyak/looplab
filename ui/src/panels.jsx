@@ -10,7 +10,7 @@ import {
   coverageSummary, filterRows, groupByConceptTree, memoryTierBlurb, rowConcepts, rowSource,
   shelfConcepts, SOURCE_RUN, UNTAGGED,
 } from './conceptShelf.js'
-import { Bars, ParallelCoords, Scatter } from './charts.jsx'
+import { Bars, MultiTrajectory, ParallelCoords, Scatter } from './charts.jsx'
 import { EXTRA_METRIC_CHANNEL_HELP, unverifiedExtraMetricKeys } from './extraMetrics.js'
 import { hyperImportance } from './report.js'
 import Markdown, { stripMd } from './markdown.jsx'
@@ -20,7 +20,9 @@ import { diffLines } from './lineDiff.js'
 import { driftStatus, leakageStatus, rewardHackStatus, OBJECTIVE_SOURCE_LABEL,
   objectiveMetricSource, objectiveSourceCaveated, objectiveSourceHelp } from './trustSemantics.js'
 import { bestMetricCaveatLabel, metricComparable, nodesSplitByComparability, sortRuns } from './runIndex.js'
-import { crossRunGroups, groupClaim, rankCoverage } from './crossRunRank.js'
+import {
+  crossRunGroups, groupClaim, rankCoverage, trajectoryClaim, trajectoryOverlay,
+} from './crossRunRank.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
@@ -2569,6 +2571,20 @@ export function CrossRunPanel({ state, onClose }) {
           </table></DataTable>
         : resource.status === 'ready' && task
           && <div className="muted">No per-run metric observations for this task ID yet.</div>}
+      {/* THE TRAJECTORY OVERLAY — one chart per comparable group and never one across groups: the
+          axis is the group's own objective, so nothing is rescaled, which is the objection that kept
+          this unbuilt (`crossRunRank.js`, header). The series rides on the run row as change points
+          (`events/trajectory.py::running_best`), so opening this panel folds nothing; what is drawn
+          and what is left out is decided and worded by `crossRunRank.js::trajectoryOverlay` /
+          `trajectoryClaim`, so a test holds the sentence to its counts. */}
+      {groups.map(group => {
+        const overlay = trajectoryOverlay(group)
+        return <div key={`${group.key}:trajectory`} className="xr-trajectory" style={{ marginTop: 12 }}>
+          {overlay.drawn > 0 && <MultiTrajectory runs={overlay.runs}
+            title={`Running best · ${group.taskId} · ${group.direction === 'min' ? 'lower is better' : 'higher is better'}${group.partition ? ` · evaluation ${group.partition}` : ''}`} />}
+          <div className="muted" style={{ fontSize: 11 }}>{trajectoryClaim(group, overlay)}</div>
+        </div>
+      })}
       {omitted > 0 && <div className="muted" style={{ marginTop: 8 }}>
         {omitted} additional observation{omitted === 1 ? '' : 's'} omitted by the client render limit.
       </div>}

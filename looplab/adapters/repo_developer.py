@@ -27,6 +27,7 @@ import math as _math
 
 from typing import Optional
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -377,6 +378,70 @@ _REPO_DEV_PARENT_BLOCK = (
     "edit_file (small SEARCH/REPLACE hunks): change ONLY what this idea requires and "
     "keep everything else as-is. Do NOT rebuild the solution from scratch and do NOT "
     "re-write whole files that only need a small change.\n\n")
+_REPO_DEV_CO_PARENT_BLOCK = (
+    "\n\n=== CO-PARENT SOLUTIONS (the OTHER lineages this ensemble must recombine) ===\n"
+    "Your working set is the PRIMARY parent above. Each co-parent below is a different evaluated "
+    "solution: its trace says how it ran and what it scored, and its files are shown where they "
+    "DIFFER from your working set (an identical file is named and not repeated). Recombine the "
+    "strongest components of both lineages — stack or average their predictions, or merge their "
+    "best pieces — rather than re-implementing either from its description.\n")
+_CO_PARENT_FILE_CHARS = 6000       # per co-parent file shown
+_CO_PARENT_TOTAL_CHARS = 16000     # across every co-parent's files
+_CO_PARENT_MAX = 3                 # co-parents rendered (an ensemble merge has one or two)
+
+
+def co_parent_block(co_parents, base: dict) -> str:
+    """The bounded co-parent section of an ensemble merge's prompt (doc 52 row 18): per co-parent
+    its identity, metric, params, rationale, a one-line TRACE (the stage rows, repairs, the error
+    if it failed) and the files that differ from the working set `base`, under fixed caps."""
+    from looplab.core.redact import redact_persisted_text
+    out = [_REPO_DEV_CO_PARENT_BLOCK]
+    used = 0
+    for node in list(co_parents or ())[:_CO_PARENT_MAX]:
+        idea = getattr(node, "idea", None)
+        params = getattr(idea, "params", None) or {}
+        rationale = redact_persisted_text(str(getattr(idea, "rationale", "") or ""),
+                                          max_chars=300, single_line=True)
+        head = (f"\n--- co-parent experiment #{getattr(node, 'id', '?')} "
+                f"(operator={getattr(node, 'operator', '?')}, metric={getattr(node, 'metric', None)}, "
+                f"params={params}) ---\n")
+        if rationale:
+            head += f"idea: {rationale}\n"
+        trace = []
+        for row in (getattr(node, "stages", None) or [])[:8]:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("stage") or row.get("name") or "?"
+            seconds = row.get("seconds")
+            trace.append(f"{name}:{row.get('status', '?')}"
+                         + (f" {seconds:.0f}s" if isinstance(seconds, (int, float)) else ""))
+        repairs = getattr(node, "repairs", 0) or 0
+        error = str(getattr(node, "error", "") or "")
+        head += ("trace: " + (" -> ".join(trace) if trace else "(no stage rows)")
+                 + (f"; repairs={repairs}" if repairs else "")
+                 + (f"; last error: {redact_persisted_text(error, max_chars=200, single_line=True)}"
+                    if error else "") + "\n")
+        out.append(head)
+        files = dict(getattr(node, "files", {}) or {})
+        for name, body in files.items():
+            text = str(body or "")
+            if base.get(name) == text:
+                out.append(f"--- {name} --- (identical to your working set)")
+                continue
+            if used >= _CO_PARENT_TOTAL_CHARS:
+                out.append(f"--- {name} --- (omitted for space)")
+                continue
+            shown = text[:_CO_PARENT_FILE_CHARS]
+            if used + len(shown) > _CO_PARENT_TOTAL_CHARS:
+                shown = shown[:max(0, _CO_PARENT_TOTAL_CHARS - used)]
+            used += len(shown)
+            out.append(f"--- {name} ---\n{shown}"
+                       + ("" if len(shown) == len(text) else f"\n… ({len(text) - len(shown)} chars omitted)"))
+    return "\n".join(out)
+
+
+
+
 # --- the between-steps MEASUREMENT (doc 53 item 10, the LoopLab half) ------------------------
 #
 # MEASURED, 2026-08-27, over the eleven AlgoTune model probes in `/var/tmp/looplab-bench/
@@ -1197,6 +1262,8 @@ class LLMRepoDeveloper:
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
                 on_tool_result=self._established_hook("plan"),
                 **self._session_opts())
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
             return []
         steps = []
@@ -1322,6 +1389,8 @@ class LLMRepoDeveloper:
                       fallback=lambda m: "", on_budget=self._note_session_budget,
                       on_tool_result=self._established_hook("plan_step"),
                       **self._session_opts(cost_budget=self._step_cost_ceiling()))
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
         return ""
@@ -1441,6 +1510,11 @@ class LLMRepoDeveloper:
         if state is not None:
             board.bind_state(state)
         extra.append(board)
+        # The session's own clock (`tools/clock.py`, doc 52 row 15): this role is tree-killed at
+        # `developer_session_time_budget_s` having been told the number once, at the top of the
+        # session; `remaining_time` is how it asks again before starting something long.
+        from looplab.tools.clock import ClockTools
+        extra.append(ClockTools())
         roots = [e["path"] for e in (getattr(self, "_editables", None) or []) if e.get("path")]
         if not roots:
             return extra
@@ -1810,7 +1884,14 @@ class LLMRepoDeveloper:
             "incomparable with its siblings, so spend the ceiling you were given before you spend "
             "the comparison. "
             "Do not shrink the experiment past the point where it answers the "
-            "researcher's question; shrink the schedule, and say in your notes what you cut.")
+            "researcher's question; shrink the schedule, and say in your notes what you cut. "
+            # THE EVAL PROCESS IS TOLD ITS OWN CLOCK (doc 52 row 15): every stage's environment
+            # carries the wall it will be killed at, so the code can size its last epoch or
+            # checkpoint and exit cleanly instead of being killed mid-step with no metric.
+            "Every stage's environment carries LOOPLAB_EVAL_DEADLINE (the Unix time, in seconds, at "
+            "which THAT stage is killed) and LOOPLAB_EVAL_TIMEOUT_S (its declared ceiling): read them "
+            "at runtime to decide whether another epoch fits, and checkpoint or score and exit "
+            "cleanly before the deadline rather than being killed mid-step with no metric.")
 
     def _operator_stage_list(self) -> list:
         """The validated OPERATOR-declared `cmd.stages` pipeline, or []. Gated on the SAME shared
@@ -2091,12 +2172,14 @@ class LLMRepoDeveloper:
                 on_budget=self._note_session_budget,
                 on_tool_result=self._established_hook("stages"),
                 **self._session_opts()) or []
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
             return []
 
     def _run(self, idea: Idea, error: Optional[str] = None,
              base: Optional[dict] = None, base_note: str = "",
-             base_deleted: Optional[list] = None) -> str:
+             base_deleted: Optional[list] = None, co_parents=()) -> str:
         from looplab.agents.agent import run_phase
         from looplab.core import tracing
         # Cleared per CALL, before anything can fail: this developer instance is SHARED across
@@ -2199,6 +2282,8 @@ class LLMRepoDeveloper:
                 parts.append(f"--- {name} ---\n{b}")
             user += (_REPO_DEV_PARENT_BLOCK.format(note=(f"; {base_note}" if base_note else ""))
                      + "\n\n".join(parts))
+        if co_parents:
+            user += co_parent_block(co_parents, base or {})
         if error:
             # {already} lists the files ACTUALLY seeded for THIS repair — `write.files` (repair_from
             # pre-loads the failing node's own files there; the legacy no-base fallback copies
@@ -2480,6 +2565,8 @@ class LLMRepoDeveloper:
                           terminal_salvage=True,
                           fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
             self.last_edit_calls = int(getattr(write, "edit_calls", 0) or 0)
@@ -2536,16 +2623,19 @@ class LLMRepoDeveloper:
     def implement(self, idea: Idea) -> str:
         return self._run(idea)
 
-    def implement_from(self, idea: Idea, parent) -> str:
+    def implement_from(self, idea: Idea, parent, *, co_parents=()) -> str:
         """Improve/refine: start from the PARENT node's solution and patch it (see _run(base=...)).
         Falls back to a from-scratch implement when the parent carries no files AND no deletions
-        (e.g. seeded rows)."""
+        (e.g. seeded rows). An ensemble merge also hands the OTHER parents (`co_parents`, doc 52
+        row 18): their code that differs from the working set, and their traces, so the
+        recombination reads both lineages instead of one plus a 120-char digest."""
         files = dict(getattr(parent, "files", {}) or {})
         deleted = list(getattr(parent, "deleted", []) or [])
         if not files and not deleted:
-            return self._run(idea)
+            return self._run(idea, co_parents=tuple(co_parents or ()))
         note = f"parent experiment #{getattr(parent, 'id', '?')}, metric={getattr(parent, 'metric', None)}"
-        return self._run(idea, base=files, base_note=note, base_deleted=deleted)
+        return self._run(idea, base=files, base_note=note, base_deleted=deleted,
+                         co_parents=tuple(co_parents or ()))
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         return self._run(idea, error=error)
@@ -2635,6 +2725,8 @@ class LLMOnboarder:
                 [{"role": "system", "content": render(
                     self.prompts, "repo_onboarder_system", self._SYS)},
                  {"role": "user", "content": user}]))
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception as e:  # noqa: BLE001 — propose a stub; human will reject/fix
             code = f"def read_metric(workdir):\n    raise RuntimeError({str(e)!r})\n"
         return {

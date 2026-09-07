@@ -13,7 +13,11 @@ from __future__ import annotations
 import inspect
 import json
 import random
-from typing import Optional, Protocol
+import threading
+import weakref
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Mapping, Optional, Protocol
 
 from looplab.core.advisory_payloads import memo_snapshot_cue, memo_verdict_cue
 from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
@@ -357,6 +361,71 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # ZERO edit calls in sessions of 22.5-27.3 minutes, which is why the budget lever was refused.
     "last_edit_calls")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
+
+
+@dataclass(frozen=True)
+class DeveloperResult:
+    """The IMMUTABLE envelope of ONE Developer call (doc 27; doc 52 row 12).
+
+    A Developer returns `str` and leaves everything else on the INSTANCE — the eleven
+    `DEVELOPER_OUTPUT_ATTRS` side channels above, which the engine read back with `getattr` after
+    the call. That contract held only while nothing else could touch the instance between the
+    call and the reads, and the thing that guaranteed it was an accident: the paid call ran ON THE
+    EVENT LOOP THREAD, so no sibling could run while it did. `engine/evaluate.py`'s repair path
+    already had to snapshot five of the channels "IMMEDIATELY, before any `await`" and carry a
+    comment about which sibling's edits a late read would attribute to this node. The freeze was
+    the serialiser, and offloading the call (which the loop-liveness measurements demanded — zero
+    ticks for a 116-276 s median hold, one recorded 88.3 min) removes it.
+
+    So the outputs become a RETURN VALUE: `engine/node_build.py::_capture_developer_result` reads
+    every registered channel off the instance in the same breath as the call, under the instance's
+    own lock (`developer_call_lock`), and hands back this frozen record. Field names ARE the
+    registry names so the two cannot drift (`tests/test_developer_result.py` pins the field set to
+    `DEVELOPER_OUTPUT_ATTRS` plus `code`), `last_files` is a read-only mapping and `last_deleted` a
+    tuple, so no consumer can mutate a record another consumer is still reading. `failed(code)` is
+    the envelope for a call that RAISED: the sentinel code and every channel at its default, which
+    is what the engine used to read off an instance that had not run.
+    """
+
+    code: Any
+    last_files: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    last_deleted: tuple[str, ...] = ()
+    last_footprint: Optional[dict] = None
+    last_report: Any = None
+    last_seed: Any = None
+    last_run: Any = None
+    last_patch: Any = None
+    last_rollback_stage: str = ""
+    last_budget_exhausted: str = ""
+    last_budget_facts: Any = None
+    last_edit_calls: int = 0
+
+    @classmethod
+    def failed(cls, code: str) -> "DeveloperResult":
+        return cls(code=code)
+
+
+# One `RLock` per Developer INSTANCE, so a call and the capture of its outputs are one atomic
+# step: two repairs offloaded to two worker threads on the SAME shared instance now queue on it
+# instead of interleaving their `last_*` writes. Keyed weakly so a pooled per-build Developer is
+# collected with its lock; an object that cannot be weakly referenced (a `SimpleNamespace` stub,
+# a slotted class) falls back to an id-keyed table, which a test process never outgrows.
+_DEVELOPER_LOCKS: "weakref.WeakKeyDictionary[Any, threading.RLock]" = weakref.WeakKeyDictionary()
+_DEVELOPER_LOCKS_BY_ID: dict[int, threading.RLock] = {}
+_DEVELOPER_LOCKS_GUARD = threading.Lock()
+
+
+def developer_call_lock(developer) -> threading.RLock:
+    """The lock a Developer call and its output capture run under — see `DeveloperResult`."""
+    with _DEVELOPER_LOCKS_GUARD:
+        try:
+            lock = _DEVELOPER_LOCKS.get(developer)
+            if lock is None:
+                lock = threading.RLock()
+                _DEVELOPER_LOCKS[developer] = lock
+            return lock
+        except TypeError:
+            return _DEVELOPER_LOCKS_BY_ID.setdefault(id(developer), threading.RLock())
 
 # The RESEARCHER's outbound ASSIGNMENTS, the mirror of `DEVELOPER_OUTPUT_ATTRS` above.
 # `RESEARCHER_ACTION_ATTRS` could not hold these: its contract test needle-checks `def {attr}(`,
@@ -1656,9 +1725,13 @@ class WrapsDeveloper:
         added to stop being the only one available. `tests/test_developer_output_forwarding.py`
         derives the required set from the engine's own `getattr` sites.
 
-        `last_seed` / `last_run` / `last_patch` are deliberately NOT mirrored: `ValidatingDeveloper`
-        reads them off `self.inner` directly, so a wrapper copy would be a second spelling with no
-        reader. `last_report` is a read-through property above for the same reason.
+        `last_seed` / `last_run` / `last_patch` were deliberately NOT mirrored until 2026-09-06:
+        `ValidatingDeveloper` reads them off `self.inner` directly, so a wrapper copy was a second
+        spelling with no reader. The `DeveloperResult` envelope capture
+        (`engine/node_build.py::_capture_developer_result`, doc 52 row 12) now reads EVERY registry
+        member off the ACTIVE developer — which under the shipped default is this facade — so the
+        three are mirrored too, or the envelope would record them as absent on every facade build.
+        `last_report` is a read-through property above.
         """
         self.last_files = getattr(self._wrapped, "last_files", {}) or {}
         self.last_deleted = getattr(self._wrapped, "last_deleted", []) or []
@@ -1666,6 +1739,9 @@ class WrapsDeveloper:
         self.last_rollback_stage = getattr(self._wrapped, "last_rollback_stage", "") or ""
         self.last_budget_exhausted = getattr(self._wrapped, "last_budget_exhausted", "") or ""
         self.last_edit_calls = getattr(self._wrapped, "last_edit_calls", 0) or 0
+        self.last_seed = getattr(self._wrapped, "last_seed", None)
+        self.last_run = getattr(self._wrapped, "last_run", None)
+        self.last_patch = getattr(self._wrapped, "last_patch", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -1823,7 +1899,7 @@ class ValidatingDeveloper(WrapsDeveloper):
         fb_call = (lambda: fb_repair(idea, code, error)) if callable(fb_repair) else None
         return self._attempt_loop(idea, lambda i: inner_repair(i, code, error), fb_call)
 
-    def implement_from(self, idea: Idea, parent) -> str:
+    def implement_from(self, idea: Idea, parent, *, co_parents=()) -> str:
         """Parent-aware implement, forwarded through the validation retry loop (arch-review §4 P1-9):
         without exposing this, the engine's `getattr(developer, 'implement_from')` capability probe
         saw only the validator's plain `implement` and regenerated the child from the pristine baseline
@@ -1832,6 +1908,10 @@ class ValidatingDeveloper(WrapsDeveloper):
         impl_from = getattr(self.inner, "implement_from", None)
         if not callable(impl_from):
             return self.implement(idea)
+        if co_parents:
+            from looplab.engine.node_build import accepts_co_parents
+            if accepts_co_parents(impl_from):
+                return self._attempt_loop(idea, lambda i: impl_from(i, parent, co_parents=co_parents))
         return self._attempt_loop(idea, lambda i: impl_from(i, parent))
 
     def repair_from(self, idea: Idea, node, error: str) -> str:

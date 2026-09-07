@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 197
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 207
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -169,6 +169,18 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # worktree. None of the four registered omission clauses applies: the key set is closed, it is
 # not an alias, it is exactly operator-typed, and its parent feature (the external coding-agent
 # Developer) has rows of its own.
+# 196 + 196 -> 206 on 2026-09-07, at the MERGE with master, and BOTH histories below are
+# real: each side grew its own copy from a common 186 and neither literal was measured
+# against a tree holding the other's rows. Verified as every entry below prescribes —
+# by INTERSECTION, never by adding the integers: 186 keys are common to the two files,
+# this branch adds ten (diagnosis_hypotheses, endgame_reserve_frac, evidence_envelope,
+# llm_cost_limit, llm_token_limit, mcts_cost_weight, novelty_literature,
+# stage_check_tools, steady_state_build, syscall_fence) and master ten
+# (developer_crash_pause_after, developer_probe_confine, developer_stage_guidance,
+# developer_step_feedback_command, established_context, established_context_bytes,
+# hide_empty_tools, llm_budget_usd, llm_stream_stall_fallback,
+# node_open_budget_floor_usd), giving 206 with no duplicate key. The keyset revision is
+# RE-DERIVED over the merged keyset for the same reason.
 # (196 at the 2026-09-06 MERGE with master, and BOTH histories above are real: this
 # branch's ten rows meeting master's one (`agent_timeout`). Neither side's digest is
 # carried — each was pinned against a tree that did not contain the other's rows — so it
@@ -177,11 +189,32 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # files, +10 this branch authored, +1 master's, 196 with no duplicate key. The file also
 # returns to master's (and the merge base's) 2-space indentation; the branch's 1-space
 # rewrite was the deviation.
+# 2026-09-06: +`stage_check_tools` (doc 52 row 9). A row for the reason `train_monitor_tools` and
+# `repair_log_tools` beside it are rows — it changes what the evidence for a paid, NODE-ENDING
+# judgement IS, it buys extra round trips when on, and it changes a PROMPT, so an operator must
+# be able to see the switch that restores the historical bytes.
+# 2026-09-06: +`evidence_envelope` (doc 52 row 13). A row on the same ground as the three above
+# it: it changes what three decision-moving roles are TOLD about the text they read and marks
+# that text, i.e. it changes a PROMPT — so the switch that restores the historical bytes must be
+# where an operator can see it.
+# 2026-09-06: +`llm_cost_limit` +`llm_token_limit` (doc 52 row 15): the run's LLM spend caps,
+# reserved at the broker's permit. Rows because a spend ceiling is exactly the operator-typed
+# knob a form exists for, beside `max_seconds` / `max_eval_seconds`.
+# 2026-09-06: +`endgame_reserve_frac` (doc 52 row 18): the plan's endgame reserve the dispatcher
+# honours. A row because it is a BUDGET allocation the operator decides beside `max_nodes`.
+# 2026-09-06: +`syscall_fence` (doc 52 row 28): the kernel syscall policy beside `landlock`. A row
+# for the reason `landlock` is one — an operator turns a kernel rung on for a run whose inputs are
+# all declared, and must see the switch that took the network away from the eval.
 # 196 + 1 -> 197 on 2026-09-07: `agent_read_loop_nudge_after`, the A9 read-loop nudge's threshold,
 # which shipped with NO Settings field at all — the loop's literal 25 was the only value that could
 # ever apply, so the "0 = off" its own docstring offered was unreachable for an operator. Exactly
 # one row, no key removed; re-derived, not edited.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "292ebf8a27ce2fc321d3f286f1da2210fe4262d1f6ea2aa68cd92a3482ddd656"
+# 2026-09-07, at the MERGE: master's nine rows meeting this branch's one. Neither side's
+# digest describes the result — each was pinned against a tree without the other's rows —
+# so it is RE-DERIVED over the merged keyset, which the 2026-08-31 entry prescribes.
+# Verified by intersection rather than by adding the integers: 207 unique keys, 197 common
+# to this branch's file plus master's ten, no duplicate and none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "28a36daf8fed55a2558039bdf92e96923beac5fa79c5a99ce6fa02c086e1117a"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
@@ -212,6 +245,9 @@ _HOME_RELATIVE_DEFAULT_FIELDS = frozenset({"memory_dir", "knowledge_dir"})
 _UNCURATED_OPEN_KEYED = frozenset({
     "agent_control", "agent_stage_base_urls", "agent_stage_models", "llm_profile", "llm_profiles",
     "llm_reasoning_extra", "role_profiles",
+    # doc 52 row 19: `{arm: "model-id[@cost]"}` — open arm names cross-referenced against the
+    # endpoints the operator runs, the same JSON-blob shape as `agent_stage_models` beside it.
+    "model_arms",
 })
 _UNCURATED_LEGACY_ALIAS = frozenset({"max_parallel", "parallel_build"})
 # The RUN-LEVEL DECLARED ENVIRONMENT (F1d). Open-keyed like the group above — the keys are arbitrary

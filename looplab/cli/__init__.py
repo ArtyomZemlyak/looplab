@@ -44,7 +44,7 @@ from looplab.engine.orchestrator import (
     Engine,
     SPECULATION_CALIBRATION_PROFILE_SETTINGS,
 )
-from looplab.search.policy import make_policy
+from looplab.search.policy import make_policy, parse_model_arms
 from looplab.search.speculation_calibration import speculation_runtime_scope_digest
 from looplab.runtime.sandbox import docker_tier_kwargs, make_sandbox
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles
@@ -418,9 +418,12 @@ def load_run_settings(run_dir, *, strict: bool, require_snapshot: bool = False) 
     paragraph it replaces ("an absent snapshot is ambient Settings under BOTH modes: `strict` is
     about corruption, not about requiring the file") was the defect its own bullet above describes.
     With the file absent, `resume` took a fresh `Settings()`, whose `require_approval` is `False`
-    and is read LIVE (`engine/orchestrator.py::Engine.__init__`, gated in the search spine), so a
+    and was read LIVE (`engine/orchestrator.py::Engine.__init__`, gated in the search spine), so a
     paused approval-pending run could be continued to completion with no approval — by deleting one
     file. `trust_mode`, `eval_trust_mode`, `confirm_*` and `backend` degrade the same way, silently.
+    Since 2026-09-06 `require_approval` is also PINNED in `run_started` (invariant #6), which closes
+    the snapshot-EDIT half of the same defect for every run started since; this refusal still
+    covers the other settings, and every log written before the pin.
 
     WHY ONLY `resume`, and this is the narrowing that matters: the bypass lives in the SEARCH SPINE,
     and `finalize` and the finalization recovery do not run it — they wrap up a run that has already
@@ -879,7 +882,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
         elif settings.researcher_panel > 1:
             from looplab.search.panel import PanelResearcher
-            researcher = PanelResearcher(researcher, k=settings.researcher_panel)
+            researcher = PanelResearcher(researcher, k=settings.researcher_panel,
+                                         explore=settings.surrogate_explore)
     elif _foresight_panel_applies(settings, researcher):
         # Foresight in UNIFIED mode: the wrappers above are skipped because they'd re-wrap only the
         # researcher handle, but ForesightPanelResearcher now DELEGATES its whole developer surface to
@@ -960,7 +964,11 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                            eta=settings.asha_eta,     # forwarded to ASHA (greedy/mcts/evo ignore it)
                            rung_nodes=settings.asha_rung_nodes,
                            debug_depth=settings.debug_depth,
-                           operator_bandit=settings.operator_bandit),
+                           operator_bandit=settings.operator_bandit,
+                           cost_weight=settings.mcts_cost_weight,   # doc 52 row 31: MCTS only
+                           # doc 52 row 19: the arms' relative costs; the engine holds the models
+                           model_arms={arm: cost for arm, (_m, cost)
+                                       in parse_model_arms(settings.model_arms).items()}),
         options=EngineOptions.from_settings(settings),
         crash_after=crash_after,
         # Maintainer-only bootstrap path for producing the paired evidence that the public positive
@@ -1067,7 +1075,7 @@ def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: b
 # against the `app` above. This block MUST stay at the bottom — the groups import the shared
 # builders back from this (still-initializing) package, which is safe only because everything they
 # need is already defined by this point.
-from looplab.cli import (concept_cmds, export_cmds, governance_cmds,  # noqa: E402,F401
+from looplab.cli import (audit_cmds, concept_cmds, export_cmds, governance_cmds,  # noqa: E402,F401
                          maintenance_cmds, memory_cmds,
                          inspect_cmds, run_cmds, ui_cmds)
 

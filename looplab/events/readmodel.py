@@ -5,8 +5,8 @@ never a source of truth — always reconstructable from events.jsonl.
 file recorded only rows: a reader holding `readmodel.sqlite` had no way to tell whether it described
 the whole log or a prefix, so a control event appended after the run finished left the projection
 silently behind. The rows now travel with a WATERMARK — the schema version, the last `seq` folded,
-the event count, and a digest of the `(seq, type)` prefix — written inside the SAME transaction as
-the rows, so it can never describe a different set of them.
+the event count, and a digest of the ordered `(seq, type, ts, data)` prefix — written inside the
+SAME transaction as the rows, so it can never describe a different set of them.
 
 Everything here FAILS CLOSED, because a watermark that can be wrong is worse than no watermark: it
 converts "obviously absent" into "silently stale". `readmodel_status` answers `current` only when a
@@ -45,7 +45,11 @@ from looplab.events.replay import fold
 # `current` — the rows may be fine, but this reader cannot prove the columns mean what it expects.
 READMODEL_SCHEMA_VERSION = 1
 WATERMARK_TABLE = "readmodel_watermark"
-DIGEST_PREFIX = "rmcov1:"
+# `rmcov1:` digested `(seq, type)` only, so a log whose `node_evaluated.metric` was edited IN PLACE —
+# same seq, same type, a different number — still certified `current` (doc 52 row 27). `rmcov2:`
+# digests the event DATA too. A watermark minted under the old prefix compares unequal to every new
+# one, so an existing read model reads `stale` once, and `looplab readmodel` rebuilds it.
+DIGEST_PREFIX = "rmcov2:"
 
 # Closed vocabulary. `unknown` is deliberately NOT folded into `stale`: "this artefact does not say
 # what it covers" and "it says, and it is behind" are different facts for an operator, and only the
@@ -83,12 +87,17 @@ class ReadModelWatermark:
 def coverage_watermark(events: Sequence[Event]) -> Optional[ReadModelWatermark]:
     """What a read model over *events* would carry, or None when it has no canonical coverage.
 
-    The digest covers the ORDERED `(seq, type)` prefix rather than only the count and max seq,
-    because a heal-truncate that rewrites a row can preserve both. It is deterministic over the
-    authenticated log: the bytes are immutable once appended, so two readers of one file derive one
-    digest.
+    The digest covers the ORDERED `(seq, type, ts, data)` prefix rather than only the count and max
+    seq, because a heal-truncate that rewrites a row can preserve both — and it covers the DATA
+    rather than only `(seq, type)`, because an in-place edit of one row's payload preserves those
+    two as well: a `node_evaluated.metric` rewritten from 0.5 to 0.1 is the same seq and the same
+    type, and until 2026-09-06 it certified `current`. It is deterministic over the authenticated
+    log: the bytes are immutable once appended, so two readers of one file derive one digest. A
+    payload with no canonical JSON form (a NaN the writer let through) yields no watermark at all,
+    which every reader reports as `unknown` — never `current`.
     """
-    rows = [[int(getattr(e, "seq", -1)), str(getattr(e, "type", ""))] for e in events]
+    rows = [[int(getattr(e, "seq", -1)), str(getattr(e, "type", "")),
+             getattr(e, "ts", 0.0), getattr(e, "data", {})] for e in events]
     digest = canonical_json_digest(rows, prefix=DIGEST_PREFIX)
     if not digest:  # no canonical form -> no watermark; the artefact stays honestly `unknown`
         return None

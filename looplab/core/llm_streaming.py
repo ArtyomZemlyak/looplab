@@ -277,7 +277,7 @@ def _sse_is_done(sse) -> bool:
     with the loop it is feeding."""
     try:
         return bool(sse.data.startswith("[DONE]"))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — a malformed SSE frame is simply not the terminator
         return False
 
 

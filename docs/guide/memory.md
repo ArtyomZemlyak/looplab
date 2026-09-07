@@ -42,8 +42,8 @@ Each type is deliberately different — they are **not** interchangeable:
 | **Cases** (`cases.jsonl`) | *The winning run's exact configuration* — the parameter dict that produced the best metric on this task, kept machine-readable so the next run can start from it instead of re-deriving it from prose. Exactly one active row per `(task_id, direction)`: a leaderboard, not a history. | `{task_id, goal, direction, params, metric, rationale}` | cross-run | run-end | **exact-task warm start** (one line in the Researcher prior, beside the meta-note) + `kb_search` (see [What are cases for?](#what-are-cases-for)) |
 | **Meta-notes** (`meta_notes.jsonl`) | *Why it may have won* — a short, LLM-distilled explanatory hypothesis over the observed run (not the raw config — that's the case, and not causal proof). | `{task_id, note}` (model-authored explanatory prose) | cross-run (per task) | run-end (LLM; falls back to a stats line) | exact warm-start, `recall_notes` |
 | **Lessons** (`lessons.jsonl`) | *Generalizable good **and** bad findings* — higher-level claims ("larger batch tends to help") with a verdict and a count of agreeing recorded observations, not independent verification. **Split by `role`** (see below). | `{statement, outcome: supported/tested/abandoned/failed/refuted/noted (action guidance; noted is neutral), claim_stance: support/oppose/neutral (relation of evidence to the literal statement on new rows), delta, confidence, evidence, evidence_sig (each evidence node's outcome signature at write time — the reconciliation provenance), evidence_count, fingerprint, role: researcher/developer (absent = shared)}` | cross-run (task-fingerprint matched) | run-end — **LLM-authored only**: the reflection consolidates the run (worked/failed nodes + resolved hypotheses + failure themes) into one lesson per theme, plus M6 comparative code-fix pairs (offline/toy path: a deterministic winner record); also **re-derived when a re-eval flips a cited node** | prompt injection (role-routed, fingerprint-matched), `search_lessons` |
-| **Skills** — hand-written (`skills_dir`) | *Best practices **with the script*** — a reusable technique + the code that implemented it, offered to the Researcher as a tool. | markdown: `name`, `description` frontmatter + the technique in the body | cross-run | **by you**; root Markdown is editable and nested `**/SKILL.md` packages are review-only in Lab → Authoring → skills | `list_skills`, `use_skill` |
-| **Skills** — auto-distilled (`<memory_dir>/skills/auto-*.md`) | The same tool surface, filled by the run itself from a card that was supported with Δ>0 and passed the portability classifier. | as above, plus `status (candidate/promoted)`, `provenance`, `claim_sha256`, `classifier_version`, `source_statement_sha256`, `source_task`, `fingerprints`; the skill reader parses the trust fields | cross-run | run-end (supported card, Δ>0) — the WRAP-UP pass, not a clean finish: `looplab finalize` performs it on a stopped run and is idempotent, so a run that was stopped or killed still gets it, but only if someone asks | A one-run *candidate* stays on disk but is hidden from the production `list_skills` / `use_skill` surface. Agentic classification binds promotion evidence to a validated canonical technique key; the offline/legacy path uses the full normalized claim. The readable prefix is never identity. A later sufficiently different task fingerprint (Jaccard similarity `< 0.6` to stored evidence) promotes it. A subsequently constructed toolset lists/loads it with `UNTRUSTED_MEMORY_AUTO_SKILL` provenance |
+| **Skills** — hand-written (`skills_dir`) | *Best practices **with the script*** — a reusable technique + the code that implemented it, offered to the Researcher as a tool. | markdown: `name`, `description` frontmatter + the technique in the body | cross-run | **by you**; root Markdown is editable and nested `**/SKILL.md` packages are review-only in Lab → Authoring → skills | `list_skills` (tiered: `global` hand-written / `domain` promoted auto skills ordered by fit to this run / `task` drafts; a declared `tier:` in the frontmatter overrides the default), `use_skill` (whole sections under the result cap, naming what it left out; `section=` reads one section in full) |
+| **Skills** — auto-distilled (`<memory_dir>/skills/auto-*.md`) | The same tool surface, filled by the run itself from a card that was supported with Δ>0 and passed the portability classifier. | as above, plus `status (candidate/promoted/demoted/retired)`, `provenance`, `claim_sha256`, `classifier_version`, `source_statement_sha256`, `source_task`, `fingerprints`, and once a card has been demoted `demotions`, `demoted_by`, `demoted_outcome`; the skill reader parses the trust fields | cross-run | run-end (supported card, Δ>0) — the WRAP-UP pass, not a clean finish: `looplab finalize` performs it on a stopped run and is idempotent, so a run that was stopped or killed still gets it, but only if someone asks | A one-run *candidate* stays on disk but is hidden from the production `list_skills` / `use_skill` surface. Agentic classification binds promotion evidence to a validated canonical technique key; the offline/legacy path uses the full normalized claim. The readable prefix is never identity. A later sufficiently different task fingerprint (Jaccard similarity `< 0.6` to stored evidence) promotes it. **The lifecycle is a lattice, not a ratchet (2026-09-06):** at the same finalize pass, code demotes a card whose claim the shared lessons store now records as reversed (the newest row about its `source_statement_sha256` / `claim_sha256` carries a negative verdict — for a *promoted* card only from a task family it was confirmed on), the second demotion retires it, a demoted card re-earns promotion the way it first did, and a retired one never moves by itself; every move is receipted as `skills_demoted` on the run's `reflection_note`. A subsequently constructed toolset lists/loads it with `UNTRUSTED_MEMORY_AUTO_SKILL` provenance |
 | **Knowledge base** (`knowledge/*.md`) | *Anything worth keeping* — free-form notes, hand- or agent-authored (the assistant's `remember` tool). The one kind **both** you and the agents write. | markdown notes | cross-run | assistant `remember`, or Lab → Authoring → knowledge | `kb_search`, `list_notes`, `read_note` |
 | **Prompts** (`<prompt_dir>/<key>.md`) | *What registered prompt consumers are told* — an override that REPLACES a matching built-in system prompt and is re-read when that call site renders it. Not learned and never written by a run: operator configuration that happens to live on disk. | one Markdown body per key in `core/prompts.py::PROMPT_KEYS` | global (a flat `Settings` field) | **by you**, in Lab → Authoring → prompts | registered `render(prompts, key, default)` call sites only; several assistant/report/monitor families still have separate prompt governance |
 | **Cards** (work-item + belief board, in-run; one belief may have several cards) | *What's worth testing* — accepted work items with a live **verdict** (open → testing → supported/tested/abandoned) and accumulating evidence. `belief_id` is the full normalized `seed_statement` digest; the Researcher and foresight collapse open, untested cards by that identity so duplicate work items do not become duplicate beliefs. Agentic paraphrase merges (`hypothesis_merged`) remain a separate, durable relation. | `{id, belief_id, seed_statement, statement, verdict, evidence, best_delta, source, retry_of}` per card | one run (derived from the event log) | Researcher (`idea.hypothesis`) + `hypothesis_added` | one representative per open, untested belief is injected into the proposal prompt |
@@ -424,6 +424,13 @@ like `run:-1`: an authoritative-looking pointer to a node that cannot exist. It 
 rather than being silently dropped, for the same reason as every other poisoned element — repairing
 the row in place would leave the surrounding claim marked complete and trustworthy.
 
+A ref is qualified by the run that WROTE the row, and since 2026-09-06 by its incarnation: a row
+carrying `run_uid` cites `<run>@<uid>:<node>`, a row carrying none keeps `<run>:<node>`. Two runs
+named `demo` are two runs — their node 0s are two refs, a claim they both support counts two
+supports, and each claim lists its evidence's incarnations in `run_refs` beside the display names in
+`runs`; the atlas counts runs over those refs, and the concept shelf inherits a row's concepts from
+the incarnation that wrote it, never from whatever run now bears the name.
+
 D8 claim v3 repeats a validated per-run producer receipt on every retained row (or writes a non-indexed
 receipt sentinel when a non-empty source retains zero claims):
 `claims_total`, `claims_retained`, `claims_omitted`, and `producer_complete`. The writer scans for the first
@@ -593,11 +600,43 @@ necessarily exposed as an on-demand tool.
 | Knowledge base + cases | `kb_search`, `list_notes`, `read_note` |
 | Lessons | `search_lessons` — returns each claim's verdict + “N agreeing recorded observations; not independent verification”. Scoped to what the live run may see: same objective `direction` (rows without one are invisible), exact task **or** a strict goal-fingerprint overlap, and never the run's own rows. Same predicate as the `cross_run_*` tools; an unbound CLI/human reader stays portfolio-wide |
 | Meta-notes | `recall_notes` — model-distilled explanatory hypotheses for this/similar task, not causal proof |
-| Skills | `list_skills`, `use_skill` |
+| Skills | `list_skills` (grouped by tier, `tier=` filters), `use_skill` (`section=` for one section in full) |
 | Own experiments | `list_experiments`, `read_experiment`, `read_code` |
 | Sibling runs (same task) | `list_sibling_runs`, `read_sibling_experiment`, `read_sibling_code`, `find_analogous_across_runs` |
 | Part IV/V portfolio claims + concepts | `cross_run_prior_attempts`, `cross_run_claims`, `cross_run_atlas`, `cross_run_search`, `cross_run_concept_map`, `similar_runs`, `find_concept_slugs`, `concept_card` |
 | Cards (open beliefs) | injected each proposal (open ones, with instruction to reuse exact wording for evidence linking) |
+
+## The records, the utility ledger and the citation instrument
+
+Until 2026-09-06 nothing said which rows a proposal had been shown: the cross-run prior was prose
+spliced into the two role prompts, the memory tools rendered a read into the prompt and kept no
+receipt, and so no utility signal could be computed and memory grew unbounded by any read-side
+number. Doc 52 row 17 adds two diagnostic records, one ledger and one instrument.
+
+- **`prior_injected`** — at every prior load (run start, each `lessons_refresh_every` refresh) the
+  engine writes one row per role: the lesson rows the prompt prior was built from (each by
+  `lesson_id`, the sha256 of its normalized statement — derived, never stored — with its outcome,
+  task, run and similarity), how many meta-notes and whether the case were spliced in, how many
+  rows the forgetting rung withheld, and the store window's digests. Main task only, fold-ignored.
+- **`memory_read`** — every `search_lessons` / `recall_notes` / `cross_run_*` / `use_skill` call
+  reports an invocation id, the exact rendered result's sha256 and length, and the rows it showed,
+  through the same engine-installed sink the agent phases use. The answer's bytes do not change;
+  outside a run nothing is written.
+- **The instrument** — `looplab prior-citations <run_dir>` (`events/prior_citations.py`) joins
+  the two to the `node_created` rows that followed, by log order: a proposal was shown the latest
+  prior of each role before it and the tool reads since the previous proposal, and it *cites* a
+  lesson when at least 60 % of the lesson's content tokens appear in its rationale, hypothesis or
+  params (or its id does). Both the join and the rule are stated in the report; a citation rate
+  is a proxy, not a causal effect, and the audit that decides whether priors change outcomes is
+  still a number over real runs on the box (`prior-injection-hit-rate-unmeasured`).
+- **The ledger** — at finalize the run appends its own report to `<memory_dir>/lesson_utility.jsonl`,
+  one row per lesson its prior showed (`{lesson_id, run_id, run_uid, shown, cited, ts}`), receipted
+  as `prior_citations` on the `reflection_note`. The next run's prior scan sums the ledger onto
+  each lesson as `utility` = `{shown, cited}`; `lesson_rank_key` ranks by the Laplace-smoothed
+  citation rate `(cited + 1) / (shown + 2)` after similarity and corroboration (neutral 0.5 when a
+  lesson has never been shown, so an old store is unmoved), and **forgetting by uselessness** —
+  `filter_useless` — stops serving a lesson shown to 8 proposals that none of them cited. The
+  store rows are never rewritten; like the contradiction quarantine, this rations prompt space.
 
 ## The concept shelf — memory indexed by the concept tree
 

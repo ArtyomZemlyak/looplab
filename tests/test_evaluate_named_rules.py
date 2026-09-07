@@ -305,7 +305,9 @@ def test_the_attempt_loop_reaches_every_rule_it_no_longer_inlines():
     """A rule nobody calls is a comment. Pinned on real `ast.Call` nodes (`called_names`), so a
     re-derivation of any of these inside `_evaluate` — the drift this split exists to prevent — has
     to delete the call, and deleting the call fails here."""
-    calls = called_names(EvaluateMixin._evaluate)
+    from _source_scan import eval_attempt_called_names, eval_attempt_tree
+
+    calls = eval_attempt_called_names()      # the driver and its phases, in driver order
     for rule in ("self._eval_failure_text", "self._repaired_footprint",
                  "_repair_provider_failure", "_repair_change_set",
                  "_repair_forces_full_retrain",
@@ -323,9 +325,9 @@ def test_the_attempt_loop_reaches_every_rule_it_no_longer_inlines():
     # held entirely by what the caller hands over, so it is pinned HERE. Passing `_stages` — the
     # resolution taken after the repair rewrote the pipeline — is the defect the comment records,
     # and it loses the failed stage's identity for first- and later-stage failures alike.
-    retrain = [node for node in ast.walk(function_tree(EvaluateMixin._evaluate))
+    retrain = [node for node in ast.walk(eval_attempt_tree())
                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                and node.func.id == "_repair_forces_full_retrain"]
-    assert [[ast.unparse(arg) for arg in call.args] for call in retrain] == [["res", "next_start"]], (
+    assert [[ast.unparse(arg) for arg in call.args] for call in retrain] == [["a.res", "a.next_start"]], (
         "the retrain rule must judge the eval RESULT this attempt produced, never a stage list "
         "resolved after the repair")

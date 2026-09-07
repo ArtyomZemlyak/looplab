@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import RunState
 from looplab.core.run_identity import row_belongs_to_run
 from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
@@ -215,6 +216,8 @@ class LessonReconcileMixin:
             out = agentic_text(client, self._reflect_tools(state), [{"role": "user", "content": prompt}],
                                loop_opts=self._reflect_loop_opts(),
                                answer_desc="one credited lesson per pair: `P<n> [GOOD]/[BAD] <lesson>`") or ""
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — reflection is best-effort; a real run writes NO templated lesson
             return [], pairs
         lessons = []

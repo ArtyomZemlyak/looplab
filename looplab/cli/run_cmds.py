@@ -34,6 +34,7 @@ from looplab.adapters.tasks import kinds_for, validate_task
 from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
+from looplab.core.models import RUN_STOP_ERROR, is_error_stop
 from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
                          _apply_speculation_calibration_profile,
@@ -151,7 +152,7 @@ def _drive_engine_to_terminal(eng: Engine):
         # stays resumable.)
         try:
             error_text = str(e)[:500]
-        except BaseException:  # an adversarial __str__ must not replace the root exception
+        except BaseException:  # noqa: BLE001 — an adversarial __str__ must not replace the root exception
             error_text = type(e).__name__
 
         # REACHING THE CEILING IS THE DESIGNED END OF A BUDGETED RUN, NOT A CRASH.
@@ -176,7 +177,7 @@ def _drive_engine_to_terminal(eng: Engine):
                 error_text = type(budget).__name__
             error = {"reason": "budget_exhausted", "error": error_text}
         else:
-            error = {"reason": "error", "error": error_text}
+            error = {"reason": RUN_STOP_ERROR, "error": error_text}
         try:
             events = eng.store.read_all()
             current = fold(events)
@@ -541,7 +542,7 @@ def _calibration_envelope_task_dict(task, settings) -> dict:
         from looplab.core.hardware import effective_gpu_inventory
         if not effective_gpu_inventory():
             calibration_errors.append("an effective visible GPU must be detected")
-    except Exception:
+    except Exception:  # noqa: BLE001 — an undetectable inventory is a stated calibration error, not a crash
         calibration_errors.append("GPU inventory could not be detected")
     if calibration_errors:
         raise typer.BadParameter(

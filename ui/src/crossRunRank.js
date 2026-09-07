@@ -55,19 +55,26 @@
 //      So this ranking orders RECORDED objective values. It does not certify what they measured, and
 //      `groupClaim` says so in those words rather than in a hedge.
 //
-// WHY NOT THE OTHER TWO OVERLAYS THAT WERE ON THE TABLE.
+// THE OTHER TWO OVERLAYS THAT WERE ON THE TABLE — one refused for good, one built (2026-09-06, doc 52
+// row 26) once both of its objections were answered rather than waived.
 //   - A NORMALIZED cross-group score (percentile / z-score) so all 5 groups could share one axis. It
 //     dies on this corpus's own numbers: 3 of the 5 groups have n <= 3, and two of them have ZERO
 //     variance (3x 1.0; 2x 0.925), so the z denominator is 0 and the percentile is 100th for everyone.
 //     It would have printed a confident position for a group that contains no ordering information at
 //     all, and — the deciding objection — the operator cannot check it. A rank of "1 of 3, values
 //     0.8077 / 0.7280 / 0.2250" is verifiable by looking; "z = +1.15" is not.
-//   - A per-run metric TRAJECTORY overlay (node index vs metric), comparable in shape if not in scale.
-//     The run row carries `nodes` as a COUNT and no series, so this needs one `/api/runs/{id}/state`
-//     per run — 45 folds on the request thread for a panel that opens on a click, against a server
-//     whose live runs re-fold on every poll. And drawing 5 objectives on one axis needs a per-run
-//     rescale, which is the normalized-score objection again wearing a line chart. Worth building when
-//     the summary row carries the series; the shape of `groupTrajectoryGap` below is left as the note.
+//   - A per-run metric TRAJECTORY overlay (experiment index vs running best), comparable in shape if
+//     not in scale. REFUSED on 2026-08-14 for two reasons, and BUILT once each was answered. The
+//     cost objection — the run row carried `nodes` as a COUNT and no series, so the overlay needed one
+//     `/api/runs/{id}/state` per run: 45 folds on the request thread for a panel that opens on a
+//     click, against a server whose live runs re-fold on every poll — is answered on the server:
+//     `events/trajectory.py::running_best` puts the running best on the summary row as CHANGE POINTS
+//     (`[experiment, best, node_id]`), derived once from the same fold and cached with it, so a poll
+//     pays nothing and `runTrajectory` below only validates. The scale objection — drawing 5
+//     objectives on one axis needs a per-run rescale, the normalized-score objection wearing a line
+//     chart — is answered by never doing it: `trajectoryOverlay` draws ONE comparable group per chart
+//     (one task, one direction, one evaluation), so the axis is the group's own objective, and a
+//     prefix-folded run is not drawn for the same reason it holds no rank.
 import {
   COMPARABILITY_UNKNOWN, bestMetricCaveatNotice, bestMetricCaveats, comparabilityRecord,
   metricComparable, sourceIncomplete,
@@ -98,6 +105,31 @@ const MAX_GROUP_ROWS = 100
 
 const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
 const finiteOrNull = value => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+
+// The most runs one overlay draws. `charts.jsx::MultiTrajectory` separates runs by hue AND dash
+// pattern, and both palettes hold eight entries, so a ninth line would repeat the first's pair
+// exactly — an operator could not tell them apart. The lines beyond it are COUNTED, in rank order.
+const MAX_OVERLAY_RUNS = 8
+
+// The run row's trajectory, validated at the boundary. `events/trajectory.py::running_best` writes
+// it: change points `[experiment, best, node_id]` with strictly increasing experiment indices, the
+// size of the x population in `evaluated`, and `complete: false` when the row was subsampled. A
+// malformed or absent series is "no series", never a drawn line — the overlay names how many rows
+// carry none, and an additive field a legacy server does not write is exactly that case.
+export function runTrajectory(run) {
+  const series = isRecord(run) ? run.trajectory : null
+  if (!isRecord(series) || !Array.isArray(series.points) || !series.points.length) return null
+  let previous = -1
+  for (const point of series.points) {
+    if (!Array.isArray(point) || point.length < 3) return null
+    const [experiment, value, node] = point
+    if (!Number.isSafeInteger(experiment) || experiment <= previous
+        || finiteOrNull(value) == null || !Number.isSafeInteger(node)) return null
+    previous = experiment
+  }
+  if (!Number.isSafeInteger(series.evaluated) || series.evaluated <= previous) return null
+  return { points: series.points, evaluated: series.evaluated, complete: series.complete !== false }
+}
 
 // The ONE place the panel reads a run's metric. `best_confirmed ?? best_metric` mirrors
 // `runIndex.js::sortRuns` and `RegistryPanel` so the three surfaces cannot drift onto two different
@@ -221,6 +253,10 @@ function buildGroup(bucket, limit) {
     // table is the surface an operator reads to decide which configuration to reuse.
     caveats: bestMetricCaveats(entry.run),
     caveatNotice: bestMetricCaveatNotice(entry.run),
+    // THE RUN'S TRAJECTORY, when its row carries one (`events/trajectory.py::running_best`): the
+    // change points of its running best, validated by `runTrajectory`. Read here, beside the rank,
+    // so the overlay draws the SAME rows the table ranks and nothing the table does not show.
+    trajectory: runTrajectory(entry.run),
   }))
   const eligible = entries.filter(entry => !entry.sourceIncomplete)
   const values = [...new Set(eligible.map(entry => entry.value))]
@@ -388,8 +424,51 @@ export function rankCoverage(index) {
   }
 }
 
-// Left deliberately unbuilt, and named so the next reader finds the reasoning rather than re-deriving
-// it: the TRAJECTORY overlay (node index vs metric per run) needs a per-node series the run summary
-// does not carry. This states the gap in the one place a future change would start.
-export const TRAJECTORY_GAP = 'A per-run metric trajectory needs the node series; /api/runs carries '
-  + 'only `nodes` as a count, so drawing it would cost one state fold per run on the request thread.'
+// WHAT ONE GROUP'S OVERLAY DRAWS, and what it leaves out, each COUNTED. The rows are the group's
+// ranked rows in rank order, so the legend reads as the leaderboard; a row is drawn only when it
+// carries a validated series. Three exclusions, each for a reason the panel prints:
+//   - a prefix-folded run (`group.unranked`) is not drawn: its series is the running best of a PREFIX,
+//     and beside complete runs its line would read as a search that stopped early — the same reason
+//     it holds no rank;
+//   - a row without a series is counted, never drawn as a flat line at any value;
+//   - the rows beyond `MAX_OVERLAY_RUNS` are counted, because the chart cannot tell a ninth apart.
+// `capped` counts drawn runs whose row was subsampled server-side (`complete: false`): the legend
+// marks each and the sentence names the count, since a coarser step is still an honest one.
+export function trajectoryOverlay(group, { limit = MAX_OVERLAY_RUNS } = {}) {
+  const ranked = Array.isArray(group?.rows) ? group.rows : []
+  const withSeries = ranked.filter(row => row.trajectory)
+  const drawn = withSeries.slice(0, Math.max(0, limit))
+  return {
+    runs: drawn.map(row => ({
+      run_id: row.runId,
+      label: row.rank != null ? `#${row.rank} ${row.label}` : row.label,
+      points: row.trajectory.points,
+      evaluated: row.trajectory.evaluated,
+      complete: row.trajectory.complete,
+    })),
+    drawn: drawn.length,
+    noSeries: ranked.length - withSeries.length,
+    prefix: Array.isArray(group?.unranked) ? group.unranked.length : 0,
+    beyondLimit: withSeries.length - drawn.length,
+    capped: drawn.filter(row => !row.trajectory.complete).length,
+    limit: Math.max(0, limit),
+  }
+}
+
+// THE SENTENCE under the chart, in the model for the reason `groupClaim` is: the counts ARE the
+// claim, and a render that could drop one to save a line would be publishing a tidier overlay than
+// the group has.
+export function trajectoryClaim(group, overlay) {
+  const size = Number.isSafeInteger(group?.size) ? group.size : 0
+  const plural = (n, one, many) => (n === 1 ? one : many)
+  const left = []
+  if (overlay.noSeries) left.push(`${overlay.noSeries} ${plural(overlay.noSeries, 'carries', 'carry')} no series (no feasible measured node, or a row served before the series existed)`)
+  if (overlay.prefix) left.push(`${overlay.prefix} prefix-folded ${plural(overlay.prefix, 'run is', 'runs are')} not drawn, for the reason ${plural(overlay.prefix, 'it holds', 'they hold')} no rank`)
+  if (overlay.beyondLimit) left.push(`${overlay.beyondLimit} beyond the ${overlay.limit} lines the chart can tell apart, in rank order`)
+  if (overlay.capped) left.push(`${overlay.capped} drawn coarser: more improvements than the row carries`)
+  const tail = left.length ? ` ${left.join('; ')}.` : ''
+  if (!overlay.drawn) return `No trajectory to draw for this group.${tail}`
+  return `Running best per evaluated experiment for ${overlay.drawn} of ${size} ${plural(size, 'run', 'runs')}, `
+    + "on this group's own axis — one task, one direction, one evaluation, nothing rescaled; "
+    + `a line holds its value until the experiment that beat it.${tail}`
+}

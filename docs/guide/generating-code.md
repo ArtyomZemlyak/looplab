@@ -75,8 +75,9 @@ model calls even though it has not started a scientific run.
 The CLI keeps the historical **Genesis** task author, and the TUI calls the server's `/api/genesis`
 planner. These three surfaces share task-adapter validation and backend-default authority, but they
 do not share one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token;
-TUI posts to `/api/start`, whose server validates before spawn but issues no reviewed receipt; CLI
-validates directly. Refine a proposal in the surface that created it.
+the TUI asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
+`/api/start` to the token it returns; CLI validates directly. Refine a proposal in the surface that
+created it.
 
 For a repo it is a real **agent** with read-only scout tools (`list_dir` / `read_file` /
 `find_files`) and is instructed to inspect your README, entry/eval script, requirements and result

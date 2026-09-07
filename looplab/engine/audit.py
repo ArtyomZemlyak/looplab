@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from looplab.core.containment import contain
 from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
                                   EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
                                   EV_NODE_EVALUATED)
@@ -265,6 +266,38 @@ class AuditMixin:
             sigs.append({"signal": "protected_audit_unavailable",
                          "detail": "the protected-file audit did not complete"})
         return sigs
+
+    def _append_phase_event(self, etype: str, data: dict) -> None:
+        """The run's sink for `core/phase_events.py` (doc 52 row 16): one DIAGNOSTIC row per phase
+        moment, from whichever task or thread the tool loop runs on.
+
+        Safe outside `_write_lock` because the three types are `DIAGNOSTIC_EVENTS` — fold-ignored
+        and excluded wholesale from every seq-equality fence — and `EventStore.append` serializes
+        the bytes itself (engine invariant #1's diagnostic shape). Every string is a model's or a
+        candidate's text on its way to disk, so it goes through the run's own tail redactor first.
+        Best-effort: a store that refuses the row loses one diagnostic, never a phase."""
+        from looplab.events.types import DIAGNOSTIC_EVENTS
+        assert etype in DIAGNOSTIC_EVENTS, etype
+        store = getattr(self, "store", None)
+        if store is None:
+            return
+        try:
+            store.append(etype, self._redact_tree(data))
+        except Exception as exc:  # noqa: BLE001 — a diagnostic row must never break the loop reporting it
+            contain("phase event append", exc)
+
+    def _redact_tree(self, value, _depth: int = 0):
+        """`_redact` over every string in a bounded JSON tree — a phase row's todos, a memory-read
+        row's statements — so no nesting is a way past the redactor."""
+        if isinstance(value, str):
+            return self._redact(value)
+        if _depth >= 4:
+            return value
+        if isinstance(value, dict):
+            return {k: self._redact_tree(v, _depth + 1) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._redact_tree(v, _depth + 1) for v in value]
+        return value
 
     def _redact(self, text: str) -> str:
         """B3/C2: mask secrets in an output tail before it is persisted.

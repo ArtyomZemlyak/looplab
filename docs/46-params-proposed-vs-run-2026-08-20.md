@@ -117,6 +117,9 @@ The machinery exists: `runtime/metric_inputs.py` binds real inputs at the metric
 `metric_subject.bind_one`, and the eval already writes its resolved config to
 `…/tests/final/config.yaml`. The deciding site is on disk and readable.
 
-`OPEN[declared-params-guard-reads-only-py]` — the guard for declared-vs-applied parameters skips every
-carrier that is not Python, and matches a pydantic schema default while the YAML overrides it.
-proof:present:endswith(".py")@looplab/engine/repair_verify.py
+*The marker that stood here (the guard for declared-vs-applied parameters read only `.py` carriers)
+was CLOSED on 2026-09-06 and deleted per the index rule: the fix landed 2026-08-30 in `203fcc5` as
+`core/param_carriers.py::document_numeric_paths`, reached through
+`engine/repair_verify.py::_carrier_kind`, which reads YAML/JSON carriers beside the Python
+extractor. Its falsifier (`present:endswith(".py")`) could never go false, because the `.py` branch
+legitimately stays — which is why the closure was found by re-derivation and not by the guard.*

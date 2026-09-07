@@ -88,3 +88,69 @@ def test_the_single_command_path_passes_the_flag_through():
     assert "health_check=bool(ex.divergence_watch)" in body, (
         "the single-command path must arm the watchdog FROM THE SWITCH; a literal here makes the "
         "Settings field and its LEGACY row decorative")
+
+
+def _repo_engine(tmp_path, **knobs):
+    """A real Engine over the repo fixture, whose eval is the SINGLE-COMMAND path."""
+    from looplab.adapters.repo_task import EvalSpec, NoOpRepoDeveloper, RepoParamResearcher, RepoTask
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+    import sys
+    from pathlib import Path
+
+    task = RepoTask(id="divergence-watch", goal="arm the switch", direction="max",
+                    editable_path=str(Path(__file__).resolve().parent / "fixtures" / "repo_fixture"),
+                    eval=EvalSpec(command=[sys.executable, "score.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}, timeout=30))
+    return Engine(tmp_path / "run", task=task, researcher=RepoParamResearcher({}, seed=0),
+                  developer=NoOpRepoDeveloper(), sandbox=SubprocessSandbox(),
+                  policy=GreedyTree(n_seeds=1, max_nodes=1), auto_install_deps=False, **knobs)
+
+
+def _dispatched_flag(engine, tmp_path, monkeypatch) -> bool:
+    """What `_run_eval` actually hands the runtime for `divergence_watch` — read at the ONE seam the
+    engine crosses into `command_eval`, on a real dispatch, without running the eval."""
+    from looplab.core.models import Idea, Node
+    from looplab.runtime import command_eval
+
+    seen = {}
+
+    def _capture(*a, **kw):
+        seen["divergence_watch"] = kw.get("divergence_watch")
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr(command_eval, "run_command_eval", _capture)
+    wd = tmp_path / "wd"
+    wd.mkdir(parents=True, exist_ok=True)
+    node = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}, rationale="r"), code="")
+    try:
+        engine._run_eval(node, str(wd), None, None)
+    except RuntimeError as exc:
+        assert str(exc) == "captured"
+    assert "divergence_watch" in seen, "the single-command dispatch never reached run_command_eval"
+    return seen["divergence_watch"]
+
+
+def test_the_switch_reaches_the_runtime_from_a_real_engine(tmp_path, monkeypatch):
+    """DRIVEN, because the source pin above was green for a week while the setting was DEAD.
+
+    From 2026-08-30 to 2026-09-06 the dispatcher read `getattr(self,
+    "single_command_divergence_watch", False)` — a name no `Engine.__init__` ever assigned, with no
+    `EngineOptions` field behind it — so `run_command_eval` was handed `divergence_watch=False` on
+    every product run whatever `Settings` said, and `test_the_single_command_path_passes_the_flag_
+    through` (which pins the RUNTIME's half of the plumbing) could not see it. The engine attribute
+    guard (`tests/test_engine_attribute_sites.py`) is what refuses that shape now; this is the
+    property it protects, observed at the seam. Mutation: reinstate the `getattr` default, or drop
+    the `_opt(...)` line in `Engine.__init__`, and the product engine below hands over False."""
+    from looplab.core.config import Settings
+    from looplab.engine.options import EngineOptions
+
+    product = _repo_engine(tmp_path / "product", options=EngineOptions.from_settings(Settings()))
+    assert _dispatched_flag(product, tmp_path / "p", monkeypatch) is True
+    bare = _repo_engine(tmp_path / "bare")
+    assert _dispatched_flag(bare, tmp_path / "b", monkeypatch) is False, (
+        "a bare Engine(...) must not gain kill authority it did not ask for")
+    explicit = _repo_engine(tmp_path / "explicit", single_command_divergence_watch=True)
+    assert _dispatched_flag(explicit, tmp_path / "e", monkeypatch) is True
+
