@@ -36,7 +36,7 @@ from looplab.events.replay import fold
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_BELIEF_ADMISSION,
                                   EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_ATTEMPTED,
-                                  EV_RESEARCH_COMPLETED,
+                                  EV_RESEARCH_COMPLETED, EV_LITERATURE_RETRIEVED,
                                   BACKGROUND_APPENDABLE,
                                   NON_CARD_SELECTION_BACKGROUND_APPENDABLE)
 
@@ -883,6 +883,13 @@ class ResearchCadenceMixin:
                 raise
             except Exception:  # noqa: BLE001 — ordinary verifier failures do not block the memo
                 pass
+        # WHAT SHARE OF THIS MEMO'S SYNTHESIS NAMES EVIDENCE (doc 52 row 32). Deterministic and
+        # free — no model, no provider call — so it is computed for every memo, including the ones
+        # with no claims at all, which are exactly the memos whose synthesis is least supported and
+        # which the verifier above never sees. Selection-neutral like every other memo field: it is
+        # recorded, and nothing reads it to decide anything (AAR's measure is an instrument first).
+        from looplab.trust.memo_verify import provenance_coverage
+        memo_d["provenance"] = provenance_coverage(memo_d)
         # The model, tool ledger, and verifier are all untrusted text producers. This
         # writer-side pass is the invariant: custom researchers cannot bypass redaction, control
         # stripping, list caps, or the aggregate text budget before any durable derivative.
@@ -908,6 +915,14 @@ class ResearchCadenceMixin:
         # Steer the next proposals: retain the legacy hint projection for replay compatibility.
         # It is explicitly model-generated advisory data, not operator authority; prompt rendering
         # filters this source while the research memo/open-hypothesis channels carry the signal.
+        # THE PAPERS THIS PASS READ, as their own registered event (doc 52 row 16; doc 51). Written
+        # from this same gated recorder, so the background task's append rule holds unchanged, and
+        # only when the memo carries any — an old-shaped memo appends nothing.
+        if memo_d.get("literature"):
+            assert EV_LITERATURE_RETRIEVED in BACKGROUND_APPENDABLE
+            self.store.append(EV_LITERATURE_RETRIEVED, {
+                **({"memo_id": memo_id} if memo_id is not None else {}),
+                "at_node": memo.at_node, "items": memo_d["literature"]})
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
         # WHERE `next_experiments` IS DELIVERED, and it is deliberately NOT from here. This writer
         # reads only the legacy union and open questions; the concrete half of the memo split

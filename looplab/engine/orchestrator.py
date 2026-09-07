@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 import anyio
 
 from looplab.core.errors import budget_stop_leaf
-from looplab.core.llm import BudgetExceeded
+from looplab.core.llm import BudgetExceeded, model_override
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
@@ -35,7 +35,7 @@ from looplab.events.types import (EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
     EV_CARD_ADDED,
-    EV_DATA_PROFILED, EV_DATA_PROVENANCE,
+    EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_PLAN,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_FORK_UNFULFILLED, EV_HOST_GRADING,
     EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_FINALIZE_STEP,
@@ -94,6 +94,8 @@ from looplab.engine.finalize import (
 from looplab.events.finalize_protocol import FINALIZE_STEP_BEGUN
 from looplab.engine.holdout import HoldoutGrader
 from looplab.engine.lessons import LessonMemory
+from looplab.engine.plan import META_SWEEP
+from looplab.engine.node_build import _OMIT as _OMIT_ARM
 from looplab.engine.options import EngineOptions
 from looplab.engine.workspace import WorkspaceSeeder
 # Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
@@ -116,6 +118,8 @@ from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
+from looplab.core.llm_budget import RunBudget
+from looplab.core.phase_events import phase_sink_scope
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
 from looplab.search.card_selection import (
@@ -132,7 +136,8 @@ from looplab.search.speculation_calibration import (
     SPECULATION_POLICY_SCOPE,
 )
 from looplab.search.operators import merge_idea
-from looplab.search.policy import KIND_EXPAND, SearchPolicy
+from looplab.search.policy import (DEFAULT_MODEL_ARM, KIND_EXPAND, META_MODEL, SearchPolicy,
+                                   parse_model_arms)
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
 # / run_phase / operator_yields / NOVELTY_STANCES …) moved to engine/strategy.py (StrategyCadenceMixin),
 # which imports those symbols from their canonical sources — so they are no longer imported here.
@@ -691,6 +696,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         train_monitor_tools = _opt("train_monitor_tools")
         train_monitor_contract = _opt("train_monitor_contract")
         repair_log_tools = _opt("repair_log_tools")
+        stage_check_tools = _opt("stage_check_tools")
         asha_live = _opt("asha_live")
         asha_live_kill = _opt("asha_live_kill")
         asha_live_quantile = _opt("asha_live_quantile")
@@ -698,6 +704,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         asha_live_kill_confidence = _opt("asha_live_kill_confidence")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
         eval_stall_timeout_s = _opt("eval_stall_timeout_s")
+        single_command_divergence_watch = _opt("single_command_divergence_watch")
         eval_deadline_grace_s = _opt("eval_deadline_grace_s")
         eval_env = _opt("eval_env")
         confirm_seed_base = _opt("confirm_seed_base")
@@ -705,6 +712,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         cadence_while_evaluating = _opt("cadence_while_evaluating")
         concept_pivot = _opt("concept_pivot")
         graded_novelty = _opt("graded_novelty")
+        novelty_literature = _opt("novelty_literature")
+        steady_state_build = _opt("steady_state_build")
         capability_expansion = _opt("capability_expansion")
         fingerprint_universal = _opt("fingerprint_universal")
         cross_run_concepts = _opt("cross_run_concepts")
@@ -725,6 +734,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         metric_subject = _opt("metric_subject")
         auto_extra_metrics = _opt("auto_extra_metrics")
         landlock = _opt("landlock")
+        syscall_fence = _opt("syscall_fence")
         max_nodes = _opt("max_nodes")
         policy_name = _opt("policy_name")
         ablate_every = _opt("ablate_every")
@@ -736,6 +746,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concurrent_consolidate = _opt("concurrent_consolidate")
         report_every = _opt("report_every")
         merge_mode = _opt("merge_mode")
+        endgame_reserve_frac = _opt("endgame_reserve_frac")
+        model_arms = _opt("model_arms")
         complexity_cue = _opt("complexity_cue")
         budget_aware = _opt("budget_aware")
         failure_reflection = _opt("failure_reflection")
@@ -879,6 +891,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             merge_mode = ("ensemble" if getattr(developer, "is_code_generating", False)
                           else "mean")
         self._merge_mode = merge_mode
+        # doc 52 row 18: the plan's endgame reserve and whether its reserve sweeps the champion (a
+        # Strategist may switch the sweep off through `operators.endgame_sweep`).
+        self._endgame_reserve_frac = float(endgame_reserve_frac or 0.0)
+        self._endgame_sweep = True
+        self._endgame_surrogate = None
+        # doc 52 row 19: the model ARMS the bandit may route a build to — `{arm: (model, cost)}`;
+        # the configured Developer model is the implicit `default` arm. Inert without
+        # `operator_bandit`, which is the policy's knob, and without a declared arm.
+        self._model_arms = parse_model_arms(model_arms)
         self._complexity_cue = complexity_cue
         self._prefer_sweep = False   # A7: Strategist-set bias toward intra-node sweeps (audit-driven)
         self._budget_aware = budget_aware
@@ -992,6 +1013,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._cadence_while_evaluating = bool(cadence_while_evaluating)
         self._concept_pivot = bool(concept_pivot)
         self._graded_novelty = bool(graded_novelty)
+        self._novelty_literature = bool(novelty_literature)
+        self._steady_state_build = bool(steady_state_build)
         self._capability_expansion = bool(capability_expansion)
         self._fingerprint_universal = bool(fingerprint_universal)
         self._cross_run_concepts = bool(cross_run_concepts)
@@ -1168,9 +1191,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                   and int(_llm_parallel_opt) > 0 else None)
         except (TypeError, ValueError, OverflowError):
             _startup_llm_total = None
+        # THE RUN'S SPEND BUDGET, one object every role's provider call reserves against at the
+        # broker's permit (`core/llm_budget.py`, doc 52 row 15). Built before the broker so the
+        # broker can carry it; fed by the durable ledger's sink (`engine/costs.py`) and seeded from
+        # the `llm_usage` rows on a resume, so the cap holds across restarts.
+        self._llm_cost_limit = _opt("llm_cost_limit")
+        self._llm_token_limit = _opt("llm_token_limit")
+        self._llm_budget = RunBudget(cost_limit=self._llm_cost_limit,
+                                     token_limit=self._llm_token_limit)
         self._llm_broker = LLMConcurrencyBroker(
             total=_startup_llm_total,
             lane_limits=default_llm_lane_limits(_startup_llm_total),
+            budget=self._llm_budget,
         )
         self._llm_lane_limits_explicit = False
         self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
@@ -1190,6 +1222,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
         # Developer so its code can emit periodic progress to avoid a false silence-kill.
         self.eval_stall_timeout_s = float(eval_stall_timeout_s)
+        # The single-command path's deterministic divergence stop, DECLARED here because
+        # `eval_dispatch._run_eval` used to read it through a `getattr(..., False)` on a name nothing
+        # ever assigned — the exact silent-typo shape `tests/test_engine_attribute_sites.py` refuses.
+        self._single_command_divergence_watch = bool(single_command_divergence_watch)
         # Most extra wall clock a live-log judge may buy for a stage at its deadline, ONCE per
         # command. 0 (default) = the historical unconditional tree-kill. See
         # `Settings.eval_deadline_grace_s` for the 22.0 discarded GPU-hours and for why it is opt-in.
@@ -1218,6 +1254,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # same shape as the line above, and deliberately its own switch: the watchdog's tools are paid
         # on a TIMER up to ~200 times per node, this one is paid once per failed attempt.
         self._repair_log_tools = bool(repair_log_tools)
+        # Whether the INTER-STAGE CHECKER may LOOK at the checked stage's own log instead of judging
+        # from `run.out[-4000:]`. Read by `train_monitor.stage_check_tools`, the ONE place
+        # `eval_stages._stage_check_fn` builds its provider — the fourth gate over the one
+        # `_log_query_tools` derivation, and its own switch: this judge is paid once per checked
+        # stage on the eval-blocking path, and it is the one that can end a node (doc 52 row 9).
+        self._stage_check_tools = bool(stage_check_tools)
         # ASHA live-curve rank watchdog (advisory in the product surface; opt-in kill). off == today.
         self._asha_live = bool(asha_live)
         self._asha_live_kill = bool(asha_live_kill)
@@ -1284,6 +1326,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # allow-list from the operator's declared mounts and stamps it into the child env; the
         # boundary itself is applied in the child, between fork and exec.
         self._landlock = str(landlock or "off")
+        # The syscall policy (`runtime/seccomp.py`), stamped beside the allow-list by
+        # `engine/resources.py::_fenced_env`; applied in the child by an exec'd launcher.
+        self._syscall_fence = str(syscall_fence or "off")
         self._run_setup_done = False             # run-level (once) dependency setup guard
         self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
         #   check-then-set on _run_setup_done races without this, launching run_setup (pip) N times
@@ -1381,7 +1426,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # re-used (see run()), so a changed live setting can't silently make pre/post-resume metrics
         # incomparable. `_build_holdout_idx` rebuilds the partition from a fraction.
         self._holdout_fraction = float(holdout_fraction)
+        # THE MLE-BENCH SEARCH SPLIT (doc 52 §5.1 row 3, `engine/holdout.py::apply_search_split`):
+        # the original assets are kept aside so every (re)build of the partition carves from them.
+        self._assets_public: Optional[dict] = None
+        self._search_answers: Optional[str] = None
+        self._search_hidden_ids: frozenset = frozenset()
         self._holdout_idx: frozenset = self._build_holdout_idx(self._holdout_fraction)
+        self._apply_search_split()
         self._holdout_epoch = 0
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
@@ -1702,9 +1753,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._main_loop_thread_ident = threading.get_ident()
         broker = getattr(self, "_llm_broker", None)
         if broker is None:  # defensive for test/library engines constructed through __new__
-            broker = self._llm_broker = LLMConcurrencyBroker()
+            broker = self._llm_broker = LLMConcurrencyBroker(
+                budget=getattr(self, "_llm_budget", None))
         try:
-            with llm_broker_scope(broker), llm_lane_scope("engine"):
+            with llm_broker_scope(broker), llm_lane_scope("engine"), \
+                    phase_sink_scope(self._append_phase_event):
                 # THE RUN-SCOPED EVAL TASK GROUP (backlog F1f, doc 33 option 1 — "adopting
                 # sessions").  Evaluation children used to belong to whichever `_run_card_session`
                 # admitted them, and that session could not return until the LAST of them drained.
@@ -1984,6 +2037,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self._holdout_epoch = state.search_epoch
                 self._holdout_idx = self._build_holdout_idx(
                     self._holdout_fraction, self._holdout_epoch)
+                self._apply_search_split()
             # A scoped terminal intent is itself a work gate. Finalize/recover that exact scope
             # below; never reopen setup/search while a paid-report or terminal append is in flight.
             pending_scope = incomplete_finalize_scope(decision_events)
@@ -2044,7 +2098,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if _resets:
                 # One rebuild per fold. A developer crash can auto-pause the first node, and a reset/
                 # abort can change the rest while it is building; never process a stale whole batch.
-                self._rerun_node(_resets[0], state)
+                # OFF the loop thread (doc 52 row 12), like every other build: the rebuild is a paid
+                # Developer call and its own-node appends are the worker seam's.
+                await self._offload_build(functools.partial(self._rerun_node, _resets[0], state))
+                self._drain_create_pause()
                 continue
             # Charge the runaway guard for what the log says was MINTED since the previous turn. Read
             # off the events rather than the fold so the empty-nodes spin (which folds to no nodes at
@@ -2161,7 +2218,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     continue
                 state = fold(fresh_events)
 
+            # THE PLAN (doc 52 row 18): written / re-cut on the main task at this creation boundary,
+            # then read back off the fold so the reserve below is the durable row's, never a local's.
+            if self._ensure_plan(state):
+                state = fold(self.store.read_all())
             actions = self._select_actions(state)
+            actions = self._plan_gate(state, actions)
             if not actions:
                 if await self._handle_no_actions(state, decision_seq=decision_seq) == "break":
                     break
@@ -2513,13 +2575,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return [action for action in lane
                 if action.get("kind") in ("draft", "improve", "merge")][:free]
 
-    # OPEN[serial-node-build-holds-the-loop] the 2026-08-29/31 offloads moved only the two propose lanes:
-    # the Developer call in this serial lane, and the fork/inject/rerun proposes, still run on the loop
-    # with no in-flight guard — while `_occupancy_paced_creates` delivers work here precisely when an
-    # eval is burning. Driven: a fork served with an adopted eval, and a width-2 Card claim with node 0
-    # in flight, each ran the paid call on the loop thread with ZERO ticks. One helper on the proposal
-    # pool covers all four sites; the own-node worker seam already licenses their appends.
-    # proof:absent:_offload_node_build@looplab/engine/orchestrator.py
+    # CLOSED 2026-09-06 (doc 52 row 12): the serial lane's build, the fork's build and the node-reset
+    # rebuild leave the loop thread through `_offload_build` / `_offload_node_build` (the proposal
+    # pool, the own-node worker seam, the pause drained on the main task), and every build site
+    # reads its outputs off the `DeveloperResult` envelope instead of the shared instance.
+    # `tests/test_developer_result.py` drives the loop's own counter through a blocking build.
     #
     # MEASURED 2026-09-04 — the largest loop hold, but the HARM is not established and the
     # difference decides whether the offload is worth its risk. `card_build` wall, and how much
@@ -2534,6 +2594,118 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # not a cost. The eval runs in a SUBPROCESS and a busy loop does not slow it. The cost is a FREE
     # GPU with BUILDABLE WORK while the loop is held, which needs board state per instant and cannot
     # be read from spans alone. Until that is measured this carries a cost CEILING, not a cost.
+    async def _steady_state_build_lane(self, creates, state, pairs) -> tuple[RunState, bool]:
+        """AIRA₂'s shape: propose and dispatch the next build the moment a LANE frees (doc 52 row 33).
+
+        The chunked fan-out above is a bulk-synchronous barrier — `_fan` builds start together and
+        NOTHING moves until the slowest finishes, so a fast worker cannot propose from a completed
+        sibling's evidence and the loop pays the maximum of every chunk instead of its mean. This is
+        the same work with the join moved: one lane per free (researcher, developer) pair, and the
+        next proposal happens when a lane opens, against a fold that already contains everything
+        that finished.
+
+        WHAT DOES NOT MOVE, because these are the invariants the barrier was protecting:
+
+        * the PROPOSAL and the RESERVATION stay on the MAIN task, serially, exactly as before
+          (engine invariant #1): a worker still only implements an id the main task has already
+          reserved durably, and ids are still minted under `_id_lock` in a fixed order;
+        * the re-fold happens before EVERY proposal rather than before every chunk, which is
+          strictly more of what the re-fold existed to buy — the novelty gate now also sees the
+          `card_added` / `node_building` receipts of the lanes still running, so it cannot re-propose
+          an idea another lane is building at this moment;
+        * the pause circuit breaker still stops before starting new work, and the group still joins
+          before the turn ends, so no build outlives the turn that started it.
+
+        WHAT DOES MOVE, and is why this ships behind a flag: the researcher is asked for ONE idea per
+        lane instead of `_fan` ideas per chunk. That is more provider calls of a smaller shape, and
+        the diversity that came from asking for `_fan` distinct ideas at once now comes from
+        proposing against a fold that holds the siblings — a different (and, on the field's own
+        account, stronger) way to get it, but not the same bytes.
+        """
+        # A SEMAPHORE and not a `CapacityLimiter`: the limiter is BORROWER-scoped — the task
+        # that acquires must be the one that releases — and the whole point here is that the
+        # MAIN task takes the slot (so it blocks before proposing) while the LANE gives it
+        # back when its build ends. Driven: the limiter raises
+        # `this borrower isn't holding any of this CapacityLimiter's tokens` on the first release.
+        limiter = anyio.Semaphore(len(pairs))
+        free_pairs = list(pairs)
+        started = 0
+        async with anyio.create_task_group() as tg:
+            for action in creates:
+                # BLOCKS UNTIL A LANE IS FREE — this is the whole difference from the barrier, and
+                # it is why the fold below sees completions the chunked path could not.
+                await limiter.acquire()
+                if self._create_paused:
+                    limiter.release()
+                    break
+                state = fold(self.store.read_all())
+                ideas, telemetry, dropped = await self._await_batch_proposal(state, 1)
+                if not ideas:
+                    self._record_dropped_batch_cards(dropped)
+                    self._pending_batch_dropped = []
+                    self._pending_batch_novelty_gated = []
+                    limiter.release()
+                    continue
+                idea, telemetry_row = ideas[0], (telemetry[0] if telemetry else None)
+                if self._refuse_degraded_proposal(idea, main_task=True):
+                    # A dead provider hands back a degraded FALLBACK; the barrier path breaks the
+                    # whole batch on one, and so does this — the next turn re-plans.
+                    self._record_dropped_batch_cards(dropped)
+                    self._pending_batch_dropped = []
+                    self._pending_batch_novelty_gated = []
+                    limiter.release()
+                    break
+                if "_scores" in action:
+                    self.store.append(EV_POLICY_DECISION,
+                                      {"scores": action["_scores"], "chosen": action.get("_chosen"),
+                                       "reason": action.get("_reason")})
+                self._append_rung_promotion(action)
+                anchor_id, anchor_attempt = scored_anchor(state)
+                reservation = self._reserve_node_build(
+                    action, idea, scored_against=anchor_id,
+                    scored_against_attempt=anchor_attempt, source="researcher",
+                    steering_context=((telemetry_row or {}).get("_steering_context", [])
+                                      if isinstance(telemetry_row, dict) else []))
+                # THE REJECTS GET THEIR NODE-LESS CARDS HERE, on the SUCCESS path too, and the
+                # two capabilities are spent in the same breath — exactly as the chunked path does
+                # after its reservations are durable. Without this a lane that proposed one idea
+                # and rejected three recorded only the one: the three drops never reached the Card
+                # board at all (the two failure paths above record them, so the loss showed only
+                # when the proposal SUCCEEDED), and `_pending_batch_novelty_gated` kept an
+                # already-reserved Idea as a live one-shot gate bypass into the next iteration.
+                self._record_dropped_batch_cards(dropped)
+                self._pending_batch_dropped = []
+                self._pending_batch_novelty_gated = []
+                if reservation is None:
+                    limiter.release()
+                    continue
+                pair = free_pairs.pop()
+                started += 1
+
+                async def _lane(action=action, pair=pair, reservation=reservation, idea=idea,
+                                telemetry_row=telemetry_row):
+                    # The span is per LANE, not per batch: a barrier's cost is one number for the
+                    # slowest member, and the thing this exists to make visible is that the lanes
+                    # no longer wait for each other.
+                    try:
+                        with self.tracer.span("parallel_build_lane", fan=len(pairs),
+                                              parallel_build=self._llm_parallel):
+                            await anyio.to_thread.run_sync(
+                                functools.partial(self._create_node_guarded, action, pair,
+                                                  reservation, idea, telemetry_row))
+                    finally:
+                        # RELEASED IN A FINALLY, and the pair goes back before the slot does: a lane
+                        # that raises must free its pair or the pool leaks a worker per crash, and
+                        # `_create_node_guarded` already turns an unexpected exception into that
+                        # node's own `node_failed` terminal rather than tearing down the group.
+                        free_pairs.append(pair)
+                        limiter.release()
+
+                tg.start_soon(_lane)
+        if self._create_paused:
+            self._drain_create_pause()
+        return fold(self.store.read_all()), started > 0
+
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
                                      no_mint_turns, decision_seq, max_es, max_s, start):
         """The `creates` branch of the run loop, lifted verbatim (doc 25 ES-05).
@@ -2750,6 +2922,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                      if (self._llm_parallel > 1 and len(creates) > 1
                          and all(a.get("kind") == "draft" for a in creates)
                          and not any(META_CARD_ID in a for a in creates)) else None)
+        if _pb_pairs and len(_pb_pairs) > 1 and self._steady_state_build:
+            # The barrier's replacement (doc 52 row 33), opt-in: propose and dispatch as each lane
+            # frees instead of chunk-join-chunk. Same reservations, same worker, same join before
+            # the turn ends — see `_steady_state_build_lane` for what moves and what does not.
+            state, _built = await self._steady_state_build_lane(creates, state, _pb_pairs)
+            return "continue", state, _no_mint_turns
         if _pb_pairs and len(_pb_pairs) > 1:
             _fan = len(_pb_pairs)
             for _i in range(0, len(creates), _fan):
@@ -2880,7 +3058,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # The complete Card lane was claimed atomically above, before the first slow
                 # build could make its siblings ineligible through the evaluate-all prefix.
                 try:
-                    self._create_node(a, reserved=reservation)
+                    await self._offload_node_build(a, reserved=reservation)
                 except BaseException:
                     for later in (_card_reservations or [])[_create_index + 1:]:
                         self._fail_reserved_build(
@@ -2895,7 +3073,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # One node per iteration on this path, so the floor is asked per node — the
                 # decision `Settings.node_open_budget_floor_usd` is about, on the main task.
                 self._refuse_node_open_below_floor(f"a new {a.get('kind')} node")
-                self._create_node(a)  # sequential -> deterministic ids/proposals
+                # sequential -> deterministic ids/proposals; OFF the loop thread since 2026-09-06
+                await self._offload_node_build(a)
             if self._create_paused:
                 self._drain_create_pause()
                 for later in (_card_reservations or [])[_create_index + 1:]:
@@ -3093,6 +3272,51 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # turn re-decide, rather than claiming a halving decision the log does not carry.
         return retry_tail_cas(self.store, _plan, on_exhaust=lambda: False)
 
+    def _ensure_plan(self, state: RunState) -> bool:
+        """Write the plan row when none exists, or a re-cut one when due (`engine/plan.py`);
+        True when a row was appended. Main task only; a 0 reserve fraction writes nothing."""
+        from looplab.engine.plan import build_plan, replan
+        if self._endgame_reserve_frac <= 0.0 or getattr(self, "_speculation_gate_calibration", False):
+            return False
+        n_seeds = int(getattr(self.policy, "n_seeds", getattr(self, "n_seeds", 0)) or 0)
+        max_nodes = int(getattr(self.policy, "max_nodes", 0) or 0)
+        if max_nodes <= 0:
+            return False
+        if state.plan is None:
+            row = build_plan(max_nodes=max_nodes, n_seeds=n_seeds,
+                             reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
+                             endgame_sweep=self._endgame_sweep)
+        else:
+            from looplab.agents.strategist import stall_rung, strategist_stall_window
+            rung, _started = stall_rung(
+                state, strategist_stall_window(getattr(self, "strategist", None)))
+            row = replan(state.plan, max_nodes=max_nodes, n_seeds=n_seeds,
+                         reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
+                         stall_rung=rung, endgame_sweep=self._endgame_sweep)
+        if row is None:
+            return False
+        self.store.append(EV_PLAN, row)
+        return True
+
+    def _plan_gate(self, state: RunState, actions: list[dict]) -> list[dict]:
+        """The reserve the dispatcher honours (`engine/plan.py::endgame_actions`): inside the
+        endgame, breadth is replaced by the top-2 ensemble and champion sweeps."""
+        from looplab.engine.plan import endgame_actions
+        if state.plan is None:
+            return actions
+        return endgame_actions(state, state.plan, actions, sweep=self._endgame_sweep)
+
+    def _sweep_researcher(self, researcher):
+        """The k-NN surrogate the endgame's champion sweep proposes with (doc 52 row 18): bounds
+        inferred from the run's own evaluated params, the run's Researcher as its fallback below
+        warm-up, the run's `surrogate_explore` weight. Built once per engine."""
+        from looplab.search.surrogate import SurrogateResearcher
+        if self._endgame_surrogate is None or self._endgame_surrogate.fallback is not researcher:
+            self._endgame_surrogate = SurrogateResearcher(
+                {}, fallback=researcher, explore=getattr(self, "_surrogate_explore", 0.1),
+                infer_bounds=True)
+        return self._endgame_surrogate
+
     def _select_actions(self, state: RunState) -> list[dict]:
         """Apply the explicit macro-selection authority order for one fresh fold."""
         # Receipt-backed Card selection is the narrowest authority and therefore wins when both opt-in
@@ -3114,6 +3338,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             "select_verifier": self._select_verifier,
             "select_verifier_samples": self._select_verifier_samples,
             "verifier_ci_tie": self._verifier_ci_tie,
+            # The HITL gate, ALWAYS written (both values are a record: a recorded False must win
+            # over a snapshot edited to True as much as the reverse). This is the one key the
+            # default payload gained after calibration receipts were issued, and
+            # `search/speculation_quality.py::_CALIBRATION_PINS_ADDED_AFTER_RECEIPTS` is what keeps
+            # those receipts valid — see there before adding another.
+            "require_approval": bool(self.require_approval),
         }
         legacy_fields = RUN_START_PINNED_FIELDS - {"card_driven_selection", "speculation_depth"}
         if values.keys() != legacy_fields:
@@ -3674,6 +3904,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         "predictions": self._graded_output_name()}
                     if hg.get("kind") == "mlebench":          # real MLE-bench: answers live in the
                         evt["competition"] = hg.get("competition")   # mle-bench data dir, never here —
+                        # WHICH PROTOCOL this run scores under (doc 52 §5.1 row 3), so the reader of
+                        # the log can tell a search-split number from a test-selected one.
+                        evt["protocol"] = ("search_split" if self._search_hidden_ids
+                                           else "private_per_node")
+                        evt["n_hidden"] = len(self._search_hidden_ids)
                         # so there is no in-memory label list to count; n_labels=0 would mislead the Trust
                         # panel into "nothing held out". Omit it; `competition` signals host-held answers.
                     else:
@@ -4082,6 +4317,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._select_verifier = _entry.select_verifier_tiebreak
             self._verifier_ci_tie = _entry.verifier_ci_tie   # R1-d: re-pin the recorded CI-tie rule
             self._select_verifier_samples = _entry.select_verifier_samples
+            # The HITL gate (invariant #6, pinned 2026-09-06). Adopt only a RECORDED value: a log
+            # written before the pin folds None and keeps the live (snapshot) value, so the fix
+            # that exists to stop an unapproved finish cannot itself finish an older
+            # approval-pending run unapproved. Say so when the record overrides the snapshot —
+            # the operator edited a value the run will not honour.
+            if _entry.require_approval is not None:
+                if bool(self.require_approval) != _entry.require_approval:
+                    _LOG.warning(
+                        "ignoring require_approval=%s on re-entry: this run's log records %s "
+                        "(engine invariant #6 — the approval gate is chosen at launch; start a "
+                        "new run to use a different one)",
+                        bool(self.require_approval), _entry.require_approval)
+                self.require_approval = _entry.require_approval
         # Pinned by tests/test_holdout.py::test_a_resume_honours_the_recorded_split_not_a_changed_live
         # _setting, which resumes with every one of these settings CHANGED and asserts the recorded
         # values win (both this block and the verifier re-pin above).
@@ -4098,6 +4346,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # seen exam'). Epoch 0 rebuilds the byte-identical original partition, so a normal
             # single-epoch run (and every replay of an existing log) is unchanged.
             self._holdout_idx = self._build_holdout_idx(self._holdout_fraction, _entry.search_epoch)
+            self._apply_search_split()
             self._holdout_epoch = _entry.search_epoch
         # E4: cross-run meta-learned priors. Excluding THIS run's id matters on resume: a run that
         # already mid-run-distilled its own comparative lessons (M6) must not read them back as if
@@ -4122,6 +4371,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._prior_note_text, self._dev_prior_note_text = \
                 self._load_reflection_priors_both(
                     exclude_run_id=_rid, exclude_run_uid=_ruid)
+            # THE RECORD of what was just spliced into both role prompts (doc 52 row 17): main
+            # task, diagnostic, one row per role — the citation instrument's first half.
+            if self._prior_note_text or self._dev_prior_note_text:
+                self.lessons.record_prior_injection(
+                    at_node=len(getattr(_entry, "nodes", None) or {}), phase="run_start")
         except (OSError, ValueError) as e:  # noqa: BLE001 - an advisory prior cannot fail the run
             self._lessons_seen_stamp = None
             self.store.append(EV_LESSONS_STORE_UNAVAILABLE, {
@@ -4416,8 +4670,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # concurrent parallel-build sibling can add an unrelated node in the same window, and
                 # miscounting that as success is the safe direction (it only stays quiet).
                 before = {n.id for n in fold(self.store.read_all()).nodes.values()}
-                self._create_node({"kind": "improve", "parent_id": pid,
-                                   "parent_generations": {str(pid): generation}})
+                await self._offload_node_build({"kind": "improve", "parent_id": pid,
+                                                "parent_generations": {str(pid): generation}})
                 after = fold(self.store.read_all()).nodes
                 if not any(nid not in before and pid in (getattr(nd, "parent_ids", None) or [])
                            for nid, nd in after.items()):
@@ -5278,6 +5532,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_apply_host_grade": ("holdout", None),
         "_host_score_split": ("holdout", None),
         "_build_holdout_idx": ("holdout", None),
+        "_apply_search_split": ("holdout", None),
         "_holdout_topk": ("holdout", None),
         "_holdout_pending": ("holdout", None),
         # --- workspace (looplab/engine/workspace.py::Workspace)
@@ -5748,7 +6003,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         broker = getattr(self, "_llm_broker", None)
         if broker is None:
             self._llm_broker = LLMConcurrencyBroker(
-                total=total, lane_limits=default_llm_lane_limits(total))
+                total=total, lane_limits=default_llm_lane_limits(total),
+                budget=getattr(self, "_llm_budget", None))
             return
         snapshot = broker.snapshot()
         current_lanes = snapshot["lane_limits"]
@@ -5988,9 +6244,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             from looplab.search.lock_in import capability_expansion_due
             if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:
                 authoritative_operator = KIND_EXPAND
+        # doc 52 row 18: an endgame champion sweep proposes through the k-NN surrogate (the LLM
+        # Researcher below warm-up); every other improve proposes exactly as before.
+        proposer = (self._sweep_researcher(researcher)
+                    if action.get(META_SWEEP) and self._endgame_reserve_frac > 0.0 else researcher)
         with self.tracer.span("propose") as _span:
             idea = _link(self._canonicalize_idea_operator(
-                researcher.propose(state, parent), authoritative_operator))
+                proposer.propose(state, parent), authoritative_operator))
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None:
             return None
@@ -6030,9 +6290,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     precoded,
                     max_eval_seconds=precoded_max_eval_seconds,
                 )
-            return self._create_node_scoped(
-                action, roles, reserved, preproposed=preproposed,
-                pretelemetry=pretelemetry)
+            # doc 52 row 19: a routed action builds under its arm's model — a ContextVar the
+            # client reads per call, scoped to this build (a worker thread's copied context).
+            with model_override(self._model_for_arm(action)):
+                return self._create_node_scoped(
+                    action, roles, reserved, preproposed=preproposed,
+                    pretelemetry=pretelemetry)
+
+    def _model_for_arm(self, action: dict) -> Optional[str]:
+        """The model id an action's `_model` arm names, or None for the default arm / no arm /
+        an arm this engine was not configured with (the build then runs on the configured model)."""
+        arm = action.get(META_MODEL) if isinstance(action, dict) else None
+        if not isinstance(arm, str) or arm == DEFAULT_MODEL_ARM:
+            return None
+        entry = self._model_arms.get(arm)
+        return entry[0] if entry else None
 
     def _create_node_scoped(self, action: dict, roles=None, reserved=None, preproposed=None,
                             pretelemetry=None) -> None:
@@ -6132,7 +6404,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # blank while this call ran.
                 with self.tracer.span("implement"), self._progress(
                         PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
-                    code = self._implement(
+                    built = self._implement_result(
                         self._directed_idea(idea.model_copy(deep=True), state),
                         developer=developer, state=state)
             elif kind == "merge":
@@ -6150,10 +6422,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # the other parent. Mean-param merges (numeric tasks, no files) stay from-scratch.
                     _didea = self._directed_idea(
                         idea.model_copy(deep=True), state)   # §1: directives steer the merge code too
-                    code = self._implement(
+                    built = self._implement_result(
                         _didea,
                         pnodes[0] if self._merge_mode == "ensemble" and pnodes else None,
-                        developer=developer, state=state)
+                        developer=developer, state=state,
+                        # doc 52 row 18: the other lineages, code and traces, not a 120-char digest
+                        co_parents=pnodes[1:] if self._merge_mode == "ensemble" else ())
             # The `debug` build branch is GONE (F5). It called `developer.repair` on a FRESH node
             # seeded from the failed parent's files — inline repair with a node-budget slot attached
             # to it. Its whole justification was that the in-node loop had a fixed count and had to
@@ -6165,11 +6439,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 parents = [parent.id]
                 with self.tracer.span("implement"), self._progress(
                         PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
-                    code = self._implement(
+                    built = self._implement_result(
                         self._directed_idea(idea.model_copy(deep=True), state), parent,
                         developer=developer, state=state)
+            # THE ENVELOPE (doc 52 row 12): everything this build recorded about itself is read off
+            # the `DeveloperResult` the call returned, captured under the instance's lock in the
+            # same breath as the call — never off the instance afterwards, which is what makes the
+            # serial lane safe to run off the loop thread beside a repair on the shared Developer.
+            code = built.code
             idea, footprint_finalized = self._finalize_developer_footprint(
-                idea, developer, code)
+                idea, developer, code, footprint=built.last_footprint)
             # 💡 deep-research provenance: tag the first couple of nodes created right after a research
             # memo (its directions are the active steering) so the UI can show WHERE research landed in
             # the tree. Audit/UI only — never affects search. Coarse-but-honest (temporal proximity).
@@ -6206,9 +6485,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 operator=idea.operator,
                 idea=durable_idea_payload(idea),
                 code=code,
-                files=getattr(developer, "last_files", {}) or {},         # per-build developer (pool-safe)
-                deleted=getattr(developer, "last_deleted", []) or [],
+                files=dict(built.last_files),                # the envelope's, never the instance's
+                deleted=list(built.last_deleted),
                 research_origin=research_origin,
+                # doc 52 row 19: the arm this build was routed to (omitted when none was)
+                model_arm=(action.get(META_MODEL) if isinstance(action.get(META_MODEL), str)
+                           else _OMIT_ARM),
                 # Variant-1: read the receipt THIS build stamped on its own researcher (set under
                 # `_advisory_lock` in `_set_complexity_hint`), so a concurrent sibling draft's advisory
                 # write to `self._cross_run_advisory_receipt` can't mis-stamp this node. Falls back to
@@ -6376,6 +6658,37 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 except Exception:  # noqa: BLE001 — best-effort terminal; never re-raise into the group
                     pass
 
+    async def _offload_build(self, fn) -> None:
+        """Run ONE paid build off the event-loop thread, on the proposal pool.
+
+        THE SERIAL LANE HELD THE LOOP (doc 52 row 12; the marker that stood above
+        `_handle_create_actions`). The 2026-08-29/31 offloads moved the two propose lanes and left
+        the Developer call of the serial build, the fork's build and the node-reset rebuild on the
+        loop thread — driven, a fork served with an adopted eval and a width-2 Card claim with node
+        0 in flight each ran the paid call with ZERO ticks, and the critic's re-read of the marker's
+        own file found the harm: a dead node waited 62 minutes for its terminal while both H200s
+        idled, because the loop was inside a build. `_occupancy_paced_creates` delivers work here
+        precisely when an evaluation is burning, which is when the loop must keep turning.
+
+        ONE helper for the four sites, on `proposal_limiter()` (anyio's shared 40-token default is
+        held by every in-flight `_run_eval` for its whole multi-hour duration, so a build queued on
+        it could wait behind the evaluations it exists to feed). A bare `to_thread` and not the
+        proposal SINK: the build's appends are its OWN node's — `node_building`, `node_created`,
+        `node_failed`, the per-node audit — which is exactly the worker seam invariant #1 licenses
+        for the concurrent fan-out, and the run-global pause it may need goes through
+        `_request_create_pause` and is drained by the caller on the main task, as the fan-out's
+        already is. The build's outputs come back through the `DeveloperResult` envelope, so a
+        repair on the shared Developer running in another worker cannot clobber what this build
+        read (`agents/roles.py::DeveloperResult`). A raise propagates to the caller unchanged: the
+        serial path keeps its historical crash-on-raise so bugs surface in tests.
+        """
+        from looplab.engine.novelty import proposal_limiter
+        await anyio.to_thread.run_sync(fn, limiter=proposal_limiter())
+
+    async def _offload_node_build(self, action: dict, **kwargs) -> None:
+        """`_create_node`, off the loop — see `_offload_build`."""
+        await self._offload_build(functools.partial(self._create_node, action, **kwargs))
+
     @in_llm_lane("build")
     def _rerun_node(self, node: Node, state: RunState) -> None:
         """node_reset "propose"/"implement": re-run this EXISTING node id IN PLACE (never mints a new
@@ -6503,10 +6816,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             with self.tracer.span("implement"):
                 # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
                 # steer its code too — same as the four _create_node build sites.
-                code = self._implement(
+                built = self._implement_result(
                     self._directed_idea(idea.model_copy(deep=True), state), parent, state=state)
+            code = built.code
             idea, footprint_finalized = self._finalize_developer_footprint(
-                idea, self.developer, code)
+                idea, self.developer, code, footprint=built.last_footprint)
             latest = fold(self.store.read_all())
             current = latest.nodes.get(node.id)
             parents_current = all(
@@ -6525,8 +6839,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._emit_node_created(
                 node_id=node.id, parent_ids=parents, operator=idea.operator,
                 idea=durable_idea_payload(idea), code=code,
-                files=getattr(self.developer, "last_files", {}) or {},
-                deleted=getattr(self.developer, "last_deleted", []) or [],
+                files=dict(built.last_files),
+                deleted=list(built.last_deleted),
                 generation=generation,
                 eval_start_boundary=True,
                 **({"parent_generations": parent_generations} if parent_generations else {}),
@@ -6710,6 +7024,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                               generation=0, operator=idea.operator, source="manual"):
             developer_called = not bool(code)
             footprint_finalized = False
+            _inj = None                     # the envelope, when the Developer was called (doc 52 row 12)
             if developer_called:
                 try:
                     self._reset_developer_footprint(self.developer)
@@ -6718,7 +7033,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # base) — hand the parent's solution to a parent-aware developer. Preserve the
                         # receipt-bound Idea by handing the plugin a deep working copy.
                         _pnode = state.nodes.get(parents[0]) if parents else None
-                        code = self._implement(idea.model_copy(deep=True), _pnode, state=state)
+                        _inj = self._implement_result(idea.model_copy(deep=True), _pnode, state=state)
+                        code = _inj.code
                 except Exception:
                     self._fail_reserved_build(
                         node_id=node_id, card_id=reservation.card_id, generation=0,
@@ -6726,7 +7042,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self._discard_node_build_telemetry()
                     raise
                 idea, footprint_finalized = self._finalize_developer_footprint(
-                    idea, self.developer, code)
+                    idea, self.developer, code,
+                    footprint=(_inj.last_footprint if _inj is not None else None))
             latest = fold(self.store.read_all())
             if any(pid not in latest.nodes
                    or latest.nodes[pid].attempt != generation
@@ -6750,7 +7067,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # sibling's full multi-file solution); else use the Developer's last build, and
                     # only when the Developer actually implemented (no ready-made code was supplied).
                     files=(req.get("files")
-                           or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
+                           or ({} if req.get("code") or _inj is None else dict(_inj.last_files))) or {},
                     deleted=req.get("deleted") or [],
                     source="manual",
                     eval_start_boundary=True,
@@ -6775,7 +7092,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             except Exception:
                 try:
                     landed = node_id in fold(self.store.read_all()).nodes
-                except Exception:
+                except Exception:  # noqa: BLE001 — a failed landing probe reads as not landed; the branch below decides
                     landed = False
                 if not landed:
                     self._fail_reserved_build(
@@ -7034,6 +7351,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     def _build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
         return self.holdout.build_holdout_idx(fraction, epoch)
+
+    def _apply_search_split(self) -> None:
+        return self.holdout.apply_search_split()
 
     def _holdout_topk(self, state: RunState) -> list[int]:
         return self.holdout.holdout_topk(state)

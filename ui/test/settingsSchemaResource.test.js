@@ -121,11 +121,39 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   default WAS the value and no config, env var or form field could move it. Verified as the
   //   paragraph prescribes: removing exactly `agent_timeout` from the catalogue gives back 185.
   //   FIFTEENTH occurrence, and the Python guard caught it first for the eleventh time.
+  //   196 + 196 -> 206 (2026-09-07), at the MERGE with master: 186 rows common to the two
+  //   files, ten added by each side, no duplicate key. Counted by intersection, not by
+  //   adding the integers — see the same note in `tests/test_settings_ui_schema.py`.
   //   195 + 1 -> 196 (2026-09-06), at the MERGE with master: this branch's ten rows
   //   meeting master's `agent_timeout`. The total is stated ONCE, here, because the
   //   Python guard asserts this file pins it exactly once.
-  assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
-  assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
+  //   186 -> 187 (2026-09-06): `stage_check_tools`, whether the inter-stage checker may query the
+  //   checked stage's own log instead of deciding from its last 4,000 characters (doc 52 row 9).
+  //   187 -> 188 (2026-09-06): `evidence_envelope`, the one untrusted-evidence envelope on the
+  //   Strategist, the triage judge, the repair critic and the arXiv / web tools (doc 52 row 13).
+  //   188 -> 190 (2026-09-06): `llm_cost_limit` + `llm_token_limit`, the run's LLM spend caps
+  //   reserved at the broker's permit (doc 52 row 15).
+  //   190 -> 191 (2026-09-06): `endgame_reserve_frac`, the plan's endgame reserve the dispatcher
+  //   honours — the top-2 ensemble once, then champion sweeps (doc 52 row 18).
+  //   191 -> 192 (2026-09-06): `syscall_fence`, the kernel syscall policy beside `landlock` (doc 52
+  //   row 28). The Python half moved in the same change, as this tripwire's history demands.
+  //   192 -> 193 (2026-09-07): `mcts_cost_weight`, the cost term of the cost-constrained MCTS
+  //   (doc 52 row 31) — a form row because it is a number an operator types to trade speed
+  //   against score, and its unit (relative to the run's mean eval second) has to be shown.
+  //   193 -> 194 (2026-09-07): `novelty_literature`, the retrieved papers reaching the novelty
+  //   gates (doc 52 row 32) — a row because it changes what the re-proposal prompt says.
+  //   194 -> 195 (2026-09-07): `diagnosis_hypotheses`, the competing explanations the crash
+  //   diagnostician considered (doc 52 row 32) — a row because it changes what a paid call asks.
+  //   195 -> 196 (2026-09-07): `steady_state_build`, the build fan-out as a refilling lane
+  //   (doc 52 row 33) — a row because it changes how many provider calls a build batch makes.
+  //   196 + 1 -> 197 (2026-09-07): `agent_read_loop_nudge_after`, found by review. The A9
+  //   read-loop nudge shipped ON with a threshold of 25 and no Settings field at all, so the
+  //   loop's literal was the only value that could ever apply and the `0 = off` its own
+  //   docstring offers was unreachable from an env var, a snapshot, this form or the guide.
+  //   206 + 1 -> 207 (2026-09-07), at the SECOND merge with master: master's ten rows had
+  //   already met this branch's ten, and `agent_read_loop_nudge_after` is the one row this
+  //   branch authored after that merge. The total is stated ONCE, below, because the Python
+  //   guard asserts this file pins it exactly once.
   //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
   //   `llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`.
   //   187 -> 188 (2026-08-28): `developer_stage_guidance` — the switch that drops ~5,000
@@ -138,7 +166,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 196)
+  assert.equal(Object.keys(schema.fieldByKey).length, 207)
+  assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
+  assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   //   190 -> 193 (2026-09-06): the three bench-driven knobs of docs/60 §60.9 — `llm_stream_stall_
   //   fallback` (beside `llm_stream`), `node_open_budget_floor_usd` (beside `llm_budget_usd`) and
   //   `developer_crash_pause_after` (beside `systemic_failure_stop`). Verified by intersection:

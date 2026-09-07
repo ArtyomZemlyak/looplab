@@ -1,4 +1,5 @@
-"""Cross-run memory HYGIENE — the one command that removes rows nobody's deletion will.
+"""Cross-run memory HYGIENE and its UTILITY INSTRUMENT — the command that removes rows nobody's
+deletion will, and the one that reports whether the rows a run was shown reached its proposals.
 
 Its own module, and the reason is the guard that forced it: `governance_cmds` sits eleven lines
 under the line ceiling `tests/test_cli_command_groups.py::test_no_group_is_a_god_module_again`
@@ -13,6 +14,13 @@ content, and is the only command here that can destroy evidence — so it is rep
 operator says `--apply`, and every rule it obeys (attribution by `run_uid` then `run_id`, the tier
 predicates that keep shared evidence, the `blind` refusal) belongs to `serve/memory_cascade.py`
 rather than to this file.
+
+`prior-citations` (2026-09-06, doc 52 row 17) joined it for the same domain reason: it is the READ
+side of the same stores — a pure projection over one run's `prior_injected` + `memory_read`
+diagnostic rows (`events/prior_citations.py`) that says which lessons the store pushed and which
+the proposals cited, i.e. the number the forgetting rung and the utility rank term are keyed on.
+It writes nothing and calls no model; the ledger it explains (`lesson_utility.jsonl`) is written
+by the run's own finalize pass, never by this command.
 """
 from __future__ import annotations
 
@@ -81,3 +89,38 @@ def memory_orphans_cmd(
         for failure in failures[:20]:
             typer.echo(f"  FAILED {failure.get('store')}: {failure.get('error')}")
     raise typer.Exit(1 if failures else 0)
+
+
+@app.command(name="prior-citations")
+def prior_citations_cmd(
+    run_dir: Path = typer.Argument(..., help="A run directory (holds events.jsonl)."),
+    limit: int = typer.Option(30, "--limit", help="How many lessons to list, most-shown first."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the whole report as JSON."),
+):
+    """Did the cross-run priors this run was shown reach its proposals? (doc 52 row 17)
+
+    A pure projection over the run's `prior_injected` + `memory_read` diagnostic rows joined to the
+    `node_created` rows that followed them (`events/prior_citations.py` states the join and the
+    lexical citation rule). This is the INSTRUMENT of the citation-rate audit; the audit itself is
+    a number over real runs on the box.
+    """
+    from looplab.events.eventstore import EventStore
+    from looplab.events.prior_citations import prior_citation_report
+
+    report = prior_citation_report(EventStore(run_dir / "events.jsonl").read_all())
+    if as_json:
+        typer.echo(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
+        return
+    rate = report["citation_rate"]
+    typer.echo(f"proposals {report['proposals']} · prior injections {report['injections']} · "
+               f"memory reads {report['reads']}")
+    typer.echo(f"shown pairs {report['shown_pairs']} · cited {report['cited_pairs']} · "
+               f"citation rate {('%.1f%%' % (100 * rate)) if rate is not None else 'n/a'}")
+    typer.echo(f"rule: {report['rule']}")
+    rows = sorted(report["lessons"].items(), key=lambda kv: (-kv[1]["shown"], -kv[1]["shown_tool"], kv[0]))
+    for lesson_id, entry in rows[:max(0, limit)]:
+        typer.echo(f"{entry['shown']:>4} shown {entry['cited']:>4} cited  "
+                   f"{entry['shown_tool']:>3} read {entry['cited_tool']:>3} cited  {lesson_id}  "
+                   f"{entry['statement'][:70]}")
+    if len(rows) > limit:
+        typer.echo(f"... (+{len(rows) - limit} more lessons; --limit)")

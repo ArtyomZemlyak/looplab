@@ -117,36 +117,56 @@ def test_the_engine_actually_READS_the_developer_and_does_not_just_mention_it():
     assert len(bindings) == 1, (
         f"_budget_exhausted is bound {len(bindings)} times; a second binding is how a snapshot "
         "gets silently overwritten before the append reads it")
-    # The binding's OUTERMOST node is the `[:32]` bound, so "is it a Call?" was too narrow — that
-    # assertion failed on the correct code, which is the useful direction for a test to fail in.
     # What matters is that the value is DERIVED FROM THE DEVELOPER rather than being a constant.
+    # Since 2026-09-06 (doc 52 row 12) it is read off the `DeveloperResult` ENVELOPE the offloaded
+    # repair returned — an attribute read named for the registry member — and the envelope's own
+    # capture (`node_build._capture_developer_result`) is where the `getattr` on the instance
+    # lives; both halves are pinned, so pinning either to a constant goes red.
     reads = [n for n in ast.walk(bindings[0].value)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr"
-             and any(isinstance(a, ast.Constant) and a.value == "last_budget_exhausted"
-                     for a in n.args)]
+             if isinstance(n, ast.Attribute) and n.attr == "last_budget_exhausted"]
     assert reads, (
         "MUTATION: pin it to a constant (`_budget_exhausted = \"\"`) and this goes red — the row "
         "would then always say 'not cut short', which is the exact false reading this field exists "
         "to remove. A source pin does NOT catch that: the first version of this test asserted the "
         "getattr TEXT was present and stayed green while the value was dead.")
+    import textwrap
+    from looplab.engine import node_build
+    capture = ast.parse(textwrap.dedent(
+        inspect.getsource(node_build.NodeBuildMixin._capture_developer_result)))
+    assert any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr"
+               and any(isinstance(a, ast.Constant) and a.value == "last_budget_exhausted"
+                       for a in n.args)
+               for n in ast.walk(capture)), "the envelope capture must read the instance's channel"
 
 
-def test_the_snapshot_stays_beside_the_other_shared_instance_read():
-    """ORDERING, which the AST above cannot express: it must be read in the same breath as
-    `last_rollback_stage`, before the next `await`.
+def test_the_snapshot_and_the_rollback_ask_come_off_the_same_envelope():
+    """ORDERING used to be the guard here: both had to be read in the same breath, before the next
+    `await`, because the developer is shared across concurrent evals and a later read attributed a
+    SIBLING node's exhaustion to this one.
 
-    The developer is shared across concurrent evals, so a later read can attribute a SIBLING node's
-    exhaustion to this one — the hazard the rollback snapshot's own comment spells out.
+    Since 2026-09-06 (doc 52 row 12) there is no breath to read in: both come off the SAME frozen
+    `DeveloperResult` the offloaded repair returned, captured under the instance's lock in the same
+    step as the call. What is pinned is therefore the receiver, not the distance.
     """
+    import ast
     import inspect
     from looplab.engine import evaluate
 
-    src = inspect.getsource(evaluate)
-    rollback = src.index('getattr(self.developer, "last_rollback_stage"')
-    budget = src.index('getattr(self.developer, "last_budget_exhausted"')
-    assert 0 < budget - rollback < 800, (
-        "the two shared-instance reads must stay adjacent; moving this one past an await is how a "
-        "sibling node's exhaustion lands on this node's row")
+    tree = ast.parse(inspect.getsource(evaluate))
+    receivers = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name) \
+                and node.targets[0].id in ("_rollback_ask", "_budget_exhausted"):
+            attrs = [n for n in ast.walk(node.value) if isinstance(n, ast.Attribute)
+                     and n.attr in ("last_rollback_stage", "last_budget_exhausted")]
+            assert len(attrs) == 1, node.targets[0].id
+            receivers[node.targets[0].id] = ast.unparse(attrs[0].value)
+    assert set(receivers) == {"_rollback_ask", "_budget_exhausted"}
+    assert len(set(receivers.values())) == 1, (
+        f"the two reads must come off ONE envelope, got {receivers}: two receivers is the "
+        "shared-instance gap back under a different name")
+    assert 'getattr(self.developer, "last_rollback_stage"' not in inspect.getsource(evaluate)
 
 
 def test_both_durable_appends_carry_the_key():

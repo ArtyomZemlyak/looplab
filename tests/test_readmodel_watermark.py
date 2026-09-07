@@ -122,6 +122,46 @@ def test_a_rewrite_preserving_count_and_max_seq_is_still_stale(tmp_path):
     assert readmodel_status(db, rewritten) == STATUS_STALE
 
 
+def test_an_in_place_edit_of_one_rows_data_is_stale_not_current(tmp_path):
+    """Same seq, same type, same count, same max seq — a different METRIC (doc 52 row 27).
+
+    A watermark over `(seq, type)` alone certified this log as `current`: nothing it hashed had
+    changed. The digest now covers the payload, so the rewritten row is a different prefix.
+    """
+    store = _run_log(tmp_path / "run")
+    db = tmp_path / "run" / "readmodel.sqlite"
+    build_readmodel(store.read_all(), db)
+    assert readmodel_status(db, store.read_all()) == STATUS_CURRENT
+    log = tmp_path / "run" / "events.jsonl"
+    lines = log.read_bytes().splitlines(keepends=True)
+    assert b'"metric":0.5' in lines[-1] or b'"metric": 0.5' in lines[-1], "precondition: the last row is the evaluation"
+    lines[-1] = lines[-1].replace(b'"metric":0.5', b'"metric":0.1').replace(b'"metric": 0.5', b'"metric": 0.1')
+    log.write_bytes(b"".join(lines))
+    edited = EventStore(log).read_all()
+    original = store.read_all()
+    assert [(e.seq, e.type) for e in edited] == [(e.seq, e.type) for e in original]
+    assert edited[-1].data["metric"] == 0.1, "precondition: the edit landed in the payload only"
+    assert readmodel_status(db, edited) == STATUS_STALE
+    assert not readmodel_is_current(db, edited)
+
+
+def test_the_digest_names_the_recipe_that_covers_the_payload():
+    """A watermark minted by the `(seq, type)` recipe can never certify a model under this one."""
+    from looplab.core.jsonutil import canonical_json_digest
+    from looplab.core.models import Event
+
+    events = [Event(seq=0, ts=1.0, type="run_started", data={"run_id": "r"}),
+              Event(seq=1, ts=2.0, type="node_evaluated", data={"node_id": 0, "metric": 0.5})]
+    want = coverage_watermark(events)
+    assert want.digest.startswith("rmcov2:")
+    legacy = ReadModelWatermark(
+        schema_version=want.schema_version, covered_seq=want.covered_seq,
+        event_count=want.event_count,
+        digest=canonical_json_digest([[e.seq, e.type] for e in events], prefix="rmcov1:"))
+    assert not legacy.same_coverage(want)
+    assert not want.same_coverage(legacy)
+
+
 def test_a_model_written_before_the_watermark_existed_still_loads_and_is_never_current(tmp_path):
     """Back-compat + fail-closed at once: old rows readable, old coverage unknowable."""
     store = _run_log(tmp_path / "run")

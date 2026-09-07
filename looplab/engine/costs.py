@@ -365,7 +365,7 @@ def _commit_usage_delta(engine: object, usage_id: str, clean: dict[str, int | fl
     """
     try:
         engine.store.append(EV_LLM_USAGE, _payload(usage_id, clean))
-    except Exception as exc:  # append may have committed before surfacing an error
+    except Exception as exc:  # noqa: BLE001 — append may have committed before surfacing an error
         if not _delta_is_durable(engine, usage_id, clean):
             return False, False, exc
     else:
@@ -451,6 +451,11 @@ def _event_usage_deltas(events: Iterable[object]) -> dict[str, dict[str, int | f
     return deltas
 
 
+# TWO SEEDERS, KEPT APART ON PURPOSE. `seed_prior_spend` (this branch) charges the resumed run's
+# ACCOUNTANTS for what the events already record; `seed_run_budget` (master) seeds the reserve-commit
+# BUDGET from the same rows. Different objects, both idempotent through their own flags -- but they
+# read the same ledger, so a future caller that runs both against one counter would double-charge a
+# resume. Whoever wires them together owns that check.
 _PRIOR_SEEDED_ATTR = "_looplab_prior_spend_seeded"
 
 
@@ -511,6 +516,34 @@ def seed_prior_spend(engine: object) -> float:
             continue
     return seeded
 
+def _budget_commit(engine: object, clean: dict[str, int | float]) -> None:
+    """Feed one sanitized delta to the run's reserve-commit budget, if the engine carries one."""
+    budget = getattr(engine, "_llm_budget", None)
+    if budget is None:
+        return
+    try:
+        budget.commit(clean)
+    except Exception:  # noqa: BLE001 — the budget is an admission aid; a broken one must not lose a ledger row
+        pass
+
+
+def seed_run_budget(engine: object) -> bool:
+    """Adopt the durable `llm_usage` rows into the run's budget ONCE (a resume's committed spend).
+
+    The cap is only meaningful across a restart if the committed half comes from the ledger rather
+    than from the accountants a fresh process constructs at zero. Idempotent through the budget's
+    own `seeded` flag; False when there is no budget, no store, or it was seeded already.
+    """
+    budget = getattr(engine, "_llm_budget", None)
+    store = getattr(engine, "store", None)
+    if budget is None or store is None or getattr(budget, "seeded", True):
+        return False
+    try:
+        persisted = _event_usage_deltas(store.read_all())
+    except Exception:  # noqa: BLE001 — an unreadable log is the resume path's own refusal, not the budget's
+        return False
+    return bool(budget.seed(persisted.values()))
+
 
 def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> list[object]:
     """Bind every currently reachable accountant exactly once.
@@ -519,6 +552,7 @@ def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> 
     before attachment belongs elsewhere. Finalization sets ``include_existing`` for a role that
     became reachable without the explicit swap seam; zero is safer there than dropping paid calls.
     """
+    seed_run_budget(engine)
     bindings, lock = _tracker(engine)
     found = find_cost_accountants(engine)
     with lock:
@@ -550,12 +584,16 @@ def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> 
                     clean = sanitize_usage_delta(delta)
                     append_error: Exception | None = None
                     if _has_value(clean):
+                        # The reserve-commit budget's COMMIT half (`core/llm_budget.py`): the same
+                        # sanitized delta the ledger records, before any durability question — the
+                        # cap is a live admission fact, durability is the ledger's own concern.
+                        _budget_commit(engine, clean)
                         with lock:
                             usage_id = _queue(_binding, clean)
                             outbox_error: Exception | None = None
                             try:
                                 _persist_outbox(engine, usage_id, clean)
-                            except Exception as exc:  # memory retry remains valid in this process
+                            except Exception as exc:  # noqa: BLE001 — memory retry remains valid in this process
                                 outbox_error = exc
                             if isinstance(outbox_error, _OutboxEvidenceError):
                                 # A same-ID file that we cannot prove is ours is stronger evidence
@@ -583,7 +621,7 @@ def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> 
                     if callable(_previous):
                         try:
                             _previous(dict(clean))
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 — the previous callback's error is recorded and re-surfaced below
                             callback_error = exc
                     if append_error is not None:
                         raise append_error
@@ -684,7 +722,7 @@ def reconcile_cost_accountants(engine: object) -> bool:
                 except _OutboxEvidenceError:
                     complete = False
                     continue
-                except Exception:
+                except Exception:  # noqa: BLE001 — still try events.jsonl below; a successful append is itself the durable boundary
                     # Still try events.jsonl: a successful append is itself the durable boundary.
                     pass
                 # Rescan even on success: this is a RETRY of an id whose first append already failed

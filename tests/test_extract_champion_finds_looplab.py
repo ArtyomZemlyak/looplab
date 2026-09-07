@@ -2,7 +2,10 @@
 
 Running `python benchmarks/algotune/extract_champion.py` puts the SCRIPT's directory on `sys.path`,
 not the repository root, so `from looplab.events.replay import fold` raises ModuleNotFoundError
-unless looplab happens to be pip-installed into the interpreter. It is not on this box.
+unless looplab happens to be pip-installed into the interpreter — which is true of a
+developer checkout (`pip install -e ".[dev,ui]"`) and false of the bench stand, where this
+script actually runs. The second test below therefore has to MAKE the import fail rather
+than assume it does; see its docstring.
 
 Measured 2026-08-31 on a finished probe, not reasoned about. `accEE` ran to its ceiling (rc=0,
 6321 s) and evaluated two nodes -- 27.466 then 221.5387 on train -- and its own summary line read
@@ -53,6 +56,15 @@ def test_an_import_it_cannot_satisfy_is_a_broken_bridge_and_not_an_empty_run(tmp
     `parents[2]` is NOT a looplab checkout, so the path insert cannot fire and the import genuinely
     fails. An import failure says nothing at all about the run, and must not be reported as if it
     did.
+
+    `-S` IS PART OF THE FIXTURE, not tuning. The header's "it is not pip-installed on this box" is
+    true of the bench stand and false of the setup CLAUDE.md prescribes to everyone else
+    (`pip install -e ".[dev,ui]"`), where an `__editable__*.pth` in site-packages makes `looplab`
+    importable from any directory — so the stray copy imported fine, printed "run has no champion",
+    and the assertion below reddened saying the fixture no longer reproduced its own subject. It
+    was right. `-S` skips site processing, which is what makes the import genuinely unsatisfiable
+    wherever this runs; it does not weaken the claim, because the claim is about what the script
+    says WHEN the import fails.
     """
     stray = tmp_path / "a" / "b" / "c"
     stray.mkdir(parents=True)
@@ -62,7 +74,7 @@ def test_an_import_it_cannot_satisfy_is_a_broken_bridge_and_not_an_empty_run(tmp
     (run_dir / "events.jsonl").write_text('{"type": "run_started", "data": {}}\n', encoding="utf-8")
 
     result = subprocess.run(
-        [sys.executable, str(stray / "extract_champion.py"), "--run-dir", str(run_dir),
+        [sys.executable, "-S", str(stray / "extract_champion.py"), "--run-dir", str(run_dir),
          "--out", str(tmp_path / "c.py")],
         cwd=str(tmp_path), capture_output=True, text=True, timeout=180,
         env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})

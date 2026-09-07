@@ -35,10 +35,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import anyio
 import orjson
 
+from looplab.adapters.toytask import ToyTask
+from looplab.core.models import NodeStatus
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
+from tests.factories import TOY_TASK, make_engine
 
 _DATA = Path(__file__).parent / "data"
 
@@ -58,3 +62,117 @@ def test_golden_log_fold_is_idempotent_and_prefix_stable():
     # every prefix folds without error (resume replays prefixes constantly)
     for i in range(1, len(evs) + 1):
         fold(evs[:i])
+
+
+# ------------------------------------------------------------ the 2-wide parallel-build golden
+# Doc 22 phase 4 specified "a new golden for a 2-wide parallel-build run (ids monotonic, one
+# terminal per node, deterministic replay)" and it was never added (doc 52 row 27). Its own status
+# note says why a checked-in LOG would be wrong: the fan-out's byte order is DELIBERATELY
+# nondeterministic (two builds append their own rows), so a golden log would over-pin the one thing
+# the seam does not promise. What the seam promises is pinned instead, the way that note lays out:
+#   (a) the fold of a real 2-wide run keeps the fan-out invariants — ids reserved serially and
+#       dense, each node's `node_created` after its own `node_building`, exactly one terminal;
+#   (b) the fold is deterministic: twice over one read, and over a second `EventStore` open;
+#   (c) two runs with the same scripted roles fold to ONE state once the run-identity and
+#       wall-clock fields are masked, while their logs are free to differ in order — the
+#       order-tolerance the build fan-out (CLAUDE.md invariant 1) actually promises;
+# and a checked-in golden PROJECTION — the order-independent view of the search's result — plays
+# the role the serial golden STATE plays: a fold or policy change that alters what a 2-wide run
+# finds turns it red. Regenerate it in the same change and say why:
+#     python - <<'PY'
+#     import orjson
+#     from tests.test_golden_replay import _parallel_run, _projection
+#     from looplab.events.replay import fold
+#     import tempfile, pathlib
+#     engine = _parallel_run(pathlib.Path(tempfile.mkdtemp()) / "run")
+#     open("tests/data/golden_parallel_projection.json", "wb").write(orjson.dumps(
+#         _projection(fold(engine.store.read_all())), option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS))
+#     PY
+# `tests/test_strategist.py::test_parallel_build_replays_deterministically_and_records_fanout` pins
+# the cost guardrail (the `parallel_build_batch` span) on the same construction.
+
+# Fields that differ between two runs of the same search: the run's identity, the archive scope
+# digest keyed on it, and every wall-clock measurement. Everything else must be equal.
+_VOLATILE = {"run_id", "run_uid", "finalize_scope", "eval_seconds", "total_eval_seconds",
+             "eval_seconds_by_kind"}
+
+
+def _parallel_run(run_dir):
+    """A real 2-wide fan-out over the toy task: `parallel_build=2` with a role factory, so two
+    builds really run on their own (researcher, developer) pairs — the same construction the
+    strategist test uses, and the one whose fan-out span proves the width."""
+    task = ToyTask.load(TOY_TASK)
+    engine = make_engine(run_dir, task=task, n_seeds=3, max_nodes=8)
+    engine.parallel_build = 2
+    engine.role_factory = task.build_roles
+    anyio.run(engine.run)
+    return engine
+
+
+def _strip_volatile(value):
+    if isinstance(value, dict):
+        return {k: _strip_volatile(v) for k, v in value.items() if k not in _VOLATILE}
+    if isinstance(value, list):
+        return [_strip_volatile(v) for v in value]
+    return value
+
+
+def _projection(state) -> dict:
+    """The order-independent view of what the search found."""
+    return {
+        "nodes": {str(n.id): {
+            "parent_ids": list(n.parent_ids), "operator": n.operator,
+            "params": dict(n.idea.params) if n.idea is not None else None,
+            "metric": n.metric, "status": n.status.value, "feasible": n.feasible,
+        } for n in sorted(state.nodes.values(), key=lambda n: n.id)},
+        "best_node_id": state.best_node_id,
+        "finished": state.finished,
+        "stop_reason": state.stop_reason,
+    }
+
+
+def test_a_two_wide_parallel_build_run_keeps_the_fan_out_invariants(tmp_path):
+    engine = _parallel_run(tmp_path / "run")
+    events = engine.store.read_all()
+    building = [(i, e.data["node_id"]) for i, e in enumerate(events) if e.type == "node_building"]
+    created = [(i, e.data["node_id"]) for i, e in enumerate(events) if e.type == "node_created"]
+    # The run really fanned out: two ids were reserved before either build landed.
+    first_landing = created[0][0]
+    assert sum(1 for i, _ in building if i < first_landing) >= 2, "no concurrent build in the log"
+    reserved = [nid for _, nid in building]
+    assert reserved == sorted(reserved) and len(set(reserved)) == len(reserved), "serial reservation"
+    landed = sorted(nid for _, nid in created)
+    assert landed == list(range(len(landed))), "ids are dense and unique"
+    reserved_at = {nid: i for i, nid in building}
+    assert all(reserved_at[nid] < i for i, nid in created), "a node lands after its own reservation"
+    terminals: dict[int, int] = {}
+    for e in events:
+        if e.type in ("node_evaluated", "node_failed"):
+            terminals[e.data["node_id"]] = terminals.get(e.data["node_id"], 0) + 1
+    assert terminals == {nid: 1 for nid in landed}, "exactly one terminal per node"
+    state = fold(events)
+    assert state.finished and set(state.nodes) == set(landed)
+    assert all(n.status in (NodeStatus.evaluated, NodeStatus.failed) for n in state.nodes.values())
+    # Deterministic replay: twice over one read, and over a second open of the same file.
+    once = fold(events).model_dump(mode="json")
+    assert once == fold(events).model_dump(mode="json")
+    assert once == fold(EventStore(tmp_path / "run" / "events.jsonl").read_all()).model_dump(mode="json")
+    for i in range(1, len(events) + 1):
+        fold(events[:i])
+
+
+def test_two_two_wide_runs_fold_to_one_state_though_their_logs_may_differ_in_order(tmp_path):
+    a = _parallel_run(tmp_path / "a")
+    b = _parallel_run(tmp_path / "b")
+    folded_a = fold(a.store.read_all()).model_dump(mode="json")
+    folded_b = fold(b.store.read_all()).model_dump(mode="json")
+    assert _strip_volatile(folded_a) == _strip_volatile(folded_b)
+    # The masked fields really are the only ones that may differ: the run's own identity.
+    assert folded_a["run_id"] != folded_b["run_id"] and folded_a["run_uid"] != folded_b["run_uid"]
+
+
+def test_the_parallel_golden_projection_is_the_checked_in_one(tmp_path):
+    engine = _parallel_run(tmp_path / "run")
+    got = _projection(fold(engine.store.read_all()))
+    want = orjson.loads((_DATA / "golden_parallel_projection.json").read_bytes())
+    assert got == want, "a 2-wide toy run no longer finds what the golden projection records"

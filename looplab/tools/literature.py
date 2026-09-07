@@ -11,6 +11,7 @@ import re
 import urllib.parse
 import urllib.request
 
+from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted
 from looplab.tools._base import fn_spec
 
 # HTTPS, not plain http: this response is injected into the Researcher's prompt as GROUNDING, so on
@@ -30,10 +31,20 @@ _SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 class LiteratureTools:
     """A single `arxiv_search` tool. `enabled=False` (or a network failure) -> a graceful message."""
 
-    def __init__(self, enabled: bool = True, max_results: int = 3, timeout: float = 8.0):
+    def __init__(self, enabled: bool = True, max_results: int = 3, timeout: float = 8.0,
+                 envelope: bool = False):
         self.enabled = enabled
         self.max_results = max_results
         self.timeout = timeout
+        # THE UNTRUSTED-EVIDENCE ENVELOPE (`core/evidence.py`, doc 52 row 13): stamp every result
+        # between `UNTRUSTED_RUN_EVIDENCE` and its closing fence, so the abstracts this tool injects
+        # as GROUNDING arrive MARKED in every loop that holds it — the Researcher's, the Strategist's
+        # and the Deep-Research stage's — instead of bare beside a system rule that names them.
+        # Stamped at the TOOL rather than only at a loop because three loops read it and only one
+        # of them (the Strategist's) fences everything; the fence is idempotent, so the two compose.
+        # OFF by default: a prompt is a contract and the tests pinning these strings construct the
+        # tool bare. `agents/factory.py` threads `Settings.evidence_envelope`.
+        self.envelope = bool(envelope)
 
     def specs(self) -> list[dict]:
         return [fn_spec(
@@ -48,7 +59,14 @@ class LiteratureTools:
             return f"(unknown tool: {name})"
         if not self.enabled:
             return "(literature search disabled — enable literature_search to use arXiv grounding)"
-        query = str((args or {}).get("query", "")).strip()
+        # Every answer past the two engine-authored refusals above goes through the envelope —
+        # including the "(unavailable: …)" string, whose `{e}` can carry a server's own response text.
+        return self._deliver(self._search(str((args or {}).get("query", "")).strip()))
+
+    def _deliver(self, text: str) -> str:
+        return fence_untrusted(text, EVIDENCE_LABEL) if self.envelope else text
+
+    def _search(self, query: str) -> str:
         if not query:
             return "(no query)"
         try:

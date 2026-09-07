@@ -164,8 +164,15 @@ class MemoryTools:
 
     def execute(self, name: str, args: dict) -> str:
         # ToolProvider contract: a malformed call or damaged store must never discard an agent phase.
+        self._last_rows: list[dict] = []
         try:
-            return self._execute(name, args)
+            result = self._execute(name, args)
+            # THE MEMORY-READ RECORD (doc 52 row 17): the exact rendered result's digest, the rows
+            # it showed (by `lesson_id`) and an invocation id, through the engine-installed sink —
+            # a no-op outside a run, never a change to the result.
+            from looplab.core.phase_events import emit_memory_read
+            emit_memory_read(name, args, result, rows=self._last_rows)
+            return result
         except Exception as exc:  # noqa: BLE001
             # exception strings can contain credentialed URLs and private paths. The
             # tool result and log therefore expose only allow-listed operation/failure categories.
@@ -264,6 +271,9 @@ class MemoryTools:
                            if self._scope.bound else
                            "(no matching lessons in the bounded recent memory window)")
                 return _bounded_result(header, [message])
+            from looplab.engine.lesson_hygiene import lesson_id
+            self._last_rows = [{"id": lesson_id(row), "statement": _safe_text(row.get("statement"), 160)}
+                               for row in hits]
             lines = [self._lesson_line(row) for row in hits]
             return _bounded_result(header, lines)
 
@@ -290,6 +300,11 @@ class MemoryTools:
                        if self._scope.bound else
                        "(no matching notes in the bounded recent memory window)")
             return _bounded_result(header, [message])
+        import hashlib
+        self._last_rows = [
+            {"id": "note-" + hashlib.sha256(str(row.get("note")).encode("utf-8")).hexdigest()[:24],
+             "statement": _safe_text(row.get("note"), 160)}
+            for row in matched]
         lines = [
             f"UNTRUSTED_TASK={_safe_text(row.get('task_id'), _TASK_ID_CHARS)!r}; "
             f"UNTRUSTED_MEMORY_NOTE={_safe_text(row.get('note'), _NOTE_CHARS)!r}"

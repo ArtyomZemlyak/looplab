@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from looplab.serve.assistant import (  # noqa: E402
     SessionStore, expand_mentions, normalize_mode, run_turn, safe_assistant_failure,
     sanitize_assistant_message)
+from looplab.serve.principal import OWNER_PRINCIPAL
 from looplab.serve.server import make_app  # noqa: E402
 
 
@@ -299,7 +300,7 @@ def test_cross_run_reads_present_in_every_mode_when_memory_configured(tmp_path):
         "concept_card",
     }
     for mode in ("plan", "auto"):
-        tools = build_tools(tmp_path, mode=mode, settings=settings)
+        tools = build_tools(tmp_path, mode=mode, settings=settings, principal=OWNER_PRINCIPAL)
         provider = next(p for p in tools.providers if type(p).__name__ == "CrossRunTools")
         assert {spec["function"]["name"] for spec in provider.specs()} == expected
 
@@ -338,12 +339,12 @@ def test_concept_governance_tools_wired_read_in_plan_edit_in_mutating(tmp_path):
 
     settings = SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=True)
     mutation_names = {"concept_merge", "concept_purge", "concept_split", "concept_edit_clear"}
-    auto = build_tools(tmp_path, mode="auto", settings=settings)
+    auto = build_tools(tmp_path, mode="auto", settings=settings, principal=OWNER_PRINCIPAL)
     auto_provider = next(p for p in auto.providers if type(p).__name__ == "ConceptGovernanceTools")
     assert {s["function"]["name"] for s in auto_provider.specs()} == {
         "concept_taxonomy", *mutation_names,
     }
-    plan = build_tools(tmp_path, mode="plan", settings=settings)
+    plan = build_tools(tmp_path, mode="plan", settings=settings, principal=OWNER_PRINCIPAL)
     plan_provider = next(p for p in plan.providers if type(p).__name__ == "ConceptGovernanceTools")
     assert {s["function"]["name"] for s in plan_provider.specs()} == {"concept_taxonomy"}
     none = build_tools(
@@ -365,7 +366,7 @@ def test_cross_run_flag_keeps_assistant_prompt_in_sync_with_portfolio_tools(tmp_
         client = _FakeChatClient([_final("done")])
         result = run_turn(
             client, tmp_path, [], "inspect the portfolio", mode,
-            settings=enabled, _subagent=True,
+            settings=enabled, _subagent=True, principal=OWNER_PRINCIPAL,
         )
         assert result["ok"]
         prompt = client.turns[0][0]["content"]

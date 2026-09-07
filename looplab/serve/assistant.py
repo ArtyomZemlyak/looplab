@@ -32,6 +32,7 @@ from looplab.core.atomicio import atomic_write_text, best_effort_fsync, strict_a
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.events.eventstore import iter_jsonl
 from looplab.serve.llm_context import ASSISTANT_EVIDENCE_GUARD, BOSS_EVIDENCE_LABEL
+from looplab.serve.principal import portfolio_access
 
 # Permission modes mirror Claude Code. `plan` is the safe read-only default; mutating modes are
 # enforced by the write/shell/git providers. Re-export the shared source of truth so session and
@@ -1618,7 +1619,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
                 command_service=None, command_key_namespace: str = "",
                 mutation_journal_path=None, mutation_recovery: bool = False, watches=None,
-                work_cycle: bool = False):
+                work_cycle: bool = False, principal=None):
     """The assistant's toolset. Read tools (filesystem scout, machine-run introspection, and — when
     memory_dir + cross_run_read_tools are on — the §22 cross-run concept/claims/atlas reads) are present
     in EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
@@ -1651,17 +1652,18 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     providers = [RepoScoutTools(roots), MachineRunsTools(run_root, alive_fn=alive_fn)]
     mdir = getattr(settings, "memory_dir", None) if settings else None
-    cross_run_enabled = bool(mdir and getattr(settings, "cross_run_read_tools", False))
     # Cross-run concept/claims/atlas READS — the same §22 portfolio knowledge the Researcher/Strategist
     # can ASK for mid-loop, now reachable by the owner assistant too (the operator asked for reading
     # tools). PORTFOLIO-WIDE: run_turn binds no single RunState, so the provider stays unbound (see its
     # bind_state docstring) and answers across the whole portfolio. Pure read, no mutation → present in
-    # EVERY mode, incl. read-only plan and recovery; gated on the same memory_dir + flag as the roles.
-    # CODEX AGENT: Multi-user security gap: ``cross_run_enabled`` is one process-wide feature flag, not
-    # a principal/tenant authorization decision. Any caller that can reach the owner Assistant receives
-    # the same unbound portfolio, including recovery and plan turns. Before shared deployment, pass an
-    # authenticated visibility predicate into every provider read and redact before model/tool exposure.
-    if cross_run_enabled:
+    # EVERY mode, incl. read-only plan and recovery; gated on the same memory_dir + flag as the roles —
+    # AND on the PRINCIPAL (doc 52 row 29): `portfolio_access` is the one decision, and it is a
+    # property of the party this turn runs as (`serve/principal.py`), never of the process. Until
+    # 2026-09-06 this was one boolean computed from Settings alone, so any caller that reached the
+    # owner Assistant received the same unbound portfolio; a review principal, or a caller that named
+    # no principal at all, now gets none of these providers whatever the flag says.
+    portfolio_ok, _portfolio_why = portfolio_access(principal, settings)
+    if portfolio_ok:
         from looplab.tools.cross_run_tools import CrossRunTools
         providers.append(CrossRunTools(mdir, role="researcher"))
     if mutation_recovery:
@@ -1677,7 +1679,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         return CompositeTools(providers)
 
     providers.append(RunLauncherTools())
-    if cross_run_enabled:
+    if portfolio_ok:
         # PART V §22.4 (Phase 2): edit the shared cross-run concept TAXONOMY (merge/rename/purge/split)
         # via the append-only, reversible governance ledger. The provider itself gates: it contributes
         # only the read `concept_taxonomy` in plan mode and adds the mutation verbs (mode+approver gated,
@@ -1726,6 +1728,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         providers.append(WatchTools(watches, run_root=run_root))
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,
+                                       principal=principal,
                                        cancel_check=cancel_check))
     if mcp and mode != "plan":
         # MCP tools are arbitrary external side effects: never in read-only plan mode (which also keeps
@@ -1941,6 +1944,7 @@ def cutoff_notice(budget: dict) -> str:
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
              approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,
+             principal=None,
              on_todos: Optional[Callable] = None, reply_sink: Optional[Callable] = None,
              on_text: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
              command_service=None, command_key_namespace: str = "",
@@ -1962,13 +1966,14 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                         command_key_namespace=command_key_namespace,
                         mutation_journal_path=mutation_journal_path,
                         mutation_recovery=mutation_recovery, watches=watches,
-                        work_cycle=work_cycle)
+                        work_cycle=work_cycle, principal=principal)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
-    # Mirror build_tools' gating so the prompt only names tools that are actually registered.
-    _mdir = getattr(settings, "memory_dir", None) if settings else None
-    _has_cross_run = bool(_mdir and getattr(settings, "cross_run_read_tools", False))
+    # Mirror build_tools' gating so the prompt only names tools that are actually registered — the
+    # SAME decision (`portfolio_access`), with the same principal, so the prompt and the toolset
+    # cannot disagree about whether this party may read the portfolio.
+    _has_cross_run, _ = portfolio_access(principal, settings)
     _has_taxonomy = _has_cross_run
     convo = [{"role": "system", "content": system_prompt(
         mode, knowledge_dir=(getattr(settings, "knowledge_dir", None) if settings else None),
@@ -2409,11 +2414,12 @@ class SubagentTools:
     inner turn is built with subagents=False."""
 
     def __init__(self, client, run_root, alive_fn: Optional[Callable] = None, settings=None,
-                 cancel_check: Optional[Callable] = None):
+                 cancel_check: Optional[Callable] = None, principal=None):
         self.client = client
         self.run_root = run_root
         self.alive_fn = alive_fn
         self.settings = settings
+        self.principal = principal        # the inner turn runs as the SAME party, never wider
         self.cancel_check = cancel_check   # forwarded so Stop interrupts a long-running subagent too
 
     def bind_state(self, state=None, parent=None) -> None:
@@ -2449,5 +2455,5 @@ class SubagentTools:
         # letting it run its full time-budget while the outer UI is already dead.
         res = run_turn(self.client, self.run_root, [], prompt, "plan",
                        alive_fn=self.alive_fn, settings=self.settings, _subagent=True,
-                       cancel_check=self.cancel_check)
+                       cancel_check=self.cancel_check, principal=self.principal)
         return res.get("reply") or "(subagent returned nothing)"

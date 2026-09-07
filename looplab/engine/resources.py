@@ -22,7 +22,7 @@ import anyio
 
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
-from looplab.runtime import landlock, read_allowlist, read_fence
+from looplab.runtime import landlock, read_allowlist, read_fence, seccomp
 from looplab.runtime.sandbox import GpuPinUnenforceable, is_secret_env
 
 
@@ -761,10 +761,14 @@ class ResourceSchedulingMixin:
     def _read_fence_dir(self) -> Optional[str]:
         """Materialize this run's source-tree READ FENCE once and return its PYTHONPATH directory.
 
-        `None` — and therefore no marker in the child env at all — whenever the fence would be a
-        no-op: a non-repo task (no editable source exists, so there is nothing a node could read that
-        it does not own), `read_fence="off"`, or every declared root dropped as too broad. That is
-        what keeps `looplab run --backend toy` and every offline test byte-identical.
+        `None` — and therefore no marker in the child env at all — only under `read_fence="off"`
+        or on an engine with no run directory (the scheduler-only test doubles). Until 2026-09-06
+        a non-repo task got no fence either ("no editable source exists, so there is nothing a
+        node could read that it does not own"), which was true of READS and false of WRITES: the
+        run RECORD is under every task's reach, and a toy or dataset node's `solution.py` is
+        model-written code with the same `open('../../events.jsonl', 'a')` as a repo stage. So
+        every run is fenced now; a run with no editable root gets a fence with no source roots
+        and the record rule alone.
 
         Installed lazily rather than at `Engine.__init__` so a run that never launches an eval never
         writes the directory, and memoized on the instance because `_resource_eval_env` is called
@@ -775,10 +779,10 @@ class ResourceSchedulingMixin:
             return cached
         policy = str(getattr(self, "_read_fence", "deny") or "deny")
         spec = getattr(self, "_repo_spec", None)
-        # Decide "is there anything to fence" BEFORE reading `run_dir`: the no-fence answer must not
-        # depend on any engine state beyond the repo spec, so a non-repo run resolves to None on an
-        # engine that has nothing else wired (which is also what the scheduler-only test doubles are).
-        if policy == "off" or not (spec or {}).get("editables"):
+        run_dir = getattr(self, "run_dir", None)
+        # The no-fence answer depends on the policy and on there being a run directory to guard,
+        # nothing else — an engine with neither (the scheduler-only test doubles) resolves to None.
+        if policy == "off" or run_dir is None:
             self._read_fence_cache = None
             return None
         # THE ALLOW ENTRY IS NOT THE HOLE, and that was measured rather than argued (2026-08-25).
@@ -798,9 +802,9 @@ class ResourceSchedulingMixin:
         # This entry stays for the reason it was always there: a run may legitimately be `--out`-ed
         # inside the repo it edits, and then its own outputs must stay readable to its own eval.
         roots, allow, dropped, swallowed = read_fence.fence_inputs(
-            spec, allow=[str(self.run_dir)])
+            spec, allow=[str(run_dir)])
         try:
-            resolved = read_fence.install(self.run_dir, roots=roots, allow=allow, policy=policy)
+            resolved = read_fence.install(run_dir, roots=roots, allow=allow, policy=policy)
         except OSError as exc:
             # An unwritable run dir must not take down the run: the fence is a safety net over an
             # authoring error, not a correctness precondition of the eval. Loud, once, then unfenced.
@@ -869,13 +873,19 @@ class ResourceSchedulingMixin:
         run that has no fence. So the dict is materialized only when there is a fence to carry."""
         fence = self._read_fence_dir()
         allow = self._landlock_allow()
-        if not fence and not allow:
+        # The SYSCALL policy (`runtime/seccomp.py`, doc 52 row 28), a name rather than a derived
+        # list: `off` — the default — stamps nothing, so an unfenced launch's env stays byte-identical.
+        policy = str(getattr(self, "_syscall_fence", "off") or "off")
+        syscall = policy if policy in seccomp.POLICIES and policy != "off" else None
+        if not fence and not allow and not syscall:
             return env
         out = dict(env or {})
         if fence:
             out[read_fence.FENCE_DIR_ENV] = fence
         if allow:
             out[landlock.LANDLOCK_ENV] = allow
+        if syscall:
+            out[seccomp.SECCOMP_ENV] = syscall
         return out
 
     def _landlock_allow(self) -> Optional[str]:

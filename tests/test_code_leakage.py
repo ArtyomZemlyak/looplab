@@ -259,3 +259,100 @@ def test_line_wrapping_cannot_hide_a_test_monitor():
     ]
     for source in clean:
         assert code_leakage_scan(source)["leak"] is False, source
+
+
+# ------------------------------------------------------------------ multi-test selection (doc 52 row 22)
+# LeakageDetector 2.0's third class: nothing is FITTED on the test split, it is evaluated N times and
+# the answer chosen. Every positive below is the shape an agent actually writes; every negative is
+# the intended protocol (select on VALIDATION, evaluate on test once) or a loop that touches the
+# test split without choosing on it. Both halves are required, so each negative drops exactly one.
+
+def _multi(code):
+    return [f for f in code_leakage_scan(code)["flags"] if f["signal"] == "multi_test"]
+
+
+def test_a_grid_loop_scored_on_the_test_split_and_kept_by_best_is_multi_test():
+    code = ("best_acc, best_model = 0, None\n"
+            "for C in [0.1, 1, 10]:\n"
+            "    model = LogisticRegression(C=C).fit(X_train, y_train)\n"
+            "    acc = accuracy_score(y_test, model.predict(X_test))\n"
+            "    if acc > best_acc:\n"
+            "        best_acc, best_model = acc, model\n")
+    flags = _multi(code)
+    assert len(flags) == 1 and flags[0]["line"] == 2, flags
+    assert flags[0]["evaluations"] == 1, "the nested predict is part of ONE evaluation, not a second"
+    assert flags[0]["selection"] == "acc > best_acc"
+
+
+def test_scores_collected_then_maxed_is_multi_test():
+    code = ("scores = []\n"
+            "for depth in range(2, 10):\n"
+            "    clf = DecisionTreeClassifier(max_depth=depth).fit(X_train, y_train)\n"
+            "    scores.append(clf.score(X_test, y_test))\n"
+            "best_depth = 2 + scores.index(max(scores))\n")
+    assert [f["selection"] for f in _multi(code)] == ["max(scores)"]
+
+
+def test_a_checkpoint_loop_scored_into_a_dict_and_chosen_is_multi_test():
+    code = ("results = {}\n"
+            "for ckpt in sorted(glob.glob('ckpt-*')):\n"
+            "    results[ckpt] = score_checkpoint(ckpt, X_test, y_test)\n"
+            "best_ckpt = max(results, key=results.get)\n")
+    assert [f["selection"] for f in _multi(code)] == ["max(results, key=results.get)"]
+
+
+def test_three_models_unrolled_and_maxed_is_multi_test():
+    code = ("a1 = accuracy_score(y_test, m1.predict(X_test))\n"
+            "a2 = accuracy_score(y_test, m2.predict(X_test))\n"
+            "a3 = accuracy_score(y_test, m3.predict(X_test))\n"
+            "winner = max(a1, a2, a3)\n")
+    flags = _multi(code)
+    assert len(flags) == 1 and flags[0]["evaluations"] == 3 and flags[0]["line"] == 1
+
+
+def test_selecting_on_validation_and_evaluating_the_test_split_once_is_the_intended_protocol():
+    code = ("best_acc = 0\n"
+            "for C in [0.1, 1, 10]:\n"
+            "    model = LogisticRegression(C=C).fit(X_train, y_train)\n"
+            "    acc = accuracy_score(y_val, model.predict(X_val))\n"
+            "    if acc > best_acc:\n"
+            "        best_acc, best_model = acc, model\n"
+            "print(accuracy_score(y_test, best_model.predict(X_test)))\n")
+    assert _multi(code) == []
+
+
+def test_a_test_evaluation_that_is_only_logged_is_not_selection():
+    code = ("for epoch in range(5):\n"
+            "    train(model)\n"
+            "    print('test acc', accuracy_score(y_test, model.predict(X_test)))\n")
+    assert _multi(code) == []
+
+
+def test_bagging_test_predictions_and_a_cv_grid_are_not_multi_test():
+    bagging = ("preds = []\n"
+               "for seed in range(5):\n"
+               "    m = RandomForestClassifier(random_state=seed).fit(X_train, y_train)\n"
+               "    preds.append(m.predict_proba(X_test))\n"
+               "final = np.mean(preds, axis=0)\n")
+    assert _multi(bagging) == [], "averaging test predictions chooses nothing"
+    cv = ("scores = []\n"
+          "for C in [0.1, 1]:\n"
+          "    scores.append(cross_val_score(LogisticRegression(C=C), X, y, cv=5).mean())\n"
+          "best_C = [0.1, 1][int(np.argmax(scores))]\n")
+    assert _multi(cv) == [], "cross-validation scores no test split"
+    single = ("X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)\n"
+              "model.fit(X_train, y_train)\nprint(model.score(X_test, y_test))\n")
+    assert _multi(single) == [], "one evaluation is the protocol; `test_size` is not a test split"
+
+
+def test_the_concatenated_scan_surface_is_scanned_part_by_part():
+    """`_trust_scan_surface` joins every node file under `# --- <name> ---` markers; two modules
+    with their own `from __future__` imports do not parse as one, and a SyntaxError must not turn
+    the whole scan blind (or a finding in a later file invisible)."""
+    surface = ("from __future__ import annotations\nx = 1\n\n\n# --- helper.py ---\n"
+               "from __future__ import annotations\n"
+               "scores = []\nfor d in range(3):\n    scores.append(clf.score(X_test, y_test))\n"
+               "best = max(scores)\n")
+    flags = _multi(surface)
+    assert len(flags) == 1 and flags[0]["line"] == 8, flags
+    assert code_leakage_scan("def broken(:\n")["flags"] == [], "an unparseable surface is unscanned, never a finding"

@@ -142,14 +142,60 @@ def test_a_pointed_at_cache_is_still_written(tmp_path, monkeypatch, caplog):
 # re-deriving from pristine was not available.
 
 
-def _patched_copy(tmp_path, *, drop_gate=False):
-    """A copy of the arena's deployed file, optionally with the write gate removed."""
-    import shutil
+# The upstream file the patcher expects, reduced to the two anchors it edits and just enough
+# scaffolding to be valid Python. It is NOT a copy of AlgoTune's: the anchors come from the
+# patcher's own constants, so this proves the patcher's LOGIC — staleness detection, idempotence —
+# and deliberately proves nothing about whether those anchors still match upstream. That second
+# question is `test_it_generates_the_same_ruler_the_arena_is_running`'s, which reads the real
+# deployed file and skips where there is none.
+#
+# Copying the arena's file was how the two below got their input, and it made them fail on every box
+# without an arena (`FileNotFoundError` out of `shutil.copy2`) — for a reason neither is about,
+# while the one test that IS about the arena was correctly guarded three lines above them.
+_UPSTREAM = '''"""Synthetic stand-in for AlgoTuner.utils.evaluator.baseline_manager."""
+import logging
+import os
+
+
+class BaselineManager:
+    def get_baseline_times(self, subset, force_regenerate=False, test_mode=False,
+                           max_samples=None):
+{anchor}
+                return self._cache[subset]
+            for _attempt in range(3):
+                baseline_times, actual_count = self._measure(subset)
+                if actual_count == self._expected:
+{write_anchor}
+                    break
+            return self._cache[subset]
+'''
+
+
+def _upstream(tmp_path):
+    """A pristine tree the patcher can patch, built from the patcher's own anchor constants."""
+    sys.path.insert(0, str(REPO / "benchmarks" / "algotune"))
+    try:
+        import patch_baseline_cache as pbc
+    finally:
+        sys.path.pop(0)
     root = tmp_path / "AlgoTune"
     (root / "AlgoTuner" / "utils" / "evaluator").mkdir(parents=True)
-    src = DEPLOYED
     dst = root / "AlgoTuner" / "utils" / "evaluator" / "baseline_manager.py"
-    shutil.copy2(src, dst)
+    dst.write_text(_UPSTREAM.format(anchor=pbc.ANCHOR, write_anchor=pbc.WRITE_ANCHOR),
+                   encoding="utf-8")
+    import ast
+    ast.parse(dst.read_text())      # the premise: an UNPATCHED file that is already valid Python
+    return root, dst
+
+
+def _patched_copy(tmp_path, *, drop_gate=False):
+    """A patched tree, optionally with the write gate removed to stand for a stale one."""
+    root, dst = _upstream(tmp_path)
+    first = _run_patcher(root, tmp_path / "seed-cache")
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "LOOPLAB baseline cache NOT WRITTEN" in dst.read_text(), (
+        "the premise failed: the patcher did not deliver a current file to start from\n"
+        + first.stdout + first.stderr)
     if drop_gate:
         body = dst.read_text()
         i = body.find("if _ll_key and not os.environ.get('ALGOTUNE_BASELINE_CACHE_DIR')")

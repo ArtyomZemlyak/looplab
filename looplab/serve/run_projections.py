@@ -19,8 +19,9 @@ import stat
 from looplab.core.atomicio import file_identity
 from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
                                        load_run_deletion_fence, run_deletion_snapshot_token)
-from looplab.engine.champion_caveats import champion_metric_caveats
+from looplab.engine.champion_caveats import champion_metric_caveats, mislead_gap
 from looplab.engine.comparability import record_of
+from looplab.events.trajectory import running_best
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
 from looplab.events.replay import fold
@@ -98,6 +99,9 @@ def run_summaries(srv, only=None) -> list:
             generation = run_generation_token(events)
             summary = {
                 "run_id": rd.name, "task_id": st.task_id, "goal": st.goal,
+                # The incarnation, so the concept shelf can inherit a memory row's concepts from
+                # the run that WROTE it rather than from whatever now bears its name (doc 52 row 4).
+                "run_uid": st.run_uid,
                 # A run id is reusable after reset/delete.  Portfolio consumers must include the
                 # durable event-log generation in their resource identity or an in-flight detail
                 # read for generation A can be joined to generation B's unchanged run id.
@@ -131,6 +135,20 @@ def run_summaries(srv, only=None) -> list:
                 # never that a detector ran (`reward_hack_detect` is off by default). Cached WITH the
                 # fold, so it costs one derivation per changed log rather than one per poll.
                 "best_metric_caveats": champion_metric_caveats(st),
+                # HOW MUCH of that number the intended protocol supports (doc 52 row 22): the
+                # Protocol Validity pair — the champion beside the best node the record says nothing
+                # against, and their gap in the run's direction — from the same two predicates the
+                # caveats use (`engine/champion_caveats.py::mislead_gap`). `None` without a champion;
+                # a clean run reads `gap: 0` with `excluded: 0`. Additive; a legacy client ignores it.
+                "mislead_gap": mislead_gap(st),
+                # THE RUN'S METRIC TRAJECTORY as change points (doc 52 row 26): the running best per
+                # evaluated experiment, `[index, best, node_id]` at every improvement plus the final
+                # index, bounded by `events/trajectory.py::TRAJECTORY_CAP`. This is the series the
+                # cross-run overlay (`ui/src/crossRunRank.js::trajectoryOverlay`) was waiting for: it
+                # rides on the row rather than costing one state fold per run on the request thread,
+                # and it is cached WITH the fold, so a poll pays nothing for it. `None` when no
+                # feasible measured node exists. Additive; a legacy client ignores it.
+                "trajectory": running_best(st),
                 # WHAT THIS NUMBER MAY BE RANKED AGAINST (`engine/comparability.py`). The row's own
                 # `task_id` + `direction` is what every cross-run surface currently partitions on,
                 # and `ui/src/crossRunRank.js` says in its own words why that is not enough: "a

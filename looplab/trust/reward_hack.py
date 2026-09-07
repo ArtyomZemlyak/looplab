@@ -6,7 +6,10 @@ Defense-in-depth: it never changes a node's metric (that's the host-side scoring
 ``trust_gate=audit`` it only surfaces a `reward_hack_suspected` event; under ``gate`` or ``block``,
 high-precision reward/leakage signals can exclude selection/breeding or mark the node infeasible.
 Pure function of the node's code + metric + the protected-name set, so it's deterministic and
-adds nothing to the event log on a clean node. OFF by default (`reward_hack_detect=False`).
+adds nothing to the event log on a clean node. ON by default since 2026-08-23
+(`Settings.reward_hack_detect=True`); a `config.snapshot.json` written before that keeps the
+historical OFF through `core/config.py::LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, so a resumed older run
+gains no gate its own first half never had.
 """
 from __future__ import annotations
 

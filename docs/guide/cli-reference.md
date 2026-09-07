@@ -18,6 +18,8 @@ looplab speculation-gate Validate paired Card-speculation evidence and publish t
 looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
 looplab tokens          TOKEN breakdown by phase, reconciled against the durable llm_usage ledger
 looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
+looplab edit-types      What KIND of edit each experiment made, which kinds paid, and how much was already tried once (doc 52 row 31)
+looplab proxy-accuracy  Was the proxy that KILLED candidates any good? Pairwise ranking accuracy against the metrics that came back (doc 52 row 31)
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
@@ -30,6 +32,14 @@ looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cros
 looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
 looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
+looplab prior-citations Did the cross-run priors this run was shown reach its proposals? (doc 52 row 17)
+looplab memory-orphans  Report — and only with --apply, remove — cross-run memory rows whose run no longer exists
+looplab landlock-check  Print the KERNEL read allow-list this run would grant, and prove the ruleset applies
+looplab reap-service-files Report — and only with --apply, remove — the service files a FINISHED destructive operation left behind
+looplab mlebench-extras The two official MLE-bench extras over ONE finished run: the paid rule-violation judge + the Dolos plagiarism pass, recorded to mlebench_extras.json (doc 52 row 22)
+looplab bait-materialize Write the three BAIT tasks (a planted, rule-compliant shortcut each) with their reference intended/shortcut scores (doc 52 row 22)
+looplab bait-audit      Score every evaluated node of a bait-task run: the deterministic fingerprint stage + the paid two-stage transcript judge, recorded to bait_audit.json (doc 52 row 22)
+looplab export-bundle   Package ONE run for a reviewer as an RO-Crate: event log + trace, launch snapshots, the champion's code off the fold, every memo's claims, the summary row and the audit sidecars, each with size + SHA-256 (doc 52 row 23)
 looplab concept-merge   Append a concept alias/purge overlay (PART IV CR1a)
 looplab concept-split   Operator split one coarse concept into finer ones, re-tagged per run (PART IV §21.20.13)
 looplab concept-steward AGENTIC taxonomy curator: proposal-only merge/split/purge review (PART IV §22.4)
@@ -50,6 +60,7 @@ looplab ui              Serve the live React UI (needs the [ui] extra)
 looplab tui             Terminal control plane: start/steer runs by chat (no browser)
 looplab export-mlflow   Log the champion to MLflow
 looplab export-notebook Export the champion as a runnable .ipynb
+looplab export-sft      This run's model turns as execution-grounded SFT rows, each carrying its node's outcome (doc 52 row 33)
 looplab harden          Grow the reward-hack exploit ruleset (hacker–fixer–solver)
 looplab tensorboard     Serve TensorBoard over per-node training logs
 looplab build-ui        Build the React UI bundle (ui/dist)
@@ -147,9 +158,9 @@ A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys)
 **Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task. This is
 the CLI planning surface; the Web **New run** flow uses the owner Assistant's `propose_run` tool and
 the TUI uses `/api/genesis`. They share task-adapter validation and backend-default authority, but
-not one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token; TUI posts
-to `/api/start`, whose server validates before spawn but issues no reviewed receipt; CLI validates
-directly. The CLI announces its choice
+not one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token; the TUI
+asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
+`/api/start` to the token it returns; CLI validates directly. The CLI announces its choice
 (`Genesis -> kind=…`) before launching, and:
 
 - picks the `kind` from your words — *or* stays within the kind you **pin** with `--kind` (it doesn't
@@ -594,7 +605,8 @@ The engine builds this file once, at the end of `finalize_run`. So a run that is
 that crashed — has none at all, and until 2026-08-14 a published one could not say whether it covered
 the whole log: a control event appended after the run finished left it silently behind. Two things
 changed. The projection now carries a **watermark** (schema version, last `seq` folded, event count,
-and a digest of the `(seq, type)` prefix, written in the same transaction as the rows), and this
+and a digest of the ordered `(seq, type, ts, data)` prefix — the payload too, so a row edited in
+place reads as `stale` — written in the same transaction as the rows), and this
 command makes the build reachable at any moment.
 
 `--check` prints `status=current|stale|unknown` and exits **1** unless the answer is `current`. It
@@ -749,6 +761,13 @@ reconciliation vs 27.9 min wall clock:
   remainder — work with no span at all, engine bookkeeping, provider waits, and the idle gap while a
   stopped run waits for someone to finalize it. It is reported rather than hidden: a residual you
   can see is a residual you can go and instrument.
+* **Contained failures** — printed only when a span carries one. `core/containment.py::contain`
+  stamps the span it ran under with a `contained` count and a `contained` event (the reason and the
+  exception type), so a run whose watchdog ticks or agentic calls degraded to their fallbacks says
+  so here — `contained failures: N across M span(s)`, then the top reasons — instead of reading as a
+  clean run (doc 52 row 14). It is an honesty count, not an error count: the handler's fallback was
+  the handler's, and nothing about the run's metrics moved. A run with no stamp keeps the report
+  above byte for byte, including every pre-2026-09-06 run on disk.
 
 ### tokens
 
@@ -1041,6 +1060,136 @@ itself — and this command prints both rather than letting one stand in for the
 
 **A row written before 2026-08-17 carries neither field** and is counted as *unkeyed*, not as
 evidence either way; a run from before that date reports `unrecorded=N` and no duplication.
+
+---
+
+## `edit-types`
+
+Read-only, no model. What KIND of edit each experiment made, which kinds paid, and how much of what
+this run "added" it had already deleted once.
+
+```bash
+looplab edit-types RUN_DIR
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (folds its `events.jsonl`; reads the committed `files` of each node and its FIRST parent) |
+
+The classification is deterministic — one regex pass per changed line, no model — over the closed
+vocabulary `looplab/tools/node_diff.py::EDIT_TYPES`: `comment`, `import`, `definition`,
+`control_flow`, `hyperparameter`, `data_io`, `logging`, `call_argument`, `whitespace`, `other`. A
+line is asked those questions in that order and takes the first that answers yes, so
+`print(f"loss={loss}")` is `logging` rather than `call_argument` and `lr = 3e-4  # tuned` is a
+hyperparameter edit rather than a comment.
+
+The shape of the output (illustrative):
+
+```
+edit types over 12 parent->child pair(s), 11 with both metrics (direction=min)
+type              +lines  -lines  pairs  improved    mean gain
+import                14       2      6       2/6   +0.0004120
+hyperparameter        41      33     10      6/10   +0.0031400
+data_io               12       9      4       1/4   -0.0002210
+control_flow          27      15      7       3/7   +0.0009900
+  a pair is counted under EVERY type its diff touches; the gain is the pair's, not the type's share
+  of it — this ranks kinds, it does not attribute a metric to one.
+
+re-introduced lines: 34 of 118 substantive added lines (29%) had already been deleted earlier in the
+same lineage
+  node 9: 12/31 (39%), lineage depth 5
+      train.py: scheduler = "cosine"  (deleted at node 4 -> node 6)
+```
+
+**Why this exists.** EvoTrace classified committed edits across 121 agent runs and found the gains
+concentrated in three of nine types, while ~30 % of ADDED lines were lines the same lineage had
+already deleted — a share that ROSE over the run in 118 of the 121. LoopLab shipped the diff
+(`diff_nodes`) and neither fact, so nothing could tell a run that is exploring from one that is
+cycling. The same classification is a section of the agent-facing tool
+(`diff_nodes(section="edits")`), so the agent that is about to re-propose a deletion is told before
+it does.
+
+**What it will not do.** A pair whose file set is missing from the record is NOT classified and is
+counted separately — an unreadable record is not a pair that changed nothing. The lineage is the
+FIRST-parent chain: a line deleted in a sibling's branch is not this node's history.
+
+---
+
+## `proxy-accuracy`
+
+Read-only, no model. Was the proxy that KILLED candidates in this run any good?
+
+```bash
+looplab proxy-accuracy RUN_DIR
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (folds its `events.jsonl`; reads `proxy_scored` against the metrics that came back) |
+
+`search/proxy.py::pairwise_accuracy` counts, over every pair of scored-and-evaluated nodes whose
+realized metrics differ, how often the proxy ordered them the way the evaluation later did — the
+measure the field quotes its own pre-execution judges in (predict-before-execute reports 61.5 %
+pairwise; Rehearse measured its judge decaying 82.8 → 56.9 % late in a loop *while remaining willing
+to decide*). A pair the proxy scored EQUAL is reported separately: that is no ordering, not a wrong
+one.
+
+```
+proxy scored 14 candidate(s); 11 of them were evaluated and can be checked; 3 were KILLED
+(`proxy_skipped`), 2 node(s) carry no proxy score
+pairwise accuracy: 63.6% (35 of 55 ordered pairs)
+  measured over the candidates the proxy LET THROUGH: a killed node has no metric, so the kill's
+  own error rate is not in this number.
+```
+
+**The number is biased optimistic, and the report says so.** A killed node has no realized metric —
+that is what killing means — so it can never enter a pair, and what is measured is the ordering
+among the candidates the proxy already approved. The only counterfactual a run can hold is a killed
+node that was evaluated anyway (a re-run, an injection), and the report counts those separately.
+
+`proxy_kill_fraction=0` (the default) turns the kill off and keeps the score as an audit signal;
+this command is what that decision should be made on.
+
+---
+
+## `export-sft`
+
+Read-only, no model. This run's model turns as **execution-grounded** SFT rows.
+
+```bash
+looplab export-sft RUN_DIR [--out sft.jsonl] [--only-successful] [--op implement]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (reads its `spans.jsonl` and folds its `events.jsonl` for the outcomes) |
+| `--out` | `<run>/sft.jsonl` | Where to write the corpus |
+| `--only-successful` | off | Keep only turns whose node produced a usable metric AND stayed feasible |
+| `--op` | *(all)* | Keep only one operation (`propose`, `implement`, …) |
+
+One JSONL row per answered generation span:
+
+```json
+{"messages": [...], "completion": "...", "op": "implement", "model": "...", "phase": "build",
+ "run_id": "...", "task_id": "...", "direction": "min",
+ "outcome": {"node_id": 7, "metric": 0.2249, "status": "evaluated", "feasible": true, "error_reason": ""}}
+```
+
+**Why the outcome rides with every row.** Frontis-MA1 (39.39 → 60.61 %) and SandMLE (+20–67 %
+relative) train operators from exactly this corpus, and what makes it worth anything is the
+grounding: a turn is a training example only in company with what the node it belongs to actually
+produced. Without it, a corpus teaches an operator to sound like this run rather than to succeed
+at it.
+
+**What it refuses to pretend.** A generation with an input and no answer — a budget cut, a transport
+failure, a refusal — is not a row and is counted separately, because a corpus that keeps those
+teaches an operator to answer nothing. A turn whose input chain could not be reconstructed carries
+`input_partial: true` (the same stamp `traceview.hydrate_inputs` sets), so a short retained
+projection is never presented as a complete prompt. A run with tracing off exits 2 rather than
+writing an empty file.
+
+The text is the run's own trace projection: capture-time redaction and projection caps already
+applied. This copies that record; it re-reads no prompt from anywhere.
 
 ---
 
@@ -2051,8 +2200,9 @@ looplab landlock-check RUN_DIR [--no-probe]
 | `--probe / --no-probe` | `--probe` | Fork a child, apply the ruleset, and prove a read inside the allow-list succeeds while one outside it is refused. The fork is why the irreversible `restrict_self` cannot touch your shell. |
 
 What it prints, in order: the Landlock ABI this kernel offers; **the mounts the task declares**, each
-marked if it is not present on this box; the full allow-list (workdir, run dir, the `data:` /
-`references:` mount sources, the interpreter, the model cache, the machine tiers); and `added: N
+marked if it is not present on this box; the full allow-list (workdir readwrite, run dir READ — it is the run's record — plus its
+`.looplab-fence/` readwrite, the `data:` / `references:` mount sources, the interpreter, the model
+cache, the machine tiers); and `added: N
 skipped: M`. **A skipped rule is a DENIAL under an allow-list, never a no-op**, so any `skipped` is
 exit 1 and names the path that would be refused.
 
@@ -2073,6 +2223,19 @@ LOOPLAB_LANDLOCK=enforce looplab run …  # then ONE real eval, and check it com
 
 The evidence that justifies the flip is that eval, not this command — this only tells you the ruleset
 is well-formed, contains your declarations, and applies.
+
+### The syscall fence's own check
+
+The sibling kernel rung, [`Settings.syscall_fence`](configuration.md) (`runtime/seccomp.py`, doc 52
+row 28), is validated the same way but through its module rather than a `looplab` command:
+
+```bash
+python -m looplab.runtime.seccomp egress      # or: mutators
+```
+
+prints whether this box can install the filter (`available=yes|no: <reason>`) and, in a child under
+the policy, what `mkfifo`, a file write, `socket(AF_INET)`, `socket(AF_INET6)`, `socket(AF_UNIX)` and
+a pipe answer — `REFUSED errno 1` is the fence. Exit `2` when the rung is unavailable here.
 
 ## `tensorboard`
 

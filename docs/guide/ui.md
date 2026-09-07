@@ -1,7 +1,7 @@
 # Web UI
 
 LoopLab ships a live React control plane. It's a **separate read/control process** — it tails each
-run's `events.jsonl`, folds it with `replay.fold`, streams the state to the browser over SSE, serves
+run's `events.jsonl`, folds it with `replay.fold`, streams the state to the browser over SSE (a full frame per connection, then deltas keyed on the seq the tab last saw), serves
 the built React app, and submits interactive controls through the server-owned durable command
 lifecycle. It never changes the engine in-process and is never imported by it (ADR-18).
 
@@ -105,7 +105,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   UI-launched run never silently falls back to the offline toy developer; after **Validate**, the
   authoritative preview shows the effective backend before Start. The launch card is an inline editor for its surfaced run,
   task, budget, seed, policy, and backend fields. Editing invalidates the prior validation receipt;
-  validate the revised card before Start is enabled. Ask the Assistant for a new proposal when the
+  validate the revised card before Start is enabled. **`POST /api/validate` is that same funnel
+  asked as a question** (since 2026-09-06, doc 52 row 8): the body `/api/start` takes, answered with
+  a 200 verdict — `{ready: true, validation_token, preview, warnings}` or `{ready: false, status,
+  code, message, field_errors}` carrying the exact refusal `/api/start` would give — with nothing
+  written, no name reserved and no engine spawned. It exists so a client can gate its launch button
+  on the server's answer instead of on a copy of the rules: the TUI's `spec_ready` copy (a
+  hand-mirrored superset of the adapters' validators) was deleted for it, and the TUI now asks
+  `/api/validate` on every draft render and binds its launch to the returned token. Ask the Assistant for a new proposal when the
   needed field is not surfaced by the card. A backend set explicitly in Settings or `LOOPLAB_BACKEND`
   still wins. See **[Generating train & test code](generating-code.md)** for the full
   Genesis flow
@@ -714,6 +721,18 @@ nothing on the row says which artifact a number is about — the metric **subjec
 (docs 31/35). No normalized cross-group score, no relative bars, no single axis. If the displayed run has no
 non-blank `task_id`, the panel fails closed with no observations: multiple legacy rows with a missing identity
 are not members of one task.
+
+Under the table, **one running-best overlay per comparable group** (since 2026-09-06, doc 52 row 26):
+each run's running best per evaluated experiment as a **step** line — it holds its value until the
+experiment that beat it — drawn only inside the group, so the axis is that group's own objective and
+nothing is rescaled or normalized. The series rides on the run row (`trajectory`: change points
+`[experiment, best, node_id]`, at most 200 of them, derived from the same fold as the row and cached
+with it), so opening the panel folds nothing. The sentence under each chart counts what is **not**
+drawn and why: rows with no series (no feasible measured node, or a row served before the series
+existed), prefix-folded runs (not drawn for the reason they hold no rank), rows beyond the eight lines
+the chart can tell apart (in rank order), and rows drawn coarser because they held more improvements
+than the row carries. The legend carries each run's **group rank**, and the chart's data view lists
+every exact change point.
 
 ## Which memory panel am I looking at?
 

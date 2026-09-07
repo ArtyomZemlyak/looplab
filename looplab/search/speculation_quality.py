@@ -249,6 +249,22 @@ _CALIBRATION_RUN_STARTED_FIELDS = frozenset({
     "eval_parallel",
     "llm_parallel",
 }) | RUN_START_PINNED_FIELDS
+# A pin admitted to `RUN_START_PINNED_FIELDS` AFTER receipts had been issued, with the value every
+# earlier writer would have recorded had the key existed (the calibration profile spells it so).
+# The schema check admits the writer's key set with AND without these, and the per-field loop reads
+# the default for an absent one, so the change to the pin SET did not revoke every issued receipt
+# (six GPU runs each); the receipt BODY derivation is untouched. Nothing else is tolerated: any
+# other absent pinned field is still the non-writer refusal it always was, and a log that CARRIES
+# the key is compared against the config exactly like every other pin.
+_CALIBRATION_PINS_ADDED_AFTER_RECEIPTS: dict[str, object] = {"require_approval": False}
+
+
+def _calibration_run_started_schemas() -> tuple[frozenset, ...]:
+    """The key sets the shipped writer has emitted: the current one and each pre-pin generation."""
+    full = frozenset(_CALIBRATION_RUN_STARTED_FIELDS)
+    return (full, full - frozenset(_CALIBRATION_PINS_ADDED_AFTER_RECEIPTS))
+
+
 _CALIBRATION_CARD_ADDED_FIELDS = frozenset({
     "id",
     "statement",
@@ -626,8 +642,8 @@ def _validate_calibration_setup(
         raise ValueError("calibration evidence setup lifecycle differs from the Toy writer")
 
     started_data = started.data or {}
-    if not isinstance(started.data, dict) or set(started_data) != set(
-        _CALIBRATION_RUN_STARTED_FIELDS
+    if not isinstance(started.data, dict) or frozenset(started_data) not in (
+        _calibration_run_started_schemas()
     ):
         raise ValueError("calibration run_started has a non-writer payload schema")
     if (
@@ -637,9 +653,8 @@ def _validate_calibration_setup(
     ):
         raise ValueError("calibration run_started task authority differs from the task snapshot")
     for field in RUN_START_PINNED_FIELDS:
-        if field not in config or canonical_json(started_data.get(field)) != canonical_json(
-            config[field]
-        ):
+        recorded = started_data.get(field, _CALIBRATION_PINS_ADDED_AFTER_RECEIPTS.get(field))
+        if field not in config or canonical_json(recorded) != canonical_json(config[field]):
             raise ValueError(
                 f"calibration run_started {field} authority differs from config.snapshot.json"
             )
@@ -1275,7 +1290,7 @@ def _calibration_staged_proposal_ref(data: Mapping[str, Any], node) -> dict | No
         return None
     try:
         staged = idea.model_copy(deep=True, update={"hypothesis": None})
-    except Exception:
+    except Exception:  # noqa: BLE001 — a hypothesis that cannot be copied cannot be a calibration replicate
         return None
     rationale = staged.rationale.strip() if isinstance(staged.rationale, str) else ""
     statement = rationale or f"{staged.operator} experiment"
@@ -1565,16 +1580,16 @@ def speculation_environment_fingerprint() -> dict[str, Any]:
                 libs[package] = version(package)
             except PackageNotFoundError:
                 libs[package] = "<missing>"
-            except Exception:
+            except Exception:  # noqa: BLE001 — metadata that raises anything else is recorded as unavailable, never guessed
                 libs[package] = "<unavailable>"
         for package in optional_packages:
             try:
                 libs[package] = version(package)
             except PackageNotFoundError:
                 pass
-            except Exception:
+            except Exception:  # noqa: BLE001 — an optional package that cannot be inspected is simply absent from the fingerprint
                 pass
-    except Exception:
+    except Exception:  # noqa: BLE001 — the fingerprint is best-effort; an empty one fails every pair rather than matching vacuously
         pass
     if libs:
         env["libs"] = libs
@@ -2651,7 +2666,7 @@ def _scorer_fidelity_section() -> tuple[dict[str, Any], list[str]]:
         if not isinstance(normalized_scorer, dict):
             raise ValueError("scorer fidelity report is not a JSON object")
         scorer = normalized_scorer
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — the scorer failure is recorded as evidence in the receipt below
         scorer = {
             "schema": SCORER_FIDELITY_SCHEMA,
             "passed": False,
@@ -2699,7 +2714,7 @@ def _gpu_evidence_section(
     try:
         inventory_source = effective_gpu_inventory() if gpu_inventory is None else gpu_inventory
         inventory = _normalize_gpu_inventory(inventory_source)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — an uninventoriable box is recorded as no GPU evidence, which the gate refuses
         inventory = []
         errors.append(f"invalid GPU inventory: {_bounded_error(exc)}")
     if require_gpu and not inventory:
@@ -2719,7 +2734,7 @@ def _gate_identity_section(
     errors: list[str] = []
     try:
         implementation_digest = _implementation_digest(implementation_digest_fn)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — an unavailable implementation digest fails every pair rather than matching vacuously
         implementation_digest = ""
         errors.append(f"implementation digest unavailable: {_bounded_error(exc)}")
     try:
@@ -2727,7 +2742,7 @@ def _gate_identity_section(
             speculation_environment_fingerprint()
             if environment_fingerprint is None else environment_fingerprint
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — an unavailable environment digest fails every pair rather than matching vacuously
         environment_sha256 = ""
         errors.append(f"environment fingerprint unavailable: {_bounded_error(exc)}")
     return implementation_digest, environment_sha256, errors
@@ -2926,7 +2941,7 @@ def _evaluate_pair(
                 "min_pair_coverage_ratio"
             ]:
                 pair_errors.append("pair trusted coverage ratio is below 0.90")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — one pair's failure is one bounded error on the receipt, never a crash of the gate
         pair_errors.append(_bounded_error(exc))
 
     passed = not pair_errors
@@ -3340,7 +3355,7 @@ def speculation_gate_receipt_rejection(
             + ("; ".join(detail) if detail
                else "the stored body differs from the recomputation")
         )[:600]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — diagnostic only; the failure names itself below
         # The reason is diagnostic only, so an unexpected failure NAMES itself rather than being
         # flattened into the same silence every other rejection used to share.
         return None, f"receipt could not be revalidated: {type(exc).__name__}: {exc}"[:600]

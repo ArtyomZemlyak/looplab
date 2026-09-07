@@ -32,62 +32,11 @@ import pytest
 SNAPSHOT = Path(__file__).resolve().parents[1] / "benchmarks" / "snapshot.sh"
 
 
-def _git(cwd, *args):
-    return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
-                          cwd=cwd, check=True, capture_output=True, text=True)
-
-
-def _bench_root(tmp_path):
-    """A BENCH_ROOT shaped like the real one on the morning of the loss."""
-    # snapshot.sh refuses a destination whose store root carries no `.persistent-store-id`: an
-    # unmounted geesefs looks exactly like a writable empty directory, and a backup written there
-    # dies with the pod while exiting 0 (measured 2026-08-31 -- the 2026-08-29 loss in miniature).
-    # Every test here uses tmp_path as the store root, and these fixtures ARE a legitimate store,
-    # so they say so once, here. The refusal is covered by
-    # test_snapshot_refuses_a_store_that_is_not_there.py.
-    (tmp_path / ".persistent-store-id").write_text("test fixture store\n")
-
-    src = tmp_path / "bench"
-
-    # Both checkouts. The third-party one was always bundled; ours never was.
-    for name, subject in (("AlgoTune", "the ruler generation lives in the key"),
-                          ("looplab", "the commit the restart was about to eat")):
-        repo = src / name
-        repo.mkdir(parents=True)
-        (repo / "kept.txt").write_text(f"{name} tracked content\n")
-        _git(repo, "init", "-q")
-        _git(repo, "add", "-A")
-        _git(repo, "commit", "-qm", subject)
-        # A SECOND BRANCH THE CHECKOUT IS NOT ON. `snapshot.sh` bundles with `--all`, and which
-        # branch `git clone <bundle>` lands on is then a question -- the very question the known
-        # failure is about ("the clone yields the wrong tree"). With one branch that question cannot
-        # be asked: every clone lands right by having nowhere else to go, so the restore test below
-        # passed for a reason unrelated to what it guards. The live repo carries four local branches.
-        _git(repo, "checkout", "-q", "-b", "not-the-one")
-        (repo / "kept.txt").write_text(f"{name} content from the WRONG branch\n")
-        _git(repo, "commit", "-qam", "a branch the restore must not land on")
-        _git(repo, "checkout", "-q", "-")
-
-    # An uncommitted edit, so "(0 dirty files)" is a claim the archive can be checked against.
-    (src / "looplab" / "kept.txt").write_text("looplab tracked content\nan edit nobody committed\n")
-
-    # The sources the script already knew about, so a MISSING line for one of them cannot be what
-    # makes this test red.
-    (src / "looplab" / "benchmarks" / "algotune").mkdir(parents=True)
-    (src / "looplab" / "benchmarks" / "algotune" / ".baseline_times").mkdir()
-    (src / "AlgoTune" / "reports").mkdir()
-    (src / "meter").mkdir()
-    (src / "logs").mkdir()
-    campaign = src / "campaign-final"
-    campaign.mkdir()
-    (campaign / "B-pde_heat1d.final.json").write_text('{"speedup": 99.0029}\n')
-
-    # A probe mid-flight: the shape whose loss cost sixty-nine runs.
-    run = src / "model-probes" / "dsPde3" / "runs" / "r1" / "run"
-    run.mkdir(parents=True)
-    (run / "events.jsonl").write_text('{"type": "llm_usage", "data": {"cost": 0.0717}}\n')
-    (run / "spans.jsonl").write_text('{"name": "generation", "attributes": {"phase": "propose"}}\n')
-    return src
+# The synthetic BENCH_ROOT moved to `tests/_bench_fixtures.py` when a SECOND file needed it —
+# `test_snapshot_refuses_a_store_that_is_not_there.py` had been pointing the script at the
+# box's own `/var/tmp/looplab-bench` instead, which is why eleven of its tests were red on
+# every machine without an arena. One builder, so the two cannot drift.
+from _bench_fixtures import bench_root as _bench_root
 
 
 def _snapshot(src, dest, archive):

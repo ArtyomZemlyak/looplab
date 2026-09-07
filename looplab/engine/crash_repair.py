@@ -649,7 +649,7 @@ class CrashRepairMixin:
 
     def _repair_error_context(self, reason: str, error: str,
                               state: Optional[RunState] = None, node=None,
-                              *, headline: str = "") -> str:
+                              *, headline: str = "", fence_note: str = "") -> str:
         """Error context handed to Developer.repair(). A timeout gets an explicit cost-reduction
         directive (the code was too slow, not wrong — shrink it to fit the budget). With deep_repair
         (C3) a crash is enriched with the failure taxonomy + a 'reproduce then fix' directive; else
@@ -690,6 +690,12 @@ class CrashRepairMixin:
         # why a text rule is admissible for a push and is not for a classification.
         if headline and headline not in error:
             error = f"[{headline}]\n{error}"
+        # A KERNEL FENCE'S OWN SENTENCE (`failure_diagnosis.fence_refusal_note`, doc 52 row 28),
+        # beside the headline and after it: the headline is what the process said, this is what the
+        # engine knows about why — an `EACCES`/`EPERM` under a rung it turned on — so the Developer
+        # does not repair a "missing file" that is a refused read. Empty on every unfenced run.
+        if fence_note and fence_note not in error:
+            error = f"{error}\n{fence_note}"
         # Repair-side twin of the Layer-4 proposal cue. Explicit footprints own the device count;
         # an unspecified footprint retains the historical parallel single-device rule.
         footprint = normalize_researcher_footprint(

@@ -76,11 +76,15 @@ def test_a_WEAKLY_monotone_feature_is_clean():
 
 
 def test_the_flagged_shape_is_unchanged_for_existing_readers():
-    """`flagged` stays `{name: coefficient}`; `flagged_detail` is ADDITIVE. A reader that renders
-    the old field must not start seeing a dict where it expects a float."""
+    """`flagged` stays `{name: coefficient}`; `flagged_detail` and `categorical_advisory` are
+    ADDITIVE. A reader that renders the old field must not start seeing a dict where it expects a
+    float — and the advisory rung (doc 52 row 34) rides BESIDE the verdict rather than inside it,
+    because it may not abort a run until its false-positive rate is measured."""
     verdict = _flag([2.0 * v for v in _Y])
     assert isinstance(verdict["flagged"]["f"], float)
-    assert set(verdict) == {"detector", "leak", "threshold", "flagged", "flagged_detail"}
+    assert set(verdict) == {"detector", "leak", "threshold", "flagged", "flagged_detail",
+                            "categorical_advisory"}
+    assert verdict["categorical_advisory"] == {}      # already flagged: the residue is empty
 
 
 def test_both_coefficients_describe_the_SAME_rows():

@@ -174,14 +174,30 @@ def test_emit_loop_survives_a_bundle_that_carries_the_turn_limits(monkeypatch):
 
 def test_the_settings_bundle_still_spreads_exactly_the_keys_it_always_did():
     """`loop_opts_from_settings` returns a `LoopOptions` now; `**` over it must be byte-identical to
-    the dict it replaced, or every call site changes behaviour at once."""
+    the dict it replaced, or every call site changes behaviour at once.
+
+    `read_loop_nudge_after` joined on 2026-09-07 and is the one addition that changes NO call site's
+    behaviour, which is why it is admitted here rather than argued away: the field's default is 25,
+    the same literal `drive_tool_loop` has always used, so every loop receives exactly the value it
+    already had. What moved is that an operator can now select another one — the option shipped with
+    no `Settings` field at all, so the `0 = off` its own docstring offered was unreachable.
+    """
     opts = loop_opts_from_settings(Settings())
     assert dict(opts) == {
         "stuck_detection": True, "stuck_repeat": 4, "stuck_alternate": 4,
         "self_plan": True, "plan_reinject_every": 5, "auto_summary": True,
         "emit_after": 300, "emit_force": 500,
+        "read_loop_nudge_after": 25,
         "context_budget_chars": Settings().context_budget_chars,
     }
+    # …and the value really is the loop's own former literal, so the addition is a reachable knob
+    # rather than a behaviour change. MUTATION: ship a different default -> every tool loop in the
+    # engine silently changes when it starts nudging.
+    import inspect
+
+    from looplab.agents.tool_loop import drive_tool_loop
+    assert (inspect.signature(drive_tool_loop).parameters["read_loop_nudge_after"].default
+            == dict(opts)["read_loop_nudge_after"])
 
     class _Bare:
         pass

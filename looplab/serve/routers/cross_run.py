@@ -700,7 +700,7 @@ def build_router(srv) -> APIRouter:
                 decision=body.decision, note=body.note, by=_actor(), at=_timestamp(),
                 expected_revision=body.expected_revision, action_id=body.action_id,
             )
-        except Exception as exc:  # converted to stable HTTP semantics below
+        except Exception as exc:  # noqa: BLE001 — converted to stable HTTP semantics below
             _raise_governance_error(exc)
         return {"ok": True, "decision": _public_cross_run_row(rec),
                 "portfolio_id": portfolio_id,
@@ -722,7 +722,7 @@ def build_router(srv) -> APIRouter:
         memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
         try:
             rec = record(memory_dir)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — converted to stable HTTP semantics by _raise_governance_error
             _raise_governance_error(exc)
         return {
             "ok": True, result_key: _public_cross_run_row(rec), "revision": rec["revision"],
@@ -900,7 +900,7 @@ def build_router(srv) -> APIRouter:
                 safe_error=lambda exc, phase: _safe_steward_error(exc, phase=phase),
                 request={"surface": "owner-http"},
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — converted to stable HTTP semantics by _raise_governance_error
             _raise_governance_error(exc)
         return _steward_response(record, portfolio_id)
 

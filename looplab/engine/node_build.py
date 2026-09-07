@@ -13,8 +13,10 @@ Agent-facing deps (`legal_actions`, `_state_brief`, `render_hint_directives`) st
 method-local imports so monkeypatching through their source modules keeps working."""
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Optional
 
+from looplab.agents.roles import DeveloperResult, developer_call_lock
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (Idea, NodeStatus, RunState, normalize_researcher_footprint,
                                  is_developer_error, is_developer_stuck)
@@ -110,6 +112,19 @@ def developer_crash_rank(state: RunState, node_id: int) -> int:
 # historical payload shape) from a REAL value, including None (e.g. `research_origin=None`
 # must still be emitted).
 _OMIT = object()
+
+
+def accepts_co_parents(fn) -> bool:
+    """Whether a Developer's `implement_from` takes the `co_parents` keyword (doc 52 row 18) — a
+    named parameter or `**kwargs`. The probe is what lets the engine hand an ensemble's other
+    lineages to a Developer that can read them and call every other one exactly as before."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "co_parents" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 class NodeBuildMixin:
@@ -244,14 +259,74 @@ class NodeBuildMixin:
         code/files) and patches it, instead of regenerating everything from the pristine baseline
         (which loses the parent's accumulated edits and burns tokens re-deriving them). Falls back
         to the plain `implement(idea)` for developers that don't take a parent (draft, offline)."""
+        return self._implement_result(idea, parent, developer=developer, state=state).code
+
+    def _implement_result(self, idea, parent=None, *, developer=None, state=None,
+                          co_parents=()) -> DeveloperResult:
+        """`_implement`, returning the whole `DeveloperResult` envelope (doc 52 row 12).
+
+        The `str`-returning `_implement` above is kept for its callers and the suite; every site
+        that then READ a side channel off the instance (`last_files`, the footprint, the rollback
+        ask) reads this envelope instead, which is what lets the paid call leave the loop thread —
+        see `agents/roles.py::DeveloperResult` for why the freeze was the only thing that made the
+        instance reads safe.
+
+        `co_parents` (doc 52 row 18) are the OTHER parents of an ensemble merge: the Developer is
+        seeded with `parent`'s files as its working set and, when its `implement_from` accepts the
+        keyword, is shown the co-parents' code and traces too — a recombination that sees one
+        lineage is an improve with a longer rationale. A Developer without the keyword is called
+        exactly as before."""
         developer = developer or self.developer
         bind_state = getattr(developer, "bind_state", None)
         if callable(bind_state):
             bind_state(state)
         impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
-            return impl_from(idea, parent)
-        return developer.implement(idea)
+            if co_parents and accepts_co_parents(impl_from):
+                return self._run_developer(developer, impl_from, idea, parent,
+                                           co_parents=tuple(co_parents))
+            return self._run_developer(developer, impl_from, idea, parent)
+        return self._run_developer(developer, developer.implement, idea)
+
+    def _run_developer(self, developer, fn, *args, **kwargs) -> DeveloperResult:
+        """ONE Developer call and the capture of its outputs, as one atomic step under the
+        instance's lock (`developer_call_lock`). The lock is what makes two offloaded calls on a
+        SHARED instance safe: they queue here, in a worker, instead of on the event loop."""
+        with developer_call_lock(developer):
+            code = fn(*args, **kwargs)
+            return self._capture_developer_result(developer, code)
+
+    @staticmethod
+    def _capture_developer_result(developer, code) -> DeveloperResult:
+        """Read every registered side channel off the instance INTO the envelope, totally.
+
+        Literal `getattr`s, one per `DEVELOPER_OUTPUT_ATTRS` member, on purpose: the registry's
+        two-way contract test (`tests/test_role_output_contract.py`) needs each consumer read to be
+        greppable, and a loop over the tuple would hide them all behind one line. TOTAL over junk —
+        a stub that sets a string where a dict is expected must read as "nothing", never raise out
+        of a build or a repair — which is the coercion the old inline reads did piecemeal."""
+        files = getattr(developer, "last_files", {}) or {}
+        deleted = getattr(developer, "last_deleted", []) or []
+        footprint = getattr(developer, "last_footprint", None)
+        edit_calls = getattr(developer, "last_edit_calls", 0) or 0
+        try:
+            edit_calls = int(edit_calls)
+        except (TypeError, ValueError):
+            edit_calls = 0
+        return DeveloperResult(
+            code=code,
+            last_files=MappingProxyType(dict(files) if isinstance(files, dict) else {}),
+            last_deleted=tuple(str(d) for d in deleted) if isinstance(deleted, (list, tuple)) else (),
+            last_footprint=dict(footprint) if isinstance(footprint, dict) else footprint,
+            last_report=getattr(developer, "last_report", None),
+            last_seed=getattr(developer, "last_seed", None),
+            last_run=getattr(developer, "last_run", None),
+            last_patch=getattr(developer, "last_patch", None),
+            last_rollback_stage=str(getattr(developer, "last_rollback_stage", "") or "").strip(),
+            last_budget_exhausted=str(
+                getattr(developer, "last_budget_exhausted", "") or "").strip()[:32],
+            last_edit_calls=edit_calls,
+        )
 
     @staticmethod
     def _reset_developer_footprint(developer) -> None:
@@ -281,12 +356,18 @@ class NodeBuildMixin:
                 if child is not None and child is not current:
                     pending.append(child)
 
-    def _finalize_developer_footprint(self, idea: Idea, developer, code: str) -> tuple[Idea, bool]:
+    def _finalize_developer_footprint(self, idea: Idea, developer, code: str,
+                                      footprint=_OMIT) -> tuple[Idea, bool]:
         """Merge the Developer's per-call resource estimate onto a durable Idea.
 
         A missing optional output means the Developer accepted the Researcher's proposal.  A concrete
         output may scale it up or down, then the detected pool clamps the effective quantities.  An
         unspecified proposal stays unspecified so legacy scheduling remains byte-for-byte compatible.
+
+        `footprint` is the envelope's `last_footprint` (doc 52 row 12): every build site that has a
+        `DeveloperResult` passes it, so the estimate read is the one captured under the call's own
+        lock and never a sibling's landing on the shared instance afterwards. Omitted, the instance
+        is read as before — the shape the suite's direct callers and older wrappers still use.
         """
         proposed = normalize_researcher_footprint(getattr(idea, "footprint", None))
         # BOTH SENTINELS. A footprint finalized from a build that produced no code is a claim about
@@ -297,7 +378,8 @@ class NodeBuildMixin:
         if proposed is None or is_developer_error(code) or is_developer_stuck(code):
             return idea, False
         finalized = normalize_researcher_footprint(
-            getattr(developer, "last_footprint", None)) or proposed
+            getattr(developer, "last_footprint", None) if footprint is _OMIT else footprint
+        ) or proposed
         clamp = getattr(self, "_clamp_resource_footprint", None)
         if callable(clamp):
             finalized = clamp(finalized) or proposed
@@ -335,6 +417,11 @@ class NodeBuildMixin:
 
         §1: when `state` is given, standing operator directives are folded into the idea so the REPAIRED
         code honors them too (consistency with the four build sites); without it the raw idea is used."""
+        return self._repair_result(node, err, state, developer=developer).code
+
+    def _repair_result(self, node, err: str, state: Optional[RunState] = None, *,
+                       developer=None) -> DeveloperResult:
+        """`_repair`, returning the whole `DeveloperResult` envelope — see `_implement_result`."""
         idea = self._directed_idea(node.idea, state) if state is not None else node.idea
         developer = developer or self.developer
         bind_state = getattr(developer, "bind_state", None)
@@ -342,8 +429,8 @@ class NodeBuildMixin:
             bind_state(state)
         rf = getattr(developer, "repair_from", None)
         if callable(rf):
-            return rf(idea, node, err)
-        return developer.repair(idea, node.code, err)
+            return self._run_developer(developer, rf, idea, node, err)
+        return self._run_developer(developer, developer.repair, idea, node.code, err)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
@@ -351,7 +438,7 @@ class NodeBuildMixin:
                            parent_generations=_OMIT, cross_run_receipt=_OMIT,
                            footprint_finalized=_OMIT, speculative=_OMIT,
                            card_build_generation=_OMIT, eval_start_boundary=_OMIT,
-                           materialize_aborted_intent=_OMIT,
+                           materialize_aborted_intent=_OMIT, model_arm=_OMIT,
                            expected_last_seq=_OMIT) -> None:
         """The single `node_created` emitter for all four creation sites (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
@@ -366,6 +453,7 @@ class NodeBuildMixin:
         data = {"node_id": node_id, "parent_ids": parent_ids, "operator": operator,
                 "idea": idea, "code": code, "files": files}
         for k, v in (("deleted", deleted), ("research_origin", research_origin),
+                     ("model_arm", model_arm),
                      ("source", source), ("origin", origin), ("forked_from", forked_from),
                      ("generation", generation),
                      ("parent_generations", parent_generations),

@@ -408,13 +408,15 @@ def test_a_non_utf8_config_snapshot_is_reported_as_unreadable_not_a_bare_500(tmp
 
     client = TestClient(make_app(tmp_path))
     got = client.get("/api/runs/demo/config")
-    assert got.status_code == 500
-    assert "unreadable" in got.json()["detail"], got.json()
+    # 503 with a code since 2026-09-06 (`serve/http.py::REFUSALS`, doc 52 row 5): an input the
+    # server could not read is a refusal, never the framework's word for a crash.
+    assert got.status_code == 503
+    assert got.json()["detail"]["code"] == "config_snapshot_unreadable", got.json()
 
     # The PUT reads the same snapshot the same way. Reach it past the generation fence with the
     # run's real generation; the decode is what must answer, not a traceback.
     generation = client.get("/api/runs/demo/state").json()["generation"]
     put = client.put("/api/runs/demo/config",
                      json={"config": {"n_seeds": 2}, "expected_generation": generation})
-    assert put.status_code == 500, put.json()
-    assert "unreadable" in put.json()["detail"], put.json()
+    assert put.status_code == 503, put.json()
+    assert put.json()["detail"]["code"] == "config_snapshot_unreadable", put.json()

@@ -58,11 +58,16 @@ def test_an_idle_pinned_neighbour_is_not_counted_as_load():
         return
     try:
         _pin([0, 1])
+        # A DELTA, NOT AN ABSOLUTE. The first version asserted == 0 and went red the one time two
+        # pytest suites ran at once: the other suite is `taskset`ed to the service lane, which is
+        # exactly what this function is built to count. What the test is about is whether an IDLE
+        # pinned neighbour adds to the count, and that question survives any background load.
+        before = ruler_selfcheck.busy_cpus_outside_lane()
         idle = _spawn([4, 5], busy=False)
         time.sleep(1.0)
-        # THE MUTATION TARGET. Without the state check this reads 2, and the field it feeds becomes
-        # a count of workers that once existed rather than of a box under load.
-        assert ruler_selfcheck.busy_cpus_outside_lane() == 0
+        # THE MUTATION TARGET. Without the state check this rises by 2, and the field it feeds
+        # becomes a count of workers that once existed rather than of a box under load.
+        assert ruler_selfcheck.busy_cpus_outside_lane() == before
         idle.kill(); idle.wait(timeout=10)
     finally:
         os.sched_setaffinity(0, keep)
@@ -74,14 +79,15 @@ def test_a_busy_pinned_neighbour_is_counted():
         return
     try:
         _pin([0, 1])
+        before = ruler_selfcheck.busy_cpus_outside_lane() or 0
         hot = _spawn([4, 5], busy=True)
         deadline = time.time() + 15
-        got = 0
-        while time.time() < deadline and got == 0:
+        got = before
+        while time.time() < deadline and got <= before:
             got = ruler_selfcheck.busy_cpus_outside_lane() or 0
             time.sleep(0.2)
         hot.kill(); hot.wait(timeout=10)
-        assert got >= 2, f"a neighbour burning two pinned cpus read {got}"
+        assert got >= before + 2, f"a neighbour burning two pinned cpus added {got - before}"
     finally:
         os.sched_setaffinity(0, keep)
 

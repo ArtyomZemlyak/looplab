@@ -19,50 +19,41 @@ Each test below reddens if its fix is removed from benchmarks/snapshot.sh.
 """
 import os
 import subprocess
-import sys
 import tempfile
 import textwrap
 from pathlib import Path
 
 import pytest
 
+from _bench_fixtures import bench_root
+
 REPO = Path(__file__).resolve().parents[1]
 SNAPSHOT = REPO / "benchmarks" / "snapshot.sh"
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_snapshot_carries_the_repo_and_the_runs import _bench_root  # noqa: E402
+# The SOURCE every test here snapshots, built once per session and never the box's own.
+# `os.environ.setdefault("BENCH_ROOT", "/var/tmp/looplab-bench")` stood here until 2026-09-07 and it
+# is why eleven of these tests were red on any machine without an arena: with no such root the
+# script reported six MISSING sources and exited 1, so eleven assertions about REFUSALS, locks and
+# the environment record failed for a reason none of them is about. A test whose subject is what a
+# script refuses has to own its inputs. The builder is shared with
+# `test_snapshot_carries_the_repo_and_the_runs.py` rather than copied — see `tests/_bench_fixtures.py`.
+_SOURCE: list = []
 
 
-_TOY_ROOT: list = []
+@pytest.fixture(scope="session", autouse=True)
+def _synthetic_bench_source(tmp_path_factory):
+    _SOURCE.append(bench_root(tmp_path_factory.mktemp("bench-source")))
+    yield
+    _SOURCE.clear()
 
 
-def _toy_root(dest) -> str:
-    """A COMPLETE but tiny BENCH_ROOT, built once per destination.
-
-    These tests defaulted `BENCH_ROOT` to the LIVE `/var/tmp/looplab-bench`, because only a complete
-    root makes `snapshot.sh` exit 0 and every one of them asserts `returncode == 0`. The cost, by
-    `--durations` on 2026-09-04: **27-33 s each** across a dozen cases and **62 s** for the busy-lock
-    one, all of it walking 5,151 files of the live corpus with a `cmp` apiece and copying 1.2 G --
-    while probes are writing into that tree. What they actually assert on is `ENVIRONMENT.txt`,
-    which is built from the ENVIRONMENT, and an exit code.
-
-    `_bench_root` is imported rather than copied: a sibling file already builds this shape, with the
-    reasoning for each part written into it, and two copies of a fixture drift exactly like two
-    copies of a rule (§204).
-    """
-    # Built ONCE, in a directory of its own, and never under the destination: two of these tests
-    # are about a store root that is empty and about a destination that cannot be written, and a
-    # fixture that plants a tree there answers both questions for them.
-    if not _TOY_ROOT:
-        holder = Path(tempfile.mkdtemp(prefix="snapshot-toy-bench-"))
-        _TOY_ROOT.append(str(_bench_root(holder)))
-    return _TOY_ROOT[0]
-
-
-def _run(dest, env=None, timeout=600):  # noqa: D401 - timeout is raised by the lock tests
+def _run(dest, env=None, timeout=600, src=None):  # noqa: D401 - timeout is raised by the lock tests
     e = dict(os.environ)
-    e.setdefault("BENCH_ROOT", _toy_root(dest))
+    # SET, not `setdefault`: an operator running the suite on the bench stand has BENCH_ROOT
+    # exported, and inheriting it would put these tests back on the box's live tree — the exact
+    # dependency this removes, and invisibly, since it would still pass there.
+    e["BENCH_ROOT"] = str(src or _SOURCE[0])
     if env:
         e.update(env)
     return subprocess.run(
@@ -116,25 +107,15 @@ def test_b_two_snapshots_at_once_do_not_share_one_directory():
         dest.mkdir()
         (store / ".persistent-store-id").write_text("test")
 
-        # A BENCH_ROOT WITH ONE RUN TREE. The subject here is the LOCK and the stamp, not the
-        # corpus, and this defaulted to the LIVE /var/tmp/looplab-bench -- so the case started TWO
-        # real snapshots of the 1.2 G bench root, `find` over 5,151 files with a `cmp` each and
-        # 1.2 G of `cp -ru`, twice, which is why it carried a 900 s timeout. Caught 2026-09-04 when
-        # `find /var/tmp/looplab-bench/model-probes` turned up in /proc during a suite run. §206
-        # reproduced this same lock behaviour on a toy tree in under a second.
-        toy = store / "bench"
-        (toy / "model-probes" / "p1" / "runs" / "t" / "run").mkdir(parents=True, exist_ok=True)
-        (toy / "model-probes" / "p1" / "runs" / "t" / "run" / "events.jsonl").write_text(
-            '{"type":"run_started"}\n', encoding="utf-8")
         env = dict(os.environ)
-        env.setdefault("BENCH_ROOT", str(toy))
+        env.setdefault("BENCH_ROOT", "/var/tmp/looplab-bench")
         procs = [
             subprocess.Popen(["bash", str(SNAPSHOT), str(dest)],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, env=env)
             for _ in range(2)
         ]
-        outs = [p.communicate(timeout=120) for p in procs]
+        outs = [p.communicate(timeout=900) for p in procs]
         rcs = [p.returncode for p in procs]
 
         trees = sorted(d for d in dest.iterdir() if d.is_dir() and d.name[0].isdigit())
@@ -239,7 +220,24 @@ def test_b2_a_taken_stamp_does_not_become_a_shared_directory():
 # 2026-08-29 failure -- an empty backup under a success code -- reintroduced by its own repair.
 
 
+# OPEN[unwritable-destination-refusal-undriven-as-root] the "NOTHING WAS WRITTEN" refusal is the
+# one rung here with no falsifier a root suite can run: `chmod 0555` refuses root nothing, and the
+# root-respecting alternatives (an immutable attribute, a read-only bind mount) need privileges a
+# container may not have, while making the store a FILE tests ENOTDIR rather than permission. Until
+# one is found this property is asserted only where the suite runs unprivileged.
+# proof:present:os.geteuid()@tests/test_snapshot_refuses_a_store_that_is_not_there.py
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the write bit, so there is no refusal")
 def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
+    """FALSELY GREEN UNTIL 2026-09-07, and only on a box with no arena.
+
+    Root bypasses directory write permission, so `chmod 0555` refuses this process nothing and the
+    snapshot writes happily. It passed anyway because `_run` was pointed at the box's own
+    `/var/tmp/looplab-bench`: with no such tree the script exited 1 for six MISSING sources, and the
+    `returncode != 0` below read that as the permission refusal it is about. Giving the tests their
+    own source removed the second cause and left the first visible. Same rule as
+    `test_read_fence.py`'s write-bit falsifier: a permission test cannot be run by the user that
+    has none.
+    """
     store = tmp_path / "looplab-bench"
     store.mkdir()
     (store / ".persistent-store-id").write_text("test")
@@ -389,37 +387,3 @@ def test_the_value_sniff_alone_covers_an_allowlisted_name_holding_a_credential(t
         "an ALLOWLISTED name printed a value that looks like a credential; only the value sniff "
         "can stop this:\n" + live
     )
-
-
-def test_these_tests_do_not_snapshot_the_live_bench_root():
-    """The guard for the fixture above, because the cost of losing it is invisible.
-
-    Every case here asserts `returncode == 0`, and only a COMPLETE `BENCH_ROOT` gives that, so the
-    file defaulted to the live `/var/tmp/looplab-bench` — walking 5,151 files with a `cmp` apiece and
-    copying 1.2 G, per test, while probes were writing into that tree. Measured by `--durations` on
-    2026-09-04: 27–33 s each across a dozen cases, now 0.14–0.16 s. (The busy-lock case stays at
-    62 s: it waits out `flock -w 60` on purpose, and that second is the behaviour under test.)
-    """
-    # PARSED, not grepped: the path is named all over the comments and docstrings above and that
-    # is the record. What must not exist is a string CONSTANT carrying it -- i.e. code that points
-    # a test at the live tree. Docstrings are excluded because they are exactly the prose.
-    import ast
-    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    docstrings = set()
-    for node in ast.walk(tree):
-        body = getattr(node, "body", None)
-        if isinstance(body, list) and body and isinstance(body[0], ast.Expr) \
-                and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-            docstrings.add(id(body[0].value))
-    live = [n for n in ast.walk(tree)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)
-            and n.value == "/var/tmp/looplab-bench" and id(n) not in docstrings]
-    # The two below are this guard's own comparisons.
-    assert len(live) == 2, (
-        f"{len(live)} code references to the live bench root (expected only this guard's two) -- "
-        "a snapshot test must build its own root, not walk the corpus probes are writing to")
-    got = _toy_root(Path(tempfile.gettempdir()) / "unused")
-    assert got != "/var/tmp/looplab-bench" and Path(got).is_dir(), got
-    assert (Path(got) / "looplab" / ".git").is_dir(), (
-        f"{got} is not a complete bench root, so snapshot.sh would exit 1 and every "
-        "`returncode == 0` here would be asserting the wrong thing")

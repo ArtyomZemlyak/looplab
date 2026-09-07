@@ -145,3 +145,401 @@ def scan(pattern: re.Pattern | str, *, pkg: Path = PKG) -> dict[str, set[str]]:
         for name in compiled.findall(text):
             found.setdefault(name, set()).add(str(path.relative_to(pkg)))
     return found
+
+
+# --------------------------------------------------------------------------- the eval attempt loop
+# `_evaluate` is a DRIVER over `EvalAttempt` and nine phase methods since 2026-09-06 (doc 52 row 21).
+# A guard that used to read "the attempt loop" off `inspect.getsource(EvaluateMixin._evaluate)` now
+# reads the driver plus every phase, IN THE ORDER THE DRIVER RUNS THEM — so an index-order pin over
+# the concatenation still says what it said about one method, and a "called exactly once" pin counts
+# across the phases. Prefer naming the phase when the property belongs to one.
+EVAL_PHASES = ("_eval_admit", "_eval_prepare_workdir", "_eval_seed_ledgers", "_eval_run_attempt",
+               "_eval_settle_outcome", "_eval_salvage", "_eval_decide_repair", "_eval_apply_repair",
+               "_eval_write_terminal")
+
+
+def eval_attempt_functions() -> list:
+    """The driver, the nine phases in driver order, then the reset terminal the phases share."""
+    from looplab.engine.evaluate import EvaluateMixin
+
+    return [getattr(EvaluateMixin, name)
+            for name in ("_evaluate",) + EVAL_PHASES + ("_eval_record_superseded",)]
+
+
+def eval_attempt_source() -> str:
+    """Every function of the attempt loop, as source, concatenated in driver order."""
+    return "\n".join(inspect.getsource(f) for f in eval_attempt_functions())
+
+
+def eval_attempt_dedented_source() -> str:
+    """The same concatenation, dedented so `ast.parse` accepts it (a method's body on its own)."""
+    return "\n".join(textwrap.dedent(inspect.getsource(f)) for f in eval_attempt_functions())
+
+
+def eval_attempt_tree() -> ast.Module:
+    """One module holding every function of the attempt loop, in driver order."""
+    return ast.parse(eval_attempt_dedented_source())
+
+
+def eval_attempt_called_names() -> list[str]:
+    """`called_names` over the whole attempt loop, in driver order."""
+    return [name for f in eval_attempt_functions() for name in called_names(f)]
+
+
+def eval_attempt_attributes_read() -> set[str]:
+    """`attributes_read` over the whole attempt loop."""
+    return set().union(*(attributes_read(f) for f in eval_attempt_functions()))
+
+
+
+# ------------------------------------------------------------------- the event payload contract
+# `looplab/events/types.py::EVENT_PAYLOAD_KEYS` says what each event type's `data` dict CARRIES
+# (doc 52 row 30). Nothing about a contract written by hand is trustworthy on its own, so the guard
+# (`tests/test_event_payload_contract.py`) re-derives BOTH sides from source and joins them here:
+# what the fold READS off a payload, and what the writers PUT there. One implementation, because two
+# scanners that disagree would make the contract un-authorable rather than merely un-checked.
+
+def _payload_dict_keys(node: ast.AST) -> tuple[set[str], set[str], bool]:
+    """`(keys written unconditionally, keys written inside a spread, an opaque spread was seen)`.
+
+    `{"a": 1, **({"b": 2} if cond else {})}` writes `a` always and `b` maybe; `{**other}` is opaque —
+    the key set is decided somewhere else, so the site can prove nothing about REQUIRED keys.
+    """
+    always: set[str] = set()
+    maybe: set[str] = set()
+    opaque = False
+    if not isinstance(node, ast.Dict):
+        return always, maybe, True
+    for key, value in zip(node.keys, node.values):
+        if key is None:                                   # a `**` spread
+            nested = [sub for sub in ast.walk(value) if isinstance(sub, ast.Dict)]
+            if not nested:
+                opaque = True
+                continue
+            for sub in nested:
+                for k in sub.keys:
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                        maybe.add(k.value)
+        elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+            always.add(key.value)
+    return always, maybe, opaque
+
+
+def subscript_string_keys(scope, name: str, *, after: int, before: int) -> set[str]:
+    """`{k}` for every `name["k"] = …` in `scope` BETWEEN two source lines.
+
+    The window is the whole soundness of this: one function often assigns `data` several times and
+    appends several different event types from it, so an unwindowed walk hands every append every
+    other one's keys (measured: 13 types gained keys they never carry). `after` is the line of the
+    dict literal this payload resolved to and `before` the append call, so only the writes that
+    can actually reach THAT payload are collected.
+    """
+    out: set[str] = set()
+    for node in scope:
+        for target in (node.targets if isinstance(node, ast.Assign) else
+                       [node.target] if isinstance(node, ast.AnnAssign) else []):
+            if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                    and target.value.id == name and isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                    and after < getattr(node, "lineno", 0) < before):
+                out.add(target.slice.value)
+    return out
+
+
+def _scope_bodies(tree: ast.AST) -> Iterator[list[ast.AST]]:
+    """Every module/function scope's OWN nodes, cut at each nested `def`.
+
+    `ast.walk(module)` reaches into every function, so a name-resolution pass run over the module
+    sees every local of every function in the file at once — which is how one function's `payload`
+    literal was read as another's. Yielding each scope's own nodes makes "the last assignment to
+    this name" mean what it says."""
+    stack: list[ast.AST] = [tree]
+    while stack:
+        scope = stack.pop()
+        own: list[ast.AST] = []
+        pending = list(ast.iter_child_nodes(scope))
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                stack.append(node)          # its body belongs to ITS scope, not this one
+                # …but the decorators and defaults are evaluated HERE, so keep them.
+                pending.extend(node.decorator_list)
+                continue
+            own.append(node)
+            pending.extend(ast.iter_child_nodes(node))
+        yield own
+
+
+def _event_type_names() -> dict[str, str]:
+    """Every module-level name that IS an event type — the `EV_*` constants plus their aliases.
+
+    `core/phase_events.py` calls `emit_phase_event(PHASE_STARTED, {...})`, so a scanner that knows
+    only `EV_*` sees no writer for three of the diagnostic types and silently reports their payload
+    as empty. The aliases are found the same way the constants are: by value.
+    """
+    from looplab.events import types as event_types
+
+    from looplab.core import phase_events
+
+    names = {n: getattr(event_types, n) for n in dir(event_types) if n.startswith("EV_")}
+    alias = re.compile(r"^([A-Z][A-Z0-9_]*)\s*=\s*(EV_[A-Z0-9_]+)\s*$", re.M)
+    for _path, text in iter_sources():
+        for local, const in alias.findall(text):
+            if const in names and local not in names:
+                names[local] = names[const]
+    # `core/phase_events.py` re-SPELLS its four types as literals because `core` may not import
+    # `events` (the layering rule), so no alias assignment above can find them. Read them off the
+    # module itself rather than by regex: a name-and-value match over one known module cannot
+    # mistake an unrelated constant that happens to equal an event name for an event type.
+    for local in dir(phase_events):
+        value = getattr(phase_events, local)
+        if (local.isupper() and isinstance(value, str) and value in event_types.ALL_EVENT_TYPES
+                and local not in names):
+            names[local] = value
+    return names
+
+
+def event_payload_writers() -> dict[str, dict]:
+    """`{event type: {"always": {key…}, "any": {key…}, "sites": [file:line…]}}`.
+
+    A WRITER is any call whose first argument is an event type and whose payload argument is a dict
+    literal — `store.append(EV_X, {...})`, `append_many([(EV_X, {...})])`, and the engine's own
+    `_append_proposal_event(EV_X, {...})` / `emit_phase_event(PHASE_X, {...})` wrappers alike. A
+    payload handed over as a local variable is followed to its last dict-literal assignment.
+    `always` holds the keys EVERY site writes unconditionally, and is empty as soon as one site
+    builds its payload opaquely — that is the set a `required` declaration is checked against.
+    """
+    from looplab.events.types import ALL_EVENT_TYPES
+
+    names = _event_type_names()
+
+    def event_type(node: ast.AST):
+        if isinstance(node, ast.Constant) and node.value in ALL_EVENT_TYPES:
+            return node.value
+        if isinstance(node, ast.Name):
+            return names.get(node.id)
+        if isinstance(node, ast.Attribute):
+            return names.get(node.attr)
+        return None
+
+    found: dict[str, dict] = {}
+    for path, tree in iter_trees():
+        # EACH SCOPE'S OWN NODES, never the module's view of every nested function. `ast.walk` on
+        # the Module reaches every body, so a file where two functions each build a local
+        # `payload` had the module pass hand each append the OTHER one's dict literal and
+        # subscript writes — measured: three event types gained an `after_seq` only
+        # `finalize_step` writes. `_own_nodes` cuts at every nested def, so a name resolves in the
+        # scope that actually binds it.
+        for scope in _scope_bodies(tree):
+            assigned: dict[str, list[ast.AST]] = {}
+            for node in scope:
+                if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name)):
+                    assigned.setdefault(node.targets[0].id, []).append(node.value)
+            for node in scope:
+                if not (isinstance(node, ast.Call) and node.args):
+                    continue
+                etype = event_type(node.args[0])
+                if etype is None:
+                    continue
+                payload = (node.args[1] if len(node.args) >= 2 else
+                           next((k.value for k in node.keywords if k.arg == "data"), None))
+                if payload is None:
+                    continue
+                subscripts: set[str] = set()
+                if isinstance(payload, ast.Name):
+                    payload_name = payload.id
+                    literals = [v for v in assigned.get(payload.id, []) if isinstance(v, ast.Dict)]
+                    if not literals:
+                        continue
+                    # `data["source"] = …` AFTER the literal is a payload key too, and one the
+                    # dict walk cannot see: `memory_read.source` reached the log undeclared while
+                    # this scan reported the type fully covered. A subscript write is `maybe` —
+                    # every one found so far is conditional, and a scan that called it `always`
+                    # would be claiming more than it checked.
+                    # THE LITERAL NEAREST ABOVE THE CALL, not the scope's last one: a function
+                    # that builds several payloads reuses the name, and `literals[-1]` then reads
+                    # a LATER event's dict as this one's. It is also what makes the subscript
+                    # window below sound — the keys collected are the ones assigned between this
+                    # payload's literal and this append.
+                    above = [v for v in literals if v.lineno <= node.lineno]
+                    payload = above[-1] if above else literals[-1]
+                    subscripts = subscript_string_keys(
+                        scope, payload_name, after=payload.lineno, before=node.lineno)
+                if not isinstance(payload, ast.Dict):
+                    continue
+                always, maybe, opaque = _payload_dict_keys(payload)
+                maybe |= subscripts
+                row = found.setdefault(etype, {"always": None, "any": set(), "sites": [],
+                                               "opaque": False})
+                row["sites"].append(f"{path.relative_to(PKG.parent)}:{node.lineno}")
+                row["opaque"] = row["opaque"] or opaque
+                row["any"] |= always | maybe
+                row["always"] = always if row["always"] is None else (row["always"] & always)
+    for row in found.values():
+        row["always"] = set() if row["opaque"] else (row["always"] or set())
+    return found
+
+
+def _fold_handler_functions() -> tuple[dict[str, ast.AST], dict[str, str]]:
+    """`(functions the fold can reach, {event type: handler name})`, off `_HANDLERS` itself.
+
+    "Can reach" is `replay.py`'s own module-level functions PLUS the ones it imports from elsewhere
+    in the package under the local name it calls them by. That hop is load-bearing rather than
+    thorough: `_on_promote` reads no key itself and calls `_coerce_node_id(d)`, which is
+    `core/models.py::coerce_node_id`. Without the hop that handler reports an empty read set and,
+    worse, `fold_stores_payload_whole` counts the call as opaque and declares the payload stored.
+    """
+    from looplab.events import types as event_types
+
+    tree = ast.parse((PKG / "events" / "replay.py").read_text(encoding="utf-8-sig"))
+    funcs = {n.name: n for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for node in tree.body:
+        if not (isinstance(node, ast.ImportFrom) and (node.module or "").startswith("looplab.")):
+            continue
+        source = PKG.parent / (node.module.replace(".", "/") + ".py")
+        if not source.is_file():
+            continue
+        imported = {n.name: n for n in ast.parse(source.read_text(encoding="utf-8-sig")).body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for alias in node.names:
+            target = imported.get(alias.name)
+            local = alias.asname or alias.name
+            if target is not None and local not in funcs:
+                funcs[local] = target
+    handlers: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "_HANDLERS" for t in node.targets)):
+            continue
+        for key, value in zip(node.value.keys, node.value.values):
+            if isinstance(key, ast.Name) and isinstance(value, ast.Name):
+                etype = getattr(event_types, key.id, None)
+                if isinstance(etype, str):
+                    handlers[etype] = value.id
+    return funcs, handlers
+
+
+def _payload_params(fn: ast.AST) -> list[str]:
+    args = fn.args
+    return [p.arg for p in (args.posonlyargs + args.args + args.kwonlyargs)]
+
+
+def _string_params(fn: ast.AST, call: "ast.Call | None") -> dict[str, str]:
+    """`{parameter: the string it is bound to}` for one call into *fn*, defaults included.
+
+    `core/models.py::coerce_node_id(d, key="node_id")` reads `d[key]` — a subscript whose key is a
+    NAME, so a scan that only sees literals reports that every lifecycle handler reads nothing.
+    Binding the constant arguments (and the parameter defaults the caller leaves alone) is what
+    turns `_coerce_node_id(d)` back into "reads `node_id`" and `_coerce_node_id(d, "from_node_id")`
+    into "reads `from_node_id`".
+    """
+    params = _payload_params(fn)
+    bound: dict[str, str] = {}
+    defaults = fn.args.defaults or []
+    positional = fn.args.posonlyargs + fn.args.args
+    for name, default in zip(positional[len(positional) - len(defaults):], defaults):
+        if isinstance(default, ast.Constant) and isinstance(default.value, str):
+            bound[name.arg] = default.value
+    for name, default in zip(fn.args.kwonlyargs, fn.args.kw_defaults or []):
+        if isinstance(default, ast.Constant) and isinstance(default.value, str):
+            bound[name.arg] = default.value
+    if call is not None:
+        for index, arg in enumerate(call.args):
+            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    and index < len(params)):
+                bound[params[index]] = arg.value
+        for kw in call.keywords:
+            if kw.arg and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                bound[kw.arg] = kw.value.value
+    return bound
+
+
+def _keys_read(fn: ast.AST, payload: set[str], funcs: dict[str, ast.AST],
+               seen: frozenset[str], bound: "dict[str, str] | None" = None) -> set[tuple[str, str]]:
+    """`{(key, "get"|"sub"|"in")}` read off any name in *payload*, following calls that forward it.
+
+    Following matters: eleven handlers read nothing directly and hand the payload to a module-level
+    helper (`_coerce_node_id(d)`, `_control_generation_matches(n, d)`), so a scan that stops at the
+    handler reports an empty contract for the events whose contract is the most load-bearing.
+    """
+    out: set[tuple[str, str]] = set()
+    bound = bound or {}
+
+    def literal(node: ast.AST) -> "str | None":
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return bound.get(node.id) if isinstance(node, ast.Name) else None
+
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("get", "pop", "setdefault")
+                and isinstance(node.func.value, ast.Name) and node.func.value.id in payload
+                and node.args and literal(node.args[0]) is not None):
+            out.add((literal(node.args[0]), "get"))
+        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                and node.value.id in payload and literal(node.slice) is not None):
+            out.add((literal(node.slice), "sub"))
+        if (isinstance(node, ast.Compare) and len(node.ops) == 1
+                and isinstance(node.ops[0], ast.In)
+                and isinstance(node.comparators[0], ast.Name)
+                and node.comparators[0].id in payload
+                and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str)):
+            out.add((node.left.value, "in"))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in funcs and node.func.id not in seen):
+            callee = funcs[node.func.id]
+            params = _payload_params(callee)
+            forwarded = {params[i] for i, arg in enumerate(node.args)
+                         if isinstance(arg, ast.Name) and arg.id in payload and i < len(params)}
+            forwarded |= {kw.arg for kw in node.keywords if kw.arg
+                          and isinstance(kw.value, ast.Name) and kw.value.id in payload}
+            if forwarded:
+                out |= _keys_read(callee, forwarded, funcs, seen | {node.func.id},
+                                  _string_params(callee, node))
+    return out
+
+
+def fold_payload_reads() -> dict[str, set[tuple[str, str]]]:
+    """`{event type: {(key, how)}}` for every key `replay.fold` reads off that type's payload."""
+    funcs, handlers = _fold_handler_functions()
+    return {etype: _keys_read(funcs[name], {_payload_params(funcs[name])[2]}, funcs,
+                              frozenset({name}))
+            for etype, name in handlers.items()}
+
+
+def fold_stores_payload_whole() -> set[str]:
+    """Event types whose handler keeps the payload OBJECT — assigned, appended, spread, or handed to
+    something `replay.py` does not define. For those the fold has no key contract at all: whatever a
+    writer puts in the dict reaches `RunState` and every projection over it."""
+    funcs, handlers = _fold_handler_functions()
+
+    def stores(fn: ast.AST, payload: set[str], seen: frozenset[str]) -> bool:
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
+                    and node.value.id in payload):
+                return True
+            if isinstance(node, ast.Dict) and any(
+                    k is None and isinstance(v, ast.Name) and v.id in payload
+                    for k, v in zip(node.keys, node.values)):
+                return True
+            if isinstance(node, ast.Call):
+                forwarded = [a for a in list(node.args) + [k.value for k in node.keywords]
+                             if isinstance(a, ast.Name) and a.id in payload]
+                local = isinstance(node.func, ast.Name) and node.func.id in funcs
+                if forwarded and not local:
+                    return True                       # imported or method call: opaque to this scan
+                if local and node.func.id not in seen:
+                    callee = funcs[node.func.id]
+                    params = _payload_params(callee)
+                    names = {params[i] for i, arg in enumerate(node.args)
+                             if isinstance(arg, ast.Name) and arg.id in payload and i < len(params)}
+                    names |= {kw.arg for kw in node.keywords if kw.arg
+                              and isinstance(kw.value, ast.Name) and kw.value.id in payload}
+                    if names and stores(callee, names, seen | {node.func.id}):
+                        return True
+        return False
+
+    return {etype for etype, name in handlers.items()
+            if stores(funcs[name], {_payload_params(funcs[name])[2]}, frozenset({name}))}

@@ -1,0 +1,106 @@
+{
+  "best_node_id": 6,
+  "finished": true,
+  "nodes": {
+    "0": {
+      "feasible": true,
+      "metric": 78.34973188999999,
+      "operator": "draft",
+      "params": {
+        "x": -3.5233,
+        "y": -6.983
+      },
+      "parent_ids": [],
+      "status": "evaluated"
+    },
+    "1": {
+      "feasible": true,
+      "metric": 57.022481379999995,
+      "operator": "draft",
+      "params": {
+        "x": 3.0187,
+        "y": -8.5513
+      },
+      "parent_ids": [],
+      "status": "evaluated"
+    },
+    "2": {
+      "feasible": true,
+      "metric": 8.0526202,
+      "operator": "draft",
+      "params": {
+        "x": 0.7176,
+        "y": -2.6862
+      },
+      "parent_ids": [],
+      "status": "evaluated"
+    },
+    "3": {
+      "feasible": true,
+      "metric": 1.4801102499999996,
+      "operator": "improve",
+      "params": {
+        "x": 2.3855,
+        "y": -2.05
+      },
+      "parent_ids": [
+        2
+      ],
+      "status": "evaluated"
+    },
+    "4": {
+      "feasible": true,
+      "metric": 1.3428921999999999,
+      "operator": "improve",
+      "params": {
+        "x": 3.9408,
+        "y": -1.6766
+      },
+      "parent_ids": [
+        3
+      ],
+      "status": "evaluated"
+    },
+    "5": {
+      "feasible": true,
+      "metric": 2.508970960000001,
+      "operator": "improve",
+      "params": {
+        "x": 4.533,
+        "y": -1.3986
+      },
+      "parent_ids": [
+        4
+      ],
+      "status": "evaluated"
+    },
+    "6": {
+      "feasible": true,
+      "metric": 0.7718885,
+      "operator": "merge",
+      "params": {
+        "x": 3.1631,
+        "y": -1.8633
+      },
+      "parent_ids": [
+        4,
+        3
+      ],
+      "status": "evaluated"
+    },
+    "7": {
+      "feasible": true,
+      "metric": 5.63296016,
+      "operator": "improve",
+      "params": {
+        "x": 0.664,
+        "y": -0.5804
+      },
+      "parent_ids": [
+        6
+      ],
+      "status": "evaluated"
+    }
+  },
+  "stop_reason": null
+}

@@ -30,7 +30,7 @@ from __future__ import annotations
 _UNSET = object()
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 from looplab.core.models import FAILURE_REASONS, REPAIRABLE_REASONS
@@ -93,6 +93,12 @@ class EngineOptions:
     # `EngineOptions` caller gains no new call — only a better-informed one, and only when the eval
     # wrote a nameable stage log at all (the toy/dataset paths never do).
     repair_log_tools: bool = True
+    # Let the INTER-STAGE CHECKER query the checked stage's own log instead of deciding from the
+    # 4,000-char stdout tail (doc 52 row 9). NOT a divergence, on the row above's ground: it is a
+    # modifier on a call the engine already makes once per `check`-flagged stage, so a bare
+    # `EngineOptions` caller gains no new call — only a better-informed one, and only when the stage
+    # wrote a nameable log at all.
+    stage_check_tools: bool = True
     asha_live: bool = False              # ASHA live-curve rank watchdog (advisory); off = today
     asha_live_kill: bool = False         # opt-in: tree-kill a persistently-underperforming node early
     asha_live_quantile: float = 0.5      # rank bar = this quantile of finished siblings' finals (median)
@@ -104,6 +110,16 @@ class EngineOptions:
     max_eval_timeout: float = 3600.0
     sweep_timeout_mult: float = 8.0      # intra-node sweep nodes get this × the single-eval budget
     eval_stall_timeout_s: float = 1800.0  # #6: silence-before-kill CAP for an eval stage; 0 disables
+    # The single-command eval path's DETERMINISTIC divergence watchdog (`Settings.
+    # single_command_divergence_watch`, 2026-08-30): five CONSECUTIVE non-finite `loss`/`grad_norm`
+    # records fail the stage `diverged`. OFF here and ON in the product surface — a divergence-table
+    # row (`tests/test_options_divergence.py`) — because it is KILL AUTHORITY, and a bare `Engine(...)`
+    # must not gain a kill it never asked for: the rule `train_monitor_kill` follows.
+    # It had NO field here from the day the setting shipped: `eval_dispatch._run_eval` read the
+    # never-assigned name through `getattr(self, "single_command_divergence_watch", False)`, so the
+    # product default was decorative for a week while its source pin stayed green. The engine
+    # attribute guard (`tests/test_engine_attribute_sites.py`, doc 52 row 21) is what found it.
+    single_command_divergence_watch: bool = False
     # -1 = AUTO (min(10% of the stage's own wall, 1800s)); 0 = off; >0 = the operator's absolute
     # ceiling. Resolved per stage in `runtime/sandbox.py::resolve_deadline_grace`.
     eval_deadline_grace_s: float = -1.0   # one-shot judge-granted extension at the deadline
@@ -117,6 +133,10 @@ class EngineOptions:
     confirm_seed_base: int = 1           # D1: first confirm seed; 1 keeps confirm splits disjoint
     max_seconds: Optional[float] = None
     max_eval_seconds: Optional[float] = None
+    # The run's LLM spend caps, reserved at admission (`core/llm_budget.py`, doc 52 row 15).
+    # 0 = no cap on BOTH sides: a cap can only refuse calls, so the same default is no divergence.
+    llm_cost_limit: float = 0.0
+    llm_token_limit: int = 0
     memory_dir: Optional[str] = None
     require_approval: bool = False
     archive_resolution: float = 1.0
@@ -148,6 +168,8 @@ class EngineOptions:
     # Kernel read allow-list: off|enforce (see Settings.landlock for why off is the default and for
     # the exact evidence that would move it).
     landlock: str = "off"
+    # Kernel syscall policy: off|mutators|egress (see Settings.syscall_fence).
+    syscall_fence: str = "off"
     # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
     n_seeds: int = 3
     max_nodes: int = 8
@@ -181,6 +203,8 @@ class EngineOptions:
     concurrent_consolidate: bool = False        # consolidate the hypothesis board on the eval-window bg loop (off = today)
     report_every: int = 0                # regenerate the run report every N created nodes (0 = manual only)
     merge_mode: str = "mean"             # A0b: "mean" | "ensemble" ("auto" resolves in Engine.__init__)
+    endgame_reserve_frac: float = 0.0    # doc 52 row 18: the plan's endgame reserve (0 = historical dispatch)
+    model_arms: dict = field(default_factory=dict)   # doc 52 row 19: {arm: "model[@cost]"} the bandit may route a build to
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
     budget_aware: bool = False           # A5: surface remaining eval budget into the prompt
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt
@@ -287,6 +311,8 @@ class EngineOptions:
     cadence_while_evaluating: bool = False  # F1i: node-count cadences may fire with evals in flight
     concept_pivot: bool = False          # PART IV 2a: concept-graph uncovered-region pivot (opt-in)
     graded_novelty: bool = False         # PART IV 2b: D3 graded novelty into the live gate (level-4/5 allow)
+    novelty_literature: bool = False     # doc 52 row 32: the retrieved papers reach the novelty gates
+    steady_state_build: bool = False     # doc 52 row 33: refill a build lane instead of joining a chunk
     capability_expansion: bool = False   # PART IV 2b: D7 capability-expansion forced-jump directive on lock-in
     fingerprint_universal: bool = False  # PART IV CR Step 0: universal (any-script) task-fingerprint tokens
     cross_run_concepts: bool = False     # PART IV CR Step 2: surface prior-run concept outcomes (audit-only)

@@ -67,19 +67,41 @@ GROUPS = {
                      # `repair-candidates` reads this run's own repair ledger and RANKS,
                      # deciding nothing. Neither calls a model, writes anything, or touches a
                      # cross-run store — the three clauses that keep the rest of this set here.
+                     # `edit-types` (doc 52 row 31) is the same contract once more: it folds THIS
+                     # run's own log, classifies each node's committed diff against its first
+                     # parent with a regex pass, calls no model, writes nothing and reads no
+                     # cross-run store. It belongs beside `stage-dups` because both answer "what
+                     # did this run actually do" over the run's own record — here, what KIND of
+                     # edit each experiment made and how much of it the lineage had already tried.
                      "landlock-check", "stage-dups", "parser-stats", "comparability",
-                     "tokens", "repair-candidates"},
+                     # `proxy-accuracy` (doc 52 row 31) is the same again: it folds this run's own
+                     # `proxy_scored` rows against the metrics that came back and prints one
+                     # number. It writes nothing, spends nothing, and reads no cross-run store —
+                     # and it is the number the `proxy_skipped` KILL should be armed on.
+                     "tokens", "repair-candidates", "edit-types", "proxy-accuracy"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",
                         "concept-steward", "concept-ratify", "claim-decide", "task-facets",
                         "task-facets-set", "claim-steward", "cross-run-digest", "cross-run-search",
                         "atlas", "claims"},
+    # `audit_cmds` is the post-run INSTRUMENT group (doc 52 row 22): a command here reads ONE
+    # finished run, may spend money on a judge, and writes a sidecar of that run — a RECORD that
+    # moves no champion, metric, selection or cross-run store. That is neither `inspect_cmds`
+    # (which never spends money) nor `governance_cmds` (which authors cross-run memory and was
+    # already at its ceiling), so it is a domain split like `memory_cmds`, not a drift.
+    "audit_cmds": {"mlebench-extras", "bait-materialize", "bait-audit"},
     # `memory_cmds` is its own group because the line ceiling below refused to let it be a fourth
     # domain inside `governance_cmds` — which was ALREADY eleven lines under the bound. Its contract
     # is the one governance does not have: every command there RECORDS a decision and adds, this one
     # REMOVES rows whose writing run is gone and decides nothing about their content.
-    "memory_cmds": {"memory-orphans"},
+    # `prior-citations` (doc 52 row 17) is the READ side of the same stores: a pure projection over
+    # one run's `prior_injected` + `memory_read` rows that reports which pushed lessons its
+    # proposals cited — the number the utility rank term and the forgetting rung are keyed on. It
+    # writes nothing and calls no model; it is here and not in `inspect_cmds` because that group
+    # sits at its own ceiling and the subject is the cross-run store's usefulness, not one run's
+    # account of itself.
+    "memory_cmds": {"memory-orphans", "prior-citations"},
     # OFFLINE RECORD REPAIRS. Its own group rather than `governance_cmds` because the subject is a
     # SINGLE run's account of itself — a node whose durable record kept the proposal and lost what
     # actually ran — not the cross-run store. It appends events, so it is not `inspect_cmds` either;

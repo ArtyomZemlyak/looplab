@@ -20,6 +20,13 @@ The READERS did not, and the same mistake produced three different failures:
     one group whose retained count could not match, `producer_receipt_known` went False, and every
     one-sided verdict was demoted to `inconclusive` portfolio-wide.
 
+The three readers doc 50 EK-03 then named followed on 2026-09-06 (doc 52 row 4):
+`engine/claims_health.py::_qualify_refs` qualifies a uid-bearing row's evidence refs by incarnation
+(`<name>@<uid>:<node>`, a uid-less row keeping `<name>:<node>`), `claims_assessments.py` registers
+`run_refs` beside the display `runs` and `claims_retrieval.py::portfolio_atlas` counts runs over them,
+and `concept_shelf.py::run_concept_index` / `attribute_row` inherit a row's concepts from the
+incarnation that wrote it (the summaries carry `run_uid` since the same change).
+
 TWO SHAPES, ONE RULE, and they are not interchangeable — `serve/memory_cascade.py::RunIdentity`
 worked this out first for the destructive path and this is that reasoning re-stated where the
 readers can reach it (`core`, so `engine`, `serve` and `trust` may all import it).

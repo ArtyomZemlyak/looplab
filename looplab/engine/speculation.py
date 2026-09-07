@@ -1072,17 +1072,22 @@ class SpeculationMixin:
         kind = reservation.kind
         try:
             self._reset_developer_footprint(developer)
+            # THE ENVELOPE (doc 52 row 12): the build's outputs are read off the `DeveloperResult`
+            # the call returned, never off the instance afterwards — see `agents/roles.py`.
             if kind == "draft":
-                code = self._implement(
+                built = self._implement_result(
                     self._directed_idea(idea.model_copy(deep=True), state),
                     developer=developer, state=state)
             elif kind == "merge":
                 parents = [state.nodes[node_id] for node_id in reservation.parent_ids]
                 directed = self._directed_idea(idea.model_copy(deep=True), state)
-                code = self._implement(
+                # An ensemble seeds from the primary parent and SEES the others (doc 52 row 18):
+                # `co_parents` are the lineages it must recombine, code and traces.
+                built = self._implement_result(
                     directed,
                     parents[0] if self._merge_mode == "ensemble" and parents else None,
-                    developer=developer, state=state)
+                    developer=developer, state=state,
+                    co_parents=parents[1:] if self._merge_mode == "ensemble" else ())
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 repair = getattr(developer, "repair", None)
@@ -1092,9 +1097,9 @@ class SpeculationMixin:
                     error = self._repair_error_context(
                         parent.error_reason, parent.error, state=state, node=parent,
                     )
-                    code = self._repair(parent, error, state, developer=developer)
+                    built = self._repair_result(parent, error, state, developer=developer)
                 else:
-                    code = self._implement(
+                    built = self._implement_result(
                         self._directed_idea(idea.model_copy(deep=True), state),
                         parent,
                         developer=developer,
@@ -1102,15 +1107,17 @@ class SpeculationMixin:
                     )
             else:
                 parent = state.nodes[action["parent_id"]]
-                code = self._implement(
+                built = self._implement_result(
                     self._directed_idea(idea.model_copy(deep=True), state),
                     parent,
                     developer=developer,
                     state=state,
                 )
-            idea, finalized = self._finalize_developer_footprint(idea, developer, code)
-            files = dict(getattr(developer, "last_files", {}) or {})
-            deleted = tuple(getattr(developer, "last_deleted", []) or [])
+            code = built.code
+            idea, finalized = self._finalize_developer_footprint(
+                idea, developer, code, footprint=built.last_footprint)
+            files = dict(built.last_files)
+            deleted = tuple(built.last_deleted)
             return SpecBuildResult(
                 card_id=card_id,
                 generation=generation,
@@ -1126,7 +1133,7 @@ class SpeculationMixin:
                 cross_run_receipt=cross_run_receipt,
                 roles=roles,
             )
-        except Exception as exc:  # one producer failure must become an explicit give-up result
+        except Exception as exc:  # noqa: BLE001 — one producer failure must become an explicit give-up result
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
             return SpecBuildResult(
                 card_id, generation, dict(action), False, roles=roles,
@@ -1691,7 +1698,7 @@ class SpeculationMixin:
                 precoded=result,
                 precoded_max_eval_seconds=max_eval_seconds,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a telemetry failure after node_created still means the durable build committed; see below
             # A telemetry failure after node_created still means the durable build committed.  A
             # pre-create exception owns a bare marker and must close it before the request advances.
             latest = fold(self.store.read_all())
@@ -1924,7 +1931,7 @@ class SpeculationMixin:
                     functools.partial(self._build_requested_card, dict(request), roles),
                     abandon_on_cancel=False,
                 )
-            except Exception as exc:  # the main task must still advance the durable gate
+            except Exception as exc:  # noqa: BLE001 — the main task must still advance the durable gate
                 result = SpecBuildResult(
                     key[0], key[1], {}, False, roles=roles,
                     error=producer_error_text(exc),
@@ -1990,7 +1997,7 @@ class SpeculationMixin:
                 audit_events=tuple(audit_events),
                 error="proposal rejected" if idea is None else "",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — one raw proposal fault yields a consumed, non-staged result rather than tearing down the task group
             return SpecRawStageResult(
                 generation=generation,
                 action=raw_action,
@@ -2029,14 +2036,14 @@ class SpeculationMixin:
                     abandon_on_cancel=False,
                     limiter=_proposal_limiter(),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — one raw proposal fault yields a consumed, non-staged result; see below
                 # Mirror the request-driven producer guard: one raw proposal fault yields a consumed,
                 # non-staged result instead of tearing down the task group and cancelling live evals.
                 try:
                     self._discard_node_build_telemetry(
                         researcher=roles[0], developer=roles[1],
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 — telemetry discard is best-effort inside a failure path
                     pass
                 result = SpecRawStageResult(
                     generation=proposal_state.search_epoch,

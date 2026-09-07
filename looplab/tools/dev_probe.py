@@ -197,7 +197,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime import landlock, read_allowlist, read_fence
+from looplab.runtime import landlock, read_allowlist, read_fence, seccomp
 from looplab.tools._base import (RESULT_CAP, CancelSignal, ToolCapability, ToolResult,
                                  clip, fn_spec, stream_tails)
 
@@ -395,6 +395,16 @@ if _LL_REASON:
         "LOOPLAB probe: the kernel no-write rung could not be applied (%%s). The audit hook and "
         "RLIMIT_FSIZE 0 still hold, so nothing can put BYTES in a file, but a native writer "
         "(pyarrow/h5py/ctypes) can still CREATE an empty one.\\n" %% (_LL_REASON,))
+%(seccomp)s
+# The kernel SYSCALL rung (runtime/seccomp.py, doc 52 row 28): `mknod`/`mknodat` answer EPERM, so
+# the two mutators the audit hook cannot see and RLIMIT_FSIZE cannot bound — a device node and a
+# FIFO hold no bytes — have a kernel refusal even on a box without Landlock (this one). Same posture
+# as the ruleset above: best-effort with a STATED limit, one line on the probe's own stderr.
+_SC_REASON = %(seccomp_fn)s()
+if _SC_REASON:
+    sys.stderr.write(
+        "LOOPLAB probe: the kernel no-mknod rung could not be applied (%%s). A native caller can "
+        "still create a device node or a FIFO.\\n" %% (_SC_REASON,))
 %(read_rung)s# The probe's cwd is its disposable workspace replica, so a staged module must be importable by the
 # name the Developer knows it by. `python <launcher>` puts the LAUNCHER's directory on sys.path, not
 # the cwd, and without this `import train` fails for a file the model can see with os.listdir().
@@ -559,6 +569,8 @@ def render_launcher(program_path: str, read_allow: Optional[tuple] = None,
                         "mutations": tuple(sorted(read_fence.MUTATION_EVENTS)),
                         "landlock": landlock.no_mutation_source(),
                         "landlock_fn": landlock.NO_MUTATION_FUNCTION,
+                        "seccomp": seccomp.no_mutation_source(),
+                        "seccomp_fn": seccomp.NO_MUTATION_FUNCTION,
                         # Spliced only when confinement is asked for, so a launcher that was not
                         # asked for it is byte-identical to what it has always been.
                         "read_rung": ("" if read_allow is None else _READ_RUNG % {
@@ -1094,8 +1106,8 @@ class DevProbeTools:
             pass
         try:
             paths.add(site.getusersitepackages())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 - same as the call above: absent under some venvs and
+            pass                       # under `-s`, and the prefixes already added cover it
         # The MODEL CACHE and the temp dir, from the same derivation the eval launcher uses rather
         # than a second hand-written list. `read_allowlist` exists because "a base-model download is
         # a read every repo task makes"; without those tiers a confined probe doing
@@ -1232,9 +1244,19 @@ class DevProbeTools:
     # the kernel's `PermissionError` for a reader the hook cannot see (`ctypes`, a native loader).
     # Anchored on the sentence/exception, never on the bare path, so a program that merely PRINTS a
     # grader path is not annotated.
+    # ONE slot, asserted rather than assumed. The join emits a NAMED group per `{path}`, so the day
+    # `read_fence.REFUSAL_MESSAGE` — a prompt string this repo edits freely — grows a second slot,
+    # `re.compile` raises `re.error: redefinition of group name 'hook'` AT CLASS-BODY EVALUATION:
+    # `import looplab.tools.dev_probe` fails and takes the Developer down, at run time, not in a
+    # test. `partition` makes the single slot a precondition with a sentence instead, and the
+    # annotation degrades to "not named" rather than the process degrading to an ImportError.
+    _FENCE_HEAD, _FENCE_SLOT, _FENCE_TAIL = read_fence.REFUSAL_MESSAGE.partition("{path}")
+    # `[^\r\n]+?` and not `\S+`: a grader directory containing a space silently lost the annotation
+    # and the Developer read the false, unactionable "is under the operator's SOURCE tree" about a
+    # site-packages path.
     _FENCE_REFUSAL_RE = re.compile(
-        "(" + r"(?P<hook>\S+)".join(re.escape(part)
-                                    for part in read_fence.REFUSAL_MESSAGE.split("{path}")) + ")"
+        ("(" + re.escape(_FENCE_HEAD) + r"(?P<hook>[^\r\n]+?)" + re.escape(_FENCE_TAIL) + ")"
+         if _FENCE_SLOT and "{path}" not in _FENCE_TAIL else "(?!x)x")
         + r"|(PermissionError: \[Errno 13\] Permission denied: '(?P<kernel>[^']+)')")
 
     def _name_the_grader(self, rc, err: str) -> str:

@@ -112,6 +112,17 @@ def test_index_mentions_every_numbered_document():
     #   50 -> 51 (2026-09-03): the second external-works synergy pass (doc 51). No collision — the
     #   number was claimed by checking the glob AND the index table together, and no sibling
     #   worktree held an unmerged `51-` at the time.
+    #   61 + 2 -> 63 (2026-09-07), at the MERGE with master, and the EIGHTH collision. Master's
+    #   block (50/51 architecture-review + external-works-synergy, and its own 53) is the
+    #   published line and keeps its numbers, as the seventh entry decided; this branch's two
+    #   (52-development-plan-2026-09-05 and 53-agent-guide-narratives-2026-09-06) meet it.
+    #   Only ONE number actually collided —
+    #   `53-agent-guide-narratives-2026-09-06` against master's
+    #   `53-looplab-loop-defects-from-algotune-2026-08-26` — so the LATER-merged document is
+    #   renumbered 53 -> 64, with `CLAUDE.md`'s two prose `doc 53` references, the mkdocs nav,
+    #   the index's first column and `docs/50`'s link moved in this same change. 52 did not
+    #   collide (master renumbered its own 52 to 63 at the seventh). The pre-existing DOUBLE 18
+    #   is on both parents and is not this merge's to resolve.
     #   59 + 2 -> 61 (2026-09-06), at the MERGE with master, and this is the SEVENTH
     #   collision — the first where two BLOCKS met rather than two documents. Master held
     #   `50-architecture-review-2026-09-02` and `51-external-works-synergy-2026-09-03`;
@@ -123,7 +134,12 @@ def test_index_mentions_every_numbered_document():
     #   link, every prose `doc NN`, the index's first column, the mkdocs nav and
     #   `benchmarks/algotune/README.md` moved in this same change. 54 remains the gap it
     #   already was. Master's two documents are the +2; nothing was dropped.
-    assert len(numbered) == 61, "the derived numbered-document inventory changed"
+    assert len(numbered) == 63, "the derived numbered-document inventory changed"
+    #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
+    #   claimed by checking the glob AND the index table together.
+    #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`
+    #   went on a byte budget (doc 53, doc 52 row 20). No collision — the number was claimed by
+    #   checking the glob AND the index table together.
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
@@ -527,3 +543,50 @@ def test_every_failure_reason_surface_names_all_of_them():
     assert not problems, (
         "FAILURE_REASONS surfaces disagree with the registry — update them in the SAME change as "
         "the registry (CLAUDE.md docs-sync rule):\n  " + "\n  ".join(problems))
+
+
+# THE AGENT GUIDE'S BYTE BUDGET (doc 52 row 20). `CLAUDE.md` is read on EVERY agent turn: at 260,266
+# bytes on 2026-09-06 it was about 60k tokens — 29 % of a 200k window before a single file was
+# read — and 75 % of it was package-map narrative whose measurements are also recorded in the
+# numbered docs and the module docstrings. The rules stayed; the stories moved, verbatim, to doc 53.
+# The budget is a CEILING with headroom for rules, not a target: a rule added here costs a line,
+# a story added here costs the budget, and the remedy is doc 53 or a docstring, never the ceiling.
+CLAUDE_MD_MAX_BYTES = 100_000
+_NARRATIVES = DOCS / "64-agent-guide-narratives-2026-09-06.md"
+
+
+def test_the_agent_guide_stays_under_its_byte_budget():
+    size = len((ROOT / "CLAUDE.md").read_bytes())
+    assert size <= CLAUDE_MD_MAX_BYTES, (
+        f"CLAUDE.md is {size:,} bytes, over the {CLAUDE_MD_MAX_BYTES:,}-byte budget every agent turn pays "
+        f"for. Keep the RULE here and move the measurement / incident / alternatives to "
+        f"{_NARRATIVES.name} or the module docstring — do not raise the budget.")
+
+
+def test_the_archived_narratives_still_cover_every_package_map_row():
+    """The archive is what made the budget honest: every row the guide keeps has its full story
+    there, one `### <path>` section per row, so a compact row is a pointer and not a deletion."""
+    rows = re.findall(r"^\| (`(?:looplab/[^`]*|ui/)`) \|", (ROOT / "CLAUDE.md").read_text(encoding="utf-8"), re.M)
+    assert rows, "the package map has no rows"
+    archive = _NARRATIVES.read_text(encoding="utf-8")
+    missing = [path for path in rows if f"### {path}\n" not in archive]
+    assert not missing, f"package-map rows with no archived narrative section: {missing}"
+    assert "## Engine invariants (the full account)" in archive
+    assert "## Conventions and traps (the full account)" in archive
+
+
+def test_the_engine_row_states_the_real_mixin_count():
+    """The package map calls `Engine` "N mixins" and then lists ~35 modules, most of which are not
+    mixins. The number said twenty-one while `Engine.__bases__` held twenty — and CLAUDE.md's own
+    rule for exactly this shape is "the count comes from the parser, never a person". Derived here
+    so the sentence cannot drift again without a red test."""
+    import re
+
+    from looplab.engine.orchestrator import Engine
+
+    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8-sig")
+    stated = re.search(r"and (\d+) mixins:", claude)
+    assert stated, "the engine row no longer states a mixin count — restate it or drop this guard"
+    assert int(stated.group(1)) == len(Engine.__bases__), (
+        f"CLAUDE.md says {stated.group(1)} mixins; `Engine.__bases__` holds "
+        f"{len(Engine.__bases__)}")

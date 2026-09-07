@@ -136,6 +136,8 @@ now has somewhere to ask it, and the answer is never inferred from silence.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 # WHAT A RUN'S CHAMPION NUMBER CAN BE CAVEATED FOR, as a closed vocabulary — one slug per surviving
 # half of `unreliable_metric_ids`' two families, plus one that is NOT of that join at all and says so
 # in its own entry: the first two qualify HOW the number was measured, the third qualifies WHAT it is
@@ -322,3 +324,75 @@ def applied_params_diverged(provenance) -> bool:
         return False
     return any(isinstance(record.get(field), (list, tuple)) and len(record[field]) > 0
                for field in ("diverged", "conflicts"))
+
+
+# --------------------------------------------------------------------------------------------------
+# THE MISLEAD GAP (doc 52 row 22). The caveats above say WHAT KIND of number the champion's is; this
+# says HOW MUCH of it the intended protocol supports. Protocol Validity's shape, reported as the
+# PAIR and its gap rather than as a flag-count subtraction:
+#
+#     S_exploit  = the number the run publishes — its champion, crowned under whatever rungs the run
+#                  was configured with (`trust_gate: audit` enforces nothing; `metric_salvage:
+#                  select` admits a recovered number)
+#     S_intended = the best number among the nodes the record says NOTHING against: feasible, no
+#                  HIGH-PRECISION reward-hack/leakage signal (`hard_flagged_ids`, mode-independent),
+#                  and measured rather than salvaged (neither the admitted nor the excluded half)
+#     G          = S_exploit − S_intended in the run's direction (positive = the published number is
+#                  better than the intended protocol supports; 0 = the champion IS an intended node)
+#
+# Spelled as calls to the same two predicates the caveats use — `hard_flagged_ids` and
+# `metric_unmeasured` — for the reason the module docstring gives: a projection that re-derived
+# either rule would drift from the rung that decides it. A CONSTRAINT violation is not an exploit
+# (the number was measured honestly against a bound the operator set), but an infeasible node is
+# outside the intended protocol too, so it is in neither population — which is also what keeps
+# `S_intended <= S_exploit` (the champion is the best FEASIBLE node) and the gap non-negative on
+# every run the selector crowned. The one exception is a run whose champion is a `select`-admitted
+# salvage while a measured node scored higher on a rung that excluded it: impossible by
+# construction (an admitted salvage is feasible and competes on equal terms), so a negative gap
+# would mean the selector and this function disagree, and it is reported rather than clamped.
+#
+# READER-SIDE DEFAULTS. `None` for a run with no champion; `intended`/`intended_node`/`gap` are
+# `None` when no node survives the filter (every scored node flagged or salvaged) — an honest
+# "nothing to compare against", never a 0. `excluded` counts the scored nodes the filter dropped,
+# so a reader can tell a clean run (0 excluded, gap 0) from a run whose champion happened to be
+# clean while half its population was not. `version` is the record's own, for a later reader.
+MISLEAD_GAP_VERSION = 1
+
+
+def mislead_gap(state) -> Optional[dict]:
+    """The Mislead pair over `state`: `{exploit, exploit_node, intended, intended_node, gap,
+    direction, scored, excluded, version}`, or `None` when the run has no champion."""
+    from looplab.engine.metric_salvage import metric_unmeasured
+    from looplab.events.replay import hard_flagged_ids
+
+    best = state.best() if hasattr(state, "best") else None
+    if best is None or best.metric is None:
+        return None
+    direction = "min" if str(getattr(state, "direction", "max") or "max") == "min" else "max"
+    flagged = hard_flagged_ids(state)
+    nodes = getattr(state, "nodes", None)
+    population = [n for n in (nodes.values() if isinstance(nodes, dict) else (nodes or []))
+                  if getattr(n, "metric", None) is not None]
+
+    def intended(n) -> bool:
+        record = getattr(n, "metric_provenance", None)
+        provenance = record if isinstance(record, dict) else {}
+        return (not getattr(n, "violations", None) and n.id not in flagged
+                and not provenance.get("salvaged") and not metric_unmeasured(n))
+
+    clean = [n for n in population if intended(n)]
+    # ties by the LOWER id, so two polls of an unchanged run publish one record
+    pick = (lambda n: (n.metric, -n.id)) if direction == "max" else (lambda n: (-n.metric, -n.id))
+    best_clean = max(clean, key=pick) if clean else None
+    exploit = float(best.metric)
+    record = {"version": MISLEAD_GAP_VERSION, "direction": direction,
+              "exploit": exploit, "exploit_node": int(best.id),
+              "intended": None, "intended_node": None, "gap": None,
+              "scored": len(population), "excluded": len(population) - len(clean)}
+    if best_clean is not None:
+        intended_value = float(best_clean.metric)
+        gap = exploit - intended_value if direction == "max" else intended_value - exploit
+        record.update({"intended": intended_value, "intended_node": int(best_clean.id),
+                       "gap": round(gap, 9)})
+    return record
+

@@ -191,3 +191,28 @@ def test_the_body_rule_agrees_with_the_header_rule(reported):
     assert proxy._body_cost({"cost": 0.5}) == 0.5
     assert proxy._header_cost({"x-litellm-response-cost-original": "0.5"}) == 0.5
     assert proxy._body_cost({}) is None and proxy._body_cost({"cost": None}) is None
+
+
+@pytest.mark.parametrize("usage,measurable", [
+    ({"prompt_tokens": 12, "completion_tokens": 34}, True),    # an ordinary invoice
+    ({"prompt_tokens": 12, "completion_tokens": 0}, True),     # a real prompt, an empty answer
+    ({"prompt_tokens": 0, "completion_tokens": 7}, True),
+    ({"prompt_tokens": 0, "completion_tokens": 0}, False),     # litellm's MINTED frame
+    ({}, False),
+    ({"prompt_tokens": None, "completion_tokens": None}, False),
+    ({"prompt_tokens": "x"}, False),                           # not a number, not a measurement
+])
+def test_a_usage_frame_is_a_measurement_only_when_it_counts_something(usage, measurable):
+    """The streaming twin of the zero-cost rule above, and it decides the same thing money-wise.
+
+    A usage-SHAPED object with zero counts priced the call at $0.00 under `metered: true` and, worse,
+    set `usage_frame_seen` — which discards every forwarded delta, so the estimator that exists to
+    catch a silent under-count is switched off by the very frame that produces one. This file's
+    subject module records litellm minting exactly that frame.
+
+    MUTATION: key on `isinstance(frame.get("usage"), dict)` alone -> the fourth row flips and every
+    minted frame prices a real call at zero with a green `metered` flag.
+    """
+    assert proxy._usage_frame_is_measurable({"usage": usage}) is measurable
+    assert proxy._usage_frame_is_measurable({"choices": [{}]}) is False, "no usage is not a usage"
+    assert proxy._usage_frame_is_measurable("data: [DONE]") is False

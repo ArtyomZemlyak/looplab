@@ -40,12 +40,25 @@ _LAYOUT = {
     "ablation": "engine",
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
+    "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
+    "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
+    "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
+    "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
+    "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
+    "bundle": "engine",  # the RO-Crate reviewer bundle export (doc 52 row 23); composes events + engine, so not `events`
+    "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
+    "attribute_sites": "engine",  # the Engine attribute declaring-site registry (doc 52 row 21)
     "established": "agents",
     "answered_by_context": "agents",
     "agents_md": "tools",
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share
+    "containment": "core",  # `contain(reason, exc)`: the countable contain-and-continue (doc 52 row 14)
+    "research_record": "core",  # exact-span EvidenceItem, retrieved literature, the claim join (doc 52 row 16)
+    "phase_events": "core",     # inner agent phases as DIAGNOSTIC events through an engine-installed sink
+    "evidence": "core",  # the ONE untrusted-evidence envelope: label + guard sentence + fence
     "appstate": "serve",
+    "principal": "serve",      # who is asking, and the one portfolio-visibility decision
     "node_activity": "serve",  # generation-scoped public building/queue/evaluation projection
     "eval_occupancy": "events",  # durable eval-start/terminal occupancy analytics
     "question_board": "tools",   # the Developer/Researcher read of the open-question board
@@ -55,6 +68,7 @@ _LAYOUT = {
     "artifacts": "serve",
     "paid_work": "serve",
     "paid_ledger": "serve",  # ...its claim→terminal receipt half, shared by the paid routes (doc 25 SR-01)
+    "api_reference": "serve",  # the HTTP API reference generated from app.openapi() (doc 52 row 25)
     "settings_ui_schema": "serve",
     "asset_brief": "tools",   # PART IV D1 bounded local asset/prior-art brief
     "audit": "engine",   # engine audit/trust-emitter mixin
@@ -119,6 +133,7 @@ _LAYOUT = {
     "belief_projection": "events",   # derived belief view over the card board (doc 25 CO-11)
     "comment_projection": "events",
     "command_eval": "runtime",
+    "numeric_contract": "runtime",  # `expect.numeric`: a declared relation the engine evaluates (doc 52 row 24)
     "command_observation": "serve",
     "code_freshness": "serve",   # is this server process still running the code on disk
     "comparison": "core",
@@ -210,11 +225,13 @@ _LAYOUT = {
     # the watchdog judges' bounded log reader + metric series — a `tools` provider like any other,
     # registered so the flat `looplab.log_tools` alias resolves and the layout audit stays exhaustive.
     "log_tools": "tools",
+    "clock": "tools",      # the loop clock + `remaining_time` tool (doc 52 row 15)
     "service_reaper": "serve",
     "llm": "core",
     # the shared paid-call concurrency boundary is a canonical core module; registering
     # it keeps both the package-layout audit and the supported flat import alias exhaustive.
     "llm_broker": "core",
+    "llm_budget": "core",  # the reserve-commit run budget the broker meters at borrow (doc 52 row 15)
     "llm_streaming": "core",
     "llm_toolcall": "core",
     "llm_transient": "core",
@@ -236,6 +253,7 @@ _LAYOUT = {
     "metrics_adapters": "serve",
     "mlebench": "adapters",
     "mlebench_grade": "adapters",
+    "mlebench_split": "adapters",
     "mlebench_prep": "adapters",
     "mlebench_real": "adapters",
     "mlflow_export": "events",
@@ -281,6 +299,7 @@ _LAYOUT = {
     "read_allowlist": "runtime",   # the ONE derivation of what an eval may read, from the
     #                              operator's declared mounts
     "landlock": "runtime",         # the kernel read allow-list applied at the launch
+    "seccomp": "runtime",          # the kernel syscall policy applied at the launch (doc 52 row 28)
     "stage_identity": "runtime",   # what a stage RAN ON and what it MADE: the reuse key a cache
     #                              would consult + the produced artifacts' content identity
     "applied_params": "runtime",   # what the CONFIGURATION that ran said the declared coordinates
@@ -352,6 +371,9 @@ _LAYOUT = {
     "trace_files": "core",       # private trace-file identity + bounded physical-row boundary
     "trust_gate": "events",  # the ONE trust_gate_changed write policy, shared by its two surfaces
     "traceview": "events",
+    "trajectory": "events",
+    "event_reference": "events",   # the generated event reference (doc 52 row 30)
+    "state_delta": "events",   # the SSE stream's delta frames: diff/apply over two folded payloads
     "tracing": "core",
     "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill
     "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory + opt-in kill)

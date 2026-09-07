@@ -92,8 +92,8 @@ from looplab.events.types import (
     EV_APPLIED_PARAMS_BACKFILLED,
     EV_SCORE_METRICS_BACKFILLED,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
-    EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
-    EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
+    EV_PLAN, EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
+    EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_LITERATURE_RETRIEVED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
     EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED,
@@ -394,6 +394,11 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.dirty_inputs = _di if isinstance(_di, list) else []   # P0-5 uncommitted-input enumeration
     _tg = str(d.get("trust_gate", "audit")).strip().lower()
     st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
+    # The HITL gate the run launched with (pinned since 2026-09-06, invariant #6). Only a JSON
+    # boolean is a record; anything else — and every log written before the pin — folds to None,
+    # which every reader treats as "not recorded, the snapshot decides" and never as False.
+    _ra = d.get("require_approval")
+    st.require_approval = _ra if isinstance(_ra, bool) else None
     # F1d: the run-level DECLARED ENVIRONMENT the evals ran under. Absent on old logs and on every
     # run that declared none -> `{}` -> the engine keeps its own launch value, i.e. byte-identical
     # legacy behaviour. Coerced to `{str: str}` here rather than trusted: this is read back by
@@ -634,6 +639,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # logs fold byte-identically (invariant 5).
             forked_from=d.get("forked_from"),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
+            model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
             footprint_finalized=d.get("footprint_finalized") is True,
             speculative=speculative,
             card_build_generation=card_build_generation,
@@ -649,7 +655,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # `_create_node` re-computes node_id=0 forever -> a 184MB node_created(0) runaway. Let
         # it propagate so a transient glitch surfaces instead of self-sustaining into a spin.
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 — skip just this event (it was `continue` in the loop arm); the fold stays total
         return   # (was `continue` in the loop arm: skip just this event)
     st.nodes[n.id] = n
     _fold_node_concept_envelope(st, ctx, n, d, current)
@@ -945,6 +951,9 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
         first_terminal = n.status is NodeStatus.pending
         if first_terminal:
             n.metric = _finite_metric(d.get("metric"))  # invalid/missing remains only in the raw log
+            # Additive, reader-side default (invariant #5): the candidate's own number on a
+            # host-scored node (doc 52 row 10a); an old log has no key and folds to None.
+            n.self_metric = _finite_metric(d.get("self_metric"))
             n.status = NodeStatus.evaluated
             n.terminal_event_seq = e.seq
             n.rerun_stage = None                # any stage-scoped re-run has now landed
@@ -997,7 +1006,7 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             for t_d in (_raw_trials if isinstance(_raw_trials, (list, tuple)) else []):
                 try:
                     trials.append(Trial(**t_d))
-                except Exception:
+                except Exception:  # noqa: BLE001 — a malformed trial row is skipped, never allowed to break the fold
                     continue
             n.trials = trials
             _charge_terminal_cost(st, n, d, ctx)
@@ -1785,6 +1794,13 @@ def _on_stage_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
         rec = {"name": d.get("name"), "status": d.get("status"),
                "exit_code": d.get("exit_code"), "seconds": d.get("seconds"),
                "repairs": n.repairs}
+        # THE PER-ATTEMPT LEDGER, appended BEFORE the per-name merge below and never rewritten by it
+        # (doc 52 row 27; BACKLOG §6 D5): each row is the attempt's own statement — its epoch is
+        # `n.repairs` as recorded here, never the merge's MAX — so the attempt a repair supersedes
+        # keeps the wall-clock it spent. Append-only across resets (`node_reset` clears `stages`,
+        # not this), stamped with the lifecycle generation (`Node.attempt`, the field that keeps its
+        # original name for projection compatibility) so a reader can partition.
+        n.stage_attempts.append({**rec, "generation": n.attempt, "seq": e.seq})
         for i, s in enumerate(n.stages):
             if s.get("name") == rec["name"]:
                 # A "reused" marker means a re-eval SKIPPED this stage (an earlier attempt already
@@ -2923,6 +2939,16 @@ def _on_strategy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
         history["developer_application"] = d["developer_application"]
     st.strategy_history.append(history)
 
+def _on_plan(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # doc 52 row 18: the run's plan artifact. Latest wins; the history keeps every re-cut. The row
+    # is validated by its writer (`engine/plan.py::build_plan`) and read back defensively here.
+    if not isinstance(d, dict) or not isinstance(d.get("phases"), list):
+        return
+    st.plan = dict(d)
+    st.plan_history.append({"at_node": d.get("at_node"), "reason": d.get("reason"),
+                            "endgame_start": d.get("endgame_start"), "reserve": d.get("reserve")})
+
+
 def _on_hypothesis_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FOREAGENT board prioritization: latest wins. The order does not re-rank evaluated nodes; the sole
     # board derivation `_derive_cards` uses it to stamp Card.priority (the compatibility priority
@@ -3065,7 +3091,7 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
             hid = str(receipt.get("id") or hypothesis_id(receipt["statement"]))
             if hid in st.hypotheses_abandoned:
                 st.hypotheses_abandoned.remove(hid)
-        except Exception:
+        except Exception:  # noqa: BLE001 — an unreadable receipt cannot reopen a hypothesis; the fold stays total
             pass
 
 
@@ -4149,7 +4175,16 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     from looplab.core.advisory_payloads import sanitize_research_memo_payload
     # old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
-    st.research.append(sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False))
+    memo = sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False)
+    st.research.append(memo)
+    # THE DURABLE RESEARCH RECORD (doc 52 row 16): the latest memo's plan is the run's current
+    # ResearchPlan / ProgressLedger, and every memo's exact-span evidence accrues by id. Both are
+    # sanitized above and read by nothing that selects; an old row carries neither.
+    if isinstance(memo.get("plan"), dict):
+        st.research_plan = memo["plan"]
+    for item in memo.get("evidence") or ():
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+            st.research_evidence.setdefault(item["id"], item)
     # `research_served` indexes `research_requests`: the engine only sets `served_manual` while
     # serving `research_requests[research_served]` (engine/research_cadence.py::normalized_belief_key). Counting every
     # such row unconditionally let a duplicate/orphan completion push the cursor PAST the queue, so a
@@ -4165,6 +4200,18 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     attempt_id = d.get("attempt_id")
     if isinstance(attempt_id, str) and attempt_id:
         st.research_attempts_completed.add(attempt_id)
+
+def _on_literature_retrieved(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # The papers a Deep-Research pass read (doc 52 row 16), sanitized on the way in like the memo
+    # they rode beside. Selection-neutral: nothing but the record reads `st.literature`.
+    from looplab.core.advisory_payloads import sanitize_literature_items
+    seen = {row.get("id") for row in st.literature if isinstance(row, dict)}
+    at_node = d.get("at_node") if type(d.get("at_node")) is int else None
+    for item in sanitize_literature_items(d.get("items")):
+        if item["id"] not in seen:
+            seen.add(item["id"])
+            st.literature.append({**item, "at_node": at_node})
+
 
 def _on_lessons_distilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # M6 does not re-rank current nodes/best; at_node + pair ids are behavioral replay gates that
@@ -4292,6 +4339,7 @@ _HANDLERS = {
     EV_ABLATE: _on_ablate,
     EV_POLICY_DECISION: _on_policy_decision,
     EV_STRATEGY_DECISION: _on_strategy_decision,
+    EV_PLAN: _on_plan,
     EV_HYPOTHESIS_RANKED: _on_hypothesis_ranked,
     EV_RUNG_PROMOTED: _on_rung_promoted,
     EV_AGENT_DECISION: _on_agent_decision,
@@ -4341,6 +4389,7 @@ _HANDLERS = {
     EV_DEEP_RESEARCH: _on_deep_research,
     EV_RESEARCH_ATTEMPTED: _on_research_attempted,
     EV_RESEARCH_COMPLETED: _on_research_completed,
+    EV_LITERATURE_RETRIEVED: _on_literature_retrieved,
     EV_LESSONS_DISTILLED: _on_lessons_distilled,
     EV_LESSONS_REFRESHED: _on_lessons_refreshed,
     EV_REPORT_GENERATED: _on_report_generated,
@@ -4537,3 +4586,12 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
         if not is_usable_metric(robust) or not is_usable_metric(n.metric):
             continue
         n.generalization_gap = (n.metric - robust) if st.direction == "max" else (robust - n.metric)
+    # Derived self-report gap (audit-only, doc 52 row 10a): how much better the candidate SAID it
+    # did than the host scorer measured. Direction-aware so positive always means "over-reported".
+    # Deliberately NOT `generalization_gap`: that one compares the signal the search optimised with
+    # an unseen one, and on a host-scored node the search optimised the HOST's number.
+    for n in st.nodes.values():
+        if not is_usable_metric(n.self_metric) or not is_usable_metric(n.metric):
+            continue
+        n.self_report_gap = ((n.self_metric - n.metric) if st.direction == "max"
+                             else (n.metric - n.self_metric))

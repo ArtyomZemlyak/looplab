@@ -29,10 +29,10 @@ Nothing below is a bug you can fix without deciding something first. That is the
 >   silent-red this index exists to end. The deciding symbol is the function itself.)
 > - **OPEN[trace-exporter-hardens-per-span-not-per-batch]** the worker still takes exactly one row per
 >   iteration and runs the whole hardened ladder (guarded open, torn-tail heal, identity CAS before
->   and after, one append receipt) per SPAN. proof:present:self._queue.popleft()@looplab/core/tracing.py
+>   and after, one append receipt) per SPAN. proof:`line:item: Optional[bytes]&&= None@looplab/core/tracing.py`
 > - **OPEN[card-trace-scans-whole-run-span-index]** `card_trace_view` still copies the whole run's
 >   light spans; `SpanIndex` has no `card_id` dimension and `_SCHEMA` is unbumped.
->   proof:absent:card_id@looplab/events/span_index.py
+>   proof:`line:_SCHEMA&&= 12@looplab/events/span_index.py`
 > - **OPEN[span-index-hashes-every-source-row]** `_read_full` still re-hashes each selected row's FULL
 >   bytes on the request path, and a 64-char digest is retained per row in memory and on disk.
 >   proof:present:hashlib.sha256(data).hexdigest()@looplab/events/span_index.py

@@ -6,6 +6,7 @@ explicit row lists / timestamp lists — adapter-agnostic.
 """
 from __future__ import annotations
 
+import ast
 import re
 from typing import Sequence
 
@@ -120,6 +121,139 @@ def _spearman(a: Sequence[float], b: Sequence[float]) -> float:
     return _pearson(_ranks([p[0] for p in pairs]), _ranks([p[1] for p in pairs]))
 
 
+# ------------------------------------------- THE RESIDUE THE TWO COEFFICIENTS CANNOT SEE (row 34)
+#
+# `target_leakage` runs Pearson beside a tie-averaged rank coefficient, so a monotone re-encoding of
+# the target is caught. Two shapes still read ~0 on BOTH: `y**2` about a symmetric mean (a perfect
+# functional dependence with no monotone component) and a categorical id that maps to the label.
+# Those are exactly the leaks a grader-adjacent column takes in practice.
+#
+# WHY THIS RUNG DOES NOT GATE, and why that is the finding rather than a shortfall. The statistic
+# that sees them — how much of the target's variance the column's own GROUPS explain — has real
+# false positives that a coefficient does not: a binary feature that perfectly predicts a binary
+# target is routine and legitimate (a diagnosis column against a diagnosed label), and so is any
+# column with as many groups as rows, which explains everything by construction. `target_leakage`
+# ABORTS A RUN, and a gate that aborts on a routine shape is worse than the gap it closes. So this
+# reports and is read by nothing that decides — the measurement it needs before it may fire is a
+# rate over real tasks, which is what `categorical-leak-rung-never-measured` now stands for.
+CATEGORICAL_LEAK_ADVISORY = 0.98      # the same bar the gating rungs use, deliberately: the number
+                                      # is not what is unproven here — firing on it is
+# THE BINNED RUNG GETS A LOWER BAR, and it is not a looser one. Binning a continuous column into
+# equal-count quantile bins throws away every within-bin difference, so its η² is a LOWER BOUND on
+# the dependence: the exact `y**2` this rung exists for measures 0.967 over the 12 bins a 60-row
+# table allows, not 1.0. Holding it to 0.98 would demand MORE evidence of the shape that is hardest
+# to see than of the shape a coefficient already catches.
+CATEGORICAL_LEAK_BINNED_ADVISORY = 0.90
+_MIN_ROWS_PER_GROUP = 5               # below this a column explains the target by cardinality alone
+_MAX_TARGET_CLASSES = 20              # a target with more distinct values is treated as continuous
+
+
+def categorical_leak(features: dict[str, list[float]], target: Sequence[float],
+                     *, exclude: Sequence[str] = ()) -> dict:
+    """How much of the target each column's own GROUPS explain — the non-monotone, categorical rung.
+
+    `{name: {"score", "rung", "distinct", "rows_per_group"}}` for every column at or above
+    `CATEGORICAL_LEAK_ADVISORY`, where `score` is the correlation ratio η² for a continuous target
+    (the share of its variance explained by the grouping) and, for a small-cardinality one, the
+    weighted purity — the accuracy of predicting each group's most common label — RESCALED against
+    the base rate a constant prediction already reaches (`(purity - base) / (1 - base)`; the raw
+    `purity` and the `base_rate` ride along on the row). Both are 1.0 exactly when the column
+    determines the target, which is the shape being looked for, and the rescaling is what keeps
+    that true on an imbalanced one — see the block at the purity branch.
+
+    ADVISORY, never a verdict: the caller reports it and nothing in the engine reads it. `distinct`,
+    `rows_per_group` and `binned` ride along because they are what tells a real leak from the two
+    routine shapes this statistic cannot distinguish on its own — a two-valued flag against a
+    two-valued label, and an id column with one row per group.
+
+    `exclude` is the columns the gating rungs already flagged. The point of this one is the RESIDUE:
+    a column Pearson already caught does not need saying twice, and reporting it here would bury the
+    finding this exists for under every ordinary strong correlation.
+    """
+    import math
+
+    out: dict[str, dict] = {}
+    skip = set(exclude or ())
+    clean_target = [float(v) for v in target
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(float(v))]
+    if len(clean_target) < 2 * _MIN_ROWS_PER_GROUP:
+        return out
+    classes = len(set(clean_target))
+    for name, column in (features or {}).items():
+        if name in skip:
+            continue
+        pairs = _finite_pairs(column, target)
+        if len(pairs) < 2 * _MIN_ROWS_PER_GROUP:
+            continue
+        groups: dict[float, list[float]] = {}
+        for x, y in pairs:
+            groups.setdefault(x, []).append(y)
+        distinct = len(groups)
+        rows_per_group = len(pairs) / distinct
+        if distinct < 2 or len(set(y for _x, y in pairs)) < 2:
+            continue          # a constant column, or a constant target that everything "explains"
+        binned = False
+        if rows_per_group < _MIN_ROWS_PER_GROUP:
+            # A CONTINUOUS column: one row per value, so its raw groups explain any target by
+            # arithmetic. Bin it into equal-count quantile bins instead — that is what turns the
+            # non-monotone case into something measurable (`y**2` is nearly constant WITHIN a bin of
+            # x, so the bins explain the target) while an id column stays near zero, because its
+            # bins carry mixed labels. Both halves matter: without the binning the id column is a
+            # false positive, and without the continuous branch `y**2` is invisible.
+            ordered = sorted(pairs, key=lambda pair: pair[0])
+            bins = max(2, min(20, len(pairs) // _MIN_ROWS_PER_GROUP))
+            groups = {}
+            for index, (_x, y) in enumerate(ordered):
+                groups.setdefault(float(index * bins // len(ordered)), []).append(y)
+            distinct = len(groups)
+            rows_per_group = len(pairs) / distinct
+            binned = True
+            if distinct < 2:
+                continue
+        if classes <= _MAX_TARGET_CLASSES:
+            # PURITY AGAINST THE BASE RATE, not raw purity. Predicting the majority label for
+            # EVERY row already scores the base rate, so on an imbalanced target raw purity is
+            # near 1.0 for a column that explains nothing: at 98/2, an alternating flag and a
+            # three-valued group both measure exactly 0.98 — the base rate — and every column of
+            # a rare-event table lands in the advisory. That is the "routine shape" this rung
+            # says it cannot distinguish, arriving by arithmetic rather than by evidence.
+            #
+            # The normalization is the share of the REDUCIBLE error the grouping removes
+            # (Cohen's kappa against the majority-class baseline): 1.0 exactly when the column
+            # determines the target — the property the docstring claims for both rungs — 0.0
+            # when it does no better than the base rate, and scale-free across imbalance. The
+            # raw purity rides along as `purity` because a reader comparing it to `base_rate` is
+            # what tells a strong column on a balanced target from one on a skewed one.
+            correct = sum(max(bucket.count(v) for v in set(bucket)) for bucket in groups.values())
+            purity = correct / len(pairs)
+            labels = [y for _x, y in pairs]
+            base = max(labels.count(v) for v in set(labels)) / len(labels)
+            if base >= 1.0:
+                continue                     # a constant target is explained by everything
+            score = (purity - base) / (1.0 - base)
+            rung = "purity"
+        else:
+            mean = sum(y for _x, y in pairs) / len(pairs)
+            total = sum((y - mean) ** 2 for _x, y in pairs)
+            if total <= 0:
+                continue                     # a constant target is explained by everything
+            within = 0.0
+            for bucket in groups.values():
+                bucket_mean = sum(bucket) / len(bucket)
+                within += sum((y - bucket_mean) ** 2 for y in bucket)
+            score = 1.0 - (within / total)
+            rung = "eta_squared"
+        bar = CATEGORICAL_LEAK_BINNED_ADVISORY if binned else CATEGORICAL_LEAK_ADVISORY
+        if score >= bar:
+            out[name] = {"score": round(score, 6), "rung": rung, "distinct": distinct,
+                         "rows_per_group": round(rows_per_group, 3), "binned": binned}
+            if rung == "purity":
+                out[name]["purity"] = round(purity, 6)
+                out[name]["base_rate"] = round(base, 6)
+    return out
+
+
 def target_leakage(features: dict[str, list[float]], target: list[float],
                    threshold: float = 0.98) -> dict:
     """Flag feature columns near-perfectly correlated with the target (a proxy/leak).
@@ -140,8 +274,12 @@ def target_leakage(features: dict[str, list[float]], target: list[float],
             flagged[name] = round(r if abs(r) >= abs(rho) else rho, 6)
             detail[name] = {"pearson": round(r, 6), "spearman": round(rho, 6),
                             "rung": "linear" if abs(r) >= threshold else "monotone"}
+    # THE THIRD RUNG RIDES BESIDE THE VERDICT AND IS NOT PART OF IT (doc 52 row 34): `leak` and
+    # `flagged` are what the engine acts on, and this rung may not abort a run until its false
+    # positive rate over real tasks is measured. A reader who wants it has it; nothing decides on it.
     return {"detector": "target_leakage", "leak": bool(flagged),
-            "threshold": threshold, "flagged": flagged, "flagged_detail": detail}
+            "threshold": threshold, "flagged": flagged, "flagged_detail": detail,
+            "categorical_advisory": categorical_leak(features, target, exclude=flagged)}
 
 
 _FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
@@ -213,10 +351,182 @@ _LEAKY_FIT_ARG_RE = re.compile(
     r"(?<![a-z])(?:validation|valset|valid|testset|testing|test|val)(?![a-z])")
 
 
+# ------------------------------------------------------------------ multi-test selection
+# LeakageDetector 2.0's third class (doc 52 row 22): REPEATED evaluation against the same TEST split
+# followed by SELECTION on those scores — a grid loop that scores every configuration on `X_test`
+# and keeps the best, three models scored on the test set and `max()`ed, an epoch loop that
+# `evaluate()`s on the test loader and keeps the best epoch. Every single evaluation in it is
+# legitimate on its own, which is why `fit_on_test` cannot see it: nothing is FITTED on the test
+# split, it is merely asked N times and the answer chosen. On `repo_task` the candidate's own scorer
+# IS that split, so a checkpoint loop that scores each checkpoint and picks the winner is this class
+# exactly. AST-based and dependency-free like the rest of the file, and precision-over-recall for the
+# same reason: `data_leakage:*` is HARD under `trust_gate=gate/block`, so a flag needs BOTH halves —
+# ≥1 test-scored evaluation INSIDE a loop (or ≥2 unrolled at one block) AND a selection tell over
+# those scores (a `max`/`argmax`/`sorted` over the collected scores, or a `> best` comparison that
+# keeps a winner). A loop that scores on a VALIDATION split is the intended protocol and is never
+# flagged (the token set is `test`/`testset`/`testing` only, bounded like `_LEAKY_FIT_ARG_RE`); a loop
+# that evaluates on the test split and only LOGS it is not selection and is not flagged either.
+# ACCEPTED RECALL GAP: a selection made on a NAME the scan cannot tie to the scoring call (scores
+# written to a file and re-read, or chosen by a hand-typed literal index) is invisible here.
+_SURFACE_MARKER_RE = re.compile(r"^# --- .+ ---$", re.M)
+_TEST_TOKEN_RE = re.compile(r"(?<![a-z])(?:test|testset|testing)(?![a-z])")
+_SCORING_NAME_RE = re.compile(
+    r"(?:^|_)(?:score|scores|scoring|evaluate|eval|accuracy|acc|precision|recall|f1|auc|roc_auc|"
+    r"rmse|mse|mae|r2|log_loss|logloss|error|metric|metrics|ndcg|mrr|map|recall_at)(?:_|$)"
+    r"|^predict(?:_proba)?$")
+_SELECTION_NAME_RE = re.compile(r"^(?:max|min|argmax|argmin|sorted|nlargest|nsmallest|idxmax|idxmin)$")
+_BEST_NAME_RE = re.compile(r"best|winner|top|chosen|selected|champion", re.I)
+
+
+def _call_name(call: "ast.Call") -> str:
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+def _test_scored(call: "ast.Call") -> bool:
+    """A call that EVALUATES on the test split: a scoring-family name over test-named arguments."""
+    if not _SCORING_NAME_RE.search(_call_name(call).lower()):
+        return False
+    args = " ".join([ast.unparse(a) for a in call.args] + [ast.unparse(k.value) for k in call.keywords])
+    return bool(_TEST_TOKEN_RE.search(args.lower()))
+
+
+def _scored_names(stmts: list, scored: set, collectors: set) -> int:
+    """Walk *stmts* (a loop body or a block): bind the names a test-scored call lands in, the
+    containers those names are appended/assigned into, and return the evaluation count."""
+    n = 0
+    nested: set = set()       # calls INSIDE a counted call's arguments — `acc(y_test, m.predict(X_test))` is ONE
+    for node in ast.walk(ast.Module(body=stmts, type_ignores=[])):
+        if isinstance(node, ast.Call) and _test_scored(node) and id(node) not in nested:
+            n += 1
+            for inner in ast.walk(node):
+                if inner is not node:
+                    nested.add(id(inner))
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            value = node.value
+            if value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = {ast.unparse(t) for t in targets}
+            if any(isinstance(c, ast.Call) and _test_scored(c) for c in ast.walk(value)):
+                for t in targets:                      # `results[k] = score(...)` collects too
+                    if isinstance(t, ast.Subscript):
+                        collectors.add(ast.unparse(t.value))
+                    else:
+                        scored.add(ast.unparse(t))
+            elif any(isinstance(c, ast.Name) and c.id in scored for c in ast.walk(value)):
+                for t in targets:                      # `results[k] = acc` collects; `x = acc` aliases
+                    if isinstance(t, ast.Subscript):
+                        collectors.add(ast.unparse(t.value))
+                    else:
+                        scored.add(ast.unparse(t))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("append", "extend", "add", "insert")
+                and any((isinstance(c, ast.Name) and c.id in scored)
+                        or (isinstance(c, ast.Call) and _test_scored(c))
+                        for a in node.args for c in ast.walk(a))):
+            collectors.add(ast.unparse(node.func.value))
+    return n
+
+
+def _selection_tell(tree: "ast.AST", scored: set, collectors: set):
+    """The statement that CHOOSES on the scores, or None: a selection call over a scored name or a
+    collector, or a comparison of a scored name against a `best`-named value."""
+    names = scored | collectors
+    if not names:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _SELECTION_NAME_RE.match(_call_name(node)):
+            text = " ".join(ast.unparse(a) for a in node.args)
+            receiver = ast.unparse(node.func.value) if isinstance(node.func, ast.Attribute) else ""
+            if any(re.search(r"(?<![\w.])" + re.escape(nm) + r"(?![\w])", text) or receiver == nm
+                   for nm in names):
+                return node
+        if isinstance(node, ast.Compare):
+            sides = [node.left] + list(node.comparators)
+            uses_score = any(isinstance(c, ast.Name) and c.id in scored
+                             for sd in sides for c in ast.walk(sd))
+            if uses_score and any(_BEST_NAME_RE.search(ast.unparse(sd)) for sd in sides):
+                return node
+    return None
+
+
+def _surface_parts(code: str) -> list[tuple[int, str]]:
+    """The scan surface as (line offset, text) parts: `engine/evaluate.py::_trust_scan_surface`
+    concatenates every node file under `# --- <name> ---` markers, and two modules concatenated do
+    not parse as one (a second `from __future__` import is a SyntaxError). Each part parses alone."""
+    parts, start = [], 0
+    lines = code.split("\n")
+    for i, line in enumerate(lines):
+        if _SURFACE_MARKER_RE.match(line) and i > start:
+            parts.append((start, "\n".join(lines[start:i])))
+            start = i + 1
+    parts.append((start, "\n".join(lines[start:])))
+    return parts
+
+
+def multi_test_scan(code: str) -> list[dict]:
+    """Flags for `multi_test`: `{"signal", "line", "code", "evaluations", "selection"}` per site."""
+    flags: list[dict] = []
+    for offset, text in _surface_parts(code):
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            continue                       # an unparseable part is unscanned, never a finding
+        lines = text.split("\n")
+        # (1) the loop form: N test-scored evaluations inside one loop, then a selection.
+        for loop in ast.walk(tree):
+            if not isinstance(loop, (ast.For, ast.AsyncFor, ast.While)):
+                continue
+            scored, collectors = set(), set()
+            n = _scored_names(loop.body, scored, collectors)
+            if n == 0:
+                continue
+            tell = _selection_tell(tree, scored, collectors)
+            if tell is None:
+                continue
+            flags.append({"signal": "multi_test", "line": loop.lineno + offset,
+                          "code": lines[loop.lineno - 1].strip()[:90], "evaluations": n,
+                          "selection": ast.unparse(tell)[:90]})
+        # (2) the unrolled form: ≥2 test-scored assignments in one block, then a selection over them.
+        for block in ast.walk(tree):
+            body = getattr(block, "body", None)
+            if not isinstance(body, list) or isinstance(block, (ast.For, ast.AsyncFor, ast.While)):
+                continue
+            scored, collectors = set(), set()
+            sites = [st for st in body if isinstance(st, (ast.Assign, ast.AnnAssign))
+                     and st.value is not None
+                     and any(isinstance(c, ast.Call) and _test_scored(c) for c in ast.walk(st.value))]
+            if len(sites) < 2:
+                continue
+            _scored_names(body, scored, collectors)
+            tell = _selection_tell(tree, scored, collectors)
+            if tell is None:
+                continue
+            first = sites[0]
+            flags.append({"signal": "multi_test", "line": first.lineno + offset,
+                          "code": lines[first.lineno - 1].strip()[:90], "evaluations": len(sites),
+                          "selection": ast.unparse(tell)[:90]})
+    # one flag per site, in source order, even when both forms saw the same block
+    seen, out = set(), []
+    for flag in sorted(flags, key=lambda f: f["line"]):
+        if flag["line"] in seen:
+            continue
+        seen.add(flag["line"])
+        out.append(flag)
+    return out
+
+
 def code_leakage_scan(code: str) -> dict:
     """I3 data-centric: static-dataflow-lite scan of solution CODE for train->test information flow
     (beyond exact-row contamination). Flags the classic anti-patterns: fitting a preprocessor on the
-    FULL data before the split, and calling .fit() on test data. Heuristic + dependency-free.
+    FULL data before the split, calling .fit() on test data, and — since doc 52 row 22 — evaluating on
+    the test split REPEATEDLY and selecting on the result (`multi_test`, the rung above). Heuristic +
+    dependency-free.
 
     NOTE on gating: under `trust_gate='audit'` (the default) these flags are advisory — surfaced to
     the operator and the agent only. But the engine emits them as `data_leakage:<signal>` signals,
@@ -263,6 +573,7 @@ def code_leakage_scan(code: str) -> dict:
         elif split_at is not None and line_i < split_at and "train" not in arg:
             # a fit/fit_transform on (apparently full) data BEFORE the split leaks test statistics
             flags.append({"signal": "fit_before_split", "line": line_i + 1, "code": snippet})
+    flags.extend(multi_test_scan(code))
     return {"detector": "code_leakage", "leak": bool(flags), "flags": flags}
 
 

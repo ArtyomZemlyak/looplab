@@ -15,10 +15,13 @@ from looplab.core.models import Idea, Node, RunState
 from looplab.core.numeric import euclidean, knn_idw, numeric_params
 
 
-def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -> Optional[float]:
+def _predict_with_distance(params: dict, hist: list[tuple[dict, float]], bounds,
+                           k: int = 3) -> Optional[tuple[float, float]]:
     """Inverse-distance-weighted k-NN prediction of an idea's metric over the history (in the shared
-    numeric param space). None when there's no comparable point. Eligibility here: a neighbour must
-    contain ALL the target's keys (distance over the target's subspace); the IDW core is knn_idw."""
+    numeric param space) AND the distance to its nearest evaluated neighbour — the one uncertainty
+    proxy the search layer has (doc 51 §5: `knn_idw` returns both and this file kept only the
+    first). None when there's no comparable point. Eligibility here: a neighbour must contain ALL
+    the target's keys (distance over the target's subspace); the IDW core is knn_idw."""
     target = numeric_params(params, keys=bounds or None)
     if not target:
         return None
@@ -31,21 +34,40 @@ def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -
     res = knn_idw(pts, k)
     if res is None:
         return None
-    pred = res[0]
+    pred, nearest = res
     # A NaN param survives `numeric_params` (isinstance-numeric), makes every distance NaN, and
     # `knn_idw` documents that a NaN distance degrades to a NaN prediction. `propose` screens only
     # for None, and `is_better` is a bare `<` — every NaN comparison is False — so a NaN would
     # become `best_pred` and then be undisplaceable, handing the panel to the malformed candidate.
     # Abstain instead: an uncomparable candidate is exactly the "no signal" case None already means.
-    return None if pred != pred else pred
+    return None if (pred != pred or nearest != nearest) else (pred, nearest)
+
+
+def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -> Optional[float]:
+    """The point estimate alone (the historical surface; `_predict_with_distance` is the pair)."""
+    res = _predict_with_distance(params, hist, bounds, k)
+    return None if res is None else res[0]
+
+
+def acquisition(pred: float, nearest: float, explore: float, direction: str) -> float:
+    """The UCB-style score the panel ranks by: the point estimate pushed toward the unexplored side
+    by `explore` x the distance to the nearest evaluated point — `search/surrogate.py`'s own
+    `acq = pred -/+ explore * nearest`, sign by objective direction, so the two callers of one IDW
+    core spend its uncertainty the same way. `explore=0` is the historical point-estimate ranking."""
+    return pred - explore * nearest if direction == "min" else pred + explore * nearest
 
 
 class PanelResearcher(WrapsResearcher):
-    def __init__(self, base, k: int = 3, bounds=None, warmup: int = 3):
+    def __init__(self, base, k: int = 3, bounds=None, warmup: int = 3, explore: float = 0.0):
         self.base = base
         self.k = max(1, k)
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
         self.warmup = max(1, warmup)
+        # The exploration weight (doc 52 row 17): the CLI wires `Settings.surrogate_explore`, the
+        # same knob the surrogate proposer spends, so the K diverse ideas are no longer ranked by
+        # pure exploitation. The constructor default keeps every bare `PanelResearcher(...)` the
+        # historical point-estimate ranking, byte for byte.
+        self.explore = max(0.0, float(explore or 0.0))
 
     # Lightweight read-throughs to the wrapped base (mirroring ForesightPanelResearcher's ctor
     # inheritance): chain-walkers like `engine/lessons.py::_merge_prompt_opts` / `reflect_client`
@@ -84,11 +106,14 @@ class PanelResearcher(WrapsResearcher):
         ideas = [self.base.propose(state, parent) for _ in range(self.k)]
         best, best_pred = None, None
         for idea in ideas:
-            pred = _predict(idea.params, hist, self.bounds)
-            if pred is None:
+            res = _predict_with_distance(idea.params, hist, self.bounds)
+            if res is None:
                 continue
-            if best_pred is None or state.is_better(pred, best_pred):
-                best, best_pred = idea, pred
+            # Rank by the acquisition, not the point estimate: a candidate the history cannot
+            # place is worth `explore` x its distance more than its prediction says.
+            score = acquisition(res[0], res[1], self.explore, state.direction)
+            if best_pred is None or state.is_better(score, best_pred):
+                best, best_pred = idea, score
         if best is not None:
             best.rationale = (best.rationale + f" [panel: best of {self.k} by surrogate]").strip()
             return best

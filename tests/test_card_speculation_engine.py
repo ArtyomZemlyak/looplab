@@ -1486,6 +1486,10 @@ def test_a_paid_raw_proposal_survives_every_row_a_concurrent_task_may_append(tmp
         "hint": {"text": "steer toward sparser solvers"},
         "hypothesis_added": {"text": "a board entry", "id": "h-1"},
         "llm_usage": {"usage_id": "raw-usage", "calls": 1},
+        # The deep-research memo's own retrieved papers (doc 52 row 16), appended from the
+        # same concurrent research task as the two `research_*` rows above and neutral for
+        # the same reason: a paper the run read falsifies no Card's receipt.
+        "literature_retrieved": {"query": "sparse solvers", "papers": []},
     }
     assert set(background_payloads) == set(BACKGROUND_APPENDABLE), (
         "a background-appendable type gained/lost a member; decide whether it can falsify a staged "

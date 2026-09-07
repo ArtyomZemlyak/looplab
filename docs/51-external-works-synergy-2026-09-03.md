@@ -425,33 +425,44 @@ monotone expression; `res[1]` read in both `panel.py` and `proxy.py`; a `def col
 an `EV_LITERATURE_RETRIEVED` constant in `events/types.py` — and every predicate flipped True → False.
 A falsifier that cannot go false is the vacuous guard this repo has found nine times in one day.
 
-- **OPEN[skill-body-served-whole-and-unbounded]** — `use_skill` returns the entire skill body with
-  no cap; `looplab/tools/skills.py` is the one agent-facing provider that neither imports
-  `tools/_base` nor calls the shared bounded-output helpers, so a skill library cannot grow without
-  eating the context window a section at a time (§3a; SkillZip).
-  proof:absent:clip@looplab/tools/skills.py
-- **OPEN[skill-status-never-demoted-on-later-evidence]** — one expression decides a skill's whole
-  lifecycle and it is monotone upward: `candidate` → `promoted` on a differently-fingerprinted
-  confirmation, and `prior_status == "promoted"` pins it there forever. No execution feedback, usage
-  count or utility signal can ever move a skill back (§3b; SkillZip/ReZip, Skill-SP, doc 41 §2).
-  proof:line:prior_status&&"candidate"@looplab/engine/memory.py
-- **OPEN[knn-uncertainty-dropped-by-two-of-three-callers]** — `core/numeric.py::knn_idw` returns
-  `(prediction, nearest_distance)`; `search/surrogate.py` spends the second value as a UCB
-  exploration term while `search/panel.py` and `search/proxy.py` keep only `res[0]`, so the K-idea
-  panel ranks purely exploitatively and the pre-eval kill has no abstain-on-uncertainty rung
-  (§5; LDM).
-  proof:absent:res[1]@looplab/search/panel.py+absent:res[1]@looplab/search/proxy.py
-- **OPEN[repo-task-exposes-no-perception-hook]** — data profiling is gated on the task exposing
-  `columns`, six adapters implement it, and `repo_task` — the family the real GPU runs use —
-  implements neither it nor `data_samples`, so `EV_DATA_PROFILED` never fires, `state.data_profile`
-  stays `None`, and `foresight.verified_report` primes predict-before-execute with no view of the
-  data at all (§6; OmniScientist).
-  proof:`absent:def columns@looplab/adapters/repo_task.py`
-- **OPEN[retrieved-literature-is-never-durable]** — `tools/literature.py` returns arXiv titles and
-  abstracts into one prompt and nothing keeps them: no registered event type, so by invariant #7 no
-  durable record, so no edge to `search/concept_graph.py`, nothing for a later run to find and
-  nothing external for `trust/memo_verify.py` to check a claim against (§2; Mechanist).
-  proof:absent:literature@looplab/events/types.py
+- *Closed 2026-09-06 (doc 52 row 17 shipped): the marker `skill-body-served-whole-and-unbounded`
+  stood here. `tools/skills.py` now imports `_base`'s `clip`/`fit_rows`: `render_skill_body`
+  answers `use_skill` in WHOLE sections under `SKILL_RESULT_CAP` (bytes are cut only when one
+  section alone is over the cap, and then it says so), names every section it left out beside the
+  exact `use_skill(name=…, section=…)` call that returns it, and `section=` makes a skill
+  addressable exactly as `run_tools._research_memo` made a memo. A body that fits is byte-identical
+  to the file. `tests/test_skill_sections_and_lifecycle.py` drives it. Deleted per the index rule.*
+- *Closed 2026-09-06 (doc 52 row 17 shipped): the marker `skill-status-never-demoted-on-later-evidence`
+  stood here. The lifecycle is a lattice: `engine/memory.py::next_auto_skill_status` is the SUPPORT
+  edge (candidate → promoted on a different task family; a demoted card re-earns promotion the same
+  way; `retired` never moves automatically) and `reconcile_auto_skill_statuses` the CONTRADICTION
+  edge, run at finalize beside the writer: the newest lessons-store row about the card's claim
+  (`source_statement_sha256` / `claim_sha256`) with a negative verdict demotes it — a promoted card
+  only from a task family it was confirmed on — and the second demotion retires it; every move is
+  receipted on the `reflection_note` (`skills_demoted`). Only code moves `status`, only from
+  recorded outcomes. Deleted per the index rule.*
+- *Closed 2026-09-06 (doc 52 row 17 shipped): the marker `knn-uncertainty-dropped-by-two-of-three-callers`
+  stood here. `search/panel.py::_predict_with_distance` keeps the pair and `acquisition` is the
+  surrogate's own sign rule (`pred ± explore × nearest`), wired from `Settings.surrogate_explore`
+  by the CLI; `search/proxy.py::score_with_uncertainty` keeps the pair and `abstains` is the
+  abstain band — never skip a candidate whose nearest evaluated neighbour is beyond
+  `support_radius`, the explored region's own leave-one-out radius — read by `should_skip` and
+  recorded on `proxy_scored` (`nearest`, `abstained`). `tests/test_knn_uncertainty.py` drives all
+  three callers. Deleted per the index rule.*
+- *Closed 2026-09-06 (doc 52 row 17 shipped): the marker `repo-task-exposes-no-perception-hook`
+  stood here. `adapters/repo_task.py::columns` / `data_samples` read the declared `data:` mounts
+  through the shared `adapters/perception.py` readers (the primary table per mount, 200 rows, at
+  most 4 tables and 64 columns, keys `<mount>:<column>`; a binary or non-tabular mount profiles as
+  `{}`), so `data_profiled` fires at setup, `RunState.data_profile` is folded, `foresight.verified_report`
+  is primed and `DataTools` serves the repo family. `tests/test_repo_task_perception.py` drives it
+  end to end through a real engine run. Deleted per the index rule.*
+- *Closed 2026-09-06 (doc 52 row 16 shipped): the marker `retrieved-literature-is-never-durable`
+  stood here. `events/types.py::EV_LITERATURE_RETRIEVED` is registered (`BACKGROUND_APPENDABLE`),
+  `engine/research_cadence.py::_record_deep_research` appends it beside the memo with the papers
+  `core/research_record.py::parse_literature` read off each `arxiv_search` answer (id over the
+  title, sha256 + length of the abstract), and `events/replay.py::_on_literature_retrieved` folds
+  them onto `RunState.literature` deduplicated by that id, so a later run and the verifier have a
+  durable record of what was actually read. Deleted per the index rule.*
 
 ---
 

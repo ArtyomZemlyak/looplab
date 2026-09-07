@@ -791,6 +791,126 @@ def eval_entrypoint_unprotected(task) -> list[str]:
         "executing — list those files in `protect` if the scoring code must be frozen."]
 
 
+class HostScorerSpec(BaseModel):
+    """A HOST-SIDE scorer: the operator's own scoring program, run by the engine as the final
+    protected `score` stage over the candidate's artifact, from a path the candidate cannot reach
+    (doc 52 row 10a — AIRA2's "consistent scoring", the repo family's L4-m -> L4-v move).
+
+    The repo task elected its champion on the number the candidate's own scorer printed: the
+    protected `cmd` froze the ENTRY file, and everything it imported, every config it read and the
+    split it scored on lived inside the editable tree the candidate rewrites. This is the other
+    half of the contract: `command` names its program by an ABSOLUTE path that `RepoTask` refuses
+    unless it is outside every editable root (`host_scorer_outside_editables`), the runtime digests
+    that program at the score stage's start and records it on the node's `metric_provenance`
+    (`host_scorer.program_sha256`), and the candidate's own printed number rides beside the host's
+    as `self_metric` — recorded, never selected on. `%subject%` in the argv expands to the ONE
+    artifact `eval.metric.subject` / `subject_glob` declared and the pipeline produced; `%params%`
+    expands as in every stage. The stage runs in the node workdir (relative artifact paths resolve
+    as they do for `cmd`), under the eval's declared environment plus `env` here, and its stdout is
+    read with `metric` (the task's own reader when absent).
+
+    What it does NOT do: it does not withhold a split — a scorer that reads a test set the
+    candidate can also read is CONSISTENT and nothing more (the withheld-split half is doc 52's
+    slice (b), which needs the run-record fence and the Landlock validation first).
+    """
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
+    command: list[str]                      # argv, no shell; must name the program by absolute path
+    timeout: float = 1800.0
+    env: dict[str, str] = Field(default_factory=dict)
+    metric: Optional[dict] = None           # reader for the host stage's stdout; None = eval.metric
+
+    @field_validator("command")
+    @classmethod
+    def _names_a_program(cls, v):
+        from looplab.runtime.command_eval import host_program_token
+        argv = [a for a in (v or []) if isinstance(a, str)]
+        if not argv or len(argv) != len(v or []):
+            raise ValueError("host_scorer.command must be a non-empty argv list of strings")
+        if host_program_token(argv) is None:
+            raise ValueError(
+                "host_scorer.command must name its program by an ABSOLUTE path (e.g. "
+                "[\"python\", \"/opt/scorers/score.py\", \"%subject%\"]) — a relative path "
+                "resolves inside the candidate's workdir, and `-m module` names no file the record "
+                "can digest, so neither can be shown to be the same scorer for every node")
+        return argv
+
+    @field_validator("timeout")
+    @classmethod
+    def _timeout_positive(cls, v):
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not v > 0:
+            raise ValueError("host_scorer.timeout must be a positive number of seconds")
+        return float(v)
+
+    @field_validator("env")
+    @classmethod
+    def _env_valid(cls, v):
+        if not v:
+            return {}
+        from looplab.core.envsafe import validate_env_map
+        clean, err = validate_env_map("host_scorer `env`", v)
+        if err:
+            raise ValueError(err)
+        return clean
+
+    @field_validator("metric")
+    @classmethod
+    def _reader_declarative(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, dict):
+            raise ValueError("host_scorer.metric must be a reader spec object")
+        kind = v.get("kind") or v.get("reader")
+        if kind in ("adapter", "auto"):
+            raise ValueError("host_scorer.metric must be a declarative reader (stdout_json / "
+                             "stdout_regex / file_json / file_regex) — the host scorer is the "
+                             "operator's, and an agent-authored reader over it would hand the "
+                             "number back to the candidate")
+        return v
+
+
+def host_scorer_outside_editables(task) -> Optional[str]:
+    """Why this task's host scorer is NOT outside its editable trees, or None when it is.
+
+    The consistency property itself, as a submit-time refusal: the program the host scorer runs must
+    live where no candidate edit can reach it. A program INSIDE an editable root would be re-seeded
+    into every node's workdir and, worse, importable from the candidate's copy — the exact
+    self-scoring `cmd` already permits. It also must EXIST as a regular file, so the receipt the
+    runtime digests is never the `program_sha256: None` a missing program would produce. Shared by
+    the `RepoTask` validator and `cli/run_cmds.py::resume`'s warnings for a grandfathered snapshot.
+    """
+    spec = task.eval if isinstance(task, RepoTask) else None
+    hs = getattr(spec, "host_scorer", None)
+    if hs is None:
+        return None
+    from looplab.runtime.command_eval import host_program_token
+    program = host_program_token(hs.command)
+    if program is None:
+        return "host_scorer.command names no absolute program path"
+    path = Path(os.path.expanduser(os.path.expandvars(program)))
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        return f"host_scorer program {program!r} cannot be resolved: {exc}"
+    if not resolved.is_file():
+        return f"host_scorer program {program!r} is not an existing file"
+    roots = [task.editable_path] + [e.path for e in task.editables]
+    for root in roots:
+        if not root:
+            continue
+        try:
+            src = Path(os.path.expanduser(os.path.expandvars(root))).resolve()
+            resolved.relative_to(src)
+        except (ValueError, OSError):
+            continue
+        return (f"host_scorer program {program!r} lives INSIDE the editable tree {root!r} — a "
+                "scorer the candidate can edit or import from is the candidate's own scorer; put "
+                "the host scorer outside every `repo` / `editables` path")
+    return None
+
+
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
 
@@ -807,6 +927,12 @@ class EvalSpec(BaseModel):
     # (runtime/command_eval.validate_stages); a stage named 'score' is allowed HERE — the operator
     # owns scoring, the reservation only guards Developer manifests.
     stages: list[dict] = Field(default_factory=list)
+    # HOST-SIDE SCORING (doc 52 row 10a): the operator's own scorer, run by the engine as the final
+    # protected `score` stage from a path outside every editable tree — see `HostScorerSpec`. When
+    # declared, `command` (if any) runs BEFORE it as the candidate-side `self_score` stage whose
+    # printed number is recorded as the node's `self_metric`, and a `stages` entry named `score` is
+    # refused (the host scorer is the score stage).
+    host_scorer: Optional[HostScorerSpec] = None
     # The DECLARED ENVIRONMENT for this task's eval — applied to `setup`, to the single `command`,
     # and to EVERY stage, with a stage's own `env` overlaying it (most specific wins). This is where
     # a fact about the TASK belongs: `VS_LOCAL_DATA_ROOT=/home/jovyan/data/dr-local` says where this
@@ -1202,6 +1328,10 @@ class EvalSpec(BaseModel):
                             "constraints", c))
         if isinstance(self.cross_check, dict):
             out.append(("eval.cross_check", "cross_check", self.cross_check))
+        # The host scorer's reader reads the SCORE stage's stdout, i.e. it stands in the `metric`
+        # slot's place — same consequence when it cannot read (every node fails `no_metric`).
+        if self.host_scorer is not None and isinstance(self.host_scorer.metric, dict):
+            out.append(("eval.host_scorer.metric", "metric", self.host_scorer.metric))
         return out
 
     @model_validator(mode="after")
@@ -1276,10 +1406,20 @@ class EvalSpec(BaseModel):
 
     @model_validator(mode="after")
     def _command_or_stages(self):
-        # The documented cmd shape is {"command" | "stages", ...}: one of the two must actually run.
-        if not self.command and not self.stages:
-            raise ValueError("cmd/eval needs a `command` (argv list) or a `stages` pipeline "
-                             "— nothing would run otherwise.")
+        # The documented cmd shape is {"command" | "stages" | "host_scorer", ...}: one of the three
+        # must actually run. A host scorer alone is a complete pipeline (the Developer's manifest
+        # supplies the preceding stages, exactly as it does for a single `command`).
+        if not self.command and not self.stages and self.host_scorer is None:
+            raise ValueError("cmd/eval needs a `command` (argv list), a `stages` pipeline or a "
+                             "`host_scorer` — nothing would run otherwise.")
+        if self.host_scorer is not None:
+            # THE HOST SCORER IS THE SCORE STAGE. An operator pipeline that also names one would
+            # have two scorers, and the engine appends the host's after the declared list — so the
+            # declared `score` would be the stage BEFORE the one that scores, a name that lies.
+            for st in self.stages:
+                if isinstance(st, dict) and str(st.get("name") or "").lower() == "score":
+                    raise ValueError("cmd.stages may not name a `score` stage when `host_scorer` "
+                                     "is declared: the host scorer IS the final score stage")
         return self
 
 
@@ -1448,6 +1588,19 @@ class RepoTask(BaseModel):
         return v
 
     @model_validator(mode="after")
+    def _host_scorer_outside_editables(self, info: ValidationInfo):
+        # The consistency property (doc 52 row 10a), refused at SUBMIT: see
+        # `host_scorer_outside_editables`. Runs after `_expand_repo_paths`, so `~`/`$VAR` roots are
+        # compared resolved. `_grandfathered` for the reason every other retroactive rule here is —
+        # a run that already recorded such a task must stay resumable; `resume` warns instead.
+        if _grandfathered(info):
+            return self
+        problem = host_scorer_outside_editables(self)
+        if problem:
+            raise ValueError(problem)
+        return self
+
+    @model_validator(mode="after")
     def _at_least_one_editable(self):
         if not self.editable_path and not self.editables:
             raise ValueError("RepoTask needs an editable source: set `editable_path` "
@@ -1467,6 +1620,62 @@ class RepoTask(BaseModel):
     # ------- TaskAdapter hooks -------
     def assets(self) -> dict[str, str]:
         return {}                              # repo/data are tree-mounted, not flat assets
+
+    # THE PERCEPTION HOOK (doc 52 row 17; doc 51 §6). Data profiling is gated at setup on the task
+    # exposing `columns`, and until 2026-09-06 this family — every real GPU run on the operator's
+    # box — exposed neither `columns` nor `data_samples`: `data_profiled` never fired,
+    # `state.data_profile` stayed None, and `foresight.verified_report` primed predict-before-execute
+    # with no view of the data at all. Both hooks read ONLY the declared `data:` mounts (the sources
+    # `runtime/read_allowlist.py` already sanctions), bounded by `adapters/perception.py`'s rows /
+    # bytes / tables / columns caps, deterministic, never executing anything; a mount that holds
+    # nothing tabular (a checkpoint, a corpus of shards) profiles as `{}` — recorded, not guessed.
+    def columns(self) -> dict[str, list]:
+        """`{"<mount>:<column>": values}` over the first `perception.SAMPLE_ROWS` rows of the
+        primary table of each declared data mount (the file itself when it is tabular, else a
+        top-level `train*`, else the first CSV/TSV/JSON/JSONL/Parquet), at most `MAX_TABLES`
+        tables and `MAX_COLUMNS` columns in declaration order."""
+        from looplab.adapters import perception as _perception
+        out: dict[str, list] = {}
+        tables = 0
+        for name, spec in self.data.items():
+            table = _perception.mount_table(spec.path)
+            if table is None:
+                continue
+            cols = _perception.tabular_columns(
+                table, _perception.SAMPLE_ROWS, max_json_bytes=_perception.MAX_JSON_BYTES)
+            if not cols:
+                continue
+            tables += 1
+            for col, values in cols.items():
+                if len(out) >= _perception.MAX_COLUMNS:
+                    break
+                out[f"{name}:{col}"] = values
+            if tables >= _perception.MAX_TABLES or len(out) >= _perception.MAX_COLUMNS:
+                break
+        return out
+
+    def data_samples(self) -> dict[str, str]:
+        """Bounded previews of each declared data mount for `DataTools` (`read_asset`,
+        `data_schema`, `data_profile`): a directory mount lists its entries and samples its primary
+        table; a file mount samples its head, or its size when it is binary. Keyed by mount name
+        (`<name>/` for a directory) and by table file name; best-effort, never raises."""
+        from looplab.adapters import perception as _perception
+        out: dict[str, str] = {}
+        for name, spec in self.data.items():
+            path = spec.path
+            try:
+                if os.path.isdir(path):
+                    entries = sorted(os.listdir(path))
+                    _perception.add_sample(out, name.rstrip("/") + "/", _perception.dir_listing(entries))
+                    pick = _perception.primary_table(path, entries, _perception.TABULAR_SUFFIXES)
+                    if pick:
+                        _perception.add_sample(
+                            out, pick, _perception.file_sample(os.path.join(path, pick)))
+                elif os.path.isfile(path):
+                    _perception.add_sample(out, os.path.basename(path), _perception.file_sample(path))
+            except OSError:
+                continue
+        return out
 
     def _declared_editable_mounts(self) -> list[dict]:
         """Normalize the single-repo shorthand + the multi `editables` into one list of

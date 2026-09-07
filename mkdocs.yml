@@ -143,6 +143,8 @@ nav:
       - JupyterHub onboarding: guide/jupyterhub-onboarding.md
       - Quickstart: guide/quickstart.md
       - CLI reference: guide/cli-reference.md
+      - HTTP API reference: guide/api-reference.md
+      - Event reference: guide/event-reference.md
       - Configuration: guide/configuration.md
       - Tasks: guide/tasks.md
       - Generating code: guide/generating-code.md
@@ -155,6 +157,8 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
+      - Agent guide narratives, archived (2026-09-06): 64-agent-guide-narratives-2026-09-06.md
+      - Development plan (2026-09-05): 52-development-plan-2026-09-05.md
       - External-works synergy II (2026-09-03): 51-external-works-synergy-2026-09-03.md
       - Whole-tree architecture review (2026-09-02): 50-architecture-review-2026-09-02.md
       - Operator list audit (2026-08-19): 43-operator-list-audit-2026-08-19.md

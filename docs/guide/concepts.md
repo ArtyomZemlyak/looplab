@@ -88,6 +88,26 @@ called, and it would both close the node-count window for a full `every` nodes a
 rather than the durable `node_eval_started` boundary, so a freshly resumed process sees occupancy 0,
 takes the ordinary create turn, and is right to.
 
+The Strategist consult has a second **trigger** beside its node-count pace since 2026-09-06
+(`engine/cadence.py::plateau_due`, doc 52 row 7): the search has just **stalled**. The reading
+existed for a year before it could move the consult's timing — `agents/strategist.py::improves_since_best`
+is in every `StrategyContext` and `RuleStrategist` branches on it against its `stall_window`
+(greedy⇄broad, deep research at 2×) — but `_should_consult` fired on `cadence_due` alone, so the
+reaction to a leader that stopped moving waited for the next tick, up to `strategist_every - 1`
+nodes of paid, leader-less pushing (FML-bench: the stagnation-adaptive agent beat all six fixed
+baselines, and the adaptation is only worth what its latency leaves). It is not a third pace and it
+is not self-clearing either — a plateau persists until a new leader is crowned — so it fires on the
+stall's **identity** rather than its persistence: `stall_rung` counts whole stall windows since the
+leader was crowned (1 = the stall the rule reacts to, 2 = the hard stall that requests deep
+research) and names the node count at which the current rung began; a decision recorded at or after
+that count closes the rung durably, and the consult's own in-process `(leader, rung)` memo covers
+the outcome that records nothing (the Strategist agreeing with itself). Bound: at most one extra
+consult per `stall_window` stall nodes, read off the Strategist that will act on it
+(`strategist_stall_window`, default 3); the coverage snapshot shares the gate and takes one extra
+sample per rung. A resumed engine re-asks once per rung — the same contract as the `(n, projection
+token)` memo. `tests/test_strategist_plateau_trigger.py` drives the trigger, the money bound and
+both halves of the idempotence.
+
 ### …and one PRECONDITION both of them share
 
 There is still no third pace, and the reason is worth reading before anyone proposes one. What
@@ -159,6 +179,8 @@ quiescent pass re-tags what the in-flight one wrote — bounded by the existing 
 run that reaches a quiet moment ends with exactly the evidence it would have had before.
 
 ## Event log = canonical replay state
+
+**Every event type, what it records and the keys its payload carries: [Event reference](event-reference.md)** — generated from `looplab/events/types.py::EVENT_PAYLOAD_KEYS`, which is also what pins engine invariant #5 (a payload key is additive, and every reader defaults it).
 
 `events.jsonl` is the append-only source of truth for the **replayable run state**: nodes, metrics,
 controls, approvals, terminal scopes, and numeric LLM usage. The engine writes domain effects; the
@@ -622,7 +644,14 @@ idea and marks the headings over it, so a `Rationale` carried across verbatim re
 from #3* rather than as this experiment's own justification. A node nobody branched gains no label
 anywhere.
 
-`GET /api/runs/{run_id}/prov`, the W3C-PROV export, carries the same split. A branched node's
+`GET /api/runs/{run_id}/prov`, the W3C-PROV export, carries the same split — and, since 2026-09-07,
+the run's CLAIMS beside its experiments: each deep-research claim is an `ll:Claim` entity generated
+by that memo's pass and `wasDerivedFrom` both the experiments it cites and the exact evidence spans
+it is bound to, carrying D8's verdict (`ll:verdict`), the verifier's own completeness bit and how
+the verdict was BOUND to the claim (`ll:verdict_binding`: by position, by a unique statement match,
+or not at all — a claim never wears its neighbour's verdict). A cited experiment the fold no longer
+holds is named as missing rather than given an invented entity, and an evidence id whose ledger row
+is gone stays in the graph as `unrecorded`. A branched node's
 experiment activity is `wasAssociatedWith` **two** agents with explicit roles — `agent:operator`
 (`prov:Person`, `ll:idea-author`) and the engine's `prov:SoftwareAgent` (`ll:implementer`, because
 the Developer really did write the code) — and carries `ll:authored_fields`,
@@ -751,6 +780,54 @@ the configured policy's legal lanes and budget semantics rather than inventing a
 Add `policy=bohb` behavior by combining ASHA racing with the surrogate proposer
 (`surrogate_proposer`).
 
+**The three empirical predictors spend the same uncertainty (2026-09-06).** `core/numeric.py::knn_idw`
+returns `(prediction, nearest_distance)`, and the distance to the nearest evaluated point is the
+only uncertainty proxy the search layer has. The surrogate proposer always spent it as a UCB term;
+the K-idea panel (`researcher_panel`) now ranks the K LLM ideas by the same acquisition
+(`pred ± surrogate_explore × nearest`, sign by direction) instead of the point estimate alone, and
+the pre-eval proxy kill (`proxy_kill_fraction`) **abstains** on a candidate whose nearest evaluated
+neighbour is farther than any evaluated point is from its own nearest sibling — its prediction is
+an extrapolation, and killing what the surrogate understands least is backwards. The `proxy_scored`
+audit row carries `nearest` and `abstained` beside the score. All three stay pure functions of
+folded state, so all three stay replay-safe.
+
+**The plan and the endgame reserve (2026-09-06).** A run now writes a durable `plan` event at its
+first creation boundary (`engine/plan.py`): the node budget cut into `seed` / `search` /
+`endgame` phases, the last one a RESERVE of `endgame_reserve_frac × max_nodes` slots (product
+default `0.2`, i.e. the Strategist's old "80 % spent" rule as a row the dispatcher reads instead
+of a consult that may never land). Inside the reserve the dispatcher replaces breadth with the
+endgame's own sequence — the top-2 **ensemble** once (the Developer is handed the primary parent
+as its working set AND the co-parents' code and traces, see below), then **champion sweeps**: an
+`improve` of the champion whose parameters the k-NN surrogate proposes (`search/surrogate.py`,
+bounds inferred from the run's own evaluated params; the LLM Researcher below warm-up — EvoTrace
+measured a 24-call sweep over one program's exposed hyperparameters matching or beating the
+evolutionary final-best on 13 of 15 tasks). A selected Card that already is an endgame action
+keeps its slot. The plan is re-cut when the live node budget changes and on a HARD stall (two
+stall windows before the endgame has begun: the endgame starts now). A Strategist may keep the
+reserve for the ensemble alone (`operators.endgame_sweep: false`); the reserve itself is the
+plan's and no role moves it. `0` disables the plan (a bare `Engine(...)` and every resumed pre-plan
+run keep the historical dispatch).
+
+**An ensemble merge sees both parents.** `merge_mode=ensemble` used to seed the Developer with
+ONE parent's files and describe the other in 120 characters of rationale — a recombination that
+reads one lineage is an improve with a longer prompt. Since 2026-09-06 the Developer's
+`implement_from` accepts `co_parents`: the other lineages' traces (stage rows, repairs, the last
+error) and the files that DIFFER from the working set, under fixed caps
+(`adapters/repo_developer.py::co_parent_block`). A Developer without the keyword is called exactly
+as before.
+
+**The operator × model router (2026-09-06).** `operator_bandit` learned WHICH OPERATOR fires from
+folded yields and nothing learned WHICH MODEL generates it, while four independent 2026 results
+say the model lever is real at iso-budget (LEVI, DEI, cross-tier routing, ShinkaEvolve's bandit).
+`model_arms` declares the candidate models with a relative cost — `{"cheap": "qwen3:8b@0.25"}` —
+beside the configured Developer model (the implicit `default` arm); the bandit branch then picks
+the arm by the same deterministic UCB over per-arm yield (`Node.model_arm`, recorded on
+`node_created`) with the gain divided by the arm's cost, the default first and every declared arm
+once. A routed build runs under `core/llm.py::model_override`, a ContextVar every client request
+reads, so the arm changes only the MODEL the same endpoint is asked for. Inert without
+`operator_bandit` or without a declared arm; the card lane's builds are not routed (a Card carries
+no arm).
+
 ## Operators
 
 The win comes from rich operators, not exotic search. The Researcher/Developer apply:
@@ -779,6 +856,14 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   reading was wrong" is a claim only a second reader can make. Neither admits a metric: both are
   absent from `NEVER_SALVAGED_REASONS`, so they can neither suppress one nor grant one. The engine's own structural answer stays on the row beside it
   (`engine_reason`) and `reason_source` says who chose the word.
+
+  `diverged` is the one word BOTH may say, and only in one direction: the engine names it when its
+  own watchdog killed the stage, and the diagnostician may name it ONLY where the engine's own
+  answer was `check_failed` (`DIAGNOSED_CONTEXT_BOUND`) — a stage that exited 0 and was then failed
+  by its own declaration is exactly the case the watchdog never saw. Unlike the two answers above,
+  it IS in `NEVER_SALVAGED_REASONS`, which is why the neighbouring override is fenced rather than
+  free: `OVERRIDE_EVIDENCE_REQUIRED` refuses a `check_failed` → `not_learning` override that cites
+  no LOG source, and stamps `reason_override_refused` on the row. Text nominates; it never decides.
 
   **A diagnosed reason now LEADS the text the Developer repairs from** (2026-08-28). It did not
   until then, and `check_false_positive` is where that cost the most: its directive says *"Read its
@@ -985,9 +1070,31 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   own statement that the result stands — so a deliberately-reused success is never called stale.
   Both numbers are derived by the fold from the log's ORDER, so no event gained a field and runs
   already on disk are attributed retroactively.
+- **Every attempt keeps its own row** (2026-09-06, doc 52 row 27). `node.stages` is a per-NAME
+  projection, so after a repair the attempt that spent the training wall-clock had no row at all —
+  only the attempt that passed. `node.stage_attempts` is the per-attempt ledger: every
+  `stage_finished` row as that attempt's own statement (`name`/`status`/`exit_code`/`seconds`, the
+  repair epoch it ran in, the lifecycle `generation`, its `seq`), appended before the per-name merge
+  and never rewritten by it, kept across resets. `Node.stage_wall_clock()` sums it per stage —
+  attempts, seconds, how many reused rather than ran, the generations spanned. Accounting only:
+  nothing that decides reads it, and a legacy log folds to an empty ledger.
+- **Host-side scoring** (2026-09-06, doc 52 row 10a) — a repo task may declare `cmd.host_scorer`,
+  the operator's own scoring program at an absolute path outside every editable root; the engine
+  appends it as the final protected `score` stage, its number is the node's `metric`, the
+  candidate's own printed number is recorded beside it as `self_metric` (with a derived
+  `self_report_gap`, positive = over-reported), and the program's sha256 rides on
+  `metric_provenance.host_scorer` so the "same scorer for every node" claim is checkable. See
+  [Host-side scoring](tasks.md#host-side-scoring-cmdhost_scorer).
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
   checker (Researcher/Developer) before the next stage runs, so a diverged train can't silently feed
-  eval. Since 2026-08-13 the checker answers a **verdict**, not a concern string: a stage dies only
+  eval. **Since 2026-09-06 the checker may LOOK** (`stage_check_tools`, on; doc 52 row 9): beside the
+  4,000-character output tail it is handed, it gets `read_log` / `metric_series` over the checked
+  stage's own log — the same tools and the same boundary the two watchdogs and the triage judge
+  have — because that tail is the end of a stdout that is itself a 64,000-byte clamp, and the
+  trainer's banner, the first losses, a traceback that preceded a long progress bar and every
+  restart are outside it by construction. Looking widens what it sees and nothing it may say: the
+  verdict line is read out of its answer and coerced by the same closed vocabulary. Since
+  2026-08-13 the checker answers a **verdict**, not a concern string: a stage dies only
   when the checker NAMES a physical failure from the closed
   `runtime/command_eval.py::STAGE_CHECK_HARD_KINDS` (`crash`, `nan_or_inf_loss`,
   `no_artifact_written`, `silent_fallback`, `loss_unchanged_from_first_step`, plus
@@ -1112,7 +1219,8 @@ Additional safety monitors are off by default. Under the default `trust_gate=aud
   either way, so this flag is not the on/off switch for tail redaction.
 - `reward_hack_detect` — flag suspicious wins (grader/answer-key access, frozen-file writes,
   suspiciously perfect metrics).
-- `code_leakage_detect` — static scan for fit-before-split / fit-on-test.
+- `code_leakage_detect` — static scan for fit-before-split / fit-on-test / multi-test selection
+  (repeated evaluation on the test split, then a `max`/`> best` choice over those scores).
 - `critic_check` — an execution-free critic of each solution. Broad critic warnings stay advisory;
   `critic:hardcoded_metric` is the narrow high-precision exception that can gate.
 

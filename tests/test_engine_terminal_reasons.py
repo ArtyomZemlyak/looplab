@@ -49,7 +49,8 @@ def _minted_literals() -> set[str]:
       * `reason="<word>"` / `terminal_reason="<word>"` — the keyword forms;
       * `reason = "<word>"` — a local whose NAME ends in `reason`, because a real writer routinely
         computes the word first and appends it a hundred lines later (`evaluate.py`'s
-        `reason = "idea_rejected"`, `_kreason = str(... or "monitor_broken")`).
+        `_kreason = str(... or "monitor_broken")`), or the same write on the attempt record the
+        `_eval_*` phases share (`a.reason = "idea_rejected"`).
 
     A ternary, an `or`, or a `str(...)` wrapper in any of those positions contributes every branch,
     because every branch is a reachable write. Everything else in the package is invisible to it,
@@ -79,7 +80,11 @@ def _minted_literals() -> set[str]:
         return set()
 
     def _is_reason_name(node) -> bool:
-        return isinstance(node, ast.Name) and node.id.rstrip("_").lower().endswith("reason")
+        # A bare local, or an attribute of the attempt record the `_eval_*` phases share since the
+        # EvalAttempt split (`a.reason = "idea_rejected"`, doc 52 row 21): the same writer, boxed.
+        name = (node.id if isinstance(node, ast.Name)
+                else node.attr if isinstance(node, ast.Attribute) else "")
+        return name.rstrip("_").lower().endswith("reason")
 
     found: set[str] = set()
     for path, source in iter_sources(LOOPLAB):

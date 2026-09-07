@@ -141,7 +141,7 @@ def yaml_numeric_paths(source) -> dict:
     """
     try:
         import yaml
-    except Exception:                                    # pragma: no cover — pyyaml is a hard dep
+    except Exception:  # noqa: BLE001 — pyyaml is a hard dep  # pragma: no cover
         return {}
     try:
         root = yaml.compose(source or "", Loader=yaml.SafeLoader)

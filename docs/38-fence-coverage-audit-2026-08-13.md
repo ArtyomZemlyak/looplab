@@ -419,3 +419,44 @@ Everything is in the session scratchpad, nothing in the repo or under `runs/`:
 `bench.py` takes the variant as `argv[1]` and must be run once per variant. Note that probing
 landlock required installing `safetensors` 0.8.0 into the box's conda environment — that is a real
 side effect of this audit and the only one outside the scratchpad.
+
+## 6. The run RECORD is unwritable by the eval (2026-09-06)
+
+Doc 52 §5.1 row 2. The surface this audit mapped is the operator's editable SOURCE tree; the run
+directory itself was outside it on both halves of the boundary. The launch allow-list
+(`runtime/read_allowlist.py::derive`) granted the run dir `readwrite`, and nothing in the hook looked
+at it — so a training script could `open('../../events.jsonl', 'a')` and append a well-formed
+`node_evaluated` row naming its own node with a metric of its choosing. The store's foreign-writer
+stop fires only on a MALFORMED row, the fold applies the FIRST terminal, and the engine's own terminal
+then landed second. `tests/test_run_record_fence.py::test_the_forged_terminal_is_recorded_unfenced_and_refused_fenced`
+drives it through a whole engine: unfenced, the run reports the forged number as its best.
+
+**What shipped.** The generated fence carries the RECORD root beside the source roots. A write is
+decided on the `open` audit event's resolved flags — `O_WRONLY | O_RDWR | O_CREAT | O_TRUNC |
+O_APPEND`, one shape for `builtins.open` modes, `pathlib`, `codecs` and `os.open` alike (verified with
+a recording hook: `'w'` is `0x80241`, `'a'` `0x80441`, `'r+'` `0x80002`, `'r'` `0x80000`) — and every
+registered mutation event reads the same resolved path the source-root check reads
+(`_mutation_path`), so the two rules cannot disagree about which file an event is about. Refused
+unless the target is under a WRITABLE prefix: the launch's own workdir, which `run_argv` hands the
+child in `LOOPLAB_EVAL_WORKDIR` beside the marker (one fence serves every launch of the run; a launch
+carrying the marker and not the variable fails CLOSED), and the fence's own directory. Reads of the
+record stay legal. `os.symlink`/`os.link` targets are checked as they are for the source roots, so a
+link the process plants itself cannot route a write around the rule. The fence is installed for
+EVERY run now — a toy or dataset node's `solution.py` is model-written code with the same reach — so
+a non-repo run carries `_ROOTS = ()` and the record rule alone. The kernel twin: `derive` grants the
+run dir `read`, the workdir `readwrite` (deeper rule), and `.looplab-fence/` `readwrite` once it exists.
+
+**Cost.** The read hot path is unchanged for a relative open from the workdir (the syscall-free bail
+still returns before either rule). On the resolved-path branch the record rule is one integer `&`
+on the flags — paid by writes only — plus one `startswith` on a hit. Measured on the build container
+(a 4-5 µs `open`, roughly 3x faster than the box's 11 µs, so every percentage is inflated here): an
+absolute-path open+read of 4 KiB moves from 3,993 to 4,656 ns under a record-only fence, and a
+roots-only fence versus a roots+record fence on the same read differ by less than the run-to-run
+noise (±500 ns); the whole hook's floor on a relative read is +249 ns. Re-measure on the box before
+quoting a number beside the +311 ns the source-root compare recorded there.
+
+**What it does not close, and this is §1e/§1f again.** A NATIVE writer, a non-Python child (`echo >>
+events.jsonl`, `cp`) and a `python -S/-E/-I` child raise no audit event: that is the KERNEL rung's
+job, and under `Settings.landlock="enforce"` the allow-list now denies them by construction. Under
+the shipped `off`, the message rung is the boundary, exactly as it is for the source tree.
+

@@ -3,6 +3,8 @@ traces, provenance, artifacts, config and cost. Handler bodies are verbatim move
 `serve/server.py::make_app` (BACKLOG §4); captured locals now live on `srv` (AppState)."""
 from __future__ import annotations
 
+import logging
+
 from collections import OrderedDict
 import hashlib
 import hmac
@@ -33,7 +35,7 @@ from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorage
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
     load_run_reset_marker)
-from looplab.serve.http import if_none_match, json_object, json_object_bytes, request_body_contract
+from looplab.serve.http import if_none_match, json_object, json_object_bytes, request_body_contract, refusal
 from looplab.events.eventstore import (
     EventStore, EventStoreLockError, JsonlRecordInvalid,
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
@@ -57,9 +59,10 @@ from looplab.serve.concept_frame import (MAX_LENS_BODY_BYTES as _CONCEPT_FRAME_M
 from looplab.serve.engine_proc import _engine_liveness, reconcile_pending_resume
 from looplab.serve.log_pages import (
     DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
+from looplab.events.state_delta import DELTA_VERSION, diff as state_diff
 from looplab.serve.protocol import (
     EXPECTED_RUN_GENERATION_FIELD, PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD,
-    SSE_DONE, SSE_STATE)
+    SSE_DONE, SSE_STATE, SSE_STATE_DELTA)
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.paid_ledger import (
     FAIL_CLOSED, PaidLedgerSpec, append_claim, confirm_terminal_receipt, fold_paid_ledger,
@@ -409,7 +412,9 @@ async def _concept_lens_json_body(request: Request) -> dict:
 def _assert_lens_generation(srv, rd: Path, *, core_generation: Optional[str],
                             expected_generation: str, stale_message: str,
                             stale_remediation: str, prepared_message: str) -> tuple[Path, str]:
-    """The paid-concept-lens generation fence, re-checked INSIDE the run sequencer.
+    """The paid-concept-lens generation fence — INSIDE the run sequencer for the two POSTs
+    (resolve-recovered, abandon), and as a CAS across the read for the recovery GET, which takes
+    no lock since 2026-09-06 (doc 52 row 5).
 
     Three endpoints — recover, resolve-recovered, abandon — each wrote this out: validate the run
     paths, read the current generation, refuse if it is missing or moved since the caller looked,
@@ -1511,78 +1516,89 @@ def build_router(srv) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
 
-        with srv.commands.sequence(rd):
-            rd, current_generation = _assert_lens_generation(
-                srv, rd, core_generation=core[RUN_GENERATION_FIELD],
-                expected_generation=expected_generation,
-                stale_message="The run changed before paid-lens recovery was inspected.",
-                stale_remediation="Reload Concepts and inspect only the current generation.",
-                prepared_message="The run changed while its recovery projection was prepared.")
+        # NO COMMAND SEQUENCER (2026-09-06, doc 52 row 5): a GET that took the exclusive
+        # cross-process lock was refused whenever a writer held the run. The fence is a CAS
+        # ACROSS the read instead — taken here, and again after the ledger is folded.
+        rd, current_generation = _assert_lens_generation(
+            srv, rd, core_generation=core[RUN_GENERATION_FIELD],
+            expected_generation=expected_generation,
+            stale_message="The run changed before paid-lens recovery was inspected.",
+            stale_remediation="Reload Concepts and inspect only the current generation.",
+            prepared_message="The run changed while its recovery projection was prepared.")
 
-            store = EventStore(rd / "events.jsonl")
-            claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
-                store.read_all(), current_generation)
-            common = {
-                "schema": _CONCEPT_LENS_RECOVERY_SCHEMA,
-                "generation": current_generation,
+        store = EventStore(rd / "events.jsonl")
+        claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
+            store.read_all(), current_generation)
+        _rd_after, generation_after = srv.commands.generation_fence(rd)
+        if generation_after != current_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": generation_after or None,
+                "message": "The run changed while its recovery projection was read.",
+                "remediation": "Reload Concepts and inspect only the current generation.",
+            })
+        common = {
+            "schema": _CONCEPT_LENS_RECOVERY_SCHEMA,
+            "generation": current_generation,
+        }
+        if conflict or len(unresolved) > 1:
+            return {
+                **common,
+                "state": "conflict",
+                "code": "concept_lens_recovery_conflict",
+                "message": (
+                    "Paid-lens receipts are malformed or overlap; recovery is disabled until "
+                    "the durable ledger is repaired."
+                ),
             }
-            if conflict or len(unresolved) > 1:
+        if unresolved:
+            request_id = next(iter(unresolved))
+            claim = claims[request_id]
+            projection = {
+                **common,
+                "request_id": request_id,
+                "started_seq": claim["started_seq"],
+                "input_seq": claim["input_seq"],
+            }
+            process_receipt = srv.jobs.rejoin(request_id)
+            if process_receipt is not None:
+                job_id = process_receipt.get("job_id")
+                process_job = srv.jobs.get(job_id) if isinstance(job_id, str) else None
+                if (isinstance(job_id, str) and re.fullmatch(r"[0-9a-f]{16}", job_id)
+                        and process_job is not None
+                        and process_job.get("status") in {"running", "done"}):
+                    return {
+                        **projection,
+                        "state": "running",
+                        "job_id": job_id,
+                        "status": process_job["status"],
+                    }
+            return {**projection, "state": "orphaned"}
+        if terminals:
+            # Multiple completed requests are valid history. The latest claim is the only useful
+            # lost-receipt candidate; only overlapping unresolved work is ambiguous above.
+            request_id = max(
+                terminals, key=lambda identity: claims[identity]["started_seq"])
+            claim = claims[request_id]
+            terminal = terminals[request_id]
+            if not confirm_terminal_receipt(store.path):
                 return {
                     **common,
                     "state": "conflict",
-                    "code": "concept_lens_recovery_conflict",
-                    "message": (
-                        "Paid-lens receipts are malformed or overlap; recovery is disabled until "
-                        "the durable ledger is repaired."
-                    ),
+                    "code": "concept_lens_recovery_terminal_unconfirmed",
+                    "message": "The visible terminal receipt could not be confirmed durable.",
                 }
-            if unresolved:
-                request_id = next(iter(unresolved))
-                claim = claims[request_id]
-                projection = {
-                    **common,
-                    "request_id": request_id,
-                    "started_seq": claim["started_seq"],
-                    "input_seq": claim["input_seq"],
-                }
-                process_receipt = srv.jobs.rejoin(request_id)
-                if process_receipt is not None:
-                    job_id = process_receipt.get("job_id")
-                    process_job = srv.jobs.get(job_id) if isinstance(job_id, str) else None
-                    if (isinstance(job_id, str) and re.fullmatch(r"[0-9a-f]{16}", job_id)
-                            and process_job is not None
-                            and process_job.get("status") in {"running", "done"}):
-                        return {
-                            **projection,
-                            "state": "running",
-                            "job_id": job_id,
-                            "status": process_job["status"],
-                        }
-                return {**projection, "state": "orphaned"}
-            if terminals:
-                # Multiple completed requests are valid history. The latest claim is the only useful
-                # lost-receipt candidate; only overlapping unresolved work is ambiguous above.
-                request_id = max(
-                    terminals, key=lambda identity: claims[identity]["started_seq"])
-                claim = claims[request_id]
-                terminal = terminals[request_id]
-                if not confirm_terminal_receipt(store.path):
-                    return {
-                        **common,
-                        "state": "conflict",
-                        "code": "concept_lens_recovery_terminal_unconfirmed",
-                        "message": "The visible terminal receipt could not be confirmed durable.",
-                    }
-                return {
-                    **common,
-                    "state": "terminal",
-                    "request_id": request_id,
-                    "started_seq": claim["started_seq"],
-                    "input_seq": claim["input_seq"],
-                    "terminal": _concept_lens_terminal_response(
-                        terminal, core, lens_pack, request_id),
-                }
-            return {**common, "state": "none"}
+            return {
+                **common,
+                "state": "terminal",
+                "request_id": request_id,
+                "started_seq": claim["started_seq"],
+                "input_seq": claim["input_seq"],
+                "terminal": _concept_lens_terminal_response(
+                    terminal, core, lens_pack, request_id),
+            }
+        return {**common, "state": "none"}
 
     @router.post("/api/runs/{run_id}/concepts/lens/recovery/abandon")
     async def abandon_recovered_concept_lens(run_id: str, request: Request,
@@ -1866,7 +1882,9 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/events")
     async def stream_events(run_id: str, request: Request):
-        """Stream canonical public state frames, including the Cards completeness receipt."""
+        """Stream canonical public state frames — a full `state` frame first, then `state_delta`
+        frames against the frame this connection last sent — including the Cards completeness
+        receipt."""
         rd = _run_dir(run_id)
         try:
             initial_entry = rd.lstat()
@@ -1899,6 +1917,9 @@ def build_router(srv) -> APIRouter:
             last_generation = None
             last_event_count = None
             last_beat = time.monotonic()
+            # The payload this CONNECTION last sent, as its own parsed copy (never the cache's
+            # object), so the next frame can be a delta against it (doc 52 row 29).
+            last_payload = None
             # A quiet/"thinking" run (a long LLM call or eval) advances no seq and flips no liveness,
             # so without this the stream goes byte-silent. Behind jupyter-server-proxy (tornado) and
             # any nginx hop, an idle read-timeout then tears the connection down → the client reconnects
@@ -1925,18 +1946,35 @@ def build_router(srv) -> APIRouter:
                 event_count = payload.get("event_count")
                 if (payload["seq"] != last_sent or alive != last_alive
                         or generation != last_generation or event_count != last_event_count):
+                    same_generation = generation == last_generation
                     last_sent = payload["seq"]
                     last_alive = alive
                     last_generation = generation
                     last_event_count = event_count
                     last_beat = time.monotonic()
-                    # CODEX AGENT: every event serializes and retransmits the complete growing folded
-                    # state, so one long-lived client receives quadratic bytes and repeats whole-state
-                    # encoding. Stream bounded deltas/event batches plus generation/checkpoint receipts,
-                    # reserving full snapshots for initial/recovery sync.
+                    full = json.dumps(payload)
+                    # THE DELTA FRAME (doc 52 row 29). Until 2026-09-06 every tick re-sent the whole
+                    # folded state, so one long-lived tab received O(events × state) bytes and the
+                    # server repeated whole-state encoding per tick. A frame after the first on THIS
+                    # connection is a delta against the payload this connection last sent
+                    # (`events/state_delta.py::diff`), keyed on that payload's seq, and only when it
+                    # is smaller than the snapshot; a generation change sends the full frame. The
+                    # client applies it to the exact snapshot it holds and reconnects for a full frame
+                    # on any mismatch (`ui/src/stateDelta.js`). A fresh connection — one presenting
+                    # `Last-Event-ID` included — always starts with a full frame.
+                    kind, body = SSE_STATE, full
+                    if last_payload is not None and same_generation:
+                        delta = {"version": DELTA_VERSION, "base_seq": last_payload["seq"],
+                                 "seq": payload["seq"], RUN_GENERATION_FIELD: generation,
+                                 "event_count": event_count,
+                                 "ops": state_diff(last_payload, payload)}
+                        encoded = json.dumps(delta)
+                        if len(encoded) < len(full):
+                            kind, body = SSE_STATE_DELTA, encoded
+                    last_payload = json.loads(full)
                     yield (f"id: {payload['seq']}\n"
-                           f"event: {SSE_STATE}\n"
-                           f"data: {json.dumps(payload)}\n\n")
+                           f"event: {kind}\n"
+                           f"data: {body}\n\n")
                     if (payload["state"].get("finished") and alive is False
                             and payload["state"].get("phase") != PHASE_FINALIZING):
                         # ``run_finished`` precedes the engine releasing its singleton while terminal
@@ -3045,17 +3083,19 @@ def build_router(srv) -> APIRouter:
                 "message": "expected_generation must be the exact generation returned by run state.",
                 "remediation": "Reload the run before requesting its files.",
             })
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            current = srv.commands.run_generation(rd)
-            if current != expected:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected,
-                    "current_generation": current or None,
-                    "message": f"The run was reset or replaced {phase} its files were read.",
-                    "remediation": "Reload Files and request only the current run generation.",
-                })
+        # NO COMMAND SEQUENCER (2026-09-06, doc 52 row 5): the same reasoning as
+        # `_assert_historical_generation` — every caller takes this fence BEFORE and AFTER its read,
+        # and that CAS across the read is what makes the read correct; the exclusive lock only made
+        # the Files surface 503 whenever a writer held the run.
+        rd, current = srv.commands.generation_fence(rd)
+        if current != expected:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected,
+                "current_generation": current or None,
+                "message": f"The run was reset or replaced {phase} its files were read.",
+                "remediation": "Reload Files and request only the current run generation.",
+            })
         return current
 
     def _artifact_attempt_conflict(node_id: int, expected_attempt: Optional[int],
@@ -3429,11 +3469,150 @@ def build_router(srv) -> APIRouter:
             out["ll:attribution"] = "legacy"
         return out
 
+    # ------------------------------------------------------------------ the CLAIMS half (row 30)
+    # The export said what the SEARCH did — solutions, experiments, lineage — and nothing about what
+    # the run CLAIMED, although `research_completed` already holds each memo's claims, the exact-span
+    # evidence ids they are BOUND to (`core/research_record.py::bind_claims_to_evidence`) and the
+    # decoupled verifier's verdict on each (D8). A provenance graph without them can answer "which
+    # change improved metric M" and not "what did this run conclude, and on what evidence" — which is
+    # the question a reviewer asks, and the shape the field's PROV-O profile settled on: claims as
+    # INDIVIDUALS, derived from the evidence and the experiments they cite, generated by the pass
+    # that made them.
+    #
+    # Every value here is already sanitized: the fold stores the memo through
+    # `sanitize_research_memo_payload` (redaction, control stripping, caps), so this projection only
+    # bounds LENGTH and COUNT. It invents nothing: a cited node that is no longer in the folded state
+    # is named as missing rather than given a made-up solution entity, and a claim whose verdict
+    # cannot be bound to it carries the binding's own failure instead of a neighbour's verdict.
+    _PROV_ROLE_RESEARCHER = "ll:researcher"
+    _PROV_CLAIM_CAP = 400          # claims exported, oldest memo first; the rest are counted, not cut
+    _PROV_TEXT_CAP = 400
+
+    def _prov_text(value) -> str:
+        return str(value or "")[:_PROV_TEXT_CAP]
+
+    def _claim_verdict(claim: dict, verdicts, index: int) -> tuple[Optional[dict], str]:
+        """`(the verdict row for this claim, how it was bound)`.
+
+        Verdicts are positional (`trust/memo_verify.py` returns one per claim, in order) and each
+        carries its own `statement`, so alignment is CHECKABLE rather than assumed: a memo whose
+        claim list was capped after the verdicts were computed would otherwise export claim *i*'s
+        text under claim *j*'s verdict. Index first, then a unique statement match, then nothing —
+        an unbound verdict is reported as unbound, never guessed.
+        """
+        if not isinstance(verdicts, list) or not verdicts:
+            return None, "not_verified"
+        statement = claim.get("statement")
+        row = verdicts[index] if index < len(verdicts) else None
+        if isinstance(row, dict) and row.get("statement") == statement:
+            return row, "aligned"
+        same = [r for r in verdicts
+                if isinstance(r, dict) and r.get("statement") == statement]
+        if len(same) == 1:
+            return same[0], "statement"
+        return None, "unmatched"
+
+    def _research_provenance(st, agent, ent, act, wgb, waw, wdf) -> dict:
+        """Add one activity per deep-research memo and one entity per claim; return what was cut."""
+        exported = 0
+        omitted_claims = 0
+        omitted_memos = 0
+        for index, memo in enumerate(st.research):
+            if not isinstance(memo, dict):
+                continue
+            claims = [c for c in (memo.get("claims") or ()) if isinstance(c, dict)]
+            if exported >= _PROV_CLAIM_CAP:
+                omitted_memos += 1
+                omitted_claims += len(claims)
+                continue
+            memo_id = memo.get("memo_id")
+            key = memo_id if isinstance(memo_id, str) and memo_id else f"idx{index}"
+            activity = f"memo:{key}"
+            verification = memo.get("verification")
+            verification = verification if isinstance(verification, dict) else {}
+            act[activity] = {
+                "prov:label": f"deep-research pass · memo {key}",
+                "ll:at_node": memo.get("at_node"),
+                "ll:trigger": _prov_text(memo.get("trigger")),
+                "ll:summary": _prov_text(memo.get("summary")),
+                "ll:claims": len(claims),
+                "ll:verification_method": _prov_text(verification.get("method")) or "none",
+                "ll:unsupported_claims": verification.get("unsupported"),
+            }
+            waw[f"waw:{activity}"] = {"prov:activity": activity, "prov:agent": agent,
+                                      "prov:role": _PROV_ROLE_RESEARCHER}
+            verdicts = verification.get("verdicts")
+            for position, claim in enumerate(claims):
+                if exported >= _PROV_CLAIM_CAP:
+                    omitted_claims += len(claims) - position
+                    break
+                exported += 1
+                claim_id = claim.get("claim_id")
+                cid = ("claim:" + claim_id) if isinstance(claim_id, str) and claim_id \
+                    else f"claim:{key}:{position}"
+                verdict_row, binding = _claim_verdict(claim, verdicts, position)
+                cited = [n for n in (claim.get("node_ids") or ()) if isinstance(n, int)]
+                present = [n for n in cited if n in st.nodes]
+                evidence_ids = [e for e in (claim.get("evidence_ids") or ()) if isinstance(e, str)]
+                ent[cid] = {
+                    "prov:label": f"claim {position + 1} of memo {key}",
+                    "prov:type": "ll:Claim",
+                    "ll:statement": _prov_text(claim.get("statement")),
+                    "ll:memo": key,
+                    "ll:cited_nodes": cited,
+                    # A claim citing an experiment the fold no longer holds (reset, tombstoned, or a
+                    # model-invented id) keeps the citation and names the gap. Inventing the entity
+                    # would make an unresolvable reference look like lineage.
+                    "ll:cited_missing_nodes": [n for n in cited if n not in st.nodes],
+                    "ll:cited_urls": [_prov_text(u) for u in (claim.get("urls") or ())],
+                    "ll:evidence_ids": evidence_ids,
+                    "ll:verdict_binding": binding,
+                }
+                if isinstance(verdict_row, dict):
+                    ent[cid]["ll:verdict"] = _prov_text(verdict_row.get("verdict"))
+                    ent[cid]["ll:verdict_note"] = _prov_text(verdict_row.get("note"))
+                    evidence = verdict_row.get("evidence")
+                    if isinstance(evidence, dict):
+                        # `complete` is the verifier's own statement about the evidence set it saw
+                        # (`trust/memo_verify.py`): an incomplete or stale set is why a `supported`
+                        # verdict is withheld, so a reader of the graph must see it beside the verdict.
+                        ent[cid]["ll:evidence_complete"] = evidence.get("complete")
+                wgb[f"wgb:{cid}"] = {"prov:entity": cid, "prov:activity": activity}
+                for node_id in present:
+                    node = st.nodes[node_id]
+                    solution = f"sol:{node_id}:{node.attempt}"
+                    wdf.append({"prov:generatedEntity": cid, "prov:usedEntity": solution})
+                for evidence_id in evidence_ids:
+                    item = st.research_evidence.get(evidence_id)
+                    entity = f"evidence:{evidence_id}"
+                    if isinstance(item, dict):
+                        ent.setdefault(entity, {
+                            "prov:label": f"evidence {evidence_id}",
+                            "prov:type": "ll:Evidence",
+                            "ll:kind": _prov_text(item.get("kind")),
+                            "ll:tool": _prov_text(item.get("tool")),
+                            "ll:locator": _prov_text(item.get("locator")),
+                            "ll:quote": _prov_text(item.get("quote")),
+                            "ll:bytes": item.get("bytes"),
+                            "ll:turn": item.get("turn"),
+                        })
+                    else:
+                        # The binding survives its evidence: a memo folded before the ledger existed
+                        # (or one whose item was dropped by a cap) still names the id it was bound to.
+                        ent.setdefault(entity, {"prov:label": f"evidence {evidence_id}",
+                                                "prov:type": "ll:Evidence",
+                                                "ll:lifecycle": "unrecorded"})
+                    wdf.append({"prov:generatedEntity": cid, "prov:usedEntity": entity})
+        return {"claims": omitted_claims, "memos": omitted_memos} if omitted_claims else {}
+
     @router.get("/api/runs/{run_id}/prov")
     def prov(run_id: str):
-        """W3C-PROV-style provenance of the search DAG: each node's solution is an entity
-        generated by an experiment activity (its operator), derived from its parent nodes. Lets
-        the lineage be queried as a knowledge-graph ('which change improved metric M the most').
+        """W3C-PROV-style provenance of the search DAG AND of what the run claimed: each node's
+        solution is an entity generated by an experiment activity (its operator), derived from its
+        parent nodes; each deep-research claim is an entity generated by that memo's pass, derived
+        from the experiments it cites and the exact evidence spans it is bound to, carrying the
+        verifier's verdict. Lets both be queried as one knowledge graph ('which change improved
+        metric M the most', 'what does this run claim, and on what evidence').
 
         An OPERATOR-BRANCHED node (`Node.forked_from`) is attributed to a second agent, because its
         idea is part operator-authored and part inherited and a reader must be able to tell which.
@@ -3491,11 +3670,17 @@ def build_router(srv) -> APIRouter:
                 edge = f"{n.id}:{generation}-{p}:{parent_generation}"
                 used[f"used:{edge}"] = {"prov:activity": a, "prov:entity": parent_entity}
                 wdf.append({"prov:generatedEntity": e, "prov:usedEntity": parent_entity})
-        return {"prefix": {"prov": "http://www.w3.org/ns/prov#", "ll": "urn:looplab:"},
-                "entity": ent, "activity": act, "agent": agents,
-                "wasGeneratedBy": wgb, "used": used,
-                "wasAssociatedWith": waw,
-                "wasDerivedFrom": {f"wdf:{i}": d for i, d in enumerate(wdf)}}
+        omitted = _research_provenance(st, agent, ent, act, wgb, waw, wdf)
+        graph = {"prefix": {"prov": "http://www.w3.org/ns/prov#", "ll": "urn:looplab:"},
+                 "entity": ent, "activity": act, "agent": agents,
+                 "wasGeneratedBy": wgb, "used": used,
+                 "wasAssociatedWith": waw,
+                 "wasDerivedFrom": {f"wdf:{i}": d for i, d in enumerate(wdf)}}
+        if omitted:
+            # A run with hundreds of memos would otherwise ship a graph nobody can load. Say what was
+            # cut ON the graph — a silently truncated provenance export is worse than a short one.
+            graph["ll:omitted"] = omitted
+        return graph
 
     @router.get("/api/runs/{run_id}/config", response_model=RunConfigResponse)
     def run_config(run_id: str):
@@ -3513,9 +3698,10 @@ def build_router(srv) -> APIRouter:
         # but NOT an OSError or JSONDecodeError — so it used to escape into exactly the bare 500
         # traceback this clause exists to replace.
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}") from exc
+            # 503 with a code, never a 500 carrying the OSError text (a host path): `http.REFUSALS`.
+            raise refusal("config_snapshot_unreadable") from exc
         if not isinstance(current, dict):
-            raise HTTPException(500, "the run configuration snapshot is not a JSON object")
+            raise refusal("config_snapshot_not_object")
         return _run_config_payload(rd, current)
 
     def _run_config_payload(rd: Path, snapshot: dict) -> dict:
@@ -3597,9 +3783,9 @@ def build_router(srv) -> APIRouter:
         try:                                     # same unreadable-vs-fault distinction as the GET
             current = json.loads(snap.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}") from exc
+            raise refusal("config_snapshot_unreadable") from exc
         if not isinstance(current, dict):
-            raise HTTPException(500, "the run configuration snapshot is not a JSON object")
+            raise refusal("config_snapshot_not_object")
         current_revision = _run_config_revision(current)
         if expected_revision is not None and expected_revision != current_revision:
             raise HTTPException(409, {
@@ -3703,8 +3889,17 @@ def build_router(srv) -> APIRouter:
         except HTTPException:
             raise
         except Exception as exc:  # noqa: BLE001
+            # A FAULT, not a refusal — the one hand-raised 500 under `serve/`, allow-listed by
+            # name in `tests/test_refusal_vocabulary.py`: the snapshot persisted and the durable
+            # trust-gate append did not, and the client must see that as a PARTIAL write and
+            # retry the same PUT (`tests/test_server.py` pins the retry). The exception text stays
+            # in the server log: an OSError's carries a host path, and this body reaches the browser.
+            logging.getLogger(__name__).warning(
+                "config PUT for %s: snapshot updated but trust_gate event append failed: %s",
+                rd.name, exc)
             raise HTTPException(
-                500, f"snapshot updated but trust_gate event append failed: {exc}") from exc
+                500, "snapshot updated but trust_gate event append failed; retry the same PUT"
+            ) from exc
         return {
             "ok": True,
             "config": _run_config_payload(rd, updated),

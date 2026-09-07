@@ -297,6 +297,11 @@ site that proves it is open.
    fourth, `Engine._apply_strategy`, already applies a `developer`), and a mention
    in `_strategist_brief`, which today never tells the model developers are switchable at all.
 6. **The schema-aligned parser is a fallback, not the default (P0, S).** `core/parse.py:195
+   DECLINED[schema-parser-default-flip] the fallback stays the fallback. measured: the local
+   instrument this repo built for the question reports 33 asks, 0 repaired, 0 failed on this box —
+   the P0 rested on "this box serves local models", which it does not — docs/BACKLOG.md §0.1
+   (declined 2026-09-06; a box that does serve local models re-opens this under a new slug with
+   its own number).
    ::_coerce_to_model` IS a real error-correcting SAP (case-insensitive key match, per-field
    coercion, extras dropped) — but `core/config.py:1483` is `llm_parser: str = "tool_call"` and
    `parse.py:213::_ORDER["tool_call"] = ["tool_call", "baml"]`, so it only runs after native FC has
@@ -369,7 +374,10 @@ site that proves it is open.
    by flipping the default and watching it go False.
    OPEN[landlock-is-opt-in-by-default] an untrusted eval gets the host-side filesystem fence only
    when an operator asks for it, so the container rungs above carry the default alone; retire this
-   when a ruleset has been through a real GPU eval and the default flips.
+   when a ruleset has been through a real GPU eval and the default flips. *(2026-09-06, doc 52 row
+   28: the `EACCES` translation and the seccomp syscall rung landed ahead of the validation — this
+   container's `landlock_create_ruleset` answers `ENOSYS`, so the GPU eval is the box's to run, and
+   the default moves only with it.)*
    proof:`present:landlock: str = "off"@looplab/core/config.py`
    **The re-derivation is the finding, not the fix.** Three ranked entries were checked against the
    tree on 2026-08-21 and none described it — #19 fixed six days earlier by the very symbol it
@@ -466,7 +474,9 @@ site that proves it is open.
     CLAUDE.md's `ui/` row has carried the measurement (36 of 45 runs with a metric, 20 groups, 5 of
     them real) since it shipped. The surviving "Cross-run ranking unavailable" string is the
     group-of-one caveat, not the disclaimer this row quotes. No marker is added: this row is
-    CLOSED. What is genuinely left is named IN CODE as `TRAJECTORY_GAP`, not here.]
+    CLOSED. What was genuinely left — the trajectory overlay — was named IN CODE as `TRAJECTORY_GAP`
+    until 2026-09-06, when doc 52 row 26 shipped it (`events/trajectory.py::running_best` on the run
+    row, `crossRunRank.js::trajectoryOverlay` + `charts.jsx::MultiTrajectory` in the panel).]
 11. ✅ **Fork-to-branch: the gesture EXISTS end to end; only its RunView affordance is missing (P1, S).**
     *(2026-08-14 — the three citations above were re-verified and all three were correct.)* The fused
     gesture landed as `inject_node` + a validated `forked_from` receipt, **not** as a new control event
@@ -558,8 +568,11 @@ site that proves it is open.
     OPEN[timeseries-adapter-embeds-its-own-forecaster] the adapter generates its own exponential
     forecaster inline, so the task validates LoopLab's plumbing rather than any forecasting
     capability; retire this when a real backend is imported.
-    proof:`absent:import autogluon@looplab/adapters/timeseries.py`
-    *Mutated before it was written:* True as shipped, False the moment that import lands.]
+    proof:present:_TS_TEMPLATE@looplab/adapters/timeseries.py
+    *Mutated before it was written:* True as shipped, False the moment that import lands. Re-pointed
+    2026-09-06 (doc 52 §2.2): `autogluon` was one backend of many; the deciding symbol is the inline
+    template the adapter hands the sandbox, which any real backend deletes (the forecaster's own
+    `def` line sits INSIDE that string, which the guard rightly refuses as prose).]
 15. **Drift detection is absent (P2, M).** `trust/leakage.py` DID go past exact-match —
     `code_leakage_scan` (`:147`, self-described "static-dataflow-lite": preprocessor fit on full data
     before the split, `.fit()` on test data), plus `target_leakage` and `temporal_leakage`. But every
@@ -597,8 +610,10 @@ site that proves it is open.
    OPEN[mcts-has-no-llm-value-estimate] the tree values a node by its metric alone, so an unexplored
    branch nobody has evaluated is indistinguishable from a bad one; retire this when a value
    estimate exists.
-   proof:missing:looplab/search/lats.py
-   *Mutated before it was written:* True as shipped, False the moment that module exists.]
+   proof:absent:value_estimate@looplab/search/policy.py
+   *Mutated before it was written:* True as shipped, False the moment that module exists. Re-pointed
+   2026-09-06 (doc 52 §2.2): `lats.py` was a file that might arrive under another name; the item's
+   own text names the fix — a value estimate in `policy.py` — so the proof is bound to that name.]
 18. **Parallel eval is in-process only (P2, L).** `engine/evaluate.py:1375` takes an
     `anyio.CapacityLimiter` and `orchestrator.py:1503,2383` open task groups; there is no `ray`,
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
@@ -615,8 +630,10 @@ site that proves it is open.
     OPEN[eval-parallelism-is-in-process-only] evals are bounded by one box's task group, so the
     second H200 is the ceiling and a queued node waits rather than dispatching; retire this when a
     cross-machine dispatcher exists.
-    proof:`absent:import ray@looplab/engine/evaluate.py`
-    *Mutated before it was written:* True as shipped, False the moment that import lands.]
+    proof:`present:res = await anyio.to_thread.run_sync(@looplab/engine/evaluate.py`
+    *Mutated before it was written:* True as shipped, False the moment that import lands. Re-pointed
+    2026-09-06 (doc 52 §2.2): `import ray` named one library of several; the line that decides the
+    item is the in-process thread hop every eval runs through, which any dispatcher replaces.]
 19. ~~**[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**~~
     **[FIXED 2026-08-15, VERIFIED 2026-08-21 — this entry outlived its defect by six days.**
     The entry prescribed the fix by name: "reuse that exact join — `engine/metric_salvage.py::
@@ -2255,7 +2272,9 @@ are asserted equal, token for token, to the one span deliberately collapsed.
 copies. `traceview.py`'s expansion lived only in the first list and `authoring_projection.py` only in
 the second — the identical splice hazard, at sub-row scale. Collapsed into one list holding both.
 
-⬜ **Still open (cheap).** Nothing enforces one row per path. A ~10-line assertion in
+~~⬜ **Still open (cheap).**~~ **[CLOSED — re-derived 2026-09-06:
+`tests/test_documentation_contracts.py::test_the_package_map_names_each_package_exactly_once` is
+exactly this assertion, keyed on the path cell.]** Nothing enforced one row per path. A ~10-line assertion in
 `tests/test_documentation_contracts.py` over `CLAUDE.md`'s package-map table — first column unique —
 would have caught this on 2026-08-13 at 13:57 and would catch the next merge that does it. Note
 §0.3's `trust/` row is a *different* defect in the same table (the row is unique, it is just wrong
@@ -2816,14 +2835,19 @@ into a false refusal. On the legacy map, `redact_output`'s ground (b) fails outr
 no intervention, no concurrency, no selection policy; the derivation makes no request and can only
 ever spend LESS GPU time than the behaviour it replaces.
 
-⬜ **Still open.**
-1. **The 4,000-character tail is the deeper defect and this does not fix it.** The window handed to
+⬜ **Still open** (items 2 and 3; item 1 SHIPPED 2026-09-06).
+1. ✅ **[2026-09-06 — SHIPPED (doc 52 row 9): `train_monitor.stage_check_tools` hands the checker
+   `read_log` / `metric_series` over the checked stage's own log, built at CHECK time in
+   `eval_stages._stage_check_fn`; its own switch `Settings.stage_check_tools` (ON; legacy snapshots
+   OFF); the verdict line is read out of the tool-using answer and coerced by the same closed
+   vocabulary. `tests/test_stage_check_tools.py` drives it.]** The 4,000-character tail was the
+   deeper defect. The window handed to
    the checker starts mid-token (`r_second': 6280.573, …`) and holds ~38 log lines of a 1.4-hour
    training; the step counter, the trainer's banner, the "Saving model" line and every restart are
    outside it. The two live-eval watchdogs and the crash-triage judge were all moved off fixed slices
-   onto `tools/log_tools.py` (`read_log` / `metric_series` over `eval_log_plan`'s sources); **the
-   inter-stage checker is the last judge in the engine still handed a blind tail**, and it is the one
-   that can end a node. Same remedy, already built.
+   onto `tools/log_tools.py` (`read_log` / `metric_series` over `eval_log_plan`'s sources); the
+   inter-stage checker was the last judge in the engine still handed a blind tail, and it is the one
+   that can end a node. Same remedy, now applied.
 2. `no_artifact_written` is reachable for a stage whose `expect.files` the engine has ALREADY
    verified on disk one branch earlier — v8 node 8's own refusal says "and no final-model save is
    reported" about a node whose declared artifact passed. That is the same class of defect as this
@@ -3352,7 +3376,7 @@ surface resolves ids through it (`events/digest.py::_folded_axes`/`folded_concep
 run that never quiesces records no consolidation now either.
 
 **WHAT THIS DOES NOT FIX, and it is the more expensive finding.** ⬜ **`skeleton_for()` matches no
-  OPEN[concept-skeleton-matches-no-run] proof:present:skeleton_for@looplab/search/concept_graph.py
+  OPEN[concept-skeleton-matches-no-run] proof:`present:def skeleton_for(task_type: str)@looplab/search/concept_graph.py+absent:repo_task@looplab/search/concept_graph.py`
 run on this box.** The curated taxonomy (`search/concept_graph.py`: 26 leaves + 10 axis roots + 10
 `<axis>/*` placeholders = 46 ids) is resolved from `state.task_id` against ONE registered pack,
 `dense-retrieval`, plus seven substring aliases. Every run here answers `repo_task`,
@@ -3370,7 +3394,7 @@ own it needs; it does **not** unify the paths the operator asked about, and sayi
 be wrong.
 
 ⬜ **The classifier REWRITES, it does not add.** `_on_node_concepts` assigns
-  OPEN[classifier-rewrites-authored-membership] proof:present:_on_node_concepts@looplab/events/replay.py
+  OPEN[classifier-rewrites-authored-membership] proof:`present:st.node_concepts[nid] = bounded@looplab/events/replay.py`
 (`st.node_concepts[nid] = bounded`), authored provenance has no protection (only OPERATOR does), and
 the authored ids survive only in the raw log — `events/digest.py` explicitly forbids readers from
 resurrecting `idea.concepts`. Measured on v8, which is the precedent: **2 of 24 authored ids survive
@@ -3426,7 +3450,9 @@ withholding removed, the stamp removed, and a comment-only evasion of the gate �
 Replayed over all 42 event logs under `runs/`, metrics, champions, feasible sets, violations,
 memberships and provenance are byte-identical: digest `3eda8c9d95dadd1b` before and after.
 
-⬜ **Remaining share of the same gate, not taken here:** `lessons.py::maybe_distill_lessons`
+~~⬜~~ **[CLOSED — re-derived 2026-09-06: both `lessons.py::maybe_distill_lessons` and
+`research_cadence.py::_maybe_refresh_report` now gate on `cadence.at_creation_boundary` (F1i); the
+paragraph below is the state as of 2026-08-18.]** **Remaining share of the same gate, not taken here:** `lessons.py::maybe_distill_lessons`
 (`lessons_distilled`: 0 on v7/v9/e5, 2 on v8) and `research_cadence.py::_maybe_refresh_report`
 (`report_generated`: 0 on v9 and e5). Both are one call to the same predicate; they are left out
 because neither was measured for what it costs to run mid-eval, and this change's whole claim is
@@ -3518,7 +3544,7 @@ stripped, and the golden fixture moves by exactly eight `"repairs": 0` lines and
    derived, not carried, and they cost one `max()` per repair row.
 
 **STILL OPEN.** ⬜ **The node graph still cannot say which experiment is running.** `util.js::
-  OPEN[node-graph-cannot-name-running-experiment] proof:present:workingId@ui/src/util.js
+  OPEN[node-graph-cannot-name-running-experiment] proof:`present:eval_started: bool = Field(default=False, exclude=True)@looplab/core/models.py`
 workingId` returns the HIGHEST-ID pending node, and `Node.eval_started` — the folded durable proof
 that an evaluation was announced — is `exclude=True`, so it never reaches the wire
 (`narration.js::pendingWork` re-derives it from the raw event tail and says so in a comment). On v9
@@ -4133,7 +4159,8 @@ no Genesis prompt, so nothing an operator authors against ever mentions the one 
 kill. That is what the marker above is pointed at.
 
 ⬜ **Auto-skill promotion still runs only from the wrap-up pass — NARROWED 2026-08-19, see §0.18.**
-  OPEN[auto-skill-promotion-run-end-only] proof:absent:promote_settled_skills@looplab/engine/lessons_distill.py
+  OPEN[auto-skill-promotion-run-end-only] proof:`present:def write_reflection_note(self, final: RunState)@looplab/engine/lessons_distill.py+absent:write_auto_skill(@looplab/engine/lessons.py`
+  (the ONE promotion writer, `memory.write_auto_skill`, is called only from `write_reflection_note`, whose contract is the FINAL state; the proof reads shipped when that contract changes or the mid-run distill module gains the writer — re-point on landing if the promotion lands under a third shape)
 The TWIN question is settled and needed no new run: `n_skills: 0` on v7/v8 is not the classifier
 over-rejecting, because **zero cards reached it** (v7 has no evaluated node at all; all three of v8's
 `supported` cards are record setters with `best_delta = None`). That rung now writes its own
@@ -4526,7 +4553,7 @@ restored the entry for being invisible.
   second request. The measured cost of leaving it is one untested top-ranked hypothesis per run that
   seeds a card before its first metric lands.
 
-OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/tools/_base.py
+OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/core/context_budget.py
 
   Both fixes are LOCAL: memos gained sections, the case record leads with its params. Neither
   establishes the general rule, which is what this entry is for — every bounded surface in the tree
@@ -4638,7 +4665,11 @@ stored in the dataset header and printed above every report, because a caveat th
 doc is a caveat nobody reading the number sees. A prompt optimised against this corpus will overfit
 it.
 
-OPEN[judge-bench-covers-two-judges-of-four] failure triage LANDED 2026-08-20
+DECLINED[judge-bench-covers-two-judges-of-four] the repair critic and the novelty gate stay
+unbenched. measured: the critic has 7 decisions in the whole corpus (a bench on it reports noise with
+a decimal point) and the novelty gate rejects ideas that are never run, so no outcome label can exist
+for it — docs/BACKLOG.md §0.19; converted 2026-09-06 from an open marker whose own text below was
+already this decline. Failure triage LANDED 2026-08-20
 (`looplab/judgebench/triage_corpus.py` + `triage_score.py`,
 `tests/data/judge_bench/failure_triage.v1.jsonl.gz`, **122 rows, 118 labelled**) and it is smaller
 than the span count suggested for a reason worth keeping: the unit that can carry a label is the
@@ -4648,7 +4679,6 @@ effort. The **repair critic** has **7 decisions in the whole corpus** and a benc
 noise with a decimal point. The **novelty gate** can never be scored for correctness at all — the
 idea it rejects is never run, so nothing on disk says whether it would have worked, and only
 `score.py`'s consistency field can ever exist for it.
-proof:absent:extract_critic@looplab/judgebench/__main__.py
 
 **[CLOSED 2026-09-03 — the marker was STALE, and the way it was stale is worth keeping.]** Its
 subject no longer exists: `_TORCH_OOM_MARKERS` and `_is_torch_oom` were DELETED on 2026-08-20 (see
@@ -4718,13 +4748,20 @@ stored PROMPT — a field no label and no headline number reads — kills the de
 sha tripwire. The regeneration test now runs and passes when pointed at the runs
 (`LOOPLAB_BENCH_RUNS=runs`), which is the first time it has ever executed.
 
-OPEN[judge-bench-cannot-see-a-post-exit-stage-failure] the missed-stop class is not a prompt
+**[CLOSED 2026-09-06 — the marker was STALE, the same way the OOM one above was.]** Its ask —
+the declared `expect`/`assert` contract in front of the judge while the stage still runs — shipped on
+2026-08-20 as `engine/train_monitor.py::stage_contract_context`, spliced into every tick's user
+message under `Settings.train_monitor_contract` (ON), and scored over the same 450-decision
+corpus: the deterministic schedule reading fires on 12 decisions, 12 wasted / 0 productive, taking
+the incumbent from 6 to 9 of 27 wasted attempts caught (CLAUDE.md, the `train_monitor.py` row).
+The falsifier was `absent:monitor_expect_context`, a symbol the fix never spelled, so the guard
+stayed green over a shipped item for seventeen days — the second time this section records that
+shape, and the reason a proof should name the fix's OWN symbol or the defect's own text, never a
+name guessed in advance. The measurement stands: the missed-stop class is not a prompt
 problem: all **20** uncaught wasted attempts are `stage_failed`, and of the 20.1 h an oracle could
 have saved by stopping each at its first look, **13.4 h across 7 attempts is
 `check_failed`/`expect_failed`** — the stage exited rc 0 and the ENGINE then failed it, over
-artifacts the judged log never showed. What reaches that is EVIDENCE, not wording: the declared
-`expect`/`assert` contract, in front of the judge while the stage still runs.
-proof:absent:monitor_expect_context@looplab/engine/train_monitor.py
+artifacts the judged log never showed. What reaches that is EVIDENCE, not wording, and it now does.
 
 The other 6.6 h is 13 real crashes, 5 of them under six minutes after the look charged for missing
 them. Both dead-model attempts were caught, at 31 of 33 and 17 of 20 decisions. **The checker half
@@ -5935,7 +5972,12 @@ reused-stage fold record). What remains open or was dismissed:
   caller is `evaluate.py::_recheck_repaired_contract`), and the divergence was LATENT — the only
   profile-passing caller is the confirm phase, which never plans, and no run in `runs/` contains a
   single `confirm_eval` row.]
-- ⬜ **P2 · unify the launch-readiness gate (S–M).** "Is this task launchable" now
+- ✅ **P2 · unify the launch-readiness gate (S–M).** **[2026-09-06 — SHIPPED (doc 52 row 8):
+  `serve/launch.py::validate_launch` answers `POST /api/validate` as a verdict over the same
+  `preflight_start` funnel `/api/start` refuses through; `serve/tui_format.py::spec_ready` is
+  deleted and the TUI asks the server on every draft render (`Tui._validate`), binding its launch
+  to the returned token. `tests/test_launch_preflight.py` + `tests/test_tui.py` drive it.]**
+  "Is this task launchable" now
   lives in 2 parallel copies — `EvalSpec._command_or_stages` (backend truth) and
   `serve/tui.py::spec_ready` (the third, `ui/src/GenesisChat.jsx`, was deleted as dead
   UI 2026-07) — and this range was itself
@@ -6094,6 +6136,11 @@ deliberately deferred, with rationale:
   wall-clock survives. What did NOT ship is the row's actual proposal: records are still keyed by
   stage NAME (last-real-wins), not attempt-indexed, and no readmodel sums attempts. Residue (§0.2) —
   accounting/UI only, as the row itself says.]
+  **[2026-09-06 — the accounting shipped (doc 52 row 27):** `Node.stage_attempts` is the
+  attempt-indexed record — every `stage_finished` row as the attempt's own statement, appended by
+  `replay._on_stage_finished` before the per-name merge and kept across resets — and
+  `Node.stage_wall_clock()` is the sum per stage. `stages` stays the per-name projection every
+  surface reads.]
 
 ### Deferred cleanup
 - ✅ **Tool-consolidation follow-through (S–M).** Dedup the paginated file-reader family —

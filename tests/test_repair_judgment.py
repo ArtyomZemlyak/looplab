@@ -198,9 +198,8 @@ def test_the_developer_is_actually_told_it_may_decline():
     # rather than the whole module so a definition sitting unused elsewhere cannot satisfy it — the
     # behavioural half is `test_the_declaration_reaches_the_developer_in_the_repair_ask` above, which
     # reads the string the Developer was actually handed.
-    from looplab.engine.evaluate import EvaluateMixin
-    assert "developer_stuck_contract(DEVELOPER_STUCK_PREFIX)" in inspect.getsource(
-        EvaluateMixin._evaluate)
+    from tests._source_scan import eval_attempt_source
+    assert "developer_stuck_contract(DEVELOPER_STUCK_PREFIX)" in eval_attempt_source()
 
 
 def test_a_developer_that_declares_itself_stuck_ends_the_node_and_spends_nothing(tmp_path):
@@ -423,17 +422,17 @@ def test_the_verdict_row_is_diagnostic_and_its_vocabularies_collide_with_nothing
     assert EV_REPAIR_CRITIC_VERDICT in DIAGNOSTIC_EVENTS
     # And the partition test in tests/test_event_types.py covers the other half (registered + not
     # folded); this pins the membership the append site asserts.
-    from looplab.engine import evaluate as ev_mod
-    # OPEN[review-guard-substring-pin] this file's own tier-3 pin is evadable by a comment.
-    # proof:present:ev_mod.EvaluateMixin._evaluate)@tests/test_repair_judgment.py
-    # REVIEW 2026-08-18 (guard-test): a POSITIVE SUBSTRING pin — the exact residue class CLAUDE.md's
-    # guard-test ladder sends to tier 3, because it is satisfied by deleting the in-code assert in
-    # `evaluate.py::_evaluate` and leaving a comment carrying the literal. The next test down already
-    # uses tests/_source_scan.py; use its AST helpers here too (e.g. `names_read` on `_evaluate`, or
-    # walk `function_tree` for a real ast.Assert reading both names) so a commented-out copy of the
-    # membership assert cannot keep this green.
-    assert "assert EV_REPAIR_CRITIC_VERDICT in DIAGNOSTIC_EVENTS" in inspect.getsource(
-        ev_mod.EvaluateMixin._evaluate)
+    # As a real `ast.Assert` over both names (the 2026-08-18 review's own prescription, closed with
+    # the EvalAttempt split): a comment carrying the literal is not an Assert node, and the append
+    # site is DECIDE_REPAIR's since doc 52 row 21.
+    import ast
+
+    from looplab.engine.evaluate import EvaluateMixin
+    from tests._source_scan import function_tree
+    asserts = [n for n in ast.walk(function_tree(EvaluateMixin._eval_decide_repair))
+               if isinstance(n, ast.Assert) and isinstance(n.test, ast.Compare)
+               and ast.unparse(n.test) == "EV_REPAIR_CRITIC_VERDICT in DIAGNOSTIC_EVENTS"]
+    assert len(asserts) == 1, "the append site must assert the row's diagnostic membership, once"
 
 
 def test_the_source_registry_is_two_way():
@@ -713,8 +712,8 @@ def test_a_verdict_moves_nothing_selection_side(tmp_path):
     #    subscripts rather than counted, so adding a fourth read is a red test naming the key.
     import re
 
-    from looplab.engine import evaluate as ev_mod
-    body = inspect.getsource(ev_mod.EvaluateMixin._evaluate)
+    from tests._source_scan import eval_attempt_source
+    body = eval_attempt_source()
     assert set(re.findall(r'critic\.get\(\s*"(\w+)"', body)) == {"action", "source", "rationale"}
     assert body.count("== CRITIC_STOP") == 1
     # ...and the verdict object itself is never handed to anything: a call taking `critic` is how a
@@ -800,16 +799,16 @@ def test_the_engine_feeds_that_floor_a_running_maximum_and_not_the_latest_pipeli
     from tests._source_scan import function_tree
     from looplab.engine.evaluate import EvaluateMixin
 
-    tree = function_tree(EvaluateMixin._evaluate)
+    tree = function_tree(EvaluateMixin._eval_decide_repair)     # the floor's phase since the split
     calls = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "repair_redone_work_stop"]
     assert len(calls) == 1, "the floor is decided in one place; re-derive this test"
     priced = {kw.arg: ast.unparse(kw.value) for kw in calls[0].keywords}
-    assert priced.get("pipeline_seconds") == "chain_pipeline_s", priced
+    assert priced.get("pipeline_seconds") == "a.chain_pipeline_s", priced
     # and that name is a running maximum, not a rebinding of the per-attempt resolution
     maxima = [n for n in ast.walk(tree)
               if isinstance(n, ast.Assign)
-              and any(getattr(t, "id", None) == "chain_pipeline_s" for t in n.targets)
+              and any(ast.unparse(t) == "a.chain_pipeline_s" for t in n.targets)
               and isinstance(n.value, ast.Call) and getattr(n.value.func, "id", "") == "max"]
     assert len(maxima) == 1, ast.unparse(tree)[:200]
 
@@ -822,7 +821,7 @@ def test_the_engine_feeds_that_floor_a_running_maximum_and_not_the_latest_pipeli
     # The property is that the new value is folded INTO the accumulator: one operand must be
     # `chain_pipeline_s` itself, and at least one other must be a DIFFERENT expression.
     operands = [ast.unparse(a) for a in maxima[0].value.args]
-    assert "chain_pipeline_s" in operands, (
+    assert "a.chain_pipeline_s" in operands, (
         f"the accumulator is not an operand of its own max — {operands} is a rebinding, not a "
         "running maximum")
     assert len(set(operands)) > 1, (

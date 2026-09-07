@@ -257,3 +257,27 @@ def test_abstraction_cache_is_bounded(tmp_path):
     # an over-large cache persisted by an older build is trimmed on load, not carried forward
     reloaded = CachedAbstractor(lambda t: Abstraction(t, []), path=str(tmp_path / "abs.json"))
     assert len(reloaded._cache) <= _MAX_ABSTRACTION_CACHE
+
+
+def test_the_shared_provider_wiring_actually_reaches_a_client(monkeypatch):
+    """`memora_llm` DEFAULTS ON, and its whole effect is the `complete` callable this wiring hands
+    the abstractor. The extraction of `_make_abstractor` out of `factory.py` (which had both
+    factories at module scope) into `providers.py` (which does not) turned the call into a
+    `NameError` that the blind except beside it read as "a client we can't build" — so every run
+    silently used lexical abstractions and nothing anywhere said so.
+
+    Driven on the observable: what the wiring passes to `make_abstractor`. `None` here is a live
+    feature reported as absent."""
+    from looplab.agents import providers
+    from looplab.tools import memora
+
+    seen: dict = {}
+    monkeypatch.setattr(memora, "make_abstractor",
+                        lambda settings, complete=None, cache_path=None:
+                        seen.setdefault("complete", complete))
+    providers._make_abstractor(Settings(memora=True, memora_llm=True))
+    assert callable(seen["complete"]), "memora_llm is on and the abstractor got no completer"
+
+    seen.clear()
+    providers._make_abstractor(Settings(memora=True, memora_llm=False))
+    assert seen["complete"] is None, "memora_llm off must stay lexical and spend nothing"

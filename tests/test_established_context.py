@@ -17,17 +17,32 @@ from pathlib import Path
 
 import pytest
 
+from looplab.agents import tool_loop
 from looplab.agents import established as est
 from looplab.agents.established import EstablishedContext, established_context_from_settings
 from looplab.agents.tool_loop import _READ_TOOL_PATH_SLOTS
 
 
-def test_the_read_tool_registry_is_the_tool_loops_own():
-    """One reading of "which tools return a file": the nudge's table and this store's must agree,
-    or a reader the nudge counts is one the block cannot carry (and vice versa)."""
-    assert set(est.READ_TOOL_PATH_SLOTS) == set(_READ_TOOL_PATH_SLOTS)
-    for name, slot in est.READ_TOOL_PATH_SLOTS.items():
-        assert _READ_TOOL_PATH_SLOTS[name][0] == slot
+def test_the_read_tool_registry_is_DERIVED_from_the_tool_loops_own():
+    """One reading of "which tools return a file", and now one TABLE.
+
+    This used to assert that two hand-written copies agreed — a check that goes red only AFTER a
+    divergence has been authored, and only for whoever runs it. The store now derives its view from
+    `tool_loop._READ_TOOL_PATH_SLOTS` and keys through `_canonical_read_path`, so a fifth reader is
+    carried by construction. What is left to hold is the DERIVATION: that the view is the loop's
+    table with the `paged` column dropped, and that the store really keys through the loop's own
+    canonicaliser rather than a private copy that could drift back.
+    """
+    assert est.READ_TOOL_PATH_SLOTS == {tool: slot for tool, (slot, _p)
+                                        in _READ_TOOL_PATH_SLOTS.items()}
+    assert est._canonical_read_path is tool_loop._canonical_read_path
+    assert not hasattr(est, "_canonical_path"), (
+        "a private canonicaliser came back; the loop's is the one ledger key rule")
+
+    # …and the store must AGREE with it on the shapes the loop's rule decides, not merely import it.
+    store = EstablishedContext()
+    assert store.record("read_file", {"path": ".\\ref.py"}, "x = 1\n") is True
+    assert store.items()[0]["path"] == "ref.py", "separators and a leading ./ are the loop's rule"
 
 
 def test_nothing_recorded_renders_nothing_and_non_readers_are_ignored():
@@ -115,14 +130,122 @@ def test_a_write_drops_the_page_it_invalidates_and_the_row_says_so():
 
 
 def test_every_writer_invalidates_and_a_reader_is_not_a_writer():
+    """Every REGISTERED writer must drop the page it rewrites — including the one that names no
+    path. `declare_stages` takes no argument at all (it writes `STAGES_MANIFEST`), so it is driven
+    against that constant; the table carries a sentinel for it rather than an argument name, which
+    is what makes "the comment says it is registered" and "it is registered" the same fact."""
+    from looplab.adapters.repo_write_tools import STAGES_MANIFEST
+
     store = EstablishedContext()
     for tool, slot in est.WRITE_TOOL_PATH_SLOTS.items():
-        store.record("read_file", {"path": "w.py"}, "before\n")
+        named = slot is not est._STAGES_MANIFEST_SLOT
+        path = "w.py" if named else STAGES_MANIFEST
+        store.record("read_file", {"path": path}, "before\n")
         assert "before" in store.render(), tool
-        assert store.invalidate(tool, {slot: "./w.py"}) is True, tool
+        assert store.invalidate(tool, {slot: f"./{path}"} if named else {}) is True, tool
         assert "before" not in store.render(), tool
     assert store.invalidate("read_file", {"path": "w.py"}) is False
     assert store.invalidate("write_file", {}) is True, "a writer with no path is still handled"
+
+
+def test_declare_stages_invalidates_the_manifest_it_alone_writes():
+    """DRIVEN, because the comment claimed this for a table that did not hold it.
+
+    MUTATION: drop `declare_stages` from the table -> the manifest is the ONE page nothing in the
+    run can invalidate, so every later chain root is seeded with the pre-declaration bytes under
+    "first page verbatim, sha …" — the G2 stale-page defect the registry exists to prevent.
+    """
+    from looplab.adapters.repo_write_tools import STAGES_MANIFEST
+
+    store = EstablishedContext()
+    store.record("read_file", {"path": STAGES_MANIFEST}, '{"stages": [{"name": "OLD"}]}')
+    assert "OLD" in store.render()
+    assert store.invalidate("declare_stages", {}) is True
+    assert "OLD" not in store.render(), "the manifest page survived the tool that rewrote it"
+
+
+def test_an_absolute_write_invalidates_a_relatively_read_page():
+    """The two spellings are BOTH legitimate: `tools/reposcout.py` resolves an absolute sandbox
+    path onto the overlay key, so exact string equality misses the pair it exists to catch.
+
+    MUTATION: compare `item["path"] == path` -> the pre-write bytes stay carried under
+    "do not re-fetch", which is the defect, not a missed optimisation.
+    """
+    store = EstablishedContext()
+    store.record("read_file", {"path": "vectorsearch/train.py"}, "import torch\n")
+    store.invalidate("write_file", {"path": "/wd/nodes/node_59/vectorsearch/train.py"})
+    assert "import torch" not in store.render()
+
+    # …and the match is COMPONENT-wise, so a sibling sharing a string prefix is untouched.
+    other = EstablishedContext()
+    other.record("read_file", {"path": "models/run"}, "kept\n")
+    other.invalidate("write_file", {"path": "models/run-v7"})
+    assert "kept" in other.render(), "a prefix sibling was invalidated as if it were the same file"
+
+
+def test_a_page_is_not_carried_out_of_the_workspace_it_was_read_in():
+    """THE CROSS-NODE LIE. The store is per RUN and `read_file` answers through `write.files`, the
+    per-NODE staged overlay, so without a workspace boundary node 3's `solver.py` is seeded into
+    node 7's chain root labelled "carried verbatim … do not re-fetch".
+
+    `invalidate` cannot cover it and the module's docstring used to claim it did: a new node writes
+    NOTHING before its first phase renders the block, so there is no write to hang the drop on.
+
+    MUTATION: drop `enter_workspace`'s content reset -> the block asserts a sibling experiment's
+    bytes are this one's working set. The COUNTS must survive, because "you have read this 9 times
+    in this run" stays true and is what the block is for.
+    """
+    store = EstablishedContext()
+    store.enter_workspace("node-3")
+    store.record("read_file", {"path": "solver.py"}, "def solve(): return 3\n")
+    assert "return 3" in store.render()
+
+    store.enter_workspace("node-7")
+    block = store.render()
+    assert "return 3" not in block, "a sibling node's page was carried into this one"
+    assert "read while building a DIFFERENT experiment" in block, "…and it must say WHY"
+    assert store.items()[0]["count"] == 1, "the count is true across nodes and must survive"
+
+    # Re-entering the SAME workspace is not a boundary: a phase change must not drop the pages the
+    # block exists to carry between phases of one node.
+    store.record("read_file", {"path": "solver.py"}, "def solve(): return 7\n")
+    store.enter_workspace("node-7")
+    assert "return 7" in store.render()
+
+
+def test_a_note_inside_a_file_is_not_mistaken_for_the_loops_own():
+    """DRIVEN. The loop appends its notes as a SUFFIX; a file may contain such a line itself.
+
+    MUTATION: `text.find(head)` -> the file is stored truncated at that line, hashed over the
+    truncation, and rendered under a header promising its first page verbatim.
+    """
+    body = "line one\n(note: this is part of the FILE)\nline three, the real tail\n"
+    store = EstablishedContext()
+    store.record("read_file", {"path": "a.py"}, body)
+    assert store.items()[0]["content"] == body
+
+
+def test_a_truncated_result_is_never_carried_as_verbatim():
+    """`_TRUNC_NOTE` does not begin `\n(note: `, so the retyped marker missed it entirely.
+
+    MUTATION: carry it anyway -> the block presents a prefix the CAP chose as "the first page
+    verbatim", with the cap's own sentence inside the quoted bytes.
+    """
+    from looplab.agents import tool_loop
+
+    cut = "half a file\n" + tool_loop._TRUNC_NOTE.format(n=9)
+    store = EstablishedContext()
+    assert store.record("read_file", {"path": "b.py"}, cut) is True
+    assert store.items()[0]["content"] is None, "a page the cap cut was carried as verbatim"
+    assert "not carried — re-read once" in store.render()
+
+
+def test_the_item_cap_can_never_exceed_the_budget():
+    """MUTATION: keep `item_bytes` at its own default -> an operator lowering
+    `established_context_bytes` below it gets a store that accepts pages `render` can never fit,
+    and the feature degenerates to index rows with nothing saying why."""
+    assert EstablishedContext(budget_bytes=1024).item_bytes == 1024
+    assert EstablishedContext(budget_bytes=99999).item_bytes == est.DEFAULT_ITEM_BYTES
 
 
 def test_the_write_table_names_the_real_write_tools():
@@ -261,3 +384,137 @@ def test_every_developer_phase_names_its_hook(phase):
         for v in (n.args[0].body, n.args[0].orelse) if isinstance(v, ast.Constant)
     }
     assert phase in labels | conditional
+
+
+def test_the_store_is_one_per_run_not_one_per_role_pair():
+    """`make_roles` runs SEVERAL times per run — the primary pair, a second one for the repair
+    Developer when the models differ, one per pooled pair under `llm_parallel > 1` (the AUTO
+    default), and again on a Strategist developer swap. Minting per call made "one store per run"
+    false in the shipped configuration: the repair session, which has the most to gain, started
+    empty and shared with nothing.
+
+    MUTATION: drop the settings cache -> each pair keeps its own ledger and the `threading.Lock`
+    guards an object nobody shares.
+    """
+    from looplab.core.config import Settings
+
+    settings = Settings()
+    first = established_context_from_settings(settings)
+    assert first is not None and established_context_from_settings(settings) is first
+
+    assert established_context_from_settings(Settings(established_context=False)) is None
+    assert established_context_from_settings(Settings()) is not first, (
+        "a run built from a DIFFERENT Settings — the calibration profile — must get its own")
+
+
+def test_a_re_read_in_the_new_workspace_stops_reporting_the_old_one():
+    """`enter_workspace` MOVES A POINTER; it destroys nothing, so supersession is derived from a
+    comparison and can be undone by the one thing that should undo it — reading the file here.
+
+    MUTATION: latch a `superseded` flag instead -> a file legitimately re-read in this workspace
+    goes on telling the model to re-read it, a remedy it has just spent (`log_tools.py` rule 3).
+    """
+    store = EstablishedContext()
+    store.enter_workspace("node-3")
+    store.record("read_file", {"path": "solver.py"}, "def solve(): return 3\n")
+
+    store.enter_workspace("node-7")
+    assert "DIFFERENT experiment" in store.render()
+
+    store.record("read_file", {"path": "solver.py"}, "def solve(): return 7\n")
+    block = store.render()
+    assert "return 7" in block and "DIFFERENT experiment" not in block
+    assert "return 3" not in block
+
+
+def test_every_readers_own_refusal_is_refused_not_carried():
+    """The filter used only `reposcout`'s vocabulary, which covers two of the four registered
+    readers. The other two name themselves in their refusals and none of those sentences starts
+    with a reposcout prefix, so each was stored, HASHED and rendered as "first page verbatim" —
+    the exact defect the filter exists to close, surviving for half the table.
+
+    MUTATION: drop a reader's prefixes -> `(read_installed: cannot locate x…)` is carried into every
+    later chain root under a header promising the module's source.
+    """
+    store = EstablishedContext()
+    for tool, args, refusal in (
+            ("read_installed", {"module": "nope"}, "(read_installed: cannot locate nope: no spec)"),
+            ("read_asset", {"name": "x"}, "(no asset 'x'; available: none)"),
+            ("read_asset", {"name": "y"}, "(this task has NO data assets at all — nothing to read)"),
+            ("read_file", {"path": "z.py"}, "(no such file: z.py)"),
+    ):
+        assert store.record(tool, args, refusal) is False, refusal
+    assert store.render() == ""
+
+
+def test_a_legacy_windowed_read_is_not_carried_as_a_whole_page():
+    """`read_installed` still accepts `max_lines` as a documented alias for `lines`, and a window
+    arriving under it read as "no window at all".
+
+    MUTATION: test `lines` only -> a 20-line slice is stored, sha'd and rendered as the module's
+    first page verbatim, with the model told to work from the copy.
+    """
+    store = EstablishedContext()
+    store.record("read_installed", {"module": "pkg.mod", "max_lines": 20}, "line\n" * 20)
+    assert store.items()[0]["content"] is None
+    assert "not carried — re-read once" in store.render()
+
+
+def test_a_zero_byte_budget_renders_nothing_at_all():
+    """`established_context_bytes` is `ge=0` and every other byte knob in `Settings` reads 0 as off.
+
+    MUTATION: gate only on the ledger being empty -> every chain root still gains the ~460-byte
+    header promising "where its content follows, it is carried verbatim" above no content.
+    """
+    store = EstablishedContext(budget_bytes=0)
+    store.record("read_file", {"path": "a.py"}, "x = 1\n")
+    store.record("read_file", {"path": "b.py"}, "y = 2\n")
+    assert store.render() == ""
+
+
+def test_deep_research_records_through_its_own_observer_and_is_seeded():
+    """THE ONE PHASE A5 MISSED, in both directions.
+
+    `make_deep_researcher` composes `repo_reader_provider`, whose `repo_read` is a registered A5
+    reader and — by that module's own measurement — 33 % of this stage's tool calls. None of them
+    reached the ledger and its chain root carried no block, while `hook(phase, inner=…)` had been
+    written for exactly this case ("composed over an existing one so a caller that already observes
+    results keeps observing them") and nothing in the tree passed `inner`.
+
+    MUTATION: pass `store.hook("deep_research")` without `inner` -> the stage's own consulted-sources
+    ledger stops being fed, so the memo's citations silently empty out. Driven rather than pinned:
+    the composed hook must reach BOTH observers with the same call.
+    """
+    import ast
+    import inspect
+
+    from looplab.agents import deep_research as dr
+
+    store = EstablishedContext()
+    seen = []
+    composed = store.hook("deep_research", inner=lambda *a: seen.append(a))
+    composed("repo_read", {"path": "train.py"}, "import torch\n")
+    assert seen == [("repo_read", {"path": "train.py"}, "import torch\n")], "the inner observer"
+    assert "import torch" in store.render(), "…and the A5 ledger, from the same call"
+
+    # …and the stage really composes it that way, with its own `_record` as the inner.
+    tree = ast.parse(inspect.getsource(dr.DeepResearcher._research_once
+                                      if hasattr(dr.DeepResearcher, "_research_once")
+                                      else dr.DeepResearcher))
+    composed_calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "hook"
+        and any(kw.arg == "inner" for kw in n.keywords)
+    ]
+    assert composed_calls, "the deep-research loop no longer composes the A5 hook over its own"
+
+
+def test_the_deep_researcher_joins_the_runs_store_rather_than_minting_one():
+    """MUTATION: build its own `EstablishedContext` -> the stage that runs BEFORE most phases keeps
+    a private ledger, so nothing it retrieved is ever established for anybody else."""
+    from looplab.agents.established import established_context_from_settings
+    from looplab.core.config import Settings
+
+    settings = Settings()
+    runs_store = established_context_from_settings(settings)
+    assert established_context_from_settings(settings) is runs_store

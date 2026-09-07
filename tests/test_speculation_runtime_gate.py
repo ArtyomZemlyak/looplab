@@ -249,6 +249,7 @@ def test_valid_receipt_admits_and_pins_exact_digest(tmp_path, monkeypatch):
         "select_verifier": False,
         "select_verifier_samples": 3,
         "verifier_ci_tie": False,
+        "require_approval": False,
         "card_driven_selection": True,
         "speculation_depth": 2,
         "speculation_implementation_digest": _IMPLEMENTATION,

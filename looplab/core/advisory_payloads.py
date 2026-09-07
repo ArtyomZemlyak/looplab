@@ -6,6 +6,7 @@ boundaries so an oversized or wrong-shaped sidecar cannot crash the engine or ex
 """
 from __future__ import annotations
 
+import re
 import hashlib
 import itertools
 import json
@@ -746,6 +747,48 @@ def memo_verdict_cue(memo) -> str:
             "nothing verifies the summary itself]")
 
 
+#: The memo's PROVENANCE-COVERAGE block (doc 52 row 32): how much of the memo's synthesis names
+#: evidence the memo itself can resolve. Computed by `trust/memo_verify.py::provenance_coverage`
+#: (deterministic, no model) and named here because the SANITIZER has to know its shape — the
+#: version and the section list are one spelling, not two.
+PROVENANCE_COVERAGE_VERSION = 1
+PROVENANCE_COVERAGE_SECTIONS = ("summary", "findings", "recommended_directions")
+#: Per section, and the same bound the writer applies — so a hand-authored block cannot
+#: claim a denominator the instrument could never have produced.
+PROVENANCE_COVERAGE_MAX_STATEMENTS = 64
+
+
+def _provenance(value):
+    """Bound one provenance block, or None when it is not one.
+
+    The counts are the record; `coverage` is RECOMPUTED from them here rather than trusted, for the
+    same reason `_verification` recomputes `unsupported`: a persisted aggregate that disagrees with
+    the rows beside it is the one number a reader cannot check, and this one exists to be read by a
+    person deciding whether a memo's conclusions are supported at all.
+    """
+    if not isinstance(value, dict) or value.get("v") != PROVENANCE_COVERAGE_VERSION:
+        return None
+    out = {"v": PROVENANCE_COVERAGE_VERSION}
+    total = bound_total = 0
+    for section in PROVENANCE_COVERAGE_SECTIONS:
+        row = value.get(section)
+        row = row if isinstance(row, dict) else {}
+        statements = row.get("statements")
+        bound = row.get("bound")
+        statements = (statements if type(statements) is int
+                      and 0 <= statements <= PROVENANCE_COVERAGE_MAX_STATEMENTS else 0)
+        # `bound <= statements` is enforced, not assumed: the block rides in a payload a custom
+        # researcher can author, and "97 of 3 statements are supported" is exactly the shape a
+        # reader would quote without checking.
+        bound = bound if type(bound) is int and 0 <= bound <= statements else 0
+        out[section] = {"statements": statements, "bound": bound}
+        total += statements
+        bound_total += bound
+    out["statements"] = total
+    out["bound"] = bound_total
+    # None, never 0.0 — a memo with nothing to measure has not failed the measurement.
+    out["coverage"] = (bound_total / total) if total else None
+    return out
 #: How many node ids a snapshot-superseded receipt carries. It rides ONE prompt line beside a
 #: 300-character summary, so it takes the node-ref bound rather than the claim bound.
 MAX_SUPERSEDED_NODE_REFS = MAX_RESEARCH_NODE_REFS
@@ -832,6 +875,12 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     }
     if valid_advisory_ref(src.get("memo_id"), "memo"):
         out["memo_id"] = src["memo_id"]
+    # THE MEMO'S OWN COVERAGE (doc 52 row 32), when the writer computed one. Never manufactured
+    # here: a row written before the measure existed must fold to exactly what it always folded to,
+    # so an absent block stays absent rather than becoming a confident `0 of 0`.
+    provenance = _provenance(src.get("provenance"))
+    if provenance is not None:
+        out["provenance"] = provenance
     if "verification" in src:
         # Reserve a bounded slice for trust output before model narrative/proposals. The shared 64k
         # cap must not persist recommendations while silently erasing unsupported verdicts.
@@ -882,6 +931,12 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
             "urls": urls,
             "url_identities": url_identities,
         }
+        # The exact-span evidence a claim is BOUND to (doc 52 row 16): ids only, minted by the
+        # engine (`core/research_record.py::bind_claims_to_evidence`), never model text.
+        evidence_ids = [v for v in _items(claim.get("evidence_ids"), MAX_RESEARCH_EVIDENCE_REFS)
+                        if _evidence_id(v)]
+        if evidence_ids or "evidence_ids" in claim:
+            projected_claim["evidence_ids"] = evidence_ids
         if valid_advisory_ref(claim.get("claim_id"), "claim"):
             projected_claim["claim_id"] = claim["claim_id"]
         if add_receipts or "evidence_receipt" in claim:
@@ -935,6 +990,110 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     out["proposed_ideas"] = [
         _tree(v, budget, proposal_items) for v in _items(src.get("proposed_ideas"), 16)
     ]
+    # THE DURABLE RESEARCH RECORD (doc 52 row 16). Additive: absent on every memo written before
+    # 2026-09-06, and an absent key stays absent so an old row is not rewritten as "no plan".
+    if "plan" in src:
+        out["plan"] = sanitize_research_plan(src.get("plan"), budget)
+    if "evidence" in src:
+        out["evidence"] = sanitize_evidence_items(src.get("evidence"), budget)
+    if "literature" in src:
+        out["literature"] = sanitize_literature_items(src.get("literature"))
+    return out
+
+
+MAX_RESEARCH_EVIDENCE_REFS = 12
+# A record id is `<kind>-` + 24 lowercase hex (`core/research_record.py` mints `ev-`/`lit-` ids
+# from a sha256 PREFIX); it is deliberately not a digest, and a full 64-hex digest is checked only
+# through `jsonutil.valid_digest_ref`, the one reader of that shape.
+_RECORD_ID = re.compile(r"\A(ev|lit)-[0-9a-f]{24}\Z")
+_PLAN_STATUSES = ("pending", "in_progress", "done")
+
+
+def _evidence_id(value) -> bool:
+    return isinstance(value, str) and value.startswith("ev-") and bool(_RECORD_ID.match(value))
+
+
+def _hex_digest(value) -> str:
+    from looplab.core.jsonutil import valid_digest_ref
+    return value if valid_digest_ref(value) else ""
+
+
+def sanitize_research_plan(value, budget: list[int]) -> Optional[dict]:
+    """The stage's last `update_plan` as `{plan, todos:[{item, status}], updates}`, bounded."""
+    if not isinstance(value, dict):
+        return None
+    todos = []
+    for row in _items(value.get("todos"), 40):
+        if not isinstance(row, dict):
+            continue
+        item = _text(row.get("item", ""), 200, budget, single_line=True)
+        if not item:
+            continue
+        status = row.get("status")
+        todos.append({"item": item,
+                      "status": status if status in _PLAN_STATUSES else "pending"})
+    updates = value.get("updates")
+    return {
+        "plan": _text(value.get("plan", ""), 1_200, budget),
+        "todos": todos,
+        "updates": updates if type(updates) is int and 0 <= updates <= _MAX_ADVISORY_COUNT else 0,
+    }
+
+
+def sanitize_evidence_items(value, budget: list[int]) -> list[dict]:
+    """Exact-span evidence items (`core/research_record.py::evidence_item`), ids and digests exact."""
+    from looplab.core.research_record import EVIDENCE_KINDS, MAX_EVIDENCE_ITEMS, QUOTE_CHARS
+    out = []
+    for row in _items(value, MAX_EVIDENCE_ITEMS):
+        if not isinstance(row, dict) or not _evidence_id(row.get("id")):
+            continue
+        digest = _hex_digest(row.get("sha256"))
+        if not digest:
+            continue
+        kind = row.get("kind") if row.get("kind") in EVIDENCE_KINDS else "tool"
+        turn = row.get("turn")
+        size = row.get("bytes")
+        item = {
+            "id": row["id"], "kind": kind,
+            "tool": _text(row.get("tool", ""), 64, budget, single_line=True),
+            "locator": _text(row.get("locator", ""), 400, budget, single_line=True),
+            "quote": _text(row.get("quote", ""), QUOTE_CHARS, budget),
+            "sha256": digest,
+            "bytes": size if type(size) is int and 0 <= size <= _MAX_ADVISORY_COUNT else 0,
+            "turn": turn if type(turn) is int and 0 <= turn <= _MAX_ADVISORY_COUNT else 0,
+        }
+        identity = row.get("locator_identity")
+        if isinstance(identity, str) and identity:
+            item["locator_identity"] = identity[:400]
+        node_id = row.get("node_id")
+        if type(node_id) is int and 0 <= node_id <= (1 << 63) - 1:
+            item["node_id"] = node_id
+        out.append(item)
+    return out
+
+
+def sanitize_literature_items(value) -> list[dict]:
+    """Retrieved papers (`core/research_record.py::parse_literature`), ids and digests exact."""
+    from looplab.core.research_record import MAX_LITERATURE_ITEMS
+    out = []
+    budget = [_MAX_ADVISORY_TEXT]
+    for row in _items(value, MAX_LITERATURE_ITEMS):
+        if not isinstance(row, dict):
+            continue
+        lit_id = row.get("id")
+        if not (isinstance(lit_id, str) and lit_id.startswith("lit-") and _RECORD_ID.match(lit_id)):
+            continue
+        title = _text(row.get("title", ""), 400, budget, single_line=True)
+        if not title:
+            continue
+        chars = row.get("abstract_chars")
+        out.append({
+            "id": lit_id, "title": title,
+            "abstract_sha256": _hex_digest(row.get("abstract_sha256")),
+            "abstract_chars": chars if type(chars) is int and 0 <= chars <= _MAX_ADVISORY_COUNT else 0,
+            "query": _text(row.get("query", ""), 200, budget, single_line=True),
+            "tool": _text(row.get("tool", ""), 64, budget, single_line=True),
+        })
     return out
 
 

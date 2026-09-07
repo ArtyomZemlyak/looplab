@@ -40,6 +40,9 @@ from looplab.core.models import (
 )
 from looplab.core.prompts import PromptStore, render
 from looplab.core.redact import redact_persisted_text
+from looplab.core.research_record import (
+    MAX_EVIDENCE_ITEMS, MAX_LITERATURE_ITEMS, QUOTE_CHARS, bind_claims_to_evidence, evidence_item,
+    parse_literature)
 from looplab.core.source_identity import canonical_source_ref
 
 
@@ -815,7 +818,8 @@ class DeepResearcher:
     _DEFAULT_LOOP_OPTS = LoopOptions(self_plan=True, auto_summary=True,
                                      emit_after=300, emit_force=500)
 
-    def __init__(self, client, tools=None, parser: str = "tool_call", loop_opts=None, prompts=None):
+    def __init__(self, client, tools=None, parser: str = "tool_call", loop_opts=None, prompts=None,
+                 established=None):
         self.client = client
         self.tools = tools
         self.parser = parser
@@ -824,6 +828,13 @@ class DeepResearcher:
         # (max_turns 0 = unlimited, time_budget_s 0 = no wall-clock cap — both config-driven via
         # Settings.agent_max_turns / agent_time_budget_s, never hardcoded here).
         self.loop_opts = LoopOptions.coerce(loop_opts).with_defaults(**self._DEFAULT_LOOP_OPTS)
+        # A5: the run's `agents/established.py` store, or None. THE ONE PHASE IT MISSED, in both
+        # directions: this stage composes `repo_reader_provider`, whose `repo_read` is a registered
+        # A5 reader and 33 % of this stage's own tool calls — none of which reached the ledger, and
+        # its chain root carried no block. The composition slot was written for exactly this
+        # (`hook(phase, inner=…)`: "composed over an existing one so a caller that already observes
+        # results keeps observing them") and nothing in the tree passed `inner` until now.
+        self._established = established
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -859,6 +870,15 @@ class DeepResearcher:
             spent=spent, limit=limit, remaining=max(0.0, limit - spent),
             pct=min(100.0, 100.0 * spent / limit))
 
+    def _established_block(self) -> str:
+        """The A5 block for this chain root, or "" — see `agents/established.py`. Appended, never
+        spliced, so a run with nothing recorded keeps the prompt it always had."""
+        store = getattr(self, "_established", None)
+        if store is None:
+            return ""
+        block = store.render()
+        return ("\n\n" + block) if block else ""
+
     def research(self, state: RunState, trigger: str = "") -> ResearchMemo:
         memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
@@ -870,26 +890,69 @@ class DeepResearcher:
             # The tool-surface join goes in the USER turn, beside the snapshot it describes, and
             # is built from the BOUND provider rather than re-derived here — see
             # `agents/answered_by_context.py` for why this is data and not another prompt rule.
+            # A5 sits BESIDE `answered_by_context` and answers the neighbouring question: that one
+            # says how much each tool holds right now, this one says what earlier phases of this run
+            # already retrieved. This stage runs before most of them on a cold start, so the block
+            # is usually empty and the prompt is byte-identical; on a cadence firing mid-run it is
+            # the one place the stage can see what the loop already paid for.
             {"role": "user", "content": self._budget_note() + state_brief(state) +
-                answered_by_context(self.tools) +
+                answered_by_context(self.tools) + self._established_block() +
                 "\nReview the run. Consult sources if useful, then emit your memo."},
         ]
         sources: list[dict] = []
+        # THE DURABLE RESEARCH RECORD (doc 52 row 16) lives on the memo FROM THE START, beside the
+        # legacy `sources` ledger and never instead of it: `_finalize`'s summary-only fallback and
+        # `_forced`'s salvage both keep whatever the loop had captured by then, so a junk emit
+        # loses the model's prose and not the evidence the run paid to read. Every row is bytes
+        # the engine OBSERVED a tool return — the model names nothing here.
+        memo.evidence = []
+        memo.literature = []
+        plan_updates = [0]
 
         def _record(name: str, args: dict, result: str) -> None:
-            # Record which sources were consulted (the query/url + a snippet) for the memo.
-            if len(sources) >= _MAX_SOURCES:
-                return
             source_url, source_identity = _arg_source(args)
-            sources.append({
-                "title": redact_persisted_text(
-                    f"{name}({_arg_label(args)})", max_chars=400, single_line=True),
-                "url": source_url,
-                "url_identity": source_identity,
-                # Preserve the historical first-200 source excerpt after sanitizing the loop's
-                # already-bounded observation; the durable writer applies the same guard again.
-                "snippet": redact_persisted_text(result, max_chars=4_000)[:200],
-            })
+            # Record which sources were consulted (the query/url + a snippet) for the memo.
+            if len(sources) < _MAX_SOURCES:
+                sources.append({
+                    "title": redact_persisted_text(
+                        f"{name}({_arg_label(args)})", max_chars=400, single_line=True),
+                    "url": source_url,
+                    "url_identity": source_identity,
+                    # Preserve the historical first-200 source excerpt after sanitizing the loop's
+                    # already-bounded observation; the durable writer applies the same guard again.
+                    "snippet": redact_persisted_text(result, max_chars=4_000)[:200],
+                })
+            # The exact-span evidence item: the id and digest are over the text the loop handed
+            # this hook (already bounded by the tool layer's `RESULT_CAP`), redacted at this
+            # boundary because the quote is persisted verbatim. The turn is the loop's own clock
+            # (`tools/clock.py`), so a verdict can later name WHEN a page was read.
+            if len(memo.evidence) < MAX_EVIDENCE_ITEMS:
+                memo.evidence.append(evidence_item(
+                    tool=name, locator=f"{name}({_arg_label(args)})",
+                    result=redact_persisted_text(result, max_chars=QUOTE_CHARS * 8),
+                    turn=_loop_turn(), locator_identity=source_identity,
+                    node_id=_arg_node(args)))
+            # Retrieved literature: the papers an `arxiv_search` answer rendered, deduplicated by
+            # the stable title id so a re-run of one query is still one paper.
+            if name == "arxiv_search" and len(memo.literature) < MAX_LITERATURE_ITEMS:
+                seen = {row["id"] for row in memo.literature}
+                for paper in parse_literature(result, query=str((args or {}).get("query") or "")):
+                    if paper["id"] not in seen and len(memo.literature) < MAX_LITERATURE_ITEMS:
+                        memo.literature.append(paper)
+                        seen.add(paper["id"])
+
+        def _plan(args: dict) -> None:
+            # The stage's plan as a RECORD (the loop's `update_plan` observer): the last update
+            # wins, counted, shaped like the sanitizer will keep it so the fallback paths and
+            # `_assemble` agree on what the memo carries.
+            plan_updates[0] += 1
+            todos = (args or {}).get("todos") if isinstance(args, dict) else None
+            memo.plan = {
+                "plan": str((args or {}).get("plan") or "") if isinstance(args, dict) else "",
+                "todos": [{"item": str(t.get("item") or ""), "status": str(t.get("status") or "pending")}
+                          for t in (todos if isinstance(todos, list) else []) if isinstance(t, dict)],
+                "updates": plan_updates[0],
+            }
 
         # Resolve through `agent.py`'s module global at CALL time, not at import time: a
         # module-level `from ... import drive_tool_loop` early-binds the function object, so a
@@ -913,7 +976,11 @@ class DeepResearcher:
                 finalize=lambda args: self._finalize(args, memo, sources),
                 # Ran out of turns without an emit — force a structured memo from the accumulated context.
                 fallback=lambda msgs: self._forced(msgs, memo, sources),
-                on_tool_result=_record,
+                # A5 records THROUGH this stage's own consulted-sources observer, never instead
+                # of it — that is what `inner=` is for.
+                on_tool_result=(self._established.hook("deep_research", inner=_record)
+                                if self._established is not None else _record),
+                on_plan=_plan, phase_label="deep_research",
                 # Live, not the session-start snapshot the user turn carries: this stage has no turn
                 # cap and no money cap, so it must hear the figure MOVE. See `tool_loop.py`.
                 budget_note=self._budget_note,
@@ -932,6 +999,9 @@ class DeepResearcher:
         clean = sanitize_research_memo_payload({
             **out.model_dump(mode="json"), "sources": sources,
             "at_node": memo.at_node, "trigger": memo.trigger,
+            # The record the loop captured (doc 52 row 16), sanitized on the same pass as the
+            # memo's prose so one bound applies to both.
+            "plan": memo.plan, "evidence": memo.evidence, "literature": memo.literature,
         })
         memo.summary = clean["summary"]
         memo.reasoning = clean["reasoning"]
@@ -947,6 +1017,13 @@ class DeepResearcher:
         memo.question_concepts = clean["question_concepts"]
         memo.question_parents = clean.get("question_parents") or []
         memo.sources = clean["sources"]
+        memo.plan = clean.get("plan")
+        memo.evidence = clean.get("evidence") or []
+        memo.literature = clean.get("literature") or []
+        # The claim<->evidence join is DETERMINISTIC and the record's, never the model's: a claim
+        # citing a URL is bound to the items read from that URL's identity, a claim citing a node
+        # to the items read from that experiment (`core/research_record.py`).
+        bind_claims_to_evidence(memo.claims, memo.evidence)
         return memo
 
     def _finalize(self, args: dict, memo: ResearchMemo, sources: list[dict]) -> ResearchMemo:
@@ -1020,6 +1097,24 @@ def _arg_label(args: dict) -> str:
     return redact_persisted_text(value, max_chars=60, single_line=True)
 
 
+def _arg_node(args: dict) -> Optional[int]:
+    """The experiment an evidence item was read FROM, when the call named one."""
+    for key in ("node_id", "id"):
+        value = (args or {}).get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
+
+
+def _loop_turn() -> int:
+    """The tool loop's current turn (0-based), 0 when no loop clock is installed."""
+    from looplab.tools.clock import current_clock
+    clock = current_clock()
+    return int(getattr(clock, "turn", 0) or 0) if clock is not None else 0
+
+
 def _arg_source(args: dict) -> tuple[str, str]:
     raw = (args or {}).get("url") or ""
     ref = canonical_source_ref(raw)
@@ -1040,6 +1135,7 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     # the same gates.  Deep Research still owns only its WebTools addition below.
     from looplab.agents.factory import _shared_providers
     from looplab.agents.repo_reader import repo_reader_provider
+    from looplab.core.evidence import envelope_enabled
     providers = _shared_providers(task, settings, run_dir, role="researcher")
     # …and the editable-repo READER the Researcher has always had, which this site never appended.
     # `_shared_providers` covers the run/knowledge/memory stores; on a cold start EVERY one of them
@@ -1052,9 +1148,11 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     if getattr(settings, "web_search", False):
         # Through the tool module's one constructor, so the task's `EvalSpec.web_deny` reaches the
         # stage that makes essentially every `web_fetch` of a run (docs/56 §150 #13: 52 of 76 runs
-        # fetched their own task's published solver here).
+        # fetched their own task's published solver here) — and, on the same call, the envelope:
+        # this loop states the boundary in `_UNTRUSTED_RESEARCH_DATA_RULE` and its fetched pages
+        # used to arrive bare beside it (`core/evidence.py`, doc 52 row 13).
         from looplab.tools.web import build_web_tools
-        providers.append(build_web_tools(task))
+        providers.append(build_web_tools(task, envelope=envelope_enabled(settings)))
     # Through `compose_tools`, not a hand-rolled `CompositeTools(providers)`. The comment above says
     # this stage uses the same capability assembly as the Researcher — and then the composition step
     # was spelled out separately, which is how it silently missed `Settings.hide_empty_tools`:
@@ -1077,5 +1175,10 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     # built-in system prompt; no prompt_dir (or no file) keeps the inline default byte-identical.
     prompts = (PromptStore(settings.prompt_dir)
                if getattr(settings, "prompt_dir", None) else None)
+    # THE RUN's store, not a new one: `established_context_from_settings` caches on the settings
+    # object, and this site is handed the same `Settings` the roles were built from, so the deep
+    # researcher joins the ledger every other phase already shares rather than starting a second.
+    from looplab.agents.established import established_context_from_settings
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
-                          prompts=prompts, loop_opts=loop_opts)
+                          prompts=prompts, loop_opts=loop_opts,
+                          established=established_context_from_settings(settings))

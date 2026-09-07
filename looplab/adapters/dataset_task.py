@@ -22,8 +22,6 @@ inside the container, so mount the data (a `repo` task with a `data` mount) for 
 """
 from __future__ import annotations
 
-import csv
-import json
 import os
 import random
 from typing import Optional
@@ -45,55 +43,12 @@ def _resolve(p: str) -> str:
     return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
 
 
-_SAMPLE_CHARS = 65536       # head-sample cap per source for the read-only DataTools preview (≤64 KiB)
-_DIR_LISTING_MAX = 100      # max entries shown when previewing a directory source
-
-
-def _head_sample(path: str) -> str:
-    """A bounded head sample of a text file: at most ``_SAMPLE_CHARS`` chars, trimmed back to the
-    last complete line when the file is longer — so a CSV/TSV preview never ends on a half-row that
-    would mislead the schema/profile parser (and read_asset shows whole lines). Reads only one char
-    past the cap to detect truncation, so a multi-GB file is never slurped."""
-    with open(path, encoding="utf-8-sig", errors="replace") as f:
-        text = f.read(_SAMPLE_CHARS + 1)
-    if len(text) > _SAMPLE_CHARS:               # file is longer than the cap → we truncated it
-        text = text[:_SAMPLE_CHARS]
-        nl = text.rfind("\n")
-        if nl > 0:                              # drop the dangling partial last line (keep the rest)
-            text = text[:nl + 1]
-    return text
-
-
-def _add_sample(out: dict[str, str], key: str, text: str) -> None:
-    """Insert a preview sample under `key`, de-duplicating by suffixing `_2`/`_3`… before the
-    extension so two sources that share a basename don't clobber each other (and a `.csv` suffix —
-    which the schema/profile fallback keys off — is preserved)."""
-    if key in out:
-        base, ext = os.path.splitext(key)
-        i = 2
-        while f"{base}_{i}{ext}" in out:
-            i += 1
-        key = f"{base}_{i}{ext}"
-    out[key] = text
-
-
-def _coerce(v):
-    """Coerce a CSV cell string to int/float when it is fully numeric, else leave it as-is. CSV cells
-    are always strings, so without this the grounding profiler would label every numeric column as
-    categorical (it keys numeric-ness off real int/float values)."""
-    if not isinstance(v, str):
-        return v
-    s = v.strip()
-    if not s:
-        return v
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    try:
-        return float(s)
-    except ValueError:
-        return v
+# Shared with `repo_task` since 2026-09-06 (`adapters/perception.py`); the private spellings stay
+# because they are this module's contract with its tests and its own readers below.
+from looplab.adapters.perception import (  # noqa: E402
+    DIR_LISTING_MAX as _DIR_LISTING_MAX, add_sample as _add_sample, head_sample as _head_sample,
+    tabular_columns as _tabular_columns)
+from looplab.adapters.perception import SAMPLE_CHARS as _SAMPLE_CHARS  # noqa: E402,F401 (tests import it)
 
 
 # The offline baseline solution: read the dataset and report its row count. Offline (backend=toy)
@@ -203,48 +158,10 @@ class DatasetTask(BaseModel):
         p = self._primary_path()
         if not p or not os.path.isfile(p):
             return {}
-        n = max(1, int(self.sample_rows))
-        try:
-            low = p.lower()
-            if low.endswith((".csv", ".tsv")):
-                with open(p, newline="", encoding="utf-8-sig", errors="replace") as f:
-                    reader = csv.reader(f, delimiter="\t" if low.endswith(".tsv") else ",")
-                    rows = []
-                    for i, row in enumerate(reader):
-                        rows.append(row)
-                        if i >= n:                  # header (row 0) + n data rows
-                            break
-                if len(rows) < 2:
-                    return {}
-                # De-duplicate header names (suffix _2, _3, …) so two physical columns sharing a name
-                # don't collapse into one key with interleaved doubled samples that misprofile both.
-                header: list[str] = []
-                seen: dict[str, int] = {}
-                for i, h in enumerate(rows[0]):
-                    name = h or f"col{i}"
-                    if name in seen:
-                        seen[name] += 1
-                        name = f"{name}_{seen[name]}"
-                    else:
-                        seen[name] = 1
-                    header.append(name)
-                cols: dict[str, list] = {h: [] for h in header}
-                for row in rows[1:]:
-                    for h, val in zip(header, row):
-                        cols[h].append(_coerce(val))
-                return cols
-            if low.endswith(".json"):
-                with open(p, encoding="utf-8-sig", errors="replace") as f:
-                    obj = json.load(f)
-                if isinstance(obj, dict) and obj and all(isinstance(v, list) for v in obj.values()):
-                    return {k: list(v)[:n] for k, v in obj.items()}
-                if isinstance(obj, list) and obj and isinstance(obj[0], dict):
-                    keys = list(obj[0].keys())   # guard non-dict rows: a mixed list must not crash
-                    return {k: [r.get(k) if isinstance(r, dict) else None for r in obj[:n]]
-                            for k in keys}
-        except (OSError, ValueError, TypeError, AttributeError, csv.Error):
-            return {}
-        return {}
+        # The CSV/TSV/JSON readers live in `adapters/perception.py` since 2026-09-06 (shared with the
+        # repo task); this kind keeps its own row knob and its own primary-file rule. A `.jsonl` /
+        # `.parquet` primary is now also readable, which the old inline body refused with `{}`.
+        return _tabular_columns(p, max(1, int(self.sample_rows)))
 
     def assets(self) -> dict[str, str]:
         return {}                               # data is read by absolute path, not embedded

@@ -48,6 +48,7 @@ ATTR_BY_FIELD = {
     "train_monitor_tools": "_train_monitor_tools",
     "train_monitor_contract": "_train_monitor_contract",
     "repair_log_tools": "_repair_log_tools",
+    "stage_check_tools": "_stage_check_tools",
     "asha_live": "_asha_live",
     "asha_live_kill": "_asha_live_kill",
     "asha_live_quantile": "_asha_live_quantile",
@@ -57,6 +58,7 @@ ATTR_BY_FIELD = {
     "max_eval_timeout": "max_eval_timeout",
     "sweep_timeout_mult": "sweep_timeout_mult",
     "eval_stall_timeout_s": "eval_stall_timeout_s",
+    "single_command_divergence_watch": "_single_command_divergence_watch",
     "eval_deadline_grace_s": "eval_deadline_grace_s",
     "eval_env": "_eval_env",
     "confirm_top_k": "confirm_top_k",
@@ -64,6 +66,13 @@ ATTR_BY_FIELD = {
     "confirm_seed_base": "confirm_seed_base",
     "max_seconds": "max_seconds",
     "max_eval_seconds": "max_eval_seconds",
+    # The run's LLM spend caps, reserved at the broker's permit (`core/llm_budget.py`, doc 52 row 15).
+    "llm_cost_limit": "_llm_cost_limit",
+    "llm_token_limit": "_llm_token_limit",
+    # The plan's endgame reserve (`engine/plan.py`, doc 52 row 18).
+    "endgame_reserve_frac": "_endgame_reserve_frac",
+    # The operator x model router's arms, parsed once at construction (`search/policy.py::parse_model_arms`).
+    "model_arms": "_model_arms",
     "memory_dir": "memory_dir",
     "require_approval": "require_approval",
     "archive_resolution": "archive_resolution",
@@ -143,6 +152,8 @@ ATTR_BY_FIELD = {
     "cadence_while_evaluating": "_cadence_while_evaluating",
     "concept_pivot": "_concept_pivot",
     "graded_novelty": "_graded_novelty",
+    "novelty_literature": "_novelty_literature",
+    "steady_state_build": "_steady_state_build",
     "capability_expansion": "_capability_expansion",
     "fingerprint_universal": "_fingerprint_universal",
     "cross_run_concepts": "_cross_run_concepts",
@@ -176,6 +187,8 @@ ATTR_BY_FIELD = {
     # attribute at the one place the `node_evaluated` payload is built, and a test sets it directly.
     "auto_extra_metrics": "auto_extra_metrics",
     "landlock": "_landlock",
+    # Private for the same reason `landlock` is: settled at construction, read by `resources.py`.
+    "syscall_fence": "_syscall_fence",
 }
 
 
@@ -338,6 +351,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         asha_live_kill=settings.asha_live_kill,
         asha_live_quantile=settings.asha_live_quantile,
         asha_live_min_siblings=settings.asha_live_min_siblings,
+        # …and the single-command divergence watchdog, ON in Settings and OFF in the bare library
+        # for the reason frozen in tests/test_options_divergence.py (kill authority).
+        single_command_divergence_watch=settings.single_command_divergence_watch,
         # …and the proposal-derived width (docs/29 F1), ON in Settings and OFF in the bare library
         # for the reason frozen in tests/test_options_divergence.py.
         proposal_width=settings.proposal_width,
@@ -351,6 +367,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # frozen in tests/test_options_divergence.py (the product may spend on a Strategist consult
         # or a classifier pass beside a running GPU; a direct `Engine(...)` may not gain that unasked).
         cadence_while_evaluating=settings.cadence_while_evaluating,
+        # …and the plan's endgame reserve (doc 52 row 18), ON in Settings (0.2) and 0 in the bare
+        # library for the reason frozen in tests/test_options_divergence.py.
+        endgame_reserve_frac=settings.endgame_reserve_frac,
     )
 
     # (b) the NEW single-bundle style.

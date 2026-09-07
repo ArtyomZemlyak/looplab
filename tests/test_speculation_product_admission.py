@@ -632,7 +632,12 @@ def test_the_invariant_is_wired_at_the_single_dispatch_funnel():
     import ast
     import textwrap
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(Engine._evaluate)))
+    from tests._source_scan import called_names, eval_attempt_tree
+
+    # Since the EvalAttempt split the funnel is `_eval_admit` (the pre-start fence) and the
+    # workdir is built by `_eval_prepare_workdir`; the whole loop is scanned so a second call
+    # anywhere in it is still a red test.
+    tree = eval_attempt_tree()
     calls = [node for node in ast.walk(tree)
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
              and node.func.attr == "_assert_speculative_selection_confirmed"
@@ -640,16 +645,23 @@ def test_the_invariant_is_wired_at_the_single_dispatch_funnel():
     assert len(calls) == 1, (
         f"`_evaluate` must CALL the invariant exactly once (found {len(calls)}); "
         "a comment naming it is not a call site")
-    assert [ast.unparse(arg) for arg in calls[0].args] == ["state", "node"], (
+    assert [ast.unparse(arg) for arg in calls[0].args] == ["a.state", "a.node"], (
         f"the funnel calls it as `{ast.unparse(calls[0])}` — the folded state and node are what it judges")
+    admit = ast.parse(textwrap.dedent(inspect.getsource(Engine._eval_admit)))
+    assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "_assert_speculative_selection_confirmed"
+               for n in ast.walk(admit)), "the invariant must be asked in ADMIT, the pre-start fence"
 
-    # It must run BEFORE anything that can start a sandbox: the workdir is the first such step.
-    workdirs = [node for node in ast.walk(tree)
-                if isinstance(node, ast.Constant) and node.value == "nodes"]
-    assert workdirs, "`_evaluate` no longer builds the node workdir under `nodes/`"
-    assert calls[0].lineno < min(node.lineno for node in workdirs), (
-        "the invariant is checked AFTER the workdir is derived — an unconfirmed prediction can "
-        "already be on its way into a sandbox")
+    # It must run BEFORE anything that can start a sandbox: the workdir is the first such step. The
+    # workdir is PREPARE_WORKDIR's (and nobody else's), and the driver runs ADMIT first.
+    workdir_phase = ast.parse(textwrap.dedent(inspect.getsource(Engine._eval_prepare_workdir)))
+    assert any(isinstance(n, ast.Constant) and n.value == "nodes" for n in ast.walk(workdir_phase)), (
+        "`_eval_prepare_workdir` no longer builds the node workdir under `nodes/`")
+    assert not any(isinstance(n, ast.Constant) and n.value == "nodes" for n in ast.walk(admit)), (
+        "the workdir is derived inside ADMIT — an unconfirmed prediction can already be on its way "
+        "into a sandbox")
+    order = called_names(Engine._evaluate)
+    assert order.index("self._eval_admit") < order.index("self._eval_prepare_workdir"), (
+        "the driver runs the workdir phase before the pre-start fence")
 
     # `assert` statements vanish under `python -O`; this one must not.
     body = inspect.getsource(Engine._assert_speculative_selection_confirmed)

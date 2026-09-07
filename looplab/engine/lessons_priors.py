@@ -98,8 +98,10 @@ class LessonPriorsMixin:
         research-flavoured meta-notes (part 1) are skipped for the Developer. role=None -> everything."""
         if not (self._e._reflection_priors and self._e.memory_dir):
             return ""
-        return self._render_role_prior(
+        text, receipt = self._pick_role_prior(
             self._scan_prior_context(exclude_run_id, exclude_run_uid), role)
+        self.prior_receipts = {role or "all": receipt}
+        return text
 
     def load_reflection_priors_both(self, exclude_run_id: Optional[str] = None,
                                     exclude_run_uid: Optional[str] = None) -> tuple[str, str]:
@@ -110,8 +112,12 @@ class LessonPriorsMixin:
         if not (self._e._reflection_priors and self._e.memory_dir):
             return "", ""
         ctx = self._scan_prior_context(exclude_run_id, exclude_run_uid)
-        return (self._render_role_prior(ctx, LESSON_ROLE_RESEARCHER),
-                self._render_role_prior(ctx, LESSON_ROLE_DEVELOPER))
+        researcher, r_receipt = self._pick_role_prior(ctx, LESSON_ROLE_RESEARCHER)
+        developer, d_receipt = self._pick_role_prior(ctx, LESSON_ROLE_DEVELOPER)
+        # The receipts of the LAST load, for `record_prior_injection` — the caller decides when
+        # (and at which node) they are written.
+        self.prior_receipts = {LESSON_ROLE_RESEARCHER: r_receipt, LESSON_ROLE_DEVELOPER: d_receipt}
+        return researcher, developer
 
     def _scan_prior_context(self, exclude_run_id: Optional[str],
                             exclude_run_uid: Optional[str] = None):
@@ -243,6 +249,32 @@ class LessonPriorsMixin:
             parsed.append((idx, o))
         # Compare WITHOUT param: tokens: the writer stamps the winner's param names, but at read
         # time no winner exists yet, so those tokens only dilute the Jaccard overlap.
+        # THE READ-SIDE UTILITY (doc 52 row 17): `lesson_utility.jsonl` holds one row per
+        # (run, lesson) — how often that run's proposals were shown the lesson and how often they
+        # cited it (`events/prior_citations.py`, written at finalize). Folded onto each parsed row
+        # as `utility` = {shown, cited} for `lesson_rank_key` / `filter_useless`; the store rows
+        # themselves are never rewritten. Best-effort: an unreadable ledger is no utility, not a
+        # failed prior.
+        from looplab.engine.memory import lesson_id
+        totals: dict[str, dict] = {}
+        try:
+            utility_rows, _u_health = read_memory_jsonl_window(base / "lesson_utility.jsonl")
+        except OSError:
+            utility_rows = []
+        for _index, u in utility_rows:
+            if not isinstance(u, dict) or not isinstance(u.get("lesson_id"), str):
+                continue
+            slot = totals.setdefault(u["lesson_id"], {"shown": 0, "cited": 0})
+            try:
+                slot["shown"] += max(0, int(u.get("shown") or 0))
+                slot["cited"] += max(0, int(u.get("cited") or 0))
+            except (TypeError, ValueError):
+                continue
+        if totals:
+            for _idx, o in parsed:
+                hit = totals.get(lesson_id(o))
+                if hit is not None:
+                    o["utility"] = dict(hit)
         fp = [t for t in self._e._task_fingerprint(self._e._empty_state_for_fp())
               if not t.startswith("param:")]
         health = {
@@ -271,11 +303,40 @@ class LessonPriorsMixin:
         return notes, parsed, fp, _memoized_embed(self._e._embedder), health, case_line
 
     def _render_role_prior(self, ctx, role: Optional[str]) -> str:
+        """Render ONE role's prior text (the historical surface; `_pick_role_prior` is the pair)."""
+        return self._pick_role_prior(ctx, role)[0]
+
+    def record_prior_injection(self, *, at_node: int, phase: str) -> None:
+        """Append one `prior_injected` row per role from the receipts the last load kept (doc 52
+        row 17): WHICH lesson rows (by `lesson_id`), how many notes and whether the case were
+        spliced into that role's prompt, and the store window they came from. MAIN task only, at
+        the two load sites; DIAGNOSTIC, so fold-ignored and fence-excluded. Best-effort."""
+        from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PRIOR_INJECTED
+        assert EV_PRIOR_INJECTED in DIAGNOSTIC_EVENTS
+        receipts = getattr(self, "prior_receipts", None) or {}
+        for role, receipt in receipts.items():
+            try:
+                self._e.store.append(EV_PRIOR_INJECTED, {
+                    "role": role, "at_node": int(at_node), "phase": str(phase)[:32], **receipt})
+            except Exception as exc:  # noqa: BLE001 — a diagnostic row must never fail a prior load
+                from looplab.core.containment import contain
+                contain("prior_injected append", exc)
+
+    def _pick_role_prior(self, ctx, role: Optional[str]) -> tuple[str, dict]:
         """Render ONE role's prior text from a shared `_scan_prior_context` scan: filter the parsed
         lessons to that role (untagged = shared), score by fingerprint similarity, splice in Memora
-        harmonic recall, apply D2 read-time hygiene + ranking, and pick the top 5 with a role label."""
+        harmonic recall, apply D2 read-time hygiene + ranking, and pick the top 5 with a role label.
+        Returns `(text, receipt)` — the receipt is the STRUCTURED record of what the text was built
+        from (`record_prior_injection` writes it), so a later proposal can be joined to the exact
+        rows it was shown; the text is byte-identical to what this method always rendered."""
         from looplab.engine.memory import prompt_slot_key      # both slot budgets below key on it
         notes, parsed, fp, embed, health, case_line = ctx
+        receipt: dict = {
+            "notes": 0, "case": False, "rows": [], "quarantined_useless": 0,
+            "source": {"lessons_sha256": health["lessons_digest"],
+                       "notes_sha256": health["notes_digest"],
+                       "complete": bool(health["complete"])},
+        }
         out = (f"\n[MEMORY_SOURCE: canonical recent snapshot; rows={health['source']}; "
                f"notes_sha256={health['notes_digest']}; lessons_sha256={health['lessons_digest']}; "
                f"complete={'true' if health['complete'] else 'false'}.]"
@@ -310,15 +371,18 @@ class LessonPriorsMixin:
                 _distinct.append(_n)
             _distinct.reverse()
             out += "\nPrior-run insights for this task (meta-learned): " + " | ".join(_distinct[-3:])
+            receipt["notes"] = len(_distinct[-3:])
         # The CASE rides the same tier and the same role gate as the notes above — it is the same
         # "what won on this exact task" fact, in the form a next run can act on. One line, after the
         # prose, because the prose says WHY it won and this says WHAT to set.
         if case_line and role != LESSON_ROLE_DEVELOPER:
             out += ("\nBest known configuration for this task (the winning run's own parameters, "
                     "not a recommendation): " + case_line)
+            receipt["case"] = True
         if not parsed:
-            return cross_run_text(
-                out, max_chars=8_000, single_line=False, entropy=True)
+            text = cross_run_text(out, max_chars=8_000, single_line=False, entropy=True)
+            receipt["chars"] = len(text)
+            return text, receipt
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives
         from looplab.engine.memory import fingerprint_similarity
         all_lessons: list[tuple[int, dict]] = []
@@ -359,14 +423,20 @@ class LessonPriorsMixin:
         # D2 hygiene at read time: quarantine any lesson whose claim a NEWER run reversed
         # (an old "supported" vs a later "tested/abandoned" of the same statement) — the
         # misevolution guard: memory must not keep pushing a refuted correlation.
-        from looplab.engine.memory import filter_contradicted, lesson_rank_key
+        from looplab.engine.memory import filter_contradicted, filter_useless, lesson_id, lesson_rank_key
         scored = filter_contradicted(scored)
+        # …and FORGETTING BY USELESSNESS (doc 52 row 17): a lesson this store has shown to at least
+        # `USELESS_MIN_SHOWN` proposals that none of them cited stops being served. The store keeps
+        # the row; the count is in the receipt so the omission is countable.
+        before_useless = len(scored)
+        scored = filter_useless(scored)
+        receipt["quarantined_useless"] = before_useless - len(scored)
         # Rank: similarity, then confidence × corroboration (evidence_count), then recency —
         # so a twice-confirmed lesson from a related task beats a one-off at equal similarity.
         scored.sort(key=lambda t: lesson_rank_key(*t))
         seen: set[tuple] = set()
         picked: list[str] = []
-        for _, _, o in scored:
+        for sim_v, _, o in scored:
             # SLOT identity, not claim identity: `prompt_slot_key` collapses numbers, so N rows of
             # one f-string template ("changing x A->B regressed the metric by D") spend ONE of the
             # five slots instead of five. The old `statement[:80]` key never fired on them — the
@@ -396,6 +466,11 @@ class LessonPriorsMixin:
             outcome = cross_run_text(
                 o.get("outcome", "?"), max_chars=40, single_line=True, entropy=True).strip()
             picked.append(f"{stmt} [{outcome}{dtxt}]")   # store is shared/free-text
+            receipt["rows"].append({
+                "id": lesson_id(o), "statement": stmt[:160], "outcome": outcome,
+                "task_id": str(o.get("task_id") or "")[:200], "run_id": str(o.get("run_id") or "")[:200],
+                "sim": round(float(sim_v), 4) if isinstance(sim_v, (int, float)) else None,
+            })
             if len(picked) >= 5:
                 break
         if picked:
@@ -407,5 +482,6 @@ class LessonPriorsMixin:
                      if role == LESSON_ROLE_DEVELOPER
                      else "Lessons from related runs (what did/didn't work)")
             out += "\n" + label + ": " + "; ".join(picked)
-        return cross_run_text(
-            out, max_chars=8_000, single_line=False, entropy=True)
+        text = cross_run_text(out, max_chars=8_000, single_line=False, entropy=True)
+        receipt["chars"] = len(text)
+        return text, receipt
