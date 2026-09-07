@@ -221,6 +221,13 @@ def build_router(srv) -> APIRouter:
     # `/commands` is schedulable and its progress readable; what is open is doing it and deleting
     # the route.
     # proof:`present:async def control(@looplab/serve/routers/control.py`
+    # Measured 2026-09-07 (doc 52 row 29, its two sibling markers shipped around this one): 62 call
+    # sites in 9 test files — test_server 27, test_fork_from_seq 17, test_run_command_service 9,
+    # test_review_fixes 3, test_strategist_developer_switch 2, one each in test_review_capabilities,
+    # test_legacy_control_deprecation, test_concept_tag_command, test_collaboration — and no
+    # first-party client. Each site is a contract to RE-VERIFY under `/commands`, not a URL to
+    # rewrite: the durable path applies asynchronously and refuses with coded records, so the
+    # 400/409/401/403 properties those sites guard need their own port.
     @router.post("/api/runs/{run_id}/control")
     async def control(run_id: str, request: Request, response: Response):
         rd = _run_dir(run_id)
