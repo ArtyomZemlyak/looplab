@@ -116,7 +116,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:db81e747b03d97f7e49cf0090b689a0d8f5b206d8bfa34668ee19736e5802cf7"
+_EXPECTED_DIGEST = "sha256:05743b6a31255b56b51fd0b295dd6095d051388079c15e5b8fce86abb83ec617"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -443,6 +443,21 @@ _EXPECTED_DIGEST = "sha256:db81e747b03d97f7e49cf0090b689a0d8f5b206d8bfa34668ee19
 #               neither parent's digest describes it. Old receipts SHOULD stop verifying: whether
 #               a single-command eval is health-checked at all is part of the envelope a
 #               speculation receipt was measured in.
+#   2026-09-07  + agent_read_loop_nudge_after (227 -> 228 profile rows): the A9 read-loop nudge's
+#               threshold, found by review to have shipped ON with no Settings field at all — the
+#               loop's literal 25 was the only value that could ever apply, so the `0 = off` its own
+#               docstring offered was unreachable from an env var, a snapshot, the form or the guide.
+#               The "field set changed too" branch, verified the prescribed way rather than by adding
+#               the integers: an AST scan of `Settings`' annotated assignments against `9c68a016`
+#               reports exactly `['agent_read_loop_nudge_after']` added and `[]` removed, so no
+#               +1/-1 pair hides behind the +1. Non-variant, so it joins the profile.
+#
+#               OLD RECEIPTS SHOULD STOP VERIFYING, and unlike a purely inert knob this one really
+#               can move a replicate: the nudge appends a note to a tool result at a threshold, so
+#               the prompt bytes a calibration replicate's Developer sees are now a function of a
+#               value the envelope did not previously record. That the DEFAULT equals the former
+#               literal makes today's behaviour identical; it does not make the envelope the same,
+#               which is the distinction this digest exists to keep.
 #   2026-09-06  + llm_stream_stall_fallback, node_open_budget_floor_usd, developer_crash_pause_after
 #               (221 -> 224 profile rows, 224 -> 227 Settings): docs/60 §60.9's A7 (engine half),
 #               A10 and A12. The "field set changed too" branch, verified the prescribed way rather
@@ -475,7 +490,7 @@ _EXPECTED_DIGEST = "sha256:db81e747b03d97f7e49cf0090b689a0d8f5b206d8bfa34668ee19
 #               precisely what a speculation receipt asserts about.
 #   2026-09-06  MERGE with master, same rule as the 2026-08-29 entry above: the count is
 #               RE-DERIVED from the merged profile, never added, and the digest with it.
-_EXPECTED_FIELD_COUNT = 227
+_EXPECTED_FIELD_COUNT = 228
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
