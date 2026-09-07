@@ -161,6 +161,8 @@ ATTR_BY_FIELD = {
     # among the budgets.
     "repair_critic_after": "_repair_critic_after",
     "systemic_failure_stop": "systemic_failure_stop",
+    "developer_crash_pause_after": "developer_crash_pause_after",
+    "node_open_budget_floor_usd": "node_open_budget_floor_usd",
     # Metric salvage: the Engine attribute is public (the mixin declares it as a class attribute so
     # a test or a resumed subclass can set it directly), so both names are the same.
     "metric_salvage": "metric_salvage",
@@ -343,6 +345,8 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the run-level systemic-failure stop, ON in Settings (3) and OFF in the bare
         # library (0) for the reason frozen in tests/test_options_divergence.py.
         systemic_failure_stop=settings.systemic_failure_stop,
+        developer_crash_pause_after=settings.developer_crash_pause_after,
+        node_open_budget_floor_usd=settings.node_open_budget_floor_usd,
         # …and F1i's cadence precondition, ON in Settings and OFF in the bare library for the reason
         # frozen in tests/test_options_divergence.py (the product may spend on a Strategist consult
         # or a classifier pass beside a running GPU; a direct `Engine(...)` may not gain that unasked).

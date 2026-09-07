@@ -425,6 +425,13 @@
      "help": "Run-level companion to inline repair attempts. Inline repair bounds ONE node's retries; this bounds a run whose every node fails for the same reason. When this many DISTINCT nodes have ended failed and not one has ever produced a metric, the run stops and names the systemic cause — the environment, dependencies or data — instead of buying the same diagnosis again. Once any node IS evaluated the environment is proven and this is off for the rest of the run: a later failure stops only that node and its direction. 0 disables it. Resets and operator aborts are not counted."
     },
     {
+     "key": "developer_crash_pause_after",
+     "label": "Pause the run after N Developer crashes",
+     "type": "int",
+     "default": 1,
+     "help": "How many Developer-session CRASHES (the provider could not be reached even after the client's own retries; the node fails as developer_crash) a run absorbs before the circuit breaker auto-PAUSES it. 1 = the historical rule, pause on the first: a session that cannot finish one node has hit something a new node cannot fix. Counted per RUN over the event log in order: crashes below the threshold still fail their node and the search goes on; the crash that reaches it requests the pause. Set 2 on an unattended stand for one automatic retry — in the 2026-08-24 campaign 9 of 20 runs ended on this pause and nobody resumed them (docs/58 §58.2). The recovery sweep reads the same rule, so a below-threshold crash is never re-paused. A run resumed from before this field keeps 1."
+    },
+    {
      "key": "auto_install_deps",
      "label": "Auto-install missing libs",
      "type": "bool",
@@ -763,6 +770,13 @@
      "help": "Stream every request (SSE) so the timeout is an INTER-TOKEN idle limit — a long-but-alive generation is never cut off, only a stalled endpoint (which is detected and retried). Off = one blocking read (old per-op timeout semantics)."
     },
     {
+     "key": "llm_stream_stall_fallback",
+     "label": "↳ retry a stalled stream without SSE",
+     "type": "bool",
+     "default": true,
+     "help": "What a STALLED stream does next. On (the historical client): the next attempt of that call goes out WITHOUT SSE and, after two stalls, the client stops streaming for good — right for an endpoint that answers the same request fine without a stream while its stream wedges. Off: a stalled stream is retried AS A STREAM on the same backoff and never degrades — right for a stand whose proxy bounds the WHOLE request (nginx proxy_read_timeout), because the unstreamed retry is exactly the request that wall then kills. Measured on the bench (docs/56 §173-175): under a streaming flag one run still sent 58 of 301 calls unstreamed on this fallback's initiative, 4 died at 300 s, and $0.10 of $1.00 went on re-sends of one body. Stalls are still counted either way; only what is asked for next changes."
+    },
+    {
      "key": "llm_timeout",
      "label": "LLM idle timeout (s)",
      "type": "float",
@@ -796,6 +810,13 @@
      "type": "float",
      "default": 0.0,
      "help": "Hard spend ceiling for this run's LLM calls, in US dollars, shared by every client the run builds (one accountant per Settings, not per client). 0 = no limit (the historical behaviour). On reaching it the next priced call raises BudgetExceeded, which every agent path treats as a hard stop that ENDS the run rather than degrading to a fallback. Priced calls only: a local model reports no cost and can never trip it. Not pinned into run_started, so a resume reads whatever is set now."
+    },
+    {
+     "key": "node_open_budget_floor_usd",
+     "label": "↳ do not open a node below ($ left)",
+     "type": "float",
+     "default": 0.1,
+     "help": "With a spend ceiling set: refuse to OPEN a new node once less than this many dollars remain, and finish the run on the same budget stop the ceiling raises — one step earlier, before a node cycle is bought that the ceiling would discard mid-way. Measured over 76 AlgoTune runs (docs/56 §156): 7.7 % of all spend landed after the last node a run ever evaluated; at $0.10 the floor refuses 61 such cycles and costs exactly one real node (which scored 0), while the audit's p75 ($0.45) would refuse 54 real nodes including the best in the corpus. Asked on the main task at the node-open decision only, so an evaluation already running still lands its result. Inert without a ceiling; 0 = off. A run resumed from before this field keeps 0."
     }
    ]
   },

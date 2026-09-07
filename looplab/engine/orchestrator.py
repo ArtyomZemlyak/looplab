@@ -808,6 +808,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
         # would turn "never stop the run for me" into "stop after one failure".
         self.systemic_failure_stop = _opt("systemic_failure_stop")
+        # STORED RAW as well; `_developer_crash_pause_due` settles a junk value to the historical 1.
+        self.developer_crash_pause_after = _opt("developer_crash_pause_after")
+        # The node-OPEN floor under the spend ceiling (`_refuse_node_open_below_floor`). Raw: 0 and
+        # junk both read as OFF there, and a positive value is only ever compared, never clamped.
+        self.node_open_budget_floor_usd = _opt("node_open_budget_floor_usd")
         self.deep_researcher = deep_researcher
         # STORED RAW, deliberately — this was `max(0, deep_research_every)` until 2026-08-07, and
         # under the new spelling that clamp is exactly backwards: `0` now means "start immediately"
@@ -2572,6 +2577,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # was selected with that Node hidden, and the claim must revalidate the SAME question or
             # it retires the Card as unclaimable. Empty whenever nothing is in flight, which is every
             # ordinary create turn — that path is byte-identical.
+            # The node-OPEN floor, asked BEFORE the claim mints durable reservations: a refusal
+            # here leaves nothing reserved and nothing owed (`_refuse_node_open_below_floor`).
+            self._refuse_node_open_below_floor(f"a Card lane of {len(creates)} node(s)")
             _card_reservations = self._claim_existing_card_builds(
                 creates, ignored_pending_node_ids=self._running_eval_node_ids())
             if _card_reservations is None:
@@ -2606,6 +2614,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # (the serial path gets this for free — each node lands before the next proposes).
                 if _i:
                     state = fold(self.store.read_all())
+                # MAIN TASK, before the paid batch proposal and before any reservation: the
+                # node-OPEN floor for this whole chunk (`_refuse_node_open_below_floor`).
+                self._refuse_node_open_below_floor(f"a build chunk of {len(_chunk)} node(s)")
                 # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned
                 # 1:1 with _ideas), so each build emits ITS OWN
                 # hypothesis_ranked/foresight_selected.
@@ -2726,6 +2737,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         )
                     raise
             else:
+                # One node per iteration on this path, so the floor is asked per node — the
+                # decision `Settings.node_open_budget_floor_usd` is about, on the main task.
+                self._refuse_node_open_below_floor(f"a new {a.get('kind')} node")
                 self._create_node(a)  # sequential -> deterministic ids/proposals
             if self._create_paused:
                 self._drain_create_pause()
@@ -6096,10 +6110,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # (which folds `paused=False`): a worker's byte position relative to an external
                 # control is nondeterministic. `_request_create_pause` records the intent; the MAIN
                 # task appends it where it already observes `_create_paused`, after the join.
-                self._request_create_pause(
-                    node_id,
-                    "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
-                    "unresolved within the node) — resume once it's fixed")
+                # "FIRST" is `developer_crash_pause_after`'s default; above it, this crash requests
+                # the pause only when its position in the log reaches the run's threshold, and a
+                # crash below it keeps exactly the terminal appended above (`developer_crash_rank`).
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node_id):
+                    self._request_create_pause(
+                        node_id,
+                        "auto-paused: a Developer session crashed (LLM unreachable or a hard "
+                        "error, unresolved within the node) — resume once it's fixed")
         self._consume_node_build_telemetry(
             node_id, 0, researcher=researcher, developer=developer)
 
@@ -6353,11 +6371,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self._discard_node_build_telemetry()
                 return
             if is_developer_error(code):
-                for crash_type, crash_data in developer_crash_records(
-                        node.id, generation, code,
-                        "auto-paused: a Developer session crashed (LLM unreachable or a hard "
-                        "error, unresolved within the node) — resume once it's fixed"):
-                    self.store.append(crash_type, crash_data)
+                crash_terminal, crash_pause = developer_crash_records(
+                    node.id, generation, code,
+                    "auto-paused: a Developer session crashed (LLM unreachable or a hard "
+                    "error, unresolved within the node) — resume once it's fixed")
+                # Terminal first and unconditionally; the pause beside it only once this crash
+                # reaches `developer_crash_pause_after` (1 = always, the historical pair).
+                self.store.append(*crash_terminal)
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node.id):
+                    self.store.append(*crash_pause)
         self._consume_node_build_telemetry(node.id, generation)
 
     def _prepare_injected_node(
@@ -6602,12 +6624,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self._discard_node_build_telemetry()
                 return
             if is_developer_error(code):
-                for crash_type, crash_data in developer_crash_records(
-                        node_id, 0, code,
-                        "auto-paused: a Developer session crashed while building an injected node "
-                        "(LLM unreachable or a hard error, unresolved within the node) — resume "
-                        "once it's fixed"):
-                    self.store.append(crash_type, crash_data)
+                crash_terminal, crash_pause = developer_crash_records(
+                    node_id, 0, code,
+                    "auto-paused: a Developer session crashed while building an injected node "
+                    "(LLM unreachable or a hard error, unresolved within the node) — resume "
+                    "once it's fixed")
+                # Same split as `_rerun_node`: the terminal always, the pause at the threshold.
+                self.store.append(*crash_terminal)
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node_id):
+                    self.store.append(*crash_pause)
         if developer_called:
             self._consume_node_build_telemetry(node_id, 0)
 

@@ -1324,12 +1324,19 @@ class SpeculationMixin:
                         or terminal_node.status is not NodeStatus.pending
                     ):
                         return None
-                    self.store.append_many(developer_crash_records(
+                    records = developer_crash_records(
                         node_id, terminal_node.attempt, result.code,
                         "auto-paused: a Developer session crashed (LLM unreachable or a hard "
                         "error, unresolved within the node) — resume once it's fixed",
-                    ), expected_last_seq=tail)
-                    self._create_paused = True
+                    )
+                    # `terminal_state` is the exact prefix this CAS appends onto, so the rank the
+                    # terminal takes is decidable before it lands: below
+                    # `developer_crash_pause_after` the transaction is the terminal alone.
+                    pause_due = self._developer_crash_pause_due(terminal_state, node_id)
+                    self.store.append_many(records if pause_due else records[:1],
+                                           expected_last_seq=tail)
+                    if pause_due:
+                        self._create_paused = True
                     return None
 
                 # A crash terminal that could not land leaves the node pending: the ordinary
@@ -1502,6 +1509,9 @@ class SpeculationMixin:
         self._refresh_speculation_budget(state)
         if self._node_reservation_slots_remaining(state, events=events) < 1:
             return False
+        # The node-OPEN floor, before a build is elected: a prefetch is a node cycle bought early,
+        # and one the ceiling would discard is not worth requesting (`_refuse_node_open_below_floor`).
+        self._refuse_node_open_below_floor("a speculative Card build")
         excluded = self._election_excluded_card_ids(state)
         actions = speculative_card_actions(
             state,
@@ -2089,6 +2099,11 @@ class SpeculationMixin:
             records = developer_crash_records(
                 node.id, node.attempt, node.code,
                 "auto-paused: recovered a Developer crash before GPU dispatch")
+            # The terminal this sweep appends takes the next crash rank; below the run's
+            # `developer_crash_pause_after` it owns no pause, exactly as the live sites decide.
+            pause_due = self._developer_crash_pause_due(state, node.id)
+            if not pause_due:
+                records = records[:1]
         else:
             # A legacy writer (or a crash in the old two-append path) may already have made the
             # sentinel terminal while losing only its pause. Folded ``paused`` cannot distinguish
@@ -2103,6 +2118,9 @@ class SpeculationMixin:
                     and candidate.id not in state.aborted_nodes
                     and not candidate.tombstoned
                     and type(candidate.terminal_event_seq) is int
+                    # A crash whose log position is below `developer_crash_pause_after` never
+                    # owed a pause: a missing one there is the DESIGN, not a lost append.
+                    and self._developer_crash_pause_due(state, candidate.id)
                     and not self._has_exact_developer_pause(
                         events,
                         node_id=candidate.id,
@@ -2119,11 +2137,13 @@ class SpeculationMixin:
             records = developer_crash_records(
                 node.id, node.attempt, node.code,
                 "auto-paused: recovered a terminal Developer crash", terminal=False)
+            pause_due = True
         tail = events[-1].seq if events else -1
         try:
             async with self._write_lock:
                 self.store.append_many(records, expected_last_seq=tail)
-            self._create_paused = True
+            if pause_due:
+                self._create_paused = True
             return True
         except EventStoreConcurrencyError:
             return True

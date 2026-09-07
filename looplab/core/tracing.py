@@ -412,6 +412,26 @@ _CAPTURE_LLM_IO = False
 _capture_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_capture", default=None)
 
 
+def annotate_generation(key: str, value) -> bool:
+    """Set one attribute on the innermost OPEN generation span; True when a generation took it.
+
+    The write-anytime sibling of `record_paid_call`'s write-once stamps, for a fact that changes
+    across a call's attempts and that the caller cannot stamp afterwards because the call may raise
+    before it returns: `core/llm.py::_post` records `stream_attempts` — whether each attempt went
+    out over SSE — on every attempt, so a call the ceiling or the retry ladder ends mid-way still
+    says how it was sent. Same non-throwing, silent-when-untraced discipline as every entry point
+    here: observability never decides whether the paid work proceeds.
+    """
+    rec = next((r for r in reversed(_stack.get()) if r.get("kind") == "generation"), None)
+    if rec is None:
+        return False
+    try:
+        SpanHandle(rec, None).set(key, value)
+    except Exception:  # noqa: BLE001 - the tracer's diagnostic boundary must stay non-throwing
+        return False
+    return True
+
+
 def set_llm_capture(enabled: bool) -> None:
     """Set the PROCESS-WIDE default capture policy. A Tracer that declares `capture_llm_io` overrides
     this inside its own spans; everything untraced (or traced by an undeclared Tracer) follows it."""

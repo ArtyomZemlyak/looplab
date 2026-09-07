@@ -1232,6 +1232,25 @@ class Settings(BaseSettings):
     # 0 disables it entirely. 3 rather than 1: a first node can fail on something a Developer really
     # can repair, and stopping a whole run on one crash would be worse than the grind it prevents.
     systemic_failure_stop: int = Field(default=3, ge=0)
+    # How many Developer-session CRASHES (`node_failed` with `reason: developer_crash` — the
+    # `(developer error: …)` sentinel, a provider that could not be reached even after the client's
+    # own within-call retries) a run absorbs before the circuit breaker auto-PAUSES it. Counted PER
+    # RUN over the event log, in log order: the crash whose position reaches this number requests
+    # the pause, every crash below it still terminalizes its node exactly as before and the search
+    # goes on. `1` is the historical rule — pause on the FIRST crash — and is the default because
+    # nothing about the breaker's argument has changed: a Developer that cannot finish one node has
+    # hit something a NEW node cannot fix, and rapid-firing more dead nodes is the wrong answer (the
+    # 403 blowout spun 67 of them). What changed is what a pause COSTS on an unattended stand: in the
+    # 2026-08-24 campaign 9 of 20 arm-B runs ended `PAUSED — a Developer session crashed` and were
+    # never resumed (docs/58 §58.2), each having reached ~$1.00 anyway — the pause was the end of the
+    # run, not a freeze somebody lifted. A bench profile sets `2`, i.e. one automatic retry, because
+    # there is no operator to resume and a single crashed session is, on that stand, usually one
+    # flapped socket. Per RUN and not per phase or chunk, on `_probe_call_counter`'s ground: the
+    # thing being bounded is what the whole run has spent on dead sessions. The recovery sweep
+    # (`speculation.py::_close_developer_sentinel_once`) reads the same rule, so a below-threshold
+    # crash terminal with no pause after it is the DESIGN and is not "recovered" into one.
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins a resumed pre-2026-09-06 run to `1`.
+    developer_crash_pause_after: int = Field(default=1, ge=1)
     # PART V (F1): concept CLASSIFIER re-tag + consolidation cadence, DECOUPLED from strategist_every. The
     # LLM concept map is heavier and slower-moving than a strategy consult, so it refreshes on its own
     # (sparser) interval. Researcher-authored idea.concepts still fold immediately at node_created — this
@@ -1843,6 +1862,21 @@ class Settings(BaseSettings):
     # is detected and retried on a fresh connection — the fix for silent multi-minute hangs. Set False
     # to use one blocking read (old per-op timeout semantics) if an endpoint streams badly.
     llm_stream: bool = True
+    # What the client does with a request whose STREAM stalled (an idle-timeout mid-body, an in-band
+    # SSE error frame, a keepalive-only 200): `True` (the historical behaviour, byte for byte) retries
+    # the next attempt of that call WITHOUT SSE and, after `core/llm.py::STREAM_STALL_DEGRADE_AFTER`
+    # stalls, stops streaming for the client's lifetime — the right trade on an endpoint that
+    # answers the same request fine without SSE while its stream wedges. `False` retries a stalled
+    # stream AS A STREAM, on the same backoff, and never degrades. It exists because on a stand
+    # whose proxy has a whole-request read timeout the non-SSE attempt is exactly the request that
+    # timeout kills: without SSE the 300 s window measures the whole generation. Measured on the
+    # 2026-09-03 bench batch (docs/56 §173-175): under `LOOPLAB_LLM_STREAM=1` `oldCK9` still sent
+    # 58 of 301 calls unstreamed on this fallback's initiative, 4 died at the 300 s wall, and
+    # $0.10 of its $1.00 went on twenty re-sends of one body. Per-run rather than per-call because
+    # the stand's property (does the proxy bound the whole request?) is a property of the endpoint,
+    # not of any one prompt. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: `True` IS the historical
+    # value, so a resumed run gains nothing.
+    llm_stream_stall_fallback: bool = True
     # LLM IDLE timeout (seconds). Stream mode: the INTER-TOKEN stall limit — a steady generation is
     # never cut off, only a silent endpoint. Non-stream: bounds the whole read. Raise for endpoints
     # with a long prefill on huge prompts; lower to fail fast on a flaky shared endpoint.
@@ -1892,6 +1926,24 @@ class Settings(BaseSettings):
     #
     # Priced calls only -- a local model reports no cost and can never trip it.
     llm_budget_usd: float = Field(default=0.0, ge=0.0)
+    # Do not OPEN a new node once `llm_budget_usd - spent` is below this many dollars; finish the run
+    # on the same `BudgetExceeded` the ceiling raises instead (`CostAccountant.require_headroom`).
+    # A node cycle that opens with less than it costs is bought and then discarded at the ceiling:
+    # measured over the 76-run AlgoTune probe corpus (docs/56 §156), $5.91 of $76.73 (7.7 %) landed
+    # AFTER the last node a run ever evaluated, and the median completed cycle costs $0.3370. The
+    # threshold is the measured knee and NOT the audit's p75 ($0.4481): replayed against every
+    # threshold, $0.10 refuses 61 empty cycles, redirects $1.54 and costs exactly ONE real node,
+    # which scored 0 — while p75 refuses 54 real nodes including the corpus's best (277.23). It is
+    # sharp: $0.15 already costs three nodes and a 211.40. Re-derive with
+    # `benchmarks/budget_gate_curve.py` before moving it; the boundary compares with a 1e-9
+    # tolerance because `1.00 - 0.92` is `0.0799…` and a cent of float error there is one 277.23.
+    # Inert without a ceiling (`llm_budget_usd` 0 = no limit, so there is no remainder to test) and
+    # `0` turns it off. Checked on the MAIN task at the node-open decision only — never inside a
+    # worker thread or an eval child — so every existing ceiling path (the deferred stop, the
+    # in-flight-eval drain, `run_finished.reason = budget_exhausted`) handles it unchanged.
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins a resumed pre-2026-09-06 run to `0.0`: a stop is new
+    # authority, and re-entry never adds one to a run already in flight.
+    node_open_budget_floor_usd: float = Field(default=0.10, ge=0.0)
     # Stop ADVERTISING a tool whose provider reports it holds nothing right now
     # (`tools/_base.py::INVENTORY_CONTRACT`). It is the offer that is withheld, never the route: a
     # withheld tool still dispatches if the model calls it, so nothing becomes unreachable, and the
@@ -2597,6 +2649,16 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # engine re-pinning one mid-log, and re-entry must not add that treatment to it — the same reason
     # every other concurrency row here is pinned to its historical value.
     "proposal_width": False,
+    # 2026-09-06, two rows and one named non-row. `node_open_budget_floor_usd` is a NEW STOP — a
+    # run that used to spend its last dollar on a node it could not finish now finishes early — and
+    # a stop is authority, so a resumed run keeps the `0.0` (off) it ran under. Its (c) is the
+    # commit that added the field. `developer_crash_pause_after` moved no default (1 is the rule the
+    # breaker has always applied), but a bench profile lowers the run's tolerance FROM the snapshot
+    # side and a pre-field snapshot must not adopt whatever the live profile says: pinned to the
+    # historical 1. `llm_stream_stall_fallback` gets NO row on `redact_output`'s ground (b): `True`
+    # is the historical value and the knob buys no call, no intervention and no selection policy.
+    "node_open_budget_floor_usd": 0.0,
+    "developer_crash_pause_after": 1,
     "speculation_depth": 0,
     "speculation_gate_receipt": None,
     "concurrent_research_repeat": False,

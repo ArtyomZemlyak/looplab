@@ -900,7 +900,8 @@ class OpenAICompatibleClient:
                  stream: bool = True, cache: bool = False,
                  header_timeout: Optional[float] = None, trust_env: bool = False,
                  max_retries: int = 8, wall_timeout: Optional[float] = None,
-                 retry_after_cap: Optional[float] = None):
+                 retry_after_cap: Optional[float] = None,
+                 stream_stall_fallback: bool = True):
         # The live transport needs the openai SDK + httpx. They are declared deps, but the module
         # import is guarded (offline/replay import-safety), so fail with a clear, actionable message
         # here rather than an opaque `NoneType has no attribute 'OpenAI'` if someone stripped them.
@@ -987,6 +988,14 @@ class OpenAICompatibleClient:
         # for this client's lifetime. Bounded worst case: one idle-timeout, not retries ×
         # idle-timeout of silence.
         self._stream_stalls = 0
+        # Whether the two degradations above are TAKEN at all (`Settings.llm_stream_stall_fallback`).
+        # `True` is the historical client byte for byte. `False` keeps counting stalls but retries a
+        # stalled stream AS A STREAM on the same backoff and never degrades: on a stand whose proxy
+        # bounds the WHOLE request (nginx `proxy_read_timeout 300`), the non-SSE attempt is exactly
+        # the one that wall kills — measured on `oldCK9` (docs/56 §173-175): 58 of 301 calls sent
+        # unstreamed on this fallback's initiative under a streaming flag, 4 of them dead at 300.0 s,
+        # and $0.10 of a $1.00 run spent re-sending one body twenty times.
+        self._stream_stall_fallback = bool(stream_stall_fallback)
         # H1: when the endpoint supports constrained decoding (vLLM/SGLang), drive structured calls
         # from the Pydantic JSON schema — `response_format` json_schema (OpenAI-standard, vLLM+SGLang)
         # + `guided_json` (vLLM extra) — so a weak model can't emit invalid JSON. Off by default
@@ -1674,6 +1683,7 @@ class OpenAICompatibleClient:
         # free tier) rate-limit bursts, and a single 429 shouldn't crash the whole run.
         body = None
         _stalled_prev = False               # this call's previous attempt stalled mid-stream
+        stream_attempts: list[bool] = []    # per-attempt `use_stream`, stamped on the generation span
         for attempt in range(self._max_retries + 1):
             # Build the request per attempt so a param-compat retry (see `_retry_or_raise`) can drop
             # the reasoning toggle. `_reasoning_ok` starts True and flips off permanently for THIS
@@ -1684,8 +1694,17 @@ class OpenAICompatibleClient:
             # often answers the SAME request fine without SSE while its stream wedges mid-generation.
             # Streaming is decided HERE, per attempt — never by the caller's payload (`_sdk_chat`
             # reads no `stream` key from it), so every call site gets the same degrade behaviour.
-            use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
-                          and not _stalled_prev)
+            # With the fallback OFF (`stream_stall_fallback=False`) the decision is `self.stream`
+            # alone: the ratchets above still COUNT (a trace can say how often the endpoint
+            # stalled) but never change what is asked for.
+            use_stream = (self.stream and (
+                not self._stream_stall_fallback
+                or (self._stream_stalls < STREAM_STALL_DEGRADE_AFTER and not _stalled_prev)))
+            # Say, per ATTEMPT, whether this call went out streamed. The generation span used to
+            # carry no record of it at all, so an unstreamed call under a streaming flag could only
+            # be found in the proxy's own ledger (docs/56 §173 counted 1,201 of them there).
+            stream_attempts.append(bool(use_stream))
+            tracing.annotate_generation("stream_attempts", list(stream_attempts))
             try:
                 # admit immediately around the real provider attempt, not around a
                 # whole node build. Retries take fresh fair turns and nested build -> novelty work
@@ -2228,6 +2247,50 @@ class CostAccountant:
                 f"(0 = no limit) and resume -- an env var will NOT do it, every resume adopts "
                 f"the snapshot (engine invariant #6).")
         return committed_spent
+
+    def require_headroom(self, floor: float, what: str) -> None:
+        """Refuse to OPEN `what` when less than `floor` dollars of the ceiling remain.
+
+        The ceiling in `add` stops a run the moment a priced call crosses the limit — AFTER the
+        money is spent, in the middle of whatever was buying it. This is the same stop asked one
+        step earlier, at the decision to open a unit of work that is known to cost more than what
+        is left: a node cycle is a median $0.3370 on the AlgoTune corpus (docs/56 §156), so a node
+        opened on the last few cents is bought and then discarded, and $5.91 of $76.73 (7.7 %)
+        landed that way after the last node those runs ever evaluated.
+
+        SAME CLASS, SAME HANDLING. It raises `BudgetExceeded`, not a new type, so everything built
+        for the ceiling handles it unchanged: `_DeferredBudgetStop`, `Engine._drain_inflight_
+        evaluation` (an eval already burning still lands its terminal), `cli/run_cmds.py`'s
+        `run_finished {"reason": "budget_exhausted"}` and the one-line `Refused:` presentation.
+        And the message keeps the ceiling's own opening words, because `events/stop_account.py`
+        recovers "this was the operator's spend ceiling" from that sentence.
+
+        Inert without a ceiling (`limit is None`: there is no remainder to test) and at `floor <= 0`.
+        The boundary is `remaining < floor - 1e-9`, and the tolerance is load-bearing rather than
+        tidy: `1.00 - 0.92` is `0.07999999999999996`, which is BELOW an $0.08 floor by 4e-17, and
+        §156's replay found one 277.23 sitting on exactly such an edge. `what` names the unit the
+        caller was about to open so the refusal says which decision it pre-empted.
+        """
+        try:
+            floor = float(floor)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(floor) or floor <= 0.0:
+            return
+        with self._lock:
+            if self.limit is None:
+                return
+            remaining = self.limit - self.spent
+            limit = self.limit
+        if remaining < floor - 1e-9:
+            raise BudgetExceeded(
+                f"LLM spend ceiling reached before opening {what}: ${max(0.0, remaining):.4f} of "
+                f"the ${limit:.4f} set by `llm_budget_usd` remains, below the "
+                f"`node_open_budget_floor_usd` of ${floor:.4f} a new node needs. The run stops "
+                f"here rather than open work it cannot finish. To continue, raise "
+                f"`llm_budget_usd` (or lower `node_open_budget_floor_usd`, 0 = off) in this "
+                f"run's `config.snapshot.json` and resume -- an env var will NOT do it, every "
+                f"resume adopts the snapshot (engine invariant #6).")
 
     def remaining(self) -> Optional[float]:
         with self._lock:
@@ -2867,6 +2930,9 @@ def make_llm_client(settings, *, model: str | None = None,
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=(getattr(settings, "llm_stream", True) if stream is None else stream),
+        # Does a stalled stream retry without SSE and eventually stop streaming for good (the
+        # historical client), or retry as a stream? Per endpoint, so it rides the run's Settings.
+        stream_stall_fallback=bool(getattr(settings, "llm_stream_stall_fallback", True)),
         # Fall back to the CONSTANT this module declares as the single source of the default (which
         # config.py imports for its own field default) — a literal here would drift the moment it moved.
         header_timeout=float(getattr(settings, "llm_header_timeout", DEFAULT_HEADER_TIMEOUT_S)

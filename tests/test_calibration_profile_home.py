@@ -97,7 +97,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               0 = uncapped, doc 56 §190-§195. Field set 220 -> 221, so branch (1) of the
 #               assertion below; re-pinned 2026-09-06 — the addition tripped four repo guards
 #               (doc 56 §191) and not this one, because the suite was read through a `-k` run.)
-_EXPECTED_DIGEST = "sha256:74faf6b4a9913b90defc376eef098bb94e0bda6d281cf274a7f0920bacfba5cb"
+_EXPECTED_DIGEST = "sha256:4362342bc6e36f676e85278ed49683be477084907bcddd87dcc75727662cf9ae"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -424,7 +424,21 @@ _EXPECTED_DIGEST = "sha256:74faf6b4a9913b90defc376eef098bb94e0bda6d281cf274a7f09
 #               neither parent's digest describes it. Old receipts SHOULD stop verifying: whether
 #               a single-command eval is health-checked at all is part of the envelope a
 #               speculation receipt was measured in.
-_EXPECTED_FIELD_COUNT = 221
+#   2026-09-06  + llm_stream_stall_fallback, node_open_budget_floor_usd, developer_crash_pause_after
+#               (221 -> 224 profile rows, 224 -> 227 Settings): docs/60 §60.9's A7 (engine half),
+#               A10 and A12. The "field set changed too" branch, verified the prescribed way rather
+#               than by adding the integers: an AST scan of `Settings`' annotated assignments
+#               against HEAD reports exactly those three added and [] removed, so no +1/-1 pair is
+#               hiding behind the +3. All three are non-variant fields and join the profile. Old
+#               receipts SHOULD stop verifying, and two of the three are not inert for a replicate:
+#               `node_open_budget_floor_usd` is a NEW STOP (a calibration replicate under a ceiling
+#               now ends before opening a node it cannot finish, where before it ended mid-cycle),
+#               and `developer_crash_pause_after` decides how many crashed Developer sessions a
+#               run absorbs before it freezes — a different population of terminals in either
+#               direction. `llm_stream_stall_fallback` only changes how a stalled provider stream
+#               is retried, but the guard is deliberately not clever enough to exempt one knob of
+#               three. Both pins re-set.
+_EXPECTED_FIELD_COUNT = 224
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

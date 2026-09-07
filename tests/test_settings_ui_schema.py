@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 190
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 193
+    # 190 + 3 -> 193 on 2026-09-06: the three bench-driven knobs of docs/60 §60.9 (A7/A10/A12),
+    # `llm_stream_stall_fallback`, `node_open_budget_floor_usd` and `developer_crash_pause_after`,
+    # each beside the row it modifies (`llm_stream`, `llm_budget_usd`, `systemic_failure_stop`).
+    # Verified as 190 keys common to the previous keyset plus exactly those three, no duplicate.
     # 189 + 1 -> 190 on 2026-08-31, at the MERGE with master, and BOTH histories under it are real.
     # Master's row is `single_command_divergence_watch`, and it is a CORRECTION rather than a
     # feature: the field shipped in `7813032e` with neither a form row nor an uncurated entry, so
@@ -210,7 +214,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # separates the best `edge_expansion` runs from the worst (20 vs 29, p = 0.037), and a median
     # split at 24 gives champions of 221.81 against 177.84 (p = 0.0077) -- and it is a correlation
     # until the arm runs. It gets a row when an arm says which N is right.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 224
+    # 224 -> 227 on 2026-09-06: docs/60 §60.9's three bench-driven knobs (A7 engine half, A10,
+    # A12), all CURATED — see the 190 -> 193 note above; the two counts move together.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 227
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

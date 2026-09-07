@@ -1513,6 +1513,9 @@ class CardReservationMixin:
                if isinstance(action, dict) and META_CARD_ID not in action]
         if not raw:
             return []
+        # MAIN TASK, before the paid proposal(s) and before any Card receipt: the node-OPEN floor
+        # (`_refuse_node_open_below_floor`) — a Card staged here is the run's next node cycle.
+        self._refuse_node_open_below_floor(f"{len(raw)} Card proposal(s)")
         proposal_events = self.store.read_all()
         proposal_state = _fold(proposal_events)
         proposal_node_ceiling = self._node_id_ceiling(proposal_events, proposal_state)

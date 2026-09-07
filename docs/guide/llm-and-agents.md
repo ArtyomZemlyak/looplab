@@ -441,7 +441,10 @@ proxy/WAF burst-throttle, not a real auth failure) is treated as retryable and b
 client makes up to **8 retries** (429 / 5xx / throttle-403) before surfacing an error. If the model
 is genuinely unreachable, a Developer session crashes (`developer_crash`); the engine then **pauses
 the whole run** on the *first* such crash (an `EV_PAUSE`) rather than rapid-firing dozens of dead
-nodes — resume once the endpoint is back.
+nodes — resume once the endpoint is back. *First* is `developer_crash_pause_after`'s default (`1`);
+a bench profile sets `2` — one automatic retry — because on an unattended stand the pause is the
+end of the run (9 of 20 campaign runs ended that way and nobody resumed them, docs/58 §58.2). The
+count is per run, in event-log order, and every crash below it still fails its own node.
 
 **A stream the gateway CUTS mid-answer is kept, not re-asked.** A proxy whose own upstream dies
 half-way through a generation reports it *in band* — a `data: {"error": …}` frame inside a response
@@ -481,7 +484,7 @@ answer decides how much it stops, because only one of the two ways is evidence a
 
 | What happened | Verdict | What stops |
 |---|---|---|
-| **Nobody answered** — the request never completed: the call raised, the endpoint was unreachable, a 401/402, a transport error surviving the client's own retry ladder | `unanswerable` | The node (`developer_crash`) **and the run**: one run-level pause naming the provider, `resume` once it is back |
+| **Nobody answered** — the request never completed: the call raised, the endpoint was unreachable, a 401/402, a transport error surviving the client's own retry ladder | `unanswerable` | The node (`developer_crash`) **and the run**: one run-level pause naming the provider, `resume` once it is back — once the run's crash count reaches `developer_crash_pause_after` (default `1`: this one) |
 | **The model answered something unreadable** — an action outside `repair`/`abandon`/`reject_idea`, an empty or missing one, the literal word `unanswerable` arriving from the wire, **or no emit at all** (prose replies your endpoint would not force into a tool call, the stuck detector, the turn/wall-clock budget) | `unreadable` | **Only the node**, terminalized like an `abandon` with the eval's own failure reason, so a node reset re-opens it. No pause — the endpoint just answered |
 
 Either way the engine **re-asks once** before acting: one non-answer is not a diagnosis, and a single
