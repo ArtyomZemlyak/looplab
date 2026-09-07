@@ -269,7 +269,12 @@ def test_cost_distinguishes_unreadable_from_absent_from_zero(client):
 
 # --- the regression net over the real corpus ------------------------------------------------------
 
-@pytest.mark.skipif(not REPO_RUNS.is_dir(), reason="no runs/ corpus in this checkout")
+# `is_dir()` alone was not the condition: an EMPTY `runs/` — what a smoke run followed by a
+# cleanup of its own output leaves behind — passes it and then fails the `seen >= 1` floor
+# below, so tidying up after a manual run turned this net red. The corpus is absent in both
+# shapes and that is the same fact.
+@pytest.mark.skipif(not REPO_RUNS.is_dir() or not any(REPO_RUNS.iterdir()),
+                    reason="no runs/ corpus in this checkout")
 def test_every_real_run_still_loads_exactly_as_it_does_today():
     """The receipt must be a STATEMENT and never a fence: no real log may start reading differently.
 

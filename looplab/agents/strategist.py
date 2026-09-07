@@ -716,7 +716,6 @@ class _StrategyOut(BaseModel):
     merge_mode: Optional[str] = None
     complexity_cue: Optional[bool] = None
     prefer_sweep: Optional[bool] = None
-    endgame_sweep: Optional[bool] = None
     request_research: Optional[bool] = None
     timeout: Optional[float] = Field(default=None, gt=0)
     eval_parallel: Optional[int] = Field(default=None, ge=0, le=1024)
@@ -739,8 +738,34 @@ class _CardStrategyOut(_StrategyOut):
     card_scoring: Optional[_CardScoringOut] = None
 
 
-def _strategy_output_model(ctx: StrategyContext):
-    return _CardStrategyOut if ctx.card_driven_selection else _StrategyOut
+class _PlanStrategyOut(_StrategyOut):
+    """Plan-on extension, on the same rule and for the same reason as `_CardStrategyOut` above.
+
+    `endgame_sweep` is an operator over the endgame RESERVE, and a run with no plan has none —
+    `endgame_reserve_frac=0` is the `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row a resumed pre-field run
+    keeps. Carrying the field there put a knob that could not do anything into the tool schema of
+    a run whose historical bytes that row exists to preserve, beside a brief that (since the same
+    change) no longer mentions it. `has_plan_reserve` is the ONE predicate both halves read."""
+    endgame_sweep: Optional[bool] = None
+
+
+class _CardPlanStrategyOut(_CardStrategyOut):
+    """Both extensions at once — the cross product is explicit because each axis is byte-identity
+    for a different flag, and a run may be on either, both or neither."""
+    endgame_sweep: Optional[bool] = None
+
+
+def has_plan_reserve(state) -> bool:
+    """Does this run carry a durable PLAN with an endgame reserve? The one predicate the brief and
+    the output schema share, so the sentence and the field it describes cannot drift apart."""
+    plan = getattr(state, "plan", None)
+    return isinstance(plan, dict) and bool(plan)
+
+
+def _strategy_output_model(ctx: StrategyContext, *, planned: bool = False):
+    if ctx.card_driven_selection:
+        return _CardPlanStrategyOut if planned else _CardStrategyOut
+    return _PlanStrategyOut if planned else _StrategyOut
 
 
 def _fmt_operator_yields(yields: dict) -> str:
@@ -838,7 +863,7 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         # plan is also what keeps a resumed pre-plan run's brief byte-identical to what it was.
         + ("endgame_sweep=false keeps the plan's endgame reserve for the ensemble alone "
            "(default: the reserve also sweeps the champion with the k-NN surrogate); "
-           if isinstance(getattr(state, "plan", None), dict) and state.plan else "")
+           if has_plan_reserve(state) else "")
         + "set request_research=true when the run is "
         "stalled or confused and would benefit from a deep-research step over a stratified run "
         "summary + the "
@@ -908,7 +933,9 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
         ops["complexity_cue"] = out.complexity_cue
     if out.prefer_sweep is not None:
         ops["prefer_sweep"] = out.prefer_sweep
-    if out.endgame_sweep is not None:
+    # `getattr`, because the field lives on the PLAN-ON schema only (`_PlanStrategyOut`): a run
+    # with no endgame reserve is handed the legacy shape that never carried it.
+    if getattr(out, "endgame_sweep", None) is not None:
         ops["endgame_sweep"] = out.endgame_sweep
     if ops:
         strat["operators"] = ops
@@ -943,7 +970,7 @@ class LLMStrategist:
 
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         from looplab.core.parse import forced_structured
-        output_model = _strategy_output_model(ctx)
+        output_model = _strategy_output_model(ctx, planned=has_plan_reserve(state))
         messages = [
             # P8: the Strategist decides timeouts/parallelism/fidelity, so the hardware attention
             # points reach it too — appended after the render(), like every other planning role.
@@ -1009,14 +1036,15 @@ class ToolUsingStrategist:
             context_budget_chars=context_budget_chars,
             max_turns=max_turns, time_budget_s=time_budget_s)
 
-    def _emit_spec(self, ctx: StrategyContext) -> dict:
+    def _emit_spec(self, ctx: StrategyContext, *, planned: bool = False) -> dict:
         return {"type": "function", "function": {
             "name": "emit", "description": "Emit the chosen search strategy.",
-            "parameters": _strategy_output_model(ctx).model_json_schema()}}
+            "parameters": _strategy_output_model(ctx, planned=planned).model_json_schema()}}
 
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         from looplab.agents.agent import drive_tool_loop
-        output_model = _strategy_output_model(ctx)
+        planned = has_plan_reserve(state)
+        output_model = _strategy_output_model(ctx, planned=planned)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)        # let the run-aware tools read the current search
         messages = [
@@ -1045,7 +1073,7 @@ class ToolUsingStrategist:
             # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
             # no per-call re-merge, no option keyword beside the spread, no double-keyword collision.
             return drive_tool_loop(
-                self.client, self.tools, messages, self._emit_spec(ctx),
+                self.client, self.tools, messages, self._emit_spec(ctx, planned=planned),
                 finalize=_finalize, fallback=_fallback,
                 # EXPLICIT, never folded into `loop_opts` (`tool_result_label` is in
                 # `EXPLICIT_ONLY_LOOP_ARGS`), and absent rather than empty when the envelope is

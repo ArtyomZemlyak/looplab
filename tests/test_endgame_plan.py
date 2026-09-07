@@ -254,3 +254,41 @@ def test_the_brief_names_the_sweep_only_when_the_run_has_a_reserve():
     clause = ("endgame_sweep=false keeps the plan's endgame reserve for the ensemble alone "
               "(default: the reserve also sweeps the champion with the k-NN surrogate); ")
     assert with_plan.replace(clause, "") == without
+
+
+def test_the_output_schema_carries_the_sweep_only_when_the_brief_names_it():
+    """THE OTHER HALF OF THE SAME BYTE-IDENTITY RULE. Gating the brief text alone would still hand
+    a legacy resume a changed tool schema — the field is in `model_json_schema()`, which is request
+    bytes. `endgame_sweep` therefore lives on the PLAN-ON extension, the same shape
+    `_CardStrategyOut` already uses for `card_driven_selection`, and both halves read the one
+    `has_plan_reserve` predicate so the sentence and the field cannot drift apart.
+
+    All four combinations, because the two axes are independent."""
+    from looplab.agents.strategist import (StrategyContext, _strategy_output_model,
+                                           has_plan_reserve)
+    from looplab.core.models import RunState
+
+    plain, planned = RunState(), RunState()
+    planned.plan = {"endgame_start": 8, "phases": [{"name": "endgame", "reserve": True}]}
+    assert has_plan_reserve(planned) and not has_plan_reserve(plain)
+
+    def props(ctx, state):
+        model = _strategy_output_model(ctx, planned=has_plan_reserve(state))
+        return set(model.model_json_schema()["properties"])
+
+    flat, card = StrategyContext(), StrategyContext(card_driven_selection=True)
+    assert "endgame_sweep" not in props(flat, plain)
+    assert "endgame_sweep" in props(flat, planned)
+    assert "endgame_sweep" not in props(card, plain) and "card_scoring" in props(card, plain)
+    assert {"endgame_sweep", "card_scoring"} <= props(card, planned)
+    # …and the legacy schema is otherwise untouched: the plan adds exactly the one field.
+    assert props(flat, planned) - props(flat, plain) == {"endgame_sweep"}
+
+
+def test_a_strategy_emitted_without_the_field_still_assembles():
+    """The reader is `getattr`, because a run with no reserve is handed a schema that never had
+    the field — an attribute read would turn the legacy shape into a crash at every consult."""
+    from looplab.agents.strategist import _StrategyOut, _assemble_strategy
+
+    strategy = _assemble_strategy(_StrategyOut(policy="greedy", rationale="r"))
+    assert "endgame_sweep" not in (strategy.get("operators") or {})
