@@ -150,3 +150,62 @@ def test_every_module_that_reads_one_spelling_reads_both():
     assert not offenders, (
         "these modules act on the crash sentinel but cannot see the stuck one, so a build that "
         f"wrote nothing falls through them as solution code: {offenders}")
+
+
+def test_the_speculative_stuck_branch_can_actually_run():
+    """The guard above reads the block as TEXT, which is why it could not see that the branch was
+    a `NameError`.
+
+    `"generation": generation` — the only binding of that name in `_create_precoded_node` is a
+    generator-expression variable a hundred lines up, and Python 3 scopes those to the
+    comprehension. So on the shipped default (`card_driven_selection`), a Developer session that
+    produced no code reached this branch through `empty_build_refusal` and raised instead of
+    writing `node_failed reason=developer_stuck`: the reserved node got no terminal, the build
+    telemetry was never discarded, and the run saw an unexplained engine crash on the one path the
+    stuck/crash split was added for.
+
+    Checked as a GENERAL property over the whole method rather than as a pin on this one name,
+    because the next unbound name will not be called `generation`: every name the method LOADS must
+    resolve to a parameter, a local, a closure cell, a builtin or a module global. `symtable` is
+    what answers that — it applies Python's own scoping rules, including the comprehension scope
+    that caused this.
+
+    MUTATION: restore the bare `generation` -> this test names it and the text guard above stays
+    green, which is the whole point.
+    """
+    import builtins
+    import inspect
+    import symtable
+    import textwrap
+
+    import looplab.engine.speculation as spec
+    from looplab.engine.speculation import SpeculationMixin
+
+    src = textwrap.dedent(inspect.getsource(SpeculationMixin._create_precoded_node))
+    top = symtable.symtable(src, "speculation.py", "exec")
+    method = top.get_children()[0]
+
+    # A NAME symtable CALLS GLOBAL IS THE CASE TO CHECK, not the one to skip: at function scope an
+    # unbound name resolves as a global, so `generation` — leaked from a comprehension that does not
+    # leak — is reported `is_global() == True`. The first cut of this guard skipped globals and was
+    # therefore VACUOUS against the very defect it was written for; driven by re-introducing the bug
+    # and watching it stay green. What must hold is that the module (or builtins) really has it.
+    def unresolved(scope) -> list:
+        bad = []
+        for sym in scope.get_symbols():
+            if not sym.is_referenced() or sym.is_assigned() or sym.is_parameter():
+                continue
+            if sym.is_free():                       # a closure cell: bound in an enclosing scope
+                continue
+            name = sym.get_name()
+            if name in dir(builtins) or hasattr(spec, name):
+                continue
+            bad.append(name)
+        for child in scope.get_children():
+            bad.extend(unresolved(child))
+        return bad
+
+    missing = unresolved(method)
+    assert not missing, (
+        f"`_create_precoded_node` loads names that resolve to nothing: {sorted(set(missing))} — "
+        "a branch that raises NameError instead of writing its terminal")

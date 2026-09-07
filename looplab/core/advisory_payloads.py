@@ -6,6 +6,8 @@ boundaries so an oversized or wrong-shaped sidecar cannot crash the engine or ex
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import re
 import hashlib
 import itertools
