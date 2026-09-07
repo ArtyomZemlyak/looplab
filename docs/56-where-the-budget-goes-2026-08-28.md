@@ -13507,3 +13507,32 @@ earlier pair on the in-process timing.
 
 Also worth recording for point 9: the best `edge_expansion` TEST score on this box is **276.7268**
 (`remEE8`), not the 224.4432 the standing list carries, and not `accEE`'s own 224.8846.
+
+## §321 — the refusal I shipped would have cost a campaign six dollars
+
+§315 made `looplab_eval` refuse to score a CP-SAT reference in a wide regime, which is right: a
+candidate that changes nothing reads about 1.5 there. `campaign.sh` exports
+`ALGOTUNE_EVAL_WORKERS=auto` **once for the whole run**, at line 528, and never revisits it. So a
+twenty-task campaign started today would have spent six dollars on the six CP-SAT tasks and
+collected six `regime_not_scorable_for_task` nulls — a guard doing exactly its job, on a driver
+with no way to satisfy it.
+
+Found by asking what the campaign does with the refusal rather than by watching it happen, which is
+the only affordable order at a dollar a probe.
+
+`run_one` now asks per task, through the same `ruler_check.scoring_regime` the inventory and the
+guard already use, so the three cannot drift apart:
+
+```
+max_clique_cpsat -> 1        pagerank -> auto        no_such_task -> ?
+```
+
+The third column is the part that needed a second pass. `uses_cpsat` answers **False** for a task
+whose reference is missing — right for an inventory, wrong here, because it sends an unknown task to
+the wide regime silently, which is the null-score campaign arriving through the safety net. Driven
+before the fix, `scoring_workers no_such_task` printed `auto`; it now prints `?`, and the driver
+says out loud that it is leaving the campaign default in place.
+
+Three mutations red: always wide, an unreadable reference falling back to the default, and printing
+the answer without exporting it. The test extracts `scoring_workers` from the shipped
+`campaign.sh` and runs it — the §312 pattern — rather than re-implementing the rule beside it.

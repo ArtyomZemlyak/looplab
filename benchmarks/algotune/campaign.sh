@@ -1114,8 +1114,49 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
   return 0
 }
 
+# THE REGIME IS A PER-TASK DECISION NOW, and this driver was still making it once for all twenty.
+#
+# §314 measured the reference submitted as its own candidate on six CP-SAT tasks: 1.1375-1.6028
+# with `auto` (one worker per lane core) and 1.0113-1.0967 with `ALGOTUNE_EVAL_WORKERS=1`, on an
+# idle box against baselines built in each regime. §315 then made `looplab_eval` REFUSE to score a
+# CP-SAT reference in a wide regime -- `regime_not_scorable_for_task` -- because a candidate that
+# changes nothing scores about 1.5 there. This driver exports `auto` for every task, so without
+# this function a twenty-task campaign would spend six dollars producing six null scores.
+#
+# The rule is read from the task's own reference (`cp_model`/`ortools`), through the same
+# `ruler_check.scoring_regime` the inventory and the guard use, so the three cannot drift apart.
+# A helper that cannot answer leaves the campaign default in place and SAYS so: a silent fallback
+# to `auto` here is the null-score campaign again, arriving through the safety net.
+scoring_workers() {                # $1 = task -> "1" (serial) or "auto" (wide)
+  python3 - "$1" "$REPO/benchmarks" <<'PYEOF' 2>/dev/null || echo "?"
+import os
+import sys
+sys.path.insert(0, sys.argv[2])
+import ruler_check
+# AN UNREADABLE REFERENCE IS NOT "NOT CP-SAT". `uses_cpsat` answers False when the file is
+# missing, which is right for an inventory and wrong here: it would send an unknown task to the
+# wide regime silently, which is the null-score campaign arriving through the safety net. Driven
+# 2026-09-07 -- before this check, `scoring_workers no_such_task` printed `auto`.
+if not os.path.exists(f"{ruler_check.CPSAT_ROOT}/{sys.argv[1]}/{sys.argv[1]}.py"):
+    print("?")
+else:
+    print("1" if ruler_check.scoring_regime(sys.argv[1]).startswith("lane") else "auto")
+PYEOF
+}
+
 run_one() {                       # $1 = task, $2 = cpu list
   T=$1; CPUS=$2
+  # Per task, before anything is measured: the width this task is SCORED in.
+  WANT_WORKERS="$(scoring_workers "$T")"
+  if [ "$WANT_WORKERS" = "?" ]; then
+    echo "[$CPUS] $T: cannot read the task's reference to choose a regime; leaving" \
+         "ALGOTUNE_EVAL_WORKERS=$ALGOTUNE_EVAL_WORKERS -- a CP-SAT task will be REFUSED by" \
+         "looplab_eval rather than scored wrongly"
+  elif [ "$WANT_WORKERS" != "${ALGOTUNE_EVAL_WORKERS:-auto}" ]; then
+    echo "[$CPUS] $T: scored at ALGOTUNE_EVAL_WORKERS=$WANT_WORKERS (its reference solves with" \
+         "CP-SAT; §314 measured the reference itself at 1.14-1.60 wide and 1.01-1.10 serially)"
+    export ALGOTUNE_EVAL_WORKERS="$WANT_WORKERS"
+  fi
   MARKER="$OUT/$ARM-$T.done"
   # Per task-arm, so two lanes cannot read each other's breadcrumb. `run_bounded` clears it on
   # entry and writes it only when the stall guard itself does the killing.
