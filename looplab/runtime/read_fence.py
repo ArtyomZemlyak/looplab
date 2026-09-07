@@ -1061,12 +1061,21 @@ def _hook(event, args):
                 r = bad = None       # a bug in the fence must never break an unrelated call
             if bad is not None:
                 _report(bad, event, _MUTATION_MESSAGE)   # outside the try: deny RAISES from here
-                return
+                continue        # …so this is the WARN path only — see the CONTINUE note below
             # THE RECORD, on the same resolved path: a mutation under the run dir outside the
             # writable prefixes — a rename INTO it, a link OF it, a truncate, a chmod, an rmdir.
             if r is not None and _record_write(r) is not None:
                 _report(r, event, _RECORD_MESSAGE)
-                return
+                continue
+            # CONTINUE, NOT RETURN, and it matters at exactly one policy. Three events carry TWO
+            # slots (`os.rename`, `os.symlink`, `os.link`: source AND destination), and under deny
+            # neither `continue` nor `return` is reachable — `_report` raises out of the hook. Under
+            # WARN it reports and returns, and returning here ABANDONED the remaining slots: driven,
+            # `os.rename` with both sides inside a fenced root recorded ONE violation instead of
+            # two, so the destination — the file that would have been created in the operator's
+            # tree — was missing from the very log that is warn's whole product. At most one report
+            # per slot is still the rule: a path that is both fenced and a record-write is one
+            # incident, and the mutation rung is the one that names it.
         return
     # `_CWD_REACHES_ROOT` is what keeps `_resolve`'s relative fast bail correct rather than merely
     # asserted, so a chdir has to be able to TURN IT ON: under `warn` the chdir proceeds, and a

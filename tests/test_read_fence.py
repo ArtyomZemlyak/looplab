@@ -1511,3 +1511,69 @@ def test_the_hook_refuses_a_mutation_of_the_fences_own_file_whatever_the_uid():
 
     # …and the rule is still NARROW: an ordinary mutation outside the fence is untouched.
     ns["_hook"]("os.remove", ("/tmp/some/other/file",))
+
+
+@pytest.mark.parametrize("event,args,fenced", [
+    ("os.rename", ("/src/repo/a.py", "/src/repo/b.py", None, None), 2),
+    ("os.link", ("/src/repo/a.py", "/src/repo/b.py", None, None), 2),
+    ("os.symlink", ("/src/repo/a.py", "/src/repo/b.py", None), 2),
+    ("os.rename", ("/tmp/outside.py", "/src/repo/b.py", None, None), 1),
+    ("os.remove", ("/src/repo/a.py", None), 1),
+])
+def test_warn_records_every_fenced_slot_of_a_two_sided_mutation(event, args, fenced):
+    """Under `warn` the violations log is the WHOLE product, and it was losing a rename's other end.
+
+    Three events carry two path slots — `os.rename`, `os.link`, `os.symlink` (source AND
+    destination) — and the mutation loop `return`ed after reporting the first. Under `deny` that is
+    unreachable (`_report` raises out of the hook, so the statement after it is dead), which is why
+    it read as correct; under `warn` `_report` returns, and returning abandoned the remaining slots.
+    Driven on the shipped code: `os.rename` with BOTH sides inside a fenced root recorded ONE
+    violation, so the destination — the file that would have been created in the operator's tree —
+    was absent from the log the operator reads to decide whether to tighten the policy.
+
+    Parametrised over both slot counts and both orders on purpose: the case that already worked
+    (only the DESTINATION fenced, slot 0 clean so the loop reached slot 1) is the one a `continue`
+    could regress into a double report.
+
+    WHAT THIS DOES NOT COVER, stated rather than implied: the `continue` also keeps a slot to at
+    most ONE report, and removing it does not redden this test — in these worlds a path under an
+    editable root is never also a record-write (that needs the run dir INSIDE a fenced root, which
+    is why run dirs are allow-listed in the first place), so the second rung stays silent either
+    way. The per-slot bound is the code's behaviour here, not a property this asserts.
+    """
+    src = read_fence.render(("/src/repo",), (), policy="warn", confine=False)
+    ns: dict = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)
+    ns["_SELF"] = ()                      # isolate the ordinary root rung from the self rung
+    recorded: list = []
+    ns["_record"] = lambda path, _policy, ev: recorded.append((ev, path))
+
+    stderr, sys.stderr = sys.stderr, io.StringIO()
+    try:
+        ns["_hook"](event, args)          # warn: reports and returns, never raises
+    finally:
+        sys.stderr = stderr
+
+    assert [path for _ev, path in recorded] == [
+        a for a in args if isinstance(a, str) and a.startswith("/src/repo")][:fenced], recorded
+    assert len(recorded) == fenced, (
+        f"{event} under warn recorded {len(recorded)} of {fenced} fenced slots — a two-sided "
+        "mutation must put BOTH ends in the log, since under warn the log is all there is")
+
+
+def test_deny_still_raises_on_the_first_fenced_slot_and_examines_no_further():
+    """The other half of the `continue`: under deny NOTHING changes, and that is the whole safety
+    argument for the change. The hook must still raise out of slot 0 — a mutation fence that
+    surveyed both ends before refusing would be doing work after it had already decided."""
+    src = read_fence.render(("/src/repo",), (), policy="deny", confine=False)
+    ns: dict = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)
+    ns["_SELF"] = ()
+    recorded: list = []
+    ns["_record"] = lambda path, _policy, ev: recorded.append((ev, path))
+
+    with pytest.raises(Exception) as caught:
+        ns["_hook"]("os.rename", ("/src/repo/a.py", "/src/repo/b.py", None, None))
+    assert type(caught.value).__name__ == "LoopLabSourceReadRefused"
+    assert [p for _e, p in recorded] == ["/src/repo/a.py"], (
+        f"deny examined a slot past the one it refused on: {recorded}")
