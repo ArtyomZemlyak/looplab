@@ -323,6 +323,8 @@ THE BOUNDS, each load-bearing:
 """
 from __future__ import annotations
 
+import json
+
 import ast
 import difflib
 import math
@@ -709,6 +711,79 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
 # something concrete a diff could have contained. A session that honestly reports "no change is
 # needed" names nothing concrete and is left alone, which matters: refusing to edit can be the right
 # answer, and this rung must not push a model into a cosmetic edit to get past it.
+# THE BUILD-PATH SIBLING of the rung below: a manifest that DECLARES a stage whose script this
+# session never wrote. Measured on v13, which lost two of its four nodes to exactly this:
+#     node 0  `mine`               exit 1 in 0.505s  "No module named vectorsearch.mine_stage"
+#     node 2  `teacher_embeddings` exit 1 in 0.209s  "can't open file '.../teacher_embeddings.py'"
+# Each then bought TWO repair sessions of ~30 minutes — all four inert, all four `changed: []`,
+# `budget_exhausted: time` — and died. The stage cost 0.2-0.5 s; the CASCADE cost ~2 h per node.
+#
+# THE SCRIPT FORM ONLY, and that is the whole safety argument. `entrypoint_candidates` answers both
+# spellings, but `python -m vectorsearch.mine_stage` and `python -m pytest` are IDENTICAL to it —
+# two candidates each, neither local — because that is how INSTALLED code looks, which is why
+# `eval_stages._stage_reachable_files` already treats the `-m` form as OPAQUE. A refusal there would
+# reject every legitimate installed-module stage. The script form yields ONE candidate and its
+# absence is decidable: CPython cannot run a file that is not there.
+#
+# AND ONLY AT THE IMPLEMENT EMIT. Three earlier sites were eliminated by the tree's own reasoning:
+# submit time (`repo_task.eval_entrypoint_unprotected` is DELIBERATELY silent on a resolvable but
+# absent entrypoint — "the Developer AUTHORS the eval entrypoint" is the designed flow), the
+# `declare_stages` tool (the stages phase runs with READ-ONLY tools, so the file cannot exist yet),
+# and the stage runner (too late: the node exists and the repair cascade is what costs).
+def build_declared_script_never_written(manifest_json: str, written: dict, *,
+                                        exists=None) -> str:
+    """The bounce text for an implement emit whose manifest names a script that is NOT THERE, else "".
+
+    Pure and total: any input answers, never raises, because it runs inside the emit path of a
+    session that has already cost minutes. Every byte fact is the CALLER's — the write tool's own
+    ledger and its own view of the workspace — never anything the model said about itself.
+
+    `exists(path) -> bool` IS THE QUESTION, and `written` alone is not it. The write ledger starts
+    EMPTY and holds only what THIS session authored (`RepoWriteTools.files`, whose docstring says
+    writes are "COLLECTED ... rather than applied to disk"), while the node runs in the repo COPY
+    plus that overlay. A Developer that declares `["python", "vectorsearch/train.py"]` against the
+    repo's own committed trainer and edits only `configs/config.yaml` has written no `train.py` —
+    and got told "this session never wrote" it, which is factually wrong, spends the session's one
+    shared bounce, and invites the model to overwrite a working trainer with a stub. `exists` is
+    `RepoWriteTools.exists`, which resolves the staged overlay and then the editable roots on disk,
+    i.e. exactly the filesystem the stage will run against.
+
+    It stays OPTIONAL so the rule can be exercised as a pure function, and a caller that omits it
+    falls back to the ledger — which is the WEAKER reading, so a caller able to answer must pass it.
+    """
+    try:
+        stages = (json.loads(manifest_json or "") or {}).get("stages") or []
+    except Exception:  # noqa: BLE001 - a malformed manifest is a different rung's problem
+        return ""
+    from looplab.adapters.repo_task import entrypoint_candidates
+    missing: list[str] = []
+    for stage in stages if isinstance(stages, list) else []:
+        if not isinstance(stage, dict):
+            continue
+        cands = entrypoint_candidates(stage.get("command"))
+        # len==1 IS the script form, per `entrypoint_candidates`' documented contract: it returns
+        # BOTH `-m` spellings and exactly one path for a script. Asserted in the tests so a change
+        # to that contract breaks loudly here rather than silently widening this refusal.
+        if len(cands) != 1:
+            continue
+        path = cands[0]
+        if path in (written or {}) or path in missing:
+            continue
+        try:
+            present = bool(exists(path)) if exists is not None else False
+        except Exception:  # noqa: BLE001 — an unreadable workspace is not evidence of absence
+            present = True
+        if not present:
+            missing.append(path)
+    if not missing:
+        return ""
+    named = ", ".join(missing[:6])
+    return ("Your stage manifest declares a script that does not exist in the workspace: " + named +
+            ". Write the file (or change the stage command to one that exists) before emitting — "
+            "a stage whose entry point is absent exits in under a second and costs the node two "
+            "repair attempts and then the node itself.")
+
+
 def repair_claimed_without_writing(summary, *, wrote: bool) -> str:
     """The bounce text for a repair emit that claims an edit while nothing was written, else "".
 

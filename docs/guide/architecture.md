@@ -112,6 +112,245 @@ other work items that test the same hypothesis), **cross-run memory**
     instead, so the group syscall that would take the engine down with it is never issued — the tree
     still dies, just by a route that cannot overshoot.
 
+### Thread pools: which work can starve which
+
+Every bare `anyio.to_thread.run_sync` draws on anyio's **shared 40-token default** pool.
+`engine/evaluate.py::_evaluate` offloads `_run_eval` onto it with no limiter and holds one token for
+that eval's entire multi-hour duration, and `eval_parallel` is admitted to 1024 by
+`core/config.py` (`parallel_build` to 64). So at a raised width the evals pin the default pool and
+anything else that offloads queues behind them **before its call begins** — a wait no span records,
+because the span opens inside the offloaded function.
+
+Two kinds of work are therefore given their own pool rather than the default:
+
+| Pool | Size | Who rides it | Why it must not queue behind an eval |
+|---|---|---|---|
+| `evaluate.py::_watch_limiter` | 8 | watchdog / ASHA / train-monitor ticks | a liveness poll that queues goes blind exactly when a kill matters |
+| `novelty.py::proposal_limiter` | 4 | the three proposal lanes | a paid proposal that queues starves the board while the GPUs idle |
+
+The proposal size is **derived**: the batch lane (`orchestrator.py::_await_batch_proposal`) and the
+per-action lane (`card_reservation.py`) are the two arms of one `if` on the loop task, and
+`speculation.py::_produce_raw_card_stage` is gated by the `_spec_raw_stage_inflight` boolean — at
+most two coexist, doubled for headroom.
+
+```mermaid
+flowchart TB
+  subgraph D["anyio default pool — 40 tokens"]
+    E1["_run_eval #1<br/>holds a token for HOURS"]
+    E2["_run_eval #2 … #N"]
+    B["draft builds (parallel_build ≤ 64)"]
+  end
+  subgraph W["watch pool — 8"]
+    T["abort / reset / train / ASHA ticks"]
+  end
+  subgraph P["proposal pool — 4"]
+    P1["_consume_batch_proposal"]
+    P2["_prepare_node_idea (per-action)"]
+    P3["_prepare_raw_card_stage (speculative)"]
+  end
+  E1 -.->|"would have blocked"| P1
+  E1 -.->|"would have blocked"| T
+  P -->|"cannot be starved by an eval"| OK["board keeps producing"]
+```
+
+### The proposal sink: one helper, policy at the call sites
+
+A paid proposal runs on a worker thread, and invariant #1 makes the engine the sole writer of folded
+domain events — so `novelty.py::_capture_proposal_events` buffers a lane's audit rows into a
+contextvar and the MAIN TASK appends them. Those rows are authority-bearing for
+`speculation.py::_proposal_authority_seq`, so a worker-thread append can cost a proposal the run
+already paid for.
+
+The **mechanics** are hoisted (`_offload_under_proposal_sink`, `_publish_proposal_events`); the
+**election** is not. Publishing a prefix is a different decision in each lane, and both answers are
+deliberate:
+
+| Lane | Publishes | Why |
+|---|---|---|
+| batch (`orchestrator`) | always | a refused proposal is when the receipt matters most (`bd182357`) |
+| per-action (`card_reservation`) | always | same rule; this lane never abandons and re-makes |
+| speculative raw stage | on the branch that hands the work on | an attach refusal COMMITS the prefix (the paid call happened); a stale-fence refusal DROPS it (the proposal is being remade) |
+
+```mermaid
+flowchart LR
+  C["_offload_under_proposal_sink"] --> S["_capture_proposal_events<br/>(contextvar buffer)"]
+  S --> T["worker thread<br/>proposal pool, 4 tokens"]
+  T -->|"returns"| F["finally"]
+  T -->|"RAISES (BudgetExceeded…)"| F
+  F --> P["_publish_proposal_events<br/>THE ONLY 4-tuple unpack"]
+  P --> L[("folded log — main task")]
+  R["speculative raw stage<br/>captures WORKER-side"] -->|"ferries via<br/>SpecRawStageResult.audit_events"| POL{"branch decides"}
+  POL -->|"work handed on"| P
+  POL -->|"proposal remade"| X["dropped, deliberately"]
+```
+
+### The paid propose loop, and what bounds it
+
+A card's proposal is an agentic tool loop: the Researcher reads the repo, siblings and the board
+before emitting one Idea. It is the most expensive per-card operation in the engine and its cost has
+been measured across three runs of the same task:
+
+| run | LLM turns per card | tool calls per card | median wall | median prompt tokens/call |
+|---|---|---|---|---|
+| v4 | 28.6 | 45.7 | 5.2 min | 27 011 |
+| v11 | 93.2 | 135.6 | 11.4 min | 50 177 |
+| v12 | 107.0 | 189.0 | 33.3 min | 52 231 |
+
+Nothing bounds it. `agent_max_turns`, `agent_time_budget_s` and `agent_context_budget_chars` all
+ship at "no cap", so a proposal runs until the model emits. On v11's nineteen proposals the turn
+counts were 24 … 319 (median 62) and **two proposals were 35% of the run's entire propose budget**.
+
+Because there is no cap today, a proposal's turn count *is* where it converged — which is what makes
+that distribution trustworthy. The moment a cap exists the two become indistinguishable, so the
+**receipt ships before the cap**: `roles.RESEARCHER_OUTPUT_ATTRS.last_budget_exhausted` names which
+bound ended a propose ("turns"/"time"), `""` when the model emitted on its own terms.
+
+```mermaid
+flowchart LR
+  P["ToolUsingResearcher.propose"] -->|"on_budget= (EXPLICIT_ONLY,<br/>never via LoopOptions)"| L["drive_tool_loop"]
+  L -->|"model emits"| E["Idea — last_budget_exhausted = ''"]
+  L -->|"turn/time budget gone"| N["_note_budget → salvage emit"]
+  N --> C["last_budget_exhausted = 'turns' | 'time'"]
+  E --> F["_prepare_node_idea._link<br/>the ONE funnel every proposal crosses"]
+  C --> F
+  F -->|"non-empty"| W["operator warning:<br/>TRUNCATED, not converged"]
+```
+
+### A run that stops says why
+
+`_run_with_llm_broker` has **thirteen** `break`/`return` statements. Several route through
+`_settle_terminal_gate` or `_finish_run`, which write a reason; nothing required the others to.
+Measured over every run on this box on 2026-08-31: five carry a `pause` or a `run_finished` row and
+**three do not** — and `e5small-dr-unified-v11`, the one that died on provider 503s, has neither.
+Its last durable event is a `trust_scan`, so anyone folding its log sees a run still in flight.
+
+Trying to answer "why did it stop" from that record ruled out a crash, a budget stop, `max_nodes`,
+an operator stop, a pause and the approval exit — and then ran out of evidence.
+
+So the loop records one exit receipt on its way out (`Engine._record_run_loop_exit`), and the
+reason is **derived from the final fold** rather than set at thirteen call sites:
+
+| fold says | receipt |
+|---|---|
+| `finished` | **no row** — `run_finished` already names that exit, and it sits at the head of `QUIET_FINALIZATION_SUFFIX`, whose readers (`speculation_quality._validate_calibration_terminal`, `test_finalize_protocol`) demand the exact contiguous terminal shape a spliced row breaks |
+| `stop_requested` | `run_loop_exited: aborted` — more specific than the pause an abort also latches |
+| `paused` | `run_loop_exited: paused` |
+| `awaiting_approval` | `run_loop_exited: awaiting_approval` — resumable, and neither a pause nor a stop |
+| none of them | **`run_loop_exited: unattributed`** — the case this exists for |
+
+The receipt covers **both exit kinds**: the fall-through after the thirteen `break`s, and — via
+the same latched helper called from `Engine.run`'s `finally` — the raising exits (the
+`BudgetExceeded` hard stop, a provider/store error, cancellation), which are exactly the classes
+the v11 chase had to rule out by hand. The latch arms only after `_enter_run` returns, so a
+refused re-entry still appends nothing, and the append is contained: a receipt must never mask
+the exception already unwinding.
+
+Deriving keeps the receipt complete by construction, adds no control flow to the hottest loop, and
+cannot disagree with the state a reader reconstructs. Finer per-exit reasons are a second rung:
+name them at the exits, then extend `RUN_EXIT_REASONS` in the same change — the guard refuses a
+word the deriver cannot produce.
+
+```mermaid
+flowchart TB
+  L["_run_with_llm_broker<br/>13 break / return"] --> D["_drain_adopted_evals"]
+  X["raising exit<br/>(budget stop, crash, cancel)"] --> R
+  D --> R["_record_run_loop_exit<br/>fold(store.read_all())"]
+  R --> Q{"which flag?"}
+  Q -->|"finished"| F["no row — run_finished<br/>is that receipt"]
+  Q -->|stop_requested| A2["run_loop_exited: aborted"]
+  Q -->|paused| P["run_loop_exited: paused"]
+  Q -->|awaiting_approval| W["run_loop_exited: awaiting_approval"]
+  Q -->|"none — v11's shape"| U["run_loop_exited: unattributed"]
+  F --> FIN["finalize_run"]
+  A2 --> FIN
+  P --> FIN
+  W --> FIN
+  U --> FIN
+```
+
+### What a card actually costs to propose
+
+A card is not proposed once. Measured on `runs/e5small-dr-unified-v12`, node 2's `card-2` took
+**five** propose phases:
+
+| phase | seconds | lane | outcome |
+|---|---|---|---|
+| seq 1997 | 604.8 | speculative | abandoned |
+| seq 2074 | 317.7 | speculative | abandoned |
+| seq 2124 | 139.8 | speculative | abandoned |
+| seq 2202 | 524.5 | speculative | abandoned |
+| seq 2303 | 1092.8 | create | `card_added card-2` |
+| **total** | **≈2679 s = 44.6 min** | | for ONE card |
+
+The four abandoned ones are 26.5 of those 44.6 minutes, and until 2026-08-31 they left **no trace
+of any kind** — the run has zero `novelty_rejected` / `card_auto_dropped` rows and its console log
+had zero `refused` lines.
+
+**The receipt drop is deliberate and stays.** `_consume_prepared_raw_stage` republishes a proposal's
+audit prefix on an ATTACH refusal only: on a stale-fence refusal "the whole proposal is being
+abandoned and re-made, so dropping them keeps the log honest" — republishing novelty rows for work
+about to be repeated would double-count it. What was missing is the ACCOUNTING, which carries no
+novelty rows and cannot double-count: one counted warning per abandonment, with the reason from
+the path that knows — the staging fence's own `CARD_STAGE_REFUSALS` slug when the stager refused,
+`producer_failed`/`proposal_refused` (`RAW_STAGE_PRE_STAGING_REASONS`) when the paid propose never
+reached the stager, and no warning at all for the attach handoff, which is handed to the serial
+boundary and built rather than abandoned.
+
+The seconds are deliberately not repeated in that line — they are already on the phase's own
+`phase_progress` row, and one number in two places is how they drift.
+
+```mermaid
+flowchart TB
+  P["speculative propose<br/>(paid, minutes)"] --> S["_stage_prepared_card"]
+  S -->|"card_id"| C["card_added — the bill ends here"]
+  S -->|"None: attach refused"| A["audit prefix PUBLISHED<br/>the work is handed to the serial spine"]
+  S -->|"None: a fence moved"| D["prefix DROPPED — deliberate,<br/>the proposal is being re-made"]
+  D --> W["counted warning: which slug, how many<br/>(added 2026-08-31 — this was silence)"]
+  W --> P
+```
+
+### An exporter that dies must not take its own alarm with it
+
+MEASURED on `runs/e5small-dr-unified-v12` (2026-08-31):
+
+| file | mtime |
+|---|---|
+| `events.jsonl` | 21:25 — live |
+| `.llm-usage-outbox/` | 21:25 — live |
+| `nodes/` | 21:24 — live |
+| `.spans-append.jsonl` | **18:20 — frozen** |
+| `spans.jsonl` | **18:20 — frozen** |
+
+Three hours and ~1760 events — a whole node's training, a build, three deep-research passes —
+with no span record and **not one console line**. A `py-spy dump` of the live pid showed seven
+threads and no exporter among them.
+
+`core/tracing.py` already had the vocabulary to explain it: six drop reasons, per-reason counters,
+and a loss receipt whose comment promises "First loss is reported promptly". But
+`_record_drop_locked` only increments counters, and the receipt is written by the worker **through
+`self._writer._export_line`, into the file that stopped**. `_LOG` was never involved:
+
+> the exporter stops → the receipt that would say so is written by the exporter → silence
+
+So the loss now goes to `_LOG.warning` **before** the durable attempt — the attempt is what may
+fail — naming the per-reason counts. The logger is independent of the writer, so the line survives
+whatever stopped it.
+
+Two hypotheses were refuted on the way, both by reading rather than guessing: the 60-second idle
+worker is self-healing (`export()` calls `_start_worker_locked()` on every enqueue, including the
+`queue_full` and `queue_bytes` branches), and nothing in the tree calls `close()`/`shutdown()` on
+the exporter outside `Engine.run`'s `finally`. The trigger is still open.
+
+```mermaid
+flowchart LR
+  D["_record_drop_locked<br/>counters only"] --> W{"worker alive?"}
+  W -->|yes| L["_LOG.warning — reasons + counts<br/>(independent of the writer)"]
+  L --> R["durable receipt via self._writer"]
+  R -->|"writes"| F[("spans.jsonl")]
+  W -->|"no — the case v12 hit"| X["nothing, for three hours"]
+  L -.->|"this is the line that<br/>now breaks that silence"| X
+```
+
 ## Where each piece lives in the code
 
 | Concept | Module |

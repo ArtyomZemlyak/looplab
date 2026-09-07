@@ -36,6 +36,7 @@ from looplab.core.fitness import finite_or_absent_metric as _is_finite_metric
 from looplab.core.text import fingerprint_similarity
 from looplab.core.receipts import ReceiptRows, bounded_receipt_count
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
+from looplab.core.run_identity import row_belongs_to_run, run_ref
 from looplab.core.jsonlio import (read_jsonl_lenient_with_health,
                                   replace_jsonl_rows_atomic_preserving_quarantine)
 
@@ -313,7 +314,14 @@ def _dedup_valid_capsules(capsules) -> _CapsuleRows:
             invalid_capsules += 1
             continue
         valid_rows += 1
-        rid = capsule["run_id"]
+        # THE READER'S DUPLICATE RULE IS THE WRITER'S IDENTITY RULE. The store replaces by `run_uid`
+        # and this de-duplicated by run NAME, so two incarnations of one name counted as a
+        # DUPLICATE: the portfolio then reported a single run and `source_complete: False`, which
+        # withholds the profit tendencies, forbids the steward's splits and purges, and prints
+        # PARTIAL on every surface — from a directory name. A capsule that records no incarnation
+        # still groups under its name (`legacy:<name>`), which is the most that can be said about it
+        # and is deliberately not merged with a uid-bearing capsule of the same name.
+        rid = run_ref(capsule)
         prev = by_run.get(rid)
         if prev is None or json.dumps(capsule, sort_keys=True) > json.dumps(prev, sort_keys=True):
             by_run[rid] = capsule
@@ -543,11 +551,10 @@ class ConceptCapsuleStore:
             self.path, loads=json.loads, dicts_only=True)
         self.capsules = [c for c in rows if self._valid_capsule(c)]   # drop poisoned rows, keep the rest
         invalid_capsules = int(read_health["invalid_shape_lines"]) + len(rows) - len(self.capsules)
-        duplicate_runs = len(self.capsules) - len({
-            (("uid", c["run_uid"]) if isinstance(c.get("run_uid"), str) and c.get("run_uid")
-             else ("legacy", c["run_id"]))
-            for c in self.capsules
-        })
+        # Same identity rule as the reader and the upsert below, through the one definition —
+        # this was a third inline spelling of it, and the readers that did NOT have it are what
+        # made two incarnations of one name read as a duplicate.
+        duplicate_runs = len(self.capsules) - len({run_ref(c) for c in self.capsules})
         malformed = int(read_health["malformed_lines"])
         quarantined = malformed + invalid_capsules + duplicate_runs
         self.source_health = {
@@ -579,12 +586,24 @@ class ConceptCapsuleStore:
                 # matching an opaque key is not permission to delete a future/invalid schema.
                 # Supersede only a row this reader fully understands; keep an unknown same-run record for
                 # explicit repair/migration alongside the new current-schema capsule.
+                # SHARED WITH THE CASCADE, AND WIDER THAN THE PREDICATE IT REPLACED IN ONE
+                # DIRECTION. The hand-written rule here was
+                # `(ruid and row.run_uid == ruid) or (not ruid and not row.run_uid and ...)`, so a
+                # uid-BEARING caller never matched a uid-LESS row; `row_belongs_to_run` falls back
+                # to the directory NAME in that case. Its own docstring names the cost — two
+                # checkouts sharing one memory dir, both holding a run called `demo` — and accepts
+                # it, because the alternative makes every row written before `run_uid` existed
+                # permanently unattributable.
+                #
+                # Accepted HERE too, and the argument is that the same widening already governs the
+                # IRREVERSIBLE path: `serve/memory_cascade.py`'s purge deletes on this predicate.
+                # A name collision that would supersede the wrong capsule would already have
+                # deleted it. What this must not become is a second, quieter rule — a run's own
+                # older capsule going unsuperseded because two readers disagree about which rows are
+                # its own is exactly the drift the unification removed.
                 replace_if=lambda row: (
-                    self._valid_capsule(row) and (
-                        (bool(ruid) and str(row.get("run_uid") or "") == ruid)
-                        or (not ruid and not row.get("run_uid")
-                            and str(row.get("run_id") or "") == rid)
-                    )),
+                    self._valid_capsule(row)
+                    and row_belongs_to_run(row, run_uid=ruid, run_id=rid)),
                 loads=json.loads, dumps=json.dumps,
             )
             self._reload()
@@ -664,7 +683,11 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
 
     per_concept: dict[str, dict] = {}
     for c in valid_capsules:
-        rid = str(c.get("run_id") or "")
+        # "Key upsert/exclusion by a persisted globally unique run-incarnation UID; retain run_id
+        # only for display" — this module's own rule, stated at the upsert and not applied here.
+        # Keyed on the NAME, two incarnations of one name overwrote each other in `_runs` and the
+        # concept lost a run.
+        ref, rid = run_ref(c), str(c.get("run_id") or "")
         oc = c.get("concept_outcomes") or {}
         outcome_meta = _capsule_completeness(
             c, "concept_outcomes", len(c.get("concept_outcomes") or {}))
@@ -698,7 +721,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
             total = sum(run_signs)
             sign = None if not run_signs else (1 if total > 0 else -1 if total < 0 else 0)
             e = per_concept.setdefault(key, {"concept": key, "_runs": {}})
-            e["_runs"][rid] = {
+            e["_runs"][ref] = {
                 "run_id": rid,
                 "task_id": str(c.get("task_id") or ""),
                 "metric": metric,

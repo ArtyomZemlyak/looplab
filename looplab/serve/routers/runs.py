@@ -35,15 +35,17 @@ from looplab.core.run_reset import (
     load_run_reset_marker)
 from looplab.serve.http import if_none_match, json_object, json_object_bytes, request_body_contract
 from looplab.events.eventstore import (
-    EventStore, EventStoreConcurrencyError, EventStoreLockError, JsonlRecordInvalid,
+    EventStore, EventStoreLockError, JsonlRecordInvalid,
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
 from looplab.events.replay import FoldCursor, fold
+from looplab.events.trust_gate import (
+    GATE_WRITE_APPENDED, GATE_WRITE_CONTENDED, apply_trust_gate,
+)
 from looplab.events.traceview import (
     TRACE_NODE_EPISODE_CAP, TRACE_PROJECTION_SCHEMA, TraceEpisodeCursorUnknown,
     trace_file_revision, trace_projection_json_bytes, unavailable_projection)
 from looplab.events.types import (
     EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED, EV_CONCEPT_LENS_STARTED,
-    EV_TRUST_GATE_CHANGED,
 )
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
@@ -236,6 +238,30 @@ class RunSourceIntegrity(BaseModel):
     unreadable: Optional[bool] = None
 
 
+class ServerCodeFreshness(BaseModel):
+    """Whether the PROCESS that built this payload is still running the code on disk.
+
+    A `looplab ui` server pins its modules at import, so a fold fix merged afterwards is absent from
+    every answer it gives — and absent SILENTLY, since a stale server returns 200 with a smaller
+    truth. Measured on 2026-09-03: a 9-day-old process published `parent_card_id` on 0 of 34 cards
+    where the tree's own projection published 17, and the question ladder drew twelve unattached
+    questions from it. `serve/code_freshness.py` carries the full case.
+
+    Required, not optional: "this server is current" and "this server is too old to have the field"
+    must not arrive as the same absence — the exact rule `RunSourceIntegrity` above already follows.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stale: bool
+    changed_count: int = Field(ge=0)
+    changed: list[str]
+    changed_truncated: bool
+    files_at_boot: int = Field(ge=0)
+    files_now: int = Field(ge=0)
+    complete: bool
+
+
 class PublicRunStateResponse(BaseModel):
     """Stable owner-state envelope; ``state`` keeps additive legacy fields discoverable at runtime."""
 
@@ -246,6 +272,7 @@ class PublicRunStateResponse(BaseModel):
     max_seq: int = Field(ge=-1)
     event_count: int = Field(ge=0)
     source_integrity: RunSourceIntegrity
+    server_code: ServerCodeFreshness
     generation: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -1804,23 +1831,37 @@ def build_router(srv) -> APIRouter:
             terminal, core, lens_pack, request_id)
 
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
+        """One half of the historical-detail CAS: the generation, or a 409 saying it moved.
+
+        NO COMMAND SEQUENCER (2026-09-03). This took `srv.commands.sequence(rd)` — the EXCLUSIVE
+        cross-process per-run lock, which fails CLOSED with a 503 on its acquire timeout — to serve a
+        GET, so historical node detail was refused whenever a writer held the run, i.e. most of the
+        time on a live one.
+
+        The lock was never what made this correct. A read fence is made correct by a CAS ACROSS the
+        read, and `node_detail` already calls this before AND after its fold — the comment there says
+        so in as many words ("the expensive fold runs without the exclusive command sequencer") — so
+        the first call holding the lock proved nothing the second call did not. Holding it across the
+        fold would be a different and much worse design: the fold is the expensive part.
+
+        `commands.generation_fence` is the shared read-side primitive, so this and the trace family's
+        `_begin_trace_read`/`_finish_trace_read` cannot drift on what a read fence is.
+        """
         if expected is None:
             raise HTTPException(400, {
                 "code": "historical_generation_required",
                 "message": "Historical node detail requires the exact run generation.",
                 "remediation": "Use the generation returned by the historical /state response.",
             })
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            current = srv.commands.run_generation(rd)
-            if expected != current:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected,
-                    "current_generation": current or None,
-                    "message": "The run was reset or replaced before historical detail was read.",
-                    "remediation": "Open the current generation or reload the exact historical view.",
-                })
+        _rd, current = srv.commands.generation_fence(rd)
+        if expected != current:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected,
+                "current_generation": current or None,
+                "message": "The run was reset or replaced before historical detail was read.",
+                "remediation": "Open the current generation or reload the exact historical view.",
+            })
         return current
 
     @router.get("/api/runs/{run_id}/events")
@@ -3531,26 +3572,17 @@ def build_router(srv) -> APIRouter:
         return effective
 
     def _repair_trust_gate_event(rd: Path, requested: str) -> bool:
-        """Make snapshot/event dual-write retryable without appending duplicate gate events."""
-        store = EventStore(rd / "events.jsonl")
-        for _attempt in range(4):
-            events = store.read_all()
-            if fold(events).trust_gate == requested:
-                return False
-            expected = events[-1].seq if events else -1
-            try:
-                store.append(
-                    EV_TRUST_GATE_CHANGED,
-                    {"trust_gate": requested, "source": "config_edit"},
-                    expected_last_seq=expected,
-                    require_lock=True,
-                )
-                return True
-            except EventStoreConcurrencyError:
-                # Another writer advanced the log. Refold under a fresh CAS: it may already have
-                # applied this exact gate, in which case the retry becomes a no-op.
-                continue
-        raise HTTPException(409, "the run changed while trust_gate was being saved; retry the edit")
+        """Make snapshot/event dual-write retryable without appending duplicate gate events.
+
+        The idempotence/CAS/lock policy is `events/trust_gate.py::apply_trust_gate`, shared with the
+        assistant's settings tool, which had drifted on all three. Only the REFUSAL stays here: a
+        409 in the config editor's own words, which the shared writer must not spell for it.
+        """
+        outcome = apply_trust_gate(rd, requested, source="config_edit")
+        if outcome == GATE_WRITE_CONTENDED:
+            raise HTTPException(
+                409, "the run changed while trust_gate was being saved; retry the edit")
+        return outcome == GATE_WRITE_APPENDED
 
     def _put_run_config_locked(
             rd: Path, snap: Path, incoming: dict, expected_revision: Optional[str],

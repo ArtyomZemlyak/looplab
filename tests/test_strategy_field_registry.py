@@ -52,7 +52,11 @@ NOT_LLM_PROPOSABLE = {
     "source",          # provenance the code stamps ("rule"|"llm"|"operator"|"config"), not a knob
     "policy_params",   # free-form dict; the schema exposes the named knobs instead
     "card_scoring",    # atomic {stance, weights} block assembled from validated pieces
-    "developer",       # the backend factory key — an operator/config decision, not a model one
+    # `developer` LEFT this set on 2026-09-03. It was exempted as "an operator/config decision, not
+    # a model one", and the consequence was that the whole switch machinery below it — the
+    # `validate_strategy` whitelist, `_prepare_strategy_developer`'s four refusal arms, the
+    # `developer_application` receipt — had no live producer at either end: `extra="forbid"` made a
+    # model naming one lose its ENTIRE decision, and `/control`'s validator refused the key too.
     "operators",       # assembled from the flat ablate_every / merge_mode / complexity_cue fields
     "max_parallel",    # legacy alias of eval_parallel, accepted on input but never proposed
     "parallel_build",  # legacy alias of llm_parallel, same

@@ -327,12 +327,41 @@ def test_the_default_kind_is_still_stdout_json():
 
 @pytest.mark.parametrize("kind", sorted(METRIC_READERS))
 def test_every_registered_reader_accepts_the_uniform_call_shape(kind):
-    """The table only works if every entry takes the same five arguments; a reader with a different
-    signature would raise TypeError on the FIRST real eval that used it, not at import."""
+    """The table only works if every entry takes the same arguments; a reader with a different
+    signature would raise TypeError on the FIRST real eval that used it, not at import.
+
+    `env` joined the shape on 2026-09-02 and only ONE reader uses it — `_read_adapter`, which EXECs
+    a subprocess and used to pass `env=None`, so the one reader that runs candidate-lineage code ran
+    OUTSIDE the eval's own environment: no fence marker, no GPU pin, and none of the operator's
+    declared `EvalSpec.env`. It is on every reader rather than on that one because the dispatch is
+    a single call shape; a per-reader exception would be a second registry answering "does this one
+    take an env", which is exactly the shape `READER_PATH_KEYS` exists as a warning about.
+    """
     import inspect
 
     assert list(inspect.signature(METRIC_READERS[kind]).parameters) == [
-        "stdout", "workdir", "spec", "wrap", "since"]
+        "stdout", "workdir", "spec", "wrap", "since", "env"]
+
+
+def test_only_the_reader_that_EXECS_actually_reads_the_env():
+    """`env` is on every signature and used by one. A second reader consulting it would be a new
+    way for a metric read to depend on the environment, which is worth noticing.
+
+    AST, so a mention in a comment or docstring does not count as a read.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    users = set()
+    for kind, reader in METRIC_READERS.items():
+        tree = ast.parse(textwrap.dedent(inspect.getsource(reader)))
+        body = [node for node in ast.walk(tree)
+                if isinstance(node, ast.Name) and node.id == "env"
+                and isinstance(node.ctx, ast.Load)]
+        if body:
+            users.add(kind)
+    assert users == {"adapter"}, f"the env is read by {sorted(users)}"
 
 
 def test_stdout_readers_never_touch_the_filesystem(tmp_path):

@@ -107,7 +107,23 @@ def test_index_mentions_every_numbered_document():
     #   content from this branch's 50/51 — the SEVENTH collision, two blocks this time.
     #   58 -> 59 (2026-09-06): doc 60, the SOTA plan derived from the benches. Document, index row,
     #   nav row and this count in one change.
-    assert len(numbered) == 59, "the derived numbered-document inventory changed"
+    #   49 -> 50 (2026-09-02): the whole-tree architecture review (doc 50). No collision — the number
+    #   was claimed by checking the glob AND the index table together.
+    #   50 -> 51 (2026-09-03): the second external-works synergy pass (doc 51). No collision — the
+    #   number was claimed by checking the glob AND the index table together, and no sibling
+    #   worktree held an unmerged `51-` at the time.
+    #   59 + 2 -> 61 (2026-09-06), at the MERGE with master, and this is the SEVENTH
+    #   collision — the first where two BLOCKS met rather than two documents. Master held
+    #   `50-architecture-review-2026-09-02` and `51-external-works-synergy-2026-09-03`;
+    #   this branch held `50-benchmark-landscape`, `51-algotune-arm-operational-notes` and
+    #   `52-bench-box-jhub-l40s`. Resolved as the SIXTH was: master's numbers stay (they
+    #   are the published line, and the two are cross-referenced from each other and from
+    #   the index), and the LATER-merged block is renumbered — 50/51/52 -> 61/62/63,
+    #   contiguous so the trio that cross-references itself stays together, with every
+    #   link, every prose `doc NN`, the index's first column, the mkdocs nav and
+    #   `benchmarks/algotune/README.md` moved in this same change. 54 remains the gap it
+    #   already was. Master's two documents are the +2; nothing was dropped.
+    assert len(numbered) == 61, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
@@ -128,9 +144,14 @@ def test_claude_md_does_not_grow():
     measurement is worth a doc and a one-line pointer. If you are about to raise it, ask which of
     the two you have — and if it is the first, raise it and say in the note below what bought it.
     """
+    #   247,023 -> 252,338 at the 2026-09-06 MERGE with master, and this is the one raise the
+    #   docstring above says to make deliberately: master's own additions to the `core/` and
+    #   `events/` rows (`run_identity.py`, `trust_gate.py`) plus its 99 commits' worth of rules,
+    #   meeting this branch's. Both sides' bytes are rules an agent must not rediscover, which is
+    #   the first of the two cases named above; not one byte of measurement was added by the merge.
     size = (ROOT / "CLAUDE.md").stat().st_size
-    assert size <= 247_023, (
-        f"CLAUDE.md grew to {size:,} bytes (the ratchet is 247,023). Every agent turn in this "
+    assert size <= 252_338, (
+        f"CLAUDE.md grew to {size:,} bytes (the ratchet is 252,338). Every agent turn in this "
         "repository pays for it. Move the measurement into docs/ and leave a pointer, or raise "
         "the ratchet here and say what bought the bytes.")
 

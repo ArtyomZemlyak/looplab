@@ -59,8 +59,8 @@ const record = value => value !== null && typeof value === 'object' && !Array.is
 const list = value => Array.isArray(value) ? value : []
 const text = value => typeof value === 'string' && value.trim() ? value.trim() : null
 
-// `engine/lesson_hygiene.py:51-53` — `" ".join(str(s).split()).lower()[:160]`. This IS the store's own
-// grouping identity (`lesson_hygiene.py:111` keys on it), so matching history against the live store
+// `engine/lesson_hygiene.py::normalize_statement` — `" ".join(str(s).split()).lower()[:160]`. This IS
+// the store's own grouping identity (its dedup passes key on it), so matching history against the store
 // on the same normalization is matching on the store's terms rather than inventing a second rule.
 // A merged row whose statement an LLM rewrote will not match, and that is the correct outcome: it is
 // no longer the sentence this experiment produced.

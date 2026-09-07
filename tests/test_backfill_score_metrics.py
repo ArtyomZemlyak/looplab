@@ -11,7 +11,8 @@ from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.events.types import EV_SCORE_METRICS_BACKFILLED
 from looplab.maintenance.backfill_score_metrics import (
-    ALREADY_RECORDED, NO_SCORE_LOG, apply_run, parse_score_log, plan_run, readable_horizon,
+    ALREADY_RECORDED, NO_SCORE_LOG, PREVIOUSLY_ANSWERED, apply_run, parse_score_log, plan_run,
+    readable_horizon, summarize, writable_rows,
 )
 
 _SUITE = "\n".join(
@@ -88,9 +89,14 @@ def test_no_direction_is_ever_written_so_the_axis_stays_unranked(tmp_path):
 
 def test_a_live_record_is_never_overwritten_and_a_second_pass_is_a_no_op(tmp_path):
     """The whole safety of the mechanism, in both directions. A measurement taken while the run was
-    happening outranks a reconstruction read from a log afterwards — and because the fold declines
-    on exactly the condition the planner skips on, re-running is idempotent BY CONSTRUCTION rather
-    than by a check that could drift out of step with it."""
+    happening outranks a reconstruction read from a log afterwards — and re-running writes NOTHING,
+    in the log as well as in the fold.
+
+    THE SECOND HALF WAS FALSE UNTIL 2026-09-02 and this test used to pin it that way: it asserted
+    `apply_run(...) == 1` with the comment "the row is still written... and changes nothing". The
+    fold did decline it; the append-only log grew by one row per considered node on every pass, and
+    the module docstring claimed the fold's idempotence bought both.
+    """
     d = _run(tmp_path, extras={"live_metric": 1.5})
     rows = plan_run(d)
     assert rows[0]["unrecoverable"] == ALREADY_RECORDED and not rows[0]["extra_metrics"]
@@ -102,12 +108,72 @@ def test_a_live_record_is_never_overwritten_and_a_second_pass_is_a_no_op(tmp_pat
 
     # Second pass over a run that WAS backfilled: the planner now sees the folded values and skips.
     d2 = _run(tmp_path / "second")
-    apply_run(d2, plan_run(d2))
+    assert apply_run(d2, plan_run(d2)) == 1
+    before = len(EventStore(str(d2 / "events.jsonl")).read_all())
     again = plan_run(d2)
     assert again[0]["unrecoverable"] == ALREADY_RECORDED
-    assert apply_run(d2, again) == 1, "the row is still written..."
+    assert apply_run(d2, again) == 0, "a row whose only content is 'a previous pass ran' is noise"
+    assert len(EventStore(str(d2 / "events.jsonl")).read_all()) == before, "the log did not grow"
     node2 = fold(EventStore(str(d2 / "events.jsonl")).read_all()).nodes[0]
-    assert node2.extra_metrics["nDCG_at_100"] == 0.46, "...and changes nothing"
+    assert node2.extra_metrics["nDCG_at_100"] == 0.46, "...and the recovered values are intact"
+
+
+def test_an_unrecoverable_node_is_recorded_ONCE(tmp_path):
+    """"The score log is gone" is a finding and belongs in the log — one time.
+
+    It is the harder half of the idempotence, because such a row is FOLD-IGNORED: nothing about the
+    node changes, so a planner consulting only `RunState` re-plans it forever. That is why
+    `_already_answered` re-reads the log rather than the fold.
+
+    MUTATION: drop the `_already_answered` consult -> the row is re-appended on every pass, which is
+    what a maintenance command run nightly does to an append-only authoritative log.
+    """
+    d = _run(tmp_path)
+    (d / "nodes" / "node_0" / "score.log").unlink()
+    assert plan_run(d)[0]["unrecoverable"] == NO_SCORE_LOG
+    assert apply_run(d, plan_run(d)) == 1, "the finding is worth recording"
+
+    before = len(EventStore(str(d / "events.jsonl")).read_all())
+    again = plan_run(d)
+    assert again[0]["unrecoverable"] == PREVIOUSLY_ANSWERED
+    assert apply_run(d, again) == 0
+    assert len(EventStore(str(d / "events.jsonl")).read_all()) == before
+
+
+def test_a_reset_node_is_planned_again_because_it_is_a_new_lifecycle(tmp_path):
+    """`_already_answered` is keyed by (node, generation), not by node.
+
+    MUTATION: key it by node alone -> a node whose eval was reset and re-scored can never be
+    backfilled again, because an answer about the generation before the reset suppresses it.
+    """
+    d = _run(tmp_path)
+    (d / "nodes" / "node_0" / "score.log").unlink()
+    apply_run(d, plan_run(d))
+    assert plan_run(d)[0]["unrecoverable"] == PREVIOUSLY_ANSWERED
+
+    store = EventStore(str(d / "events.jsonl"))
+    store.append("node_reset", {"node_id": 0, "stage": "eval"})
+    # The terminal must name the generation it belongs to — `_attempt_matches` drops one that does
+    # not, which is the fold refusing to apply a dead attempt's result to a live lifecycle.
+    store.append("node_evaluated",
+                 {"node_id": 0, "generation": 1, "metric": 0.8, "status": "ok"})
+    node = fold(store.read_all()).nodes[0]
+    assert node.attempt == 1 and node.metric == 0.8, "the reset opened a new generation"
+    assert plan_run(d)[0]["unrecoverable"] == NO_SCORE_LOG, "and it is looked at again"
+
+
+def test_the_dry_run_promises_the_number_the_apply_writes(tmp_path):
+    """`considered` was that number and it was one per node forever. A dry run that over-promises
+    is how an operator learns the command is noisy only after running it."""
+    d = _run(tmp_path)
+    rows = plan_run(d)
+    assert summarize(rows)["writable"] == 1
+    assert apply_run(d, rows) == 1
+
+    rows = plan_run(d)
+    summary = summarize(rows)
+    assert summary["considered"] == 1 and summary["writable"] == 0
+    assert apply_run(d, rows) == 0
 
 
 def test_a_node_with_no_score_log_gets_a_row_that_says_so(tmp_path):

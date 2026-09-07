@@ -40,9 +40,28 @@ _RECEIPT_NAME_RE = re.compile(
     r"[0-9a-f]{4}-[0-9a-f]{12})\.json$")
 _RECEIPT_KEYS = frozenset({
     "version", "id", "run_id", "run_key", "expected_generation", "status", "phase",
-    "archive_stamp", "artifacts", "task_stage", "task_digest", "effective_config",
+    "artifacts", "task_stage", "task_digest", "effective_config",
     "new_generation", "created_at", "updated_at",
 })
+# The ONE key a receipt MAY carry beyond the required set, and it is a registry rather than a
+# loosening: an unknown extra key stays malformed (`test_an_extra_key_is_malformed_rather_than_
+# ignored`), because a receipt is a durable contract and a key nothing reads is a claim nothing
+# checks.
+#
+# `archive_suffix` names this operation's archives after its own `operation_id` instead of a
+# millisecond stamp, which is what lets the rename take the no-replace fallback on a filesystem that
+# cannot provide the kernel flag — see `reset_route._durable_archive_move` for the measurement and
+# for why the stamp could not have it. It is OPTIONAL rather than required, and NOT a receipt
+# version bump, because the version is checked exactly and has no multi-version reader: bumping it
+# would make every in-flight v1 receipt unreadable and wedge exactly the runs this change exists to
+# unwedge. A receipt without it owns stamp-named files and keeps its stamp-derived naming.
+#
+# `archive_stamp` moved OUT of the required set for the same reason and in the same direction: a
+# receipt written now carries the suffix and no stamp, and one written before carries the stamp
+# and no suffix. Neither is optional in the sense of 'may be absent' — `_valid_artifacts` refuses a
+# receipt from which `_archive_suffix_of` derives nothing, so EXACTLY ONE of the two is required,
+# and that rule lives where the names are actually checked rather than in the key set.
+_OPTIONAL_RECEIPT_KEYS = frozenset({"archive_suffix", "archive_stamp"})
 _STATUS_FOR_PHASE = {
     "prepared": "pending",
     "archiving": "pending",
@@ -67,6 +86,9 @@ _PHASE_TRANSITIONS = {
 }
 _IMMUTABLE_RECEIPT_FIELDS = frozenset({
     "version", "id", "run_id", "run_key", "expected_generation", "archive_stamp",
+    # Immutable for the same reason `archive_stamp` is: it names the files this operation already
+    # moved, so a change to it mid-operation would orphan them under a name nothing looks for.
+    "archive_suffix",
     "artifacts", "task_stage", "task_digest", "effective_config", "created_at",
 })
 
@@ -108,8 +130,24 @@ def validate_reset_binding(
     return expected_path
 
 
-def _valid_artifacts(value: Any, archive_stamp: Any) -> bool:
-    if (type(archive_stamp) is not int or archive_stamp <= 0
+def _archive_suffix_of(value: dict) -> Any:
+    """The suffix THIS receipt's archive names are built from, or None if it is not canonical.
+
+    Two spellings and the older one is not cruft: a receipt prepared before archives carried their
+    operation id still owns `<name>.reset-<ms stamp>` files on disk, and such a run must stay
+    resumable. `archive_suffix` wins where present; `archive_stamp` is what a receipt from before it
+    carries. `reset_route` derives the same two, and both readers must agree or a receipt would name
+    files the validator does not expect.
+    """
+    suffix = value.get("archive_suffix")
+    if isinstance(suffix, str) and suffix:
+        return suffix if suffix == f"reset-{value.get('id')}" else None
+    stamp = value.get("archive_stamp")
+    return f"reset-{stamp}" if type(stamp) is int and stamp > 0 else None
+
+
+def _valid_artifacts(value: Any, archive_suffix: Any) -> bool:
+    if (not isinstance(archive_suffix, str) or not archive_suffix
             or not isinstance(value, list)
             or len(value) != len(RESET_ARTIFACT_NAMES)):
         return False
@@ -118,14 +156,15 @@ def _valid_artifacts(value: Any, archive_stamp: Any) -> bool:
                 or set(row) != {"source", "archive", "existed"}
                 or type(row.get("existed")) is not bool
                 or row.get("source") != source
-                or row.get("archive") != f"{source}.reset-{archive_stamp}"):
+                or row.get("archive") != f"{source}.{archive_suffix}"):
             return False
     return True
 
 
 def _validate_receipt(value: Any, *, path: Path) -> dict[str, Any]:
     if (not isinstance(value, dict)
-            or set(value) != _RECEIPT_KEYS
+            or not isinstance(value, dict)
+            or set(value) - _OPTIONAL_RECEIPT_KEYS != _RECEIPT_KEYS
             or value.get("version") != RESET_RECEIPT_VERSION
             or not isinstance(value.get("id"), str)
             or RUN_RESET_OPERATION_RE.fullmatch(value["id"]) is None
@@ -139,7 +178,7 @@ def _validate_receipt(value: Any, *, path: Path) -> dict[str, Any]:
             or value.get("status") not in RESET_STATUSES
             or value.get("phase") not in RESET_PHASES
             or _STATUS_FOR_PHASE.get(value.get("phase")) != value.get("status")
-            or not _valid_artifacts(value.get("artifacts"), value.get("archive_stamp"))
+            or not _valid_artifacts(value.get("artifacts"), _archive_suffix_of(value))
             or not isinstance(value.get("task_stage"), str)
             or Path(value["task_stage"]).name != value["task_stage"]
             or not value["task_stage"].startswith(f".looplab-reset-task-{value['id']}.")

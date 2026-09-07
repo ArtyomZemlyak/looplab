@@ -220,14 +220,32 @@ site that proves it is open.
    `readmodel_is_current` before trusting a row.
 5. **The `agentless` Developer is DECLINED on our own corpus; what stays open is the Strategist's
    ability to ask for a backend at all (P2, S).**
-   OPEN[strategist-developer-field] the LLM Strategist cannot propose a `developer` — the field is
-   absent from `_StrategyOut` and `_normalize_set_strategy` rejects one, so the switch machinery
-   below it has no live producer. proof:absent:"developer"@looplab/serve/control_validation.py
+   **[CLOSED 2026-09-03 — both producers shipped, and the invisible drop with them.]** Everything
+   BELOW the switch already existed: `validate_strategy` had whitelisted `developer` all along,
+   `_prepare_strategy_developer` has four refusal arms and `developer_application` is a durable
+   receipt shape. Nothing could reach any of it. `_StrategyOut` declares `extra="forbid"`, so a model
+   naming a backend lost its ENTIRE decision — policy, widths, rationale — and
+   `_normalize_set_strategy`'s closed key set answered an operator's `developer` with a 400.
 
-   The proof is the OPERATOR half, and it is the quoted ALLOW-LIST key rather than the bare word:
-   `_normalize_set_strategy`'s closed key set is what a settable field must join, so the quoted key
-   appearing there is what shipping looks like and nothing else writes it. The bare word was the
-   first spelling and it FALSELY fired on 2026-08-19 — an unrelated comment naming
+   The two ends REFUSE DIFFERENTLY, and that asymmetry is `core/appconfig.py`'s: the operator is
+   present at the HTTP boundary and can fix a typo, so an unknown name is a 400 naming
+   `developer_switch_names()` (the one home, so the operator and the model cannot be told different
+   things are switchable); the model is not present, and a hallucinated name must not take a decision
+   or a run down, so `validate_strategy` still drops.
+
+   What the drop now also does is SAY SO — the defect that comment already described and that adding
+   a producer made reachable. A refused name rides in its own `developer_refused` key (never in
+   `developer`, which would be the very claim it refuses) and `_prepare_strategy_developer` lifts it
+   into the SAME `developer_application` receipt the factory refusal uses, under `reason_code:
+   "unknown_backend"`. Before, the decision kept its rationale ("switch developer to agentless") with
+   no `developer` and no receipt of any kind: a history that read as a switch that happened.
+   `tests/test_strategist_developer_switch.py` drives all of it; `test_strategy_field_registry.py`
+   caught the two halves this change had to move — `_assemble_strategy` must copy the field, and
+   `developer` had to leave `NOT_LLM_PROPOSABLE`.
+
+   The old proof was the OPERATOR half, as the quoted ALLOW-LIST key rather than the bare word:
+   `_normalize_set_strategy`'s closed key set is what a settable field must join. The bare word was
+   the first spelling and it FALSELY fired on 2026-08-19 — an unrelated comment naming
    `_finalize_developer_footprint` satisfied it within the hour. That is the substring-pin failure
    mode this repo already tracks under the slug `review-guard-substring-pin`, reaching the index
    itself: a proof whose literal is a common word is satisfiable by PROSE, so an `absent:` proof
@@ -2918,12 +2936,18 @@ memory-orphans`. Both CLIs report before they write and neither runs automatical
    gone but whose *row* survives for other runs. `memory-orphans` goes back through
    `purge_attributable_memory` once per contributing run so every tier predicate still applies.
 
-**STILL OPEN.** ⬜ The leak's *source* is untouched: `save_deletion_identity` still runs before the
-  OPEN[deletion-identity-leaked-before-refusal] proof:present:save_deletion_identity@looplab/serve/routers/org.py
-transaction can refuse, so a refused deletion still parks a sidecar and the reaper only collects them
-afterwards. Writing it after the fence is taken would end the leak rather than sweep it, but the
-sidecar exists precisely to survive a crash *between* those points, so the honest fix is to write it
-under the fence and not before — a change to the deletion transaction's ordering, not to the reaper.
+**CLOSED 2026-09-03 — and NOT by the ordering change this paragraph prescribed.** The leak's source
+was that `save_deletion_identity` runs before the transaction can refuse; the prescription here was
+to move the write under the fence, and that is wrong for the reason the same sentence gives — the
+sidecar exists precisely to survive a crash BETWEEN the identity read and the deletion, so a write
+that happens later cannot cover the window it was introduced for. What was actually missing was the
+CLEAN-UP: a refusal is a terminal answer, so the sidecar it parked can be read by nothing.
+`routers/org.py`'s deletion route now discards it on any exception out of
+`begin_or_resume_run_deletion`, through `deletion_transaction.py::discard_deletion_identity`, whose
+discriminator is the RECEIPT and not the exception class — a receipt is what makes an operation
+resumable, so a sidecar with one beside it is live state a retry reads and is kept whatever this
+attempt failed on. `tests/test_deletion_identity_leak.py` drives both halves and both mutations. The
+reaper's sweep stays: it is what collects the sidecars already on disk and the ones a crash strands.
 
 
 ### §0.11 "This run can never be deleted" — it could, by one command, and the refusal did not name it (2026-08-17)
@@ -4296,14 +4320,37 @@ there is proved by comparing `canonical_json(body)` over the same corpus. Adding
 `Settings` field changes no derivation and no measurement; it changes only what a snapshot happens
 to contain. The equality is doing the job of a version check with the tool of an exactness check.
 
-OPEN[calibration-corpus-revoked-by-unrelated-settings] every preserved calibration run refuses because the expected field set is a CURRENT constant, so any new `Settings` field revokes evidence it cannot affect. proof:`present:if set(config) != expected_config_fields@looplab/search/speculation_quality.py`
+**[CLOSED 2026-09-03 — the check is DIRECTIONAL, which is what this entry's prescription reduces
+to once the rest of the protocol is accounted for.]** The entry asked for a VERSION keyed on
+`config_snapshot_schema`, and it does not need one: that marker bumps on a FORMAT change, not on
+every field addition, so it cannot tell a snapshot written before `agent_timeout` from one written
+after. What it CAN do is exactly what the entry's second clause says — "a field added later is
+absent-and-fine while a field the calibration actually READS staying absent is still fatal" — and
+that is a statement about two DIFFERENT sets, not about a version.
 
-  The shape of the fix is a VERSION, not a loosening: the expected set has to be the one that was
-  current when the evidence was written (the snapshot already stamps `config_snapshot_schema`), so a
-  field added later is absent-and-fine while a field the calibration actually READS staying absent is
-  still fatal. Do NOT simply subtract the unknown names — that turns an exactness check into a
-  no-op and the next genuinely-lossy snapshot passes. It is a receipt-protocol revision and belongs
-  with that module's owner; what this entry adds is that the cost of NOT doing it is already paid.
+  So the equality became two one-way checks:
+  * `required_config_fields` — the profile's pinned keys, the variant fields, the runtime-scope
+    document fields, and every key `_analyze_speculation_run` goes on to read by name — missing is
+    still fatal, which is the clause that stops this being the "simply subtract the unknown names"
+    no-op the entry warns against. Intersected with what a snapshot DOCUMENT can carry, because
+    `masked_snapshot()` pops the credential bindings: requiring `llm_api_key_base_url` present
+    refuses every calibration run, which is the original defect with the sign flipped, and is
+    exactly what the first cut of this did.
+  * a key THIS BINARY does not understand, present — still fatal, the same fail-closed rule
+    `core/config.py::settings_from_snapshot` applies on resume.
+
+  **The exactness that matters was never this check**, which is what makes the narrowing safe:
+  `speculation_runtime_scope_digest(config)` digests the whole snapshot document and compares it to
+  the `speculation_runtime_scope_sha256` the RUN stamped at start, consulting no current constant —
+  only the two artifacts. Every profile-pinned value is re-checked one loop down, and each key the
+  protocol reads is validated by name. `tests/test_calibration_field_skew.py` drives it, simulating
+  the skew in the honest direction (the BINARY's set grows) rather than by deleting a key from a
+  snapshot, which would also break that digest and pass for the wrong reason.
+
+  The cost this entry recorded is now spent rather than paid: `agent_timeout`, added the same day,
+  is the clearest instance of the class — a field calibration cannot be affected by (it uses the toy
+  backend and launches no coding agent) that legitimately moves the profile DIGEST, which binds the
+  complete settings map, while it must not revoke a snapshot for merely predating it.
 
 ## Three cadences that looked like defects — measured 2026-08-25, and two of my own claims were wrong
 
@@ -4367,12 +4414,30 @@ What the sweep did find is a real leak on the one long run. `rubertlite-dense-re
 22 firings) re-distilled **three pairs** — `(23,14)`, `(14,7)`, `(24,14)` — each paid for twice, and
 it also has a double firing at `at_node=24`.
 
-OPEN[distilled-pair-ledger-leaks-on-long-runs] three (child, parent) pairs were distilled and paid for twice on the only run long enough to show it. proof:`present:for p in (d.get("pairs") or [])@looplab/engine/lessons_reconcile.py`
+**[CLOSED 2026-09-03 — found, and it is the RECONCILE writer.]** Three pairs of ~60 on one run is
+small, and the SHAPE is what mattered: the ledger is the only thing standing between a cadence and
+unbounded re-spend. The instruction was to find which of the 22 firings admitted a pair an earlier
+one had spent, and the answer is that none of them had to — one of the three writers never recorded
+what it spent.
 
-  Three pairs of ~60 on one run is small, and it is the SHAPE that matters: the ledger is the thing
-  standing between a cadence and unbounded re-spend, and it is the only run with enough firings to
-  test it at all. Find which of the 22 firings admitted a pair an earlier one had spent before
-  changing anything.
+`reconcile_lessons` calls `_comparative_lessons` (one paid provider call over the pairs it selected)
+and then gated its ledger append on `pairs_used`, which the two lines above it CLEAR whenever the
+re-derivation commits nothing:
+
+    fresh = committed_fresh
+    if not fresh:
+        pairs_used = []
+    if pairs_used:            # ...so a paid pass that committed nothing recorded NOTHING
+
+The ledger's contract is `select_comparison_pairs`' own words — "later firings must not re-spend LLM
+budget on the same pair" — so SPENT means PAID, not fruitful, and the mid-run cadence already reads
+it that way in as many words ("even with 0 lessons, so the at_node gate advances"). This was the one
+writer of the three that did not. The pairs are now bound at the provider call into
+`spent_pairs_this_pass` and never cleared; the receipt's `lessons` list still carries only what
+committed, so it can never claim a lesson that is not in the store, and `count` is allowed to be 0.
+A pass that never made the call (offline, no client, a failure before it) records nothing — a ledger
+row for a pair nobody paid for would bar a real lesson forever.
+`tests/test_reconcile_pair_ledger.py` drives it, with both mutations checked.
 
 ## An EMPTY-authority card dies the moment the board stops being empty, and its prefetched node is killed before it ever runs
 
@@ -4585,8 +4650,26 @@ idea it rejects is never run, so nothing on disk says whether it would have work
 `score.py`'s consistency field can ever exist for it.
 proof:absent:extract_critic@looplab/judgebench/__main__.py
 
-OPEN[torch-oom-markers-miss-the-allocator-body]
-proof:absent:PYTORCH_CUDA_ALLOC_CONF@looplab/engine/triage.py — `_TORCH_OOM_MARKERS` lists the
+**[CLOSED 2026-09-03 — the marker was STALE, and the way it was stale is worth keeping.]** Its
+subject no longer exists: `_TORCH_OOM_MARKERS` and `_is_torch_oom` were DELETED on 2026-08-20 (see
+the note that stands in their place at `engine/triage.py`, kept so nobody reinstates them from the
+corpus win they really did produce), and `oom` became answer-only — no engine path mints it and the
+diagnostician, which reads the whole stage log and must cite what it stood on, decides. So
+"lengthen the marker list with the allocator body" was no longer a fix for anything.
+
+Note HOW the marker survived that. Its falsifier was `absent:PYTORCH_CUDA_ALLOC_CONF@triage.py`, and
+that literal is absent — not because the item is open, but because the entire rung it describes was
+removed. An `absent:` proof cannot tell "not implemented yet" from "the subject was deleted", which
+is the one blind spot of the ladder in CLAUDE.md: prefer a predicate over the FIX'S OWN SYMBOL, and
+where the honest fix might be a DELETION, expect to re-derive rather than trust the green.
+
+What the item measured is not lost and is tracked where it belongs: not one of the 122 recorded
+tails carries a marker at all, i.e. the whole win of any text rule is the WINDOW it is handed, and
+the durable 500-char tail is `oom-evidence-not-in-repair-text`'s subject. `judgebench/triage_score.py`
+keeps `_FROZEN_TORCH_OOM_MARKERS` as a deliberately frozen 2026-08-20 snapshot for the bench's
+incumbent arm; it is evidence about a deleted rule and must not be edited.
+
+The original text, for the record: `_TORCH_OOM_MARKERS` listed the
 EXCEPTION NAMES (`torch.OutOfMemoryError`, `CUDA out of memory`) and none of the allocator's message
 BODY, so a capture truncated past the exception line — the common shape when a chatty stage pushes
 the diagnosis out of the clamp — is invisible to it. Measured on `failure_triage.v1`:
@@ -4741,11 +4824,19 @@ trained at. It becomes admissible the moment the EFFECTIVE batch is lifted into 
 event — an `extra_metrics`-shaped problem, since the number comes off the candidate's own process.
 proof:absent:effective_train_batch@looplab/events/types.py
 
-OPEN[claim-ui-line-citations] Four dead `file.py:NNN` citations survive in `ui/src/` —
-`cardBoardModel.js` cites `core/models.py:349` (that line is `return int(v.strip())`) and
-`cards.py:809` (blank), and `CardBoard.jsx` cites `card_ledger.py:1757`. `citation_defects()` scans
-`looplab/` only; widening it to `ui/` is one argument away, and the fix is to locate by SYMBOL.
-proof:present:cards.py:809@ui/src/cardBoardModel.js
+**[CLOSED 2026-09-03 — located by SYMBOL, and there were SEVEN, not four.]** A `grep -rn '\.py:[0-9]'`
+over `ui/src/` (which is what the item asked `citation_defects()` to be widened to) found three more
+the hand count missed: a second `core/models.py:349`, a `models.py:282` for the `Idea` class, a
+`core/cards.py:193-219` for the cue-kind table, and two in `derivedMemory.js` — every one of them a
+line number, every one of them already wrong or one edit from it. Each is now a `<mod>.py::<symbol>`
+citation: `Idea.card_id`, `Card.evidence`, `_apply_card_status`, `CARD_STEERING_CONTEXT_FIELDS`,
+`normalize_statement`. `ui/src/` now contains ZERO `file.py:NNN` citations, which is the property
+worth having — CLAUDE.md's rule is that a line citation is falsified by any edit above it, so the
+count of them is the thing to keep at zero rather than the count of DEAD ones.
+
+Widening `citation_defects()` to `ui/` is still one argument away and is deliberately not made here:
+it resolves `<mod>.py::<symbol>` against the Python tree, and a JS file citing Python is a different
+relation from a Python file doing so — worth arguing before it is enforced.
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 

@@ -1,7 +1,7 @@
 // Semantic grouping of DAG nodes (UI #7). Pure helpers: pick a group key per node under a chosen
 // mode, build groups, compute a soft enclosing region (BubbleSets-lite hull) from member rects,
 // and reroute edges when a group collapses into a super-node. No React, no side effects.
-import { fmt } from './util.js'
+import { fmt, nodeActivityStatus } from './util.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
 
@@ -141,6 +141,20 @@ export function isMergeEntryEdge(childNode) {
 export function groupAggregate(memberIds, nodesObj, direction, state = null) {
   const better = direction === 'min' ? (a, b) => a < b : (a, b) => a > b
   let best = null; const series = []; const status = { evaluated: 0, failed: 0, pending: 0 }
+  // The live half of the breakdown, counted from the ACTIVITY rather than the lifecycle. `status`
+  // above tallies `n.status`, where building, training and waiting-for-a-slot are all `pending` — so
+  // a collapsed group of three nodes actively training read "○3 pending", which is the opposite of
+  // what an operator collapses a group to find out. Kept as a SEPARATE tally rather than by adding
+  // keys to `status`: that object is the terminal-lifecycle census several callers already sum, and
+  // widening it would double-count every pending node.
+  const activity = { building: 0, evaluating: 0, queued: 0 }
+  // The ○ dot's own census, counted PER MEMBER here rather than by subtracting the lane tally from
+  // the lifecycle tally in the JSX. The two tallies count DIFFERENT populations — a synthetic
+  // `withBuilding` member is `building` in the lanes and absent from `status.pending`, while a
+  // reset node being rebuilt is the reverse — so the subtraction over-deducted one per synthetic
+  // member, and the Math.max floor over it then silently ate a genuinely-unplaced pending node's
+  // dot. A member is unplaced-pending iff its LIFECYCLE is pending and no activity lane claims it.
+  let unplacedPending = 0
   const members = memberIds.map(id => nodesObj[id]).filter(node => nodeIsActive(node, state))
   members.sort((a, b) => a.id - b.id).forEach(n => {
     const m = n.confirmed_mean ?? n.metric
@@ -151,8 +165,11 @@ export function groupAggregate(memberIds, nodesObj, direction, state = null) {
       if (best == null || better(m, best)) best = m
     }
     status[n.status] = (status[n.status] || 0) + 1
+    const lane = nodeActivityStatus(n, state)
+    if (Object.hasOwn(activity, lane)) activity[lane] += 1
+    else if (n.status === 'pending') unplacedPending += 1
   })
-  return { best, series, status, count: members.length }
+  return { best, series, status, activity: { ...activity, unplacedPending }, count: members.length }
 }
 
 // A direction chip is a semantic filter, not just decoration. Collapsed cards therefore aggregate

@@ -94,6 +94,14 @@ _REVIEW_NODE_KEYS = {
     # handed `nDCG_at_100: 0.44` beside `0.41` cannot say which node did better without it, and the
     # answer is not derivable from the key's spelling.
     "extra_metrics_direction",
+    # ...and WHETHER THE WHOLE MAP IS A RECONSTRUCTION, by the same rule a third time. The score
+    # backfill recovers values from the preserved score log after the run and writes them through
+    # the `declared` channel — correctly — so `extra_metrics_provenance` alone tells a reviewer the
+    # guarded channel produced them and nothing tells them it was recovered afterwards, at a
+    # precision two decimals coarser than the objective. Two nodes that tie on a reconstructed row
+    # are not known to be equal, and a reviewer comparing them cannot see that without this. It
+    # carries no portfolio identity — a flag, a timestamp and this node's own per-key decimals.
+    "extra_metrics_backfill",
     "violations", "feasible", "stages",
     # `repairs` rides with `stages` for the SAME reason `extra_metrics_provenance` rides with
     # `extra_metrics`, one paragraph up: each stage row carries the repair epoch it was recorded in,

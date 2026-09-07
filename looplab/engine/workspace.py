@@ -26,6 +26,101 @@ if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestr
     from looplab.engine.orchestrator import Engine
 
 
+# THE NODE'S OWN BUILT SOURCE, and it is deliberately NOT one of the two fingerprints below.
+# `_dir_fingerprint` (triage.py) answers "git HEAD, else (relpath, size, mtime_ns)", and BOTH of its
+# branches are wrong for comparing a built node against the parent it claims to modify:
+#
+#   * a node workspace IS a git repo (`.git`, `.dvc`, `.gitmodules` are seeded into every one), so
+#     the git branch fires and returns HEAD — blind to the uncommitted build edits that ARE the
+#     experiment. `substrate_fingerprint` below says the same thing about the same blindness:
+#     "a record that is confidently wrong, which is worse than one that says nothing".
+#   * the fallback keys on `mtime_ns`, so two separately-created workspaces ALWAYS differ. A guard
+#     built on it fires never.
+#
+# So this reads CONTENT, and only of the files a proposal can change. `experiments/` holds model
+# checkpoints (hundreds of MB per node) and is written by the train, not by the build; the rest of
+# the skip list is caches and editor droppings. MEASURED on e5small-dr-unified-v12: two of forty-
+# seven parent edges across three runs are nodes whose source is byte-identical to their parent's,
+# each having paid a full train to change nothing (#160).
+_SOURCE_DIGEST_SUFFIXES = (".py", ".yaml", ".yml", ".json", ".toml", ".cfg", ".ini", ".sh")
+_SOURCE_DIGEST_SKIP_DIRS = frozenset({
+    "experiments", ".ipynb_checkpoints", "__pycache__", ".git", ".dvc", "node_modules",
+    ".pytest_cache", ".mypy_cache", "wandb", "outputs",
+})
+
+
+def source_tree_digest(root) -> str:
+    """A content digest over a node workspace's SOURCE files, or "" when there is nothing to read.
+
+    Deterministic and order-independent: every eligible file contributes `relpath\0sha256` to one
+    sorted list, which is then hashed. Two workspaces agree iff every source file agrees, so a
+    build that changed nothing is exactly a digest collision with its parent.
+
+    Best-effort by construction — an unreadable file contributes its path and the marker `unread`
+    rather than raising, because this is a diagnostic and may never cost a node its evaluation.
+
+    THE WALK IS PRUNED, NOT FILTERED, and the difference is the whole cost of this function. The
+    skip set was applied per-file AFTER `rglob("*")` had already yielded and `is_file()`-stat'd
+    every entry, so the walk fully descended `experiments/` (checkpoint directories, ~92 MB apiece
+    here), `.git`, `wandb` and `outputs` and paid a stat inside each — measured 1,084 of 2,721
+    yielded entries under a skip dir on this checkout alone. `dirnames[:] = …` is what its sibling
+    `runtime/stage_identity.py::workdir_content` uses on the SAME workdirs, and
+    `serve/code_freshness.py::snapshot` uses on the package tree.
+
+    THREE BOUNDS, all of them `workdir_content`'s and all of them absent before:
+      * symlinks are NOT followed. `rglob` will not recurse into a symlinked directory but
+        `is_file()` resolves a symlinked FILE, and a `data:`/`references:` mount defaults to a
+        symlink (`DataSpec.mount`) — so a mounted `.json`/`.yaml` was read whole into memory, per
+        parent, per node. That is the case `workdir_content` refuses by name.
+      * a file above `SAMPLE_ABOVE` is sampled head+tail instead of read entire, with the mode in
+        the preimage so a sampled entry can never collide with a fully-read one.
+      * the tree is bounded by file COUNT and BYTES, checked after the `lstat` and before the read,
+        so crossing the ceiling costs at most the ceiling. Over it, the answer is "" — no digest,
+        hence no row — never a digest over a smaller set than it claims.
+
+    It runs on the engine's own event loop at eval dispatch, once for the node and once per parent,
+    so none of this is theoretical: on the network mount this repo documents at ~0.4 ms per lstat,
+    the unpruned walk was seconds of blocking stat traffic per dispatch.
+    """
+    import hashlib
+    import os
+    import stat as _stat
+    from pathlib import Path
+    from looplab.runtime.stage_identity import MAX_KEYED_BYTES, MAX_KEYED_FILES
+    from looplab.runtime.metric_subject import SAMPLE_ABOVE, _sha256
+    base = Path(root)
+    if not base.is_dir():
+        return ""
+    rows: list[str] = []
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in _SOURCE_DIGEST_SKIP_DIRS]
+        for name in filenames:
+            full = Path(dirpath) / name
+            if full.suffix.lower() not in _SOURCE_DIGEST_SUFFIXES:
+                continue
+            try:
+                st = os.lstat(full)                     # lstat: a symlink is not a source file here
+            except OSError:
+                continue
+            if not _stat.S_ISREG(st.st_mode):
+                continue
+            if len(rows) >= MAX_KEYED_FILES:
+                return ""
+            total += min(int(st.st_size), SAMPLE_ABOVE)
+            if total > MAX_KEYED_BYTES:
+                return ""
+            rel = full.relative_to(base)
+            try:
+                mode, digest = _sha256(full, int(st.st_size))
+            except Exception:  # noqa: BLE001 - a diagnostic may never raise on a node's behalf
+                mode, digest = "unread", "unread"
+            rows.append(f"{rel.as_posix()}\0{mode}\0{digest}")
+    if not rows:
+        return ""
+    return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()
+
+
 class WorkspaceSeeder:
     """The engine's workspace seeding / materialization cluster. See the module docstring for
     the `self._e` (engine handle) convention."""

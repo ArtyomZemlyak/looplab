@@ -299,7 +299,7 @@ Widened (диагност читает свои лог-чтения) даёт +8
 
 ## 59.7 За пределами AlgoTune: бенча на ML-задачах нет
 
-[Doc 50 ветки](50-benchmark-landscape-and-local-plan-2026-08-19.md) планировал 0 → A → B → C1+D:
+[Doc 50 ветки](61-benchmark-landscape-and-local-plan-2026-08-19.md) планировал 0 → A → B → C1+D:
 пин LLM вне машины, первое число на MLE-bench, честное Lite-подмножество, head-to-head. Его §5c
 записал, что Kaggle-доступ 10/12, окружения MLE-bench сгнили по пинам, FML-bench заблокирован
 Blackwell'ом, а AlgoTune поднялся — и вся кампания ушла в AlgoTune. Это правильно как первое

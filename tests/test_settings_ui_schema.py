@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 195
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 196
+    # 195 + 1 -> 196 on 2026-09-06, at the MERGE with master: this branch's ten rows
+    # meeting master's `agent_timeout`. Verified as every entry below prescribes rather
+    # than by adding the integers: 185 rows are common to the two files, ours adds ten and
+    # master one, and removing exactly those eleven gives back 185 with no duplicate key.
     # 190 + 3 -> 193 on 2026-09-06: the three bench-driven knobs of docs/60 §60.9 (A7/A10/A12),
     # `llm_stream_stall_fallback`, `node_open_budget_floor_usd` and `developer_crash_pause_after`,
     # each beside the row it modifies (`llm_stream`, `llm_budget_usd`, `systemic_failure_stop`).
@@ -123,6 +127,21 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # Verified as the paragraph prescribes rather than by bumping the number: master's file
     # carried 184 keys, ours 188, the intersection 183, and re-adding exactly those five to
     # master's catalogue gives 189 with no duplicate key.
+    # 185 -> 186 catalogued rows on 2026-09-03: `agent_timeout`, the wall on ONE external
+    # coding-agent invocation. A ROW because none of the four honest omission clauses holds — the
+    # key set is closed, it is not a legacy alias, it is exactly operator-typed, and its parent
+    # feature (the external coding-agent Developer) already has rows. It is also the shape those
+    # clauses exist to catch from the other side: `CliAgentDeveloper`'s constructor default was the
+    # only value a composed run could have, because `agents/factory.py` never passed the argument.
+    # 184 -> 185 catalogued rows on 2026-08-30: `single_command_divergence_watch`, and this one is a
+    # CORRECTION rather than a feature. The field shipped in `7813032e` with neither a form row nor
+    # an uncurated entry, so `_reconcile_settings_fields` was RED on master from that merge until
+    # now — a targeted suite that did not include `tests/test_stage_environment.py` is what let it
+    # through. A ROW and not an uncurated entry because none of that registry's four honest reasons
+    # holds: it is not an open key set, not a legacy alias, not a load-time binding, and the
+    # "second-order tuning whose PARENT already has a row" clause is false — the deterministic
+    # divergence watchdog has no row of its own, and the `train_monitor_*` family beside it is the
+    # LLM judge, a different rung.
     # 216 -> 217 Settings and 183 -> 184 catalogued rows on 2026-08-27: `triage_time_budget_s`, the
     # wall-clock ceiling on ONE crash/timeout triage call. A row rather than an uncurated omission
     # because it is the operator's only handle on a loop that BLOCKS the eval thread with the GPU
@@ -216,7 +235,18 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # until the arm runs. It gets a row when an arm says which N is right.
     # 224 -> 227 on 2026-09-06: docs/60 §60.9's three bench-driven knobs (A7 engine half, A10,
     # A12), all CURATED — see the 190 -> 193 note above; the two counts move together.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 229
+    # 217 -> 218 Settings on 2026-08-30: `single_command_divergence_watch`. It reached master
+    # in `7813032e` WITHOUT this pin or a catalogue row, which is why the reconciliation was
+    # red from that merge until now — see the catalogue note above for why it gets a form row
+    # rather than an uncurated entry.
+    # 218 -> 219 Settings on 2026-09-03: `agent_timeout`. See the catalogue note above for why it
+    # is a form row; the reason it is a Settings field at ALL is that it previously was not, and the
+    # constructor default it replaced was therefore the only value a composed run could ever have.
+    # 229 + 1 -> 230 on 2026-09-06, at the MERGE with master: master's `agent_timeout`
+    # meeting this branch's ten. Re-derived from the merged model, not added: an AST scan
+    # of `Settings` against both parents reports exactly those eleven added and none
+    # removed.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 230
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

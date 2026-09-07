@@ -112,6 +112,18 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   python-side reconciliation was red on master from that merge until now. It is the 190th
   //   row here; the total is pinned ONCE, below, because the Python guard asserts that this
   //   file states it exactly once.
+  //   184 -> 185 (2026-08-30): `single_command_divergence_watch`, a CORRECTION and not a
+  //   feature — the field shipped in `7813032e` with no catalogue row at all, so the
+  //   python-side reconciliation was red on master from that merge until now.
+  //   185 -> 186 (2026-09-03): `agent_timeout`, the wall on ONE external coding-agent
+  //   invocation. Also a correction: `CliAgentDeveloper.__init__` carried `timeout=600.0` and
+  //   `agents/factory.py` never passed the argument, so on every composed run that constructor
+  //   default WAS the value and no config, env var or form field could move it. Verified as the
+  //   paragraph prescribes: removing exactly `agent_timeout` from the catalogue gives back 185.
+  //   FIFTEENTH occurrence, and the Python guard caught it first for the eleventh time.
+  //   195 + 1 -> 196 (2026-09-06), at the MERGE with master: this branch's ten rows
+  //   meeting master's `agent_timeout`. The total is stated ONCE, here, because the
+  //   Python guard asserts this file pins it exactly once.
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
@@ -126,7 +138,7 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 195)
+  assert.equal(Object.keys(schema.fieldByKey).length, 196)
   //   190 -> 193 (2026-09-06): the three bench-driven knobs of docs/60 §60.9 — `llm_stream_stall_
   //   fallback` (beside `llm_stream`), `node_open_budget_floor_usd` (beside `llm_budget_usd`) and
   //   `developer_crash_pause_after` (beside `systemic_failure_stop`). Verified by intersection:

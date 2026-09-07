@@ -115,23 +115,117 @@ class ParseError(Exception):
     pass
 
 
-def _extract_json(text: str) -> dict:
+# How many top-level JSON objects one reply is scanned for. A reply that opens more than this many
+# decodable objects is prose about JSON, not an answer; the bound is on the WORK, and the historical
+# first-object behaviour is what it degrades to.
+_JSON_CANDIDATE_CAP = 16
+
+
+def _schema_key_sets(schema) -> tuple[frozenset[str], frozenset[str]]:
+    """(required, declared) top-level property names of a JSON schema, or two empty sets.
+
+    Total on purpose: this is handed whatever `model_json_schema()` produced, and a schema shape it
+    cannot read must degrade to "no opinion" — which is exactly the historical first-object rule —
+    rather than raise inside a parser whose whole job is tolerating malformed input.
+    """
+    if not isinstance(schema, dict):
+        return frozenset(), frozenset()
+    props = schema.get("properties")
+    declared = frozenset(k for k in props if isinstance(k, str)) if isinstance(props, dict) else frozenset()
+    req = schema.get("required")
+    required = frozenset(k for k in req if isinstance(k, str)) if isinstance(req, list) else frozenset()
+    return required & declared if declared else required, declared
+
+
+def _schema_fit(obj: dict, required: frozenset[str], declared: frozenset[str]) -> tuple[int, bool]:
+    """How well a decoded object answers the schema: (required keys present, answers it at all).
+
+    THE SECOND HALF IS A BOOLEAN, NOT A COUNT, and that is the whole rule. Counting declared keys
+    reads as "more complete is better", which is a different question from "is this the answer" —
+    and on this tree it is answered by the wrong object almost every time: `required` is absent from
+    `model_json_schema()` whenever every field has a default, which is EVERY emit model here (the
+    Strategist's has 14 properties and no `required` block at all). The score then collapses to a
+    count of optional keys, so a later, fuller object is a STRICT improvement and wins — reproduced
+    against the real `_StrategyOut`, where a reply answering `{"policy": "greedy", "rationale":
+    "seed phase"}` and then illustrating a fuller decision returned the ILLUSTRATION, while the same
+    reply with no schema returned the answer. A worked example, a restated few-shot and a
+    "here is what a complete one looks like" are all that shape.
+
+    What the schema can honestly say about a candidate is whether it answers the question at all —
+    which is exactly what catches the echo this scoring exists for: `{"type": "object", "properties":
+    {...}}` decodes cleanly, is a dict, and carries NONE of the declared names. So: every required
+    field, then answered-or-not, and `_extract_json`'s "the first candidate wins ties" does the rest.
+    Conservative by construction — a later object can only win by carrying required fields the
+    earlier one lacked, never by being longer.
+    """
+    keys = frozenset(k for k in obj if isinstance(k, str))
+    return len(keys & required), bool(keys & declared)
+
+
+def _extract_json(text: str, schema=None) -> dict:
+    """Pull the model's ANSWER out of a text reply.
+
+    THE OBJECT THE MODEL MEANT, not the first one it typed. This returned the first complete
+    top-level JSON object, and the text path's own hint message ends by pasting the whole JSON
+    schema — so a model that echoes or restates that schema before answering had its ECHO parsed as
+    the answer. `{"type": "object", "properties": {...}}` decodes cleanly, is a `dict`, and carries
+    none of the fields the caller asked for; it then either fails validation (a wasted provider call
+    and a fall-through to the next parser) or, for a model whose fields are all optional with
+    defaults, VALIDATES — returning an object of entirely default values as though the model had
+    chosen them. A worked example in the reply, or a restated few-shot, does the same.
+
+    The rule is conservative by construction: candidates are scored against the schema and the FIRST
+    one wins every tie, so this changes an answer only when a LATER object matches the schema
+    STRICTLY better. With no schema (`schema=None`, which is every direct caller and every test that
+    predates this) it is byte-identical to the first-object walk it replaces.
+
+    "STRICTLY BETTER" IS NOT "LONGER" — see `_schema_fit`. Scoring the second half as a COUNT of
+    declared keys made a trailing worked example beat the model's real answer on every emit model in
+    this tree, because none of them declares a `required` block.
+    """
     # Reasoning models (e.g. Qwen3) wrap chain-of-thought in <think>…</think> that
     # can itself contain braces — strip it before locating the JSON object.
     text = _THINK.sub("", text)
     decoder = json.JSONDecoder()
-    # Decode the first complete JSON object, ignoring any trailing prose (which may
-    # itself contain braces — so a naive find('{')..rfind('}') span is unsafe).
+    # Decode top-level JSON objects, ignoring any trailing prose (which may itself contain braces —
+    # so a naive find('{')..rfind('}') span is unsafe). Resume the scan AFTER a decoded object rather
+    # than one character in: a nested `{` inside an object already decoded is not a second candidate,
+    # and re-decoding from inside it is quadratic on a large reply.
+    required, declared = _schema_key_sets(schema)
+    # The best a candidate can do: every required field, and it answers the schema. With no
+    # `required` block — every emit model in this tree — that is reached by the FIRST object
+    # carrying any declared name, which is both the right answer and the reason the scan stops
+    # there. Short-circuiting on "all DECLARED fields present" instead meant a model that
+    # legitimately omitted an optional field never short-circuited at all, and the walk ran to the
+    # end of the reply: measured at 0.63 s against 0.0002 s on a 197 KB reply with 16,001 braces,
+    # per structured call on the text-parser path. `_JSON_CANDIDATE_CAP` never bounded that, because
+    # it counts DECODED candidates and the cost is in the failed `raw_decode` attempts.
+    perfect = (len(required), bool(declared))
+    best: dict | None = None
+    best_fit = (-1, False)
+    seen = 0
     i = text.find("{")
     while i != -1:
         try:
-            obj, _ = decoder.raw_decode(text, i)
+            obj, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
             i = text.find("{", i + 1)
             continue
         if isinstance(obj, dict):
-            return obj
-        i = text.find("{", i + 1)
+            if not declared and not required:
+                return obj                      # no schema to judge by: the historical behaviour
+            fit = _schema_fit(obj, required, declared)
+            if fit > best_fit:                  # strictly better only — the first candidate wins ties
+                best, best_fit = obj, fit
+            if best_fit >= perfect:
+                return best                     # every declared field present; nothing can beat it
+            seen += 1
+            if seen >= _JSON_CANDIDATE_CAP:
+                break
+        # Resume AFTER the object just decoded: a nested `{` inside it is not a second candidate.
+        i = text.find("{", max(end, i + 1))
+    if best is not None:
+        return best
     # H2 schema-aligned lenient fallback: small models emit near-JSON (single quotes, trailing
     # commas, Python True/None). Try a Python-literal eval of the outermost {...} span before failing.
     s, e = text.find("{"), text.rfind("}")
@@ -266,7 +360,9 @@ def _walk_parsers(client, messages, model, schema, order, obs) -> T:
                 # universally accepted.
                 hint = {"role": "user",
                         "content": f"Respond with ONLY a JSON object matching this schema: {json.dumps(schema)}"}
-                obj = _extract_json(client.complete_text([*messages, hint]))
+                # The SCHEMA reaches the extractor: this hint pastes it into the prompt, so a model
+                # that echoes it back emits a decodable object carrying none of the asked-for fields.
+                obj = _extract_json(client.complete_text([*messages, hint]), schema)
             try:
                 answer = model.model_validate(obj)
                 obs.set("parser_used", p).set("attempts", attempts).set("repaired", False)

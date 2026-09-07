@@ -81,20 +81,35 @@ def test_the_staging_half_stayed_on_the_main_task():
 
     `_stage_prepared_card` appends `card_added`, and the module's contract reserves
     selection-affecting writes for the main engine task. Only `_prepare_node_idea` — which an AST
-    pass shows makes zero `store.append` calls — is offloaded.
+    pass shows makes zero `store.append` calls — is offloaded, and since ec404d78 it leaves the
+    thread through `_offload_under_proposal_sink` (whose own `run_sync` + sink capture are pinned
+    by `tests/test_batch_proposal_consume.py`), so this guard follows the delegation. The original
+    spelling pinned the literal `await anyio.to_thread.run_sync(` in this function's SOURCE — that
+    helper extraction stranded it red against production code whose property still held, and the
+    function also carries a `# proof:` comment naming the offload call verbatim, so any substring
+    respelling would be comment-satisfiable. AST both ways.
     """
-    import inspect
+    import ast
     from looplab.engine.card_reservation import CardReservationMixin
+    from tests._source_scan import function_tree
 
-    src = inspect.getsource(CardReservationMixin._stage_card_creates)
-    assert "await anyio.to_thread.run_sync(" in src, "the paid proposal must leave the loop thread"
-    prepare_at = src.index("self._prepare_node_idea")
-    stage_at = src.index("self._stage_prepared_card")
-    offload_at = src.index("await anyio.to_thread.run_sync(")
-    assert offload_at < prepare_at < stage_at, "the offload must wrap the PREPARE call"
-    tail = src[stage_at - 400:stage_at]
-    assert "to_thread" not in tail, (
+    tree = function_tree(CardReservationMixin._stage_card_creates)
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    offloads = [c for c in calls
+                if getattr(c.func, "attr", None) == "_offload_under_proposal_sink"]
+    assert offloads, "the paid proposal must leave the loop thread through the sink helper"
+    # The PREPARE rides INSIDE the offload's own argument (a functools.partial reference), never
+    # beside it on the loop thread.
+    assert any(isinstance(a, ast.Attribute) and a.attr == "_prepare_node_idea"
+               for c in offloads for a in ast.walk(c)), "the offload must wrap the PREPARE call"
+    stages = [c for c in calls if getattr(c.func, "attr", None) == "_stage_prepared_card"]
+    assert stages, "the staging half is gone from this function — re-point this guard"
+    assert not any(inner is stage for off in offloads for inner in ast.walk(off)
+                   for stage in stages), (
         "the staging half must remain on the main task — it writes card_added")
+    assert not any(getattr(c.func, "attr", None) == "run_sync" for c in calls), (
+        "a direct to_thread hop here bypasses the sink — folded proposal receipts would be "
+        "appended from a worker, which invariant #1 forbids")
 
 
 def test_the_offloaded_call_writes_no_events():

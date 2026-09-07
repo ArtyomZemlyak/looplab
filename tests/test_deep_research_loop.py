@@ -624,8 +624,12 @@ def test_durable_memo_writer_sanitizes_before_verify_and_resanitizes_output(monk
     assert secret not in rendered and "https://u:p@" not in rendered
     assert "\x00" not in rendered and "\x1b" not in rendered
     assert "***" in rendered and "DIRECTION" in rendered
+    # `belief_admission` joined this sequence when the board started writing down what it refused.
+    # It sits between the memo and the board rows because `_admissible_beliefs` classifies the
+    # directions before any of them becomes a hypothesis — the ORDER is the contract, so it is
+    # asserted rather than filtered out.
     assert [event_type for event_type, _ in eng.store.events] == [
-        "research_completed", "hint", "hypothesis_added"]
+        "research_completed", "hint", "belief_admission", "hypothesis_added"]
     assert observed["memo"]["claims_receipt"]["total"] == 65
     assert eng.store.events[0][1]["memo"]["claims_receipt"] == {
         "v": 1, "total": 65, "retained": 64, "omitted": 1, "complete": False,
@@ -682,8 +686,12 @@ def test_spawn_research_records_immediately_via_its_own_task():
     # RECORD path and needs no event store.
     eng._record_research_attempt = lambda snap, *, trigger, manual: (
         attempts.append((trigger, manual)) or "attempt-1")
+    # `**extra` on purpose: this is a STUB of a production signature that grows. `converged_skips`
+    # was added on 2026-08-31 and a fixed-arity lambda made the real call raise `TypeError`, which
+    # the loop's containment `except Exception` swallows into "nothing was recorded" — the failure
+    # reads as a product regression and is a stub-contract break.
     eng._record_deep_research = (
-        lambda memo, *, trigger, manual, attempt_id=None, superseded=None:
+        lambda memo, *, trigger, manual, attempt_id=None, superseded=None, **extra:
         recorded.append((memo, trigger, manual, attempt_id)))
 
     async def run():

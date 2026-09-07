@@ -1561,6 +1561,19 @@ class Settings(BaseSettings):
     # use the raw agent output unchecked.
     validate_agent: bool = True
     agent_max_retries: int = 1    # re-prompts of the agent on an invalid result
+    # How long ONE external coding-agent invocation may run before it is killed.
+    #
+    # IT WAS UNREACHABLE. `CliAgentDeveloper.__init__` carries `timeout: float = 600.0` and
+    # `agents/factory.py` never passed the argument, so on every composed run that constructor
+    # default WAS the value and no config, env var or UI field could move it — a launch-time
+    # constant nobody chose for a repo task, where the agent seeds a whole worktree, reads it and
+    # writes several files. The default here is that same 600.0, so an unset config is
+    # byte-identical to what shipped.
+    #
+    # Bounded like every other wall in this file rather than left open: an agent that never exits is
+    # a build slot held forever. NOT the eval clock — `max_eval_timeout` bounds the Researcher's
+    # per-node evaluation, a different wall on a different process.
+    agent_timeout: float = Field(default=600.0, gt=0, le=24 * 3600.0)
     # Patch-gated multi-file agent (ADR-7 Rule 3): run the CLI agent in a git worktree and
     # accept only edits whose paths match `agent_surface` (reject-not-strip out-of-surface
     # touches). Lets the agent create helper modules, not just solution.py. Degrades to
@@ -2503,6 +2516,7 @@ class Settings(BaseSettings):
             value = getattr(self, field)
             if value not in allowed:
                 raise ValueError(f"{field} must be {'|'.join(allowed)}, got {value!r}")
+        self._check_case_insensitive_enum_fields()
         self._check_member_fields()
         self._check_llm_profiles()
         return self
@@ -2519,6 +2533,40 @@ class Settings(BaseSettings):
     _MEMBER_FIELDS: typing.ClassVar[tuple] = (
         ("inline_repair_reasons", lambda: FAILURE_REASONS),
     )
+
+    # The CASE-INSENSITIVE sibling of `_ENUM_FIELDS`, and it is separate for a reason that would be
+    # a regression if it were folded in. `llm.reasoning_body` does `(mode or "").strip().lower()` and
+    # `(style or "auto").lower()` before reading either value, so `llm_reasoning="High"` works today
+    # and refusing it here would break a config that is doing nothing wrong. The vocabulary is
+    # therefore matched the way the READER matches it, not the way the table above does.
+    #
+    # WHY THEY BELONG IN A VOCABULARY AT ALL — two different failures, and the second is the quiet
+    # one this whole mechanism exists for. Probed against the real `reasoning_body`:
+    #   * `llm_reasoning="banana"` -> `{"reasoning_effort": "banana"}` on an effort-style provider,
+    #     which 400s. Loud, but only at the provider, and the reject classifier then flips reasoning
+    #     OFF for that client's lifetime — so a typo degrades every later call silently.
+    #   * `llm_reasoning_style="banana"` -> `{}`. The `if/elif` chain shapes NOTHING and returns an
+    #     empty body, so reasoning is simply never requested and no error is raised anywhere. That is
+    #     the no-op fall-through `_ENUM_FIELDS` was built for, on a field whose default is `high`.
+    #
+    # Spelled out rather than imported from `core/llm.py` for the read_fence reason one table up:
+    # `config` stays import-light, and `tests/test_reasoning_vocabulary.py` pins these against the
+    # reader's own branches so the two cannot drift.
+    _CASE_INSENSITIVE_ENUM_FIELDS: typing.ClassVar[tuple] = (
+        # "" = send nothing (server default); off|none|false|0 = disable; on = default depth;
+        # low|medium|high = that effort.
+        ("llm_reasoning", ("", "off", "none", "false", "0", "on", "low", "medium", "high")),
+        # auto picks qwen for qwen* models else effort; none shapes nothing and relies on
+        # `llm_reasoning_extra` alone, which is a legitimate choice rather than a typo.
+        ("llm_reasoning_style", ("auto", "qwen", "effort", "none")),
+    )
+
+    def _check_case_insensitive_enum_fields(self) -> None:
+        for field, allowed in self._CASE_INSENSITIVE_ENUM_FIELDS:
+            value = getattr(self, field)
+            if str(value or "").strip().lower() not in allowed:
+                raise ValueError(
+                    f"{field} must be {'|'.join(a or '(empty)' for a in allowed)}, got {value!r}")
 
     def _check_member_fields(self) -> None:
         for field, vocabulary in self._MEMBER_FIELDS:
@@ -2969,6 +3017,51 @@ def migrate_config_snapshot(data: dict) -> dict:
 _AGENT_STAGE_MAP_FIELDS = ("agent_stage_models", "agent_stage_base_urls")
 
 
+def _canonicalize_snapshot_reasoning(data: dict) -> dict:
+    """Map a HISTORICALLY ACCEPTED reasoning spelling onto the canonical one, warning, on resume.
+
+    `_CASE_INSENSITIVE_ENUM_FIELDS` closed these two vocabularies to catch a typo at submit, and it
+    is right to: on an effort-style provider `llm_reasoning="banana"` reaches the wire as
+    `reasoning_effort: "banana"`, 400s, and the reject classifier then flips reasoning off for that
+    client's whole lifetime. But the check runs on EVERY `Settings(**snapshot)` build, and the
+    vocabulary it closed was narrower than the reader that had been accepting these values for
+    months — asymmetrically so. `core/llm.py::reasoning_body` computes `on = mode not in ("off",
+    "none", "false", "0")`, so `false`/`0` were valid OFF spellings (and are in the set) while
+    `true`/`1`/`yes`/`enabled` were equally valid ON spellings against a qwen-style endpoint and are
+    NOT. A run launched with `llm_reasoning=true` — the shipped shape on a qwen box — worked, was
+    snapshotted verbatim, and after the check landed could no longer be resumed, finalized, or have
+    its config read by the server: an unrelated hardening making an otherwise healthy run
+    unrecoverable, with the only remedy being to hand-edit `config.snapshot.json`.
+
+    So the ASYMMETRY between submit and reload is drawn here, exactly as
+    `adapters/repo_task.py::_grandfathered` draws it for the task document and
+    `refuse_unknown_settings_keys` for the settings layers: strict is the default, and only the
+    reload path softens — by CANONICALIZING, never by skipping the check, so a resumed run gets the
+    same behaviour it had rather than an unvalidated string.
+
+    The mapping is `reasoning_body`'s own rule and nothing else: a spelling the reader disables on
+    becomes `off`, any other non-empty unknown becomes `on`. `tests/test_reasoning_vocabulary.py`
+    pins it against that reader's branches so the two cannot drift. `llm_reasoning_style` is NOT
+    canonicalized: an unknown style shapes nothing at all (`{}`), so there is no historical
+    behaviour to preserve and the run resumes with the refusal it deserves.
+    """
+    effective = dict(data)
+    raw = effective.get("llm_reasoning")
+    if not isinstance(raw, str):
+        return effective
+    mode = raw.strip().lower()
+    allowed = dict(Settings._CASE_INSENSITIVE_ENUM_FIELDS)["llm_reasoning"]
+    if not mode or mode in allowed:
+        return effective
+    # `reasoning_body`'s off-list, verbatim. Anything else non-empty enabled reasoning.
+    effective["llm_reasoning"] = "off" if mode in ("off", "none", "false", "0") else "on"
+    _LOG.warning(
+        f"config snapshot llm_reasoning={raw!r} is not in the closed vocabulary this build "
+        f"validates; resuming as {effective['llm_reasoning']!r}, which is what it MEANT to the "
+        "reader that accepted it; snapshot evidence was not rewritten")
+    return effective
+
+
 def _filter_unknown_snapshot_agent_stages(data: dict) -> dict:
     """Filter obsolete stage keys/values from an effective resume copy, warning in stable order.
 
@@ -3040,7 +3133,8 @@ def settings_from_snapshot(data: dict) -> Settings:
             f"this run's config.snapshot.json declares format v{found}, but this build understands "
             f"at most v{CONFIG_SNAPSHOT_SCHEMA}. It was written by a newer LoopLab; resuming here "
             "would silently drop settings this build does not know. Upgrade LoopLab to resume it.")
-    migrated = _filter_unknown_snapshot_agent_stages(migrate_config_snapshot(data))
+    migrated = _canonicalize_snapshot_reasoning(
+        _filter_unknown_snapshot_agent_stages(migrate_config_snapshot(data)))
     migrated.pop("llm_api_key", None)
     migrated.pop("llm_api_key_base_url", None)
     migrated.pop(CONFIG_SNAPSHOT_SCHEMA_KEY, None)   # a document marker, never a Settings field

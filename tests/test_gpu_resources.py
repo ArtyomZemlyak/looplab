@@ -378,6 +378,22 @@ class _EvalResetHost(_Pool):
     _assert_speculative_selection_confirmed = (
         EvaluateMixin._assert_speculative_selection_confirmed)
 
+    async def _contain_eval_crash(self, node_id, generation, exc):
+        """OPT OUT of the crash containment, because this double's exception is a PROBE.
+
+        Production `_evaluate` now closes its own node on any unexpected exception rather than
+        letting it cancel every sibling eval in the run-scoped group
+        (`engine/evaluate.py::EvaluateMixin._contain_eval_crash`). These tests raise `_ReachedLaunch`
+        as a control-flow marker meaning "execution got as far as the launch" — it is not a fault,
+        and containing it would turn every assertion below into "the node was terminalized", which
+        says nothing about where control reached.
+
+        Spelled as an override rather than by not inheriting the mixin: the double must still take
+        the real containment PATH, so a future change that moves the marker's raise inside a nested
+        task group is visible here instead of silently passing.
+        """
+        raise exc
+
     def __init__(self, *, parallel):
         super().__init__(ids=(0,), mem={0: 16_000}, parallel=parallel)
         self.tracer = _Tracer()

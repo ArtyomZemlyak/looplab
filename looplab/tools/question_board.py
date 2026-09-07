@@ -33,6 +33,7 @@ reader, in the sense `tools/log_tools.py` uses the word.
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from looplab.core.cards import card_is_direction
@@ -58,9 +59,29 @@ def _delta(card) -> str:
     to write next.
     """
     value = getattr(card, "best_delta", None)
-    if not isinstance(value, float) or value != value or value in (float("inf"), float("-inf")):
+    # `isinstance` excludes bool; `math.isfinite` is the one spelling of the NaN/inf refusal this
+    # record's own writer uses (`core/cards.py::card_child_rollup`) — a hand-rolled `!=`/`in` copy
+    # here is how the two surfaces drift about which values count as measured.
+    if not (isinstance(value, float) and math.isfinite(value)):
         return "—"
     return f"{value:+g}"
+
+
+def _champion_verdict(rollup) -> str:
+    """"answered: best vs champion -0.0027 by card-0", or "" when nothing measured yet.
+
+    Absent is SAID by returning nothing at all rather than a zero, for the same reason `_delta`
+    gives: a question whose experiments produced no number and one whose experiments tied the
+    champion are different findings.
+    """
+    if not isinstance(rollup, dict):
+        return ""
+    value = rollup.get("best_vs_champion")
+    if not (isinstance(value, float) and math.isfinite(value)):
+        return ""
+    owner = rollup.get("best_vs_champion_card_id")
+    tail = f" by {owner}" if isinstance(owner, str) and owner else ""
+    return f"answered: best vs champion {value:+g}{tail}"
 
 
 class QuestionBoardTools:
@@ -128,6 +149,21 @@ class QuestionBoardTools:
             rows.append(f"QUESTION_ID={qid} {_text(getattr(question, 'seed_statement', ''))}")
             if tags:
                 rows.append(f"    concepts: {', '.join(tags)}")
+            # THE ANSWER, on the question's own line, because this listing is read by the role
+            # deciding what to propose NEXT. Every child `delta=` below is the parent-relative
+            # `best_delta`, which is None for a first-generation DRAFT — so a question answered by a
+            # draft rendered as a row of em-dashes and read as untested. Measured on v11: three of
+            # the four directions with an evaluated child showed nothing, while their children had
+            # measured 0.773951, 0.759164 and 0.718923.
+            #
+            # `best_vs_champion` (ed7fba9e) is the champion-relative number the fold already
+            # computes on the parent, and it needs no node metrics here. It is SPELLED differently
+            # from the children's `delta=` on purpose: the two have different baselines and
+            # routinely disagree in sign, and collapsing them would let a question that lost to the
+            # champion read as a win.
+            verdict = _champion_verdict(getattr(question, "child_rollup", None))
+            if verdict:
+                rows.append(f"    {verdict}")
             if not kids:
                 # The most actionable row on the board, and it says so rather than being omitted for
                 # being empty — the same choice the operator's Research ladder makes.

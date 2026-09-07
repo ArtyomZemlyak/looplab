@@ -15,9 +15,11 @@ TIME: the test suite (and any operator tooling) monkeypatches `looplab.server.ma
 the flat alias + this late binding keep that single patch point working for every router."""
 from __future__ import annotations
 
+import contextvars
 import os
 import stat
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -44,6 +46,7 @@ from looplab.serve.protocol import (
     PHASE_SEARCH, PHASE_SPEC_APPROVAL, RUN_GENERATION_FIELD)
 from looplab.serve.public_cards import (INTERNAL_CARD_STATE_FIELDS,
                                         REVIEW_OMITTED_CARD_FIELDS, public_cards_projection)
+from looplab.serve.code_freshness import cached_code_freshness
 from looplab.serve.reviews import ReviewStore
 from looplab.serve.run_commands import RunCommandService, run_generation_token
 from looplab.serve.settings_store import SettingsStore
@@ -110,6 +113,56 @@ def _public_state_value(value):
         # gets full entropy redaction on its own path in `state_payload`.
         return redact_secrets(value, entropy=False)
     return value
+
+
+# ONE FOLD PER (RUN, FILE IDENTITY, REQUEST). Measured on the routers: two folds per
+# `GET .../config`, three plus a full read per PUT, two per artifact read and two per 4 s metrics
+# poll — each re-reading and re-folding the whole `events.jsonl`, which on a repo run embeds full
+# file sets in every `node_created`.
+#
+# A ContextVar rather than a parameter threaded through ~29 call sites: the repeat folds are spread
+# across route bodies, helper closures and `run_projections`, and a parameter would have to reach
+# every one of them to help at all. `anyio`/Starlette copy the context into the threadpool, so a
+# sync route handler sees the memo the async middleware installed; the value is a dict MUTATED IN
+# PLACE for that reason — a `set()` inside the worker thread would not propagate back.
+#
+# ABSENT MEANS NO MEMO, which is the whole safety story. Outside a request (background jobs, the
+# CLI, a test constructing `AppState` directly) `state()` is byte-identical to the plain fold it has
+# always been, so nothing outside the HTTP path changes behaviour.
+_REQUEST_FOLD_MEMO: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "looplab_request_fold_memo", default=None)
+#: Bound per request. An SSE generator or a fan-out route could otherwise accumulate one folded
+#: state per run; past this the memo stops answering, degrading to the previous behaviour.
+_REQUEST_FOLD_MEMO_MAX = 8
+
+
+@contextmanager
+def request_fold_scope():
+    """Memoize `AppState.state` for the duration of one request. Nesting is safe (inner wins).
+
+    Yields the memo itself so a caller that knows the request has stopped doing bounded work — the
+    ASGI middleware, at the first chunk of a STREAMING response — can release the folded states it
+    holds without leaving the scope.
+    """
+    memo: dict = {}
+    token = _REQUEST_FOLD_MEMO.set(memo)
+    try:
+        yield memo
+    finally:
+        _REQUEST_FOLD_MEMO.reset(token)
+
+
+def _events_identity(rd: Path):
+    """`file_identity` of the run's log, or a sentinel that can never equal a real one.
+
+    A missing/unreadable log must MISS rather than share an entry with another missing one: the two
+    runs' folds are both empty today, but keying them together would make the memo answer about a
+    file it never read.
+    """
+    try:
+        return file_identity((Path(rd) / "events.jsonl").stat())
+    except OSError:
+        return ("unreadable", str(rd))
 
 
 class AppState:
@@ -309,11 +362,43 @@ class AppState:
 
     def state(self, rd: Path):
         """`fold(self.events(rd))` — the routers' one-line state hydration (previously spelled out
-        at ~16 call sites). DELIBERATELY uncached: engine invariant #4 (state is only observed via
-        a fresh fold of the log) — the SSE hot path has its own size+mtime-keyed cache in
-        `state_payload`, which is a *payload* cache, never a folded-state handle reused across
-        requests."""
-        return fold(self.events(rd))
+        at ~16 call sites).
+
+        MEMOIZED WITHIN ONE HTTP REQUEST and never across them. Measured on the routers: two folds
+        per `GET .../config`, three plus a full read per PUT, two per artifact read and two per 4 s
+        metrics poll — each one re-reading and re-folding the whole `events.jsonl`, which on a repo
+        run embeds full file sets in every `node_created`.
+
+        THE RULE IT DOES NOT BREAK. Invariant #4 forbids caching derived state across ENGINE LOOP
+        ITERATIONS; the engine is a different process and never reaches this method. The narrower
+        rule this keeps is the one that makes the memo safe: `fold` is deterministic and
+        order-tolerant with no I/O (invariant #5), so two folds of the SAME BYTES produce equal
+        states, and the key is `file_identity` — the same identity the payload cache is keyed by.
+        An append inside the request (the config PUT, which writes an event and re-folds) changes
+        the identity and therefore MISSES, which is exactly what that caller needs.
+
+        WITHIN a request, not across, because a folded `RunState` is mutable. Nothing in `serve/`
+        mutates one today — checked, and `tests/test_request_fold_memo.py` re-derives it — but a
+        cross-request cache would make that a property every future route has to preserve, silently,
+        with the failure showing up as another request's state. A request-scoped memo has no such
+        obligation: it dies with the request, and outside one (background jobs, the CLI, a test
+        calling `AppState` directly) there is no memo at all and this is byte-identical to the plain
+        fold it always was.
+        """
+        memo = _REQUEST_FOLD_MEMO.get()
+        if memo is None:
+            return fold(self.events(rd))
+        key = (str(rd), _events_identity(rd))
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        st = fold(self.events(rd))
+        # Bounded: an SSE generator or a fan-out route could otherwise accumulate one state per run
+        # for the life of a request. Past the bound the memo simply stops answering, which degrades
+        # to today's behaviour rather than to a wrong answer.
+        if len(memo) < _REQUEST_FOLD_MEMO_MAX:
+            memo[key] = st
+        return st
 
     def state_payload(self, rd: Path, upto_seq: Optional[int] = None,
                       *, audience: str = "owner") -> dict:
@@ -347,9 +432,18 @@ class AppState:
                 # hybrid object that is neither historical nor live.
                 out["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
                 out["source_integrity"] = self.log_integrity(rd)
+                # Present-time, and re-stamped on the hit path for the same reason liveness is: a
+                # server that went stale WHILE this entry sat in the cache would otherwise keep
+                # answering "current" out of a body built before the merge.
+                # ONE READ, two places. It is a fact about THIS payload, so asking twice can only
+                # produce a payload whose `state` mirror and envelope disagree — and each ask is a
+                # cache lookup that may become a tree walk at the 30-second boundary.
+                server_code = cached_code_freshness()
+                out["server_code"] = server_code
                 return {"state": out, "seq": last_seq, "max_seq": max_seq,
                         "event_count": event_count,
                         "source_integrity": self.log_integrity(rd),
+                        "server_code": server_code,
                         RUN_GENERATION_FIELD: generation or None}
         all_evs = self.events(rd)
         generation = run_generation_token(all_evs)
@@ -475,6 +569,13 @@ class AppState:
         # cache tuple: the receipt is keyed on the FILE, so a repair must be observed on the next tick
         # rather than inherited from a cached body.
         d["source_integrity"] = self.log_integrity(rd)
+        # WHOSE CODE BUILT THIS PAYLOAD. A `looplab ui` process pins its own modules at import, so a
+        # fold fix merged afterwards is absent from every answer it gives — silently, since a stale
+        # server returns 200 with a smaller truth. Mirrored into `state` as well as onto the envelope
+        # for the same reason `source_integrity` is: `useRunState` publishes the folded snapshot and
+        # not the frame around it. See `serve/code_freshness.py` for the case that produced it.
+        server_code = cached_code_freshness()   # one read, mirrored below — see the hit path
+        d["server_code"] = server_code
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
             with self._state_cache_lock:      # only the dict ops; the fold/trim above ran lock-free
                 self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
@@ -489,6 +590,7 @@ class AppState:
         return {"state": d, "seq": last_seq, "max_seq": max_seq,
                 "event_count": event_count,
                 "source_integrity": self.log_integrity(rd),
+                "server_code": server_code,
                 RUN_GENERATION_FIELD: generation or None}
 
     def state_probe(self, rd: Path) -> dict:

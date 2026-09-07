@@ -136,6 +136,9 @@ def test_every_list_field_of_the_emit_schema_is_covered():
         "open_questions": '["q1"]',
         "next_experiments": '["e1"]',
         "question_concepts": '[["loss/contrastive", "training/negative-mining"]]',
+        # Positional twin of `question_concepts`: the parent's exact statement text, or "" for a
+        # top-level question. A non-empty element keeps the "was decoded" assertion below honest.
+        "question_parents": '["how do we raise recall@100?"]',
         "claims": '[{"statement": "c1", "node_ids": [3], "urls": []}]',
     }
     list_fields = {name for name, field in _MemoOut.model_fields.items()

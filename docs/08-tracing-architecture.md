@@ -68,11 +68,113 @@ one delegate attempt, because retrying an exception after an ambiguous append co
 worker is reused across sporadic submits and is retired by an explicit flush/shutdown (or a long calm idle
 period), so a long run neither creates a thread per span nor retains unbounded daemon workers.
 
-Loss is observable in two forms:
+Loss is observable in three forms:
 
 - `AsyncJsonlSpanExporter.metrics()` is a race-consistent process-local snapshot;
 - coalesced `looplab.exporter.loss` internal spans durably record dropped-span and export-failure deltas
   through a direct, bounded writer path that cannot itself enter or be evicted by the ordinary queue.
+- `trace_export_health` rows, appended to `events.jsonl` **by the engine**, publish that same snapshot
+  whenever `trace_export_unhealthy` holds — see below for why the first two are not enough.
+
+### A span's row must not depend on its context bookkeeping
+
+A row is written when a span CLOSES, so an operation that loses its close writes nothing while its
+children write normally. Measured on `runs/e5small-dr-unified-v12/spans.jsonl`: 3618 spans, 31
+distinct parents, and **4 parent ids appear on 268 children while owning no row of their own** —
+`891a4e7216bf6d` alone has 256, and it is the parent of the last six spans that run ever wrote.
+
+The cause is an ordering inside `Tracer.span`'s `finally`, and it is driven rather than reasoned:
+
+    finally:
+        rec["duration_s"] = ...
+        otel_cm.__exit__(...)
+        _stack.reset(token)            ─┐  every one of these is a ContextVar.reset, which RAISES
+        _current_tracer.reset(...)      │  ValueError("... was created in a different Context")
+        _node_ctx.reset(...)            ├─ when a span's enter and exit land in DIFFERENT contexts
+        _generation_ctx.reset(...)      │
+        _phase_ctx.reset(...)          ─┘
+        try: self.exporter.export(rec)  <- was LAST: one raising reset skipped it and the span vanished
+        except: pass
+
+Entering under `contextvars.copy_context().run(cm.__enter__)` and exiting outside it reproduces it
+in three lines: the exit raises `ValueError`, and no row is written.
+
+The fix is the order — export first, then unwind:
+
+    finally:
+        rec["duration_s"] = ...
+        otel_cm.__exit__(...)
+        try: self.exporter.export(rec)   <- the diagnostic is recorded before anything can raise
+        except: pass
+        _stack.reset(token) ... etc      <- bookkeeping, still allowed to raise and propagate
+
+The export stays wrapped, so a failing exporter still cannot mask the in-flight exception; what
+changes is that context bookkeeping no longer decides whether a diagnostic gets recorded. The
+`ValueError` still propagates — it is real information about a span that crossed a context
+boundary — and `tests/test_span_survives_a_failed_context_reset.py` pins both halves.
+
+THIS IS NOT THE WHOLE OF v12's OUTAGE and the tests say so: the tracer SURVIVES a failed reset, a
+later span records normally, so a lost close does not by itself explain a run that stopped writing
+spans for 33 hours. It explains the four orphans, which is what it claims.
+
+### A dead exporter cannot report that it is dead
+
+Both loss surfaces above are written BY the exporter. The durable receipt is appended from
+`_worker_main`, and the `_LOG.warning` beside it is raised on the same path, so an exporter whose
+worker has stopped emits neither. `metrics()` survives the worker, but nothing in the product read it.
+
+MEASURED on `e5small-dr-unified-v12`, 2026-09-01: `spans.jsonl` last written 18:20, `events.jsonl`
+still appending 10.5 hours later, `py-spy dump` showing no `looplab-trace-export-*` thread in the live
+engine, and zero loss receipts in the run. The outage was total, ongoing, and completely silent.
+
+    span ends ──▶ exporter queue ──▶ worker ──▶ spans.jsonl
+                                       │
+                                       ├──▶ loss receipt (spans.jsonl)   ─┐ both die WITH
+                                       └──▶ _LOG.warning                 ─┘ the worker
+                                       ·
+                       metrics() ──────┴──▶ (survives the worker)
+                                              │
+    run loop turn ────────────────────────────┴──▶ trace_export_unhealthy?
+                                                     │ no  ──▶ nothing appended
+                                                     │ yes ──▶ engine appends
+                                                               trace_export_health
+                                                               to events.jsonl
+
+The engine is the one writer that outlives the exporter, so `Engine._record_trace_export_health` reads
+the snapshot once per turn and publishes it on the run's own log. The row is DIAGNOSTIC (invariant #1:
+`_proposal_authority_seq` excludes `DIAGNOSTIC_EVENTS` wholesale, so it cannot displace a paid
+proposal), it is gated on `trace_export_unhealthy` so a healthy run's log is untouched, and it is
+deduplicated on the snapshot itself so a permanently-dead exporter costs one row per distinct state
+rather than one per turn. It is published BEFORE the turn's decision prefix is read, so the row is part
+of the fold that turn reasons over and cannot move the tail under the sequence recheck that follows.
+
+`trace_export_unhealthy` fires on FOUR independent symptoms. Three were there from the start:
+`shutdown` (the exporter stopped
+accepting for good), a dead worker with rows still QUEUED (an idle exporter with an empty queue
+legitimately owns no thread), or any recorded loss — a drop, an export failure, or a loss receipt that
+itself failed to write.
+
+The fourth landed with `TRACE_WORKER_STOP_REASONS` and closes a hole this predicate had from the
+day it shipped: **a worker that died for a harmful reason, with nothing dropped**. Before the
+registry the five terminal paths were byte-identical from the outside, so a CRASHED worker with an
+empty queue and zero drops looked exactly like one resting between submits — and that is v12's
+shape: no receipts, no drops, no thread, and no row. The split is a denylist, not an allowlist:
+
+    routine, no row      idle       parked with nothing queued; the next submit restarts it
+                         retired    handed the file off; the next submit restarts it
+
+    spans are lost       crashed          an exception escaped the worker loop
+                         receipt_failed   the loss receipt itself could not be written
+                         abandoned        terminal ownership released — no more spans from here
+
+A denylist because a SIXTH reason added upstream without touching this set reads as routine, which
+is the safe direction for a diagnostic that must not cry wolf; and
+`test_the_denylist_names_only_reasons_the_exporter_can_produce` refuses a word the exporter cannot
+emit, so the set cannot rot into a decoy.
+
+Together the two halves make the outage reportable: the registry names WHY the worker stopped,
+`metrics()` carries it (`worker_stop_reason`, `worker_stop_detail`, and a counter per reason), and
+this row publishes it on the run's own log — which the exporter itself could never do.
 The receipt receives one delegate attempt as well: an exception may happen after its append committed,
 so retrying the same delta could inflate every postmortem count. On ambiguous failure the process-local
 snapshot remains authoritative for that process, while the durable summary may undercount but never
@@ -368,3 +470,56 @@ Nested spans with status (OK/ERROR + recorded exception) and attributes:
   `tree.html` remain rebuildable derived artifacts rather than an Inspector data dependency.
 - Browser span forests use one topology-complete logical tree and a globally bounded DOM window;
   disclosure/detail state is retained only for span ids still present in the current projection.
+
+
+## A failure that does not name itself is undiagnosable from inside the product
+
+MEASURED on `runs/e5small-dr-unified-v13`, live. The exporter froze at `exported_spans: 3970` and
+failed every export after it:
+
+| +min | accepted | exported | export_failures | loss_receipt_failures | worker_alive |
+|---|---|---|---|---|---|
+| 233.8 | 5154 | **3970** | 1184 | 858 | true |
+| 296.5 | 6376 | **3970** | 2406 | 1691 | false |
+| 296.6 | 6386 | **3970** | 2416 | 1695 | true |
+| 322.2 | 7419 | **3970** | 3449 | 2246 | false |
+
+`spans.jsonl` and `.spans-append.jsonl` both stopped at the same instant; the run produced spans for
+three more hours. The loop is `export fails → write a loss receipt → the receipt fails →
+_retire_worker_locked("receipt_failed") → the next span restarts the worker → identical failure`,
+which is the `worker_alive` flapping while both counters climb.
+
+SIX CAUSES had to be eliminated from OUTSIDE the process, against the live frozen file — writability
+(an `O_APPEND` open succeeds), ENOSPC (1 PB at 0%), a stale descriptor (`/proc/<pid>/fd` holds
+none), a held flock (`LOCK_NB` acquires immediately), descriptor/path divergence (`fstat == stat`,
+inode stable — the exact post-yield validation the helper performs), and a torn tail (the last
+complete line is 41,646 bytes of valid JSON). None is the cause.
+
+The seventh could not be reached. The console log carried the failure 3,449 times and said only
+`trace export lost spans: none (export failures: 1)`, because the delegate's exception was
+discarded by two `except Exception: pass` handlers. **Retaining the delta for a later attempt is
+right; discarding the reason is what made the class undiagnosable.**
+
+```
+  THE TWO SWALLOW SITES, and what each now records
+
+   worker loop
+     ├─ per-span export ──► _writer._export_line(item)
+     │      except Exception as exc ──► export_error = _bounded_export_error("export", exc)
+     │                                        │   phase-prefixed: the two writers differ and so
+     │                                        │   do their remedies
+     │      with self._condition: ────────────┘   recorded under the SAME lock as the counter it
+     │          self._last_export_error = ...     explains, so the health row reads them together
+     │
+     └─ loss receipt ─────► _writer._export_line(receipt_line)
+            except Exception as exc ──► receipt_error = _bounded_export_error("receipt", exc)
+            failure ──► _retire_worker_locked("receipt_failed")
+
+   metrics() ──► {..., export_failures, last_export_error, worker_stop_reason, ...}
+                                            │
+   engine ──► trace_export_health row ──────┘   and the WARNING line now names it too
+
+   Bounded at 240 chars: an unbounded field on a row emitted once per failure is a second loss
+   mechanism. Empty means nothing has failed in THIS process — it resets in `_reset_process_state`
+   with the counters, because an error carried across a fork would blame a child for its parent.
+```

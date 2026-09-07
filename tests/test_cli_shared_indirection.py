@@ -167,7 +167,14 @@ def test_the_lifecycle_commands_read_the_snapshot_STRICTLY():
 
     source = inspect.getsource(run_cmds)
     assert "load_run_settings(run_dir, strict=False)" not in source
-    assert source.count("load_run_settings(run_dir, strict=True)") == 3
+    # THREE strict lifecycle loads, and exactly ONE of them additionally requires the file to exist.
+    # `require_snapshot` is `resume`'s alone because the approval gate lives in the SEARCH SPINE:
+    # `finalize` and the finalization recovery wrap up a run that has already stopped and cannot
+    # reach it, so refusing them would make a run predating `config.snapshot.json` permanently
+    # unfinishable (`tests/test_finalization_recovery.py::
+    # test_cli_finalize_accepts_explicit_task_file_for_legacy_run` is named for that run).
+    assert source.count("load_run_settings(run_dir, strict=True)") == 2
+    assert source.count("load_run_settings(run_dir, strict=True, require_snapshot=True)") == 1
 
 
 def test_no_command_re_derives_the_snapshot_PARSE():

@@ -397,6 +397,21 @@ class StrategyCadenceMixin:
         """
         requested = strat.get("developer")
         current = str(getattr(self, "_developer_name", "default") or "default")
+        # A name `validate_strategy` REFUSED, carried here in its own key so it could never be
+        # mistaken for a switch. It is a refusal like the four below and gets the same receipt — the
+        # difference is only WHERE it was decided, which `reason_code` says. Without this the drop is
+        # invisible: the decision keeps its rationale ("switch developer to agentless") with no
+        # `developer` and no receipt, i.e. a history that reads as a switch that happened.
+        refused_name = strat.get("developer_refused")
+        if isinstance(refused_name, str) and refused_name:
+            effective = {k: v for k, v in strat.items() if k != "developer_refused"}
+            return effective, _NO_PREPARED_DEVELOPER, {
+                "status": "refused",
+                "requested_backend": refused_name,
+                "applied_backend": current,
+                "reason_code": "unknown_backend",
+                "reason": f"{refused_name!r} is not an available Developer backend",
+            }
         if not isinstance(requested, str) or not requested or requested == current:
             return strat, _NO_PREPARED_DEVELOPER, None
 
@@ -885,6 +900,25 @@ class StrategyCadenceMixin:
                     if strat.get("request_research"):
                         merged["request_research"] = True
                     merged = validate_strategy(merged, ctx) or strat
+                    # THE REFUSAL RECEIPT SURVIVES THE SECOND PASS, and without this it did not.
+                    # `validate_strategy` rebuilds its output from scratch and mints
+                    # `developer_refused` only from an INPUT `developer` key — which `merged` no
+                    # longer has, because the FIRST pass already dropped the unregistered name. So
+                    # the receipt the first pass minted was stripped by the second, and
+                    # `_prepare_strategy_developer` saw neither a `developer` nor a
+                    # `developer_refused`: the durable `strategy_decision` carried the rationale
+                    # ("switch developer to agentless") with no switch and no receipt of any kind,
+                    # i.e. exactly the invisible drop the refusal was added to end.
+                    #
+                    # Restored HERE and taken only from `strat` — this decision's own validated
+                    # output — never from `prev`, for `request_research`'s reason three lines up: a
+                    # receipt carried forward from `active_strategy` would attribute an earlier
+                    # decision's refusal to this one. Not carried inside `validate_strategy` either,
+                    # because there the key would become model-settable, and a Strategist claiming a
+                    # refusal it never asked for is a false receipt on a durable row.
+                    merged.pop("developer_refused", None)
+                    if strat.get("developer_refused"):
+                        merged["developer_refused"] = strat["developer_refused"]
                     # Carry the CURRENT operator-pinned field set (not the strategist's decision, which
                     # owns no fields) so resume-time _apply_strategy still exempts the operator's knobs
                     # even though this record's top-level source is the strategist's (mega-review).

@@ -14,8 +14,9 @@ import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus, isSalvagedMetricViolation,
   OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
   objectiveSourceHelp } from './trustSemantics.js'
-import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
-  extraMetricChannel } from './extraMetrics.js'
+import {
+  extraMetricChannel, extraMetricCaveated, extraMetricSourceHelp,
+  extraMetricSourceLabel, extraMetricIsBackfilled } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
   appliedParamsNotice, appliedParamsConflicts,
@@ -164,7 +165,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
 // concept tree's) passes the jump, because from those surfaces "where does this sit in the run?" is
 // a real question, and it is exactly the jump the concept tree used to make without being asked.
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
-  onOpenLineage = null, onOpenCard = null,
+  evalStages = null, onOpenLineage = null, onOpenCard = null,
   historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
   commentsRevision = null, focusCommentId = null, traceClearRecoveryStore: sharedClearStore = null,
   traceClearRecoverySnapshot: sharedClearSnapshot = null,
@@ -403,7 +404,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId}
           onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration}
-          onOpenCard={onOpenCard} />}
+          onOpenCard={onOpenCard} evalStages={evalStages} />}
         {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
           nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
           readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId}
@@ -412,7 +413,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         {activeTab === 'Trace' && <Trace key={`trace:${detailScope}:${n.attempt ?? 'pending'}`}
           n={n} runId={runId} expectedGeneration={expectedGeneration} onOpenCard={onOpenCard}
           expectedTraceRevision={n.trace_revision}
-          live={live} working={nodeWorking}
+          live={live} working={nodeWorking} evalStages={evalStages}
           detailStatus={detailStatus} reloadPending={!!detailPending}
           clearScope={traceClearScope} clearRecoveryStore={traceClearRecoveryStore}
           recoverClearState={traceClearRecoveryStore.current.get(traceClearScope) || null}
@@ -486,6 +487,7 @@ function KV({ k, v }) { return <><div className="k">{k}</div><div className="v">
 // Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
 export function GroupSummary({
   groupKey, memberIds, state, themeFilter = null, highlightIds = null, onSelectNode, onClose,
+  evalStages = null,
 }) {
   const dir = state.direction
   // Keep the drill-down on exactly the same semantic projection as its collapsed super-node. Without
@@ -523,7 +525,7 @@ export function GroupSummary({
               <td><button type="button" className="btn xs ghost" data-group-member-id={n.id}
                 aria-label={`Open experiment #${n.id}`} onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
               <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
-              <td>{nodeActivityView(n, state).shortLabel}</td></tr>)}</tbody></table></DataTable>
+              <td>{nodeActivityView(n, state, evalStages).shortLabel}</td></tr>)}</tbody></table></DataTable>
         </>}
     </div>
   </>
@@ -989,7 +991,8 @@ function DerivedMemory({ n, state, runId }) {
   </>
 }
 
-function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard }) {
+function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard,
+  evalStages = null }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
@@ -1005,7 +1008,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
   // the whole point: an inherited rationale under a bare "Rationale" reads as this experiment's own
   // justification, which is the misreading the fork receipt was stamped to prevent.
   const forkProv = forkProvenance(n)
-  const activity = nodeActivityView(n, state)
+  const activity = nodeActivityView(n, state, evalStages)
   const ideaNote = field => {
     const note = forkFieldNote(forkProv, field)
     return note ? <span className="muted idea-attribution"> — {note}</span> : ''
@@ -2400,7 +2403,7 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
 }
 
 export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
-  onOpenCard = null,
+  onOpenCard = null, evalStages = null,
   detailStatus = 'ready',
   reloadPending = false, clearScope, clearRecoveryStore, recoverClearState = null,
   clearRecoverySignal = null, publishClearRecovery }) {
@@ -2464,15 +2467,25 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // node_reset re-build of an existing node, which the spliced `building` flag misses because
   // withBuilding never overwrites an id already in state.nodes), not the singular `live.building`.
   const _bmarker = buildingMarkers(live).find(m => Number(m?.node_id) === Number(n.id))
-  const activity = nodeActivityView(n, live)
+  const activity = nodeActivityView(n, live, evalStages)
   const building = working && activity.status === NODE_ACTIVITY.BUILDING
   const _op = building ? (_bmarker?.operator || n.operator || '') : ''
-  const statusLabel = !working ? null
-    : building
-      ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
-      : '🏋️ training / evaluating…'
-  const status = statusLabel && <div className="trace-live-status" role="status"><span className="tls-dot" />{statusLabel}
-    <span className="muted trace-live-note">live · auto-updates</span></div>
+  // A QUEUED node used to render nothing here at all: `working` is build-or-evaluate, so the one tab
+  // an operator opens to ask "what is this node doing?" answered with a blank strip for the whole
+  // time it sat waiting for a slot — indistinguishable from a node nobody is watching. It gets its
+  // own line, and deliberately no `live · auto-updates` note and no pulse, because nothing is running
+  // for it and there is nothing to auto-update.
+  const queued = activity.status === NODE_ACTIVITY.QUEUED
+  const statusLabel = working
+    ? (building
+        ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
+        // The activity label, not a fixed string: when the run reports a live stage cursor this reads
+        // "Stage train · 2 of 3" instead of calling a whole multi-hour pipeline "training".
+        : `🏋️ ${activity.label}…`)
+    : queued ? `⏳ ${activity.label}…` : null
+  const status = statusLabel && <div className={'trace-live-status' + (queued ? ' waiting' : '')} role="status">
+    <span className="tls-dot" />{statusLabel}
+    {!queued && <span className="muted trace-live-note">live · auto-updates</span>}</div>
   const retryParentTrace = () => onReload?.('retry')
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
   // The attempt picker. Only rendered when there IS an earlier generation — a node that never got
@@ -2764,10 +2777,13 @@ export function Metrics({ n, detail, state, runId }) {
   // also fed `anyUnverified`, so a phantom row could summon the whole self-reported footnote.
   //
   // `channel` is therefore `null` when this node holds no value, and the source cell renders
-  // nothing at all rather than a word about nothing. `bestChannel` is the same read against the
-  // CHAMPION's own record: the `best #N` column is a different node's number, and until now only
-  // the ★ row consulted `champObjective`, so a self-reported champion extra sat unlabelled beside
-  // this node's labelled one — the by-contrast misread the ★ cell's own comment warns about.
+  // nothing at all rather than a word about nothing. `bestCaveated` is the same read against the
+  // CHAMPION's own record: the `best #N` column is a different node's number, and until 2026-08-29
+  // only the ★ row consulted `champObjective`, so a self-reported champion extra sat unlabelled
+  // beside this node's labelled one — the by-contrast misread the ★ cell's own comment warns about.
+  // It carries the presence check that the old `bestChannel` did (it is false when the champion
+  // holds no value for this key), so the two columns still cannot invent a caveat about an empty
+  // cell.
   const rows = [
     { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
     ...extraKeys.map(k => {
@@ -2776,15 +2792,21 @@ export function Metrics({ n, detail, state, runId }) {
       return {
         k, mine, best,
         channel: mine == null ? null : extraMetricChannel(n, k),
-        bestChannel: (champ && best != null) ? extraMetricChannel(champ, k) : null,
+        // A RECONSTRUCTION IS A CAVEAT EVEN THOUGH ITS CHANNEL IS THE GUARDED ONE. The score
+        // backfill writes recovered values as `declared` — correctly, the operator's own scoring
+        // program printed them — so a cell keyed on the channel alone rendered a value recovered
+        // from a log after the fact identically to one measured while the run was happening, at a
+        // precision two decimals coarser than the objective. `extraMetricCaveated` is the OR of the
+        // two questions; the label and its tooltip come from one call each so they cannot drift.
+        caveated: mine == null ? false : extraMetricCaveated(n, k),
+        bestCaveated: (champ && best != null) ? extraMetricCaveated(champ, k) : false,
       }
     }),
   ]
-  // A row with no value on EITHER side can no longer summon this footnote: `channel` and
-  // `bestChannel` are both null there, so the sentence is printed only when some cell it describes
-  // is actually on screen.
-  const anyUnverified = rows.some(r => (r.channel && r.channel !== 'declared')
-    || (r.bestChannel && r.bestChannel !== 'declared'))
+  // A row with no value on EITHER side can no longer summon this footnote: `caveated` and
+  // `bestCaveated` are both false there, so the sentence is printed only when some cell it
+  // describes is actually on screen.
+  const anyUnverified = rows.some(r => r.caveated || r.bestCaveated)
   return <>
     <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
     <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>source</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
@@ -2794,16 +2816,16 @@ export function Metrics({ n, detail, state, runId }) {
           ? <span className={objectiveCaveated ? 'warn' : ''}
             title={objectiveSourceHelp(objective)}>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>
           : r.channel
-            ? <span className={r.channel === 'declared' ? '' : 'warn'}
-              title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>
+            ? <span className={r.caveated ? 'warn' : ''}
+              title={extraMetricSourceHelp(n, r.k)}>{extraMetricSourceLabel(n, r.k)}</span>
             : null}</td>
         <td>{fmt(r.mine)}</td>
         {showChamp && <td>{r.star && objectiveSourceCaveated(champObjective)
           ? <span className="warn" title={objectiveSourceHelp(champObjective)}>
             {fmt(r.best)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
-          : r.bestChannel && r.bestChannel !== 'declared'
-            ? <span className="warn" title={EXTRA_METRIC_CHANNEL_HELP[r.bestChannel]}>
-              {fmt(r.best)} · {EXTRA_METRIC_CHANNEL_LABEL[r.bestChannel]}</span>
+          : r.bestCaveated
+            ? <span className="warn" title={extraMetricSourceHelp(champ, r.k)}>
+              {fmt(r.best)} · {extraMetricSourceLabel(champ, r.k)}</span>
             : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {/* The extras' footnote below exists because a tooltip is not discoverable — an operator
         scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
@@ -2870,6 +2892,20 @@ export function Metrics({ n, detail, state, runId }) {
       are audit-only and never drive selection. <b>provenance unknown</b> means the run predates this
       record; treat it as self-reported.
     </div>}
+    {/* PRINTED, not the footnote's job to hover. The argument above the ★ footnote — "a tooltip is
+        not discoverable, an operator scanning a table does not hover every cell" — is STRONGER
+        here, because the harm is a silent tie: the recovered suite is printed to two decimals while
+        the objective is read at six, so two nodes that differ can render identical on every
+        recovered row. `extraMetricIsBackfilled` is per NODE (the fold declines a node that already
+        carries any extra metric, so a backfilled map is backfilled entirely) and the champion's
+        record is read separately, because the `best #N` column is a different node's number. */}
+    {(extraMetricIsBackfilled(n) || (champ && extraMetricIsBackfilled(champ))) && (
+      <div className="muted">
+        Rows marked <b>reconstructed</b> were recovered from the preserved score log after the run,
+        not recorded while it was happening — at the precision the scoring program chose to print,
+        which is coarser than the objective. Two nodes equal on a reconstructed row are not known to
+        be equal.
+      </div>)}
     {n.confirmed_mean != null && <div className="kv confirmed-metric">
       {/* Same rule as the `|| 'Multiple'` above: `||` falls through on a real 0 and would quietly
           substitute the sample length for a recorded count of zero — a different number presented as

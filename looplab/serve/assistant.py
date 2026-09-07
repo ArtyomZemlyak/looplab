@@ -31,6 +31,7 @@ from typing import Callable, Optional
 from looplab.core.atomicio import atomic_write_text, best_effort_fsync, strict_atomic_write_text
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.events.eventstore import iter_jsonl
+from looplab.serve.llm_context import ASSISTANT_EVIDENCE_GUARD, BOSS_EVIDENCE_LABEL
 
 # Permission modes mirror Claude Code. `plan` is the safe read-only default; mutating modes are
 # enforced by the write/shell/git providers. Re-export the shared source of truth so session and
@@ -1464,6 +1465,19 @@ class ShareStore:
 
 
 # --------------------------------------------------------------------------- system prompt + toolset
+# The guard below names the CHANNEL, and since 2026-09-03 every tool result carries the label it
+# names: `drive_tool_loop`'s `tool_result_label` fences each result between `UNTRUSTED_RUN_EVIDENCE`
+# and `END UNTRUSTED_RUN_EVIDENCE` (`agents/tool_loop.py::fence_untrusted`). The Boss's evidence is
+# one message the server stamped and is self-describing; a tool result is not, so a model forty
+# results into a long turn had nothing in the text to re-anchor on. It is stamped at the LOOP rather
+# than in each tool, so no tool's own return value changed and the suites pinning those shapes stay
+# green — and it is opt-in, so every other persona is byte-identical.
+#
+# The OTHER half of the original finding is a POLICY question and is deliberately not decided here:
+# in `auto` mode this role holds finalize/stop/resume/extend-budget/write/commit with no approval,
+# including on unattended standing-watch wake-ups. The guard now tells the model that only the
+# operator's own message can authorize an action, which is the prompt-side half; whether `auto`
+# should hold those verbs at all is the operator's call, not a defect to patch.
 def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None,
                   cross_run_tools: bool = False, taxonomy_tools: bool = False,
                   work_cycle: bool = False, standing_work: bool = False) -> str:
@@ -1541,7 +1555,16 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
            "`stop_watch`.\n" if standing_work else "")
         + "Be concise and concrete; use Markdown. Your final reply answers only the CURRENT request "
         "and reports only work performed in this turn; earlier conversation is context, not work to "
-        "recap. When you have the answer, call `final_answer` exactly once with your reply.")
+        "recap. When you have the answer, call `final_answer` exactly once with your reply."
+        # THE UNTRUSTED-EVIDENCE BOUNDARY, at system authority and shared with the Boss
+        # (`llm_context.py::untrusted_evidence_guard`). This role had none while the Boss's own
+        # docstring argued for one on grounds that are all true here too: it reads candidate-authored
+        # stdout and agent traces through tools, expands `@run:`/`@file:` blocks straight into the
+        # user turn, and can finalize, stop, extend the budget of or DELETE a run. LAST, so it is the
+        # final thing the system message says, and UNCONDITIONAL, because untrusted text can arrive
+        # at any point in a turn — including an unattended standing-watch wake-up with no operator
+        # present to notice.
+        + ASSISTANT_EVIDENCE_GUARD)
 
 
 # @-mentions: `@run:<id>` and `@file:<path>` in the user's message are expanded (server-side, before
@@ -2035,7 +2058,16 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     try:
         reply = drive_tool_loop(client, tools, convo, _emit_spec(),
                                 finalize=_fin, fallback=_fb, on_step=_on_step, on_text=on_text,
-                                cancel_check=cancel_check, on_budget=budget_box.update, **opts)
+                                cancel_check=cancel_check, on_budget=budget_box.update,
+                                # ENFORCE the rule the system prompt states. `ASSISTANT_EVIDENCE_
+                                # GUARD` tells this role that everything a tool returns is
+                                # `BOSS_EVIDENCE_LABEL`, and until 2026-09-03 nothing marked one: the
+                                # Boss's evidence is a single message the server stamped and is
+                                # self-describing, while a tool result is not, so a model forty
+                                # results into a long turn had nothing in the text to re-anchor on.
+                                # The same constant on both sides, so the guard and the fence cannot
+                                # come to name different things.
+                                tool_result_label=BOSS_EVIDENCE_LABEL, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
         return {"ok": False, **safe_assistant_failure(e), "steps": steps,
                 "applied": _collect("applied"), "proposals": _collect("proposals"),

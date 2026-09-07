@@ -19,6 +19,7 @@ deliberate refusal (`core/errors.py::OperatorRefusal`) becomes a message + exit
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import sys
 import copy
@@ -31,7 +32,7 @@ from typer.core import TyperGroup
 
 from looplab import __version__
 from looplab.core.config import Settings
-from looplab.core.errors import EnvironmentRefusal, OperatorRefusal
+from looplab.core.errors import EnvironmentRefusal, OperatorRefusal, exception_leaves
 from looplab.core.run_deletion import (
     RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
 from looplab.core.run_reset import (
@@ -74,11 +75,65 @@ def _make_cli_streams_total() -> None:
             continue
 
 
+# THE ONE PLACE LOOPLAB CONFIGURES LOGGING, and until 2026-09-01 there was none — which made the
+# level of all 39 `_LOG.warning` sites in the package a property of Python's defaults rather than a
+# choice anybody had made. The cost was not theoretical: an `_LOG.info` reached NOBODY on every run
+# ever recorded (root sits at WARNING with no handlers, so `logging.lastResort` is what puts a
+# record on stderr and it is fixed at WARNING), so the package had exactly ONE usable level and an
+# author with a genuinely informational line had to inflate it to WARNING or bury it where nothing
+# could ever show it. One line per site, promoted forever, instead of one decision here.
+#
+# The DEFAULT IS WARNING, so this changes what nobody asked for: the same records reach stderr, and
+# an INFO line still reaches nobody unless an operator asks for it. What it adds is that asking is
+# now possible, and that a record arrives with its level and logger on it — `lastResort` writes the
+# bare message, indistinguishable from a stray `print` or a library's own output and ungreppable by
+# level.
+LOG_LEVEL_ENV = "LOOPLAB_LOG_LEVEL"
+DEFAULT_LOG_LEVEL = "WARNING"
+
+
+def _configure_cli_logging() -> None:
+    """Configure logging when the CLI is invoked — never on import, never for an embedder.
+
+    Same shape and same reasoning as `_make_cli_streams_total` beside it: a library embedding
+    LoopLab owns its own logging, and a module that configures logging at import time takes that
+    away from every host that merely imported it. `basicConfig` is additionally a NO-OP when the
+    root logger already has a handler, so an embedder that configured logging first keeps it even
+    on the path where its own code then calls into this CLI — the host wins, without a probe here
+    that could disagree with the one `basicConfig` makes internally.
+
+    A deployment env var rather than a `Settings` field or a `--verbose` flag, for exactly the
+    reason `LOOPLAB_TRACEBACK` is one (see its comment): it is a property of the shell you are
+    debugging in, it must work on EVERY command including the ones with no settings surface at all,
+    and it must never be snapshotted into a run. It reaches a UI-launched engine too — those are
+    spawned as `python -m looplab.cli` (`serve/engine_proc.py`), so they come through here and
+    inherit the exporting shell's environment.
+
+    An UNPARSEABLE value degrades to the default and says so, rather than raising: this runs before
+    `super().__call__`, i.e. outside `_RefusalBoundaryGroup`, so a raise here is not a refusal an
+    operator reads — it is a raw traceback at exit 1, the presentation that boundary exists to
+    remove. Degrading keeps the CLI usable, and the complaint is visible because the default level
+    that carries it has just been installed.
+    """
+    raw = os.environ.get(LOG_LEVEL_ENV, "").strip()
+    level = logging.getLevelName(raw.upper()) if raw else DEFAULT_LOG_LEVEL
+    # `getLevelName` answers the STRING "Level <x>" for anything it does not know, so a non-int
+    # result is exactly "this is not a level" — the documented way to ask, and the reason this is
+    # not a hand-written name table that would drift from the stdlib's.
+    unknown = raw and not isinstance(level, int)
+    logging.basicConfig(level=DEFAULT_LOG_LEVEL if unknown else level,
+                        format="%(levelname)s %(name)s: %(message)s")
+    if unknown:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a logging level; using %s", LOG_LEVEL_ENV, raw, DEFAULT_LOG_LEVEL)
+
+
 class _TotalOutputTyper(typer.Typer):
     """Typer entry point that configures output only when the CLI is actually invoked."""
 
     def __call__(self, *args, **kwargs):
         _make_cli_streams_total()
+        _configure_cli_logging()
         return super().__call__(*args, **kwargs)
 
 
@@ -120,13 +175,10 @@ def deliberate_refusals(exc: BaseException) -> list[BaseException]:
     return [exc] if isinstance(exc, OperatorRefusal) else []
 
 
-def _exception_leaves(exc: BaseException):
-    """Flatten an (arbitrarily nested) exception group to the exceptions it actually carries."""
-    if isinstance(exc, BaseExceptionGroup):
-        for sub in exc.exceptions:
-            yield from _exception_leaves(sub)
-    else:
-        yield exc
+# Flattening an exception group is `core/errors.py::exception_leaves` — the module every layer that
+# has to ask "what actually failed in there" may import. This name is kept as the local spelling so
+# the existing call sites and their monkeypatch seams read unchanged.
+_exception_leaves = exception_leaves
 
 
 def refusal_report(exc: BaseException) -> str:
@@ -340,7 +392,7 @@ def log_integrity_from(store: EventStore) -> dict:
             "corrupt_line": div.get("corrupt_line"), "dropped_lines": div.get("dropped_lines")}
 
 
-def load_run_settings(run_dir, *, strict: bool) -> Settings:
+def load_run_settings(run_dir, *, strict: bool, require_snapshot: bool = False) -> Settings:
     """Load a run's `config.snapshot.json` into Settings — the ONE answer to "which settings does
     this command actually run with" (doc 25 CT-08).
 
@@ -361,12 +413,41 @@ def load_run_settings(run_dir, *, strict: bool) -> Settings:
       diagnostic reaches the endpoint recorded for that run. An absent or unreadable snapshot must
       not stop someone from reading an old or partially-written run, so it degrades to ambient.
 
-    An absent snapshot is ambient Settings under BOTH modes: `strict` is about corruption, not about
-    requiring the file. Callers that need the file to exist check for it themselves and say why
-    (`_finalization_recovery_inputs` names both snapshots in one message).
+    `require_snapshot=True` additionally REFUSES an absent snapshot on a run that already has an
+    event log, and exactly one caller asks for it: `resume`. That is the 2026-09-03 fix, and the
+    paragraph it replaces ("an absent snapshot is ambient Settings under BOTH modes: `strict` is
+    about corruption, not about requiring the file") was the defect its own bullet above describes.
+    With the file absent, `resume` took a fresh `Settings()`, whose `require_approval` is `False`
+    and is read LIVE (`engine/orchestrator.py::Engine.__init__`, gated in the search spine), so a
+    paused approval-pending run could be continued to completion with no approval — by deleting one
+    file. `trust_mode`, `eval_trust_mode`, `confirm_*` and `backend` degrade the same way, silently.
+
+    WHY ONLY `resume`, and this is the narrowing that matters: the bypass lives in the SEARCH SPINE,
+    and `finalize` and the finalization recovery do not run it — they wrap up a run that has already
+    stopped. A run predating `config.snapshot.json` is a real, supported thing
+    (`tests/test_finalization_recovery.py::test_cli_finalize_accepts_explicit_task_file_for_legacy_run`
+    is named for it), and refusing to FINALIZE one would make an old run permanently unfinishable
+    over a gate it can no longer reach. Same asymmetry as `adapters/repo_task.py`'s grandfathering:
+    refuse where the operator is about to spend something, grandfather where they are only closing
+    the books.
+
+    The discriminator is the run's own EVENT LOG, not the run directory: a bare `--out` path with no
+    log is a fresh run whose snapshot has not been written yet (this function is called before the
+    engine writes one), and refusing there would break `run` itself. `run_dir=None` is the same case.
+
+    Callers that need the file to exist for a REASON OF THEIR OWN still check and say so
+    (`_finalization_recovery_inputs` names both snapshots in one message); this refusal is about the
+    settings, so it names the settings that would have been lost.
     """
     snap = Path(run_dir) / "config.snapshot.json" if run_dir is not None else None
     if snap is None or not snap.exists():
+        if require_snapshot and snap is not None and (Path(run_dir) / "events.jsonl").exists():
+            raise typer.BadParameter(
+                f"{snap} is missing, but {run_dir} holds an events.jsonl — this run was started with "
+                "settings that are no longer on disk. Continuing would silently run it on defaults "
+                "(require_approval, trust_mode, eval_trust_mode, confirm_*, backend, ...), which can "
+                "finish an approval-pending run with no approval. Restore the snapshot from a backup, "
+                "or copy one from another run of the same task and edit it.")
         return Settings()
     if strict:
         return _settings_from_config_snapshot(snap)

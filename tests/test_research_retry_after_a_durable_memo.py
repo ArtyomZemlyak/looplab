@@ -142,7 +142,7 @@ class _LoopStub(ResearchCadenceMixin):
                                      recommended_directions=["d"])
 
     def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
-                              superseded=None):
+                              superseded=None, **extra):
         # `superseded=` is `_research_attempt_step`'s own kwarg on this branch (the
         # `_results_since_snapshot` stamp), and the stub has to accept it for the same reason
         # `tests/test_research_overlap.py::_LoopStub` does: this fake stands in for the real

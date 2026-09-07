@@ -116,6 +116,12 @@ _INT_LIST_FIELDS = {"evidence", "parent_ids", "status_nodes", "discarded_nodes"}
 _ROLLUP_KEYS = frozenset({
     "children", "open", "running", "evaluated", "failed", "dropped", "nodes",
     "best_delta", "best_card_id",
+    # The champion-relative pair. It is SEPARATE from `best_delta` because the two have different
+    # baselines and routinely disagree in sign: on v11 the InfoNCE direction reads
+    # `best +0.01724` (its child beat its own parent) and `best vs champion -0.013805` (and is
+    # still below the run's best). Collapsing them would let a direction that lost to the champion
+    # be read as a win.
+    "best_vs_champion", "best_vs_champion_card_id",
 })
 _FOOTPRINT_KEYS = {"gpus", "gpu_mem_mib", "proposed_by", "finalized_by", "pinned_by"}
 _NOVELTY_KEYS = {"grade", "level", "near_node", "near_generation", "recommendation"}

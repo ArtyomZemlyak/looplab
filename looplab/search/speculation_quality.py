@@ -1758,17 +1758,60 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
     # set: `masked_snapshot()` pops credential bindings and stamps `config_snapshot_schema`, so the
     # two sets are structurally different and an exact equality against the profile can never hold.
     # (See `calibration_snapshot_document_fields` for the two commits that each closed this gate.)
-    from looplab.search.speculation_calibration import SPECULATION_CALIBRATION_SNAPSHOT_FIELDS
-    expected_config_fields = (
+    from looplab.search.speculation_calibration import (
+        SPECULATION_CALIBRATION_SNAPSHOT_FIELDS, SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS)
+    # THE SET IS DIRECTIONAL (2026-09-03), and it was a two-way equality against a CURRENT constant.
+    #
+    # `SPECULATION_CALIBRATION_SNAPSHOT_FIELDS` is derived from THIS BINARY's `Settings.model_fields`,
+    # so every `Settings` field added after a calibration run was recorded appeared as `missing` and
+    # revoked it. Six preserved GPU runs sat as a dead asset on this box and the gate reported it as
+    # a snapshot mismatch — which reads like a corrupt run rather than like a version skew — and no
+    # receipt could be minted here at all. Adding an unrelated field changes no derivation and no
+    # measurement; it changes only what a snapshot happens to contain. The equality was doing the job
+    # of a version check with the tool of an exactness check.
+    #
+    # THE EXACTNESS THAT MATTERS IS ELSEWHERE AND IS UNTOUCHED, which is what makes this narrowing
+    # safe rather than a loosening. `speculation_runtime_scope_digest(config)` below digests the
+    # whole snapshot document and compares it to the `speculation_runtime_scope_sha256` the RUN
+    # stamped at start, so a snapshot that is not byte-exactly the one that run started with already
+    # fails — and that check consults no current constant, only the two artifacts. Every value the
+    # profile pins is re-checked one loop down, and each field the protocol reads is validated by
+    # name below.
+    #
+    # So what is left for this check is the two things a digest cannot say:
+    #   * a field the protocol NEEDS is absent -> still fatal, exactly as before. `_REQUIRED` is
+    #     that set spelled out, not "everything Settings currently declares", and it is the clause
+    #     the BACKLOG entry insists on: "a field the calibration actually READS staying absent is
+    #     still fatal". Subtracting unknown names without it turns this into a no-op.
+    #   * a field THIS BINARY DOES NOT UNDERSTAND is present -> still fatal, because a snapshot
+    #     written by a newer LoopLab may carry semantics this build would silently drop. That is the
+    #     same fail-closed rule `core/config.py::settings_from_snapshot` already applies on resume.
+    # A field this binary declares that an OLDER snapshot predates is absent-and-fine, which is the
+    # whole of the change.
+    known_config_fields = (
         set(SPECULATION_CALIBRATION_SNAPSHOT_FIELDS)
         | set(SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS)
     )
-    if set(config) != expected_config_fields:
-        missing = sorted(expected_config_fields - set(config))
-        extra = sorted(set(config) - expected_config_fields)
+    required_config_fields = (
+        set(SPECULATION_CALIBRATION_PROFILE_SETTINGS)
+        | set(SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS)
+        | set(SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS)
+        # ...and every key this function goes on to read by name.
+        | {"speculation_gate_receipt", "max_nodes", "card_driven_selection",
+           "speculation_depth", "trust_gate"}
+        # INTERSECTED with what a snapshot DOCUMENT can carry, because `masked_snapshot()` pops the
+        # credential bindings: `llm_api_key_base_url` is pinned by the profile and can never appear
+        # in a snapshot, so requiring it present refuses EVERY calibration run — which is the
+        # original defect with the sign flipped, and is exactly what the first cut of this did.
+        # The profile-settings loop below still checks its VALUE through `config.get`, where an
+        # absent key reads None and a pinned None matches.
+    ) & known_config_fields
+    missing = sorted(required_config_fields - set(config))
+    unknown = sorted(set(config) - known_config_fields)
+    if missing or unknown:
         raise ValueError(
             f"config fields differ from the exact calibration snapshot "
-            f"(missing={missing}, extra={extra})"
+            f"(missing={missing}, extra={unknown})"
         )
     if config.get("speculation_gate_receipt") is not None:
         raise ValueError("config.speculation_gate_receipt must be null in fresh calibration evidence")

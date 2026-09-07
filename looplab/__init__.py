@@ -120,6 +120,7 @@ _LAYOUT = {
     "comment_projection": "events",
     "command_eval": "runtime",
     "command_observation": "serve",
+    "code_freshness": "serve",   # is this server process still running the code on disk
     "comparison": "core",
     "concepts": "core",       # canonical concept identity + materialization integrity contracts
     "concept_frame": "serve",   # bounded versioned concept frames served to the UI
@@ -308,6 +309,7 @@ _LAYOUT = {
     "run_projections": "serve",   # the run-list projections AppState now owns (doc 25 SR-12)
     "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
     "run_deletion": "core",
+    "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
     "run_reset": "core",
     "node_diff": "tools",   # what actually differs between two nodes: code, params proposed vs applied
     "run_tools": "tools",
@@ -344,6 +346,7 @@ _LAYOUT = {
     "trace_clear": "serve",      # durable write-ahead trace-clear state machine (doc 25 SR-03)
     "trace_append": "core",      # trusted spans.jsonl append-receipt contract
     "trace_files": "core",       # private trace-file identity + bounded physical-row boundary
+    "trust_gate": "events",  # the ONE trust_gate_changed write policy, shared by its two surfaces
     "traceview": "events",
     "tracing": "core",
     "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill

@@ -82,3 +82,76 @@ export function unverifiedExtraMetricKeys(nodes, keys) {
   }
   return out
 }
+
+// WAS IT MEASURED, OR RECONSTRUCTED AFTERWARDS — the browser half of
+// `looplab/core/models.py::extra_metric_is_backfilled`, and a question ORTHOGONAL to the channel
+// above rather than a fourth value of it.
+//
+// `maintenance/backfill_score_metrics.py` recovers objectives the score stage printed and the run
+// threw away (36 numbers computed, one kept). It writes them through the `declared` channel, which
+// is the honest one of the three — the operator's own scoring program printed them, so `auto` and
+// `engine` are both false — and until 2026-09-02 that was the WHOLE record, so a reconstruction
+// rendered here exactly like a measurement taken while the run was happening.
+//
+// THE COST IS ABOUT PRECISION. The recovered suite is printed to TWO decimals while the primary is
+// read at six, so neighbouring nodes tie: `e5small-dr-unified-v4` nodes 0 and 1 differ by 0.006 on
+// recall@100 and are identical on every recovered metric. "These two nodes are equal on nDCG" and
+// "the print statement cannot tell them apart" are different claims, and a table that renders the
+// second as the first is stating something false.
+//
+// NOT PER KEY, because the writer cannot produce a partially-backfilled node: the fold declines a
+// node that already carries ANY extra metric, so a backfilled map is backfilled entirely. The
+// `node` argument is still taken per call so the two readers below have the same shape as the
+// channel ones and a caller cannot pass the wrong object silently.
+export const EXTRA_METRIC_RECONSTRUCTED_LABEL = 'reconstructed'
+export const EXTRA_METRIC_RECONSTRUCTED_HELP =
+  'Recovered from the preserved score log after the run, not recorded while it was happening. The '
+  + 'operator\'s own scoring program printed it — but at the precision it chose to print, which is '
+  + 'coarser than the objective, so two nodes equal here are not known to be equal.'
+
+// Absent means MEASURED, and that is the safe direction here — the opposite of the channel map's.
+// An absent channel means "nobody wrote down where this came from" and must not read as the
+// guarded one; an absent backfill marker means the fold never applied a reconstruction to this
+// node, which no log written before the backfill tool existed can contradict.
+export function extraMetricIsBackfilled(node) {
+  const record = node && node.extra_metrics_backfill
+  return !!(record && typeof record === 'object' && !Array.isArray(record) && record.backfilled)
+}
+
+// How many decimals this value was PRINTED to, or null. `null` is not "full precision" — it is
+// "nobody wrote it down", which is the answer for every live measurement and for a reconstruction
+// whose log did not say. A surface rendering a tie must say which of the three it is looking at.
+export function extraMetricPrecision(node, key) {
+  const record = node && node.extra_metrics_backfill
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+  const decimals = record.precision_decimals
+  if (!decimals || typeof decimals !== 'object' || Array.isArray(decimals)) return null
+  const found = decimals[key]
+  return Number.isInteger(found) && found >= 0 ? found : null
+}
+
+// The source cell's full sentence for one key: the channel, plus the reconstruction note when there
+// is one. ONE function so the label and its tooltip cannot come apart, and so a surface cannot
+// print "declared" with no hint that the number was recovered from a log.
+export function extraMetricSourceLabel(node, key) {
+  const channel = extraMetricChannel(node, key)
+  if (!extraMetricIsBackfilled(node)) return EXTRA_METRIC_CHANNEL_LABEL[channel]
+  return `${EXTRA_METRIC_CHANNEL_LABEL[channel]} · ${EXTRA_METRIC_RECONSTRUCTED_LABEL}`
+}
+
+export function extraMetricSourceHelp(node, key) {
+  const channel = extraMetricChannel(node, key)
+  if (!extraMetricIsBackfilled(node)) return EXTRA_METRIC_CHANNEL_HELP[channel]
+  const decimals = extraMetricPrecision(node, key)
+  const precision = decimals == null ? '' : ` Printed to ${decimals} decimal place(s).`
+  return `${EXTRA_METRIC_CHANNEL_HELP[channel]} ${EXTRA_METRIC_RECONSTRUCTED_HELP}${precision}`
+}
+
+// A value that is caveated for EITHER reason — the channel is not the guarded one, or the whole map
+// is a reconstruction. This is what a source cell decides its `warn` class on: `declared ·
+// reconstructed` is still a caveat, and rendering it unmarked because the channel is `declared` is
+// the inversion this whole block exists to close.
+export function extraMetricCaveated(node, key) {
+  return !extraMetricIsDeclared(node, key) || extraMetricIsBackfilled(node)
+}
+

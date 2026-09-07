@@ -225,6 +225,82 @@ def test_bench_verdicts_match_the_production_schema():
     assert set(typing.get_args(annotation)) == set(VERDICTS)
 
 
+def test_bench_stage_statuses_match_the_production_registry():
+    """The same guard for the STAGE vocabulary, and it was missing while the copy was wrong.
+
+    `judge_corpus`'s set predated `runtime/command_eval.py::STAGE_STATUSES` and carried `"error"` —
+    which `_run_stages` mints nowhere — while omitting `needs_failed` and `env_unsupported`, which
+    it does. Those two therefore fell through to `LABEL_UNKNOWN`/`stage_status_unknown` instead of
+    `LABEL_WASTED`, dropping attempts the engine refused before spawning anything out of the
+    early-stop bench's saveable-hours denominator.
+
+    A copy is still the right shape here (see `VERDICTS`' own note: a bench that moves when
+    production moves cannot detect that it moved). What a copy may not be is WRONG.
+    """
+    from looplab.judgebench.judge_corpus import (STAGE_FAILED_STATUSES, STAGE_OK_STATUSES,
+                                                 STAGE_TIMEOUT_STATUSES)
+    from looplab.runtime.command_eval import STAGE_STATUSES
+
+    bench = STAGE_FAILED_STATUSES | STAGE_OK_STATUSES | STAGE_TIMEOUT_STATUSES
+    assert bench == set(STAGE_STATUSES), (
+        f"the bench classifies a different vocabulary than the engine mints: "
+        f"only in bench {sorted(bench - set(STAGE_STATUSES))}, "
+        f"only in production {sorted(set(STAGE_STATUSES) - bench)}")
+    assert not (STAGE_FAILED_STATUSES & STAGE_OK_STATUSES), "the three classes must partition"
+    assert not (STAGE_FAILED_STATUSES & STAGE_TIMEOUT_STATUSES)
+    assert "timeout" not in STAGE_FAILED_STATUSES, (
+        "`timeout` is deliberately its own label class — see the module docstring")
+
+
+def test_the_bench_reads_the_SAME_TRACEBACK_LINE_production_does():
+    """Two regexes for "the last exception line", drifted on three clauses.
+
+    `judge_corpus._TERMINAL_EXCEPTION` sets the bench's `terminal_exception` label and ranks which
+    tool reads get stored; `failure_diagnosis._HEADLINE_RE` decides what the Developer is SHOWN.
+    Production widened for the indented-traceback case (a launcher indenting each child's traceback
+    inside its own report block) and for any bracketed stream tag, and accepts `…Interrupt`; the
+    bench anchored at the line start, allowed only `[rank\\d+]: `, and accepted `…Exit`. So the
+    bench could not see the headline the diagnostician was shown on exactly the case production was
+    widened for.
+
+    Still a COPY, on `VERDICTS`' argument — a bench that moves when production moves cannot detect
+    that it moved — so this asserts AGREEMENT rather than identity, and states the one deliberate
+    difference.
+    """
+    from looplab.engine.failure_diagnosis import _HEADLINE_RE
+    from looplab.judgebench.triage_corpus import _TERMINAL_EXCEPTION
+
+    for line in ("ValueError: plain",
+                 "    torch.OutOfMemoryError: CUDA out of memory",   # the indented traceback
+                 "[rank0]: RuntimeError: ddp collective failed",     # the torchrun tag
+                 "[worker-3]: KeyError: 'k'",                        # any bracketed tag
+                 "KeyboardInterrupt: stopped"):
+        assert bool(_TERMINAL_EXCEPTION.findall(line)) == bool(_HEADLINE_RE.findall(line)), line
+        assert _TERMINAL_EXCEPTION.findall(line), f"and both must MATCH it: {line}"
+
+    assert not _TERMINAL_EXCEPTION.findall("retrying after ValueError happened"), (
+        "both stay ANCHORED: a line that merely mentions an error name is not a terminal line")
+    assert not _HEADLINE_RE.findall("retrying after ValueError happened")
+
+    # THE ONE DELIBERATE DIFFERENCE: `SystemExit: 2` is a definite crash for LABELLING and is not a
+    # headline worth pushing to a Developer, so the bench keeps `Exit` and production does not.
+    assert _TERMINAL_EXCEPTION.findall("SystemExit: 2")
+    assert not _HEADLINE_RE.findall("SystemExit: 2")
+
+
+def test_bench_non_eval_reasons_are_reasons_something_MINTS():
+    """A label that can never match is a bucket that stays empty while reading as coverage.
+
+    Both `cancelled` and `idea_rejected_pre_eval` were dead: nothing writes either, and the real
+    word is `idea_rejected`. Resolved from `ENGINE_TERMINAL_REASONS` rather than by grepping for the
+    string, so a spelling that exists only in prose cannot satisfy this."""
+    from looplab.core.models import ENGINE_TERMINAL_REASONS
+    from looplab.judgebench.judge_corpus import NON_EVAL_FAILURE_REASONS
+
+    unknown = sorted(set(NON_EVAL_FAILURE_REASONS) - set(ENGINE_TERMINAL_REASONS))
+    assert not unknown, f"the bench classifies terminal reason(s) nothing mints: {unknown}"
+
+
 def test_prompt_splits_round_trip_exactly(dataset):
     """The replay seam. If the split and the render are not inverses, a "changed prompt" replay is
     measuring a prompt nobody can reconstruct.

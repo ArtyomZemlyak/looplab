@@ -29,7 +29,25 @@ const STORED_COMMAND_STATUSES = new Set(['submitting', ...COMMAND_STATUSES])
 const OBSERVATION_KINDS = new Set([null, 'transport', 'access', 'protocol', 'missing', 'request'])
 
 const STORED_RECORD_KEYS = new Set(['id', 'status', 'event_type', 'error'])
+// THE ENVELOPE'S OWN VERSION. Without it, this reader's only answer to a payload it does not fully
+// recognise is `protocolInvalid` — and the shape that produces is a DEPLOY: ship a build that adds
+// one envelope key, and a tab still running the previous build reads a perfectly valid in-flight
+// command, fails `hasOnlyKeys`, and calls it a protocol violation. That is the outcome-unknown state
+// the whole two-phase commit exists to avoid, manufactured by the client's own key set.
+//
+// A version distinguishes "corrupt" from "newer than me", which need opposite answers: corruption
+// means trust nothing, while a newer protocol means the fields I DO understand — above all the
+// command id — are still exactly what they claim, so the command can be re-checked rather than
+// declared dead. Two sibling stores in this tree already version theirs
+// (`attentionStorage.js::ATTENTION_STATE_VERSION`, `settingsSchema.js::SETTINGS_SCHEMA_VERSION`).
+//
+// MIGRATION: an envelope with no `v` is version 1 — the shape that shipped before this field — and
+// is read exactly as before. That is the whole migration, because the field is additive; a future
+// bump is what needs a step here, and this is the hook it will hang from.
+export const COMMAND_ENVELOPE_VERSION = 1
+
 const RUN_ENVELOPE_KEYS = new Set([
+  'v',
   'runId', 'action', 'expectedGeneration', 'idempotencyKey', 'commandId', 'record', 'statusUnavailable',
   'observationKind', 'retrying', 'checking', 'updatedAt', 'committed',
 ])
@@ -379,6 +397,7 @@ function saveCommandTransport(source, runId, state, storage) {
     if (!commandId && (arg == null || nodeGeneration == null)) return false
   } else if (source === 'assistant' && state.nodeGeneration != null) return false
   const payload = {
+    v: COMMAND_ENVELOPE_VERSION,
     runId: String(runId), action: state.action,
     ...(source === 'assistant' ? { arg, nodeGeneration } : {}),
     expectedGeneration, idempotencyKey: String(state.idempotencyKey), commandId, record,
@@ -426,8 +445,36 @@ function loadCommandTransport(source, runId, storage) {
     if (raw == null) return null
     let payload
     try { payload = JSON.parse(raw) } catch { return protocolTransport(runId, source) }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
-        || !hasOnlyKeys(payload, commandEnvelopeKeys(source))
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return protocolTransport(runId, source)
+    }
+    // An absent `v` is version 1 (the shape before the field existed). A HIGHER one was written by a
+    // newer build of this app, so its unfamiliar keys are expected rather than corruption — skip the
+    // key check, keep what is still readable (the command id above all), and let the surface re-check
+    // the command's status instead of calling a live command dead.
+    const envelopeVersion = payload.v === undefined ? 1 : payload.v
+    if (!Number.isSafeInteger(envelopeVersion) || envelopeVersion < 1) {
+      return protocolTransport(runId, source, payload)
+    }
+    if (envelopeVersion > COMMAND_ENVELOPE_VERSION) {
+      const transport = protocolTransport(runId, source, payload)
+      // A NEWER PROTOCOL IS NOT A VIOLATION, and until this line it was answered as one.
+      // `protocolTransport` hard-codes `protocolInvalid: true, canResubmit: false` — the
+      // outcome-unknown state — so the newer-envelope branch returned exactly what the key check it
+      // was added to skip already returned, and `protocolNewer` was a flag no surface reads. The
+      // comment above states the intent: the fields this build understands are still what they
+      // claim, so the command is RE-CHECKED rather than declared dead.
+      //
+      // Only with an id, because that is what makes a re-check possible: `Dock.jsx::
+      // onCheckTransport` fetches `record.id` when the state is not `protocolInvalid`, and refuses
+      // with the outcome-unknown toast when there is none. `canResubmit` stays FALSE either way —
+      // re-checking a command by id is safe; REPLAYING an envelope this build does not fully
+      // understand is not.
+      return transport.commandId
+        ? { ...transport, protocolInvalid: false, protocolNewer: true }
+        : { ...transport, protocolNewer: true }
+    }
+    if (!hasOnlyKeys(payload, commandEnvelopeKeys(source))
         || payload.runId !== String(runId) || !commandTransportActions(source).has(payload.action)
         || !validRunGeneration(payload.expectedGeneration)
         || !safeIdentityText(payload.idempotencyKey)

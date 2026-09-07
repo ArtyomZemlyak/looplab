@@ -84,6 +84,11 @@ class _RunHost:
     _drain_inflight_evaluation = Engine._drain_inflight_evaluation
     _evals_inflight = Engine._evals_inflight
     _drain_adopted_evals = Engine._drain_adopted_evals
+    # The run-loop exit receipt `Engine.run`'s outer `finally` writes, bound REAL rather than
+    # stubbed: it is owed only once `_enter_run` has returned (`_run_loop_exit_owed`), and this host
+    # never enters a run, so the shipped early-return is the branch taken. A no-op stub would have
+    # asserted the same thing without proving the latch is what decides it.
+    _record_run_loop_exit = Engine._record_run_loop_exit
 
     def __init__(self, failure: BaseException):
         self._failure = failure

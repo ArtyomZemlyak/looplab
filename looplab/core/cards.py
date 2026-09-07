@@ -869,7 +869,9 @@ _ROLLUP_BUCKETS = {
 }
 
 
-def card_child_rollup(children) -> dict | None:
+def card_child_rollup(children, *, champion_metric: float | None = None,
+                      child_metrics: dict | None = None,
+                      direction: str = "max") -> dict | None:
     """A direction's own progress, summed from the children that answer it. ``None`` for no children.
 
     WHY A ROLLUP AND NOT A DERIVED STATUS. The obvious design gives a parent the "worst" or "latest"
@@ -885,6 +887,29 @@ def card_child_rollup(children) -> dict | None:
     ``best_delta`` is the best improvement-over-parent any child measured, with the child that owns
     it — the direction's actual research answer, and the one number worth putting beside its title.
     A child with no measurement contributes nothing rather than a zero.
+
+    ``best_vs_champion`` IS A SECOND, DIFFERENT NUMBER, and the difference is the whole reason it
+    exists. ``best_delta``'s baseline is each child's own PARENT NODE
+    (`events/card_ledger.py::_evidence_verdict`), so a question answered by a first-generation DRAFT —
+    which has no parent carrying a metric — gets no delta at all. Measured on
+    `runs/e5small-dr-unified-v11`: of the four directions with an evaluated child, THREE report
+    ``best_delta: null`` for exactly that reason, while their children measured 0.773951, 0.759164
+    and 0.718923. The board therefore showed an answered question as unmeasured, which is what the
+    operator saw.
+
+    The baseline is the RUN CHAMPION's metric. The direction's own ``scored_against`` was tried
+    first and MEASURED as `None` on all nine of v11's directions — a direction is derived from a
+    belief row and never carries a score fence, so that fallback would be null exactly where it is
+    needed. The champion exists on every run that has evaluated anything and answers what an
+    operator reads this board for: did anything under this question beat the best we have. The
+    ``best_delta``/``supported`` ladder is deliberately UNTOUCHED: `card_ledger.py::_evidence_verdict` records
+    what loosening it cost last time (a live Researcher on v5 reading "verdict=supported" over one
+    parentless node and writing "…that's odd").
+
+    ``child_metrics`` maps card id -> that child's best feasible-evaluated metric; the caller owns
+    it because `nodes` is in ITS scope, not this module's. Absent anchor or metrics simply yields
+    ``None`` for the pair — never a zero, for the same reason a child with no measurement
+    contributes nothing.
     """
     rows = [c for c in (children or []) if c is not None]
     if not rows:
@@ -907,12 +932,25 @@ def card_child_rollup(children) -> dict | None:
             if best_delta is None or delta > best_delta:
                 best_delta = delta
                 best_card_id = str(getattr(child, "id", "") or "") or None
+    best_vs_champion: float | None = None
+    best_vs_champion_card_id: str | None = None
+    if isinstance(champion_metric, float) and math.isfinite(champion_metric) and child_metrics:
+        for child in rows:
+            metric = child_metrics.get(str(getattr(child, "id", "") or ""))
+            if not (isinstance(metric, float) and math.isfinite(metric)):
+                continue
+            gain = (metric - champion_metric) if direction == "max" else (champion_metric - metric)
+            if best_vs_champion is None or gain > best_vs_champion:
+                best_vs_champion = gain
+                best_vs_champion_card_id = str(getattr(child, "id", "") or "") or None
     return {
         "children": len(rows),
         **counts,
         "nodes": nodes,
         "best_delta": best_delta,
         "best_card_id": best_card_id,
+        "best_vs_champion": best_vs_champion,
+        "best_vs_champion_card_id": best_vs_champion_card_id,
     }
 
 
@@ -992,6 +1030,15 @@ def card_rollup_brief(rollup) -> str:
     if isinstance(best, float) and math.isfinite(best):
         owner = rollup.get("best_card_id")
         parts.append(f"best {best:+.6g}" + (f" by {owner}" if isinstance(owner, str) and owner else ""))
+    # Against the QUESTION's own anchor, and shown even when `best_delta` is absent — that absence
+    # is the common case for a direction answered by drafts, and it is what made an answered
+    # question read as unmeasured. Spelled "vs anchor" so the two numbers can never be confused:
+    # they have different baselines and can disagree in sign.
+    anchor = rollup.get("best_vs_champion")
+    if isinstance(anchor, float) and math.isfinite(anchor):
+        owner = rollup.get("best_vs_champion_card_id")
+        parts.append(f"best vs champion {anchor:+.6g}"
+                     + (f" by {owner}" if isinstance(owner, str) and owner else ""))
     return ", ".join(parts)
 
 

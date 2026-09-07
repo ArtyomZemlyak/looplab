@@ -92,6 +92,28 @@ engine cannot execute, and every malformed task file or unknown `-s` key.
 Set `LOOPLAB_TRACEBACK=1` to get the frames of a refusal back — useful when a refusal fires and you
 believe it should not. It changes nothing else, and it never suppresses a crash's traceback.
 
+## Log level
+
+The CLI configures Python logging once, when it is invoked — never on import, so a program that
+merely imports LoopLab keeps its own logging, and an embedder that configured logging first keeps
+that too. Records arrive on **stderr** as `LEVEL logger: message`; for a run started from the UI
+that is `<run_dir>/engine.stderr.log`, since those engines are spawned as `python -m looplab.cli`
+and come through the same entry point.
+
+The default is `WARNING`. Set `LOOPLAB_LOG_LEVEL` to widen it:
+
+```bash
+LOOPLAB_LOG_LEVEL=INFO looplab run --kind quadratic ...
+```
+
+Any level name Python knows works (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). A value that is
+not a level does **not** stop the command: it falls back to `WARNING` and says so on stderr, so a
+typo in an exported variable is visible rather than silently running at a level you did not ask for.
+
+A deployment variable rather than a setting or a flag, for the same reason as `LOOPLAB_TRACEBACK`:
+it is a property of the shell you are debugging in, it has to work on every command including the
+ones with no settings surface, and it must never be snapshotted into a run.
+
 ---
 
 ## `init`

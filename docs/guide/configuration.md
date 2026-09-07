@@ -70,19 +70,20 @@ document therefore has no task and is rejected by `run`. The file is **input onl
 snapshots, so `resume`/`replay` are unchanged. Precedence within one run: `--set`/flags **>** the
 file's `settings:` **>** env/`.env` **>** defaults.
 
+An unknown key in any LAUNCH layer is refused by name — the config file's `settings:` block, the
+command-line flags and `--set` all go through one rule — so a renamed or mistyped knob stops the run
+instead of silently taking the default. `--set` has always done this; the file layer did not, and a
+`settings:` block carrying `max_node: 30` used to build a `Settings` with `max_nodes = 8` and print
+nothing. RESUME is deliberately the other way: `config.snapshot.json` keeps `extra="ignore"` so an
+older binary can still load a snapshot a newer one wrote.
+
 ---
 
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **195 of the 229 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 195 catalogued keys.
-server-owned curated catalogue with **195 of the 229 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 195 catalogued keys.
-server-owned curated catalogue with **195 of the 229 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 195 catalogued keys.
-server-owned curated catalogue with **195 of the 229 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 195 catalogued keys.
+server-owned curated catalogue with **196 of the 230 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 196 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -675,8 +676,8 @@ These are no-ops unless `backend=llm`.
 | `llm_temperature` | `LOOPLAB_LLM_TEMPERATURE` | `0.6` | Sampling temperature |
 | `llm_parser` | `LOOPLAB_LLM_PARSER` | `tool_call` | Structured-output strategy (`tool_call`, with text fallback) |
 | `llm_guided_json` | `LOOPLAB_LLM_GUIDED_JSON` | `false` | Use the endpoint's constrained decoding (vLLM/SGLang `guided_json`) |
-| `llm_reasoning` | `LOOPLAB_LLM_REASONING` | `high` | Thinking depth: `""` (server default) / `off` / `on` / `low` / `medium` / `high` |
-| `llm_reasoning_style` | `LOOPLAB_LLM_REASONING_STYLE` | `auto` | How to shape the request: `auto` / `qwen` / `effort` / `none` |
+| `llm_reasoning` | `LOOPLAB_LLM_REASONING` | `high` | Thinking depth: `""` (server default) / `off` (or its synonyms `none` / `false` / `0`) / `on` / `low` / `medium` / `high`. Case-insensitive, and refused at construction if it is none of these — an unknown value used to be forwarded to the provider verbatim as `reasoning_effort` |
+| `llm_reasoning_style` | `LOOPLAB_LLM_REASONING_STYLE` | `auto` | How to shape the request: `auto` / `qwen` / `effort` / `none`. Case-insensitive, and refused at construction if it is none of these — an unknown style shaped an EMPTY body, so reasoning was silently never requested |
 | `llm_reasoning_extra` | `LOOPLAB_LLM_REASONING_EXTRA` | `{}` | Raw fields merged into the request body (escape hatch) |
 | `llm_stream` | `LOOPLAB_LLM_STREAM` | `True` | Stream the response (SSE) and reassemble it — bounds a stalled generation via an idle-guard watchdog; off = one blocking request |
 | `llm_stream_stall_fallback` | `LOOPLAB_LLM_STREAM_STALL_FALLBACK` | `True` | What the client does with a request whose **stream stalled** (an idle timeout mid-body, an in-band SSE error frame, a keepalive-only 200). `true` is the historical client byte for byte: the next attempt of that call goes out **without SSE**, and after `STREAM_STALL_DEGRADE_AFTER` (2) stalls the client stops streaming for its lifetime — the right trade on an endpoint that answers the same request fine without a stream while its stream wedges. `false` retries a stalled stream **as a stream**, on the same backoff, and never degrades — the right trade on a stand whose proxy bounds the WHOLE request (nginx `proxy_read_timeout 300`), because without SSE the 300 s window measures the whole generation, i.e. the fallback's own retry is exactly the request that wall kills. Measured on the 2026-09-03 bench batch (docs/56 §173-175): under `LOOPLAB_LLM_STREAM=1`, `oldCK9` still sent 58 of 301 calls unstreamed on this fallback's initiative, 4 of them dead at 300.0 s, and $0.10 of its $1.00 went on twenty re-sends of one body. Stalls are still COUNTED either way — every generation span now carries `stream_attempts`, the per-attempt SSE flag — only what is asked for next changes. Per run, not per call: whether the proxy bounds the whole request is a property of the endpoint. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: `true` is the historical value |
@@ -1051,6 +1052,7 @@ When the Developer is delegated to an external coding agent (`developer_backend`
 |---|---|---|---|
 | `validate_agent` | `LOOPLAB_VALIDATE_AGENT` | `true` | Audit each agent output, retry with feedback, then fall back to the task's original in-process Developer (LLM writer, deterministic/template Developer, or repo baseline) |
 | `agent_max_retries` | `LOOPLAB_AGENT_MAX_RETRIES` | `1` | Re-prompts of the agent on an invalid result |
+| `agent_timeout` | `LOOPLAB_AGENT_TIMEOUT` | `600.0` | Wall-clock seconds one external coding-agent invocation may run before it is killed. Not the eval clock — `max_eval_timeout` bounds a node's evaluation, a different wall on a different process. |
 | `agent_patch_gate` | `LOOPLAB_AGENT_PATCH_GATE` | `true` | Run the agent in a git worktree; accept only edits inside the surface |
 | `agent_surface` | `LOOPLAB_AGENT_SURFACE` | `["*.py"]` | Edit-surface allow-list (globs) |
 | `agent_cmd` | `LOOPLAB_AGENT_CMD` | — | Override the agent's launcher/path |

@@ -103,7 +103,20 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               calibrated before it is genuinely different: every chain root now opens with
 #               bytes the old one did not carry, so a speculation receipt issued against the
 #               old prompts should stop verifying.)
-_EXPECTED_DIGEST = "sha256:ddae3bf376fb2b6c5d6a14b5f67f7cc9f191adea1301584cf309b938a6c9291c"
+#   2026-09-03  + agent_timeout               (the wall on ONE external coding-agent invocation).
+#               This is the "field set changed too" branch: 215 -> 216, so the calibration envelope
+#               really is different and old receipts SHOULD stop verifying. It is also the clearest
+#               possible instance of why the SIBLING check had to stop being an equality — a field
+#               that no calibration run can be affected by (calibration uses the toy backend and
+#               never launches a coding agent) legitimately moves THIS pin, which binds the complete
+#               settings map, while it must NOT revoke a preserved snapshot merely for predating it.
+#               See `search/speculation_quality.py`'s directional field check.
+#   2026-09-06  MERGE with master. Both sides grew the schema independently and the merge
+#               keeps both, so BOTH pins are RECOMPUTED from the merged module rather than
+#               taken from either side — neither side's digest describes it. Verified the
+#               prescribed way, by DIFFING the field set rather than adding the integers:
+#               master adds `agent_timeout`, this branch adds ten, nothing is removed.
+_EXPECTED_DIGEST = "sha256:db81e747b03d97f7e49cf0090b689a0d8f5b206d8bfa34668ee19736e5802cf7"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -444,7 +457,25 @@ _EXPECTED_DIGEST = "sha256:ddae3bf376fb2b6c5d6a14b5f67f7cc9f191adea1301584cf309b
 #               direction. `llm_stream_stall_fallback` only changes how a stalled provider stream
 #               is retried, but the guard is deliberately not clever enough to exempt one knob of
 #               three. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 226
+#   2026-09-02  + single_command_divergence_watch (214 -> 215). The "field set changed too" branch,
+#               and verified by DIFFING THE FIELD SET rather than reading the count, as the
+#               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated assignments
+#               between the commit that last pinned 214 (`cc6a64e`) and HEAD reports exactly
+#               [single_command_divergence_watch] added and [] removed, so no +1/-1 pair is hiding
+#               behind the new integer. Old receipts SHOULD stop verifying, and this one is as far
+#               from inert as the list gets: it gives the SINGLE-COMMAND eval path a deterministic
+#               divergence stop it never had — the one path with no early stop at all, even though
+#               its own branch comment says the command IS the training and `eval_log_plan` grants
+#               it LOG_ROLE_TRAINING for that reason. It ships ON (measured: the shipped
+#               `_StageHealthMonitor` replayed over every preserved log fires on 0 of 110 scoring
+#               phases and 2 of 133 `train.log`, both true positives), so a replicate calibrated
+#               after it can have a stage stopped and REPAIRED — `diverged` is in `FAILURE_REASONS`
+#               — where a replicate calibrated before it would have run that stage to its wall.
+#               That is a different number of evaluations on the same failing node, which is
+#               precisely what a speculation receipt asserts about.
+#   2026-09-06  MERGE with master, same rule as the 2026-08-29 entry above: the count is
+#               RE-DERIVED from the merged profile, never added, and the digest with it.
+_EXPECTED_FIELD_COUNT = 227
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

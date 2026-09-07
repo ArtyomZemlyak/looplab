@@ -924,6 +924,87 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
   a live node at that exact attempt (it need NOT still be the champion — amended 2026-08-13, see the
   **Layer-3 safety boundary** list item 3); without one, the writer must explicitly set the empty marker.
   Missing legacy fence data stays unknown and never becomes selection-ready.
+  **Both halves of the triple must be read from ONE fold** (amended 2026-08-31,
+  `card_reservation.scored_anchor`). `_reserve_node_build` takes `scored_against` from whatever its
+  CALLER folded and then re-folds fresh inside `_plan` under the log-tail CAS; taking the ATTEMPT
+  from that second fold recorded an (old id, new attempt) pair whenever the anchor re-ran in
+  between, and the fence's verdict is decided by exactly that field
+  (`scored_against_generation != anchor_attempt -> stale`). So the receipt read `current` in the one
+  case the generation exists to catch. It was unreachable while the paid propose ran ON the loop
+  thread — the loop was frozen, so the two folds were the same log — and offloading the batch
+  propose to a worker opened the window to the propose's whole duration. Callers that name an
+  anchor id therefore name its attempt too; the stale ID is deliberately NOT corrected, per item 3
+  above.
+
+```mermaid
+flowchart LR
+  F1["fold #1 (caller)<br/>best_node_id = 1<br/>attempt = 0"] -->|scored_against = 1| R
+  F1 -.->|"scored_anchor(): attempt = 0<br/>(added 2026-08-31)"| R
+  P["paid propose<br/>OFFLOADED to a worker<br/>— the loop keeps folding"] --> R
+  N["node 1 re-runs mid-propose<br/>attempt 0 -> 1"] --> F2
+  F2["fold #2 (_plan, under the CAS)<br/>node 1 attempt = 1"] -->|"attempt, BEFORE the fix"| R
+  R["card_added receipt"] --> V{"card_score_fence_state<br/>generation == live attempt?"}
+  V -->|"(1, 1) two folds"| C["current — WRONG:<br/>the metric it was scored on is gone"]
+  V -->|"(1, 0) one fold"| S["stale — correct"]
+```
+- A direction's rollup carries TWO numbers with DIFFERENT baselines, and they routinely disagree in
+  sign. `best_delta` is the best improvement over a child's own PARENT NODE; `best_vs_champion` is
+  the best child metric against the RUN CHAMPION (added 2026-08-31).
+
+  Why the second exists, measured on `runs/e5small-dr-unified-v11`: of the four directions with an
+  evaluated child, THREE reported `best_delta: null` — their children are first-generation drafts
+  with no parent carrying a metric — while those children had measured 0.773951, 0.759164 and
+  0.718923. An answered question read as unmeasured. With the champion baseline all four are
+  answered, and all four are refuted:
+
+  | direction | best_delta | best vs champion |
+  |---|---|---|
+  | longer training | — | **−0.003272** by card-0 |
+  | InfoNCE family | **+0.01724** by card-7 | **−0.013805** by card-7 |
+  | hard negatives | — | **−0.018059** by card-1 |
+  | LoRA | — | **−0.0583** by card-2 |
+
+  The InfoNCE row is why they must stay two numbers: its child beat its own parent and is still
+  below the run's best. Collapsing them would let a direction that lost to the champion read as a
+  win.
+
+  The direction's own `scored_against` was tried FIRST and rejected on measurement: it is `None` on
+  all nine of v11's directions, because a direction is derived from a belief row and never carries a
+  score fence. A fallback that is null exactly where it is needed is not a fallback.
+
+  `best_delta` and the `supported`/`tested` ladder are deliberately untouched — see
+  `events/card_ledger.py`'s own record of what loosening them cost on v5.
+
+```mermaid
+flowchart LR
+  Q["direction / question"] --> C1["child card"]
+  Q --> C2["child card"]
+  C1 --> N1["node — metric"]
+  C2 --> N2["node — metric"]
+  N1 --> B1{"has a parent<br/>node with a metric?"}
+  B1 -->|yes| D["best_delta<br/>(vs its own parent)"]
+  B1 -->|"no — a DRAFT"| X["no best_delta<br/>3 of 4 on v11"]
+  N1 --> CH["best_vs_champion<br/>(vs the run's best)"]
+  N2 --> CH
+  D --> R["rollup on the direction"]
+  X --> R
+  CH --> R
+```
+
+- The AGENT's own board says the same thing. `tools/question_board.py::read_questions` renders a
+  question, its `concepts:`, its children — and, since 2026-09-01, `answered: best vs champion …`
+  on the question's own line. Every child row's `delta=` is the parent-relative `best_delta`, so
+  before this a question answered by a DRAFT was a row of em-dashes to the role deciding what to
+  propose next. Live on v11 and v12 the same four questions the operator's board now answers read:
+
+      QUESTION_ID=does-mining-hard-negatives-…   answered: best vs champion -0.018059 by card-1
+      QUESTION_ID=does-parameter-efficient-…     answered: best vs champion -0.0583   by card-2
+      QUESTION_ID=does-the-infonce-family-…      answered: best vs champion -0.013805 by card-7
+      QUESTION_ID=does-training-the-e5-small-…   answered: best vs champion -0.003272 by card-0
+
+  It sits on the QUESTION line and not on a child, because the two numbers have different
+  baselines and disagree in sign on that very InfoNCE row (`best +0.01724` against its own parent).
+
 - `RunState.cards: dict[str,Card]=default_factory(dict)`, assigned only inside `_derive_cards`.
 - **Reserve now** the operator-override maps + the final-overlay phase:
   `RunState.card_priority_pins`/`card_operator_edits`/`card_resource_pins` (`default_factory=dict`), even

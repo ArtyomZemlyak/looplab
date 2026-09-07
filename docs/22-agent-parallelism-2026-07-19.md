@@ -314,3 +314,60 @@ per-experiment TIME-BUDGET cue (so each parallel node is sized to fit). Variant 
 Sources: Anthropic — multi-agent research system
 (https://www.anthropic.com/engineering/multi-agent-research-system); AlphaEvolve, arXiv 2506.13131
 (https://ar5iv.labs.arxiv.org/html/2506.13131).
+
+---
+
+## 6. Measured 2026-09-03: the second lane starves, and the reason is the BUILD/TRAIN RATIO
+
+The 2026-07-19 motivation above predicted this shape ("builds nodes one at a time and sits idle for
+the whole ~30–40 min of a training eval"). Four runs later it is measurable, and the number that
+moved is not the width — it is how much of a train a build now occupies.
+
+Lane occupancy, integrating `node_eval_started` against `node_evaluated`/`node_failed` over each
+run's own wall clock:
+
+    run                        length    0 evals          1 eval           2 evals
+    e5small-dr-unified-v4      100.8h    13.5h (13.4%)    67.4h (66.8%)    19.9h (19.8%)
+    e5small-dr-unified-v11      45.4h     3.2h ( 7.0%)    19.0h (41.8%)    23.2h (51.2%)
+    e5small-dr-unified-v12      57.9h    17.2h (29.7%)    30.2h (52.1%)    10.5h (18.2%)
+
+v12 leaves BOTH H200s idle for 17.2 hours — four times v11's share — while configured at
+`eval_parallel=2`.
+
+Why, in one table:
+
+    run                        median train    median build    build / train
+    e5small-dr-unified-v4        445.9 min        39.7 min          8.9%
+    e5small-dr-unified-v11       333.6 min        45.8 min         13.7%
+    e5small-dr-unified-v12       186.2 min        51.2 min         27.5%
+
+Trains got 58% shorter while builds got 29% longer. A build at 8.9% of a train is invisible — the
+next card is ready long before the lane frees. At 27.5% it is not, and the box waits:
+
+    v4/v11   |=== train ===============================|=== train ==============|
+             |build|                                    |build|
+             lane 2 refilled before it drains
+
+    v12      |=== train =========|=== train =========|      |=== train ====|
+             |  build   |        |  build   |   IDLE  |     |  build  | IDLE
+             lane 2 drains while the next card is still being made
+
+THE SPECULATIVE LANE IS OFF, AND IT IS OFF ON ALL THREE RUNS.
+`engine/speculation.py::_speculation_enabled` requires `speculation_depth > 0` AND a gate-receipt
+digest, and `cli/run_cmds.py` restricts that receipt to "ONLY the offline toy benchmark the
+calibrated lane is measured on". So Variant 2 (§3) has never run on a real task. That is a
+constant across v4/v11/v12 and therefore cannot explain the regression — it explains why nothing
+absorbs it.
+
+Two further measurements bound the fix:
+
+* **There is never inventory to build ahead FROM.** Peak cards added-but-not-built is **1** on both
+  v11 and v12; v12 has none at all for 41.2h (71.6% of the run). Nine of its nineteen builds start
+  with an empty box, and at every one of those starts the number of other unbuilt cards is zero.
+* **The board is kept that empty by the admission cap.** Of 413 directions proposed by v12's 36
+  research memos, 394 were CAPPED, 2 restated, 0 repeated, 17 admitted — and even those 17 arrive
+  singly (`belief_admission` now records this per memo).
+
+So `eval_parallel=2` is a width this pipeline cannot honour while a build is a quarter of a train
+and nothing builds ahead. The levers are Variant 2 for real runs, the propose cost itself, or
+accepting one lane and not paying for two.
