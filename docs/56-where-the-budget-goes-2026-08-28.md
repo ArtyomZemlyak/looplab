@@ -13536,3 +13536,39 @@ says out loud that it is leaving the campaign default in place.
 Three mutations red: always wide, an unreadable reference falling back to the default, and printing
 the answer without exporting it. The test extracts `scoring_workers` from the shipped
 `campaign.sh` and runs it — the §312 pattern — rather than re-implementing the rule beside it.
+
+## §322 — the serial rulers are minted before the money, and the rnd branch had nothing to pull
+
+§321 left half the problem standing. Telling `run_one` to score a CP-SAT task at
+`ALGOTUNE_EVAL_WORKERS=1` only helps on a box that already has that task's serial ruler. On one that
+does not, the same run cannot score, through either of two doors, both driven here:
+
+* without `ALGOTUNE_ALLOW_NEW_REGIME=1` → `baseline_regime_mismatch`, refused before measuring;
+* with it → the first evaluation BUILDS the ruler and returns `baseline_measured_in_pass`, which in
+  a campaign is a node of a paid probe consumed by the denominator.
+
+`declare_baseline_ruler` sets the regime and builds nothing, so the pre-flight now mints what the
+per-task regime will need — both subsets, on the free lane, before any arm starts, skipping what is
+already on disk so a resumed campaign pays nothing. Driven end to end against a wide-only scratch
+cache holding just `max_clique_cpsat__test__w22x1r3.json`: both `__test__lane22r3.json` and
+`__train__lane22r3.json` appeared.
+
+A mint that fails is not fatal and not silent — the task still reaches `looplab_eval`, which refuses
+rather than scoring it wrongly, and the operator is told which task will produce nulls *before* the
+arm runs. That is the entire reason this belongs in the pre-flight.
+
+Four mutations red: minting for every task, only the test subset, re-minting what exists, and
+swallowing the warning. The tests drive the shipped function with `python3` shimmed so the loop's
+decisions are checked in seconds instead of the twenty minutes four real timings cost — and the
+first shim swallowed `scoring_workers`' own `python3` call too, so every task came back `?` and
+nothing was minted: a fixture disagreeing with the test rather than with the bug.
+
+### The rnd branch
+
+Asked to pull it. Measured before merging: `origin/claude/agents-rnd-benchmarks-0cf964` is at
+**546a8e08**, and it holds **zero** commits this bench branch does not — the bench branch is 124
+ahead of it, and the local `rnd-merge` / `rnd-merged` are 367 and 429 behind. The merge ran and said
+`Already up to date`. What HAS moved is `origin/master`, by **99 commits** (`6262f3a1..bf860b72`);
+merging that is the operation the branch's own history calls "merge: origin/master into the rnd
+branch", it has resolved ten to fifteen conflicts each time it was done, and it changes the arm
+under measurement — so it is not something to do in passing.

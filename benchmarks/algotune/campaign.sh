@@ -567,6 +567,43 @@ declare_baseline_ruler() {
 }
 declare_baseline_ruler
 
+# THE SERIAL RULERS ARE MINTED BEFORE ANY MONEY IS SPENT, because the alternative is spending it.
+#
+# §321 taught `run_one` to score a CP-SAT task at `ALGOTUNE_EVAL_WORKERS=1`. On a box that has only
+# wide entries, that run cannot score: `looplab_eval` refuses `baseline_regime_mismatch` (the serial
+# key is absent while a wide one is there), and with `ALGOTUNE_ALLOW_NEW_REGIME=1` it instead spends
+# the first evaluation BUILDING the ruler and returns `baseline_measured_in_pass` -- a node of a
+# paid probe, consumed by the denominator. Both were driven on this box.
+#
+# So each task that will be scored serially gets its ruler here, on the free lane, before an arm
+# starts: two subsets, no LLM cost, about three minutes each. A task whose ruler already exists is
+# skipped, so a resumed campaign pays nothing.
+premint_serial_rulers() {
+  _minted=0
+  for _T in $TASKS; do
+    [ "$(scoring_workers "$_T")" = "1" ] || continue
+    for _S in test train; do
+      [ -n "$(ls "$ALGOTUNE_BASELINE_CACHE_DIR/${_T}__${_S}__lane"*.json 2>/dev/null)" ] && continue
+      echo "  minting the serial ruler for $_T/$_S (it is scored at one worker; §314)"
+      ALGOTUNE_EVAL_WORKERS=1 ALGOTUNE_ALLOW_NEW_REGIME=1 \
+        python3 "$REPO/benchmarks/ruler_selfcheck.py" --task "$_T" --subset "$_S" \
+        --lane "${PREMINT_LANE:-${LANE_CPUS[0]:-0-10}}" --reps 1 >/dev/null 2>&1 || true
+      if [ -n "$(ls "$ALGOTUNE_BASELINE_CACHE_DIR/${_T}__${_S}__lane"*.json 2>/dev/null)" ]; then
+        _minted=$((_minted + 1))
+      else
+        # NOT FATAL AND NOT SILENT. The task will reach `looplab_eval`, which refuses rather than
+        # scoring it wrongly -- the operator needs to know which task will produce nulls and why,
+        # before the arm runs, not after.
+        echo "  WARNING: could not mint $_T/$_S serially; that task will be REFUSED at scoring time"
+      fi
+    done
+  done
+  [ "$_minted" -gt 0 ] && echo "  minted $_minted serial ruler(s) before the arms started"
+  return 0
+}
+# (called below, after `scoring_workers` and the lane plan exist -- a call placed here
+# would run before either was defined.)
+
 # THE GOAL CARD IS PART OF THE ARM, not something an operator has to remember to export.
 #
 # `run_probe.sh` builds its card with `--deliver --one-card --enforce-rules`. This driver passed
@@ -1314,6 +1351,8 @@ reap_orphan_workers
 # sits idle -- which breaks the dedicated-core guarantee the timing argument rests on.
 declare -a LANE_PID
 for L in $(seq 0 $((LANE_COUNT - 1))); do LANE_PID[$L]=""; done
+
+premint_serial_rulers
 
 for T in $TASKS; do
   SLOT=""
