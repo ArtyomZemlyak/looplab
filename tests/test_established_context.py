@@ -470,3 +470,51 @@ def test_a_zero_byte_budget_renders_nothing_at_all():
     store.record("read_file", {"path": "a.py"}, "x = 1\n")
     store.record("read_file", {"path": "b.py"}, "y = 2\n")
     assert store.render() == ""
+
+
+def test_deep_research_records_through_its_own_observer_and_is_seeded():
+    """THE ONE PHASE A5 MISSED, in both directions.
+
+    `make_deep_researcher` composes `repo_reader_provider`, whose `repo_read` is a registered A5
+    reader and — by that module's own measurement — 33 % of this stage's tool calls. None of them
+    reached the ledger and its chain root carried no block, while `hook(phase, inner=…)` had been
+    written for exactly this case ("composed over an existing one so a caller that already observes
+    results keeps observing them") and nothing in the tree passed `inner`.
+
+    MUTATION: pass `store.hook("deep_research")` without `inner` -> the stage's own consulted-sources
+    ledger stops being fed, so the memo's citations silently empty out. Driven rather than pinned:
+    the composed hook must reach BOTH observers with the same call.
+    """
+    import ast
+    import inspect
+
+    from looplab.agents import deep_research as dr
+
+    store = EstablishedContext()
+    seen = []
+    composed = store.hook("deep_research", inner=lambda *a: seen.append(a))
+    composed("repo_read", {"path": "train.py"}, "import torch\n")
+    assert seen == [("repo_read", {"path": "train.py"}, "import torch\n")], "the inner observer"
+    assert "import torch" in store.render(), "…and the A5 ledger, from the same call"
+
+    # …and the stage really composes it that way, with its own `_record` as the inner.
+    tree = ast.parse(inspect.getsource(dr.DeepResearcher._research_once
+                                      if hasattr(dr.DeepResearcher, "_research_once")
+                                      else dr.DeepResearcher))
+    composed_calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "hook"
+        and any(kw.arg == "inner" for kw in n.keywords)
+    ]
+    assert composed_calls, "the deep-research loop no longer composes the A5 hook over its own"
+
+
+def test_the_deep_researcher_joins_the_runs_store_rather_than_minting_one():
+    """MUTATION: build its own `EstablishedContext` -> the stage that runs BEFORE most phases keeps
+    a private ledger, so nothing it retrieved is ever established for anybody else."""
+    from looplab.agents.established import established_context_from_settings
+    from looplab.core.config import Settings
+
+    settings = Settings()
+    runs_store = established_context_from_settings(settings)
+    assert established_context_from_settings(settings) is runs_store

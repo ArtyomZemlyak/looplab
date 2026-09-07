@@ -815,7 +815,8 @@ class DeepResearcher:
     _DEFAULT_LOOP_OPTS = LoopOptions(self_plan=True, auto_summary=True,
                                      emit_after=300, emit_force=500)
 
-    def __init__(self, client, tools=None, parser: str = "tool_call", loop_opts=None, prompts=None):
+    def __init__(self, client, tools=None, parser: str = "tool_call", loop_opts=None, prompts=None,
+                 established=None):
         self.client = client
         self.tools = tools
         self.parser = parser
@@ -824,6 +825,13 @@ class DeepResearcher:
         # (max_turns 0 = unlimited, time_budget_s 0 = no wall-clock cap — both config-driven via
         # Settings.agent_max_turns / agent_time_budget_s, never hardcoded here).
         self.loop_opts = LoopOptions.coerce(loop_opts).with_defaults(**self._DEFAULT_LOOP_OPTS)
+        # A5: the run's `agents/established.py` store, or None. THE ONE PHASE IT MISSED, in both
+        # directions: this stage composes `repo_reader_provider`, whose `repo_read` is a registered
+        # A5 reader and 33 % of this stage's own tool calls — none of which reached the ledger, and
+        # its chain root carried no block. The composition slot was written for exactly this
+        # (`hook(phase, inner=…)`: "composed over an existing one so a caller that already observes
+        # results keeps observing them") and nothing in the tree passed `inner` until now.
+        self._established = established
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -859,6 +867,15 @@ class DeepResearcher:
             spent=spent, limit=limit, remaining=max(0.0, limit - spent),
             pct=min(100.0, 100.0 * spent / limit))
 
+    def _established_block(self) -> str:
+        """The A5 block for this chain root, or "" — see `agents/established.py`. Appended, never
+        spliced, so a run with nothing recorded keeps the prompt it always had."""
+        store = getattr(self, "_established", None)
+        if store is None:
+            return ""
+        block = store.render()
+        return ("\n\n" + block) if block else ""
+
     def research(self, state: RunState, trigger: str = "") -> ResearchMemo:
         memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
@@ -870,8 +887,13 @@ class DeepResearcher:
             # The tool-surface join goes in the USER turn, beside the snapshot it describes, and
             # is built from the BOUND provider rather than re-derived here — see
             # `agents/answered_by_context.py` for why this is data and not another prompt rule.
+            # A5 sits BESIDE `answered_by_context` and answers the neighbouring question: that one
+            # says how much each tool holds right now, this one says what earlier phases of this run
+            # already retrieved. This stage runs before most of them on a cold start, so the block
+            # is usually empty and the prompt is byte-identical; on a cadence firing mid-run it is
+            # the one place the stage can see what the loop already paid for.
             {"role": "user", "content": self._budget_note() + state_brief(state) +
-                answered_by_context(self.tools) +
+                answered_by_context(self.tools) + self._established_block() +
                 "\nReview the run. Consult sources if useful, then emit your memo."},
         ]
         sources: list[dict] = []
@@ -913,7 +935,10 @@ class DeepResearcher:
                 finalize=lambda args: self._finalize(args, memo, sources),
                 # Ran out of turns without an emit — force a structured memo from the accumulated context.
                 fallback=lambda msgs: self._forced(msgs, memo, sources),
-                on_tool_result=_record,
+                # A5 records THROUGH this stage's own consulted-sources observer, never instead
+                # of it — that is what `inner=` is for.
+                on_tool_result=(self._established.hook("deep_research", inner=_record)
+                                if self._established is not None else _record),
                 # Live, not the session-start snapshot the user turn carries: this stage has no turn
                 # cap and no money cap, so it must hear the figure MOVE. See `tool_loop.py`.
                 budget_note=self._budget_note,
@@ -1077,5 +1102,10 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     # built-in system prompt; no prompt_dir (or no file) keeps the inline default byte-identical.
     prompts = (PromptStore(settings.prompt_dir)
                if getattr(settings, "prompt_dir", None) else None)
+    # THE RUN's store, not a new one: `established_context_from_settings` caches on the settings
+    # object, and this site is handed the same `Settings` the roles were built from, so the deep
+    # researcher joins the ledger every other phase already shares rather than starting a second.
+    from looplab.agents.established import established_context_from_settings
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
-                          prompts=prompts, loop_opts=loop_opts)
+                          prompts=prompts, loop_opts=loop_opts,
+                          established=established_context_from_settings(settings))
