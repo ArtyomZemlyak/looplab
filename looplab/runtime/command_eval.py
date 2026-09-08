@@ -3363,7 +3363,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     #
     # ONLY TWO CHANNELS HERE, and that is a fact about this tier rather than an omission. The third,
     # `EXTRA_METRIC_ENGINE`, names keys printed by source the ENGINE spliced into the artifact — and
-    # the one splicer that exists, `agents/roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
+    # the one splicer that exists, `agents/toy_roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
     # `solution.py` artifact and never a repo eval COMMAND. A repo task's argv runs the operator's
     # own program over the agent's working set; nothing the engine authored is inside it, so every
     # undeclared number on its stdout really is the candidate's. If that ever stops being true, the

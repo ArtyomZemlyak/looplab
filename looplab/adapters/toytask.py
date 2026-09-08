@@ -13,7 +13,11 @@ from looplab.core.models import validate_direction
 
 from looplab.core.comparison import ComparisonContract
 from looplab.core.parse import LLMClient
-from looplab.agents.roles import LLMResearcher, ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.roles import LLMResearcher
+# The toy pair lives in its own module (doc 25 AG-02) and is deliberately NOT re-exported by
+# `roles.py`: the calibration envelope names these two classes by dotted path, so there is exactly
+# one live spelling of each.
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 
 
 class ToyTask(BaseModel):

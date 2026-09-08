@@ -6461,9 +6461,12 @@ seam with 15+ call sites and several hundred tests speaking it; replacing the ke
 already closed by the partition rule above. `LoopOptions` is what a caller CONFIGURES with; the
 signature stays what the loop is CALLED with.
 
-#### AG-02 · MEDIUM · flat-code · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
+#### AG-02 · MEDIUM · flat-code · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[roles-module-still-a-god-module]** the CUDA-probe blob moved to `core/calibration.py`; the finding's other four responsibilities (prompt fragments, the Protocols + attr registries, the toy backends, the wrapper contracts) and the `ToyResearcher`/`ToyObjectiveDeveloper` calibration hooks are untouched, and the module has grown from the 1,058 lines the finding measured to **1,465** (2026-08-19). proof:present:ToyResearcher@looplab/agents/roles.py
+*Closed 2026-09-08: the remaining four responsibilities left `roles.py` for four siblings —
+`agents/role_prompts.py`, `agents/state_brief.py`, `agents/role_wrappers.py`, `agents/toy_roles.py`
+— and the module is 787 lines of role CONTRACTS plus the LLM roles. See the resolution note at the
+end of this finding.*
 
 **roles.py is a 1058-line god-module; the 137-line CUDA-probe calibration blob in its middle belongs to the speculation subsystem, not to role backends**
 
@@ -6501,6 +6504,63 @@ NOT done: the `ToyResearcher`/`ToyObjectiveDeveloper` calibration hooks the reco
 "if feasible". They are entangled with the toy backends' own behaviour rather than being constants,
 so they want their own pass — and the finding's other four responsibilities in `roles.py` (prompt
 fragments, the Protocols + attr registries, the toy backends, the wrapper contracts) are untouched.
+
+*Resolution (2026-09-08) — the rest of the split.* `roles.py` goes 1,947 -> 787 lines and keeps
+exactly the two things it is named for: the role CONTRACTS (both Protocols, the duck-typed
+attribute registries, `DeveloperResult` and `developer_call_lock`, the wrapper-chain resolvers,
+`forward_hints` / `collect_hint_cues`) and the LLM-backed Researcher/Developer. That is THREE of
+the finding's four remaining responsibilities moved out and one deliberately kept: the Protocols +
+registries ARE what "role backends" names, three guard tests point a rename at `agents/roles.py` in
+their failure messages, and putting a registry one re-export away from the file every consumer of it
+already reads is a cost with no reader on the other side. Four siblings, comments verbatim:
+
+* `agents/role_prompts.py` (282 lines) — the prompt fragments and the suffix assemblers.
+* `agents/state_brief.py` (462) — the board prompt window, the card binding, and `_state_brief`;
+  it is also the half of the old module that reached across packages, so the two deferred
+  cycle-breaking imports moved with the code that needs them.
+* `agents/role_wrappers.py` (445) — `WrapsResearcher` / `WrapsDeveloper` / `bind_state_on` /
+  `ValidatingDeveloper`: the follow-up split the recommendation names, mirroring the tool_loop
+  pattern it points at.
+* `agents/toy_roles.py` (127) — the toy backends WITH their calibration hooks. Those hooks are the
+  recommendation's "if feasible" half, and the answer is that they are entangled with the toy
+  backends' own behaviour, so the PAIR moved rather than the hooks being cut off the classes that
+  own them. The reading cost the finding measured is paid either way.
+
+Three of the four are re-exported by `roles.py`, so every existing spelling and every monkeypatch of
+`looplab.agents.roles.<name>` still names the SAME object — including the two private names
+`tests/test_cross_package_private_seams.py` declares by that spelling (`_state_brief` for `engine`,
+`_CONCEPT_AUTHORING_GUIDANCE` for `serve`). The toy pair deliberately is
+NOT: `search/speculation_calibration.py::SPECULATION_RUNTIME_ROLES_DESCRIPTOR` identifies those two
+classes by DOTTED PATH and that string feeds the calibration receipt's digest, so a second live
+spelling would be a second answer to "which implementation ran". The descriptor follows them to
+`looplab.agents.toy_roles.*`, which moves `speculation_runtime_scope_digest` and revokes every
+receipt issued against the old envelope. That is the deliberate answer rather than freezing a path
+that resolves to nothing — a frozen name is the recorded-fact-away-from-its-deciding-site shape
+`core/claimpin.py` exists to end — and it costs nothing that was not already spent:
+`search/speculation_quality.py`'s header lists the FOUR identities that revoke a receipt, and
+`speculation_implementation_digest` (a semantic edit to any shipped `.py`) had already revoked every
+receipt this split touches.
+
+One import edge is deferred and had to be: `roles.py` imports `role_wrappers` to re-export it, and
+`ValidatingDeveloper._record` reads `DEVELOPER_OUTPUT_ATTRS` back off `roles.py`. At module level
+that pair is green from `import roles` and an ImportError from `import role_wrappers` — verified,
+not reasoned about: the mutation below produces exactly that error at collection.
+
+*The guard is `tests/test_role_module_split.py`, and it drives the three ways a move of this shape
+breaks something silently.* (1) The prompts are pinned by a sha256 over EIGHTEEN composed fragments
+and assemblies, computed against the PRE-MOVE module and compared part by part before being written
+down — a prompt string is a contract, so "moved verbatim" is a correctness claim here exactly as it
+is for the CUDA probe source. (2) Every name a re-exported sibling DEFINES is derived by AST and
+asserted `is`-identical through `roles.py`, so a name added to a sibling and forgotten in the
+re-export block is red, and a name defined in both is red. (3) A fresh interpreter imports each of
+the five modules FIRST, because a cycle shows up in one order only.
+
+*Verified to bite by mutating a throwaway copy, five ways.* One extra space in `_OPERATOR_NOTE` ->
+the digest goes red. Dropping `_CONCEPT_AUTHORING_GUIDANCE` from `_researcher_system` while its
+bytes stay in the file -> two red, which is why the assembly is tested beside the digest. Deleting
+`_state_brief` from the re-export block -> red, naming it. Re-exporting the toy pair -> red.
+Turning the wrapper module's registry read into a module-level import -> an ImportError at
+collection.
 
 #### AG-03 · MEDIUM · inconsistency · effort: medium — **RESOLVED (2026-08-02)**
 
@@ -7232,9 +7292,11 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 - TASK_OPTIONAL_HOOKS (adapters/tasks.py:77) with its two-way source-scan test makes the duck-typed adapter seam rename-safe in both directions; probes I checked (onboard_command in repo_developer.py:597, host_grader in engine/orchestrator.py:1206) all resolve.
 - Load-bearing why-comments throughout: nearly every defensive branch cites the concrete incident or review item that motivated it (e.g. the _covered_by empty-string trap in repo_write_tools.py:58-67), which materially lowers the cost of maintaining the defensive code.
 
-#### RA-01 · HIGH · mergeable-entities · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
+#### RA-01 · HIGH · mergeable-entities · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[make-roles-backend-wirings-not-split]** the composition root moved to `agents/factory.py`; `make_roles` is still one 193-line function whose three developer-backend wirings interleave with the shared provider/prompt setup. proof:present:make_roles@looplab/agents/factory.py
+*Closed 2026-09-08: `make_roles`'s three developer-backend wirings are three named gates in
+`agents/developer_backends.py`, and `agents/factory.py` goes 456 -> 384 lines. See the second
+resolution note at the end of this finding.*
 
 **adapters/tasks.py is two modules fused: task schema/registry + the entire agent composition root**
 
@@ -7272,6 +7334,43 @@ branches are genuinely distinct wirings, but they interleave with the shared pro
 rather than sitting as three separable blocks; splitting them needs its own pass with room to verify
 each backend, and doing it badly would scatter the wiring instead of naming it. Recorded so the
 remaining half is visible rather than assumed done. Teeth-verified against 6 breakages.
+
+*Resolution (2026-09-08), the remaining half.* The three wirings are three functions in
+`agents/developer_backends.py` — `in_house_repo_developer`, `external_cli_developer`,
+`best_of_n_developer` — and `make_roles` composes them in the order that keeps an external preset
+ahead of the in-house editor. `agents/factory.py` goes 456 -> 384 lines, and its cap follows the
+file down to 385: this is the extraction `tests/test_agent_factory_split.py` prescribed the next
+time the cap was spent, so leaving 163 lines of slack behind would be the same failure as raising a
+cap seven times further than the change needs, one direction over.
+
+The value is not the line count, and the shape says so: EVERY gate returns `None` for "this backend
+does not apply", so each one is a statable rule with a truth table instead of a clause inside a
+multi-clause `if`. That is what makes the second fact honest — `_handoff_dev` is the in-house
+editor's own gate read a second time (only that Developer runs stages->plan->implement inside the
+node's handoff scope and reads the Researcher's brief), and a helper that returned the unchanged
+developer instead of `None` could not have kept the two together.
+
+Deliberately NOT extracted, for the same reason the earlier half kept `make_llm_client` where it
+was: the sweep offer, the PromptStore poke, the provider assembly and the H3 per-role client
+rebinding are SHARED setup every backend takes. Moving them would scatter the wiring instead of
+naming it, which is exactly what the note above refused to do badly.
+
+`_agent_model` moved with the one branch that consumes it and is re-exported by `agents/factory.py`,
+because `adapters/tasks.py` carries that private name across the package boundary and the identity
+is pinned. `agents/factory.py` may now name TWO `agents` modules at module level — `providers` and
+`developer_backends` — and the layering guard was extended by RE-DERIVING the condition for each
+rather than by widening the exemption: a name added to that tuple whose module takes a module-level
+`search`/`tools`/`agents` import is a red test.
+
+*The guard is `tests/test_developer_backend_wiring.py`, and it drives the rules rather than pinning
+their text.* Each gate is called with real `Settings` and the real example tasks in every
+configuration that turns it off and the one that turns it on; then `make_roles` is driven through
+counting stubs that assert the three are consulted in order and that each is handed what the
+previous one returned. *Verified to bite by mutating a throwaway copy, five ways:* flipping the
+order so the in-house editor wins over a preset -> red; dropping `_handoff_dev` from the in-house
+branch -> red; making the external agent ignore `param_search` -> red; making the in-house editor
+ignore an external preset -> three red; and the comment evasion (the best-of-N call left as TEXT
+only) -> red, because the ordering test counts CALLS.
 
 Two REGISTRY guards caught the split, which is what they exist for, and both needed a real update
 rather than a green-making edit:

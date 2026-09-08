@@ -39,7 +39,7 @@ import looplab.cli.run_cmds as _run_cmds
 import looplab.engine.orchestrator as _orch
 import looplab.engine.resources as _resources
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.llm_broker import (default_llm_lane_limits, llm_broker_scope, llm_lane_scope,
                                      llm_request_permit)
 from looplab.core.models import RunState

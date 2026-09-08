@@ -694,8 +694,9 @@ contracts (exit codes, groups, documented set) are each measurably contradicted.
 | AG-16 | L | C | `agents/reachability.py::task_onboarder_llm_roles` (bare `ValueError`), `strategist.py::make_strategist` (bare `ValueError`), `unified_agent.py::UnifiedAgent.last_budget_exhausted` (one slot, two producers) | Residual bare refusals; a facade slot whose correctness rests on documented call ordering. | `ConfigRefusal`; two named slots with the registry updated. |
 | AG-17 | L | P | `tool_loop.py::drive_tool_loop` (the `(emit_after or emit_force) and (tools is not None or self_plan)` gate) | With tools=None, `self_plan=False`, both budgets 0, a model hallucinating varying tool calls gets a fresh observation each turn and the `emit_force` ceiling is off — each turn a paid call. Shipped defaults close it. | Count `call_turns` toward `emit_force` whenever anything was CALLED. |
 
-Tracked: `roles-module-still-a-god-module`, `make-roles-backend-wirings-not-split`,
-`strategist-developer-field`, `temporal-leakage-flags-the-boundary`, `target-leakage-is-linear-only`.
+Tracked: `strategist-developer-field`, `temporal-leakage-flags-the-boundary`,
+`target-leakage-is-linear-only`. (`roles-module-still-a-god-module` and
+`make-roles-backend-wirings-not-split` closed 2026-09-08 — doc 25 AG-02 / RA-01.)
 
 **Top moves.** (1) AG-01 + the containment-polarity AST funnel. (2) One prompt assembler. (3) A
 CLI contract registry (`cli/registry.py` rows: name, group, side-effects, exit codes) from which

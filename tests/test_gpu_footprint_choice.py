@@ -36,8 +36,8 @@ import pytest
 
 import looplab.engine.orchestrator as _orch
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import (RESEARCHER_HINT_ATTRS, LLMResearcher, ToyObjectiveDeveloper,
-                                  ToyResearcher, footprint_guidance)
+from looplab.agents.roles import RESEARCHER_HINT_ATTRS, LLMResearcher, footprint_guidance
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.models import Idea, Node, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.runtime.sandbox import SubprocessSandbox

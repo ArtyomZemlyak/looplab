@@ -13,7 +13,7 @@ identical to the OLD cli.py::_engine kwarg-by-kwarg passthrough:
 from __future__ import annotations
 
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.config import Settings
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import Engine

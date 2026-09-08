@@ -41,6 +41,14 @@ _LAYOUT = {
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
+    # The four modules `roles.py` split into on 2026-09-08 (doc 25 AG-02). `roles.py` re-exports the
+    # first three; `toy_roles` is named directly by its importers, because the calibration envelope
+    # identifies the toy pair by dotted path and one live spelling is the point.
+    "role_prompts": "agents",   # the role prompt fragments + the suffix assemblers, moved VERBATIM
+    "state_brief": "agents",    # the board prompt window + `_state_brief`: what a proposal role SEES
+    "role_wrappers": "agents",  # WrapsResearcher/WrapsDeveloper/bind_state_on + ValidatingDeveloper
+    "toy_roles": "agents",      # the offline ToyResearcher/ToyObjectiveDeveloper backends
+    "developer_backends": "agents",  # the three developer-backend wirings `make_roles` composes (RA-01)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)

@@ -83,7 +83,8 @@ DEFERRED: dict[tuple[str, str], str] = {
                             "module-level name is typing-only)",
     ("agents", "engine"): "roles reach `node_build`/`repair_judgment`/`triage` inside a call the "
                           "engine makes",
-    ("agents", "events"): "`roles.py` renders a digest for one prompt",
+    ("agents", "events"): "`state_brief.py` renders a digest for one prompt (it was `roles.py` "
+                          "until the doc 25 AG-02 split moved the state brief to its own module)",
     ("agents", "runtime"): "`cli_agent` spawns its sandbox per run",
     ("agents", "search"): "the documented one-way rule: `search` imports `agents` at module "
                           "level, so `agents` may reach `search` only function-locally "

@@ -4911,7 +4911,9 @@ OPEN[claim-legacy-prompt-branches] Both pre-correction GPU paragraphs still ship
 library caller reads "declaring MORE than the ceiling does not get this experiment more hardware",
 which the scheduler contradicts. The engine path always stamps, so no run gets it; the byte-for-byte
 restoration is deliberate. What is missing is a decision about whether a false sentence may be the
-off-switch's value at all. proof:present:SERIALISES@looplab/agents/roles.py
+off-switch's value at all. The clause MOVED with the prompt fragments to
+`agents/role_prompts.py` on 2026-09-08 (doc 25 AG-02) and the proof is re-pointed at it; the
+item itself is untouched. proof:present:SERIALISES@looplab/agents/role_prompts.py
 
 OPEN[claim-effective-batch-event] `auto_find_batch_size` is refused as the memory answer on a
 measurement (transformers 4.51.0 keeps the DECLARED `per_device_train_batch_size` on `args` and the
