@@ -55,7 +55,7 @@ below shows both the Genesis path and the equivalent task file.
     competition grader) give the *"the agent never authors its own metric"* guarantee. **`code_regression`
     does not**, despite being a from-scratch kind: it is a **demo** task in which the solution computes
     **and self-reports** its own K-fold CV MSE, with no private grader — so a reward-hacking model could
-    print a fake number (`adapters/regression.py:195-199`). `dataset` self-reports too
+    print a fake number (`adapters/regression.py::CodeRegressionTask`, whose own docstring says so). `dataset` self-reports too
     ([tasks.md](tasks.md#dataset)). If you are choosing a kind **for the anti-cheat guarantee**, use
     `mlebench` / `mlebench_real`, or `repo` (your own protected `eval.command` + protected metric
     reader). The code-leakage / reward-hack monitors still *audit* the self-reporting kinds, but auditing

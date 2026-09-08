@@ -7,26 +7,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field
 
-from looplab.core.models import validate_direction
-
-from looplab.core.comparison import ComparisonContract
+from looplab.adapters.synthetic import SyntheticTaskBase
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher, ToyObjectiveDeveloper, ToyResearcher
 
 
-class ToyTask(BaseModel):
+class ToyTask(SyntheticTaskBase):
     kind: str = "quadratic"
     id: str = "toy_quadratic"
     goal: str = "minimize (x-3)^2 + (y+1)^2"
-    direction: str = "min"
-
-    @field_validator("direction")
-    @classmethod
-    def _direction_valid(cls, v):
-        return validate_direction(v)
-    comparison_contract: ComparisonContract | None = None
     bounds: dict[str, tuple[float, float]] = Field(
         default_factory=lambda: {"x": (-10.0, 10.0), "y": (-10.0, 10.0)}
     )

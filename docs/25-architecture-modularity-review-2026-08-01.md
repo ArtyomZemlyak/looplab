@@ -7415,9 +7415,7 @@ Teeth-tested against five breaks: the adapter skipping the guard, string-prefix 
 of `.resolve()`, the validator drifting back to a local copy, the narrowed except (the symlink-loop
 crash), and host_score's inverse assertion degrading to a silent None.
 
-#### RA-06 · MEDIUM · mergeable-entities · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
-
-> **OPEN[synthetic-task-adapters-copy-paste]** the direction validator is attached to all nine models; the five copy-paste synthetic skeletons are not collapsed. proof:absent:SyntheticTaskBase@looplab/adapters
+#### RA-06 · MEDIUM · mergeable-entities · effort: medium — **RESOLVED (2026-09-08)**
 
 **Five synthetic task adapters are copy-paste skeletons, and the direction validator exists in only 2 of 9 task models**
 
@@ -7425,8 +7423,8 @@ crash), and host_score's inverse assertion degrading to a silent None.
 registered task models — verified by `tests/test_task_direction_validator.py`, which DISCOVERS the
 models by import rather than listing them, so a new adapter that forgets it fails. `mlebench_real`
 opts "auto" in explicitly (it resolves that from the grader before any comparison) rather than
-every model loosening. **Still open:** the `SyntheticTaskBase` / `PerturbResearcher` collapse of
-the five copy-paste skeletons, which the finding itself rates lower priority.
+every model loosening. The `SyntheticTaskBase` / `PerturbResearcher` half landed on 2026-09-08;
+see the closure note below.
 
 *Locations:* `looplab/adapters/toytask.py:17-45`, `looplab/adapters/regression.py:109-241`, `looplab/adapters/classification.py:80-140`, `looplab/adapters/timeseries.py:67-132`, `looplab/adapters/mlebench.py:146-284`, `looplab/adapters/repo_task.py:319-324`, `looplab/adapters/dataset_task.py:167-171`
 
@@ -7434,9 +7432,49 @@ the five copy-paste skeletons, which the finding itself rates lower priority.
 
 *Recommendation:* At minimum, hoist a shared direction validator (a mixin or Annotated Literal["min","max"] type in core) onto every task model — small change, real correctness payoff. Optionally extract a SyntheticTaskBase (common fields + columns/build_roles conventions) and a parameterized PerturbResearcher to collapse the five skeletons; these are stable demo tasks so this half is lower priority.
 
-#### RA-07 · MEDIUM · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
+*Resolution (2026-09-08) — the collapse half, and one omission that is a fact rather than laziness.*
 
-> **OPEN[repo-developer-run-epilogue-duplicated]** the `_stage_note` extraction landed byte-for-byte; the fresh-repo orchestration and the duplicated `last_files`/`last_footprint` epilogue are still inline in `LLMRepoDeveloper._run`. proof:absent:_run_fresh@looplab/adapters/repo_developer.py
+`looplab/adapters/synthetic.py` now holds the two things that were genuinely the same across the
+five demo adapters, and nothing else. `SyntheticTaskBase` carries `kind`/`id`/`goal`/`direction`/
+`comparison_contract` and the one `direction` validator the nine models had been hand-copying;
+`PerturbResearcher` carries "draft random params, else perturb the parent" over a four-kind knob
+vocabulary — `IntWalk` (a whole-unit walk on a complexity axis, clamped), `ScaledChoice`
+(halve/keep/double on a positive scale), `Carried` (drafted once, then held at the parent's value)
+and `Jitter` (a Gaussian step in a bounded interval). The four hand-written Researcher classes are
+gone; `regression_researcher` / `classification_researcher` / `timeseries_researcher` /
+`mlebench_researcher` are four configurations of `PerturbResearcher` that keep each task's recorded
+reasoning as their docstring, and `regression.py`'s two near-identical task models now share one
+`_PolyDataTask` holding the six data fields, `_data()` and `columns()`.
+
+**Collapsing a SEEDED proposer is the refactor that can look right and change every run.** The
+parameters go on moving and the metrics go on landing; the only symptom is that `--seed 4` stops
+reproducing the run in the record. So the knobs draw in DECLARATION order, which is the order the
+hand-written `propose()` bodies drew in, and every coercion moved with its knob (`IntWalk` cites the
+`int` it walked from, `Jitter` cites the parent's raw float — the `degree={pd}` vs `alpha={pa}`
+divergence the four classes already had). Verified rather than asserted: the four researchers' full
+proposal traces were captured from the pre-collapse classes and re-captured after, across several
+seeds and including a parent that declares none of the knobs, and the two are byte-identical.
+`tests/test_synthetic_task_base.py` (29) keeps the golden traces plus a truth table per knob kind.
+
+**`seed` is deliberately NOT hoisted, and neither is `gpu_capable()`.** A task model's field ORDER
+is a wire contract: `core/setup_identity.py::setup_config_hash` dumps the task payload WITHOUT
+sorted keys — "it is the model's own field order" — that digest is `run_started.config_hash` which a
+resume compares against, and `search/speculation_quality.py::_validate_calibration_setup` re-derives
+it by rebuilding a `ToyTask` and dumping it. `seed` sits after `bounds`/`n`/`gap` in four models and
+before them in `MLEBenchTask`, so a base declaration pulls it to position six in all of them and
+silently re-digests every synthetic run already on disk: the resume refuses its own snapshot and
+every calibration receipt over a Toy run stops validating. The five fields the base DOES hoist are
+already the first five, in exactly that order, in all six models — which is why the six default
+`config_hash` values are unchanged, pinned as literals in the guard. `gpu_capable()` is five
+`return False`s with five DIFFERENT measured reasons (a fixed template with no code channel; a brief
+that pins the solution to numpy+stdlib), and a base docstring could keep only one of them.
+
+**Out of scope, named:** `repo_task.py::RepoParamResearcher`, which the finding lists with the five.
+It is a bounds-driven uniform/Gaussian proposer on a REAL repo task that also carries
+`Idea.eval_profile`; it is not a synthetic demo skeleton, and folding it in would have put a
+production proposal path behind a vocabulary built for the demos.
+
+#### RA-07 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-09-08)**
 
 **LLMRepoDeveloper._run is a 185-line orchestration block with three spellings of the pipeline note and duplicated epilogue**
 
@@ -7466,6 +7504,40 @@ NOT done: `_run_fresh` and the `_record_result` epilogue. Those move control flo
 string, and `_run`'s exception trap plus the `last_files`/`last_footprint` bookkeeping interact with
 the per-step error collection — that wants its own contract derivation, not the tail of a
 prompt-extraction change.
+
+*Resolution (2026-09-08) — the remaining two cuts, and the drift the second one had already caused.*
+
+`_run_fresh(idea, write, system, messages, tools, *, stage_note, base_note, validate_build)` is the
+PLAN + IMPLEMENT half of the fresh-repo path, and `_fresh_stage_note(idea, write, system,
+op_stages)` is the STAGES decision tree that precedes it. The tree was the only reader of
+`operator_stages` / `declared` / `carried_over` / `manifest_protected`, four locals initialized
+twenty lines above their own `if is_fresh_repo:` block and dead on the repair path; two of the four
+inits went with the guard, because they existed only so the repair path could fall past their
+assignments. `_run_fresh` takes its seams rather than recomputing them: `messages`/`tools` because
+the repair path builds the identical pair, `stage_note` because every plan step must be told the
+SAME pipeline the user message asserted, and `validate_build` because the one-bounce budget is
+shared with the repair rule and cannot become per-phase.
+
+**The epilogue was not merely duplicated — the copies had already drifted, and the drift was live.**
+`_run` has three exits (the `OperatorRefusal` fault, the blanket developer-hiccup trap, the clean
+return) and the fault one published `last_files`, `last_deleted` and `last_footprint` but NOT
+`last_edit_calls`. So a build that edited files and then hit a provider outage handed the engine
+those files under ZERO edit attempts, and `engine/node_build.py` reads both off the developer
+through the same `DEVELOPER_OUTPUT_ATTRS` seam — one receipt whose two halves came from different
+facts. There is no path on which the omission is right: `_run` clears `last_edit_calls` at entry for
+the shared-instance reason, so the count published at any exit can only ever be that call's own.
+`_record_result(write, idea)` is now the one epilogue and all three exits publish all four facts.
+
+`tests/test_repo_run_epilogue.py` (8) drives it rather than pinning it — a real developer, the real
+write tool, and each real exit — because `pass  # self._record_result(...)` satisfies a source scan
+and publishes nothing. It also pins the other direction with an AST walk over `_run` ALONE (the
+assignments are legitimate inside `_record_result`): a fourth exit that re-copies them is red.
+Teeth-verified against two breaks on a scratch copy — restoring the drifted fault path (the
+behavioural test AND the AST guard both fail) and passing `stage_note=""` into `_run_step` (the
+plan-step threading test fails).
+
+`co_parent_block` and `_scout_tools` are untouched: they are documented seams and nothing about what
+they render moved.
 
 #### RA-08 · LOW · layering · effort: small — **RESOLVED (2026-08-08)**
 

@@ -11,12 +11,9 @@ tabular tasks; a real AutoGluon-TS/Darts backend is a drop-in replacement for th
 from __future__ import annotations
 
 import random
-from typing import Optional
 
-from pydantic import BaseModel, field_validator
-
-from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState, validate_direction
+from looplab.adapters.synthetic import IntWalk, Jitter, PerturbResearcher, SyntheticTaskBase
+from looplab.core.models import Idea
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
 
@@ -64,25 +61,18 @@ print(json.dumps({{"metric": mase}}))
 '''
 
 
-class TimeSeriesResearcher:
-    """Blind optimizer over (alpha in [0,1], seasonal period int)."""
+def timeseries_researcher(max_period: int = 12, seed: int = 0) -> PerturbResearcher:
+    """Blind optimizer over (alpha in [0,1], seasonal period int).
 
-    def __init__(self, max_period: int = 12, seed: int = 0):
-        self.max_period = max_period
-        self.rng = random.Random(seed)
-
-    def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
-        if parent is None:
-            return Idea(operator="draft",
-                        params={"alpha": round(self.rng.random(), 3),
-                                "period": float(self.rng.randint(1, self.max_period))},
-                        rationale="random forecaster config")
-        pa = parent.idea.params.get("alpha", 0.5)
-        alpha = min(1.0, max(0.0, round(pa + self.rng.gauss(0.0, 0.15), 3)))
-        pp = int(round(parent.idea.params.get("period", 4)))
-        period = max(1, min(self.max_period, pp + self.rng.choice([-1, 0, 1])))
-        return Idea(operator="improve", params={"alpha": alpha, "period": float(period)},
-                    rationale=f"perturb node {parent.id} (alpha={pa})")
+    The two knobs are of different KINDS and that is the point of the pair: `alpha` is a continuous
+    blend weight that a Gaussian step explores, while `period` is the cycle length — an integer that
+    either matches the season or does not, so it walks in whole units. Collapsed onto
+    `PerturbResearcher` (doc 25 RA-06); alpha draws first in both branches, as it always did.
+    """
+    return PerturbResearcher(
+        (Jitter("alpha", sigma=0.15, lo=0.0, hi=1.0, ndigits=3, default=0.5),
+         IntWalk("period", 1, max_period, default=4.0)),
+        seed=seed, draft_rationale="random forecaster config")
 
 
 class TimeSeriesDeveloper:
@@ -99,17 +89,10 @@ class TimeSeriesDeveloper:
         )
 
 
-class TimeSeriesTask(BaseModel):
+class TimeSeriesTask(SyntheticTaskBase):
     kind: str = "timeseries"
     id: str = "seasonal_forecast"
     goal: str = "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE"
-    direction: str = "min"
-
-    @field_validator("direction")
-    @classmethod
-    def _direction_valid(cls, v):
-        return validate_direction(v)
-    comparison_contract: ComparisonContract | None = None
     n: int = 120
     period: int = 7
     trend: float = 0.05
@@ -125,7 +108,7 @@ class TimeSeriesTask(BaseModel):
         return {"t": list(range(self.n)), "y": self._series()}
 
     def build_roles(self):
-        return (TimeSeriesResearcher(max_period=self.max_period, seed=self.seed),
+        return (timeseries_researcher(max_period=self.max_period, seed=self.seed),
                 TimeSeriesDeveloper(self._series(), h=self.backtest_h))
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):
@@ -135,9 +118,6 @@ class TimeSeriesTask(BaseModel):
         bounds = {"alpha": (0.0, 1.0), "period": (1.0, float(self.max_period))}
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 TimeSeriesDeveloper(self._series(), h=self.backtest_h))
-
-    def external_fallback_uses_llm(self) -> bool:
-        return False  # the fallback fills a deterministic local template
 
     def gpu_capable(self) -> bool:
         """Both role pairs end in `TimeSeriesDeveloper`, a fixed seasonal-naive numpy template — the
