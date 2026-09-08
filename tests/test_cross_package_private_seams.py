@@ -187,8 +187,11 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
                                   "_dedup_valid_capsules", "_filter_capsule_rows",
                                   "_portfolio_concept_overview_data"),
         "looplab.events.eventstore": ("_interprocess_lock",),
-        "looplab.serve.engine_proc": ("_engine_alive", "_fresh_resume_launch_pending",
-                                      "_fresh_run_launch_pending", "_run_lifecycle_lock"),
+        # `looplab.serve.engine_proc` stood here with four names, and stands here no longer: the
+        # run-lifecycle primitives moved DOWN to `looplab/engine/run_lifecycle.py` and came out
+        # PUBLIC (doc 25 XP-03, closed 2026-09-08), so `tools/` neither reaches up nor reaches a
+        # private name. Four rows deleted, none added — the shape a shrink-only debt is meant to
+        # take.
     },
 }
 
@@ -277,14 +280,15 @@ def test_the_widest_debts_are_the_ones_the_review_named():
 
 # --- the tools -> serve inversion (doc 25 XP-03 / TO-03) --------------------------------------
 
-def test_the_run_mutating_tool_takes_its_serve_primitives_by_injection():
+def test_the_run_mutating_tool_takes_its_lifecycle_primitives_by_injection():
     """`tools/` sits BELOW `serve/` in the package map, and `serve/assistant.py` constructs
-    `RunControlTools` — so reaching up into `serve` from the tool closes a cycle that only
+    `RunControlTools` — so reaching up into `serve` from the tool closed a cycle that only
     function-local imports were keeping open.
 
-    The primitives are now an explicit `RunLifecycleFns` argument. The default still lazily imports
-    the serve implementations, so this is a boundary made VISIBLE rather than one already moved:
-    the remaining upward import lives in exactly one named place a caller can replace.
+    The primitives are an explicit `RunLifecycleFns` argument, and since 2026-09-08 the DEFAULT no
+    longer reaches upward either: the five live in `looplab/engine/run_lifecycle.py`, below both
+    packages, and `serve/engine_proc` + `serve/run_files` re-export them. Both halves are driven
+    here — an injected provider is used verbatim, and the default resolves without `serve`.
     """
     from looplab.tools.machine_runs_tools import RunControlTools, RunLifecycleFns
 
@@ -308,30 +312,38 @@ def test_the_run_mutating_tool_takes_its_serve_primitives_by_injection():
     tools = RunControlTools("runs", lifecycle=injected)
     assert tools.lifecycle() is injected, "an injected provider must be used verbatim"
 
-    # ...and with nothing injected the default still resolves the serve implementations, so the
-    # historical behaviour of every existing caller is unchanged.
+    # ...and with nothing injected the default resolves the SAME five callables the server uses,
+    # so the historical behaviour of every existing caller is unchanged — but out of the module
+    # below both packages. Compared by identity against `serve/engine_proc`'s re-exports, because
+    # "the same implementation" is the property; "an importable name exists" is not.
     default = RunControlTools("runs").lifecycle()
     assert isinstance(default, RunLifecycleFns)
-    assert all(callable(getattr(default, field)) for field in
-               ("engine_alive", "fresh_resume_launch_pending", "fresh_run_launch_pending",
-                "run_lifecycle_lock", "run_config_write_lock"))
+    from looplab.serve import engine_proc, run_files
+    assert default.engine_alive is engine_proc._engine_alive
+    assert default.fresh_resume_launch_pending is engine_proc._fresh_resume_launch_pending
+    assert default.fresh_run_launch_pending is engine_proc._fresh_run_launch_pending
+    assert default.run_lifecycle_lock is engine_proc._run_lifecycle_lock
+    assert default.run_config_write_lock is run_files.run_config_write_lock
 
 
-def test_the_upward_import_is_confined_to_that_one_default():
-    """The point of the inversion: `serve` may be named in the default provider and nowhere else in
-    `tools/`, so the boundary is one reviewable site instead of scattered lazy imports."""
+def test_no_upward_import_of_serve_is_left_anywhere_in_tools():
+    """The inversion is COMPLETE (doc 25 XP-03, closed 2026-09-08): `serve` may not be named by an
+    import anywhere in `tools/`, at module level or inside a function.
+
+    This used to allow exactly one site — the `lifecycle` default provider — which made the debt
+    reviewable without paying it: every caller that did not inject (the assistant's own default
+    path included) still took the edge. The primitives moved DOWN to `engine/run_lifecycle.py`
+    instead, so the allowance is gone and the rule is now unconditional.
+    """
     offenders = []
     for path, source in iter_sources(_PKG / "tools"):
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
+        for node in ast.walk(ast.parse(source)):
             module = getattr(node, "module", None) if isinstance(node, ast.ImportFrom) else None
-            if not module or not module.startswith("looplab.serve"):
-                continue
-            enclosing = [n.name for n in ast.walk(tree)
-                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                         and n.lineno <= node.lineno <= (n.end_lineno or n.lineno)]
-            if "lifecycle" not in enclosing:
-                offenders.append(f"{path.relative_to(_PKG.parent)}:{node.lineno}: {module}")
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import) else [])
+            reached = [m for m in [module, *names]
+                       if m and (m == "looplab.serve" or m.startswith("looplab.serve."))]
+            for m in reached:
+                offenders.append(f"{path.relative_to(_PKG.parent)}:{node.lineno}: {m}")
     assert not offenders, (
-        "tools/ imports serve/ outside the one injectable default provider — pass the dependency "
-        f"in instead of reaching up for it:\n  " + "\n  ".join(offenders))
+        "tools/ imports serve/ again — pass the dependency in, or move it down beside "
+        f"looplab/engine/run_lifecycle.py:\n  " + "\n  ".join(offenders))

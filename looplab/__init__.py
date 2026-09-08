@@ -336,6 +336,8 @@ _LAYOUT = {
     "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
     "run_deletion": "core",
     "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
+    "run_lifecycle": "engine",  # the run dir's lifecycle fences + config-write lock, moved DOWN out
+                                # of `serve/` so `tools/` takes its defaults downward (doc 25 XP-03)
     "run_reset": "core",
     "node_diff": "tools",   # what actually differs between two nodes: code, params proposed vs applied
     "run_tools": "tools",

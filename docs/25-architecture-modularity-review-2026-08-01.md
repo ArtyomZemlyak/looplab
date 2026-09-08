@@ -6832,9 +6832,11 @@ inputs and wrong when a descendant is visited before its parent joins.
 **Still open:** the module is 1,721 lines and still holds `_TurnMutationFence`, `_RunCommandAdapter`
 and three unrelated providers. That split is a separate change with its own verification.
 
-#### TO-03 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### TO-03 · MEDIUM · layering · effort: medium — **RESOLVED (2026-09-08)**
 
-> This finding's remaining arm is the same one XP-03 carries; it is indexed there once, under the slug `run-lifecycle-primitives-cannot-move-down`, because the slug is the identity and one item may not be declared twice.
+*Closed 2026-09-08 with XP-03's downward-extraction arm — this finding's remaining arm WAS that arm,
+which is why it was indexed there once rather than twice. `tools/` now names `looplab.serve` nowhere
+at all, at either import level; see XP-03's resolution note.*
 
 **tools -> serve layering violation in machine_runs_tools, contradicting the rule other tools modules explicitly state**
 
@@ -6846,7 +6848,12 @@ and three unrelated providers. That split is a separate change with its own veri
 
 *Status (2026-08-02):* the injection seam landed — `RunLifecycleFns` injected by serve, with the
 lazy serve import kept as the deliberate default fallback (`e4722db`; resolved per call so read-only
-assistant sessions never pay for the server package). Same seam as XP-03; see there for what remains.
+assistant sessions never pay for the server package). Same seam as XP-03.
+
+*Resolution (2026-09-08):* the default no longer reaches up either — the five primitives are
+`looplab/engine/run_lifecycle.py`, below both packages, so this module's stated rule ("tools must
+never import serve", which two of its own functions were breaking) is now true of the whole package
+and machine-checked at both import levels. XP-03 carries the full account.
 
 #### TO-04 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
@@ -8127,9 +8134,10 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 call it; the deliberate subsets (`train_monitor`, `log_pages`, `artifacts`) each state which
 fields they omit and why, against that definition.
 
-#### XP-03 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### XP-03 · MEDIUM · layering · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[run-lifecycle-primitives-cannot-move-down]** the injection seam landed (`RunLifecycleFns`), with the lazy `serve` import kept as the deliberate default fallback — so the cycle is still there whenever nothing injects. Moving the five primitives down means moving the whole run-lifecycle/launch-liveness subsystem; it wants its own change. This is also TO-03's remaining arm. proof:present:RunLifecycleFns@looplab/tools/machine_runs_tools.py
+*Closed 2026-09-08 — the downward-extraction arm landed, so the cycle is gone at BOTH levels rather
+than hidden behind an injection default. See the resolution note below.*
 
 **tools/machine_runs_tools.py is a serve-side component living in tools/, forming a tools<->serve cycle**
 
@@ -8150,12 +8158,53 @@ because the default resolves the same implementations.
 the default still resolves all five callables, and NO `looplab.serve` import may appear in `tools/`
 outside that one provider. Verified to have teeth by scattering a second lazy import back in.
 
-*Still open (the downward-extraction arm):* the five primitives cannot simply move to a lower layer
-as-is — `_run_lifecycle_lock`, `_fresh_resume_launch_pending` and `_fresh_run_launch_pending`
-transitively need `_run_lifecycle_key`, `_run_lifecycle_locks(_guard)`, `_run_lifecycle_lock_path`,
-`_engine_liveness`, `_launch_claim_is_fresh` and `_run_launch_marker_path`. That is the whole
-run-lifecycle/launch-liveness subsystem, not four helpers; moving half of it would split the grace
-constants across two modules, which is worse than the cycle. It wants its own change.
+*Resolution (2026-09-08, the downward-extraction arm) — the subsystem moved whole, and the debt
+shrank by four rows without adding one.*
+
+The 2026-08-02 note was right that the five primitives cannot move as-is and wrong that this made
+the move large: the transitive closure it lists — `_run_lifecycle_key`,
+`_run_lifecycle_locks(_guard)`, `_run_lifecycle_lock_path`, `_engine_liveness`,
+`_launch_claim_is_fresh`, `_run_launch_marker_path` and the grace constants — is 300 lines and needs
+nothing above `core` + `events`. It is now `looplab/engine/run_lifecycle.py`, moved verbatim
+(comments included) out of `serve/engine_proc.py` and `serve/run_files.py`.
+
+`engine/` and not a new package: it is the LOWEST unit both `tools` and `serve` may already import,
+and the subject is the engine's own process and run directory — `engine.lock` is the engine's
+singleton lock, the launch marker fences the engine's own claim -> Popen -> child-lock gap, and
+`engine/resources.py` already keeps the sibling cross-process lease there. Nothing that SPAWNS
+moved: `_spawn_engine`, the resume reconciler, the JupyterHub reaper and the two HTTP-shaped
+wrappers (`run_lifecycle_lock_http`, `engine_write_lock_http`, which need fastapi) stay in
+`serve/engine_proc.py`.
+
+**The underscores came off, and that is the point.** XP-01's own recommendation for this shape is
+"promote the functions … into a public read-model API (drop the underscore) so the boundary is
+explicit", and `tests/test_cross_package_private_seams.py` counts a private name imported across a
+package boundary as debt. Moving the primitives while keeping them private would have traded four
+`tools/ <- looplab.serve.engine_proc._*` rows for thirteen `serve/ <- looplab.engine.run_lifecycle._*`
+rows — a bigger registry for a smaller cycle. `serve/engine_proc.py` re-exports each one under its
+historical `_`-prefixed spelling (`engine_alive as _engine_alive`, …), so no caller moved, and this
+module's own functions still read them out of this module's globals — every
+`monkeypatch.setattr(engine_proc, "_engine_alive", …)` seam in the suite still lands. Registry: four
+rows deleted, none added.
+
+**Two seams did have to move, and both were found by driving the property rather than by reading.**
+(1) `run_lifecycle_lock` keeps its FUNCTION-LOCAL `from looplab.events.eventstore import
+_interprocess_lock` — hoisting it to module scope froze the original at import time and made
+`test_lifecycle_lock_is_required_and_reports_503`'s replacement of the lock backend inert, i.e. the
+"unavailable backend is a 503, never a silent degrade" contract stopped being tested. The reason is
+now written at the import. (2) `RESUME_RECONCILE_GRACE_S` is read THROUGH the owning module by
+`serve/engine_proc.py`'s reconciler, not off its re-exported copy: a bound copy gave a test that
+lowered the grace two different answers in one reconcile pass, because `within_resume_grace` reads
+the constant from `run_lifecycle`. Three `test_server.py` patches and one `test_run_control_tools.py`
+patch moved to the owning module in the same change — a patch of the re-export would have left the
+tool's own binding untouched and deleted a node with no launch fence at all.
+
+The guard is now a RULE rather than a row: the `("tools", "serve")` entry is gone from
+`tests/test_package_layering.py::DEFERRED` (which refuses stale rows, so it could not have been left
+behind), `test_tools_never_reaches_serve_at_any_level` refuses the edge at module level AND inside a
+function — the level a new `DEFERRED` row could otherwise re-argue — and
+`test_no_upward_import_of_serve_is_left_anywhere_in_tools` replaces the old "confined to that one
+default" allowance, which was what made the debt reviewable without paying it.
 
 #### XP-04 · LOW · layering · effort: small — **RESOLVED (2026-08-02)**
 
