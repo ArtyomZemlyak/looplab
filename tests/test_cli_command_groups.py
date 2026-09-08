@@ -78,7 +78,14 @@ GROUPS = {
                      # `proxy_scored` rows against the metrics that came back and prints one
                      # number. It writes nothing, spends nothing, and reads no cross-run store —
                      # and it is the number the `proxy_skipped` KILL should be armed on.
-                     "tokens", "repair-candidates", "edit-types", "proxy-accuracy"},
+                     # `seed-distance` (doc 52 row 31, the last of that row) is `edit-types`'
+                     # sibling and shares its three clauses exactly: one fold of THIS run's log, one
+                     # regex pass over the same closed edit vocabulary, no model, no write, no
+                     # cross-run store. `edit-types` measures each STEP; this measures the whole
+                     # walk against the lineage root, which is the question a per-step tally cannot
+                     # answer — and nothing in the loop reads either.
+                     "tokens", "repair-candidates", "edit-types", "proxy-accuracy",
+                     "seed-distance"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",
