@@ -110,9 +110,9 @@ def test_read_health_survives_the_filter():
     """The filtered result is still a `_ClaimSourceRows` carrying its source's read health — a scoped
     read of a PARTIALLY readable store must keep saying so, or the caller reports a confident empty
     answer built on an unreadable file."""
-    from looplab.engine.claims_health import _claim_source_rows
+    from looplab.engine.claims_health import claim_source_rows
 
-    source = _claim_source_rows([_lesson("mine"), _lesson("theirs")], research=False)
+    source = claim_source_rows([_lesson("mine"), _lesson("theirs")], research=False)
     lessons, _capsules, _research = scope_cross_run_sources(task_id="mine", lessons=source)
     assert getattr(lessons, "read_health", None) == source.read_health
 

@@ -134,7 +134,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:e52ed9295f43ebe0a22007ed040641edc0c25c041f15bebe40f1d254d8211a68"
+_EXPECTED_DIGEST = "sha256:558818a7af6dfa084eb623d64106cca1c3ed86034cd0369c0b4904f623978153"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -574,7 +574,16 @@ _EXPECTED_DIGEST = "sha256:e52ed9295f43ebe0a22007ed040641edc0c25c041f15bebe40f1d
 #               threshold, so the prompt bytes a replicate's Developer sees are now a function of a
 #               value the envelope did not record. The default matching the former literal makes
 #               today's behaviour identical; it does not make the envelope the same.
-_EXPECTED_FIELD_COUNT = 239
+#   2026-09-08  + lesson_operator_scope (239 -> 240 profile rows): whether the Developer's cross-run
+#               prior is RANKED by the operator about to fire (doc 52 §4.3). Verified the way this
+#               history prescribes rather than by adding integers: an AST scan of `Settings`'
+#               annotated assignments reports exactly `['lesson_operator_scope']` added and `[]`
+#               removed. Old receipts SHOULD stop verifying, and here the reason is unusually clean:
+#               the field decides WHICH five cross-run lessons reach the Developer's prompt, so a
+#               replicate calibrated before it ran under an envelope that could not record the
+#               ordering its build was shown. The default (off) reproduces that ordering byte for
+#               byte; it does not make the envelope the same.
+_EXPECTED_FIELD_COUNT = 240
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

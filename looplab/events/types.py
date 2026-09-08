@@ -1741,8 +1741,13 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # The last five arrive as `**receipt` from `lessons_priors.py::_pick_role_prior`, a spread
         # the writer scan reads as opaque — so they are declared from the builder by hand and the
         # type is named in `tests/test_event_payload_contract.py::OPAQUE_PAYLOAD_WRITERS`.
+        # `operator` / `operator_scoped` ride the same spread and appear only on an OPERATOR-SCOPED
+        # render (`Settings.lesson_operator_scope`, off by default): which action the retrieval was
+        # scoped to. Both, not one — the outer key is what the row was scoped to and the receipt's own
+        # copy is what the RANKING actually used, so a render that fell back is visibly different.
         optional=(
-            "at_node", "case", "notes", "phase", "quarantined_useless", "role", "rows", "source"
+            "at_node", "case", "notes", "operator", "operator_scoped", "phase",
+            "quarantined_useless", "role", "rows", "source"
         ),
     ),
     "promote": PayloadContract(

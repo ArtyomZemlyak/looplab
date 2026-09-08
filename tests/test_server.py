@@ -2195,7 +2195,7 @@ def test_boss_routes_never_run_their_whole_log_work_on_the_event_loop(tmp_path, 
 
 def test_settings_and_secret_puts_never_take_their_blocking_locks_on_the_event_loop(
         tmp_path, monkeypatch):
-    """`ui_settings_transaction` / `secret_transaction` each end in `_interprocess_lock(required=
+    """`ui_settings_transaction` / `secret_transaction` each end in `interprocess_lock(required=
     True)` — a blocking `fcntl.flock(LOCK_EX)` with NO timeout — followed by load/validate/atomic-
     write disk I/O. Both PUTs must `await request.json()`, so they are `async def` and used to run
     that whole transaction INLINE on the ASGI loop: a lock another server process held froze every
@@ -2665,7 +2665,7 @@ def test_put_run_config_fails_closed_when_interprocess_lock_is_unavailable(
     # Read the fence BEFORE the lock is broken: the PUT must fail on the lock, not on a body the
     # route rejects before it ever tries to acquire one.
     generation = client.get("/api/runs/demo/state").json()["generation"]
-    monkeypatch.setattr(runs_router, "_interprocess_lock", unavailable)
+    monkeypatch.setattr(runs_router, "interprocess_lock", unavailable)
     response = _run_config_put(
         client, "demo", {"settings": {"timeout": 44.0}}, generation=generation)
     assert response.status_code == 503

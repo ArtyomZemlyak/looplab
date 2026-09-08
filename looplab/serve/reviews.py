@@ -207,7 +207,7 @@ class ReviewStore:
         that ordering.  There is intentionally no thread-only fallback.
         """
         from looplab.events.eventstore import (
-            EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+            EventStoreLockError, InterprocessLockContended, interprocess_lock)
 
         if not self._lock.acquire(timeout=_STORE_LOCK_TIMEOUT_SECONDS):
             raise ReviewError(
@@ -216,7 +216,7 @@ class ReviewStore:
             try:
                 # Non-blocking acquisition gives the HTTP layer a bounded, safely retryable 503
                 # instead of parking a request thread behind another worker indefinitely.
-                with _interprocess_lock(
+                with interprocess_lock(
                         self._lock_path, required=True, blocking=False):
                     yield
             except (EventStoreLockError, InterprocessLockContended, OSError) as exc:

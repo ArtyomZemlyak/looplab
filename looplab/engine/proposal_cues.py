@@ -967,17 +967,17 @@ class ProposalCuesMixin:
             from pathlib import Path
 
             from looplab.engine.claims import (
-                _filter_claim_source_rows,
+                filter_claim_source_rows,
                 build_context_pack,
                 claims_for_memory,
                 render_context_pack,
             )
             from looplab.engine.memory import (
-                _capsule_source_summary,
-                _capsule_completeness,
-                _capsule_fingerprint_scope_complete,
-                _portfolio_concept_overview_data,
-                _filter_capsule_rows,
+                capsule_source_summary,
+                capsule_completeness,
+                capsule_fingerprint_scope_complete,
+                portfolio_concept_overview_data,
+                filter_capsule_rows,
             )
             base = Path(self.memory_dir)
             if _governance is None:
@@ -1011,9 +1011,9 @@ class ProposalCuesMixin:
                 if not tid and not fp:
                     scope_unknown += 1
                     continue
-                if not _capsule_fingerprint_scope_complete(row):
+                if not capsule_fingerprint_scope_complete(row):
                     scope_unknown += 1
-                    meta = _capsule_completeness(
+                    meta = capsule_completeness(
                         row, "fingerprint", len(row.get("fingerprint") or []))
                     fingerprint_unknown += int(meta is None or meta[0] is None)
                     fingerprint_omitted += int(meta[1] or 0) if meta is not None else 0
@@ -1044,21 +1044,21 @@ class ProposalCuesMixin:
                 if not isinstance(stored, list):
                     return False
                 if capsule:
-                    from looplab.engine.memory import _capsule_fingerprint_scope_complete
+                    from looplab.engine.memory import capsule_fingerprint_scope_complete
                     # capsule fingerprints are bounded durable projections. A capped or
                     # pre-receipt fingerprint may still support its exact task above, but cannot authorize
                     # fuzzy transfer into a different task's live Researcher prompt.
-                    if not _capsule_fingerprint_scope_complete(row):
+                    if not capsule_fingerprint_scope_complete(row):
                         return False
                 stored = [t for t in stored if not str(t).startswith("param:")]
                 return fingerprint_similarity(fp, stored) >= 0.34
 
-            lessons = _filter_claim_source_rows(lessons, _scoped, research=False)
-            capsules = _filter_capsule_rows(capsules, lambda r: _scoped(r, capsule=True))
+            lessons = filter_claim_source_rows(lessons, _scoped, research=False)
+            capsules = filter_capsule_rows(capsules, lambda r: _scoped(r, capsule=True))
             # Research rows are scoped exactly like the Strategist note's: same live direction,
             # exact task, never this run. `_unscoped_research` is the same read `load_research_claims`
             # performed here before, now done once with the other two governed stores.
-            research = _filter_claim_source_rows(
+            research = filter_claim_source_rows(
                 _unscoped_research,
                 ctx.visible_row_predicate(current_direction, task_id=tid, excluded_run=rid),
                 research=True,
@@ -1068,9 +1068,9 @@ class ProposalCuesMixin:
             governance = _governance
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview.
-            capsule_source = _capsule_source_summary(capsules)
+            capsule_source = capsule_source_summary(capsules)
             if capsules or capsule_source.get("source_complete") is not True:
-                overview, concept_rows = _portfolio_concept_overview_data(
+                overview, concept_rows = portfolio_concept_overview_data(
                     capsules, aliases=governance["aliases"],
                     splits=governance["splits"])
             else:

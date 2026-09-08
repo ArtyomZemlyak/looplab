@@ -4597,9 +4597,9 @@ The duplication remains; the divergence in guarantees does not. Remaining differ
 takes the extraction: `ReviewStore` also has `O_EXCL` id reservation, abandoned-reservation healing,
 and a recovery/replay contract that `ShareStore` has no analogue for.
 
-#### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
+#### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[unconverted-stat-signature-ledger]** the two tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 17 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 17@tests/test_file_identity_tiers.py`
+> **OPEN[unconverted-stat-signature-ledger]** the THREE tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 5 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 5@tests/test_file_identity_tiers.py`
 
 **Event-log rewrite/race detection implemented six different ways across serve/**
 
@@ -4653,7 +4653,44 @@ hand-rolled signature (`eventstore`'s trusted-growth tuple, which is `file_ident
 stay-converted pin — a file-granular set that would otherwise go green while a sibling site in the
 same file was still hand-spelled.
 
-`tests/test_file_identity_tiers.py` therefore pins the two tiers as BEHAVIOUR (growth keeps
+*Follow-up (2026-09-08, second pass) — the ledger falls from 17 to 5, and the TIER the first pass
+kept almost-spelling now has a name.* `core/atomicio.py::same_file_kind` is the MIDDLE tier:
+`(st_dev, st_ino, st_mode, st_file_attributes)`, "the same directory entry, and still the same KIND
+of entry". It is the question every TOCTOU re-validation in the tree asks — an `lstat`, something
+slow, then a proof that the name is still the same entry AND still a directory (a regular file)
+rather than a symlink or a reparse point swapped in underneath. Content is deliberately outside it:
+a run directory gains children and a lock file gains bytes on the normal path, so `file_identity`
+would fail those fences on ordinary activity, and `same_file_entry` cannot see a type change at all.
+
+Four sites spelled it by hand and **two omitted `st_file_attributes`** — the same Windows
+reparse-point hole `file_identity` was written to close, here on the run-directory identity that
+`_engine_liveness` and the events STREAM re-check before authorizing a writer. They now call the
+tier: `serve/engine_proc.py`'s two `_run_dir_unchanged` / `_lock_entry_unchanged` comparisons and
+`serve/routers/runs.py`'s streaming pair.
+
+The other five conversions are the weak `(size, mtime_ns)` change detectors, each of which could not
+see a REPLACEMENT: `engine/lessons.py::lessons_store_stamp` (the cross-run refresh gate — the store
+is not only appended to, `compact_lessons` REPLACES it), `tools/knowledge_tools.py::_source_revision`
+(the in-memory knowledge index), `serve/engine_proc.py::_log_sig` (the spawn waiter),
+`serve/routers/runs.py`'s two cache keys (the concept-core cache, which also omitted the Windows
+attribute, and the operator-stage-names memo). The two that decide what an agent READS are driven
+regressions rather than source assertions: a same-length replacement with the mtime restored, and an
+assertion that the two fields the old tuple carried are provably identical — so the old code was
+equal by construction and the fixture cannot rot into a vacuous pass.
+
+Five sites remain, and each is a judgement rather than a backlog item: `events/eventstore.py`'s
+trusted-growth tuple (compared against an `fstat` where the Windows attribute may not agree with the
+`stat` it is compared to — converting it would make the growth fence spuriously fail on Windows, in
+the direction that ABORTS appends); `serve/scope_report_store.py::_stat_identity` and
+`serve/scope_generate.py`'s `observed`/`directory_identity`, which are PERSISTED in scope-report
+sidecars behind an explicit `len(log_sig) != 7` shape check, so a tuple of a different width is a
+compatibility break, not a strengthening; `events/traceview.py`'s trace revision, which mixes a
+descriptor-bound ChangeTime token into the tuple; and `events/span_index.py::_index_from_handle`,
+which is not a signature at all — it is parallel assignment of three named locals beside a real
+`trace_file_identity` call, and rewriting it as three statements to satisfy the sweep would be the
+comment-shaped pass CLAUDE.md's guard-test rule forbids.
+
+`tests/test_file_identity_tiers.py` therefore pins the tiers as BEHAVIOUR (growth keeps
 `same_file_entry`; a same-size in-place rewrite defeats it but not `file_identity`), pins all three
 fixed bugs, and turns the remainder into a LEDGER: the count of unconverted hand-rolled signatures
 cannot grow without the test going red, and lowering it is the work. That is a bounded, visible backlog
@@ -7090,9 +7127,9 @@ still saw the shared call on the way past. A separate guard re-derives that ever
 is still `RESULT_CAP - <headroom>` rather than a free-standing constant, which is the other half of
 the finding. Teeth-tested against 18 breaks, all biting.
 
-#### TO-09 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### TO-09 · MEDIUM · layering · effort: medium — **RESOLVED (2026-09-08)**
 
-> This finding's facade arm is the same one XP-01 carries; it is indexed there once, under the slug `cross-run-read-model-still-private`.
+> This finding's facade arm is the same one XP-01 carries; it was indexed there once, under the slug `cross-run-read-model-still-private`, and closed on 2026-09-08 — `engine/knowledge_views.py` is the public read model and `interprocess_lock` is public. XP-01 carries the resolution narrative for both.
 
 **cross_run_tools/concept_tools depend on ~10 underscore-private engine helpers via lazy imports, so an engine rename fails silently at runtime**
 
@@ -7115,10 +7152,11 @@ Two entries are pinned by size to keep the promotion work prioritized by pressur
 whoever trips over it first: `serve/` leans on nine `events.traceview` privates, and `tools/` +
 `cli/` on seven `engine.memory` capsule read-model privates — XP-01's primary promotion candidate.
 
-The **facade arm remains open**: this makes the breakage loud, it does not make the boundary
-public. Promoting the capsule/claim read-model to public names is still the recommended fix, and
-`_interprocess_lock` — imported by four packages outside `events` — is still a private name doing
-a public job.
+*The facade arm landed 2026-09-08* (narrative on XP-01): `engine/knowledge_views.py` is the public
+cross-run read model the four consumer sites import, the thirteen views and the purge sentinel are
+public in the modules that own them, and `_interprocess_lock` — imported by four packages outside
+`events` — is the public `interprocess_lock`. Seventeen rows left the registry by being PAID; the
+`engine.memory` size pin inverted into a refusal of any new private import of that read model.
 
 #### TO-10 · LOW · dead-code · effort: small — **RESOLVED (2026-08-08)**
 
@@ -8097,9 +8135,9 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 - Low-level helpers are genuinely reused across packages rather than reimplemented: read_jsonl_lenient/iter_jsonl, core/atomicio, core/redact, events/digest's node_metric/top-k — cli/inspect_cmds even documents WHY it picks read_jsonl_lenient over iter_jsonl for corrupt-span tolerance.
 - Load-bearing why-comments at append sites, cache keys and lock acquisitions make the replay/idempotency invariants auditable in place — most files explain the failure mode a guard exists for, not just what the code does.
 
-#### XP-01 · HIGH · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### XP-01 · HIGH · layering · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[cross-run-read-model-still-private]** `tools/cross_run_tools.py` still reaches engine internals by their private names (`_capsule_rows`, `_claim_source_rows`, `_filter_claim_source_rows`, `_filter_capsule_rows`, `_dedup_valid_capsules` …) instead of a public cross-run read model, and `_interprocess_lock` is still a private name imported by four packages outside `events`. This is also TO-09's facade arm. proof:present:_capsule_rows@looplab/tools/cross_run_tools.py
+> *Closed 2026-09-08: the marker `cross-run-read-model-still-private` stood here.*
 >
 > **Contradiction, found 2026-08-19:** this finding has carried **PARTIALLY RESOLVED (2026-08-02)** since the 2026-08-08 reconciliation while containing NO resolution narrative at all — the doc's own §0.3 rule is that "the heading status plus its adjacent resolution narrative is the current authority", and here there is no adjacent narrative to be the authority. What landed under this heading is TO-03/XP-03's injection seam, recorded on those two findings; nothing has been done about the private-name surface itself.
 
@@ -8110,6 +8148,49 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 *Evidence:* cross_run_tools.py lazily imports _capsule_fingerprint_scope_complete, _capsule_rows, _dedup_valid_capsules, _claim_source_rows, _filter_claim_source_rows, _filter_claim_assessments, _capsule_source_summary, _filter_capsule_rows, _portfolio_concept_overview_data from engine.memory/engine.claims/engine.concept_registry — private names of a 1600-line (memory.py) and 2896-line (claims.py) module used from a lower-layer package. tools/ also imports engine at 26 sites total (knowledge_tools.py:270, concept_tools.py:209-365) while engine imports tools back (15 sites), a package cycle held together only by function-local imports. Unlike every other duck-typed seam in this codebase (BACKGROUND_APPENDABLE, DEVELOPER_OUTPUT_ATTRS, PROMPT_KEYS...), this private cross-package surface has no registry or source-scan guard, so an engine-internal rename that looks safe (underscore = private) silently breaks the cross-run tools. serve/run_files.py:13 similarly imports events.eventstore._interprocess_lock at module level.
 
 *Recommendation:* Promote the functions cross_run_tools actually needs into a public read-model API (drop the underscore, add to engine/memory's public surface or a dedicated cross-run read-model module) so the boundary is explicit; alternatively guard the private-import list with the same registry+source-scan discipline used for the other seams. Rename _interprocess_lock to a public name since four packages outside events (serve, cli, engine, tools) depend on it.
+
+*Resolution (2026-09-08) — the facade arm, in the shape §6.6 prescribes.* Two promotions, and
+neither is sufficient without the other.
+
+`looplab/engine/knowledge_views.py` is the PUBLIC cross-run knowledge read model and the ONE import
+site for the four consumers outside `engine/` (`tools/cross_run_tools.py`, `tools/concept_tools.py`,
+`cli/governance_cmds.py`, `serve/routers/cross_run.py`). The thirteen functions and the purge
+sentinel they used to reach for by underscore are now public IN THE MODULES THAT OWN THEM —
+`concept_capsules.py` (`capsule_rows`, `filter_capsule_rows`, `capsule_completeness`,
+`capsule_fingerprint_scope_complete`, `capsule_source_summary`, `dedup_valid_capsules`,
+`portfolio_concept_overview_data`), `claims_health.py` (`claim_source_rows`,
+`filter_claim_source_rows`, `filter_claim_assessments`, `load_claim_source_path`,
+`safe_claim_source_summary`, `safe_research_source_summary`) and `concept_registry.py`
+(`_TOMBSTONE` -> `CONCEPT_TOMBSTONE`). The facade re-exports the owning modules' OBJECTS, never
+wrappers: one implementation and one docstring per view, so the facade cannot drift from what it
+stands for. `memory.py` and `claims.py` keep re-exporting the same objects for their in-package
+callers, so no monkeypatch seam moved.
+
+Not merely cosmetic, which is the question a rename-only change has to answer. What the boundary
+buys is that an engine-internal reshuffle — `memory.py` splitting again, a view moving between
+`claims_health` and `claims` — is now ONE edit instead of an edit in four packages, and that the
+underscore is no longer claiming a freedom (rename at will) that four packages had already spent.
+`tests/test_knowledge_views.py` pins both directions: every view resolves and IS the owning module's
+object, and no consumer outside `engine/` may import a view from an engine internal — which WORKS
+(memory re-exports them), so it has to be a test rather than a convention. Its last case is DRIVEN:
+a real capsule store read back through the real `cross_run_prior_attempts`, because the failure this
+finding describes is a tool that answers "(cross-run tool unavailable)" — a string, not an
+exception, invisible to every source assertion.
+
+`events/eventstore.py::_interprocess_lock` is likewise now the public `interprocess_lock`, updated
+at all ~90 call sites across `serve/`, `cli/`, `engine/`, `tools/` and the tests. §6.6 suggested
+keeping a back-compat alias; it was deliberately NOT kept, and that is the one deviation. Six test
+modules re-bind this name ON THE MODULE OBJECT to prove a fail-closed path
+(`monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)`), and an alias no caller reads
+would leave every one of them patching nothing — a guard that passes while proving nothing, which is
+precisely the failure class CLAUDE.md's guard-test rule names. A missing attribute makes
+`monkeypatch.setattr` raise, so the removal is LOUD exactly where it matters.
+
+The registry those edges lived in (`tests/test_cross_package_private_seams.py`) loses twenty-four
+declared names (70 -> 46 edges) rather than re-pointing them — its own docstring says a new private cross-package import is "the
+moment to ask whether it should be public instead", and this is that question answered. The size pin
+that kept `engine.memory`'s seven privates visible INVERTS: the capsule/claim read model may not come
+BACK as a private cross-package surface.
 
 #### XP-02 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 

@@ -1768,7 +1768,7 @@ class RunControlTools:
 
     def _commit_delete_node_snapshot(self, rid: str, rd: Path, nid: int,
                                      subtree: set[int], expected_tail: int, *, purge: bool) -> str:
-        from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, _interprocess_lock
+        from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, interprocess_lock
         from looplab.events.replay import fold
         from looplab.events.types import ASSISTANT_APPENDABLE, EV_NODE_TOMBSTONED
         lifecycle = self.lifecycle()
@@ -1785,7 +1785,7 @@ class RunControlTools:
                 return f"(run {rid} became LIVE while awaiting permission — stop it and retry)"
             if purge:
                 return self._purge_node_snapshot(rid, rd, nid, subtree, expected_tail)
-            with _interprocess_lock(rd / "engine.lock"):
+            with interprocess_lock(rd / "engine.lock"):
                 store = EventStore(evp)
                 events = store.read_all()
                 tail = events[-1].seq if events else -1
@@ -1830,7 +1830,7 @@ class RunControlTools:
 
         from looplab.core.atomicio import atomic_write_text
         from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
-        from looplab.events.eventstore import EventStore, _interprocess_lock, iter_event_jsonl
+        from looplab.events.eventstore import EventStore, interprocess_lock, iter_event_jsonl
         from looplab.events.replay import fold
         from looplab.events.span_index import invalidate, span_destructive_write_guard
 
@@ -1841,8 +1841,8 @@ class RunControlTools:
         # wins, no child can enter while the source-of-truth logs are rewritten. The span-index guard
         # is the same third lock used by reset/archive: a cold trace read cannot publish offsets for
         # the pre-purge inode behind this rewrite.
-        with (_interprocess_lock(rd / "engine.lock"),
-              _interprocess_lock(Path(str(evp) + ".lock")),
+        with (interprocess_lock(rd / "engine.lock"),
+              interprocess_lock(Path(str(evp) + ".lock")),
               span_destructive_write_guard(spans, required=True)):
             self._commands._reject_unresolved_reset(rd, "purge nodes")
             source_store = EventStore(evp)

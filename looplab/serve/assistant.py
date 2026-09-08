@@ -979,14 +979,14 @@ class ShareStore:
         no thread-only fallback — a filesystem that cannot provide the ordering fails closed.
         """
         from looplab.events.eventstore import (
-            EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+            EventStoreLockError, InterprocessLockContended, interprocess_lock)
 
         if not self._lock.acquire(timeout=_SHARE_STORE_LOCK_TIMEOUT_SECONDS):
             raise self._store_unavailable()
         try:
             try:
                 self.dir.mkdir(parents=True, exist_ok=True)
-                with _interprocess_lock(self._lock_path, required=True, blocking=False):
+                with interprocess_lock(self._lock_path, required=True, blocking=False):
                     yield
             except (EventStoreLockError, InterprocessLockContended, OSError) as exc:
                 raise self._store_unavailable() from exc

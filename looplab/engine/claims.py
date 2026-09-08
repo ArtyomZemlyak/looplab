@@ -90,19 +90,19 @@ from looplab.engine.claims_health import (  # noqa: F401
     _RESEARCH_VERIFICATION_FIELDS,
     _bounded_claim_projection,
     _claim_rows_snapshot_digest,
-    _claim_source_rows,
+    claim_source_rows,
     _claim_source_semantic_projection,
     _claim_source_summary,
     _claim_text,
     _empty_claim_read_health,
     _empty_claim_read_segment,
     _epistemic,
-    _filter_claim_assessments,
-    _filter_claim_source_rows,      # re-exported: a guarded post-split import contract
+    filter_claim_assessments,
+    filter_claim_source_rows,      # re-exported: a guarded post-split import contract
     _identity_text,
     _indexable_research_claim,
     _lesson_claim_stance,
-    _load_claim_source_path,
+    load_claim_source_path,
     _metric_identity,
     _node_ids,
     _parse_node_id,
@@ -112,8 +112,8 @@ from looplab.engine.claims_health import (  # noqa: F401
     _research_verification,
     _safe_claim_read_health,
     _safe_claim_read_segment,
-    _safe_claim_source_summary,
-    _safe_research_source_summary,
+    safe_claim_source_summary,
+    safe_research_source_summary,
     _string_list,
     _source_guarded_epistemic,
     _unknown_claim_source_summary,
@@ -579,7 +579,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     from pathlib import Path
 
     from looplab.events.eventstore import (
-        _interprocess_lock, replace_jsonl_rows_atomic_preserving_quarantine,
+        interprocess_lock, replace_jsonl_rows_atomic_preserving_quarantine,
     )
     if not memory_dir:
         return 0
@@ -682,7 +682,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     # Hold the same interprocess lock the case/capsule/decision sidecar stores use — and RE-READ inside it —
     # so concurrent runs survive. Raw-line preservation additionally keeps unreadable/future records visible
     # to store-health readers instead of laundering quarantine into an apparently complete file.
-    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+    with interprocess_lock(Path(str(path) + ".lock"), required=True):
         replace_jsonl_rows_atomic_preserving_quarantine(
             path,
             rows,
@@ -734,7 +734,7 @@ def load_research_claims(memory_dir) -> list[dict]:
 
     # `map`, not a comprehension re-wrapped by hand: a row-shape projection must not be able to lose
     # the read receipt this store was read with (doc 25 EM-09).
-    return _load_claim_source_path(path, research=True).map(_durable_projection)
+    return load_claim_source_path(path, research=True).map(_durable_projection)
 
 
 def load_claim_lessons(memory_dir) -> list[dict]:
@@ -743,7 +743,7 @@ def load_claim_lessons(memory_dir) -> list[dict]:
 
     if not memory_dir:
         return _ClaimSourceRows()
-    return _load_claim_source_path(Path(memory_dir) / "lessons.jsonl", research=False)
+    return load_claim_source_path(Path(memory_dir) / "lessons.jsonl", research=False)
 
 
 def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
@@ -779,7 +779,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
 
     from looplab.engine.governance_health import observed_path_missing
     from looplab.engine.governance_protocol import governed_projection
-    from looplab.engine.memory import ConceptCapsuleStore, _dedup_valid_capsules
+    from looplab.engine.memory import ConceptCapsuleStore, dedup_valid_capsules
     if _governance is None:
         return governed_projection(
             memory_dir,
@@ -804,7 +804,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
         capsules = (ConceptCapsuleStore(cp).all()
                     if cp and not observed_path_missing(cp) else [])
     capsule_source = capsules if isinstance(capsules, (list, tuple)) else []
-    capsules = _dedup_valid_capsules(capsule_source)
+    capsules = dedup_valid_capsules(capsule_source)
     research = load_research_claims(memory_dir) if research_claims is None else research_claims
     research = _valid_claim_source_rows(research, research=True)
     lessons, capsules, research = scope_cross_run_sources(

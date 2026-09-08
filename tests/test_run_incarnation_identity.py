@@ -97,14 +97,14 @@ def test_attribution_keeps_the_cascade_asymmetry(row, uid, name, expected, why):
 # --- one two-incarnation fixture per store ------------------------------------------------------
 
 def test_capsule_readers_do_not_report_two_incarnations_as_a_duplicate():
-    """MUTATION: key `_dedup_valid_capsules` on `run_id` -> `duplicates` is 1, `source_complete`
+    """MUTATION: key `dedup_valid_capsules` on `run_id` -> `duplicates` is 1, `source_complete`
     goes False, and the portfolio prints PARTIAL while withholding the steward's actions."""
-    from looplab.engine.concept_capsules import _dedup_valid_capsules
+    from looplab.engine.concept_capsules import dedup_valid_capsules
 
     def _capsule(uid):
         return _valid(uid, 0.5)
 
-    rows = _dedup_valid_capsules([_capsule(_UID_A), _capsule(_UID_B)])
+    rows = dedup_valid_capsules([_capsule(_UID_A), _capsule(_UID_B)])
 
     assert len(rows) == 2, "two incarnations collapsed into one capsule"
     assert rows.source_health["source_duplicate_run_rows"] == 0, (
@@ -114,9 +114,9 @@ def test_capsule_readers_do_not_report_two_incarnations_as_a_duplicate():
 def test_a_concept_keeps_a_run_row_per_incarnation():
     """The `_runs` map was keyed by name, so one incarnation overwrote the other and the concept
     lost a run. `run_id` stays on the ROW for display — this module's own prescription."""
-    from looplab.engine.concept_capsules import _portfolio_concept_overview_data
+    from looplab.engine.concept_capsules import portfolio_concept_overview_data
 
-    overview, _rows = _portfolio_concept_overview_data(
+    overview, _rows = portfolio_concept_overview_data(
         [_valid(_UID_A, 0.5), _valid(_UID_B, 0.9)])
     entry = next(c for c in overview["concepts"] if c["concept"] == _CONCEPT)
 

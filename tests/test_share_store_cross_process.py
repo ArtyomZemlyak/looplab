@@ -116,7 +116,7 @@ def test_the_interprocess_failure_path_raises_rather_than_yielding(tmp_path):
     """The OTHER half of "fails closed", which the contention test above cannot reach.
 
     That test contends on the per-path PROCESS lock — same interpreter — so it raises before the
-    interprocess block runs. Deleting the `raise` around `_interprocess_lock` therefore leaves it
+    interprocess block runs. Deleting the `raise` around `interprocess_lock` therefore leaves it
     green while a filesystem that cannot provide the OS lock silently degrades to thread-only
     exclusion, which is exactly the guarantee this change adds. Pinned structurally: every handler
     in `_store_lock` must raise, and none may `yield`.

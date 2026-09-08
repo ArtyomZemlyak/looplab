@@ -1156,6 +1156,30 @@ class Settings(BaseSettings):
     # run-start read only, the pre-M6 behavior.
     lessons_every: int = Field(default=4, ge=0)
     lessons_refresh_every: int = Field(default=4, ge=0)
+    # OPERATOR-SCOPED cross-run lessons (doc 52 §4.3). Cross-run lessons are retrieved by task
+    # FINGERPRINT (Jaccard >= 0.34, harmonic recall, top 5) and by ROLE, and by nothing about the
+    # action about to fire — so a merge, a repair and an improve on one task all read the same five
+    # rows, while the IN-RUN context has had parent-plus-sibling scoping since
+    # `events/digest.py::lineage_lessons`. ON threads the operator of the `Idea` being built into
+    # the Developer prior's ranking (`lesson_hygiene.py::lesson_operator_bucket`): this operator's
+    # own lessons first, then untagged ones, then rows tagged only with other operators.
+    #
+    # OFF BY DEFAULT, and the default is the finding rather than caution. The only per-operator
+    # scoping ablation in the field (AIRA-dojo) came back NULL, so there is no evidence to spend a
+    # prompt change on — and a prompt is a contract: `false` reproduces the Developer's prior BYTE
+    # FOR BYTE, because the flag decides only WHICH FIVE of the already-eligible rows fill the
+    # slots. It RANKS rather than filters for the same reason: dropping other-operator rows would
+    # bet a real loss (a Developer never shown the fix for a crash class) on an unmeasured effect.
+    #
+    # What the field buys while off is the EVIDENCE to decide it: every distilled lesson now records
+    # the operators of its own evidence nodes unconditionally (no prompt bytes, no call), and a
+    # scoped render writes a `prior_injected` row naming the operator, which
+    # `events/prior_citations.py` joins to what the proposals cited. NO
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: the live default IS the historical behaviour, so a
+    # pre-field snapshot resumes into exactly what it was doing (the map exists for the case where
+    # those two differ). Costs no store read and no provider call — the per-operator render re-ranks
+    # the scan the run-start/refresh load already paid for, with its embedder memo intact.
+    lesson_operator_scope: bool = False
     # B3 output redaction: the HIGH-ENTROPY half of the persisted-tail redactor.
     # **This flag no longer decides whether tails are redacted at all** (backlog C2, 2026-08-14).
     # Known credential SHAPES and the operator's own secret env VALUES are masked on every persisted

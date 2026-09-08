@@ -68,6 +68,29 @@ def same_file_entry(info: os.stat_result) -> tuple[int, int]:
     return int(info.st_dev), int(info.st_ino)
 
 
+def same_file_kind(info: os.stat_result) -> tuple[int, ...]:
+    """The MIDDLE tier: "the same directory entry, and still the same KIND of entry?" (doc 25 SC-11).
+
+    `(st_dev, st_ino, st_mode, st_file_attributes)` — `same_file_entry` plus the two fields that say
+    what the entry IS. It is the question every TOCTOU re-validation in the tree asks: a probe that
+    lstat'd a directory (or a regular lock file), did something slow, and must now prove the name it
+    is about to act on is still the same entry AND still a directory (a regular file) rather than a
+    symlink, a FIFO or a reparse point swapped in underneath it. Content is deliberately outside it:
+    a run directory gains children and a lock file gains bytes on the normal path, so `file_identity`
+    would fail every one of these fences on ordinary activity.
+
+    `st_mode` is compared WHOLE, permission bits included: these are ownership/authority fences, and a
+    `chmod` under a probe is a change it should notice rather than one it should reason about.
+
+    Four sites spelled this by hand and two of them omitted `st_file_attributes`, so on Windows an
+    entry that gained a reparse point compared EQUAL to the entry that was validated — the same
+    omission `file_identity` was written to stop. Adding it here is fail-closed: a mutated attribute
+    now reads as "not the entry I checked", which is what each of those callers does with a mismatch.
+    """
+    return (int(info.st_dev), int(info.st_ino), int(info.st_mode),
+            int(getattr(info, "st_file_attributes", 0) or 0))
+
+
 def _fsync_timeout() -> float:
     try:
         value = float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)

@@ -152,12 +152,12 @@ def _finish(path: Path, *, kind: str, action_id: str, actor: str, at: str,
 
 @contextmanager
 def _invocation_guard(path: Path):
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     path.parent.mkdir(parents=True, exist_ok=True)
     invoke_lock = path.parent / f"{path.name}.invoke.lock"
     with _thread_lock(invoke_lock):
-        with _interprocess_lock(invoke_lock, required=True):
+        with interprocess_lock(invoke_lock, required=True):
             yield
 
 

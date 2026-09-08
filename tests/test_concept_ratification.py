@@ -253,7 +253,7 @@ def test_a_dry_run_writes_no_policy_and_no_receipt(portfolio):
     """The operator's preview shares the stage's code path and must leave the portfolio untouched.
 
     "Untouched" is scoped to POLICY and AUDIT, not to the directory listing: reading a coherent
-    governance snapshot takes the memory-wide lock, and `_interprocess_lock` creates its lock file.
+    governance snapshot takes the memory-wide lock, and `interprocess_lock` creates its lock file.
     Every read-side surface (the HTTP concept lens, the CLI) does the same, so a dry run must not be
     held to a stricter rule than a plain read.
     """

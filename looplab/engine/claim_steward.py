@@ -44,8 +44,8 @@ def _bounded_refs(value, *, maximum: int, item_maximum: int) -> list[str]:
 def _claim_prompt_payload(claims) -> tuple[list[dict], dict[str, dict]]:
     """Return the exact bounded claim envelope shown to the model plus its opaque-id map."""
     from looplab.engine.claim_key import claim_uid
-    from looplab.engine.claims import (_safe_claim_source_summary,
-                                       _safe_research_source_summary)
+    from looplab.engine.claims import (safe_claim_source_summary,
+                                       safe_research_source_summary)
 
     source = claims if isinstance(claims, (list, tuple)) else []
     reviewable = [c for c in source if isinstance(c, dict)
@@ -64,7 +64,7 @@ def _claim_prompt_payload(claims) -> tuple[list[dict], dict[str, dict]]:
         n_support = n_support if isinstance(n_support, int) and not isinstance(n_support, bool) else 0
         n_oppose = c.get("n_oppose")
         n_oppose = n_oppose if isinstance(n_oppose, int) and not isinstance(n_oppose, bool) else 0
-        research_source = _safe_research_source_summary(c.get("research_source"))
+        research_source = safe_research_source_summary(c.get("research_source"))
         if research_source is None:
             # An old/custom projection has no reconstructable D8 denominator. Make UNKNOWN model-visible;
             # validation below refuses to turn its retained prefix into a positive ratification.
@@ -75,7 +75,7 @@ def _claim_prompt_payload(claims) -> tuple[list[dict], dict[str, dict]]:
                 "producer_unknown_runs": 1,
                 "producer_claims_omitted": 0,
             }
-        claim_source = _safe_claim_source_summary(c.get("claim_source"))
+        claim_source = safe_claim_source_summary(c.get("claim_source"))
         if claim_source is None:
             claim_source = {
                 "receipt_known": False,

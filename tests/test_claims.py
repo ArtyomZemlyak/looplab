@@ -790,7 +790,7 @@ def test_d8_producer_cap_receipt_withholds_positive_when_opposition_tail_is_unkn
 
 
 def test_research_source_aggregate_rejects_known_unknown_run_contradiction():
-    from looplab.engine.claims import _safe_research_source_summary
+    from looplab.engine.claims import safe_research_source_summary
 
     malformed = {
         "source_complete": True,
@@ -803,8 +803,8 @@ def test_research_source_aggregate_rejects_known_unknown_run_contradiction():
         "producer_claims_retained": 1,
         "producer_claims_omitted": 0,
     }
-    assert _safe_research_source_summary(malformed) is None
-    assert _safe_research_source_summary({
+    assert safe_research_source_summary(malformed) is None
+    assert safe_research_source_summary({
         **malformed,
         "source_complete": False,
         "producer_receipt_known": False,
@@ -1039,19 +1039,19 @@ def test_nested_extensions_cannot_displace_research_contract_fields(tmp_path):
 
 
 def test_research_source_read_health_extension_is_atomic_and_receipt_invariants_hold():
-    from looplab.engine.claims import _research_source_summary, _safe_research_source_summary
+    from looplab.engine.claims import _research_source_summary, safe_research_source_summary
 
     current = _research_source_summary([])
-    assert _safe_research_source_summary(current) == current
+    assert safe_research_source_summary(current) == current
     partial = dict(current)
     partial.pop("invalid_rows")
-    assert _safe_research_source_summary(partial) is None
+    assert safe_research_source_summary(partial) is None
     contradictory = dict(current)
     contradictory.update({
         "producer_receipt_known": True, "producer_unknown_runs": 1,
         "producer_runs": 1, "producer_complete": True, "source_complete": True,
     })
-    assert _safe_research_source_summary(contradictory) is None
+    assert safe_research_source_summary(contradictory) is None
 
 
 def test_claims_for_memory_applies_decisions_too(tmp_path):
@@ -1607,9 +1607,9 @@ def test_the_private_names_other_packages_import_still_resolve_through_claims():
     declared in tests/test_cross_package_private_seams.py). The split must not move them."""
     from looplab.engine import claims
 
-    for name in ("_claim_source_rows", "_filter_claim_source_rows", "_safe_claim_source_summary",
-                 "_safe_research_source_summary", "_filter_claim_assessments",
-                 "_load_claim_source_path"):
+    for name in ("claim_source_rows", "filter_claim_source_rows", "safe_claim_source_summary",
+                 "safe_research_source_summary", "filter_claim_assessments",
+                 "load_claim_source_path"):
         assert hasattr(claims, name), f"engine.claims.{name} disappeared in the split"
 
 

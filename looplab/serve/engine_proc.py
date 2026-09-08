@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from looplab.core.atomicio import same_file_entry
+from looplab.core.atomicio import file_identity, same_file_entry, same_file_kind
 from looplab.core.pathsafe import is_reparse
 
 
@@ -56,8 +56,7 @@ def _engine_liveness(rd: Path) -> Optional[bool]:
             return bool(
                 stat.S_ISDIR(current.st_mode)
                 and not is_reparse(current)
-                and (current.st_dev, current.st_ino, current.st_mode)
-                == (run_entry.st_dev, run_entry.st_ino, run_entry.st_mode)
+                and same_file_kind(current) == same_file_kind(run_entry)
                 and rd.resolve(strict=True) == canonical_run
             )
         except (FileNotFoundError, OSError):
@@ -114,9 +113,7 @@ def _engine_liveness(rd: Path) -> Optional[bool]:
             return bool(
                 stat.S_ISREG(current.st_mode)
                 and not is_reparse(current)
-                and (current.st_dev, current.st_ino, current.st_mode)
-                == (entry.st_dev, entry.st_ino, entry.st_mode)
-                == (opened.st_dev, opened.st_ino, opened.st_mode)
+                and same_file_kind(current) == same_file_kind(entry) == same_file_kind(opened)
                 and lock.resolve(strict=True).parent == canonical_run
             )
         except (FileNotFoundError, OSError):
@@ -247,18 +244,18 @@ def _run_lifecycle_lock_path(rd: Path) -> Path:
 @contextmanager
 def _run_lifecycle_lock(rd: Path):
     """Cross-thread/process fence for resume-claim, reset, and delete of one run."""
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     key = _run_lifecycle_key(rd)
     with _run_lifecycle_locks_guard:
         local = _run_lifecycle_locks.setdefault(key, threading.RLock())
-    # REQUIRED, not best-effort. Without it, `_interprocess_lock` swallows an unsupported lock backend
+    # REQUIRED, not best-effort. Without it, `interprocess_lock` swallows an unsupported lock backend
     # and this degrades to the in-process RLock alone — so two server processes (or two startup
     # reconcilers) could claim and spawn the SAME resume, and race event appends before engine.lock
     # exists to catch them. reset/delete are pure check-then-act around `_fresh_resume_launch_pending`,
     # so they have no CAS to fall back on. Callers map the resulting EventStoreLockError to a 503; the
     # same fail-closed contract `_put_run_config_locked` already uses for run config.
-    with local, _interprocess_lock(_run_lifecycle_lock_path(rd), required=True):
+    with local, interprocess_lock(_run_lifecycle_lock_path(rd), required=True):
         yield
 
 
@@ -296,10 +293,10 @@ def engine_write_lock_http(rd: Path):
     """
     from fastapi import HTTPException
     from looplab.events.eventstore import (
-        EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+        EventStoreLockError, InterprocessLockContended, interprocess_lock)
 
     try:
-        with _interprocess_lock(rd / "engine.lock", required=True, blocking=False):
+        with interprocess_lock(rd / "engine.lock", required=True, blocking=False):
             yield
     except InterprocessLockContended as exc:
         raise HTTPException(409, {
@@ -760,10 +757,14 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
         except Exception:  # noqa: BLE001 - unreadable state stays recoverable; keep waiting
             return None
 
-    def _log_sig() -> Optional[tuple[int, int]]:
+    def _log_sig() -> Optional[tuple[int, ...]]:
+        # `file_identity`, not the (size, mtime_ns) pair this used to spell: the waiter is asking
+        # "has anything happened to the log since I last looked", and a REPLACEMENT (a reset that
+        # atomically swapped a fresh events.jsonl in) is the loudest thing that can happen to it —
+        # invisible to size+mtime when the new file happens to match, and exactly the case where
+        # continuing to wait is wrong (doc 25 SC-11).
         try:
-            st = (run_dir / "events.jsonl").stat()
-            return st.st_size, st.st_mtime_ns
+            return file_identity((run_dir / "events.jsonl").stat())
         except OSError:
             return None
 

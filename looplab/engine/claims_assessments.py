@@ -36,8 +36,8 @@ from looplab.engine.claims_health import (
     _qualify_refs,
     _research_source_summary,
     _research_verification,
-    _safe_claim_source_summary,
-    _safe_research_source_summary,
+    safe_claim_source_summary,
+    safe_research_source_summary,
     _source_guarded_epistemic,
     _string_list,
     _valid_claim_source_rows,
@@ -99,9 +99,9 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
         unverified = sorted({r for m in members for r in m.get("unverified", [])})
         rep = max(members, key=lambda m: (m["n_support"] + m["n_oppose"], m["statement"]))
         mat = members[0].get("maturity", "machine-proposed")
-        research_source = (_safe_research_source_summary(members[0].get("research_source"))
+        research_source = (safe_research_source_summary(members[0].get("research_source"))
                            or _research_source_summary([]))
-        claim_source = (_safe_claim_source_summary(members[0].get("claim_source"))
+        claim_source = (safe_claim_source_summary(members[0].get("claim_source"))
                         or _claim_source_summary([], [], research_source=research_source))
         out.append({
             "statement": rep["statement"],
@@ -207,11 +207,11 @@ def _structured_assessments(lessons, research_claims, decisions, *,
     from looplab.engine.claim_key import claim_signature, claim_uid
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
-    research_source = (_safe_research_source_summary(research_source)
+    research_source = (safe_research_source_summary(research_source)
                        if research_source is not None else _research_source_summary(research_claims))
     if research_source is None:
         research_source = _research_source_summary(research_claims)
-    claim_source = (_safe_claim_source_summary(claim_source)
+    claim_source = (safe_claim_source_summary(claim_source)
                     if claim_source is not None else _claim_source_summary(
                         lessons, research_claims, research_source=research_source))
     if claim_source is None:

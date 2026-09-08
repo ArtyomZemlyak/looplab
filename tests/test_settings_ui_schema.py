@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 207
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 208
+    # 207 + 1 -> 208 on 2026-09-08: `lesson_operator_scope` (doc 52 §4.3) — whether the Developer's
+    # cross-run prior is RANKED by the operator about to fire. A row on `memo_verdict_cue`'s ground
+    # (it changes a prompt), and OFF is the shipped default, so the operator opting IN is the one
+    # who needs to find the switch. Exactly one row, none removed.
     # 206 + 1 -> 207 on 2026-09-07, at the SECOND merge with master: master's ten rows had
     # already met this branch's ten, and this is the one row this branch authored after
     # that merge — `agent_read_loop_nudge_after`. Verified by intersection as every entry
@@ -324,10 +328,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # the two counts move together because it is a curated row.
     # 227 -> 229 Settings on 2026-09-06: A5's `established_context` / `established_context_bytes`,
     # the pair whose catalogue entry was also missing until 2026-09-07.
+    # 242 + 1 -> 243 on 2026-09-08: `lesson_operator_scope` (doc 52 §4.3). The two counts move
+    # together because it is a curated row — see the catalogue note above.
     # 241 + 1 -> 242 on 2026-09-07, at the SECOND merge: `agent_read_loop_nudge_after`,
     # the one field this branch added after master already carried its ten. The two counts
     # move together because it is a curated row.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 242
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 243
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

@@ -779,12 +779,25 @@ off. Deleted per the index rule.*
 
 ### 4.3 From the docs pass (§2.1), corrected
 
-OPEN[lessons-are-not-operator-scoped] cross-run LESSONS are retrieved by task fingerprint and role
-(`engine/lessons_priors.py::_render_role_prior`: fingerprint Jaccard ≥ 0.34, harmonic recall, top-5)
-regardless of the operator about to fire; the in-run parent-plus-siblings context DOES exist
-(`events/digest.py::lineage_lessons`, `sibling_digest`). The only per-operator scoping ablation in the
-field (AIRA-dojo) is null, so this is LAST in the memory stack and closes as a decline if the
-citation-rate audit shows no operator effect. proof:absent:operator_scoped@looplab/engine/lessons_priors.py
+*Closed 2026-09-08: the marker `lessons-are-not-operator-scoped` stood here.
+`engine/lessons_priors.py::operator_scoped_prior` ranks the DEVELOPER's cross-run prior by the
+operator of the `Idea` being built — `node_build.py::_developer_prior_text` is the one site in the
+loop that holds both halves — through `lesson_hygiene.py::lesson_operator_bucket`: this operator's
+own lessons, then untagged ones, then rows tagged only with others. Every distilled lesson now
+records the operators of its own evidence nodes unconditionally
+(`lessons_reconcile.py::_evidence_operators`, stamped by both `lessons_distill` writers), which is
+the fact the store never held.
+
+Three shapes chosen against the field evidence rather than around it. It RANKS and never filters,
+because the only per-operator ablation (AIRA-dojo) is null and a filter would bet a real loss — a
+Developer never shown the fix for a crash class — on an unmeasured effect. It is OFF by default
+(`Settings.lesson_operator_scope`) and OFF reproduces the Developer prompt BYTE FOR BYTE, driven
+through `_directed_idea` in `tests/test_lesson_operator_scope.py`. And it makes the decline
+DECIDABLE instead of arguable: a scoped render writes a `prior_injected` row naming its operator, so
+`events/prior_citations.py` can measure whether the operator's own lessons are cited more than the
+rest — the citation-rate audit this marker made the condition of its own close. It costs no store
+read and no provider call (the retained scan is re-ranked, the embedder memo intact). Deleted per
+the index rule.*
 
 *Closed 2026-09-06 (row 18 shipped): the marker `no-plan-artifact-with-endgame-reserve` stood here.
 `events/types.py::EV_PLAN` is a FOLDED plan artifact (`RunState.plan` / `plan_history`) that

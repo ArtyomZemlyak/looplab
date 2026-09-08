@@ -10,7 +10,7 @@ from typing import Iterator, Optional
 
 from looplab.core.run_deletion import assert_run_deletion_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
-from looplab.events.eventstore import _interprocess_lock
+from looplab.events.eventstore import interprocess_lock
 
 
 _RUN_CONFIG_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
@@ -30,7 +30,7 @@ def run_config_write_lock(
         deletion_operation_id: Optional[str] = None) -> Iterator[None]:
     """Own the config transaction and enforce every whole-run writer fence."""
     with (run_config_thread_lock(snapshot_path),
-          _interprocess_lock(Path(str(snapshot_path) + ".lock"), required=True)):
+          interprocess_lock(Path(str(snapshot_path) + ".lock"), required=True)):
         assert_run_reset_write_allowed(snapshot_path.parent, operation_id)
         assert_run_deletion_write_allowed(snapshot_path.parent, deletion_operation_id)
         yield

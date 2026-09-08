@@ -301,6 +301,10 @@ class EngineOptions:
     # one either: every row there exists because a bare `Engine(...)` must not gain unasked work or
     # authority, and this reads a folded payload — no call, no money, no kill, no selection.
     memo_verdict_cue: bool = True
+    # Operator-scoped cross-run lessons (doc 52 §4.3). Matches the `Settings` default — so NOT a
+    # divergence-table row — and a bare `Engine(...)` gains nothing: off, the Developer prior is the
+    # run-wide text it always was.
+    lesson_operator_scope: bool = False
     workdir_audit: bool = True           # 4.4: flag unexpected writes in the eval workdir
     # ADR-17: capture this run's bounded/redacted LLM I/O into its spans.jsonl. Bound to the run's OWN
     # Tracer (core/tracing.py) rather than the process-global flag, so two Engines in one process keep

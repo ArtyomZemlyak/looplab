@@ -65,7 +65,11 @@ from looplab.engine.governance_protocol import (  # noqa: F401 — re-exported f
 # lets a future migration detect a normalization mode change.
 CONCEPT_KEY_VERSION = 1
 
-_TOMBSTONE = "\x00purged"   # canonical target that marks a concept purged (dropped from cross-run views)
+# The purge SENTINEL: a canonical alias target that marks a concept purged (dropped from every
+# cross-run view). PUBLIC as of 2026-09-08 and re-exported by `engine/knowledge_views.py` — a
+# concept read model outside `engine/` has to be able to tell a purge from a merge, and
+# `tools/concept_tools.py` was doing it by importing this module's `_TOMBSTONE` (doc 25 XP-01).
+CONCEPT_TOMBSTONE = "\x00purged"
 _MAX_CONCEPT = 500
 _MAX_ACTOR = 120
 _MAX_AT = 120
@@ -159,7 +163,7 @@ def _would_cycle(src: str, dst: str, aliases: dict) -> bool:
     while cur in aliases and cur not in seen:
         seen.add(cur)
         nxt = aliases[cur]
-        if nxt == _TOMBSTONE:
+        if nxt == CONCEPT_TOMBSTONE:
             return False               # a purge chain terminates, never a cycle
         cur = nxt
     return cur == src
@@ -338,16 +342,16 @@ def load_concept_aliases(memory_dir) -> dict:
         if action == "clear":
             out.pop(src, None)
         elif action == "purge":
-            out[src] = _TOMBSTONE
+            out[src] = CONCEPT_TOMBSTONE
         elif action == "set":
             dst = normalize_key(r.get("to"))
             if dst and len(dst) <= _MAX_CONCEPT:
                 out[src] = dst
         elif action == "legacy":
             dst = normalize_key(r.get("to"))
-            out[src] = _TOMBSTONE if not dst else dst
+            out[src] = CONCEPT_TOMBSTONE if not dst else dst
         target = out.get(src)
-        if target and target != _TOMBSTONE and _would_cycle(src, target, out):
+        if target and target != CONCEPT_TOMBSTONE and _would_cycle(src, target, out):
             raise GovernanceLedgerUnavailable(
                 _ALIAS_LEDGER, "identity_cycle", line=line_number)
     return out
@@ -390,12 +394,12 @@ def withdrawn_alias_pairs(memory_dir) -> set:
             # The target comes from whatever edge this clear reversed. A clear with no live edge
             # withdraws nothing — there was no judgement to take back.
             target = live.pop(src, "")
-            if target and target != _TOMBSTONE:
+            if target and target != CONCEPT_TOMBSTONE:
                 withdrawn.add(frozenset({src, target}))
             continue
         dst = normalize_key(r.get("to"))
         if action == "purge" or (action == "legacy" and not dst):
-            live[src] = _TOMBSTONE
+            live[src] = CONCEPT_TOMBSTONE
         elif dst and len(dst) <= _MAX_CONCEPT:
             live[src] = dst
             # LAST row wins, exactly as the alias replay resolves it: re-governing a pair that was
@@ -418,7 +422,7 @@ def resolve_slug(slug: str, aliases: dict) -> Optional[str]:
         positions[cur] = len(order)
         order.append(cur)
         nxt = aliases[cur]
-        if nxt == _TOMBSTONE:
+        if nxt == CONCEPT_TOMBSTONE:
             return None            # purged
         cur = normalize_key(nxt)
     return cur or None
@@ -954,11 +958,11 @@ def _concept_governance_transaction(memory_dir):
     alias purge. A memory-wide lock supplies that linearization point; the shared revision makes the
     resulting cross-ledger order visible in every mutation receipt.
     """
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     base = Path(memory_dir)
     with _CONCEPT_GOVERNANCE_THREAD_LOCK:
-        with _interprocess_lock(base / "concept_governance.lock", required=True):
+        with interprocess_lock(base / "concept_governance.lock", required=True):
             yield
 
 
@@ -968,8 +972,8 @@ def _concept_source_transaction(memory_dir, *, required: bool):
     if not required:
         yield
         return
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     source_lock = Path(memory_dir) / "concept_capsules.jsonl.lock"
-    with _interprocess_lock(source_lock, required=True):
+    with interprocess_lock(source_lock, required=True):
         yield

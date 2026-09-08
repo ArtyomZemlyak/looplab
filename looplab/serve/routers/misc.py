@@ -39,7 +39,7 @@ from looplab.core.memory_window import (
 )
 from looplab.core.pathsafe import is_reparse
 from looplab.engine.concept_shelf import bounded_row_concepts, build_shelf, run_concept_index
-from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.serve.http import if_none_match, json_object, request_body_contract
 from looplab.serve.launch import task_file_roots
 from looplab.serve.assistant import safe_provider_failure
@@ -1092,7 +1092,7 @@ def _run_author_operation(srv, *, kind: str, name: str, operation_id: str, text_
     try:
         # Hold both locks for the full transition. The settings lock makes "current root" a real
         # precondition rather than a Path captured just before the authoring lock was acquired.
-        with _AUTHOR_THREAD_LOCK, _interprocess_lock(
+        with _AUTHOR_THREAD_LOCK, interprocess_lock(
                 _author_operation_lock_path(srv), required=True), \
                 srv.settings.ui_settings_transaction():
             directory = _current_author_directory(srv, kind)
@@ -1254,7 +1254,7 @@ def _lookup_author_operation(srv, *, kind: str, name: str, operation_id: str,
 
 def _run_legacy_author_write(srv, *, kind: str, name: str, text: str) -> dict[str, Any]:
     try:
-        with _AUTHOR_THREAD_LOCK, _interprocess_lock(
+        with _AUTHOR_THREAD_LOCK, interprocess_lock(
                 _author_operation_lock_path(srv), required=True), \
                 srv.settings.ui_settings_transaction():
             directory = _current_author_directory(srv, kind)
@@ -1360,7 +1360,7 @@ def build_router(srv) -> APIRouter:
         # Atomic rename prevents torn JSON but cannot protect this larger load→merge→write cycle:
         # two concurrent disjoint PUTs must observe one another instead of losing the first rename.
         # OFF the event loop. `ui_settings_transaction()` takes a threading.Lock plus
-        # `_interprocess_lock(required=True)` — a blocking `fcntl.flock` with NO timeout — and then
+        # `interprocess_lock(required=True)` — a blocking `fcntl.flock` with NO timeout — and then
         # does load / merge / `Settings()` validation / atomic write inline. Run inline on the ASGI
         # loop, a lock another server process holds froze every SSE stream and poll on this worker
         # until it was released. Same offload `/control` and `submit_command` already use; the JSON

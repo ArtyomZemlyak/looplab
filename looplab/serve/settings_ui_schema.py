@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 207
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 208
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -220,7 +220,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # so it is RE-DERIVED over the merged keyset, which the 2026-08-31 entry prescribes.
 # Verified by intersection rather than by adding the integers: 207 unique keys, 197 common
 # to this branch's file plus master's ten, no duplicate and none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "28a36daf8fed55a2558039bdf92e96923beac5fa79c5a99ce6fa02c086e1117a"
+# 207 + 1 -> 208 on 2026-09-08: `lesson_operator_scope` (doc 52 §4.3), whether the Developer's
+# cross-run prior is ranked by the operator about to fire. A row because it changes a PROMPT —
+# the same ground `memo_verdict_cue` and `evidence_envelope` are rows on — and because OFF is
+# the shipped default here, so the operator turning it ON is the one who needs to see it.
+# Exactly one row, none removed; re-derived over the whole keyset, not edited.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "9b47024dbca3f887929c6e9f29e73d7db43ccb6c314fbb77ca30bdf96e6cfd84"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
