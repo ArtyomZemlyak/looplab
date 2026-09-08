@@ -79,10 +79,10 @@ class ProjectStore:
     @contextmanager
     def _transaction(self):
         """Hold both locks before the mutator re-reads current state; fail closed if unsupported."""
-        from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+        from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 
         try:
-            with self._lock, _interprocess_lock(self._lock_path, required=True):
+            with self._lock, interprocess_lock(self._lock_path, required=True):
                 yield
         except EventStoreLockError as exc:
             raise ProjectStoreLockError(

@@ -122,7 +122,12 @@ EXPECTED = {
     "graded_novelty": (True, False),
     "cross_run_concepts": (True, False),
     "concept_run_base": (True, False),
-    "cross_run_structured_claims": (True, False),
+    # `cross_run_structured_claims` LEFT this table on 2026-09-08 (doc 25 EM-06): it converged to
+    # True on both sides rather than diverging. It never belonged with its neighbours — it buys no
+    # paid work and admits no proposal, it only chooses which claim IDENTITY a read-only projection
+    # groups by, and the durable governance write path has always used the structured one. A bare
+    # `Engine(...)` on the lean default therefore read a projection its own decision writer could
+    # not have produced. Do not re-add it here without re-reading that finding.
     "cross_run_curation": (True, False),
     "cross_run_advisory": (True, False),
     "cross_run_read_tools": (True, False),

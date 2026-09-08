@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import pytest
 import shutil
 import subprocess
 import time
@@ -55,8 +56,25 @@ def test_the_snapshot_really_lands_on_those_cpus(tmp_path):
         f"date +%s.%N > {bench}/meter/moved-$$\n"
         "exit 0\n", encoding="utf-8")
     os.chmod(run / "snapshot.sh", 0o755)
+    # THE LANE COMES FROM THIS PROCESS'S OWN AFFINITY, not from a pair of cpu numbers the bench box
+    # happens to have. `taskset` pins to the INTERSECTION of what it is asked for and what the
+    # process may use, so a hard-coded `2,5` on a container whose cpuset is 0-3 landed the snapshot
+    # on `[2]` and failed this assertion — about the box, not about the pinning. Two cpus the box
+    # really has make the same claim everywhere, and the skip below is honest about the one case
+    # where it cannot be made at all.
+    #
+    # A STRICT SUBSET ON EVERY BOX THAT HAS ONE. Asking for two cpus made the lane EQUAL to what
+    # the process could use on a two-cpu container, so "pinned" and "unpinned" produce the same
+    # affinity line and the assertion below is satisfied by a `snapshot_timer.sh` with no
+    # `taskset` in it at all — which the trailing waiver `or len(usable) == 2` then blessed as
+    # honest. One cpu is a strict subset wherever there are two, so the claim is made everywhere
+    # instead of waived on the boxes CI actually runs on.
+    usable = sorted(os.sched_getaffinity(0))
+    if len(usable) < 2:
+        pytest.skip("a single-cpu box cannot show a snapshot landing on a chosen subset")
+    lane = usable[:2] if len(usable) > 2 else usable[:1]
     env = dict(os.environ, BENCH_ROOT=str(bench), SNAPSHOT_DEST=str(tmp_path / "dest"),
-               SNAPSHOT_SERVICE_LANE="2,5")
+               SNAPSHOT_SERVICE_LANE=",".join(str(c) for c in lane))
     proc = subprocess.Popen(["bash", str(run / "snapshot_timer.sh"), "_loop", "2"],
                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     try:
@@ -66,5 +84,9 @@ def test_the_snapshot_really_lands_on_those_cpus(tmp_path):
         proc.wait(timeout=10)
     seen = (bench / "affinity").read_text(encoding="utf-8").strip().splitlines()
     assert seen, "the stub snapshot never ran"
-    assert all(line.strip() == "[2, 5]" for line in seen), (
-        f"the snapshot ran on {seen}, not on the lane it was given")
+    assert all(line.strip() == str(lane) for line in seen), (
+        f"the snapshot ran on {seen}, not on the lane {lane} it was given")
+    # …and the lane is a strict SUBSET of what the process could otherwise have used — no waiver,
+    # or "pinned" is indistinguishable from "unpinned" and the whole test is satisfied by a script
+    # that never calls `taskset`.
+    assert len(lane) < len(usable), (lane, usable)
