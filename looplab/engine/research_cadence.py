@@ -668,21 +668,41 @@ class ResearchCadenceMixin:
         if (len(state.research_requests)
                 > state.research_served + self._outstanding_manual_research(state)):
             return self._run_deep_research(state, trigger="manual", manual=True)
-        # Auto triggers only at a creation decision point (no pending evals), never re-firing at a
-        # node-count already researched (the at_node gate makes resume a no-op).
-        # THIS IS THE ONE MEMBER OF THE F1i FAMILY THAT KEEPS THE OLD PREDICATE, deliberately. The
-        # other four moved to `cadence.at_creation_boundary` because their phase stopped happening;
-        # this one's did not — `_spawn_research` runs the SAME decision concurrently and never
-        # carried the guard, so `research_completed (trigger=cadence)` is alive in all six runs in
-        # `runs/`, including the three with zero quiescent prefixes. Opening this gate mid-eval buys
-        # a double-spend (two thinks racing between the shared `_cadence_research_marks` read and
-        # their receipts) to reach work already being done. The `concurrent_research=false` hole is
-        # `docs/BACKLOG.md` F1i-b; `tests/test_cadence_while_evaluating.py` pins the refusal.
+        # Auto triggers only at a creation decision point, never re-firing at a node-count already
+        # researched (the at_node gate makes resume a no-op).
+        #
+        # THIS MEMBER OF THE F1i FAMILY REACHES THE BOUNDARY ONLY WHEN IT IS THE RUN'S ONLY
+        # RESEARCH PATH, which is the whole of F1i-b and the whole of the refusal beside it. The
+        # other four moved to `cadence.at_creation_boundary` outright because their phase stopped
+        # happening; this one's did not — `_spawn_research` runs the SAME decision concurrently and
+        # never carried the guard, so `research_completed (trigger=cadence)` is alive in all six
+        # runs in `runs/`, including the three with zero quiescent prefixes. Opening this gate
+        # mid-eval WHILE that half is live buys a double-spend — two thinks racing between the
+        # shared `_cadence_research_marks` read and their receipts — to reach work already being
+        # done, so `concurrent_research` is a conjunct of the kill switch rather than a separate
+        # test: with it ON the predicate is byte-for-byte the historical one.
+        #
+        # Under `concurrent_research=false` there is no second path to race. `_spawn_research`
+        # returns False at its first line, `_research_overlap_loop` is never started, and this gate
+        # is the only way a scheduled think can ever fire — which in a GPU-shaped run (`v7`, `v9`
+        # and the live `e5small-dr-unified-v2` each end with three pending nodes and ZERO quiescent
+        # prefixes) meant deep research never fired at all. One path needs no agreement between two:
+        # `_research_attempt_step` writes its `research_attempted` receipt BEFORE the provider call
+        # and `_cadence_research_marks` counts it, so the durable gate alone bounds the loop to one
+        # paid think per node-count however many times the outer loop turns at it — the same money
+        # rule `_maybe_distill_lessons` and `_maybe_refresh_report` are held to, and the reason
+        # neither of them needs the in-process attempted-at-`n` memo either.
+        #
         # `n == 0` used to be part of THIS clause; it is now the run-opening branch below, because
         # "no nodes yet" is not "nothing to research" — see `_ground_run_start`. The at_node gate is
         # evaluated FIRST so a run-opening memo already in the log makes the branch a no-op on
         # resume, exactly as it does for every later node-count.
-        if state.pending_nodes() or self._already_researched_at(state, n):
+        if self._already_researched_at(state, n):
+            return state
+        if not at_creation_boundary(len(state.pending_nodes()),
+                                    while_evaluating=(
+                                        getattr(self, "_cadence_while_evaluating", False)
+                                        and not getattr(self, "concurrent_research", False))):
             return state
         if n == 0:
             return self._ground_run_start(state)
@@ -1058,10 +1078,19 @@ class ResearchCadenceMixin:
         # Deterministic layer always (refs exist? quoted numbers match?); LLM rubric pass when a
         # client is wired. Verdicts ride INSIDE the folded memo and cannot change this run's champion;
         # finalize later uses their aligned support as the gate for positive D8 evidence.
-        if self._research_verify and memo_d.get("claims"):
+        # ONE FOLD FOR BOTH DETERMINISTIC PASSES OVER THE CLAIMS. The verifier needs the run's
+        # nodes and so does the number-fidelity instrument below; folding the whole log twice per
+        # memo would buy nothing, and an unreadable log must not block the memo either way.
+        state = None
+        if memo_d.get("claims"):
+            try:
+                state = fold(self.store.read_all())
+            except Exception as exc:  # noqa: BLE001 — a memo is recorded even off an unreadable log
+                from looplab.core.containment import contain
+                contain("research memo state fold", exc)
+        if self._research_verify and state is not None:
             try:
                 from looplab.trust.memo_verify import verify_memo
-                state = fold(self.store.read_all())
                 ver = verify_memo(memo_d, state,
                                   client=getattr(self.deep_researcher, "client", None),
                                   parser=getattr(self.deep_researcher, "parser", "tool_call"))
@@ -1078,6 +1107,19 @@ class ResearchCadenceMixin:
         # recorded, and nothing reads it to decide anything (AAR's measure is an instrument first).
         from looplab.trust.memo_verify import provenance_coverage
         memo_d["provenance"] = provenance_coverage(memo_d)
+        # AND WHERE ITS QUOTED NUMBERS CAME FROM (doc 52 row 32, second half). Same terms: no
+        # model, no call, recorded and read by nothing that decides — and independent of
+        # `research_verify`, because a run that buys no verdicts still deserves the free
+        # measurement. `None` (no claims to measure) leaves the memo without the block entirely.
+        if state is not None:
+            try:
+                from looplab.trust.memo_verify import number_fidelity_report
+                numbers = number_fidelity_report(memo_d, state)
+                if numbers is not None:
+                    memo_d["numbers"] = numbers
+            except Exception as exc:  # noqa: BLE001 — an instrument never blocks the memo it measures
+                from looplab.core.containment import contain
+                contain("memo number fidelity", exc)
         # The model, tool ledger, and verifier are all untrusted text producers. This
         # writer-side pass is the invariant: custom researchers cannot bypass redaction, control
         # stripping, list caps, or the aggregate text budget before any durable derivative.

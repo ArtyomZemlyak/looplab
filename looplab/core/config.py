@@ -1485,6 +1485,11 @@ class Settings(BaseSettings):
     # identically under either value, and pinning a resumed run to `false` would preserve the defect
     # for exactly the multi-hour runs it costs the most. `EngineOptions` keeps it OFF, like every
     # other Part IV/V knob, so a bare `Engine(...)` gains no unasked work.
+    # THE FIFTH CONSUMER READS IT CONJOINED (F1i-b, 2026-09-08): the serial deep-research gate
+    # `research_cadence.py::_maybe_deep_research` reaches the boundary only when
+    # `concurrent_research` is OFF, because that is the only configuration in which it is the run's
+    # ONLY research path and therefore cannot race the background half for one node-count's spend.
+    # With `concurrent_research` on — the shipped default — this knob leaves that gate untouched.
     cadence_while_evaluating: bool = True
     # PART IV Phase 2a live steering (§21.11/§21.13). When on, the `concept_retag_every` cadence (NOT
     # `strategist_every` — the producer gates on `_should_consult_concepts`, which uses the seed boundary
@@ -1522,9 +1527,13 @@ class Settings(BaseSettings):
     # an idea reads as new because nothing here tried it while the run's own reading describes it —
     # the form RQ-Bench measured. On, the deterministic overlap (`engine/novelty.py::
     # literature_overlap`, lexical, no model, no call) rides on the novelty audit rows AND is named
-    # in the re-proposal the gate was already buying. It NEVER rejects: running an experiment a
-    # paper describes is often exactly right, so the overlap is evidence, not a verdict. Off by
-    # default because the second half changes a prompt.
+    # in the re-proposal the gate was already buying, AND is the `literature=` input of
+    # `search/graded_novelty.py::grade_novelty` (2026-09-08), where it renames the ONE terminal
+    # whose claim it can falsify: "a new region of the space" becomes level 3
+    # `described_in_retrieved_literature`, a grade the live pre-gate already defers on, so no
+    # proposal's admission moves. It NEVER rejects: running an experiment a paper describes is
+    # often exactly right, so the overlap is evidence, not a verdict — and because its recall is a
+    # stated FLOOR, only a PRESENT overlap ever moves anything. Off by default: the prompt half.
     novelty_literature: bool = False
     # THE BUILD FAN-OUT AS A LANE, NOT A BARRIER (doc 52 row 33). The parallel build joins a whole
     # chunk before anything moves, so the loop pays the SLOWEST build of every chunk and a fast
@@ -1597,8 +1606,9 @@ class Settings(BaseSettings):
     # merge, opposite polarity ("X helps" vs "X never helps") is surfaced as a CONTRADICTION instead of being
     # collapsed, paraphrase/inflection variants group by exact structured key (no transitive over-merge), and
     # operator governance is scope-precise (a decision in task A cannot reach a same-worded claim in task B).
-    # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379);
-    # the bare-library EngineOptions default stays off (engine/options.py). See engine/claims.py.
+    # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379),
+    # and since 2026-09-08 (doc 25 EM-06) in the bare-library EngineOptions and every projection signature
+    # too — the durable write path never had another mode. See engine/claims.py.
     cross_run_structured_claims: bool = True
     # PART IV cross-run §22.4 (AGENTIC portfolio stewards). At finalize, when an LLM client is available,
     # let the concept and claim stewards review the freshly-updated portfolio and PROPOSE curation. Proposals
@@ -2531,6 +2541,15 @@ class Settings(BaseSettings):
     # created nodes (0 = off; it still regenerates on a manual `report_refresh` from the UI). The
     # deterministic report always renders from the node set regardless of this knob.
     report_every: int = 3
+    # MLflow AUTOLOGGING (2026-09-08, docs/BACKLOG.md §16): a tracking URI to MIRROR this run into
+    # while it runs — `events/mlflow_export.py::autolog` tails the run's event log from a follower
+    # thread and publishes each node terminal as it lands (a child run per node, `node_metric` /
+    # `best_metric` series on the parent). "" is OFF and is the shipped default, because sending a
+    # run to a tracking server is EGRESS and only an operator naming a server may start it; MLflow
+    # is an optional dependency, so an unset or uninstalled mirror degrades to today's behaviour
+    # (`looplab export-mlflow` after the run) with no error. The mirror is a READER: it never
+    # appends to the log, takes no lock, and a dead URI costs the mirror, never the search.
+    mlflow_tracking_uri: str = ""
     # Agent Skills (I18, ADR-9): dir of SKILL.md the Researcher can list/load as tools.
     skills_dir: str | None = None
     # Prompt store (I18, ADR-8): dir of editable, hot-reloaded role prompt .md files.

@@ -13,10 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from looplab.core.atomicio import atomic_write_text, file_identity
+from looplab.core.context_budget import bounded_page
 from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.core.redact import redact_persisted_text
 from looplab.core import _pathsafe
-from looplab.tools._base import RowCountTooLarge, clip, fn_spec, jsonl_row_count
+from looplab.tools._base import (RESULT_CAP, RowCountTooLarge, clip, fn_spec,
+                                 jsonl_row_count)
 from looplab.tools.perm_modes import (
     DEFAULT_MODE, authorize, default_approver)
 from looplab.tools.retrieval import glob_files, grep, read_file
@@ -30,6 +32,26 @@ from looplab.trust.cross_run import LessonScope
 #: their own silent clip; a hit that stops mid-recipe and looks whole is the case-params defect one
 #: layer up), and that each record orders itself so its payload is above the line.
 _KB_HIT_CHARS = 600
+
+#: What ONE `read_note` page may spend. Derived from the loop's own per-result cap (the provider
+#: contract in `tools/_base.py`: budgets come FROM `RESULT_CAP`, never from a free-standing ~4000)
+#: with headroom for the loop's own truncation marker, so a full page plus its receipt never reaches
+#: the blunt outer cut that would eat the receipt.
+_NOTE_PAGE_CHARS = RESULT_CAP - 200
+
+#: The byte window one `read_note` draws its pages from — `retrieval.read_file`'s own memory guard,
+#: named here because the receipt's character totals are relative to it (see the call site).
+_NOTE_READ_BYTES = 2_000_000
+
+
+def _page_offset(value) -> int:
+    """A model-supplied `offset` as a non-negative int. A junk value reads as 0 — the first page is
+    always a defensible answer, and `bounded_page` names the range it actually covered, so a caller
+    that meant something else can see that it did not get it."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _kb_hit(text: str) -> str:
@@ -541,8 +563,14 @@ class KnowledgeTools:
             fn_spec("grep", "Regex search across knowledge notes (*.md). Returns matching lines.",
                      {"pattern": {"type": "string"}}, ["pattern"]),
             fn_spec("list_notes", "List available knowledge note filenames.", {}, []),
-            fn_spec("read_note", "Read a knowledge note by filename.",
-                     {"name": {"type": "string"}}, ["name"]),
+            fn_spec("read_note",
+                     "Read a knowledge note by filename. Long notes come back one page at a "
+                     "time; the reply names the range it covered and the exact call that "
+                     "returns the rest (`offset` = first character not yet covered).",
+                     {"name": {"type": "string"},
+                      "offset": {"type": "integer",
+                                 "description": "First character to read (default 0)."}},
+                     ["name"]),
         ]
 
     # ---- dispatch ----
@@ -612,7 +640,30 @@ class KnowledgeTools:
                 # it out of the prompt.
                 if _pathsafe.looks_secret(Path(target.name)):
                     return f"(refused: {target.name} looks like a secret/credential)"
-                return read_file(str(target))[:4000]
+                # THE BOUNDED-ANSWER RULE (`core/context_budget.py::bounded_page`, docs/BACKLOG.md
+                # §0.17), and this reader was the last silent cut among the agent-facing ones: a
+                # bare `[:4000]` head cut, with no marker and no continuation, so a note whose
+                # payload sits past char 4,000 came back looking WHOLE. The note is operator-authored
+                # prose — the one shape whose conclusion is routinely at the end.
+                # `note_name`, not `name`: `name` is this dispatcher's TOOL name, and shadowing it
+                # here would leave the fall-through at the bottom naming a note instead of a tool.
+                note_name = Path(str(args.get("name", ""))).name
+                raw = read_file(str(target), max_bytes=_NOTE_READ_BYTES)
+                # `read_file`'s byte ceiling is a MEMORY guard, and it bounds the window the page
+                # numbers are relative to — so when it fires, the receipt's total describes the
+                # window and not the file. Say which, rather than publishing a total that is a
+                # smaller number than the note: the whole point of the receipt is that the caller
+                # can tell a short answer from a cut one.
+                try:
+                    windowed = target.stat().st_size > _NOTE_READ_BYTES
+                except OSError:
+                    windowed = False
+                what = f"note {note_name}" + (f" (first {_NOTE_READ_BYTES} bytes of the file):"
+                                              if windowed else ":")
+                return bounded_page(
+                    raw, _NOTE_PAGE_CHARS, offset=_page_offset(args.get("offset")),
+                    more_call=("read_note(name=" + repr(note_name) + ", offset={offset})"),
+                    what=what)
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"
         return f"(unknown tool: {name})"

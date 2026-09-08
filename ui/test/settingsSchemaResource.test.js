@@ -166,13 +166,18 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  //   207 + 1 -> 208 (2026-09-08): `lesson_operator_scope` — whether the Developer's cross-run
-  //   prior is RANKED by the operator of the idea being built (doc 52 §4.3). A row on
-  //   `memo_verdict_cue`'s ground: it changes a PROMPT. Verified as this paragraph prescribes
-  //   rather than by bumping the number: the catalogue was 208 keys and removing exactly
-  //   `lesson_operator_scope` gave back 207, so this is one real addition with nothing renamed
-  //   away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 208)
+  //   207 + 2 -> 209 (2026-09-08, at the MERGE): two branches each added one row on the same day,
+  //   and each pinned 208 against a tree without the other's. Verified as this paragraph
+  //   prescribes rather than by bumping the number: removing exactly `lesson_operator_scope` and
+  //   `mlflow_tracking_uri` gives back the 207 keys both files shared, so these are two real
+  //   additions with nothing renamed away underneath either.
+  //   `lesson_operator_scope` — whether the Developer's cross-run prior is RANKED by the operator
+  //   of the idea being built (doc 52 §4.3). A row on `memo_verdict_cue`'s ground: it changes a
+  //   PROMPT.
+  //   `mlflow_tracking_uri` (docs/BACKLOG.md §16) — the MLflow mirror that runs WHILE the run does.
+  //   A row because it decides whether this run's params, metrics and champion code leave the box
+  //   for an external tracking server; blank is off.
+  assert.equal(Object.keys(schema.fieldByKey).length, 209)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

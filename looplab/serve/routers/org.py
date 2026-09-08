@@ -17,7 +17,7 @@ from looplab.serve.memory_cascade import (MEMORY_CASCADE_SCHEMA, attributable_me
                                           known_memory_dirs, memory_dir_is_known,
                                           purge_attributable_memory, run_memory_identity,
                                           unreadable_identity_receipt)
-from looplab.serve.http import json_object
+from looplab.serve.http import generation_conflict, json_object
 from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 
@@ -121,19 +121,14 @@ def build_router(srv) -> APIRouter:
             canonical = srv.commands.validate_paths(_run_dir(run_id))
             current_generation = srv.commands.run_generation(canonical)
             if current_generation != expected_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "run_id": run_id,
-                    "operation": operation,
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation or None,
-                    "message": (
-                        f"The run changed before {action}; "
-                        "no organization metadata was written."),
-                    "remediation": (
-                        "Refresh the Runs list and repeat the change on the intended "
-                        "current generation."),
-                })
+                raise generation_conflict(
+                    f"The run changed before {action}; no organization metadata was written.",
+                    expected=expected_generation, current=current_generation or None,
+                    remediation=("Refresh the Runs list and repeat the change on the intended "
+                                 "current generation."),
+                    # This surface mutates ONE run inside a batch, so the refusal names which run
+                    # and which operation was refused; the fence fields alone cannot say that.
+                    run_id=run_id, operation=operation)
             return _project_call(fn)
 
     @router.get("/api/projects")

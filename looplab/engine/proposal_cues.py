@@ -554,9 +554,10 @@ class ProposalCuesMixin:
         touch a device is the prompt-side twin of the category error `_task_gpu_capable` exists to
         stop: inferring the WORK's needs from the BOX.
 
-        WHAT `Settings.gpu_footprint_cue` MOVES, and why the historical tail is a legacy branch
-        rather than an edit. The shipped paragraph closed with a claim the scheduler contradicts —
-        that declaring above the budget "does NOT get this experiment more hardware" and the run
+        WHAT `Settings.gpu_footprint_cue` MOVES, and why the historical tail became a QUIET branch
+        rather than an edit or a restoration. The shipped paragraph closed with a claim the
+        scheduler contradicts — that declaring above the budget "does NOT get this experiment more
+        hardware" and the run
         "serialises at the same per-experiment cost". `resources.py::_resource_request_for_node`
         takes a DECLARED count over AUTO, `_acquire_gpus` reserves exactly that many devices
         all-or-nothing and `_resource_eval_env` writes them into the child's
@@ -614,15 +615,21 @@ class ProposalCuesMixin:
         head = (f"\nGPU BUDGET — this run evaluates up to {self._eval_parallel} experiment(s) "
                 f"concurrently on a pool of {pool} GPU(s)")
         if not getattr(self, "_gpu_footprint_cue", False):
-            # LEGACY BRANCH: byte-identical to the pre-2026-08-19 paragraph. Spliced at the same
-            # position as the replacement below (the `_system_body` pattern), so `false` is the old
-            # prompt and not a shorter one.
+            # QUIET BRANCH (2026-09-08): the ordinary declaration and the count the command must
+            # target — the two clauses of the pre-2026-08-19 paragraph that were never in dispute —
+            # and NOTHING about what a larger count buys. It is spliced at the same position as the
+            # replacement below (the `_system_body` pattern), so `false` is a NARROWER prompt.
+            #
+            # It is no longer the historical paragraph byte for byte, and that is the decision this
+            # branch records (`agents/roles.py::_FOOTPRINT_BUDGET_QUIET` carries the argument; doc 45
+            # §2 is where it was left open). The old tail closed on "declaring more does NOT get this
+            # experiment more hardware … the run serialises at the same per-experiment cost", which
+            # the scheduler contradicts in both halves. A byte-for-byte off-switch is owed to a run
+            # ALREADY IN FLIGHT — the `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` contract — and
+            # `gpu_footprint_cue` has no row there, so nothing resumes onto this branch: what `false`
+            # reaches is a live prompt, and a live prompt may be quiet but may not be wrong.
             return (
-                head + ", so ONE experiment may declare at most "
-                f"`footprint.gpus = {budget}`. That is a CEILING, and declaring more does NOT get this "
-                "experiment more hardware: the extra devices are taken from the sibling experiments that "
-                "would otherwise run at the same time, so the run serialises at the same per-experiment "
-                f"cost. Declaring `gpus: {budget}` is the ordinary case, not an escalation. Whatever you "
+                head + f", so `footprint.gpus = {budget}` is the ORDINARY declaration. Whatever you "
                 "declare, the training/eval command must target that SAME count.")
         # WHAT A SMALLER DECLARATION DOES NOT BUY, said out loud, because the omission was
         # measurably expensive. `budget` already states the ordinary count; nothing stated what

@@ -2,8 +2,10 @@
 
 CLAUDE.md states the layering in prose — `core` imports nothing above itself, `events` and
 `runtime` only `core`, `search` may import `agents` at module level while `agents` reaches
-`search` only through a deferred import, `tools` reaches `serve` only by injection, the engine
-must not grow a dependency on `serve` — and until this file only a third of it was guarded
+`search` only through a deferred import, `tools` never reaches `serve` at all (doc 25 XP-03,
+2026-09-08: it used to, "only by injection", which meant it did on every path that did not
+inject), the engine must not grow a dependency on `serve` — and until this file only a third was
+guarded
 (`runtime` purity, the `agents→search` direction, the private-name seams). The rest held by
 convention, and the review measured why convention is not a guard: 38 % of intra-`looplab`
 import edges are function-local, so hoisting them would collapse the graph into eight cycles.
@@ -83,7 +85,8 @@ DEFERRED: dict[tuple[str, str], str] = {
                             "module-level name is typing-only)",
     ("agents", "engine"): "roles reach `node_build`/`repair_judgment`/`triage` inside a call the "
                           "engine makes",
-    ("agents", "events"): "`roles.py` renders a digest for one prompt",
+    ("agents", "events"): "`state_brief.py` renders a digest for one prompt (it was `roles.py` "
+                          "until the doc 25 AG-02 split moved the state brief to its own module)",
     ("agents", "runtime"): "`cli_agent` spawns its sandbox per run",
     ("agents", "search"): "the documented one-way rule: `search` imports `agents` at module "
                           "level, so `agents` may reach `search` only function-locally "
@@ -101,7 +104,9 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("judgebench", "trust"): "`bait` invokes the structured judge at audit time",
     ("search", "adapters"): "`speculation_quality` builds the toy task for its calibration "
                             "benchmark",
-    ("search", "trust"): "`foresight`/`graded_novelty` call the verifier inside a scoring step",
+    ("search", "trust"): "`foresight`/`graded_novelty` call the verifier inside a scoring step, "
+                         "and `operators.feature_engineering_verdicts` applies the >1-SE rule "
+                         "(`trust/gate.py`) to one CV ledger row",
     ("serve", "agents"): "the assistant and preflight routes build roles per request",
     ("serve", "runtime"): "the engine process and the runs router reach the sandbox and "
                           "`command_eval` per request",
@@ -109,9 +114,6 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("tools", "adapters"): "`machine_runs_tools` loads a task on demand",
     ("tools", "agents"): "`asset_brief`/`run_tools` build an agent inside one tool call",
     ("tools", "search"): "the cross-run tools reach the concept cluster per call",
-    ("tools", "serve"): "the declared debt: `machine_runs_tools` takes `engine_proc`/"
-                        "`run_files` as its DEFAULT primitives and by injection otherwise "
-                        "(`tests/test_cross_package_private_seams.py`)",
     ("trust", "adapters"): "`critic` asks `repo_task` which argv are entrypoints, per scan",
     ("trust", "agents"): "`judge` builds its agent per invocation",
     ("trust", "engine"): "`memo_verify` reads `engine.memory` when it finalizes evidence",
@@ -295,12 +297,27 @@ def test_the_engine_never_reaches_serve_and_nothing_reaches_the_cli(graph):
                 f"{src} reaches the process entry {dst} ({kind}) at {graph[kind][(src, dst)][:3]}")
 
 
-def test_the_two_documented_one_way_rules_are_deferred_not_hoisted(graph):
-    # `search` -> `agents` at module level and `agents` -> `search` only deferred; `tools` ->
-    # `serve` only deferred (the injection debt). Both are in the tables above; this states them.
+def test_the_documented_one_way_rule_is_deferred_not_hoisted(graph):
+    # `search` -> `agents` at module level and `agents` -> `search` only deferred. It is in the
+    # tables above; this states it.
     assert ("search", "agents") in graph["module"]
     assert ("agents", "search") in deferred_only(graph)
-    assert ("tools", "serve") in deferred_only(graph)
+
+
+def test_tools_never_reaches_serve_at_any_level(graph):
+    """The injection debt is PAID (doc 25 XP-03, closed 2026-09-08), so it is a rule, not a row.
+
+    `tools/machine_runs_tools.py` used to take its `RunLifecycleFns` defaults by importing
+    `serve/engine_proc` + `serve/run_files` inside a function — the cycle was there for every
+    caller that did not inject, which was all of them but the server. The five primitives now live
+    in `looplab/engine/run_lifecycle.py`, below both packages. Nothing may put the edge back at
+    EITHER level: a module-level one is already refused by the matrix, and a function-local one
+    would only be refused as an undeclared deferred edge, which a new DEFERRED row could re-argue.
+    """
+    for kind in ("module", "deferred"):
+        assert ("tools", "serve") not in graph[kind], (
+            f"tools -> serve is back ({kind}) at {graph[kind].get(('tools', 'serve'))}; the "
+            "run-lifecycle primitives live in looplab/engine/run_lifecycle.py")
 
 
 # ---------------------------------------------------------------------- the scanner's teeth

@@ -912,9 +912,12 @@ def claims_cmd(
     top: int = typer.Option(20, help="How many most-evidenced claims to show."),
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
     pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
-    fuzzy: bool = typer.Option(False, "--fuzzy", help="Merge paraphrased claims (CR1b, suggestion-grade)."),
-    structured: bool = typer.Option(False, "--structured", help="Use the scope+polarity-safe structured "
-                                    "claim key (§21.20.13): opposite-polarity claims contradict, not merge."),
+    structured: bool = typer.Option(True, "--structured/--lean", help="Claim identity: the scope+polarity-safe "
+                                    "structured claim key (§21.20.13, the DEFAULT) — opposite-polarity claims "
+                                    "contradict rather than merge and a decision in one task cannot reach "
+                                    "another's. `--lean` is the deprecated normalized-statement projection; its "
+                                    "`--governance-receipt` digest can never satisfy `claim-decide`, which "
+                                    "validates against the structured projection."),
     scope: str = typer.Option(
         "", "--scope", help="Project only this task's evidence (the CLI spelling of the HTTP "
         "`/api/cross-run/claims?scope_task=` read). REQUIRED to obtain a usable --governance-receipt "
@@ -973,7 +976,7 @@ def claims_cmd(
             # HTTP pair (`/api/cross-run/claims?scope_task=` + POST claim-decide `scope`) already did.
             claims = claims_for_memory(
                 base, lessons=lessons, research_claims=research, scope_task=scope,
-                decisions=governance["decisions"], fuzzy=fuzzy, structured=structured)
+                decisions=governance["decisions"], structured=structured)
             research_source = safe_research_source_summary(
                 getattr(claims, "research_source", None)) or {}
             claim_source = safe_claim_source_summary(

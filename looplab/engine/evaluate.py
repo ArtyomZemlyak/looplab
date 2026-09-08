@@ -62,6 +62,7 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
                                  normalize_extra_metric_directions,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
+from looplab.core.run_identity import run_ref
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.comparability import comparability_record
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
@@ -525,6 +526,83 @@ def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dic
     return out
 
 
+# THE OUTCOMES ONE EVALUATOR INVOCATION MAY SETTLE WITH — a CLOSED vocabulary, registry-style, for
+# the same reason `REPAIR_VERDICTS` and `TRIAGE_ACTIONS` are: the settle row is read by a resume
+# deciding what an earlier process's invocation did, and a typo'd outcome there reads as an unknown
+# state rather than failing. `ok`/`failed` are the evaluator's own two answers; `superseded` and
+# `aborted` are the intervention verdicts the attempt settles under, kept apart from `failed` because
+# they say the invocation was CUT, not that the candidate was bad; `gpu_unpinnable` is the one
+# fail-closed launch refusal that terminalizes from inside the attempt.
+EVAL_INVOCATION_OUTCOMES: frozenset[str] = frozenset(
+    {"ok", "failed", "superseded", "aborted", "gpu_unpinnable"})
+
+
+def eval_invocation_id(run_reference, node_id, generation, attempt) -> str:
+    """The RECONCILIABLE key for one evaluator invocation (doc 27
+    `paid-eval-has-no-attempt-scoped-receipt`).
+
+    DETERMINISTIC over (run, node lifecycle, attempt) and deliberately not a fresh uuid: the whole
+    job of this id is to let a RESUMED process name the invocation an earlier one may have already
+    made. A random key can prove "some invocation was left open"; only a derived one can say "the
+    invocation I am about to make is THAT one", which is what the claim row's
+    `after_interrupted_attempt` stamp asserts and what an external evaluator can be handed as an
+    idempotency key.
+
+    The run reference is `core/run_identity.py::run_ref`'s, so two incarnations over one run
+    directory produce different ids while the same incarnation reproduces its own exactly.
+    """
+    return f"{run_reference or 'run'}:n{int(node_id)}:g{int(generation)}:a{int(attempt)}"
+
+
+def eval_invocation_outcome(superseded: bool, aborted: bool, ok: bool) -> str:
+    """What this evaluator invocation settled as, in the ORDER the attempt itself settles.
+
+    A separate rule rather than an inline conditional because the order is the whole content: an
+    intervention that lands while the evaluator is running (`superseded` = a node reset, `aborted` =
+    an operator abort or a Card drop) says the invocation was CUT, and recording that as `failed`
+    would put a deliberate stop in the same column as a candidate that crashed — the same distinction
+    `_evaluate`'s own containment draws one level up. The order matches the branch order the settle
+    phase has always had (superseded -> aborted -> the evaluator's own answer).
+    """
+    if superseded:
+        return "superseded"
+    if aborted:
+        return "aborted"
+    return "ok" if ok else "failed"
+
+
+def unsettled_eval_invocations(events, node_id: int, generation: int) -> frozenset[str]:
+    """Invocation ids whose LAST row is a claim: an invocation of that key is open right now.
+
+    LAST ROW WINS, and the alternative was written first and rejected on what it says after a
+    resume. Counting claims against settles is the natural audit rule — "two invocations of this key
+    were opened and one closed" — but it can never return to closed: the interrupted invocation has
+    no settle and never will, so every LATER attempt of that key would be stamped
+    `after_interrupted_attempt` on the strength of a crash two resumes ago. The question the stamp
+    actually asks is whether the invocation IMMEDIATELY BEFORE this one was left open, and that is
+    what the last row answers. The crash is still in the log for an audit to count.
+
+    One id can legitimately appear more than once per lifecycle in a single process: the attempt
+    ordinal advances only on a repair, so a dependency round that re-runs the same attempt claims the
+    same key again — and in-process those rows alternate claim/settle, which the rule reads exactly.
+
+    Generation-scoped and keyed through `_durable_row_belongs`, like every other durable ledger in
+    this module — a row from an abandoned lifecycle must not stamp the live one.
+    """
+    last_row: dict[str, str] = {}
+    for e in events or []:
+        if e.type not in (EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED):
+            continue
+        d = e.data or {}
+        if not _durable_row_belongs(d, node_id, generation):
+            continue
+        key = str(d.get("invocation_id") or "")
+        if key:
+            last_row[key] = e.type
+    return frozenset(key for key, kind in last_row.items()
+                     if kind == EV_EVAL_INVOCATION_CLAIMED)
+
+
 def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, list[dict], int]:
     """This node's repair ledger as the EVENT LOG records it: (attempts, judge rows, unparseables).
 
@@ -669,6 +747,7 @@ from looplab.events.replay import fold
 from looplab.events.replay import event_generation_binds
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
+                                  EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED,
                                   EV_NODE_BUILD_DELTA,
                                   EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
@@ -676,6 +755,7 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
                                   EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
                                   EV_TRAIN_MONITOR_ALERT,
                                   EV_REPAIR_CRITIC_VERDICT,
+                                  EV_EFFECTIVE_TRAIN_BATCH,
                                   EV_REWARD_HACK_SUSPECTED, EV_TRUST_SCAN,
                                   EV_SPEC_DRIFT, EV_STAGE_FINISHED, EV_STAGE_ROLLBACK)
 # Module level, like `hashlib` above and for the same reason: a function-local import of these names
@@ -683,7 +763,8 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
 # so this is a leaf import and not a cycle.
 from looplab.trust import scan_receipt as _scan_receipt
 from looplab.trust.scan_receipt import (TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC,
-                                        TRUST_DETECTOR_EXPLOIT_SUITE, TRUST_DETECTOR_REWARD_HACK,
+                                        TRUST_DETECTOR_EXPLOIT_SUITE, TRUST_DETECTOR_FEATURE_CV,
+                                        TRUST_DETECTOR_REWARD_HACK,
                                         TRUST_DETECTOR_WORKDIR_AUDIT, TRUST_DETECTORS,
                                         TRUST_SCAN_EVIDENCE_VERSION)
 # The two WRITERS below reach their shared rules through the MODULE, never by value: `trust_scan` and
@@ -940,6 +1021,11 @@ class EvalAttempt:
     _superseded_marker: Any = None
     _manifest_stamp: Any = None
     # --- seeded by SEED_LEDGERS from the durable rows; carried across attempts
+    # The invocation ids an EARLIER PROCESS claimed for this lifecycle and never settled, read once
+    # off the log this eval started from (doc 27 `paid-eval-has-no-attempt-scoped-receipt`). Seeded
+    # from `events_at_start` on purpose: it answers "did a dead process already invoke the evaluator
+    # for the attempt I am about to make", so rows THIS process writes must never enter it.
+    unsettled_at_start: frozenset = frozenset()
     _repair_cap: int = 0
     attempt: int = 0
     unparseable_repairs: int = 0
@@ -972,9 +1058,13 @@ class EvalAttempt:
     full_retrains: int = 0
     rolled_to: set = field(default_factory=set)
     rollback_refusal: str = ""
-    # --- per attempt: RUN_ATTEMPT binds the first six, SETTLE_OUTCOME the next seven, SALVAGE
+    # --- per attempt: RUN_ATTEMPT binds the first seven, SETTLE_OUTCOME the next seven, SALVAGE
     #     `err_evidence`, DECIDE_REPAIR the last three
     _t0: float = 0.0
+    # This attempt's evaluator-invocation receipt: bound and CLAIMED by RUN_ATTEMPT immediately
+    # before the evaluator is invoked, cleared when the pair is closed, so a non-empty value means
+    # "an invocation of this key is open right now".
+    invocation_id: str = ""
     _log_snapshot: Any = None
     _log_plan: Any = None
     _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
@@ -1223,6 +1313,50 @@ class EvaluateMixin:
             "node_id": node.id, "generation": node.attempt})
         return True
 
+    async def _claim_eval_invocation(self, a: "EvalAttempt") -> None:
+        """Open this attempt's receipt: append the CLAIM before the evaluator is invoked.
+
+        Appended from the eval child under `_write_lock`, exactly like the other per-attempt
+        diagnostics this loop writes (`deps_installed`, `full_retrain_charged`,
+        `repair_critic_verdict`) — invariant #1's `DIAGNOSTIC_EVENTS` seam. It is a per-ATTEMPT row,
+        so making it folded would put it inside the speculative election's compare-and-swap window,
+        which is the measured cost `_record_eval_start_boundary` documents; `DIAGNOSTIC_EVENTS` is
+        excluded from those fences wholesale, so no reader keys on this row's position.
+
+        `after_interrupted_attempt` is written only when TRUE, on the house rule that an absent key
+        and a false one are different facts (`_emit_node_created` leaves optional keys out rather
+        than None-filling them): the stamp asserts that THIS key was claimed by a process that never
+        settled it, which is a claim about the log, not a default.
+
+        The id itself is bound by the PHASE (`_eval_run_attempt`), beside every other per-attempt
+        value it binds, so the record's own slots keep their one declaring site.
+        """
+        row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+               "invocation_id": a.invocation_id}
+        if a.invocation_id in a.unsettled_at_start:
+            row["after_interrupted_attempt"] = True
+        async with self._write_lock:
+            self.store.append(EV_EVAL_INVOCATION_CLAIMED, row)
+
+    async def _settle_eval_invocation(self, a: "EvalAttempt", outcome: str,
+                                      seconds: float) -> None:
+        """Close this attempt's receipt with what the invocation did and what it charged.
+
+        The id is CLEARED as the pair closes, so a second settle for one claim is unrepresentable —
+        `unsettled_eval_invocations` reads the LAST row for a key, and a stray extra settle would
+        close an invocation that is still running. A no-op when no claim is open (a phase reached
+        from a test or a recovery path that never invoked an evaluator).
+        """
+        if not a.invocation_id:
+            return
+        assert outcome in EVAL_INVOCATION_OUTCOMES, f"unregistered eval outcome: {outcome!r}"
+        row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+               "invocation_id": a.invocation_id, "outcome": outcome,
+               "eval_seconds": round(float(seconds), 3)}
+        a.invocation_id = ""
+        async with self._write_lock:
+            self.store.append(EV_EVAL_INVOCATION_SETTLED, row)
+
     def _record_node_build_delta(self, node) -> bool:
         """Say whether this node's built SOURCE differs from the parent it claims to modify.
 
@@ -1341,6 +1475,11 @@ class EvaluateMixin:
             names.append(TRUST_DETECTOR_CODE_LEAKAGE)
         if self._critic_check and scan_src:
             names.append(TRUST_DETECTOR_CRITIC)
+        # The FE CV gate rides the SAME flag that puts the "KEEP a feature only if it improves CV"
+        # directive in the proposal prompt (docs/BACKLOG.md §0.1 row 13): a run that never asked for
+        # engineered features has no ledger to read and must not report that this detector looked.
+        if self._feature_engineering and scan_src:
+            names.append(TRUST_DETECTOR_FEATURE_CV)
         return tuple(name for name in TRUST_DETECTORS if name in set(names))
 
     def _trust_gate_signals(self, node, scan_src: str, detectors=None) -> list[dict]:
@@ -1470,6 +1609,13 @@ class EvaluateMixin:
         # was invisible to every trust test that does not drive a whole run. See that
         # method's docstring.
         sigs += self._trust_gate_signals(node, scan_src, detectors)
+        # …and the feature-engineering CV gate LAST, because it is the one detector that reads the
+        # node's STDOUT as well as its code (the per-feature ledger the FE directive asks for), so it
+        # cannot live in `_trust_gate_signals`' pure `(idea, scan_src)` contract. Appending keeps the
+        # documented order of everything ahead of it byte-identical.
+        if TRUST_DETECTOR_FEATURE_CV in detectors:
+            from looplab.trust.cv import feature_cv_findings
+            sigs += feature_cv_findings(scan_src, res.stdout, state.direction)
         return sigs
 
     def _eval_intervention_seen(self, node_id: int, generation: int, start_seq: int,
@@ -2252,7 +2398,7 @@ class EvaluateMixin:
                             break
                         # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
                     await self._eval_write_terminal(a)
-        except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS):
+        except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS) as exc:
             # A deliberate stop is not a node failure. Cancellation is how a reset, an operator abort
             # and a run stop reach this worker; answering one with a `node_failed` would invent a
             # failure out of an intervention, and swallowing it would break structured concurrency.
@@ -2275,6 +2421,15 @@ class EvaluateMixin:
             # unconfirmed prediction was about to cross into the sandbox. Recording that as a node
             # failure and pausing would hide the exact thing the invariant exists to make impossible,
             # and would let the next run make the same crossing with a tidier receipt.
+            #
+            # …AND THE ONE THING THAT DOES HAPPEN BEFORE THE RE-RAISE. A `BudgetExceeded` in this
+            # tuple may have been raised by this node's OWN post-score bookkeeping — the inline
+            # repair, a stage check, the triage/diagnosis call — long after the sandbox finished and
+            # wrote its score. Propagating it straight up loses the terminal for compute the run has
+            # already bought, which is the same defect `orchestrator.py::_drain_inflight_evaluation`
+            # documents for the SIBLINGS of such a node. The stop is unchanged in class, message and
+            # timing; only the record survives it.
+            await self._land_terminal_before_ceiling(a, exc)
             raise
         except Exception as exc:                                       # noqa: BLE001 — see above
             # `Exception`, NOT `BaseException`, and the line is deliberate. Every measured production
@@ -2300,8 +2455,52 @@ class EvaluateMixin:
             # existed anyway.
             if any(isinstance(leaf, _EVAL_DELIBERATE_STOPS + (anyio.get_cancelled_exc_class(),))
                    for leaf in exception_leaves(exc)):
+                # Same terminal-first rule as the clause above, and it has to be repeated here
+                # rather than hoisted: a ceiling raised inside the nested watcher group arrives
+                # WRAPPED, so this is the branch a real one takes on the measured path.
+                await self._land_terminal_before_ceiling(a, exc)
                 raise
             await self._contain_eval_crash(node_id, a.generation, exc)
+
+    async def _land_terminal_before_ceiling(self, a: "EvalAttempt", exc: BaseException) -> None:
+        """Land THIS node's terminal before a spend ceiling raised by its own post-score bookkeeping
+        leaves the worker. No-op for every other stop, and for a node that has nothing to record.
+
+        THE WINDOW. `_evaluate`'s attempt loop runs RUN_ATTEMPT (the sandbox; the score is on disk
+        when it returns) and only then SETTLE_OUTCOME -> SALVAGE -> DECIDE_REPAIR -> APPLY_REPAIR,
+        every one of which can make a PAID call: the inter-stage check, the training-log judge, the
+        triage/diagnosis call, the repair critic, the repair itself. On a run that is at its ceiling
+        the next of those raises `BudgetExceeded`, and the terminal is written by WRITE_TERMINAL,
+        after all of them. So the run stopped holding a measured number it never recorded — the
+        node reads `pending` on resume and its GPU hours are bought a second time.
+
+        THREE GUARDS, and each is the reason this cannot double-write. `budget_stop_leaf` is asked
+        of the LEAVES (a ceiling from the nested watcher group arrives as an `ExceptionGroup`), so
+        an operator cancel, a reset and an ordinary crash all fall through untouched. `a.res is
+        None` means RUN_ATTEMPT never returned, i.e. there is no measurement to lose. And the
+        durable ledger is consulted for a terminal this lifecycle already wrote, because invariant
+        #2 is "exactly one terminal per node" — the fold takes the first and would ignore a second,
+        but a log carrying two is a lie about what happened, not a harmless duplicate.
+
+        CONTAINED, and deliberately so: this runs while a `BudgetExceeded` is already unwinding, and
+        a store error raised HERE would REPLACE it — the operator's own spend limit reaching them as
+        an ENOSPC. Losing the terminal to a store that cannot append is the lesser harm and it is
+        said out loud, exactly as `novelty.py::_offload_under_proposal_sink`'s publish `finally`
+        says it.
+        """
+        if budget_stop_leaf(exc) is None:
+            return
+        if a.res is None or a.generation < 0 or a.node is None:
+            return
+        try:
+            if any(e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED)
+                   and _durable_row_belongs(e.data, a.node_id, a.generation)
+                   for e in self.store.read_all()):
+                return                     # invariant #2: this lifecycle is already terminal
+            await self._eval_write_terminal(a)
+        except Exception:  # noqa: BLE001 — never replace the ceiling with a bookkeeping error
+            _LOG.warning("could not land node %s's terminal before the spend ceiling propagated",
+                         a.node_id, exc_info=True)
 
     async def _eval_record_superseded(self, a: "EvalAttempt") -> None:
         """The stale-generation terminal a reset owes this lifecycle: fold-budget-only (replay
@@ -2528,6 +2727,14 @@ class EvaluateMixin:
         # bound that reaches the repair chains `inline_repair_retrain_cap` structurally cannot
         # charge — the ones that re-run a stage without discarding a completed one.
         a.prior_repair_seconds = _durable_repair_seconds(a.events_at_start, a.node_id, a.generation)
+        # THE INVOCATIONS AN EARLIER PROCESS LEFT OPEN, from the same log and for the same reason as
+        # the ledgers above: a bound (or here, a FACT) that a resume forgets is not one. An evaluator
+        # may finish paid or external side effects — a training run, a submission, a remote job — and
+        # its terminal event is appended much later, so a kill in that gap leaves this node
+        # byte-indistinguishable from one whose evaluator never ran. The receipt pair is what tells
+        # them apart, and this is where the answer is read; `_eval_run_attempt` stamps the repeat.
+        a.unsettled_at_start = unsettled_eval_invocations(
+            a.events_at_start, a.node_id, a.generation)
         # THE LICENSE IS PRICED AT THE LARGEST DECLARATION THE CHAIN HAS SEEN, because the SPEND
         # it is compared against was earned under all of them. `chain_seconds` accumulates
         # wall-clock spent under the PRE-repair manifest, while the pipeline cost is re-resolved
@@ -2687,11 +2894,24 @@ class EvaluateMixin:
             # The lifecycle reservation selected by the dispatcher stays unchanged through this
             # retry. CUDA_VISIBLE_DEVICES contains physical ids (logical→physical remap), while
             # an unspecified serial eval keeps eval_env=None and sees the whole box as before.
+            # THE ATTEMPT-SCOPED RECEIPT OPENS HERE — the last statement before the evaluator is
+            # invoked, which is the boundary the annotation this replaced named: "an evaluator may
+            # finish paid/external side effects here, but its terminal event is appended much later.
+            # A process death in that gap makes resume run the evaluator again. Persist an
+            # attempt-scoped outcome/outbox before exposing success, or require a reconciliable
+            # idempotency key at the evaluator boundary." The claim is that key
+            # (`eval_invocation_id`, derived so a resume re-derives the SAME one), its settle is the
+            # outcome, and a claim with no settle is an invocation whose result nobody recorded.
+            #
+            # WHAT IT DOES NOT CLAIM: that the side effect was undone. LoopLab cannot make an
+            # arbitrary evaluator transactional, so the repeat still happens — and is STAMPED
+            # `after_interrupted_attempt`, exactly as `eval_dispatch.py::_ensure_run_setup` stamps
+            # its own at-least-once repeat rather than presenting it as a first attempt.
+            a.invocation_id = eval_invocation_id(
+                run_ref(getattr(a.state, "run_uid", ""), getattr(a.state, "run_id", "")),
+                a.node_id, a.generation, a.attempt)
+            await self._claim_eval_invocation(a)
             try:
-                # CODEX AGENT: an evaluator may finish paid/external side effects here, but its
-                # terminal event is appended much later. A process death in that gap makes resume
-                # run the evaluator again. Persist an attempt-scoped outcome/outbox before exposing
-                # success, or require a reconciliable idempotency key at the evaluator boundary.
                 a.res = await anyio.to_thread.run_sync(
                     self._run_eval, a.node, str(a.workdir), a.eval_env, None, cancel, a.next_start
                 )
@@ -2722,6 +2942,11 @@ class EvaluateMixin:
                             # Docker/runtime probe + setup cost from the immutable eval budget.
                             "eval_seconds": round(a.total_eval + (time.time() - a._t0), 3)})
                         self._maybe_crash()
+                    # Inside the SAME shield: this exit owes its invocation a settle exactly as the
+                    # normal path does, and an unshielded append here would be preempted by the
+                    # scope cancellation above and leave the receipt open on a node that terminalized.
+                    await self._settle_eval_invocation(
+                        a, "gpu_unpinnable", round(time.time() - a._t0, 3))
                 return PHASE_RETURN
             cancel.set()                  # eval finished on its own …
             _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
@@ -2754,6 +2979,12 @@ class EvaluateMixin:
         # before the silence. NOT for a real deadline timeout (that is still mid-training).
         a.ok = (a.res.metric is not None and not a.res.timed_out
               and (a.res.exit_code == 0 or getattr(a.res, "stalled", False)))
+        # …and the receipt closes, BEFORE any of the branches below can write a terminal or return.
+        # The pair must bracket the evaluator invocation and nothing else: settling it inside one of
+        # those branches would leave every other branch's invocation open, which reads as a crash
+        # that never happened. `attempt_eval_seconds` is this attempt's own charge, just measured.
+        await self._settle_eval_invocation(
+            a, eval_invocation_outcome(a.superseded, a.aborted, a.ok), a.attempt_eval_seconds)
         if a.superseded:
             # The reset discards this lifecycle's metric/state, not compute already spent. A
             # stale-generation terminal is fold-budget-only: replay rejects its state fields
@@ -4263,6 +4494,36 @@ class EvaluateMixin:
                         _eval_payload.get("metric_provenance") or {},
                         applied_params=_applied_prov)
                 self.store.append(EV_NODE_EVALUATED, _eval_payload)
+                # WHAT THE TRAINING PROCESS SAID IT RAN AT (`runtime/effective_batch.py`), bound at
+                # the metric read beside the applied coordinates and recorded as its own diagnostic
+                # row. `docs/45-claim-surfaces-2026-08-20.md` §3.2 refused `auto_find_batch_size` as
+                # the memory answer because the reduced batch survives only in `trainer_state.json`
+                # while every saved config keeps the declared one, and named the durable event as
+                # the condition that lifts the refusal; this is it.
+                #
+                # AFTER the terminal, on the trust-scan row's ground: a record may not sit between an
+                # evaluation and the one row the run cannot afford to lose, and a row lost to a kill
+                # in this window simply is not there — which is the honest reading, since ABSENCE is
+                # what this record already means on every task that is not a transformers training.
+                #
+                # AND ONLY WHEN THERE IS ONE. Unlike the trust scan — whose "we looked and it was
+                # clean" is the load-bearing claim — a row saying no trainer artifact exists would be
+                # appended once per node on every task on this box that never trains one, i.e. an
+                # unbounded log recording that this deployment does not use HuggingFace.
+                _batch = getattr(a.res, "effective_train_batch", None)
+                if isinstance(_batch, dict) and _batch.get("readings"):
+                    self.store.append(EV_EFFECTIVE_TRAIN_BATCH, {
+                        "node_id": a.node_id,
+                        "generation": a.generation,
+                        # None when the readings disagree — two trainings each recorded their own
+                        # true number and this record settles neither (see the module's rule).
+                        "train_batch_size": _batch.get("train_batch_size"),
+                        "disagree": bool(_batch.get("disagree")),
+                        "readings": _batch.get("readings") or [],
+                        "read_at": time.time(),
+                        "files_seen": int(_batch.get("files_seen") or 0),
+                        "truncated": bool(_batch.get("truncated")),
+                    })
                 # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                 # emission does not rewrite the metric, but the folded trust_gate policy
                 # can exclude high-precision signals from champion/breeding under gate/block.

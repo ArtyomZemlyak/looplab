@@ -384,7 +384,7 @@ def _preselect_retrieval_docs(docs, query: str, limit: int):
 
 def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None,
                        research_claims=None, scope_task: str = "", contradiction_quota: float = 0.34,
-                       max_corpus: int = 2000, structured: bool = False, intent: Optional[str] = None,
+                       max_corpus: int = 2000, structured: bool = True, intent: Optional[str] = None,
                        scope_receipt: Optional[dict] = None,
                        _governance: Optional[dict] = None) -> dict:
     """CR2a retrieval planner (§21.20.5, full CR): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
@@ -661,7 +661,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
                     decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
                     aliases: Optional[dict] = None, splits: Optional[dict] = None,
-                    structured: bool = False) -> dict:
+                    structured: bool = True) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured bounded observation/mixed-evidence
     view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a

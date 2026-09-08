@@ -100,24 +100,50 @@ def test_research_claims_contribute_support_and_sources():
 
 def test_lesson_and_research_claim_unify_on_the_same_statement():
     # a lesson OPPOSES while a D8 memo claim SUPPORTS the same statement -> one mixed claim (not two).
-    # Identity reuses the shipped `normalize_statement` (whitespace+case), so casing/spacing unify...
+    # The two stores fold together under EITHER identity mode; what differs is the boundary. Under the
+    # DEFAULT structured key the research row must share the lesson's SCOPE to join it, which is the
+    # whole point of that key — an unscoped memo claim is not evidence about task `t`.
     out = claim_assessments(
         [_lesson("Distillation  helps", "refuted", [2])],
-        research_claims=[{"statement": "distillation helps", "node_ids": [8],
+        research_claims=[{"statement": "distillation helps", "node_ids": [8], "task_id": "t",
                           "verification": {"verdict": "supported", "method": "llm"}}])
-    assert len(out) == 1                              # normalized statement collapses them
+    assert len(out) == 1
     c = out[0]
     assert c["epistemic"] == "mixed" and c["support"] == ["?:8"] and c["oppose"] == ["r1:2"]
 
+    # ...and the same pair with the memo claim left UNSCOPED stays two claims, because a decision
+    # taken about one of them must not silently govern the other.
+    split = claim_assessments(
+        [_lesson("Distillation  helps", "refuted", [2])],
+        research_claims=[{"statement": "distillation helps", "node_ids": [8],
+                          "verification": {"verdict": "supported", "method": "llm"}}])
+    assert len(split) == 2 and sorted(row["scope"] for row in split) == ["", "t"]
 
-def test_identity_matches_the_shipped_lesson_normalizer_punctuation_is_significant():
-    # ...but a trailing period is NOT stripped — identity is deliberately the SAME as the lesson store's
-    # `normalize_statement` (we do not fork a divergent claim normalizer), so these stay two claims.
-    out = claim_assessments([
+
+def test_lean_identity_matches_the_shipped_lesson_normalizer_whitespace_and_case_only():
+    # The LEGACY lean projection (`structured=False`, deprecated): identity is the shipped lesson
+    # `normalize_statement` (whitespace+case), so casing/spacing unify...
+    out = claim_assessments(
+        [_lesson("Distillation  helps", "refuted", [2])],
+        research_claims=[{"statement": "distillation helps", "node_ids": [8],
+                          "verification": {"verdict": "supported", "method": "llm"}}],
+        structured=False)
+    assert len(out) == 1                              # normalized statement collapses them
+    assert out[0]["epistemic"] == "mixed"
+
+    # ...but a trailing period is NOT stripped — that identity is deliberately the SAME as the lesson
+    # store's `normalize_statement` (we do not fork a divergent claim normalizer), so these stay two
+    # claims. The structured key stems the subject instead, which is why it collapses them.
+    lean = claim_assessments([
+        _lesson("distillation helps", "supported", [1]),
+        _lesson("distillation helps.", "supported", [2]),
+    ], structured=False)
+    assert len(lean) == 2
+    structured = claim_assessments([
         _lesson("distillation helps", "supported", [1]),
         _lesson("distillation helps.", "supported", [2]),
     ])
-    assert len(out) == 2
+    assert len(structured) == 1 and set(structured[0]["support"]) == {"r1:1", "r1:2"}
 
 
 def test_ranking_most_evidenced_and_contested_first():
@@ -132,14 +158,16 @@ def test_ranking_most_evidenced_and_contested_first():
 
 def test_numeric_string_node_ids_are_compatible_and_urls_are_not_node_evidence():
     out = claim_assessments(
-        [], research_claims=[{"statement": "s", "node_ids": ["4", "-5"], "urls": ["u"],
+        [], research_claims=[{"statement": "sharding helps recall", "node_ids": ["4", "-5"],
+                              "urls": ["u"],
                               "verification": {"verdict": "supported", "method": "llm"}}])
     # A NEGATIVE id is not a legacy spelling of anything — node ids index the run's node table — so
     # the row is quarantined, not silently repaired (see the next test).
     assert out == []
 
     ok = claim_assessments(
-        [], research_claims=[{"statement": "s", "node_ids": ["4", "5"], "urls": ["u"],
+        [], research_claims=[{"statement": "sharding helps recall", "node_ids": ["4", "5"],
+                              "urls": ["u"],
                               "verification": {"verdict": "supported", "method": "llm"}}])
     # Legacy bounded integer strings still coerce exactly; a URL belongs only in sources.
     assert ok[0]["support"] == ["?:4", "?:5"] and ok[0]["sources"] == ["u"]
@@ -406,15 +434,18 @@ def test_reserved_caveat_slot_can_be_filled_by_a_ratified_caveat():
 def test_ratified_mixed_counts_as_contested_and_rejected_dropped_from_atlas():
     from looplab.engine.claims import build_context_pack, claim_assessments, portfolio_atlas
     from looplab.engine.memory import normalize_statement
-    lessons = [_lesson("cA", "supported", [1], run_id="rA"), _lesson("cA", "tested", [2], run_id="rB"),  # mixed
-               _lesson("cB", "supported", [1], run_id="rA"), _lesson("cB", "tested", [2], run_id="rB")]  # mixed
-    dec = {normalize_statement("cA"): {"decision": "ratified"},   # a ratified contradiction is still contested
-           normalize_statement("cB"): {"decision": "rejected"}}   # a rejected contradiction is NOT live
+    # The statements carry a real subject and relation because the DEFAULT projection is the
+    # structured key, and a string with no assertion in it ("cA") is not a claim there at all.
+    a, b = "warmup helps stability", "sharding helps recall"
+    lessons = [_lesson(a, "supported", [1], run_id="rA"), _lesson(a, "tested", [2], run_id="rB"),  # mixed
+               _lesson(b, "supported", [1], run_id="rA"), _lesson(b, "tested", [2], run_id="rB")]  # mixed
+    dec = {normalize_statement(a): {"decision": "ratified"},   # a ratified contradiction is still contested
+           normalize_statement(b): {"decision": "rejected"}}   # a rejected contradiction is NOT live
     pack = build_context_pack(claim_assessments(lessons, decisions=dec))
-    assert pack["n_contested"] == 1                               # cA counts (ratified mixed); cB excluded
+    assert pack["n_contested"] == 1                               # a counts (ratified mixed); b excluded
     atlas = portfolio_atlas(lessons, [], decisions=dec)
     stmts = [c["statement"] for c in atlas["contradictions"]]
-    assert "cA" in stmts and "cB" not in stmts                    # operator-rejected contradiction dropped
+    assert a in stmts and b not in stmts                          # operator-rejected contradiction dropped
 
 
 def test_cli_claim_decide_and_reflect(tmp_path):
@@ -1085,38 +1116,43 @@ def test_memory_helpers_scope_lessons_research_and_capsules_together(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# CR1b — opt-in fuzzy/paraphrase claim merge (off by default)
+# CR1b — the paraphrase merge, DELETED 2026-09-08 (doc 25 EM-06): the structured claim key is its
+# full CR and is now the default, so the opt-in token-Jaccard merge no longer exists. What replaced
+# these three tests is the identity the paraphrases now collapse under, driven below and in
+# tests/test_claim_key.py.
 # --------------------------------------------------------------------------- #
 
-def test_fuzzy_off_is_default_no_merge():
-    lessons = [_lesson("hard negative mining improves recall", "supported", [1]),
-               _lesson("hard-negative mining boosts recall performance", "supported", [2])]
-    out = claim_assessments(lessons)                     # fuzzy defaults off
-    assert len(out) == 2                                 # two distinct normalized statements
-
-
-def test_fuzzy_merges_paraphrases():
+def test_paraphrases_collapse_by_structured_key_not_by_token_overlap():
+    """The deleted `fuzzy` merge grouped "improves recall" with "improves recall greatly" by token
+    Jaccard — a similarity score, applied transitively, that could merge two claims neither of which
+    asserted the same thing. The structured key collapses the SAME pair because they stem to one
+    subject+relation+polarity in one scope, and a claim about a different subject stays separate no
+    matter how many words it shares."""
     lessons = [_lesson("hard negative mining improves recall", "supported", [1], run_id="rA"),
                _lesson("hard negative mining improves recall greatly", "tested", [2], run_id="rB"),
                _lesson("learning rate warmup stabilizes training", "supported", [3], run_id="rC")]
-    out = claim_assessments(lessons, fuzzy=True)
-    # the two hard-negative paraphrases merge into one (contested: rA supports, rB refutes); the warmup
-    # claim stays separate.
+    out = claim_assessments(lessons)
     hn = [c for c in out if "hard negative" in c["statement"].lower()]
     assert len(hn) == 1 and hn[0]["epistemic"] == "mixed"
     assert set(hn[0]["support"]) == {"rA:1"} and set(hn[0]["oppose"]) == {"rB:2"}
-    assert "merged_from" in hn[0] and len(hn[0]["merged_from"]) == 2
     assert any("warmup" in c["statement"] for c in out)
 
 
-def test_cli_claims_fuzzy_flag(tmp_path):
+def test_the_cli_claims_command_has_no_fuzzy_flag_and_projects_structured_by_default(tmp_path):
     from typer.testing import CliRunner
     from looplab.cli import app
     _write_lessons(tmp_path / "lessons.jsonl", [
         _lesson("distillation improves retrieval recall", "supported", [1]),
         _lesson("distillation improves retrieval recall a lot", "supported", [2])])
-    r = CliRunner().invoke(app, ["claims", str(tmp_path), "--fuzzy"])
-    assert r.exit_code == 0
+    assert CliRunner().invoke(app, ["claims", str(tmp_path), "--fuzzy"]).exit_code != 0
+    # Default = structured: the receipt says so, and it is the receipt `claim-decide` validates
+    # against, so a review that silently projected lean could never be decided on.
+    import orjson
+    r = CliRunner().invoke(app, ["claims", str(tmp_path), "--json", "--governance-receipt"])
+    assert r.exit_code == 0 and orjson.loads(r.stdout)["structured"] is True
+    lean = CliRunner().invoke(app, ["claims", str(tmp_path), "--lean", "--json",
+                                    "--governance-receipt"])
+    assert lean.exit_code == 0 and orjson.loads(lean.stdout)["structured"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -1795,19 +1831,29 @@ def test_every_private_global_claims_assessments_reads_resolves():
 
 
 def test_the_three_shared_helpers_live_in_the_leaf_with_one_definition_each():
-    """`_CLAIM_WORD`, `_string_list` and `_MAX_DECISION_SCOPE` are each read by three of the four
+    """`_CLAIM_WORD`, `_string_list` and `_MAX_DECISION_SCOPE` are each read by several of the four
     modules. Left in whichever section declared them first, every consumer needed a deferred import
     back into `claims.py`; the alternative — a copy per module — is worse, because `_CLAIM_WORD`
-    defines what counts as a claim word for BOTH the fuzzy merge and the retrieval planner's intent
-    classifier, and a divergence would make a claim retrievable by a query the merge step considers
-    a different statement. They live in the leaf for the same reason `_MAX_DECISION_METRIC` does."""
+    defines what counts as a claim word for the retrieval planner's intent classifier and for the
+    lesson/claim tokenizer it must agree with, and a divergence would make a claim retrievable by a
+    query the grouping step considers a different statement. They live in the leaf for the same
+    reason `_MAX_DECISION_METRIC` does.
+
+    The reader SET is per name, not per module: `claims_assessments` stopped reading `_CLAIM_WORD`
+    on 2026-09-08 when the token-Jaccard fuzzy merge was deleted (doc 25 EM-06), and asserting the
+    old three-module list would have forced an unused import to be kept alive to satisfy a test."""
     import ast
 
     from looplab.engine import claims, claims_assessments, claims_health, claims_retrieval
 
-    for name in ("_CLAIM_WORD", "_string_list", "_MAX_DECISION_SCOPE"):
+    readers = {
+        "_CLAIM_WORD": (claims, claims_retrieval),
+        "_string_list": (claims, claims_assessments, claims_retrieval),
+        "_MAX_DECISION_SCOPE": (claims, claims_assessments, claims_retrieval),
+    }
+    for name, modules in readers.items():
         assert hasattr(claims_health, name), f"{name} left the leaf"
-        for module in (claims, claims_assessments, claims_retrieval):
+        for module in modules:
             assert getattr(module, name) is getattr(claims_health, name), (
                 f"{module.__name__}.{name} is not the leaf's object — a second definition means the "
                 "two can drift apart silently")
@@ -1836,7 +1882,12 @@ def test_the_three_shared_helpers_live_in_the_leaf_with_one_definition_each():
 # 2026-09-06 (doc 52 row 4): every claim projection gained `run_refs` — the evidence's INCARNATIONS
 # beside the display `runs` — and nothing else moved: stripping that one key from the new payload
 # restores the digest recorded before it (5e5ad06efacc3debdc9fec1fe69e62b47b8bbcaaf3dbbad26f4a45d46f6b258b).
-_CLAIMS_PROJECTION_DIGEST = "3824436e0530d29433ce3e2892452240be50e31d593f59a37ee6407b8781da6e"
+# 2026-09-08 (doc 25 EM-06): the `fuzzy` dimension left the CORPUS, not the projections. The harness
+# passed `structured=`/`fuzzy=`/`bounded=` explicitly, and with `fuzzy=False` the deleted branch was
+# `rows = out` — so every surviving key's VALUE is byte-identical to its `:f=False` predecessor and
+# the whole change to the payload is that eight `:f=True` entries are gone and eight `:f=False` key
+# NAMES lost that segment. Nothing about what a proposing agent sees moved.
+_CLAIMS_PROJECTION_DIGEST = "edf2ec502193cf4c88ce7ba81182676a8feaaba13788cf902a678d1fd17c7ca4"
 
 
 def _projection_corpus():
@@ -1874,16 +1925,15 @@ def _projection_outputs():
     lessons, research, decisions = _projection_corpus()
     out = {}
     for structured in (False, True):
-        for fuzzy in (False, True):
-            for bounded in (True, False):
-                key = f"assess:s={structured}:f={fuzzy}:b={bounded}"
-                rows = claim_assessments(lessons, research_claims=research, decisions=decisions,
-                                         fuzzy=fuzzy, structured=structured, bounded=bounded)
-                out[key] = list(rows)
-                for cap in (1, 3, 5, 64, 500):
-                    out[f"pack:{key}:{cap}"] = build_context_pack(rows, max_claims=cap)
-                out[f"render:{key}"] = render_context_pack(build_context_pack(rows, max_claims=5))
-                out[f"atlas:{key}"] = portfolio_atlas(rows, [])
+        for bounded in (True, False):
+            key = f"assess:s={structured}:b={bounded}"
+            rows = claim_assessments(lessons, research_claims=research, decisions=decisions,
+                                     structured=structured, bounded=bounded)
+            out[key] = list(rows)
+            for cap in (1, 3, 5, 64, 500):
+                out[f"pack:{key}:{cap}"] = build_context_pack(rows, max_claims=cap)
+            out[f"render:{key}"] = render_context_pack(build_context_pack(rows, max_claims=5))
+            out[f"atlas:{key}"] = portfolio_atlas(rows, [])
     return json.dumps(out, sort_keys=True, default=str)
 
 

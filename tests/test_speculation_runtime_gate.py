@@ -6,7 +6,7 @@ import pytest
 
 import looplab.search.speculation_quality as quality
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.cli.run_cmds import _run_engine_guarded
 from looplab.core.config import Settings
 from looplab.engine.options import EngineOptions

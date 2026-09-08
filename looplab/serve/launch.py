@@ -27,6 +27,7 @@ from looplab.core.comparison import canonical_comparison_contract
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
                                  flatten_parallelism_layers)
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
+from looplab.core.run_proposal import RunProposal
 from looplab.serve.appstate import (
     _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
@@ -659,17 +660,11 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     effective, inferred, base_digest = _resolved_settings(
         canonical_task, saved_settings, file_settings, launch_settings)
     warnings = ("backend=llm was inferred for this generative task",) if inferred else ()
-    # The same submit-time warning the CLI prints: an eval `command` that names no in-repo file
-    # leaves the score stage's CODE inside the Developer's edit surface, while the Developer's
-    # prompt tells it the scoring cannot be rewritten. `adapter` may be an injected dict in tests —
-    # the helper is total over that (it isinstance-checks a RepoTask and returns [] otherwise).
-    from looplab.adapters.repo_task import (eval_entrypoint_unprotected,
-                                            eval_source_tree_command_paths)
-    warnings += tuple(eval_entrypoint_unprotected(adapter))
-    # docs/29 F1c's third piece: an argv token naming the editable SOURCE tree absolutely reaches
-    # the operator's original rather than the node's copy, so no node's edits to it ever take
-    # effect. Same channel, same totality over an injected dict `adapter`.
-    warnings += tuple(eval_source_tree_command_paths(adapter))
+    # The submit-time warnings a validated task earns, from the ONE rule the CLI also prints
+    # (`adapters/tasks.py::submit_warnings`, doc 27's shared-schema row). This used to be two
+    # inline calls here and a hand-written copy of them in `cli/run_cmds.py`, so a third warning
+    # would have landed on whichever surface its author happened to be editing.
+    warnings += task_adapters.submit_warnings(adapter)
     token = _launch_token(
         run_id, canonical_task, effective, source_fp, referenced_paths,
         _sha(saved_settings), base_digest, seed_chat)
@@ -739,6 +734,23 @@ def validate_launch(srv, body: Any) -> dict:
                 verdict[key] = detail[key]
         return verdict
     return {"ready": True, **preflight_response(plan)}
+
+
+def validate_proposal(srv, proposal: RunProposal, chat=None) -> dict:
+    """`validate_launch` asked about a `RunProposal` instead of a hand-built body.
+
+    The last hand-built body is the one a client writes to ASK the question, and doc 27's
+    `three-new-run-planners-no-shared-schema` row is about exactly that class of copy: three
+    planners, three spellings of the same payload. A caller holding the shared schema
+    (`core/run_proposal.py::RunProposal` — reachable from `serve`, `tools` and `cli`) now asks
+    through the schema, so the body it validates and the body it will POST are produced by one
+    function, `RunProposal.start_body`.
+
+    This adds no second rule and no second answer: it is `validate_launch`, which is
+    `preflight_start`, which is what `/api/start` refuses through. Nothing is written, no name is
+    reserved, no engine is spawned.
+    """
+    return validate_launch(srv, proposal.start_body(chat))
 
 # Moved here from `routers/control.py` (doc 25 SR-12): launch policy with no HTTP dependency, which
 # `routers/genesis.py` was importing out of a SIBLING ROUTER's privates — route modules stopped being

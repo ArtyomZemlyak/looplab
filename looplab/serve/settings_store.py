@@ -14,12 +14,16 @@ from pydantic import SecretStr
 
 from looplab.core.atomicio import atomic_write_text, best_effort_fsync
 from looplab.core.config import Settings
+from looplab.core.run_proposal import LAUNCH_SECRET_FIELDS, LAUNCH_SETTING_FIELDS
 
 # Both fields are runtime-only and must never enter UI settings or run snapshots. Only the key is an
 # HTTP-writeable secret; the server derives and persists its endpoint binding in the same JSON file.
-_SECRET_FIELDS = {"llm_api_key", "llm_api_key_base_url"}
+# The two sets are DEFINED in `core/run_proposal.py` and re-exported here under their historical
+# private names: a launch card built in `tools/` (the Web assistant's `propose_run`) filters by the
+# same policy, and `tools/` may not import `serve` (doc 25 XP-03). One definition, two spellings.
+_SECRET_FIELDS = set(LAUNCH_SECRET_FIELDS)
 _SECRET_API_FIELDS = {"llm_api_key"}
-_ALLOWED_FIELDS = set(Settings.model_fields)
+_ALLOWED_FIELDS = set(LAUNCH_SETTING_FIELDS)
 
 _REVISION_KEY = "__looplab_revision__"
 _INITIAL_UI_REVISION = "gUoF2YQlVSLWCEg3hWJOCxJ2YFDKfZ2D"

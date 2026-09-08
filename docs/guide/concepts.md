@@ -151,14 +151,17 @@ need no memo, because they record their `at_node` on every path: `lessons_distil
 even with zero lessons, and the report writer stamps `at_node` outside its own try, so even a
 provider failure closes the window.
 
-**Four of the five call it; the fifth is a refusal.** The serial deep research
-(`_maybe_deep_research`) keeps the old predicate on purpose. Its phase never stopped happening —
+**Four of the five call it outright; the fifth calls it conditionally.** The serial deep research
+(`_maybe_deep_research`) keeps the old predicate while `concurrent_research` is on. Its phase never
+stopped happening —
 the *concurrent* half of that same decision (`_spawn_research`) carries no such guard, and
 `research_completed (trigger=cadence)` is alive in every run on this box, including the three with
 zero quiescent prefixes. Opening the serial half mid-eval would put a main-task think and a
 background think at the same node count with only a read-then-write window between their shared
-mark check and their receipts, buying a double-spend to reach work already being done. The residual
-hole — `concurrent_research=false`, not the shipped default — is filed as backlog F1i-b.
+mark check and their receipts, buying a double-spend to reach work already being done. Under
+`concurrent_research=false` there is no second path to race, so there the serial gate DOES reach the
+creation boundary — it is the run's only research path, and on a GPU-shaped run the old predicate
+meant it never fired at all (backlog F1i-b, closed 2026-09-08).
 
 `Settings.cadence_while_evaluating` (ON) is the kill switch back, and it carries a
 `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row pinning it `false` for a run resumed from a snapshot written
@@ -177,6 +180,22 @@ run-wide (the fold applies it backwards to every authored-delta node's membershi
 surface resolves ids through it), and a per-row stamp cannot express that. Once the run drains, a
 quiescent pass re-tags what the in-flight one wrote — bounded by the existing `_RETAG_CAP` — so a
 run that reaches a quiet moment ends with exactly the evidence it would have had before.
+
+**What the classifier replaces is kept (2026-09-08).** The cadence REWRITES a node's membership
+rather than merging into it, which is the designed behaviour — the proposer must not certify its own
+taxonomy — but until now the ids the proposer authored survived only in the raw event log, since
+`events/digest.py::_folded_axes` (rightly) forbids every read surface from resurrecting
+`idea.concepts`: a node whose tags were deliberately cleared must not keep classifying under its old
+authored axis. The fold now keeps the authored claim beside the membership in
+`RunState.node_concepts_authored` (`core/models.py::authored_node_concepts` reads it). It follows the
+IDEA and never the membership — a new authored envelope replaces it, a propose reset or a subject
+change clears it, and a classifier or operator row cannot touch it — and it is display/audit only:
+`classifier_verified_node_concepts` remains the single door admission and cross-run evidence cross.
+`concept_mode: "delta"` nodes are not duplicated into it, because their authored operands already
+live in `node_concept_deltas`, which no classifier writer clears. `looplab concept-authorship` is the
+instrument over the pair: per node the authored set, the folded set, what survived and what was
+replaced, with both sides resolved through the run's consolidation renames so a RENAMED id is never
+reported as a classifier replacement.
 
 ## Event log = canonical replay state
 
@@ -222,7 +241,21 @@ bought the same think, the same build, or the same install a second time. With t
   moved to the serial path — instead of silently re-issued to a provider;
 - `run_setup` is exactly-once for a command that reported an outcome and at-least-once across a kill
   in between, and that repeat is stamped `after_interrupted_attempt` in the log. LoopLab cannot make
-  an arbitrary operator command transactional, so prefer an idempotent one.
+  an arbitrary operator command transactional, so prefer an idempotent one;
+- **one evaluation ATTEMPT is receipted the same way**, and it is a different fact from
+  `node_eval_started`. That row is the node LIFECYCLE's boundary — one per node, no attempt — and it
+  answers "was this node ever dispatched". The evaluator itself is invoked once per attempt and may
+  finish paid or external side effects (a training run, a submission, a remote job) minutes before
+  the node's terminal event is appended, so a kill in that gap left the node
+  byte-indistinguishable from one whose evaluator never ran. `eval_invocation_claimed` goes down
+  immediately before the invocation and `eval_invocation_settled` immediately after, carrying the
+  outcome (`ok` / `failed` / `superseded` / `aborted` / `gpu_unpinnable`) and the seconds it charged.
+  The id is DERIVED from (run, node, generation, attempt) rather than minted, which is what lets the
+  resumed process name the invocation it is repeating — hand it to an evaluator as an idempotency
+  key if that evaluator has one — and a claim whose last row is still a claim is an invocation
+  nobody recorded the result of. The repeat is stamped `after_interrupted_attempt`, exactly like
+  `run_setup` above and with the same honesty: nothing here claims the side effect was undone.
+  Both rows are diagnostic — the fold ignores them, and the node still reaches exactly one terminal.
 
 **The environment a run actually got is a fact on the log, not something to reconstruct afterwards.**
 A repo task appends `deps_declared` once at run start: what its source tree declares (the requirement
@@ -1088,6 +1121,11 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   `self_report_gap`, positive = over-reported), and the program's sha256 rides on
   `metric_provenance.host_scorer` so the "same scorer for every node" claim is checkable. See
   [Host-side scoring](tasks.md#host-side-scoring-cmdhost_scorer).
+- **The withheld scorer** (2026-09-08, doc 52 row 10a slice (b)) — `cmd.holdout_scorer` is the same
+  operator-owned shape over a split the HOST holds, run once at finish over the val-top-k and never
+  during the search. Its number is the node's `holdout_metric`, so under `holdout_select` the
+  champion is elected on a number no candidate was scored on while it was being built. See
+  [The withheld scorer](tasks.md#the-withheld-scorer-cmdholdout_scorer).
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
   checker (Researcher/Developer) before the next stage runs, so a diverged train can't silently feed
   eval. **Since 2026-09-06 the checker may LOOK** (`stage_check_tools`, on; doc 52 row 9): beside the
@@ -1177,6 +1215,14 @@ A reported number is only useful if it generalizes. The trust layer is leakage-f
   candidate is scored the same way.
 - **Leakage detectors** — train/test contamination, target leakage, and temporal leakage are
   flagged.
+- **Distribution shift** — at setup the run also records how far the deployment sample is from the
+  training one, column by column (PSI + a two-sample KS statistic for numeric columns, total
+  variation distance plus the share of unseen categories for categorical ones), as a `data_shift`
+  event. It is **advisory and read by nothing that decides**: shift is the normal case on a real
+  task, so it is a fact beside a worse metric, never a refusal. The pair compared is whatever the
+  task declares — a `train*` table beside a `test*`/`valid*` one in a data mount, else the
+  train/test rows the leakage gate already asks for; a task that declares no pair records nothing,
+  because "not compared" and "compared, no shift" are different facts.
 - **Variance gate** — a candidate must beat the incumbent by more than ~1 standard error to be
   promoted, so noise doesn't crown a lucky run.
 - **Optional multi-seed confirmation** — when `confirm_top_k` and `confirm_seeds` enable it, re-run the
@@ -1226,6 +1272,11 @@ Additional safety monitors are off by default. Under the default `trust_gate=aud
   (repeated evaluation on the test split, then a `max`/`> best` choice over those scores).
 - `critic_check` — an execution-free critic of each solution. Broad critic warnings stay advisory;
   `critic:hardcoded_metric` is the narrow high-precision exception that can gate.
+- `feature_engineering` — the same flag that puts the "KEEP a feature only if it improves CV"
+  directive in the proposal prompt also ENFORCES it: the candidate's own per-feature `FEATURE_CV`
+  ledger is run through the operator's keep/drop rule (`search/operators.py`), and a feature the
+  ledger fails while the code still builds it is a `feature_cv:kept_feature_failed_cv` finding. The
+  evidence is the node's own numbers, so a candidate that reports no ledger is not flagged.
 
 Heuristic perfect-score, audit-unavailable and suspicious-output warnings remain advisory in every mode.
 High-precision reward-hack/leakage signals (and `critic:hardcoded_metric`) exclude a node from best-selection
@@ -1483,7 +1534,7 @@ proposal the run has already paid for, which is the hazard invariant #1 records 
 `train_monitor_alert`.
 
 **A DIRECTION IS NEVER A CLAIM, and since 2026-08-26 that is enforced rather than only asked for.**
-`agents/roles.py::bind_idea_to_board_card` resolves two independent edges against the same visible
+`agents/state_brief.py::bind_idea_to_board_card` resolves two independent edges against the same visible
 board — `card_id` (a claim on a work item) and `parent_card_id` (a filing under a question) — and
 until then a direction could become either one. Both resolution paths reached it: a proposal naming a
 `DIRECTION_ID` in `card_id` bound to it (and had its own `hypothesis` overwritten by the direction's
@@ -1524,7 +1575,7 @@ provider rather than by granting `RunTools` wholesale, which would also hand ove
 rest. It records nothing: every field is already on the Card, and the fold is untouched.
 
 **So does the deep-research memo prompt**, which is the stage that fills the board: both halves render
-from one shared block (`agents/roles.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
+from one shared block (`agents/state_brief.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
 `SEED_STATEMENT_JSON` spelling, without the claim contract (a memo has no `card_id` field). Until
 2026-08-12 it saw none of it — four memos in one 90-minute evaluation registered 18 belief rows for
 about five ideas, three of them re-wordings of the question whose experiment was running while they
@@ -2069,7 +2120,7 @@ Where each concept lives in the code:
 | Append-only log / pure fold / SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Derived Card ledger (fold-time receipt bounds + the `derive_cards` post-pass) | `events/card_ledger.py` |
 | Sandbox seam + subprocess/Docker bodies | `runtime/sandbox.py` |
-| Researcher/Developer roles (toy + LLM) | `agents/roles.py`, `agents/unified_agent.py` |
+| Researcher/Developer roles (LLM; the toy pair is `agents/toy_roles.py`, the prompts `agents/role_prompts.py`, the state brief `agents/state_brief.py`, the wrappers `agents/role_wrappers.py`) | `agents/roles.py`, `agents/toy_roles.py`, `agents/unified_agent.py` |
 | Structured output + LLM client + cost accountant | `core/parse.py`, `core/llm.py` |
 | Durable per-run observed-usage ledger | `engine/costs.py` |
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
@@ -2077,11 +2128,13 @@ Where each concept lives in the code:
 | The two pacing rules (node-count `cadence_due`, occupancy `occupancy_due`) | `engine/cadence.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
 | HTTP control-payload validation (`normalize_control` + the five per-event tables) | `serve/control_validation.py` |
+| The receipt PROTOCOL (identity, phase, the paranoid read/save) shared by every irreversible transaction | `core/receipt.py` |
 | Durable whole-run Replay/deletion receipts + the destructive-quiescence ladder | `serve/durable_op.py`, `serve/reset_transaction.py`, `serve/deletion_transaction.py` |
+| Durable receipt for the agent-facing node purge (its phase lattice + the crash fence) | `tools/node_purge_receipt.py`, `tools/run_control_tools.py` |
 | Serve-side paid work: metering lease + claim→terminal receipt ledger | `serve/paid_work.py`, `serve/paid_ledger.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |
-| Leakage detectors + data profiler | `trust/leakage.py`, `core/profile.py` |
+| Leakage detectors + data profiler + the advisory distribution-shift record | `trust/leakage.py`, `core/profile.py`, `trust/drift.py` |
 | Vector store + agentic retrieval | `tools/vectorstore.py`, `tools/retrieval.py`, `tools/knowledge_tools.py`, `agents/agent.py` |
 | Typed tool capabilities/results, MCP structure/cancellation, and operator-pinned Developer commands | `tools/_base.py`, `agents/tool_loop.py`, `tools/mcp_tools.py`, `tools/dev_commands.py`, `engine/workspace_seed.py` |
 | Cross-run case library | `engine/memory.py` |
@@ -2094,7 +2147,7 @@ Where each concept lives in the code:
 | Trace span exporter | `core/tracing.py` |
 | Search policies | `search/policy.py` |
 | Static HTML lineage tree | `events/htmlview.py` |
-| Task adapters + loader | `adapters/tasks.py`, `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
+| Task adapters + loader | `adapters/tasks.py`, `adapters/synthetic.py` (the five demo adapters' shared `SyntheticTaskBase` + `PerturbResearcher`), `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
 | Strategist / Deep-Research / report | `agents/strategist.py`, `agents/deep_research.py`, `serve/report.py` |
 
 

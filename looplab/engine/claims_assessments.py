@@ -1,4 +1,4 @@
-"""The three claim-assessment PROJECTIONS — lessons plus research claims into one verdict view.
+"""The claim-assessment PROJECTIONS — lessons plus research claims into one verdict view.
 
 Split out of the `claims.py` god-module (doc 25 EM-01). This is the layer that turns two independent
 durable stores — lesson outcomes and D8 research claims — into the epistemic view everything
@@ -21,7 +21,6 @@ import math
 from typing import Optional
 
 from looplab.engine.claims_health import (
-    _CLAIM_WORD,
     _ClaimAssessmentRows,
     _MAX_DECISION_METRIC,
     _MAX_DECISION_SCOPE,
@@ -45,82 +44,6 @@ from looplab.engine.claims_health import (
     normalize_statement,
     sanitize_cross_run_projection,
 )
-
-def _stmt_tokens(s: str) -> frozenset:
-    return frozenset(w for w in _CLAIM_WORD.findall((s or "").casefold()) if len(w) > 2)
-
-
-def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[dict]:
-    """Conservative opt-in paraphrase projection.
-
-    Candidates must share scope, semantic polarity and governance maturity, and every member must clear the
-    threshold (complete-link). A bounded token index avoids all-pairs and single-link bridge collapse.
-    """
-    n = len(claims)
-    if n <= 1:
-        return claims
-    from looplab.engine.claim_key import claim_signature
-    toks = [_stmt_tokens(c["statement"]) for c in claims]
-    meta = [(tuple(c.get("scopes") or []), claim_signature(c["statement"])["polarity"],
-             str(c.get("maturity") or "machine-proposed")) for c in claims]
-    groups: list[list[int]] = []
-    token_groups: dict[str, set[int]] = {}
-    for i, token_set in enumerate(toks):
-        candidates = sorted({gid for token in token_set for gid in token_groups.get(token, ())})[:64]
-        chosen = None
-        for gid in candidates:
-            members = groups[gid]
-            if len(members) >= 64 or any(meta[j] != meta[i] for j in members):
-                continue
-            complete = True
-            for j in members:
-                union, inter = token_set | toks[j], token_set & toks[j]
-                if not inter or len(inter) / len(union) < threshold:
-                    complete = False
-                    break
-            if complete:
-                chosen = gid
-                break
-        if chosen is None:
-            chosen = len(groups)
-            groups.append([])
-        groups[chosen].append(i)
-        for token in token_set:
-            token_groups.setdefault(token, set()).add(chosen)
-
-    out = []
-    for idxs in groups:
-        members = [claims[i] for i in idxs]
-        if len(members) == 1:
-            out.append(members[0])
-            continue
-        sup = sorted({r for m in members for r in m["support"]})
-        opp = sorted({r for m in members for r in m["oppose"]})
-        unverified = sorted({r for m in members for r in m.get("unverified", [])})
-        rep = max(members, key=lambda m: (m["n_support"] + m["n_oppose"], m["statement"]))
-        mat = members[0].get("maturity", "machine-proposed")
-        research_source = (safe_research_source_summary(members[0].get("research_source"))
-                           or _research_source_summary([]))
-        claim_source = (safe_claim_source_summary(members[0].get("claim_source"))
-                        or _claim_source_summary([], [], research_source=research_source))
-        out.append({
-            "statement": rep["statement"],
-            "epistemic": _source_guarded_epistemic(sup, opp, claim_source), "maturity": mat,
-            "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
-            "unverified": unverified, "n_unverified": len(unverified),
-            "runs": sorted({r for m in members for r in m["runs"]}),
-            "run_refs": sorted({r for m in members for r in m.get("run_refs", ())}),
-            "scopes": sorted({r for m in members for r in m["scopes"]}),
-            "sources": sorted({s for m in members for s in m.get("sources", [])}),
-            "verification": sorted({v for m in members for v in m.get("verification", [])}),
-            "decision": members[0].get("decision"),
-            "merged_from": sorted(m["statement"] for m in members),
-            "research_source": research_source,
-            "claim_source": claim_source,
-        })
-    out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
-    return out
-
 
 def _register_incarnation(group: dict, row: dict) -> None:
     """`runs` keeps directory NAMES for display; `run_refs` keeps INCARNATIONS for counting (doc 50
@@ -200,7 +123,7 @@ def _ingest_evidence(lessons, research_claims, resolve, *, weigh=None) -> None:
 def _structured_assessments(lessons, research_claims, decisions, *,
                             research_source: Optional[dict] = None,
                             claim_source: Optional[dict] = None) -> list[dict]:
-    """The SCOPE+POLARITY-safe structured projection (full CR of the lean fuzzy merge). Identity is the
+    """The SCOPE+POLARITY-safe structured projection, THE DEFAULT (doc 25 EM-06). Identity is the
     `claim_signature` merge_key: (subject stems, scope=task, metric, polarity). Opposite-polarity claims
     sharing a `contra_key` are surfaced as a CONTRADICTION (they never merge, and each is marked contested).
     Governance overlays by the structured `claim_uid` (scope-precise)."""
@@ -354,35 +277,46 @@ def _structured_assessments(lessons, research_claims, decisions, *,
 
 
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
-                      decisions: Optional[dict] = None, fuzzy: bool = False,
-                      structured: bool = False, bounded: bool = True) -> list[dict]:
+                      decisions: Optional[dict] = None,
+                      structured: bool = True, bounded: bool = True) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
-    assessments. Groups by normalized statement; each claim carries `support`/`oppose` node-id evidence,
-    contributing `runs`/`scopes`, and an `epistemic` state. `decisions` (from `load_claim_decisions`)
-    overlays an operator `maturity` (`operator-ratified`/`operator-rejected`/`operator-pinned`, else
-    `machine-proposed`) — the §22.4 governance overlay. Sorted most-evidenced first. Pure.
+    assessments. Each claim carries `support`/`oppose` node-id evidence, contributing `runs`/`scopes`,
+    and an `epistemic` state. `decisions` (from `load_claim_decisions`) overlays an operator `maturity`
+    (`operator-ratified`/`operator-rejected`/`operator-pinned`, else `machine-proposed`) — the §22.4
+    governance overlay. Sorted most-evidenced first. Pure.
 
-    `structured` (opt-in, the full CR of the lean `fuzzy` merge) switches identity to the SCOPE+POLARITY-safe
-    structured claim key (`claim_key.claim_signature`): claims from different tasks never merge, opposite
-    polarity ("X helps" vs "X never helps") is a CONTRADICTION not a merge, and paraphrase/inflection
-    variants collapse by exact structured key (O(n), no transitive over-merge). Mutually exclusive with the
-    lean `fuzzy` path (structured wins)."""
-    # THE THREE MODES, and which overlay key each one's governance decisions arrive under — the table
-    # doc 25 EM-06 asks for, because "operator decisions must overlay correctly across all three" is
-    # the whole cost of keeping them, and nothing else states which guards which:
+    `structured` (THE DEFAULT since 2026-09-08, doc 25 EM-06) is the SCOPE+POLARITY-safe structured
+    claim key (`claim_key.claim_signature`): claims from different tasks never merge, opposite polarity
+    ("X helps" vs "X never helps") is a CONTRADICTION not a merge, and paraphrase/inflection variants
+    collapse by exact structured key (O(n), no transitive over-merge). `structured=False` is the LEGACY
+    lean read path — normalized-statement grouping, kept for callers reading a projection built under
+    it, deprecated and slated for deletion with the shadow overlay keys it is the only reader of."""
+    # THE TWO MODES, and which overlay key each one's governance decisions arrive under — the table
+    # doc 25 EM-06 asks for, because "operator decisions must overlay correctly across every mode" is
+    # the whole cost of keeping more than one, and nothing else states which guards which:
     #
-    #   flags                 identity                                overlay key
+    #   flag                  identity                                overlay key
     #   ------------------    ------------------------------------    -----------------------------
-    #   (neither)             normalize_statement grouping (LEAN)     `_scoped_key` / `_global_key`
-    #   fuzzy=True            + token-Jaccard transitive merge        `_scoped_key` / `_global_key`
     #   structured=True       claim_key.claim_signature (scope +      structured `claim_uid`
-    #                         polarity safe); WINS over fuzzy
+    #     (THE DEFAULT)       polarity safe)                          (legacy keys as a FALLBACK)
+    #   structured=False      normalize_statement grouping (LEAN,     `_scoped_key` / `_global_key`
+    #     (LEGACY)            deprecated)
     #
-    # The two legacy paths share one overlay spelling; the structured path deliberately does NOT —
-    # its key is scope-precise, so a decision recorded against a lean key must not silently apply to
-    # a structured claim from a different task. That asymmetry is why the modes cannot be collapsed
-    # by deleting a branch, and why `structured` is still opt-in: making it the default CHANGES which
-    # claims merge, which is a behaviour change for the governance overlay, not a refactor.
+    # The legacy path reads the shadow overlay spelling; the structured path deliberately does NOT
+    # key on it — its key is scope-precise, so a decision recorded against a lean key must not
+    # silently apply to a structured claim from a different task; it consults the legacy keys only
+    # as an explicitly UNSCOPED fallback (`_decision_for`). That asymmetry is why the last mode
+    # cannot be collapsed by deleting a branch alone: a caller still projecting lean would silently
+    # change which claims merge, i.e. what its governance overlay applies to.
+    #
+    # WHY THE DEFAULT FLIPPED. The durable side was already structured on both ends: every operator
+    # decision is written through `record_claim_decision`, which validates against
+    # `claim_assessments(..., structured=True)`, and `load_claim_decisions` indexes a scoped row by
+    # its structured UID ONLY. A lean projection therefore handed an operator an `evidence_digest`
+    # the write path could never match, and merged across the task boundary the write path enforces.
+    # The migration is safe in the one direction that matters for an existing store: no durable
+    # decision becomes unreachable, because an unscoped/unqualified row stays indexed at its legacy
+    # keys and `_decision_for` still consults them.
     # DEFERRED for the same reason as `_decision_for` above: `claims.py` imports this module to
     # re-export it, so the ledger half's legacy overlay-key spellings come in per call (EM-01).
     from looplab.engine.claims import _global_key, _scoped_key
@@ -468,7 +402,6 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         })
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
-    rows = _fuzzy_merge_claims(out) if fuzzy else out
-    projected = [_bounded_claim_projection(row) for row in rows] if bounded else rows
+    projected = [_bounded_claim_projection(row) for row in out] if bounded else out
     return _ClaimAssessmentRows(
         projected, claim_source=claim_source, research_source=research_source)
