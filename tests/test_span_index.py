@@ -605,6 +605,76 @@ def test_cold_persisted_index_validates_receipts_then_scans_only_tail(run, monke
     assert refreshed.full_span("root10") is not None
 
 
+def test_a_batched_multi_row_append_is_trusted_like_n_single_row_ones(run, monkeypatch):
+    """The exporter now appends a whole DRAIN under one receipt (doc 34 D-02); the fast path must
+    top up from it exactly as it does from a one-row receipt — one region, hashed once, no rebuild.
+
+    This is the reader half of that change and the reason it needed no schema bump: a receipt has
+    always proved a byte RANGE rather than a row, so a range holding seven spans is checked as
+    strictly as seven ranges holding one each.
+    """
+    from looplab.core.tracing import JsonlSpanExporter, _span_jsonl_line
+
+    _rd, source, _spans = run
+    index = get_index(source)
+    before_size = source.stat().st_size
+    batch = _spans_for(11, "batched-drain")
+    JsonlSpanExporter(source)._export_lines([_span_jsonl_line(span) for span in batch])
+    appended_bytes = source.stat().st_size - before_size
+
+    hashed: list[tuple[int, int]] = []
+    real_hash = span_index._source_region_sha256
+    monkeypatch.setattr(span_index, "_source_region_sha256",
+                        lambda stream, offset, length: hashed.append((offset, length))
+                        or real_hash(stream, offset, length))
+
+    refreshed = get_index(source)
+
+    assert refreshed is index, "a valid receipt chain must top up, never rebuild"
+    assert hashed == [(before_size, appended_bytes)], (
+        f"one receipt, one hashed region for all {len(batch)} rows; got {hashed}")
+    assert all(refreshed.full_span(span["span_id"]) is not None for span in batch)
+
+
+def test_a_forged_MULTI_ROW_receipt_is_not_trusted_on_shape(run):
+    """`test_forged_append_transition_forces_rebuild`'s sibling for a BATCHED region.
+
+    The exporter now appends a whole drain under one receipt, so the shape a forger can present has
+    changed: a single valid-looking transition that claims many rows at once. The proof is still the
+    bytes — the reader hashes `[before_size, after_size)` whatever it holds — and this pins that a
+    wide region buys no leniency.
+    """
+    from looplab.core.trace_append import (
+        SPAN_APPEND_JOURNAL_NAME, SPAN_APPEND_RECEIPT_SCHEMA)
+
+    rd, source, _spans = run
+    initial = get_index(source)
+    before = source.stat()
+    batch = _spans_for(12, "forged-drain")
+    with open(source, "ab") as stream:
+        for span in batch:
+            stream.write(orjson.dumps(span) + b"\n")
+    after = source.stat()
+    forged = {
+        "schema": SPAN_APPEND_RECEIPT_SCHEMA,
+        "dev": after.st_dev,
+        "ino": after.st_ino,
+        "before_size": before.st_size,
+        "before_mtime_ns": before.st_mtime_ns,
+        "before_ctime_ns": before.st_ctime_ns,
+        "after_size": after.st_size,
+        "after_mtime_ns": after.st_mtime_ns,
+        "after_ctime_ns": after.st_ctime_ns,
+        "append_sha256": "0" * 64,          # valid shape, false proof over ALL seven rows
+    }
+    (rd / SPAN_APPEND_JOURNAL_NAME).write_bytes(orjson.dumps(forged) + b"\n")
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial, "a multi-row region must be proved by its bytes like any other"
+    assert all(refreshed.full_span(span["span_id"]) is not None for span in batch)
+
+
 def test_source_growth_without_append_receipt_rebuilds_fail_closed(run):
     _rd, source, _spans = run
     initial = get_index(source)
