@@ -66,6 +66,7 @@ from looplab.engine.card_reservation import (CardReservationMixin, _BuildReserva
                                             discarded_proposal_receipt)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
+from looplab.engine.noise_floor import NoiseFloorMixin
 from looplab.engine.costs import bind_cost_accountants, find_cost_accountants, seed_prior_spend
 from looplab.engine.crash_repair import CrashRepairMixin
 from looplab.engine.eval_dispatch import EvalDispatchMixin
@@ -870,7 +871,8 @@ def _task_declared_env(task) -> bool:
 # would say the same thing on the main task.
 _OFFLOADED_BUILD = threading.local()
 
-class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
+class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin,
+             StrategyCadenceMixin,
              ConceptCadenceMixin, VerifierTiebreakMixin, ValueEstimateMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
              AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
@@ -1717,6 +1719,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # no state to persist. Real MLE-bench (kind="mlebench") is graded by the official
         # out-of-process grader, which the engine cannot partition — skipped.
         self.confirm_seed_base = max(0, int(confirm_seed_base))
+        # THE EVAL NOISE FLOOR (doc 52 row 11). Coerced the way `confirm_seed_base` above is, and
+        # the `< 2` clamp is the SETTING's stated rule rather than a silent one: a single repeat has
+        # no spread, so 1 is off exactly as 0 is, and `_noise_floor_due` never has to re-decide it.
+        _noise_seeds = max(0, int(_opt("eval_noise_seeds")))
+        self.eval_noise_seeds = _noise_seeds if _noise_seeds >= 2 else 0
         self._holdout_select = bool(holdout_select)
         self._holdout_top_k = max(1, int(holdout_top_k))
         self._select_verifier = bool(select_verifier)
@@ -2753,7 +2760,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return None
 
     async def _handle_no_actions(self, state, *, decision_seq) -> str:
-        """The empty-action ladder: confirm -> holdout -> HITL approval -> finish (doc 25 XP-06).
+        """The empty-action ladder: noise floor -> confirm -> holdout -> HITL approval -> finish
+        (doc 25 XP-06).
 
         Lifted verbatim out of the run loop's `if not actions:` branch, which — like the ES-05
         `creates` branch before it — always continued or broke and never fell through. Its six
@@ -2762,6 +2770,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         It stays in THIS module because it folds: `fold` is the module-global monkeypatch seam.
         """
+        # THE EVAL NOISE FLOOR (doc 52 row 11), BEFORE confirmation and for the reason the two are
+        # different instruments: the floor is measured on the SEARCH's champion under the SEARCH's
+        # own protocol, and confirm may demote that champion on a different (disjoint-seed, full-
+        # profile) signal. Off by default (`Settings.eval_noise_seeds`), and off means this ladder
+        # step is one comparison. It records and decides nothing; a completed pass gates itself.
+        if self._noise_floor_due(state):
+            await self._noise_floor_phase(state)
+            return "continue"
         # Optional multi-seed confirmation pass (I12) before finishing:
         # re-evaluate the top-k under several seeds and record robust metrics.
         if (self.confirm_top_k > 0 and self.confirm_seeds > 0

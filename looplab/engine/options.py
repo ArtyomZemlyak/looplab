@@ -131,6 +131,10 @@ class EngineOptions:
     confirm_top_k: int = 0
     confirm_seeds: int = 0
     confirm_seed_base: int = 1           # D1: first confirm seed; 1 keeps confirm splits disjoint
+    # THE EVAL NOISE FLOOR (doc 52 row 11): how many times ONE candidate is re-evaluated so the run
+    # records the spread of its own metric. 0 = off on BOTH sides — the same default, so no
+    # options-divergence row — and off means `engine/noise_floor.py` is never entered.
+    eval_noise_seeds: int = 0
     max_seconds: Optional[float] = None
     max_eval_seconds: Optional[float] = None
     # The run's LLM spend caps, reserved at admission (`core/llm_budget.py`, doc 52 row 15).

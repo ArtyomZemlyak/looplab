@@ -64,6 +64,9 @@ ATTR_BY_FIELD = {
     "confirm_top_k": "confirm_top_k",
     "confirm_seeds": "confirm_seeds",
     "confirm_seed_base": "confirm_seed_base",
+    # The eval NOISE FLOOR's repeat count (`engine/noise_floor.py`, doc 52 row 11). Same name on
+    # the Engine: it is clamped there (0 and 1 both mean off), not renamed.
+    "eval_noise_seeds": "eval_noise_seeds",
     "max_seconds": "max_seconds",
     "max_eval_seconds": "max_eval_seconds",
     # The run's LLM spend caps, reserved at the broker's permit (`core/llm_budget.py`, doc 52 row 15).

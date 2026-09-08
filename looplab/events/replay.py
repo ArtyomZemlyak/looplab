@@ -73,6 +73,7 @@ from looplab.events.types import (
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
+    EV_EVAL_NOISE_FLOOR, EV_EVAL_NOISE_SEED,
     EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
@@ -284,6 +285,7 @@ class _FoldCtx:
     __slots__ = (
         "best_confirmed", "best_confirmed_significant", "llm_usage_seen", "llm_usage_ids",
         "charged_terminal_generations", "charged_confirm_seeds", "charged_ablation_ids",
+        "charged_noise_seeds",
         "pending_finish_report", "concept_subject_invalidated", "concept_mode_untrusted",
         "concept_input_capped", "concept_input_invalid", "run_base_capped",
         "run_base_invalid", "run_base_seen", "event_index",
@@ -306,6 +308,11 @@ class _FoldCtx:
         # still current. A reset may discard its metric/state, but cannot refund compute already spent.
         self.charged_terminal_generations: set[tuple[int, int]] = set()
         self.charged_confirm_seeds: set[tuple[int, int, int]] = set()
+        # The same first-write-wins cost key for the eval-NOISE probe's repeats. Its own set and
+        # not confirm's: the two phases can run seeds of the SAME (node, generation, seed) triple —
+        # confirm at the full profile from `confirm_seed_base`, the probe at the node's own profile
+        # from 0 — and sharing the memo would refund whichever ran second.
+        self.charged_noise_seeds: set[tuple[int, int, int]] = set()
         # (node_id, seq) of every `node_repaired` row already charged to the repair epoch. What
         # carries invariant #5 for that counter now that it advances rather than max-ing: a
         # duplicate or re-folded row shares its SEQ, a per-process ordinal restart does not.
@@ -1340,6 +1347,13 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         return
     for nid in requeued:
         st.confirm_seed_results.pop(nid, None)
+        # The eval-NOISE probe's per-seed memo resets with the node for the reason the confirm memo
+        # does (see `_requeue_reset_node`): the probe memo-skips every seed already recorded, so a
+        # stale entry would summarize PRE-reset metrics as the spread of post-reset code without
+        # running a single repeat. The `eval_noise_floor` summary is deliberately NOT cleared — it
+        # names the generation it measured, a spread already measured does not become false, and
+        # re-measuring would spend the eval seconds again.
+        st.eval_noise_seed_results.pop(nid, None)
         st.proxy_scores.pop(nid, None)
     st.proxy_skipped = [nid for nid in st.proxy_skipped if nid not in requeued]
     _purge_node_requests(st, requeued)
@@ -1649,6 +1663,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # single seed. Pending force-confirm requests are lifecycle-scoped and are cancelled below;
         # completed fulfillment history stays for audit while its generation-aware twin prevents ABA.
         st.confirm_seed_results.pop(n.id, None)
+        st.eval_noise_seed_results.pop(n.id, None)   # same rule, same reason as the line above
         _purge_node_requests(st, {n.id})
         # Abort/proxy decisions belong to the lifecycle that was active when they were recorded.
         # Keeping them would immediately abort/skip every reset generation forever.
@@ -1898,6 +1913,79 @@ def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
         n.confirmed_seeds = seeds
         if verifier_evidence_digest(st.direction, n) != prior_evidence:
             n.verifier_score = None
+
+def _on_eval_noise_seed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """One repeat of the eval-NOISE probe (doc 52 row 11): its cost, and its per-seed resume memo.
+
+    Deliberately SIMPLER than `_on_confirm_eval` above, and the asymmetry is the instrument's whole
+    point. A confirm seed's metric becomes a node's `confirmed_mean` and can therefore change which
+    node wins, so that handler must reject every stale, forged or torn shape before it touches a
+    Node. A noise repeat touches NO node field: it lands in a run-level memo nothing selects on. So
+    the only two properties it owes are the two the fold owes every event — the eval seconds are
+    charged EXACTLY ONCE per (node, generation, seed), so a duplicate or re-folded row cannot
+    inflate the budget or make the fold order-dependent, and a malformed row is inert.
+    """
+    nid = _coerce_node_id(d)
+    seed = _coerce_node_id({"node_id": d.get("seed")}) if "seed" in d else None
+    if nid is None or seed is None:
+        # UNKEYED: there is no memo slot, so there is no idempotent cost add either. The sole
+        # emitter always writes both keys; this only guards a foreign / hand-edited log.
+        return
+    n = st.nodes.get(nid)
+    generation = d.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        generation = n.attempt if n is not None else 0
+    cost_key = (nid, generation, seed)
+    if cost_key not in ctx.charged_noise_seeds:
+        ctx.charged_noise_seeds.add(cost_key)
+        # Charged for a SUPERSEDED lifecycle too (its own bucket, `noise`): a reset discards the
+        # measurement, never the compute a worker already spent on it — the same rule the confirm
+        # and terminal cost keys above are written to.
+        _charge_eval_seconds(st, "noise", d.get("eval_seconds"))
+    if n is None or generation != n.attempt:
+        return                      # spent money, not evidence: a stale repeat memoizes no seed
+    st.eval_noise_seed_results.setdefault(nid, {})[seed] = _finite_metric(d.get("metric"))
+
+
+def _noise_seed_number(v):
+    """One persisted SEED as an int (or None) — `_coerce_node_id`'s rules on a bare value."""
+    return _coerce_node_id({"node_id": v})
+
+
+def _noise_number_list(raw, coerce) -> list:
+    """A persisted list of numbers from an untrusted payload, element-wise, bounded.
+
+    `eval_noise_floor` is stored on `RunState` for readers, so a hand-edited or foreign log must not
+    be able to park an arbitrary nested object there. `coerce` is `_finite_metric` (a metric, which
+    may legitimately be None) or `_coerce_node_id` (a seed). The cap is the probe's own bound with
+    room to spare — a run cannot ask for more repeats than it can pay for."""
+    if not isinstance(raw, list):
+        return []
+    return [coerce(v) for v in raw[:64]]
+
+
+def _on_eval_noise_floor(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """The probe's SUMMARY and its completion gate (doc 52 row 11).
+
+    Normalized field by field rather than stored whole, for the reason the list helper above states:
+    nothing decides on this record, but it IS carried on `RunState` for every projection over it, so
+    its shape is the fold's and not a writer's. Last row wins — a run measures its floor once, and a
+    second row could only come from a hand-edited log or a future writer that re-measures."""
+    st.eval_noise_floor = {
+        "node_id": _coerce_node_id(d),
+        "generation": _coerce_node_id({"node_id": d.get("generation")}),
+        "seeds": _noise_number_list(d.get("seeds"), _noise_seed_number),
+        "metrics": _noise_number_list(d.get("metrics"), _finite_metric),
+        "n": max(0, _noise_seed_number(d.get("n")) or 0),
+        "mean": _finite_metric(d.get("mean")),
+        "std": _finite_metric(d.get("std")),
+        "sem": _finite_metric(d.get("sem")),
+        "spread": _finite_metric(d.get("spread")),
+        "search_metric": _finite_metric(d.get("search_metric")),
+        "profile": str(d.get("profile"))[:64] if isinstance(d.get("profile"), str) else None,
+        **({"reason": str(d.get("reason"))[:200]} if isinstance(d.get("reason"), str) else {}),
+    }
+
 
 def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # D1 holdout-gated promotion: the engine re-scored this val-leader's predictions on
@@ -4363,6 +4451,8 @@ _HANDLERS = {
     EV_STAGE_FINISHED: _on_stage_finished,
     EV_CONFIRM_EVAL: _on_confirm_eval,
     EV_NODE_CONFIRMED: _on_node_confirmed,
+    EV_EVAL_NOISE_SEED: _on_eval_noise_seed,
+    EV_EVAL_NOISE_FLOOR: _on_eval_noise_floor,
     EV_HOLDOUT_EVALUATED: _on_holdout_evaluated,
     EV_AGENT_VALIDATED: _on_agent_validated,
     EV_DATA_PROFILED: _on_data_profiled,

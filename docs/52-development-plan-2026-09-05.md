@@ -351,11 +351,26 @@ performance gains" from embedding rejection and only "marginal" gains from the L
 shipped default (`novelty_mode="llm"`, `novelty_semantic=False`) is the inverse of the field's
 ablation; one more arm of the profile A/B decides it. proof:missing:docs/audit/novelty-gate-ab.md
 
-OPEN[eval-noise-floor-is-never-measured] no run records the repeated-seed spread of one candidate's
-metric, so whether a champion's margin exceeds evaluation noise — AIRA₂'s explanation of the field's
-"overfitting" — is undecidable; `confirm_top_k=0` / `confirm_seeds=0` by default and
-`trust/gate.py::one_se_better` is wired only into confirm. The instrument is the same ≥3-seed arm the
-profile A/B needs. proof:absent:eval_noise@looplab+absent:noise_floor@looplab/trust
+OPEN[eval-noise-floor-is-never-measured] *(narrowed 2026-09-08: the MECHANISM shipped, the NUMBER is
+what stays open.)* What is still owed is the spread on a REAL task, on the box — the ≥3-seed arm the
+profile A/B needs, reported beside `generalization_gap` — and with it the answer to whether any
+champion margin this repo has published exceeds its own evaluation noise, AIRA₂'s explanation of the
+field's "overfitting". proof:missing:docs/audit/eval-noise-floor.md
+
+*The instrument (2026-09-08). `Settings.eval_noise_seeds` (0 = off and shipped off; 1 is off too,
+because one number has no spread) makes `engine/noise_floor.py::_noise_floor_phase` re-evaluate the
+CHAMPION N times under the SEARCH's own protocol — the node's own `idea.eval_profile`, seeds 0..N-1,
+so the first repeat re-measures the exact configuration the search scored — once per run, in the
+empty-action ladder BEFORE the confirm pass. It is deliberately not confirmation, which re-scores the
+top-k at the FULL profile from a DISJOINT seed base and whose mean SELECTS. Each repeat is an
+`eval_noise_seed` row charged to its own `noise` budget bucket and never a second node terminal
+(invariant 2); the pass writes one `eval_noise_floor` summary that doubles as its completion gate —
+metrics, mean, sample std, range and `sem`, the same quantity `trust/gate.py::one_se_better` compares
+a margin against (`core/fitness.py::standard_error_difference(std, n, 0.0, 0)`), so that rule and
+`engine/champion_caveats.py::mislead_gap` are on the floor's scale by construction. Read by nothing
+that decides: an instrument that also moved a champion could not be used to judge the champions it
+moved. Driven end to end over a real toy run (`tests/test_eval_noise_floor.py`), whose floor is a
+MEASURED ZERO because the toy quadratic is deterministic — the mechanism working, not the number.*
 
 OPEN[no-external-benchmark-number-exists] `adapters/mlebench_real.py` and `docs/MLEBENCH.md` ship the
 real host-graded path and no completed run is recorded anywhere in the tree. Every blocker is now in
@@ -1042,7 +1057,7 @@ marker(s) it retires**, so the list re-derives from `grep -rn 'OPEN\['`.
 | 8 | One launch-readiness gate behind `/api/validate` | two copies, one pointing at the backlog | S | `launch-readiness-gate-is-two-copies` |
 | 9 | **The stage checker gets the log tools** the three watchdog judges already have | the last blind 4,000-char judge; the re-train BACKLOG §0.9 recorded | S–M | `stage-checker-is-handed-a-blind-tail` |
 | 10 | **Consistent host-side scoring for `repo_task`**, in two slices: (a) a host-side score stage held constant across candidates, `generalization_gap` folded for repo runs; (b) the split made HIDDEN once #2 and the Landlock validation hold, selection through `holdout_select`; replay-digest proof that undeclared runs are byte-identical | the field's largest measured selection effect, open on the box's own runs; L4-m → L4-v | L | `repo-task-champion-is-picked-on-the-candidates-own-metric` |
-| 11 | **The profile A/B, properly designed** on the box: knobs without the gate / the gate alone / the embedding-novelty arm, ≥3 seeds per arm, `generalization_gap` and the noise floor reported | the built quality machinery ships off, undecided; the arms decide three markers at once | S code, box time | `research-grade-profile-is-not-the-default`, `embedding-novelty-gate-declined-on-one-incident`, `eval-noise-floor-is-never-measured` |
+| 11 | **The profile A/B, properly designed** on the box: knobs without the gate / the gate alone / the embedding-novelty arm, ≥3 seeds per arm, `generalization_gap` and the noise floor reported. **The noise-floor INSTRUMENT shipped 2026-09-08** (`engine/noise_floor.py` under `Settings.eval_noise_seeds`, off): a run records the repeated-seed spread of its champion under the search's own protocol, with the `sem` the >1-SE rule uses, and reads it into no decision — so the arm now has a floor to report rather than one to invent. The three MEASUREMENTS stay open | the built quality machinery ships off, undecided; the arms decide three markers at once | S code, box time | `research-grade-profile-is-not-the-default`, `embedding-novelty-gate-declined-on-one-incident`, `eval-noise-floor-is-never-measured` |
 | 12 | **A `DeveloperResult` envelope, then the repair path AND the serial build lane off the loop** (one helper on the proposal pool, capture-sink discipline, a loop-liveness test per site) | zero ticks during a 116–276 s median hold; a dead node waited 62 min for its terminal while both GPUs idled | M | `developer-output-has-no-immutable-envelope`, `repair-path-holds-the-engine-loop`, `serial-node-build-holds-the-loop` |
 | 13 | **One untrusted-evidence envelope** (`core/evidence.py`) behind a flag, on the Strategist, triage / critic stderr, arXiv / web | model-authored text reaches decision-moving surfaces unlabelled | M | `no-single-untrusted-evidence-envelope` |
 | 14 | **Containment made countable**: ruff `BLE001` as a census, the 652 `noqa`s as an allow-list, `contain(span, reason)`, the paid-call `BudgetExceeded` funnel | 460 silent handlers; a swallowed budget stop at a selection site | M | `containment-is-unmeasured` |

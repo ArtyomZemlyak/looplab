@@ -105,6 +105,17 @@ EV_SCORE_METRICS_BACKFILLED = "score_metrics_backfilled"
 EV_NODE_TOMBSTONED = "node_tombstoned"
 EV_CONFIRM_EVAL = "confirm_eval"
 EV_NODE_CONFIRMED = "node_confirmed"
+# THE EVAL NOISE FLOOR (doc 52 row 11), under `Settings.eval_noise_seeds` (0 = off, the default).
+# `eval_noise_seed` is ONE repeat of one candidate's evaluation under the SEARCH's own protocol —
+# the node's own `idea.eval_profile`, seeds 0..N-1 — and `eval_noise_floor` is the pass's summary:
+# the metrics, their mean, the sample std and `sem`, the exact quantity `trust/gate.py::one_se_better`
+# compares a margin against. Both are FOLDED, and each carries what the other cannot: the per-seed
+# rows are the resume memo (a crashed pass re-runs only the seeds it has not paid for) and the
+# summary row is the pass's completion gate, so a finished pass is never bought twice. Neither is a
+# node TERMINAL — invariant #2 is about `node_evaluated`/`node_failed`, and a repeated evaluation
+# that minted a second one would make the same node win twice. Nothing that decides reads either.
+EV_EVAL_NOISE_SEED = "eval_noise_seed"
+EV_EVAL_NOISE_FLOOR = "eval_noise_floor"
 EV_HOLDOUT_EVALUATED = "holdout_evaluated"
 EV_AGENT_VALIDATED = "agent_validated"
 EV_DATA_PROFILED = "data_profiled"
@@ -1566,6 +1577,17 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "That evaluator invocation returned, with the outcome and the seconds it charged.",
         required=("attempt", "eval_seconds", "generation", "invocation_id", "node_id", "outcome"),
         optional=(),
+    ),
+    "eval_noise_floor": PayloadContract(
+        "The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor.",
+        required=("generation", "mean", "metrics", "n", "node_id", "profile", "search_metric",
+                  "seeds", "sem", "spread", "std"),
+        optional=("reason",),
+    ),
+    "eval_noise_seed": PayloadContract(
+        "One repeat of that candidate's evaluation, with its seed, metric and eval seconds.",
+        required=("eval_seconds", "generation", "metric", "node_id", "seed"),
+        optional=("superseded",),
     ),
     "finalization_finished": PayloadContract(
         "The wrap-up for one finish (keyed by that finish's seq) completed.",
