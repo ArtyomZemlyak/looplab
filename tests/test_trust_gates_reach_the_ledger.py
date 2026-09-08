@@ -40,7 +40,7 @@ import pytest
 
 from _source_scan import function_tree
 from factories import make_engine
-from looplab.agents.roles import ToyObjectiveDeveloper
+from looplab.agents.toy_roles import ToyObjectiveDeveloper
 from looplab.core.models import Idea, developer_artifact_footprint
 from looplab.engine.evaluate import EvaluateMixin
 from looplab.events.eventstore import EventStore

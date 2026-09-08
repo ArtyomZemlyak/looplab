@@ -39,7 +39,7 @@ import looplab.cli.run_cmds as _run_cmds
 import looplab.engine.orchestrator as _orch
 import looplab.engine.resources as _resources
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.llm_broker import (default_llm_lane_limits, llm_broker_scope, llm_lane_scope,
                                      llm_request_permit)
 from looplab.core.models import RunState
@@ -267,7 +267,8 @@ def test_the_unified_agent_facade_does_not_hide_an_llm_backed_researcher(tmp_pat
     In unified mode `researcher IS developer` — one `UnifiedAgent` — and its
     `client`/`is_code_generating` forwarders come from `WrapsDeveloper`, so they describe the
     DEVELOPER stage only. On every adapter with a TEMPLATED Developer but an `LLMResearcher`
-    (classification, regression, timeseries) both of `_build_calls_an_llm`'s probes therefore read
+    (classification, regression — and timeseries, until its LLM path started writing the forecaster
+    on 2026-09-08) both of `_build_calls_an_llm`'s probes therefore read
     the same client-less template, the whole product default answered "no LLM", and AUTO pinned the
     build width to 1 while the run called the provider once per node. Verified against a real run of
     `examples/classification_task.json`, whose `llm_usage` rows show the Researcher on the wire
