@@ -66,8 +66,11 @@ test('only a 4xx is authoritative about a public link; everything else stays unc
       assert.equal(shareActionFailure(action, { status }).uncertain, false, `${action} ${status}`)
     }
   }
+  // The advice a lost response earns: since the browser holds the create identity (doc 25 SC-10),
+  // the same click recovers the link instead of publishing a second one, so "revoke before
+  // retrying" would now be exactly the wrong instruction.
   assert.equal(shareActionFailure('snapshot', { status: 500 }).notice,
-    'Share uncertain · revoke before retrying')
+    'Share uncertain · try again to recover it')
   assert.equal(shareActionFailure('revoke', { status: 500 }).notice, 'Revoke uncertain · retry to confirm')
   assert.equal(shareActionFailure('revoke', { status: 403 }).notice, 'Revoke failed')
 })
@@ -89,6 +92,19 @@ test('an authoritative snapshot refusal names the cause the operator can act on'
     'Share failed')
   // The exception's own message never reaches the operator.
   assert.equal(shareActionFailure('snapshot', { status: 400, message: 'ECONNRESET at 0x1' }).notice,
+    'Share failed')
+  // The create-recovery refusals each name a different remedy, and none of them says "revoke".
+  assert.equal(shareActionFailure('snapshot', {
+    status: 410, code: 'assistant_share_replay_terminal',
+  }).notice, 'That public link was revoked or expired · create a new one')
+  assert.equal(shareActionFailure('snapshot', {
+    status: 409, code: 'assistant_share_recovery_conflict',
+  }).notice, 'Saved public-link request no longer matches · try again')
+  assert.equal(shareActionFailure('snapshot', {
+    status: 400, code: 'assistant_share_recovery_invalid',
+  }).notice, 'Saved public-link request is unusable · try again')
+  // Inherited Object.prototype keys are not codes: `toString` must not read as a known refusal.
+  assert.equal(shareActionFailure('snapshot', { status: 400, code: 'toString' }).notice,
     'Share failed')
 })
 

@@ -147,3 +147,140 @@ def test_the_research_cap_keeps_the_OLDEST_rows_whatever_order_the_file_is_in():
     assert projection["total_research"] == total
     assert projection["visible_research"] == TRACE_CARD_RESEARCH_CAP
     assert projection["truncated"] is True
+
+
+# --------------------------------------------------------- the index's narrowed selection (D-03)
+# `card_trace_view` used to hand this projection the WHOLE run's light span list and let it rescan
+# that list once per owned node (docs/34 D-03). The selection moved into `SpanIndex` on 2026-09-08;
+# what these tests owe that decision is both halves of it — the answer is IDENTICAL, the work is not,
+# and each of the two research rules is driven separately because the second is the one a
+# trace-scoped narrowing would have looked correct without.
+def _indexed(tmp_path, spans):
+    """Write `spans` as a run's `spans.jsonl` and return its `SpanIndex`."""
+    import orjson
+
+    from looplab.events.span_index import get_index, invalidate
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    source = rd / "spans.jsonl"
+    with open(source, "wb") as f:
+        for span in spans:
+            f.write(orjson.dumps(span) + b"\n")
+    invalidate(source)
+    return get_index(source)
+
+
+def _noise(count):
+    """Other cards' research and other nodes' builds — the run this card is one hypothesis of."""
+    out = []
+    for i in range(count):
+        out.append(_span("propose", f"t-noise{i}", f"np{i}", start=100.0 + i,
+                         card_id=f"card-noise-{i}"))
+        out.append(_span("create_node", f"t-noise{i}", f"nn{i}", start=100.5 + i, node_id=500 + i))
+        out.append(_span("generation", f"t-noise{i}", f"ng{i}", parent=f"nn{i}", start=100.6 + i,
+                         kind="generation", node_id=500 + i,
+                         usage={"prompt": 3, "completion": 1, "total": 4}))
+    return out
+
+
+def _card_corpus():
+    """`_corpus()` plus the run-scoped BUILD trace node 0 claims — the Card lane's real shape.
+
+    The build ran on a speculative producer before any node id existed, so not one of its spans
+    carries `node_id`; the node names it after the fact on `materialize_node`. Included because it
+    is exactly the part a naive trace-scoped narrowing would drop.
+    """
+    return _corpus() + [
+        _span("card_build", "t-build", "b0", start=15.0),
+        _span("generation", "t-build", "b0g", parent="b0", start=15.5, kind="generation",
+              usage={"prompt": 7, "completion": 3, "total": 10}),
+        _span("materialize_node", "t-node0", "m0", parent="n0", start=21.0, node_id=0,
+              build_trace="t-build", generation=0),
+    ]
+
+
+def test_narrowed_selection_matches_the_whole_run_projection(tmp_path):
+    """The card's story is the same story, whether the projection is handed the run or the card.
+
+    This is the invisible-optimization property, driven rather than asserted: both sides run the
+    real projection, and the sections must be byte-identical. The narrowing lives one layer down
+    (`SpanIndex.card_trace_spans`) precisely so this equivalence is checkable at all.
+    """
+    idx = _indexed(tmp_path, _card_corpus() + _noise(200))
+    node_trace_ids = {"0": "t-node0"}
+
+    whole = project_card_trace(idx.light_spans(), card_id="card-1", node_ids=[0],
+                               node_trace_ids=node_trace_ids, _normalized=True)
+    spans, claimed = idx.card_trace_spans(
+        "card-1", node_ids=[0], node_trace_ids=node_trace_ids)
+    narrow = project_card_trace(spans, card_id="card-1", node_ids=[0],
+                                node_trace_ids=node_trace_ids, claimed=claimed, _normalized=True)
+
+    assert narrow["research"] == whole["research"]
+    assert narrow["nodes"] == whole["nodes"]
+    assert narrow["card_id"] == whole["card_id"]
+    # The claimed BUILD trace is in the node's section on both sides — the half a trace-scoped
+    # narrowing loses, and the reason the claim map travels with the selection.
+    assert whole["nodes"][0]["spans"] == narrow["nodes"][0]["spans"] >= 4
+    assert narrow["nodes"][0]["generations"] == 2
+    # Only the receipt's span axis differs, and deliberately: it now counts the CARD's spans.
+    for key in ("total_research", "visible_research", "total_nodes", "visible_nodes", "truncated"):
+        assert narrow["projection"][key] == whole["projection"][key]
+    assert narrow["projection"]["total_spans"] == len(spans)
+    assert whole["projection"]["total_spans"] == idx.span_count()
+
+
+def test_the_selection_copies_only_the_card_s_rows(tmp_path):
+    """THE ACCOUNTANT for docs/34 D-03: rows COPIED, counted — not a stopwatch.
+
+    The old call site copied every light row in the run (a 1 GB run's index is ~220 MB of dicts).
+    What the selection may copy is stated exactly: the two research rules' candidate traces plus the
+    rows of the nodes this card owns, and nothing else in the run.
+    """
+    idx = _indexed(tmp_path, _card_corpus() + _noise(200))
+    spans, _claimed = idx.card_trace_spans(
+        "card-1", node_ids=[0], node_trace_ids={"0": "t-node0"})
+
+    assert {s["span_id"] for s in spans} == {
+        "p1", "p1g",                 # rule one: the trace of the stamped `propose` root…
+        "n0", "n0g", "m0",           # rule two: node 0's own trace (its `node_created` trace)…
+        "b0", "b0g",                 # …the run-scoped build trace node 0 CLAIMS…
+        "n0b",                       # …and node 0's row in the trace its RESET rebuilt it under.
+    }
+    # `rp` — the unstamped re-proposal root sharing that rebuild trace — is deliberately NOT here:
+    # `_rows_for_node` keeps only rows whose effective node is 0, and a research root names none.
+    # It enters the selection through the caller's OWNED traces instead, which is what
+    # `test_an_unstamped_re_proposal_is_still_reached_through_the_owned_trace` drives.
+    assert "rp" not in {s["span_id"] for s in spans}
+    # The run is 600+ rows of other cards and other nodes; none of them is copied.
+    assert idx.span_count() > 600
+    assert len(spans) < idx.span_count() / 50
+    assert not any(s["span_id"].startswith("n") and s["trace_id"].startswith("t-noise")
+                   for s in spans)
+
+
+def test_an_unstamped_re_proposal_is_still_reached_through_the_owned_trace(tmp_path):
+    """Rule two survives the narrowing. The reset path's re-proposal carries NO card stamp, so the
+    index dimension cannot see it; the caller's owned traces are what put it in the selection."""
+    idx = _indexed(tmp_path, _card_corpus() + _noise(50))
+    spans, claimed = idx.card_trace_spans(
+        "card-1", node_ids=[0], node_trace_ids={"0": "t-node0-rebuild"})
+    out = project_card_trace(spans, card_id="card-1", node_ids=[0],
+                             node_trace_ids={"0": "t-node0-rebuild"}, claimed=claimed,
+                             _normalized=True)
+    links = {r["trace_id"]: r["link"] for r in out["research"]}
+    assert links["t-node0-rebuild"] == "shared_trace"
+    assert links["t-prop"] == "card_id"
+
+
+def test_a_card_stamped_proposal_in_a_foreign_trace_is_found_by_lookup(tmp_path):
+    """The rule that made a trace-scoped narrowing impossible, driven directly: a stamped `propose`
+    root can live in a trace this card owns nothing else in, and the index must still find it."""
+    idx = _indexed(tmp_path, _card_corpus() + _noise(50))
+    assert idx.card_propose_tids["card-1"] == {"t-prop"}
+    spans, claimed = idx.card_trace_spans("card-1", node_ids=[], node_trace_ids={})
+    out = project_card_trace(spans, card_id="card-1", node_ids=[], claimed=claimed,
+                             _normalized=True)
+    assert [r["trace_id"] for r in out["research"]] == ["t-prop"]
+    assert out["research"][0]["link"] == "card_id"

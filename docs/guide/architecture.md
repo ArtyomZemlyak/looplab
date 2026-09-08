@@ -49,9 +49,10 @@ other work items that test the same hypothesis), **cross-run memory**
     are deduped (exact hash + an agentic paraphrase merge), prioritized (foresight), and tracked to a
     verdict. The base
     cross-run memory paths and reflection priors are **on by default** (`~/.looplab/memory` +
-    `~/.looplab/knowledge`). Product `Settings` also enable the Part-IV concept, advisory and
-    structured-claim reads by default; only callers that construct bare `EngineOptions` directly
-    retain the lower-level opt-in defaults.
+    `~/.looplab/knowledge`). Product `Settings` also enable the Part-IV concept and advisory reads by
+    default; only callers that construct bare `EngineOptions` directly retain the lower-level opt-in
+    defaults. Structured claim identity is the exception that converged: it is the default on BOTH
+    sides (doc 25 EM-06), because the durable governance write path never had another mode.
     A run with an eligible best result can write a case and reflection artifacts, while only a
     supported improving hypothesis can seed an auto-skill. Later matching runs may retrieve the
     applicable records. A model-authored meta-note is an explanatory hypothesis over recorded
@@ -360,7 +361,7 @@ flowchart LR
 | The two pacing clocks: the node-count window (`cadence_due`, behind lessons/deep-research/report/Strategist/concept cadences) and the occupancy pace (`occupancy_due` — produce while an eval is running and the board behind it does not cover the width; records no `at_node`, has no setting of its own) | `engine/cadence.py`, `engine/orchestrator.py::_occupancy_paced_creates` |
 | Standing watches + continuous work: one durable assistant record (`<runs>/assistant/.watches/`) and lazy scheduler for typed run/experiment/stage waits, every-N monitoring, and bounded resumable goal/TODO/checkpoint cycles — server-evaluated conditions, pinned target identity and permission mode | `serve/assistant_watch.py`, `serve/routers/assistant.py`, `ui/src/assistantWatchModel.js` |
 | Append-only log · pure fold · SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
-| Researcher / Developer / unified agent | `agents/roles.py`, `agents/unified_agent.py` |
+| Researcher / Developer / unified agent (the role CONTRACTS + the LLM roles; the prompt fragments, the state brief, the wrapper stack and the toy backends are its four siblings) | `agents/roles.py`, `agents/role_prompts.py`, `agents/state_brief.py`, `agents/role_wrappers.py`, `agents/toy_roles.py`, `agents/unified_agent.py` |
 | Canonical eval/LLM concurrency + named-lane broker | `engine/orchestrator.py`, `core/llm_broker.py`, `engine/strategy.py` |
 | Card model · identity digests/receipts · replay/public projection · selection | `core/cards.py`, `events/card_ledger.py`, `serve/public_cards.py`, `search/card_selection.py` |
 | Resource admission · GPU lifecycle reservations | `engine/resources.py`, `core/hardware.py` |

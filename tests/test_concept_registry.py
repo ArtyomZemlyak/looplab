@@ -566,7 +566,7 @@ def test_append_governance_validation_aborts_append_atomically(tmp_path):
     # Cycle rejection for record_concept_alias runs as validation UNDER the append lock, so a concurrent
     # writer cannot slip a cycle-closing edge past a pre-append snapshot. A validation failure must abort
     # the append without leaving a partial record.
-    from looplab.engine.concept_registry import _append_governance
+    from looplab.engine.governance_protocol import append_governance
     p = tmp_path / "gov.jsonl"
     p.write_text('{"from": "x", "to": "y"}\n', encoding="utf-8")
     before = p.read_text(encoding="utf-8")
@@ -575,12 +575,12 @@ def test_append_governance_validation_aborts_append_atomically(tmp_path):
         pass
 
     with pytest.raises(_Boom):
-        _append_governance(
+        append_governance(
             p, {"from": "a", "to": "b"},
             validate=lambda: (_ for _ in ()).throw(_Boom()),
         )
     assert p.read_text(encoding="utf-8") == before
-    _append_governance(p, {"from": "c", "to": "d"}, validate=lambda: None)
+    append_governance(p, {"from": "c", "to": "d"}, validate=lambda: None)
     assert '"c"' in p.read_text(encoding="utf-8")
 
 
@@ -600,18 +600,53 @@ def test_governance_append_refuses_a_torn_jsonl_tail(tmp_path):
 # --- EM-05: the append primitive no longer knows the concept ledgers by name --------------------
 
 def test_the_append_primitive_has_no_ledger_filename_branch():
-    """`_append_governance` is imported as a generic primitive by task_facets, lessons and
+    """`append_governance` is imported as a generic primitive by task_facets, lessons and
     steward_invocation, but branched on `concept_aliases.jsonl`/`concept_splits.jsonl` in two
     places — so a "generic" append secretly knew the concept ledgers (doc 25 EM-05)."""
     import ast
     import inspect
 
-    from looplab.engine import concept_registry
+    from looplab.engine import governance_protocol
 
-    body = ast.unparse(ast.parse(inspect.getsource(concept_registry._append_governance)))
+    body = ast.unparse(ast.parse(inspect.getsource(governance_protocol.append_governance)))
     assert "concept_aliases.jsonl" not in body and "concept_splits.jsonl" not in body, (
         "the shared append primitive names a specific ledger again; select the reader with "
         "`read_rows` at the call site instead")
+
+
+def test_the_append_primitive_is_not_homed_in_the_concept_module():
+    """The other half of EM-05, closed 2026-09-08: WHERE the generic primitive lives.
+
+    Four subsystems that have nothing to do with concepts — `task_facets`, `curation_protocol`,
+    `steward_invocation`, and `concept_tidy`'s receipt log — imported the append protocol through
+    `concept_registry`, which is how it acquired concept knowledge in the first place (the filename
+    branches the test above refuses, and a `governance_memory_dir` argument it resolved through
+    `concept_governance_global_revision`). It now lives in `engine/governance_protocol.py` and takes
+    the cross-ledger revision as an injected callable.
+
+    Mutations that fail this: move the definition back, or resolve the concept-global revision
+    inside the primitive again.
+    """
+    from looplab.engine import concept_registry, governance_protocol
+    from tests._source_scan import called_names, names_read
+
+    assert governance_protocol.append_governance.__module__ == (
+        "looplab.engine.governance_protocol")
+    # AST, not a substring: this module's own docstrings NAME the concept revision they stopped
+    # resolving, and a prose mention is exactly what the guard must not read as code.
+    reached = set(called_names(governance_protocol.append_governance)) | names_read(
+        governance_protocol.append_governance)
+    assert "concept_governance_global_revision" not in reached, (
+        "the generic append resolves a concept-specific revision again; the caller injects it")
+    assert "global_revision" in reached, "the injected cross-ledger revision is no longer consulted"
+
+    # ...and the concept module still SERVES every existing importer of the three conflict types,
+    # whose `Concept...` spellings are an agent-facing contract (`tools/concept_tools.py` classifies
+    # them by `type(exc).__name__`).
+    for name in ("ConceptGovernanceConflict", "ConceptGovernanceGlobalConflict",
+                 "ConceptGovernanceIdempotencyConflict"):
+        assert getattr(concept_registry, name) is getattr(governance_protocol, name)
+        assert getattr(governance_protocol, name).__name__ == name
 
 
 def test_every_policy_ledger_append_passes_its_strict_reader():
@@ -633,12 +668,12 @@ def test_every_policy_ledger_append_passes_its_strict_reader():
         if not isinstance(node, ast.Call):
             continue
         name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        if name != "_append_governance":
+        if name != "append_governance":
             continue
         if not any(kw.arg == "read_rows" for kw in node.keywords):
             offenders.append(node.lineno)
     assert not offenders, (
-        f"_append_governance called without `read_rows` at lines {offenders} in concept_registry; "
+        f"append_governance called without `read_rows` at lines {offenders} in concept_registry; "
         "a policy ledger read leniently cannot fail closed on a torn operator row")
 
 
@@ -646,3 +681,108 @@ def concept_registry_path() -> str:
     from looplab.engine import concept_registry
 
     return concept_registry.__file__
+
+
+# --- EM-05, closed 2026-09-08: the claim ledger composes the SAME protocol steps ----------------
+
+def test_the_shared_action_replay_reads_ids_through_the_ledgers_own_rule():
+    """`action_replay` is the idempotency lookup both governance writers run BEFORE their CAS.
+
+    Three rules live in it and each fails in its own direction: the FIRST committed row for an id
+    wins (an append-only ledger's first commit of an action id IS the action); an id that matches
+    with a DIFFERENT semantic payload is a conflict, not a replay (otherwise a reused id silently
+    returns someone else's receipt); and the id is read off the row through the ledger's OWN rule,
+    because the claim ledger sanitizes a persisted id before comparing it and a raw comparison would
+    miss the replay and append a second operator decision.
+    """
+    from looplab.engine.governance_protocol import action_replay
+
+    rec = {"action": "set", "from": "a", "to": "b", "action_id": "req-1"}
+    rows = [
+        {"action": "set", "from": "a", "to": "b", "action_id": "req-1", "revision": 1, "by": "first"},
+        {"action": "set", "from": "a", "to": "b", "action_id": "req-1", "revision": 2, "by": "second"},
+    ]
+    existing, exact = action_replay(rows, rec, "req-1")
+    assert exact and existing["by"] == "first", "the FIRST commit of an action id is the action"
+
+    conflicting = dict(rec, to="c")
+    existing, exact = action_replay(rows, conflicting, "req-1")
+    assert existing is not None and not exact, (
+        "a reused id carrying a different payload must be reported as a conflict, never replayed")
+
+    assert action_replay(rows, rec, "req-2") == (None, False)
+
+    # The id-reading rule is the caller's: a row whose stored id needs normalizing is invisible to
+    # the default reader and found by the ledger's own.
+    padded = [{"action": "set", "from": "a", "to": "b", "action_id": " req-1 "}]
+    assert action_replay(padded, rec, "req-1") == (None, False)
+    found, exact = action_replay(padded, rec, "req-1",
+                                 action_id_of=lambda row: str(row.get("action_id") or "").strip())
+    assert found is not None and exact
+
+    # The receipt metadata is NOT identity: the same mutation retried by another actor at another
+    # time is the same action, which is what makes a lost-response retry safe.
+    assert action_replay(rows, dict(rec, by="third", at="later"), "req-1")[1] is True
+
+
+def test_both_governance_writers_refuse_the_same_bad_expected_revision(tmp_path):
+    """One CAS input rule, driven from both writers (doc 25 EM-05).
+
+    `record_claim_decision` hand-rolled its own `isinstance(bool) / isinstance(int) / < 0` copy of
+    `validate_expected_revision`. `True` is an `int` subclass, so a JSON `true` reaching a revision
+    comparison compares equal to 1 — a stale write accepted against revision one. Mutation: relax
+    either half in `governance_protocol.validate_expected_revision` and BOTH halves fail.
+    """
+    from looplab.engine.claims import record_claim_decision
+
+    for bad in (True, -1, 1.0, "1"):
+        with pytest.raises(ValueError, match="expected_revision must be a non-negative integer"):
+            record_claim_decision(str(tmp_path), statement="s", decision="ratified",
+                                  expected_revision=bad)
+        with pytest.raises(ValueError, match="expected_revision must be a non-negative integer"):
+            record_concept_alias(str(tmp_path), from_concept="hn", to_concept="hard-neg",
+                                 expected_revision=bad)
+    assert not (tmp_path / "claim_decisions.jsonl").exists(), (
+        "a refused CAS input must not have created the ledger")
+
+
+def test_both_governance_writers_report_a_publication_failure_as_ledger_unavailable(
+        tmp_path, monkeypatch):
+    """The durable append is one implementation, so its refusal is one refusal.
+
+    A write whose fsync fails has bytes in the page cache and no publication guarantee, and the ONE
+    thing neither writer may do is report success. Both must surface the closed, content-free
+    `GovernanceLedgerUnavailable` rather than a raw `OSError` carrying a filesystem path across an
+    API/CLI/tool boundary. Mutation: drop the `except (OSError, TimeoutError, RuntimeError)`
+    translation from `durable_governance_append` and both halves fail.
+    """
+    import looplab.core.atomicio as atomicio
+    from looplab.engine.claims import record_claim_decision
+    from looplab.engine.governance_health import GovernanceLedgerUnavailable
+
+    def _refuse(_fd):
+        raise OSError("device is gone")
+
+    monkeypatch.setattr(atomicio, "strict_fsync", _refuse)
+    with pytest.raises(GovernanceLedgerUnavailable):
+        record_claim_decision(str(tmp_path), statement="s", decision="ratified")
+    with pytest.raises(GovernanceLedgerUnavailable):
+        record_concept_alias(str(tmp_path), from_concept="hn", to_concept="hard-neg")
+
+
+def test_the_claim_ledger_no_longer_hand_rolls_the_append_protocol():
+    """The residue, as AST rather than substrings (CLAUDE.md tier 3, behind the three above).
+
+    `record_claim_decision` reached for `interprocess_lock`, `strict_fsync`, `strict_fsync_parent`
+    and its own action-id scan; every one of those is a second answer to a question the shared
+    protocol already answers, and the two answers only ever agreed by hand.
+    """
+    from looplab.engine.claims import record_claim_decision
+    from tests._source_scan import called_names
+
+    called = set(called_names(record_claim_decision))
+    assert {"governance_lock", "action_replay", "validate_expected_revision",
+            "durable_governance_append"} <= called, (
+        f"record_claim_decision stopped composing the shared protocol steps (calls: {sorted(called)})")
+    assert not (called & {"interprocess_lock", "strict_fsync", "strict_fsync_parent"}), (
+        "record_claim_decision re-inlined a step the shared governance protocol owns")
