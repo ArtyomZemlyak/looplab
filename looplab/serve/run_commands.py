@@ -59,7 +59,7 @@ from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
     _spawn_engine)
-from looplab.serve.http import generation_conflict
+from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES
 
@@ -414,7 +414,7 @@ class RunCommandService:
             if directory.is_symlink() or directory.resolve().parent != root:
                 raise HTTPException(409, "run .command-locks changed during validation")
         except OSError as exc:
-            raise HTTPException(409, f"run command-lock path cannot be validated: {exc}") from exc
+            raise refusal("run_lock_path_unreadable") from exc
         return directory
 
     def _sequence_path(self, rd: Path) -> Path:
@@ -484,7 +484,7 @@ class RunCommandService:
         except FileNotFoundError:
             return False
         except OSError as exc:
-            raise HTTPException(503, f"could not retire run start record: {exc}") from exc
+            raise refusal("run_claim_unretirable") from exc
         return True
 
     def run_generation(self, rd: Path) -> str:
@@ -861,7 +861,7 @@ class RunCommandService:
                         claim.unlink()
                         count += 1
                     except OSError as exc:
-                        raise HTTPException(503, f"could not resolve active claim: {exc}") from exc
+                        raise refusal("run_claim_unretirable") from exc
                 for record_path in damaged:
                     # QUARANTINE, never unlink. The record is the only account of a command whose
                     # outcome nobody knows; what has to stop is its hold on the control plane, not its
@@ -875,8 +875,7 @@ class RunCommandService:
                             os.replace(record_path, target)
                         count += 1
                     except OSError as exc:
-                        raise HTTPException(
-                            503, f"could not quarantine an unreadable command record: {exc}") from exc
+                        raise refusal("run_record_unquarantinable") from exc
                 return {"ok": True, "resolved": True, "count": count,
                         "reason": "operator_verified_unknown_claims"}
 
@@ -1125,7 +1124,7 @@ class RunCommandService:
                 try:
                     path.unlink()
                 except OSError as exc:
-                    raise HTTPException(503, f"could not retire observed-live spawn claim: {exc}") from exc
+                    raise refusal("run_claim_unretirable") from exc
                 return {"ok": True, "resolved": True, "reason": "engine_lock_observed"}
             if liveness is None:
                 raise HTTPException(409, self._engine_unknown_error("resolve the engine spawn claim"))
@@ -1136,7 +1135,7 @@ class RunCommandService:
                     try:
                         path.unlink()
                     except OSError as exc:
-                        raise HTTPException(503, f"could not retire dead-child spawn claim: {exc}") from exc
+                        raise refusal("run_claim_unretirable") from exc
                     return {"ok": True, "resolved": True, "reason": "child_definitively_gone"}
                 if self._claim_child_exactly_alive(row):
                     raise HTTPException(409, {
@@ -1159,7 +1158,7 @@ class RunCommandService:
                 try:
                     path.unlink()
                 except OSError as exc:
-                    raise HTTPException(503, f"could not resolve spawn claim: {exc}") from exc
+                    raise refusal("run_claim_unretirable") from exc
                 return {"ok": True, "resolved": True, "reason": "operator_verified_unknown_claim"}
 
             return self.guarded_claim_resolution(
@@ -1218,8 +1217,7 @@ class RunCommandService:
                         except OSError as exc:
                             contention = exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
                             if not contention:
-                                raise HTTPException(
-                                    503, f"run command locking is unsupported: {exc}") from exc
+                                raise refusal("run_command_locking_unsupported") from exc
                             if time.monotonic() >= deadline:
                                 raise HTTPException(
                                     503, "timed out waiting for the run command sequencer") from exc
@@ -1235,8 +1233,7 @@ class RunCommandService:
                             contention = isinstance(exc, BlockingIOError) or exc.errno in {
                                 errno.EACCES, errno.EAGAIN}
                             if not contention:
-                                raise HTTPException(
-                                    503, f"run command locking is unsupported: {exc}") from exc
+                                raise refusal("run_command_locking_unsupported") from exc
                             if time.monotonic() >= deadline:
                                 raise HTTPException(
                                     503, "timed out waiting for the run command sequencer") from exc
@@ -1290,13 +1287,13 @@ class RunCommandService:
             if events.is_symlink() or events.resolve().parent != canonical:
                 raise HTTPException(409, "run events.jsonl must not be a symlink")
         except OSError as exc:
-            raise HTTPException(409, f"run event path cannot be validated: {exc}") from exc
+            raise refusal("run_path_unreadable") from exc
         directory = canonical / ".commands"
         try:
             if directory.is_symlink() or (directory.exists() and directory.resolve().parent != canonical):
                 raise HTTPException(409, "run .commands must not be a symlink")
         except OSError as exc:
-            raise HTTPException(409, f"run command path cannot be validated: {exc}") from exc
+            raise refusal("run_path_unreadable") from exc
         return canonical
 
     def _directory(self, rd: Path) -> Path:

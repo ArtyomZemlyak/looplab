@@ -103,6 +103,93 @@ def test_no_route_answers_a_literal_500_for_input_it_could_not_read():
     assert found == set(FAULT_500_SITES), (found, set(FAULT_500_SITES))
 
 
+def test_no_refusal_of_ANY_status_reflects_the_caught_exception(tmp_path):
+    """THE SAME RULE, WITHOUT THE STATUS FILTER — and that filter is why this class survived.
+
+    `refusal()`'s docstring states it plainly: "Never interpolate the exception: an `OSError`'s
+    text carries the host path, and the body goes to the browser and into every export of it."
+    The census above enforced it only for `HTTPException(500, …)`, so EIGHT sibling sites in
+    `run_commands.py` raising 409/503 with an f-string of the caught `OSError` were invisible to
+    the check that ended this class. Driven before the fix: a stray regular file where the server
+    wants its lock directory answered
+
+        {"detail": "run command-lock path cannot be validated:
+                    [Errno 17] File exists: '/abs/host/path/.command-locks'"}
+
+    …to the browser, while `test_no_route_answers_a_literal_500_for_input_it_could_not_read`
+    stayed green. The status was never the property; the interpolation is.
+
+    SCOPED TO `OSError`, which is the property and not a proxy for it. A `ValidationError` or an
+    `EventStoreConcurrencyError` reflected into a 422/409 is the operator's own input or the run's
+    own sequence number said back to them — that is what those refusals are FOR, and censoring
+    them would make the server less useful without making it safer. What an `OSError` carries that
+    those do not is the HOST PATH, put there by the kernel and never by the caller.
+
+    AST, per handler: an `HTTPException` raised inside an `except OSError as <name>:` (or a tuple
+    containing one, or a subclass the module names) may not interpolate `<name>` into its body. A
+    `refusal("<slug>")` carries no exception by construction, which is why the fix is to route
+    through the table rather than to reword eight strings.
+    """
+    oserrors = {"OSError", "IOError", "EnvironmentError", "FileNotFoundError", "PermissionError",
+                "FileExistsError", "NotADirectoryError", "IsADirectoryError", "BlockingIOError",
+                "InterruptedError", "TimeoutError", "ConnectionError", "BrokenPipeError"}
+
+    def _catches_oserror(node) -> bool:
+        names = ([node.type] if not isinstance(node.type, ast.Tuple) else list(node.type.elts))
+        return any(getattr(n, "id", getattr(n, "attr", "")) in oserrors for n in names if n)
+
+    offenders = []
+    for path in _serve_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for handler in ast.walk(tree):
+            if not (isinstance(handler, ast.ExceptHandler) and handler.name and handler.type):
+                continue
+            if not _catches_oserror(handler):
+                continue
+            caught = handler.name
+            for node in ast.walk(handler):
+                if not (isinstance(node, ast.Call)
+                        and getattr(node.func, "id", "") == "HTTPException"):
+                    continue
+                for arg in list(node.args) + [k.value for k in node.keywords]:
+                    for sub in ast.walk(arg):
+                        if isinstance(sub, ast.Name) and sub.id == caught:
+                            offenders.append(
+                                f"{path.relative_to(SERVE)}:{node.lineno} interpolates the caught "
+                                f"`{caught}` into a refusal body")
+    assert not offenders, (
+        "a refusal reflects a caught OSError's text — it carries the HOST PATH, and "
+        "the body reaches the browser and every export of it. Route it through `REFUSALS` / "
+        "`refusal(<slug>)` instead:\n  " + "\n  ".join(sorted(set(offenders))))
+
+
+def test_a_bad_command_lock_path_answers_a_code_and_no_host_path(tmp_path):
+    """THE DEFECT, driven: a stray regular file where the server wants its lock directory.
+
+    A bad restore or an operator's mistake leaves `<run>/.command-locks` as a FILE. The handler
+    caught the `OSError` and interpolated it, so the browser received
+
+        {"detail": "run command-lock path cannot be validated:
+                    [Errno 17] File exists: '/abs/host/path/.command-locks'"}
+
+    — the absolute host path of the operator's run directory, in a body that is also written into
+    every export of it. MUTATION: restore the f-string -> the run directory's path is in `detail`.
+    """
+    _run(tmp_path)
+    # UNDER THE SERVER ROOT, which is where `_lock_directory` puts it — not under the run dir.
+    (tmp_path / ".command-locks").write_text("not a directory\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    response = client.post(f"/api/runs/{RUN}/control",
+                           json={"type": "run_abort", "data": {}})
+
+    assert response.status_code in (409, 503), response.text
+    body = response.json()["detail"]
+    assert isinstance(body, dict), body
+    assert body["code"] in REFUSALS and body["message"] and body["remediation"], body
+    assert str(tmp_path) not in response.text, response.text
+    assert "Errno" not in response.text, response.text
+
+
 def test_the_emitted_slugs_are_exactly_the_table():
     """Two-way: every `refusal("<slug>")` names a table row, and every row is emitted somewhere —
     a row nobody emits is a status nobody can be shown, and a slug outside the table is a status
@@ -115,8 +202,16 @@ def test_the_emitted_slugs_are_exactly_the_table():
                     and node.args and isinstance(node.args[0], ast.Constant)):
                 emitted.add(node.args[0].value)
     assert emitted == set(REFUSALS), (emitted, set(REFUSALS))
+    # The STATUS is a closed set, not a constant. The table held only unreadable-snapshot rows when
+    # this rule was written, and 503 was the only answer any of them could give. The 2026-09-08
+    # rows are the command-lifecycle sites, where a run directory whose `.command-locks` or
+    # `.commands` entry is a file or a symlink is the operator's own state conflicting with the
+    # request — 409, which is the status those sites already answered before they were routed
+    # through the table. What the rule is actually about is that a coded refusal never becomes a
+    # 500 and never invents a status of its own, so the check is the SET.
     for slug, (status, message, remediation) in REFUSALS.items():
-        assert status == 503 and message and remediation, slug
+        assert status in (409, 503), (slug, status)
+        assert message and remediation, slug
 
 
 @pytest.mark.parametrize("snapshot, slug", [

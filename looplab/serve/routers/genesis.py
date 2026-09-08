@@ -13,6 +13,8 @@ from typing import Optional
 import anyio
 from fastapi import APIRouter, HTTPException, Request
 
+from looplab.serve.principal import portfolio_access, request_principal
+
 from looplab.core.config import Settings
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.http import json_object
@@ -315,7 +317,17 @@ def build_router(srv) -> APIRouter:
                 "and (if it's argument- or config-driven) the params_style/config choice in what you read. "
                 "If there is NO entry/train script yet, say so and plan for the agent to write it (command "
                 "-> a file inside edit_surface). Don't just SAY you'll look — look, then call `emit` once.")
-            if getattr(gset, "cross_run_read_tools", False) and getattr(gset, "memory_dir", None):
+            # `portfolio_access`, NOT the two Settings clauses. `serve/principal.py` states that
+            # this is "the ONE decision that mounts the portfolio providers", and that whether the
+            # cross-run stores may be read "is a property of the PARTY and never of the process" —
+            # `assistant.py` was converted on 2026-09-06 and this route was not, so it still
+            # decided on a process flag. Nothing reaches it today from a non-owner plane
+            # (`POST /api/genesis` is outside `_SAFE_UNAUTH_API`, and `review_request_allowed`
+            # confines a review bearer to GET/HEAD/OPTIONS on `/api/review*`), so this closes a
+            # STRUCTURAL gap rather than a live one: the documented invariant was false, and it
+            # was one router-mount edit away from being real.
+            _portfolio_ok, _portfolio_why = portfolio_access(request_principal(request), gset)
+            if _portfolio_ok:
                 from looplab.tools.cross_run_tools import CrossRunTools
                 cross_run = CrossRunTools(gset.memory_dir, role="researcher", audience="run")
                 task = draft.get("task") if isinstance(draft, dict) else {}

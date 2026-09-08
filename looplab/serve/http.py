@@ -135,6 +135,36 @@ REFUSALS: dict[str, tuple[int, str, str]] = {
     "config_snapshot_not_object": (
         503, "the run configuration snapshot is not a JSON object",
         "Restore config.snapshot.json from a backup or from another run of the same task."),
+    # THE COMMAND-LIFECYCLE SITES, added 2026-09-08. Eight of them raised 409/503 with an f-string
+    # of the caught `OSError`, i.e. exactly what `refusal()`'s own docstring one screen down
+    # forbids — driven: a stray regular file where the server wants its lock directory reflects
+    # `[Errno 17] File exists: '/abs/host/path/.command-locks'` to the browser. They were invisible
+    # to `test_no_route_answers_a_literal_500_for_input_it_could_not_read`, which walked only
+    # `HTTPException(500, …)`, so the census that ended this class for the 500s never saw the
+    # siblings raising other codes.
+    "run_lock_path_unreadable": (
+        409, "the run's command-lock path could not be validated",
+        "The run directory's `.command-locks` entry is not a plain directory the server can "
+        "resolve — most often a leftover file, a symlink, or a permission change. Remove or fix "
+        "that entry inside the run directory and retry."),
+    "run_path_unreadable": (
+        409, "the run's command path could not be validated",
+        "The run directory's `events.jsonl` or `.commands` entry is not a plain file/directory the "
+        "server can resolve — most often a symlink or a permission change. Fix that entry inside "
+        "the run directory and retry."),
+    "run_record_unquarantinable": (
+        503, "an unreadable command record could not be quarantined",
+        "A damaged file under the run's `.commands` directory could not be moved aside. Check the "
+        "run directory's permissions and free space, then retry."),
+    "run_command_locking_unsupported": (
+        503, "the filesystem under the run directory does not support command locking",
+        "The run directory is on a filesystem whose advisory locks the server cannot take (some "
+        "network and FUSE mounts). Move the run directory to local storage, or run the server on "
+        "the host that owns the mount."),
+    "run_claim_unretirable": (
+        503, "a run's start or spawn claim could not be retired",
+        "The claim file under the run directory could not be removed. Check the run directory's "
+        "permissions and free space, then retry; the claim is re-checked on every attempt."),
 }
 
 
