@@ -171,6 +171,16 @@ def notify_producer(notify, key) -> None:
         pass
 
 
+def raw_stage_source(action: Mapping[str, Any]) -> str:
+    """WHO authored this raw proposal — the engine's own merge operator, or the Researcher.
+
+    One spelling, because the answer rides on the durable result an operator reads and the two
+    sites that used to derive it (the worker and its failure path) had to agree: a proposal that
+    failed would otherwise be attributed differently from the same proposal that succeeded.
+    """
+    return "engine" if action.get("kind") == "merge" else "researcher"
+
+
 @dataclass(frozen=True)
 class SpecRawStageResult:
     """One isolated raw-policy proposal awaiting a short main-task Card commit."""
@@ -187,6 +197,37 @@ class SpecRawStageResult:
     cross_run_receipt: dict[str, Any] = field(default_factory=dict)
     audit_events: tuple[tuple[str, dict, Optional[str], Optional[str]], ...] = ()
     error: str = ""
+
+    @classmethod
+    def failure(cls, exc: BaseException, *, generation: int, action: Mapping[str, Any],
+                proposal_state: RunState, proposal_node_ceiling: int, source: str,
+                audit_events: tuple = ()) -> "SpecRawStageResult":
+        """The CONSUMED, non-staged result of a raw proposal that raised (doc 25 EC-12).
+
+        Both sites that build one — the worker's own guard and the wrapper around it — used to spell
+        out ten or eleven keyword fields against this fourteen-field dataclass, and the fields they
+        share are exactly the ones a copy cannot get wrong loudly: a proposal that raised is still
+        `success=False` at the SAME ceiling and under the SAME `source` as the proposal that would
+        have succeeded, or `_serve_raw_card_stage` consumes a result attributed to nobody.
+
+        `audit_events` is the one field the two sites legitimately disagree about and it is therefore
+        a parameter rather than a default the classmethod invents: the worker may already have
+        buffered folded intents before it raised (they are published by the main task and must not be
+        dropped), while the wrapper's guard fires when the worker never returned at all and has
+        nothing to carry.  `at_node` is not a parameter for the opposite reason — a failed proposal
+        is always AT the ceiling it was prepared against, and the two sites already agreed on that.
+        """
+        return cls(
+            generation=generation,
+            action=dict(action),
+            proposal_state=proposal_state,
+            proposal_node_ceiling=proposal_node_ceiling,
+            at_node=proposal_node_ceiling,
+            source=source,
+            success=False,
+            audit_events=tuple(audit_events),
+            error=producer_error_text(exc),
+        )
 
 
 def needs_outer_rebuild(node) -> bool:
@@ -1916,6 +1957,50 @@ class SpeculationMixin:
         self._serve_card_builds(max_eval_seconds, allow_commit=False)
         return True
 
+    async def _run_isolated_producer(
+        self,
+        worker,
+        *,
+        on_failure,
+        store,
+        release,
+        notify,
+        notify_key,
+        limiter=None,
+    ) -> None:
+        """Run ONE isolated producer to a stored result, then release its slot (doc 25 EC-12).
+
+        The two producers differ in their result type and in what "release the slot" means (a key
+        discarded from a set beside a superseded result; a bool flag beside role telemetry), so those
+        three are callbacks.  What is NOT negotiable is the shape around them, and each clause of it
+        fails silently in a different direction if a copy drops it:
+
+        * `abandon_on_cancel=False` makes pause/abort wait for the entire blocking
+          Developer/provider call even after the main task has durably closed this request as
+          stale. The session's exit gate still counts _spec_build_inflight, so an unavailable
+          provider can make an operator stop take the full transport timeout. Use a genuinely
+          cancellable producer or quarantine/abandon this isolated role pair after cancellation.
+        * a raising worker still STORES a result. The main task advances the durable gate off the
+          stored slot, so a producer that stored nothing is indistinguishable from one still running
+          — the session would wait out its whole exit gate on a fault that already happened.
+        * the release and the notification are in `finally`, in that order. Releasing after the
+          wake-up would let the consumer re-scan the slots while the flag still says "inflight".
+
+        The wrapper returns nothing on purpose: the result is reachable only through `store`, which
+        is the same durable-slot discipline the main task re-scans.
+        """
+        try:
+            try:
+                result = await anyio.to_thread.run_sync(
+                    worker, abandon_on_cancel=False, limiter=limiter)
+            except Exception as exc:  # noqa: BLE001 — the main task must still advance the durable gate
+                result = on_failure(exc)
+            store(result)
+        finally:
+            release()
+            # Notifications are only hints. Never let a full/closing stream block task-group teardown.
+            notify_producer(notify, notify_key)
+
     async def _produce_card_build(
         self,
         request: Mapping[str, Any],
@@ -1925,31 +2010,25 @@ class SpeculationMixin:
         key = self._request_key(request)
         if key is None:
             return
-        try:
-            try:
-                # abandon_on_cancel=False makes pause/abort wait for the entire blocking
-                # Developer/provider call even after the main task has durably closed this request as
-                # stale. The session's exit gate still counts _spec_build_inflight, so an unavailable
-                # provider can make an operator stop take the full transport timeout. Use a genuinely
-                # cancellable producer or quarantine/abandon this isolated role pair after cancellation.
-                result = await anyio.to_thread.run_sync(
-                    # `_start_head_producer` already appended this attempt's `card_build_attempted`
-                    # receipt, so a kill anywhere below leaves the head quarantined on resume instead
-                    # of silently re-issuing possibly-charged work (see `_serve_card_builds`).
-                    functools.partial(self._build_requested_card, dict(request), roles),
-                    abandon_on_cancel=False,
-                )
-            except Exception as exc:  # noqa: BLE001 — the main task must still advance the durable gate
-                result = SpecBuildResult(
-                    key[0], key[1], {}, False, roles=roles,
-                    error=producer_error_text(exc),
-                )
+
+        def _store(result: SpecBuildResult) -> None:
             self._discard_spec_result(self._spec_builds.get(key))
             self._spec_builds[key] = result
-        finally:
-            self._spec_build_inflight.discard(key)
-            # Notifications are only hints. Never let a full/closing stream block task-group teardown.
-            notify_producer(notify, ("producer", key))
+
+        await self._run_isolated_producer(
+            # `_start_head_producer` already appended this attempt's `card_build_attempted`
+            # receipt, so a kill anywhere below leaves the head quarantined on resume instead
+            # of silently re-issuing possibly-charged work (see `_serve_card_builds`).
+            functools.partial(self._build_requested_card, dict(request), roles),
+            on_failure=lambda exc: SpecBuildResult(
+                key[0], key[1], {}, False, roles=roles,
+                error=producer_error_text(exc),
+            ),
+            store=_store,
+            release=lambda: self._spec_build_inflight.discard(key),
+            notify=notify,
+            notify_key=("producer", key),
+        )
 
     @in_llm_lane("build")
     def _prepare_raw_card_stage(
@@ -1965,7 +2044,7 @@ class SpeculationMixin:
         raw_action = dict(action)
         generation = proposal_state.search_epoch
         researcher, developer = roles
-        source = "engine" if raw_action.get("kind") == "merge" else "researcher"
+        source = raw_stage_source(raw_action)
         self._discard_node_build_telemetry(researcher=researcher, developer=developer)
         audit_events: list[tuple[str, dict, Optional[str], Optional[str]]] = []
         try:
@@ -2006,16 +2085,12 @@ class SpeculationMixin:
                 error="proposal rejected" if idea is None else "",
             )
         except Exception as exc:  # noqa: BLE001 — one raw proposal fault yields a consumed, non-staged result rather than tearing down the task group
-            return SpecRawStageResult(
-                generation=generation,
-                action=raw_action,
-                proposal_state=proposal_state,
-                proposal_node_ceiling=proposal_node_ceiling,
-                at_node=proposal_node_ceiling,
-                source=source,
-                success=False,
+            # The intents captured BEFORE the fault ride along: they are already-folded audit rows the
+            # main task publishes, and dropping them loses the record of a paid proposal that ran.
+            return SpecRawStageResult.failure(
+                exc, generation=generation, action=raw_action, proposal_state=proposal_state,
+                proposal_node_ceiling=proposal_node_ceiling, source=source,
                 audit_events=tuple(audit_events),
-                error=producer_error_text(exc),
             )
         finally:
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
@@ -2029,44 +2104,46 @@ class SpeculationMixin:
         roles: tuple[Any, Any],
         notify,
     ) -> None:
-        try:
+        def _on_failure(exc: BaseException) -> SpecRawStageResult:
+            # Mirror the request-driven producer guard: one raw proposal fault yields a consumed,
+            # non-staged result instead of tearing down the task group and cancelling live evals.
             try:
-                # The proposal pool, not anyio's default — see `novelty.proposal_limiter`.
-                result = await anyio.to_thread.run_sync(
-                    functools.partial(
-                        self._prepare_raw_card_stage,
-                        dict(action),
-                        proposal_events,
-                        proposal_state,
-                        proposal_node_ceiling,
-                        roles,
-                    ),
-                    abandon_on_cancel=False,
-                    limiter=_proposal_limiter(),
+                self._discard_node_build_telemetry(
+                    researcher=roles[0], developer=roles[1],
                 )
-            except Exception as exc:  # noqa: BLE001 — one raw proposal fault yields a consumed, non-staged result; see below
-                # Mirror the request-driven producer guard: one raw proposal fault yields a consumed,
-                # non-staged result instead of tearing down the task group and cancelling live evals.
-                try:
-                    self._discard_node_build_telemetry(
-                        researcher=roles[0], developer=roles[1],
-                    )
-                except Exception:  # noqa: BLE001 — telemetry discard is best-effort inside a failure path
-                    pass
-                result = SpecRawStageResult(
-                    generation=proposal_state.search_epoch,
-                    action=dict(action),
-                    proposal_state=proposal_state,
-                    proposal_node_ceiling=proposal_node_ceiling,
-                    at_node=proposal_node_ceiling,
-                    source="engine" if action.get("kind") == "merge" else "researcher",
-                    success=False,
-                    error=producer_error_text(exc),
-                )
+            except Exception:  # noqa: BLE001 — telemetry discard is best-effort inside a failure path
+                pass
+            # No `audit_events`: this guard fires when the worker never returned, so nothing was
+            # buffered here. The worker's own guard carries what it had captured.
+            return SpecRawStageResult.failure(
+                exc, generation=proposal_state.search_epoch, action=action,
+                proposal_state=proposal_state, proposal_node_ceiling=proposal_node_ceiling,
+                source=raw_stage_source(action),
+            )
+
+        def _store(result: SpecRawStageResult) -> None:
             self._spec_raw_stage_result = result
-        finally:
+
+        def _release() -> None:
             self._spec_raw_stage_inflight = False
-            notify_producer(notify, ("raw_proposal", proposal_state.search_epoch))
+
+        await self._run_isolated_producer(
+            functools.partial(
+                self._prepare_raw_card_stage,
+                dict(action),
+                proposal_events,
+                proposal_state,
+                proposal_node_ceiling,
+                roles,
+            ),
+            on_failure=_on_failure,
+            store=_store,
+            release=_release,
+            notify=notify,
+            notify_key=("raw_proposal", proposal_state.search_epoch),
+            # The proposal pool, not anyio's default — see `novelty.proposal_limiter`.
+            limiter=_proposal_limiter(),
+        )
 
     def _serve_raw_card_stage(self) -> tuple[bool, bool, Optional[str]]:
         """Main-task-only commit of one prepared proposal and its buffered audit intents.

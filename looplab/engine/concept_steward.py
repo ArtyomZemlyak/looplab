@@ -174,16 +174,19 @@ def concept_curation_snapshot(memory_dir, *, aliases: Optional[dict] = None,
     """Freeze one portfolio overview and its exact prompt digest before a durable paid claim."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
+    from looplab.engine.governance_health import observed_path_missing
+    from looplab.engine.governance_protocol import governed_projection
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
 
     base = Path(memory_dir) if memory_dir else None
     if _governance is None:
-        return project_governed_sources(
+        return governed_projection(
             memory_dir,
             lambda governance: concept_curation_snapshot(
                 memory_dir, aliases=aliases, splits=splits,
                 max_proposals=max_proposals, _governance=governance),
+            # The capsules are read unconditionally below, so they are a fixed name; the concept
+            # POLICY is taken only when this call has to resolve one of the two halves itself.
             include_concepts=aliases is None or splits is None,
             source_names=("concept_capsules.jsonl",),
         )

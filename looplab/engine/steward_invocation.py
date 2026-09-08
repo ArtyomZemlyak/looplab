@@ -100,10 +100,10 @@ def _cached(path: Path, *, kind: str, action_id: str) -> dict | None:
 
 
 def _append(path: Path, *, kind: str, record: dict) -> dict:
-    from looplab.engine.concept_registry import _append_governance
+    from looplab.engine.governance_protocol import append_governance
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    return _append_governance(
+    return append_governance(
         path, record, require_durable=True,
         read_rows=lambda current: _read(current, kind=kind),
     )
