@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from looplab.adapters import tasks as task_adapters
 from looplab.core.atomicio import file_identity
-from looplab.core.pathsafe import WINDOWS_RESERVED
+from looplab.core.pathsafe import RUN_CHILD_NAME_DEFECTS, validate_run_child
 from looplab.core.appconfig import load_document, parse_document_text, split_document
 from looplab.core.comparison import canonical_comparison_contract
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
@@ -67,19 +67,22 @@ def _sha(value: Any) -> str:
 
 
 def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Path:
-    if not isinstance(run_id, str) or not run_id:
+    # `must_exist=False` on purpose: this route is about a run that does not exist YET, so the
+    # shared predicate answers the LEXICAL and CONTAINMENT halves only (doc 25 SC-03) and what an
+    # existing entry at that path MEANS stays here — it is this route's conflict policy, with three
+    # distinct refusals below. The STRICT name tier is the same one `deletion_service` takes: what
+    # may be created and what may be deleted must not be two different sets.
+    child = validate_run_child(root, run_id, must_exist=False, strict_name=True)
+    if child.defect == "absent":
         _reject(400, "invalid_run_id", "run_id is required", "run_id")
-    if (len(run_id) > 255 or run_id != run_id.strip() or run_id.endswith((".", " "))
-            or ":" in run_id or any(ord(ch) < 32 for ch in run_id)
-            or run_id.split(".", 1)[0].upper() in WINDOWS_RESERVED):
+    if child.defect in RUN_CHILD_NAME_DEFECTS:
         _reject(400, "invalid_run_id", "run_id is unsafe or filesystem-ambiguous", "run_id")
-    requested = root / run_id
-    try:
-        resolved = requested.resolve()
-    except OSError as exc:
-        _reject(400, "invalid_run_id", f"run_id cannot be resolved: {exc}", "run_id")
-    if resolved == root or resolved.parent != root:
+    if child.defect == "unreadable":
+        _reject(400, "invalid_run_id", "run_id cannot be resolved", "run_id")
+    if child.defect is not None:
         _reject(400, "invalid_run_id", "run_id must be a plain name, not a path", "run_id")
+    requested = root / run_id
+    resolved = child.path
     if (resolved.name.lower() in _RESERVED_RUN_IDS
             or resolved.name.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
