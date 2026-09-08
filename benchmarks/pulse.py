@@ -206,6 +206,32 @@ def unscored_result(root: str, name: str, got: dict) -> str | None:
             "  # the corpus is __w22x1r3; unset means 1 worker and a number nothing compares to")
 
 
+def log_age(path: str, now: float | None = None) -> float:
+    """Seconds since this log last grew -- with the clock read AFTER the stat, not before.
+
+    §357. `pulse` sampled `time.time()` once at the top and used it for every probe's age. Between
+    that sample and the stat it reads the meter's ledger (20 MB), walks `/proc` twice and globs the
+    probe trees, so the age was understated by the whole preamble; for a probe writing continuously
+    it went NEGATIVE and the table printed `-0s`.
+
+    Harmless as printed, and not harmless as a rule: `age > STALL_TIMEOUT` is the only thing that
+    calls a probe stalled, and an age that can be negative is an age that can be arbitrarily wrong
+    in the direction of "fresh". A log dated in the FUTURE -- a clock step, a file copied off
+    another box, an mtime preserved by `cp -p` -- would read as eternally fresh and never trip the
+    ceiling. That is reported rather than clamped away: a negative age is a fact about the clock or
+    the file, and both are worth saying out loud.
+
+    An injected `now` is used as given, because a test owns its own clock.
+    """
+    stamp = os.path.getmtime(path)
+    return (time.time() if now is None else now) - stamp
+
+
+def format_age(age: float) -> str:
+    """The age as the table prints it -- and a log dated ahead of the clock says so."""
+    return "  AHEAD!" if age < -1.0 else f"{max(0.0, age):7.0f}s"
+
+
 def wchan(pid) -> str:
     try:
         return open(f"/proc/{pid}/wchan", encoding="utf-8").read().strip() or "-"
@@ -569,11 +595,12 @@ def main(argv=None) -> int:
             print(f'{name:10s} {lanes._fmt(row["cpus"]):12s}  no events.jsonl yet')
             continue
         got = pulse(found[0])
-        age = now - os.path.getmtime(found[0])
+        # `args.now` only when it was INJECTED: otherwise the clock is read after the stat.
+        age = log_age(found[0], args.now)
         called = newest.get(name)
         call_age = (now - called[0]) if called else None
         print(f'{name:10s} {lanes._fmt(row["cpus"]):12s} {got["spend"]:8.4f} {got["nodes"]:5d} '
-              f'{got["zeros"]:5d} {got["errors"]:4d} {age:7.0f}s '
+              f'{got["zeros"]:5d} {got["errors"]:4d} {format_age(age)} '
               f'{(f"{call_age:8.0f}s" if call_age is not None else "       -"):>9s}  '
               f'{wchan(row["pid"])}')
         if called and called[1] != "200":
