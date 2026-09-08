@@ -17,10 +17,12 @@ is the one left.)*
 
 Nothing below is a bug you can fix without deciding something first. That is the entry criterion.
 
-> **Re-derived 2026-08-19 against master `8be301f7`, and INDEXED.** Four of the five are genuinely
-> still deferred and now carry `OPEN[…]` markers whose proofs the guard re-derives from the tree;
-> **D-05 is CLOSED** and its own status update was false the day it was written. From here,
-> `grep -rn 'OPEN\['` is the answer to "what is still deferred in doc 34?".
+> **Re-derived 2026-08-19 against master `8be301f7`, and INDEXED.** Four of the five were genuinely
+> still deferred that day and took `OPEN[…]` markers whose proofs the guard re-derives from the tree;
+> **D-05 is CLOSED** and its own status update was false the day it was written. **D-02, D-03 and
+> D-04 closed on 2026-09-08** and their markers are gone, which is what closing means here — so this
+> sentence is not the count. From here, `grep -rn 'OPEN\['` is the answer to "what is still deferred
+> in doc 34?".
 >
 > - **OPEN[agent-node-purge-has-no-durable-receipt]** `_purge_node_snapshot` is still an irreversible
 >   multi-file transaction inside a bare `try/finally` with the ad-hoc `events.jsonl.bak-del<N>`
@@ -38,12 +40,12 @@ Nothing below is a bug you can fix without deciding something first. That is the
 >   (`tests/test_span_index.py::test_a_batched_multi_row_append_is_trusted_like_n_single_row_ones`).
 >   Driven in `tests/test_async_trace_exporter.py::test_one_drain_pays_the_hardened_ladder_once_for_the_whole_batch`:
 >   six spans across two drains pay two source opens instead of six.*
-> - **OPEN[card-trace-scans-whole-run-span-index]** `card_trace_view` still copies the whole run's
->   light spans; `SpanIndex` has no `card_id` dimension and `_SCHEMA` is unbumped.
->   proof:`line:_SCHEMA&&= 12@looplab/events/span_index.py`
-> - **OPEN[span-index-hashes-every-source-row]** `_read_full` still re-hashes each selected row's FULL
->   bytes on the request path, and a 64-char digest is retained per row in memory and on disk.
->   proof:present:hashlib.sha256(data).hexdigest()@looplab/events/span_index.py
+> - *D-03 CLOSED 2026-09-08 — `SpanIndex` grew the `card_id` dimension the decision named
+>   (`card_propose_tids`) and `card_trace_spans` now serves BOTH research rules by lookup;
+>   `_SCHEMA` is 13.*
+> - *D-04 CLOSED 2026-09-08 — the row digest keeps its verification over a BOUNDED preimage
+>   (`_row_digest`: length + 8 KiB head + 8 KiB tail, 32 hex), with the corruption class it does and
+>   does not catch stated at `_ROW_DIGEST_PREFIX`; `_SCHEMA` 13 keeps the two widths apart.*
 >
 > **Dead line citations, all three in the 2026-08-14 status updates and all off by 80-170 lines:**
 > `machine_runs_tools.py:1623` → the pointer is at `:1796`; `serve/appstate.py:613` → the comment is
@@ -153,6 +155,19 @@ motivated it.
 
 ## D-03 · `card_trace_view` scans the whole run's spans · `serve/appstate.py`
 
+> ***CLOSED (2026-09-08).*** *The recommendation below was taken as written. `SpanIndex` carries a
+> `card_id` dimension — `card_propose_tids`, stamped card id -> the traces of the root `propose`
+> spans naming it, built at `_append` from the ONE shared predicate
+> `traceview.card_research_root_card` — and `SpanIndex.card_trace_spans` serves BOTH match rules by
+> lookup: rule one from that dimension (which is why a trace-scoped narrowing was never the answer),
+> rule two from the owned traces the fold resolves. It returns the run-GLOBAL claim map with the
+> spans, because a claim's two halves live in different traces and a contested trace is a run-wide
+> refusal a subset cannot make. `project_card_trace` is unchanged in what it decides and gained one
+> optional `claimed=` parameter, shaped exactly like `_conversation_bands`'s. The `_SCHEMA` bump the
+> decision required is 13, shared with D-04. Pinned by the pair in
+> `tests/test_card_trace_projection.py`: the narrowed answer is IDENTICAL to the whole-run one, and
+> the selection copies the card's rows and nothing else (8 rows of the fixture's 610).*
+>
 > **Status update (2026-08-14).** Unchanged. The scan is still whole-run — `serve/appstate.py:613`
 > carries the "KNOWN COST … docs/34 (CARD-TRACE-SCAN)" comment feeding `project_card_trace` — and
 > `events/span_index.py` has no `card_id` or span-name dimension (`_SCHEMA` is 12; `card_id` appears
@@ -175,6 +190,22 @@ path, and a decision about what else deserves a dimension before the row grows a
 
 ## D-04 · `SpanIndex` hashes every source row · `events/span_index.py`
 
+> ***CLOSED (2026-09-08).*** *The corruption-class decision was made, in the form this entry asks
+> for: a `_SCHEMA` bump (to 13) with the chosen preimage rule written at `_read_full` and stated in
+> full at `span_index.py::_ROW_DIGEST_PREFIX`. The digest is KEPT and bounded —
+> `sha256(b"looplab:span-row:v1\0" + length + head 8 KiB + tail 8 KiB)`, truncated to 32 hex, so a
+> row of any size costs one 16 KiB hash and the per-row hex retained in memory and on disk halves.
+> What it must catch is named: any change to the row's LENGTH or either EDGE — offset drift onto a
+> neighbour, a resized in-place rewrite, a truncated tail, a persisted index loaded against another
+> file — with `_read_full`'s FULL normalized-light comparison still verifying every attribution
+> field at every read. What it deliberately does not catch is named too: a same-length mutation
+> strictly inside the heavy middle of a row over 16 KiB, which the no-index reader
+> (`traceview.load_spans`) also returns, so the index gives up no promise it usefully held. A v12
+> index's 64-hex digests can never be compared against the new ones — different width, refused
+> structurally by `_decode_row_digest`, and separated by the schema bump. The accountant is
+> `tests/test_span_index.py::test_read_full_hashes_bounded_bytes_per_row_not_whole_rows`
+> (measured: 600,346 bytes hashed per row under the old rule, 16,448 ceiling under this one).*
+>
 > **Status update (2026-08-14).** Unchanged. `_read_full` still SHA-256s each selected row's FULL
 > bytes and `_scan_light` still retains a 64-char digest per row; `_SCHEMA` is still 12. The pointer
 > comment is in place (`events/span_index.py:694`) and states the same bounded-prefix-plus-length
