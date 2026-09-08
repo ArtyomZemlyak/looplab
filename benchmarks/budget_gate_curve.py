@@ -34,6 +34,10 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import events_read  # noqa: E402
 import statistics
 
 DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
@@ -48,10 +52,13 @@ def load(root: str, exclude=()) -> list[dict]:
             else path.split("/")[-5]
         if name in exclude:
             continue
-        try:
-            rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-        except (OSError, ValueError):
-            continue
+        # THROUGH THE SHARED READER (§361). Two defects lived in the four lines this replaces. The
+        # list comprehension parsed every row inside ONE try, so a single torn line -- normal on a
+        # live run -- discarded the WHOLE probe's curve rather than that line. And it did not unroll
+        # the crash-atomic packets: the corpus holds 23 of them carrying 17 `node_failed` and 17
+        # `pause`, so every node failure was invisible to this plot. `events_read` skips a torn line
+        # and expands a packet, and it is the only copy of that rule that knows both spellings.
+        rows = list(events_read.iter_events(path))
         if not rows:
             continue
         cost = [(r["ts"], float((r.get("data") or {}).get("cost") or 0.0))

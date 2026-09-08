@@ -43,6 +43,10 @@ TRAPS INHERITED UNCHANGED FROM plot_corpus.py (they were right)
 from __future__ import annotations
 
 import json
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import events_read  # noqa: E402
 import math
 import os
 import re
@@ -94,15 +98,15 @@ def iter_jsonl(path):
 
 
 def iter_events(path):
-    """A LINE IS NOT AN EVENT: crash-atomic packets carry `type` as a list."""
-    for rec in iter_jsonl(path):
-        if isinstance(rec.get("type"), list):
-            for ev in (rec.get("data") or {}).get("events") or []:
-                yield ev
-        else:
-            yield rec
+    """The shared rule, not a fourth copy of it (§361).
 
-
+    This file carried its own unrolling keyed on `isinstance(type, list)` -- the LIST spelling only,
+    while the engine's own tests exercise the bare STRING -- and it expanded any list-typed row even
+    when `data.events` was absent, losing the row instead of yielding it. `events_read.is_packet`
+    requires BOTH the sentinel and actual events, and knows both spellings. Three copies of one rule
+    is how they came to disagree; this leaves one.
+    """
+    return events_read.iter_events(path)
 def read_score_log(path):
     best = last = None
     for rec in iter_jsonl(path):

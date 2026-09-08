@@ -35,6 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lanes  # noqa: E402
+import events_read  # noqa: E402
 import ruler_check  # noqa: E402
 
 WORDING_DATE = "2026-09-05"
@@ -1043,34 +1044,29 @@ def check_every_node_was_graded_on_train(bench: str):
         probe = path.split("/model-probes/", 1)[1].split("/")[0]
         if probe == "_ruler":
             continue
-        try:
-            fh = open(path, encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        with fh:
-            for line in fh:
-                if '"node_evaluated"' not in line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if row.get("type") != "node_evaluated":
-                    continue
-                nodes += 1
-                got = _SUBSET_EVIDENCE.search(str((row.get("data") or {}).get("stdout_tail") or ""))
-                try:
-                    evidence = json.loads(got.group(1)) if got else None
-                except ValueError:
-                    evidence = None
-                if not isinstance(evidence, dict):
-                    missing += 1
-                    continue
-                reasons[evidence.get("reason")] = reasons.get(evidence.get("reason"), 0) + 1
-                if evidence.get("asked") != "train" or evidence.get("verified") is not True:
-                    wrong.append(f"{probe}/node {(row.get('data') or {}).get('node_id')}: "
-                                 f"asked={evidence.get('asked')!r} "
-                                 f"verified={evidence.get('verified')!r}")
+        # THROUGH THE SHARED READER (§361). A line in `events.jsonl` is not an event: the engine
+        # writes crash-atomic packets whose real events sit in `data.events`, and the corpus holds
+        # 23 of them carrying 17 `node_failed`, 17 `pause` and 6 `node_building`. None is a
+        # `node_evaluated` TODAY, which is the only reason this check's own loop was not already
+        # wrong -- and "not wrong yet" is not a rule. `events_read` is the one place that knows
+        # both spellings of the sentinel and refuses to swallow a row that only looks like one.
+        for row in events_read.iter_events(path):
+            if row.get("type") != "node_evaluated":
+                continue
+            nodes += 1
+            got = _SUBSET_EVIDENCE.search(str((row.get("data") or {}).get("stdout_tail") or ""))
+            try:
+                evidence = json.loads(got.group(1)) if got else None
+            except ValueError:
+                evidence = None
+            if not isinstance(evidence, dict):
+                missing += 1
+                continue
+            reasons[evidence.get("reason")] = reasons.get(evidence.get("reason"), 0) + 1
+            if evidence.get("asked") != "train" or evidence.get("verified") is not True:
+                wrong.append(f"{probe}/node {(row.get('data') or {}).get('node_id')}: "
+                             f"asked={evidence.get('asked')!r} "
+                             f"verified={evidence.get('verified')!r}")
     if not nodes:
         return False, "no evaluated node on this box, so the split cannot be checked"
     detail = (f"{nodes} evaluated node(s): {nodes - missing - len(wrong)} asked train and verified"
