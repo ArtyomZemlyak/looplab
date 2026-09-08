@@ -1853,6 +1853,21 @@ class ValidatingDeveloper(WrapsDeveloper):
         # rejected agent attempt must not leak its resource estimate onto fallback code.
         shipped = self.fallback if fell_back else self.inner
         self.last_footprint = getattr(shipped, "last_footprint", None)
+        # …AND EVERY OTHER REGISTERED CHANNEL, off the SAME shipped developer. This wrapper set
+        # three of the ten and never called `_sync_audit`, so on its shipping path the engine's
+        # envelope read `last_rollback_stage`, `last_budget_exhausted`, `last_edit_calls`,
+        # `last_seed`, `last_run`, `last_patch` and `last_budget_facts` as their FALSY defaults —
+        # "no rollback was requested", "the session finished on its own terms", "zero edits" — which
+        # is the reading `DEVELOPER_OUTPUT_ATTRS` exists to stop being the only one available.
+        # `last_report` is excluded because this wrapper owns it: it describes the external AGENT
+        # even when the FALLBACK shipped, which is the whole point of the `agent=` split above.
+        for _attr in DEVELOPER_OUTPUT_ATTRS:
+            if _attr in ("last_files", "last_deleted", "last_footprint", "last_report"):
+                continue
+            try:
+                setattr(self, _attr, getattr(shipped, _attr, None))
+            except Exception:  # noqa: BLE001 - an optional audit channel must never block a build
+                pass
 
     def _attempt_loop(self, idea: Idea, call, fallback_call=None) -> str:
         """Run `call(idea)` (implement or repair), validate, retry-with-feedback up to

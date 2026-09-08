@@ -40,7 +40,7 @@ from looplab.core.pathsafe import filesystem_identity
 from looplab.core.models import Event
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
-from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
+from looplab.engine.finalize import is_guarded_abort
 from looplab.events.comment_projection import COMMENT_MAX_VERSION
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, EventStoreLockError,

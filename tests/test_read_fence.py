@@ -1030,25 +1030,25 @@ def test_the_hook_rung_refuses_a_mutation_of_the_fences_own_file_at_any_uid(tmp_
                for line in read_fence.violations(run_dir))
 
 
-def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(tmp_path,
-                                                                              monkeypatch):
-    """The control for the test above: the capability it denies has to exist to be worth denying.
+def test_the_fence_overwrite_is_refused_by_the_hook_with_every_other_rung_taken_away(
+        tmp_path, monkeypatch):
+    """THREE RUNGS, and the overwrite has to be refused with the other two taken away.
 
     Same world, same child. The write bit is handed back from the pytest process — which is NOT
-    fenced, so `_SELF` never sees it — and the identical `open(fence, "w")` then succeeds, and the
-    next process of the run reads the human's checkpoint. This is the pre-fix behaviour, reproduced
-    inside the suite, and it is what makes the sibling test's `STAGE2 ESCAPED not in out` a claim
-    about `_harden` rather than about the child failing to try.
+    fenced, so `_SELF` never sees that chmod — and `run_argv`'s `read_fence.reassert` copy is
+    dropped BY NAME, because with it present the mode is simply repaired before the child starts
+    and this test would be characterising the repair instead of the policy (no copy is the state
+    `reassert` is specified to leave alone: a resumed engine, a hand-set marker). What is left is
+    the hook, and the identical `open(fence, "w")` against it.
 
-    THE THIRD RUNG HAS TO BE TAKEN AWAY TOO (2026-09-08). `run_argv` now calls
-    `read_fence.reassert`, which compares the file against the engine's own in-memory copy and puts
-    the mode back before the child starts — so with that copy present this control stops
-    characterizing anything: the widened bit is repaired, the write is refused, and the test goes
-    red UNPRIVILEGED while still passing under root, where DAC-override made the repair moot. That
-    is two properties wearing one name, which is the exact shape this file has been bitten by, so
-    the trusted copy is dropped here BY NAME: no copy is the state `reassert` is specified to leave
-    alone (a resumed engine, a hand-set marker), and it is the only state in which this control
-    measures what it says it measures — the un-hardened world, at every uid."""
+    Until 2026-09-08 that call SUCCEEDED and this test asserted that it did — `_SELF` was consulted
+    in `_mutation_fenced` alone, and a truncating open raises the `open` event, not a mutation one,
+    so the branch that refuses the chmod and the unlink never saw the cheapest spelling of the same
+    escape (driven — chmod REFUSED, remove REFUSED, `open(..., "w")` ALLOWED). The open branch
+    consults `_SELF` when the flags say WRITE, which is what makes the sibling test's
+    `STAGE2 ESCAPED not in out` a claim about the POLICY rather than about the ambient capabilities
+    of whichever box the suite runs on. What `harden_guarantee` reports as reduced is now exactly
+    the residual it names: a `cp`, a `ctypes` `fopen`, a C extension — no audit event, no hook."""
     src, _sib, run_dir, wd, _models = _world(tmp_path)
     target = src / "experiments" / "baseline" / "final" / "model.safetensors"
     fence = _install(run_dir, src)
@@ -1056,8 +1056,7 @@ def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(t
     monkeypatch.delitem(read_fence._INSTALLED, fence, raising=False)
     os.chmod(generated, 0o644)                  # exactly what `_harden` had done, undone
 
-    # Only the overwrite, so the assertions below describe THE ESCAPE and nothing else: this test
-    # characterizes the un-hardened world and must read the same before and after the fix.
+    # Only the overwrite, so the assertions below describe THAT CALL and nothing else.
     read_it = "print(open(%r).read())" % str(target)
     rc, out, _err, timed_out = _run(f"""
         import os, subprocess, sys
@@ -1072,11 +1071,14 @@ def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(t
                                env=os.environ.copy(), capture_output=True, text=True)
         print("STAGE3", "READ" if {CHECKPOINT!r} in later.stdout else "refused")
         """, wd, fence)
-    assert not timed_out and rc == 0, out
+    # NON-VACUITY FIRST: the child must have reached the fence, or "no escape" would be a claim
+    # about a child that never ran. STAGE1 is that receipt; the write then raises out of the
+    # `open`, so the child exits non-zero and STAGE2/STAGE3 never print.
+    assert not timed_out, out
     assert "STAGE1 refused LoopLabSourceReadRefused" in out, out
-    assert "STAGE2 ESCAPED open-w" in out, out
-    assert "STAGE3 READ" in out, out
-    assert generated.read_text(encoding="utf-8") == "# gone"
+    assert "STAGE2 ESCAPED open-w" not in out, out
+    assert "STAGE3 READ" not in out, out
+    assert "LoopLab source-tree READ FENCE" in generated.read_text(encoding="utf-8")
 
 
 # ------------------------------------------------------- the fence's own self-protection, stated
@@ -1115,10 +1117,17 @@ def test_the_kernel_rung_reports_whether_it_binds_and_a_real_child_agrees(tmp_pa
     `test_a_node_cannot_rewrite_the_fence_that_fences_it` skips under root, which is correct for
     ITS claim, and the suite therefore reported zero failures on a root box where
     `open(<fence>, "w")` from inside a fenced child went straight through. A uid-scoped skip cannot
-    be the answer here, because the property is an IFF and both sides of it are uid-dependent
-    together: the sentence the module now prints and the escape the box actually admits must agree.
-    So this test never skips — on an unprivileged box both sides are false, on a privileged one
-    both are true, and a mutation that makes them disagree is red on EITHER."""
+    be the answer here: the sentence the module prints and what the box actually admits must agree,
+    at every uid, and this test never skips.
+
+    THE PAIR IS NO LONGER AN IFF, and that is a fix rather than a weakening (2026-09-08, from the
+    other side): `_hook`'s open branch consults `_SELF` on a WRITE, so this child's `open` is
+    refused at euid 0 and at euid 1001 alike — the Python half became uid-INDEPENDENT. What stays
+    uid-dependent is the KERNEL rung, and the vector that survives it is the NATIVE one the sibling
+    `_TAMPER` test drives with `/bin/rm` at both uids. So the two halves are asserted separately:
+    the write is blocked, always; and when `harden_guarantee` reports a reduction it must name both
+    which half of the precondition is missing AND that what is left open is a native writer. A
+    sentence claiming more than that is the same defect as one claiming less."""
     src, _sib, run_dir, wd, _models = _world(tmp_path)
     target = src / "experiments" / "baseline" / "final" / "model.safetensors"
     fence = _install(run_dir, src)
@@ -1132,14 +1141,17 @@ def test_the_kernel_rung_reports_whether_it_binds_and_a_real_child_agrees(tmp_pa
     assert ("STAGE2 ESCAPED open-w" in out) or ("STAGE2 blocked open-w" in out), out
 
     reduced = read_fence.harden_guarantee(generated)
-    escaped = "STAGE2 ESCAPED open-w" in out
-    assert escaped == (reduced is not None), (
-        "the module's own sentence about its kernel rung disagrees with what the box did: "
-        f"escaped={escaped!r} harden_guarantee={reduced!r}\n{out}")
+    assert "STAGE2 ESCAPED open-w" not in out, (
+        "a fenced child overwrote the fence with a plain `open` — the hook rung is uid-independent "
+        f"and must refuse this at every uid\nharden_guarantee={reduced!r}\n{out}")
     if reduced is not None:
         # …and it names WHICH half is missing, because "advisory" without the reason is the
-        # unstated precondition the marker was about.
+        # unstated precondition the marker was about…
         assert "ADVISORY" in reduced and ("CAP_DAC_OVERRIDE" in reduced or "euid 0" in reduced)
+        # …and WHAT is left open, which is the native writer this child is not: a sentence that
+        # still said "a node's eval code can overwrite the generated fence" would be describing the
+        # call the box just refused, one line above.
+        assert "NATIVE" in reduced and "`_SELF`" in reduced, reduced
 
 
 @pytest.mark.parametrize("mode, named", [(0o444, False), (0o644, True), (0o666, True),

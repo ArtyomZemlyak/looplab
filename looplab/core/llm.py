@@ -2415,6 +2415,14 @@ class LiteLLMClient:
                 # atomic total+lane slot; backoff/retry waiting itself consumes no shared capacity.
                 with llm_request_permit():
                     return litellm.completion(model=self._model_for_call(), **kwargs)
+            except BudgetExceeded:
+                # THE HARD RUN-BUDGET STOP IS NOT A PROVIDER ERROR, and it is raised from INSIDE
+                # this permit: `llm_broker.borrow()` reserves against `RunBudget` before queueing.
+                # Normalizing it to `LLMError` handed the role layer's documented `except LLMError`
+                # retry+fallback an exhausted ceiling to DEGRADE around, and `tool_loop.resilient`'s
+                # `except BudgetExceeded: raise` funnel never saw it, because it was no longer one.
+                # CLAUDE.md's rule for every blind handler around a paid call in the run path.
+                raise
             except Exception as e:  # noqa: BLE001 - normalize EVERY provider error to LLMError
                 last = e
                 name = type(e).__name__.lower()

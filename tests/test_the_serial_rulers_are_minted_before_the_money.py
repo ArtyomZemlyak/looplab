@@ -26,6 +26,7 @@ DRIVE = """set -e
 export PATH="$SHIM:$PATH"
 export REPO="{repo}"
 export ALGOTUNE_BASELINE_CACHE_DIR="$CACHE"
+export ALGOTUNE_TASKS_ROOT="$TASKS_ROOT"
 export TASKS="{tasks}"
 export PREMINT_LANE="0-1"
 export ALGOTUNE_PREMINT="${{WANT_MINT:-1}}"   # doubled: this line lives in a .format() template
@@ -36,11 +37,28 @@ premint_serial_rulers
 """
 
 
+# The tasks these fixtures treat as CP-SAT (i.e. scored serially). `min_dominating_set` and
+# `max_clique_cpsat` are two of the nine §314 measured; `pagerank` is deliberately not one, which is
+# what `test_only_the_serially_scored_tasks_are_minted` is about.
+_CPSAT_TASKS = {"min_dominating_set", "max_common_subgraph", "kcenters"}
+
+
 def _run(tasks, cache_files=(), shim_writes=True, want_mint="1"):
     with tempfile.TemporaryDirectory() as tmp:
         work, cache, shim = Path(tmp) / "w", Path(tmp) / "c", Path(tmp) / "s"
         for d in (work, cache, shim):
             d.mkdir()
+        # THE REFERENCE TREE, as a fixture. `scoring_workers` runs `ruler_check` in a SUBPROCESS, so
+        # a monkeypatched module attribute cannot reach it and the function answered `?` for every
+        # task on any box without the bench's AlgoTune checkout at `/var/tmp/looplab-bench` — the
+        # loop then minted nothing, and these tests failed on an empty `out` rather than on what
+        # they are about. `ALGOTUNE_TASKS_ROOT` is the env override `ruler_check.CPSAT_ROOT` reads.
+        tasks_root = Path(tmp) / "AlgoTuneTasks"
+        for task in tasks.split():
+            (tasks_root / task).mkdir(parents=True)
+            (tasks_root / task / f"{task}.py").write_text(
+                "from ortools.sat.python import cp_model\n" if task.endswith("_cpsat")
+                or task in _CPSAT_TASKS else "import numpy\n", encoding="utf-8")
         for name in cache_files:
             (cache / name).write_text("{}", encoding="utf-8")
         # The shim stands in for `ruler_selfcheck.py`: it writes the file a real mint would write,
@@ -62,7 +80,7 @@ done
 """ if shim_writes else "exit 1\n"), encoding="utf-8")
         (shim / "python3").chmod(0o755)
         env = {**os.environ, "WORK": str(work), "CACHE": str(cache), "SHIM": str(shim),
-               "WANT_MINT": want_mint}
+               "TASKS_ROOT": str(tasks_root), "WANT_MINT": want_mint}
         got = subprocess.run(["bash", "-c", DRIVE.format(repo=REPO, script=SCRIPT, tasks=tasks)],
                              capture_output=True, text=True, env=env, timeout=300)
         return got.stdout + got.stderr, sorted(p.name for p in cache.iterdir())

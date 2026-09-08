@@ -465,6 +465,18 @@ class AppState:
         # Card projection has declared them exact, leaving a completeness receipt that describes data
         # no longer present on the wire.
         d = _public_state_value(d)
+        # THE RUN-LEVEL CRASH TEXT gets the pass its node-level twin gets below. `stop_detail` folds
+        # `run_finished.error`, which `cli/run_cmds.py` writes as a raw `str(exc)[:500]` — it never
+        # goes through `Engine._redact`, the funnel every other persisted tail passes — so a
+        # `FileNotFoundError` naming a host path, a bucket URI or a provider body reached this
+        # payload verbatim. `_public_state_value` only DROPS the keys in `_PUBLIC_STATE_RAW_KEYS`
+        # and gives everything else `entropy=False`, and this payload feeds the token-less /state
+        # GET, the headerless SSE stream and a `review` share link (see the note above
+        # `_public_state_value`). Redact BEFORE truncating, for the straddling-secret reason the
+        # node-level line records, and to the same 160 chars: this is a status line, not a report.
+        if d.get("stop_detail"):
+            from looplab.core.redact import redact_secrets
+            d["stop_detail"] = redact_secrets(str(d["stop_detail"]))[:160]
         # `cards` and its completeness receipt must come from one projection invocation.
         # Re-projecting the two halves separately would let mutable caller input or a later selector
         # change publish counts that do not describe the actual mapping in this SSE/state frame.

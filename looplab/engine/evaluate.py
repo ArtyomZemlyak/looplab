@@ -53,8 +53,7 @@ import anyio
 from looplab.agents.roles import DeveloperResult
 import orjson
 
-from looplab.core.llm import BudgetExceeded
-from looplab.core.errors import BudgetExceeded, exception_leaves, is_run_ending
+from looplab.core.errors import BudgetExceeded, budget_stop_leaf, exception_leaves
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
                                  developer_artifact_footprint, developer_stuck_reason,
@@ -959,7 +958,12 @@ class EvalAttempt:
     _hypotheses: Any = None
     _override_refused: Any = None
     repair_log: list = field(default_factory=list)
-    best_depth: int = -1
+    # `best_depth` (the best pipeline depth any ATTEMPT reached) lived here until 2026-09-08: it was
+    # declared, reset and `max`-ed, and read by nothing. Its comment claimed it was "surfaced to the
+    # judge as the other, non-textual evidence that a repair did real work" — but all three judge and
+    # record sites pass `a._depth`, THIS attempt's depth, so the sentence told the next reader the
+    # judge sees something it has never seen. Removed rather than wired: handing the judge a new
+    # number changes a paid prompt, which is a flagged decision and not a review's to make.
     next_start: Any = None
     full_retrains: int = 0
     rolled_to: set = field(default_factory=set)
@@ -2152,7 +2156,23 @@ class EvaluateMixin:
                         self.store.append(EV_NODE_FAILED, {
                             "node_id": node_id, "generation": generation,
                             "error": self._redact(detail)[:400], "reason": "engine_error"})
-                    if not (state.paused or state.finished or state.stop_requested):
+                    # AND THE PAUSE SKIPS A LIFECYCLE THAT ALREADY CLOSED ITSELF. Until
+                    # 2026-09-08 this was a separate `if` on the RUN's state alone, so a body that
+                    # had written its own `node_evaluated` and then raised on the way OUT — a span
+                    # exporter hitting ENOSPC on `spans.jsonl`, a closed tracer, any teardown fault
+                    # — correctly declined the second terminal and paused the whole run anyway: a
+                    # node that SUCCEEDED required an operator resume, for telemetry.
+                    #
+                    # The predicate is the node's STATUS, not the terminal guard above. A crash
+                    # naming a SUPERSEDED generation writes no terminal either, and there the pause
+                    # must still fire — the fault is real whatever lifecycle it belonged to, and
+                    # that node is still pending under its current attempt
+                    # (`test_a_terminal_for_a_SUPERSEDED_generation_is_not_written` drives exactly
+                    # that pair). What this skips is the one case where nothing is owed and nothing
+                    # is stuck: the node reached a terminal of its own.
+                    _self_closed = node is not None and node.status is not NodeStatus.pending
+                    if not _self_closed and not (state.paused or state.finished
+                                                 or state.stop_requested):
                         self.store.append(EV_PAUSE, {
                             "reason": "engine_error",
                             "detail": self._redact(
@@ -2578,9 +2598,6 @@ class EvaluateMixin:
         # same reason as the budget: it bounds a per-NODE condition (a provider answering with
         # prose), so a process-local count let a resume grant three more truncations.
         # `unparseable_repairs` is seeded from the ledger above.
-        # Best pipeline depth any attempt has reached (stages passed/reused before the failure) —
-        # surfaced to the judge as the other, non-textual evidence that a repair did real work.
-        a.best_depth = -1
         # Multi-stage reuse across repair attempts: `next_start` is the stage to run FROM on the next
         # eval — _UNSET on the first eval (derives node.rerun_stage), then set by the safe-reuse
         # predicate after each repair (a stage name = reuse the completed earlier stages, e.g. skip
@@ -2982,7 +2999,6 @@ class EvaluateMixin:
         # however similar two error strings look.
         a._depth = len([s for s in (a.res.stages or [])
                       if isinstance(s, dict) and s.get("status") in ("ok", "reused")])
-        a.best_depth = max(a.best_depth, a._depth)
         # ONE BUDGET, AND IT IS DURABLE. `inline_repair_attempts` bounds the repairs this node
         # may make, full stop; `attempt` is the count of durable `node_repaired` rows for this
         # lifecycle, so a resume continues the chain rather than restarting it. 0 still means
@@ -3504,12 +3520,23 @@ class EvaluateMixin:
                 # exit for "the repair call failed at the provider" rather than adding a
                 # second, differently-behaved one. `except Exception` deliberately does not
                 # catch `BaseException`, so cancellation and KeyboardInterrupt still travel.
-                if is_run_ending(_repair_exc):
+                if budget_stop_leaf(_repair_exc) is not None:
                     # RE-APPLIED ONTO MASTER'S REFACTOR of this block (§331). The same rule as
                     # `repo_developer`'s handler: the spend ceiling is an ENDING, not a provider
                     # failure, and routing it through the crash sentinel pauses a run that is simply
                     # finished -- 16 of the 105 runs that reached full budget in the probe corpus,
                     # every one within 0.2 s of its last call.
+                    #
+                    # `budget_stop_leaf`, NOT `is_run_ending`. The latter is literally
+                    # `isinstance(exc, BudgetExceeded)`, and the `except BudgetExceeded: raise`
+                    # clause directly above already took every one of those — so as written this
+                    # guard could not fire, and the only case it was ADDED for is the one it missed:
+                    # a ceiling the repo Developer wrapped (`raise LLMError(...) from
+                    # BudgetExceeded`) or an `ExceptionGroup` from a nested task group inside the
+                    # session. Those fell through to the `developer_crash` sentinel and
+                    # `_auto_pause_provider_failure` — a run that spent its allowance, filed as a
+                    # dead provider and paused. `budget_stop_leaf` is the module's own predicate for
+                    # exactly this and walks `exceptions`/`__cause__`/`__context__`.
                     raise
                 repaired = DeveloperResult.failed(f"{DEVELOPER_ERROR_PREFIX} {_repair_exc})")
         new_code = repaired.code

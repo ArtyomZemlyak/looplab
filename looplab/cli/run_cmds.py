@@ -34,7 +34,7 @@ from looplab.adapters.tasks import kinds_for, validate_task
 from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
-from looplab.core.models import RUN_STOP_ERROR, is_error_stop
+from looplab.core.models import RUN_STOP_ERROR
 from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
                          _apply_speculation_calibration_profile,

@@ -1283,6 +1283,14 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
     "gpu_unavailable", "gpu_unpinnable", "proxy_skipped", "superseded", "card_dropped",
     "aborted", "developer_crash", "idea_rejected", "monitor_broken", "asha_underperforming",
     "frozen",
+    # THE MODEL RAN OUT OF MOVES ON THIS CARD (`core/models.py::DEVELOPER_STUCK_PREFIX`), minted by
+    # `engine/speculation.py` and three orchestrator sites. Registered late: the guard test is
+    # one-way (registered -> minted) and could not see a reason that was minted and unregistered,
+    # so every reader deriving "is this an engine terminal" from this tuple answered no for it.
+    # Distinct from `developer_crash` — nothing is wrong with the provider — and distinct from
+    # `crash`, which means the CANDIDATE's process died and is repairable; a stuck build produced
+    # no code to repair. Whether it is BENIGN is a separate question this tuple does not answer.
+    "developer_stuck",
     # THE ENGINE ITSELF RAISED (`engine/evaluate.py::EvaluateMixin._contain_eval_crash`). Deliberately
     # here and not in `FAILURE_REASONS`: `crash` means the CANDIDATE's process died and is therefore
     # repairable, so classifying a disk-full or a read-only run directory as one hands the Developer

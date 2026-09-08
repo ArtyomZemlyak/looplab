@@ -654,8 +654,9 @@ if _RECORD:
 # (`_PROBE_NAME`), where the source is exec'd from a namespace that has no `__file__` — the probe
 # yields the pure `_fenced()` predicate and installs nothing, so it has no file to protect.
 #
-# COST: none on the READ hot path, by construction — `_SELF` is consulted in `_fenced_target` only,
-# i.e. on the mutation events a training process never raises. What it adds there is one string
+# COST: none on the READ hot path, by construction — `_SELF` is consulted on the mutation events a
+# training process never raises, and on an `open` only once the resolved-path branch has already
+# been taken AND the flags say WRITE. What it adds there is one string
 # concat and one `startswith` against a ONE-element tuple, and a create+close+remove loop
 # (N=20,000, best-of-5, one fresh process per variant) could not separate it from this box's
 # run-to-run noise in either direction. Startup pays one `realpath` of this file's directory.
@@ -903,8 +904,18 @@ def _fenced_dir(p):
     allow-list is applied to the RESOLVED path, so entering a `data:` mount that was materialized as
     a symlink into the tree still works. `os.fchdir` hands a bare fd, which `_as_str` resolves
     through `/proc/self/fd`; when even that fails the caller falls back to assuming the worst."""
+    r = _resolved_dir(p)
+    return _prefixed(r) if r is not None else None
+
+
+def _resolved_dir(p):
+    """The RESOLVED directory an `os.chdir`/`os.fchdir` argument names, or None.
+
+    Split out of `_fenced_dir` because the chdir hook has to ask TWO policy questions of one
+    directory — is it a fenced root, and is it the RECORD — and asking them of two separately
+    resolved spellings is how the two answers drift. See `_hook`'s chdir branch."""
     r = _as_str(p)
-    return _prefixed(_real(r)) if r is not None else None
+    return _real(r) if r is not None else None
 
 
 def _fenced_target(path, dir_fd):
@@ -1040,18 +1051,32 @@ def _hook(event, args):
         if bad is not None:
             _report(bad, event, _MESSAGE)
             return
-        # THE RECORD. Flags FIRST — one integer `&` on the resolved-path branch only — so a read
-        # pays nothing past the source check it already paid, and a relative open from the
-        # workdir still takes the syscall-free bail above (`p is None`).
-        if p is not None and _RECORD:
+        # THE FENCE'S OWN SOURCE, AND THE RECORD. Flags FIRST — one integer `&` on the
+        # resolved-path branch only — so a read pays nothing past the source check it already paid,
+        # and a relative open from the workdir still takes the syscall-free bail above (`p is None`).
+        if p is not None and (_SELF or _RECORD):
             try:
                 flags = args[2]
-                hit = (flags.__class__ is int and (flags & _WRITE_FLAGS) != 0
-                       and _record_write(p) is not None)
+                writing = flags.__class__ is int and (flags & _WRITE_FLAGS) != 0
             except Exception:
-                return                   # a bug in the RECORD must never break an unrelated open;
+                return                   # a bug in these rungs must never break an unrelated open;
                                          # the refusal above has already run, so nothing is let past
-            if hit:
+            # `_SELF` WAS A MUTATION-BRANCH RULE ONLY, and a plain `open(<fence>/sitecustomize.py,
+            # "w")` raises no mutation event: it is one `open` with `O_TRUNC`, so the branch that
+            # refuses the `chmod` and the `unlink` never sees it. Driven — chmod REFUSED, remove
+            # REFUSED, the truncating open ALLOWED — which left the fence rewritable by exactly the
+            # cheapest spelling, and the kernel rung under it (`_harden`'s 0444) is ignored for root
+            # (see `_harden`'s open item `fence-kernel-rung-rests-on-ambient-caps`, which this
+            # does not close: a NATIVE writer raises no audit event at all). Checked BEFORE the record and
+            # regardless of `_WRITABLE`, because `install()` passes the fence dir as a writable
+            # prefix so `_record` can append its own log — the `_busy` re-entrancy flag that append
+            # already sets is what exempts it here, rather than a prefix the candidate shares.
+            if (writing and _SELF and not getattr(_busy, "on", False)
+                    and _join(p, "").startswith(_SELF)):
+                _report(p, event, _MUTATION_MESSAGE)
+                return                   # one incident per open: under `warn` this returns, under
+                                         # `deny` `_report` has already raised
+            if writing and _RECORD and _record_write(p) is not None:
                 _report(p, event, _RECORD_MESSAGE)
         return
     if event != "os.chdir":
@@ -1095,7 +1120,8 @@ def _hook(event, args):
     # opens. It must never turn it OFF — see the MONOTONIC note below, which is the whole argument.
     global _CWD_REACHES_ROOT
     try:
-        bad = _fenced_dir(args[0])
+        _target = _resolved_dir(args[0])
+        bad = _prefixed(_target) if _target is not None else None
     except Exception:
         return
     # MONOTONIC — this flag is only ever SET here, never cleared, and that is the whole correctness
@@ -1115,8 +1141,19 @@ def _hook(event, args):
     # what makes this the monotonic assignment the comment above describes: written as a plain
     # `= args[0].__class__ is int` it CLEARS the flag whenever the target is outside every root,
     # which is the pre-event guess this whole block exists to refuse to make.
+    # AND THE RECORD, on the same resolved directory. `_prefixed` answers about the EDITABLE roots
+    # only, so a chdir INTO the run directory left this flag False, every bare relative open after
+    # it took `_resolve`'s syscall-free bail (`p is None`), and the open branch's record check —
+    # guarded on `p is not None` — never ran: `os.chdir("../..")` out of the node workdir and then
+    # `open("events.jsonl", "a")` appended a `node_evaluated` row of the candidate's choosing, under
+    # policy `deny`, with nothing logged (driven; the absolute and `../..` spellings of the same
+    # append were both refused, which is what made the gap invisible). The startup derivation
+    # `_cwd_reaches_root` has carried this clause from the beginning, so a LAUNCHER standing in the
+    # run dir was covered and a chdir there was not — one question with two answers.
     _CWD_REACHES_ROOT = (
-        _CWD_REACHES_ROOT or bad is not None or args[0].__class__ is int)
+        _CWD_REACHES_ROOT or bad is not None or args[0].__class__ is int
+        or (_target is not None and (_record_write(_target) is not None
+                                     or (_SELF and _join(_target, "").startswith(_SELF)))))
 
 
 def _chain():
@@ -1212,12 +1249,15 @@ def _harden(target: Path) -> None:
     operator's checkpoint — i.e. the `rubertlite-dr-unified-v6` node-4 incident, re-enabled from
     inside a node, for the whole rest of the run rather than for one process.
 
-    WHY THE KERNEL AND NOT THE HOOK. The thing being protected IS the hook, so a rung expressed only
-    in the hook protects itself with the object under attack. `CapEff` is 0 for a node process in
-    this container (no `CAP_DAC_OVERRIDE`), so the owner write bit is not advisory here: it is the
-    kernel refusing the `open`, before any Python runs, for every writer including the native ones
-    (`ctypes`, a C extension, a `cp`) that raise no audit event at all and that the whole module
-    docstring lists as beyond an audit hook's reach.
+    WHY THE KERNEL AND NOT THE HOOK ALONE. The thing being protected IS the hook, so a rung
+    expressed only in the hook protects itself with the object under attack. `CapEff` is 0 for a
+    node process in this container (no `CAP_DAC_OVERRIDE`), so the owner write bit is not advisory
+    here: it is the kernel refusing the `open`, before any Python runs, for every writer including
+    the native ones (`ctypes`, a C extension, a `cp`) that raise no audit event at all and that the
+    whole module docstring lists as beyond an audit hook's reach. That last clause is why this rung
+    stays even now that the hook covers the Python spelling: `_SELF` is consulted on the `open`
+    branch too (2026-09-08), so `open(<fence>, "w")` is refused by the hook as well — but a `cp`
+    raises no event, and only the mode bit reaches it.
 
     *That sentence was a fact about ONE deployment and the module could not tell which one it was
     running in — only the Docker tier drops capabilities (`--cap-drop ALL`), the subprocess tier
@@ -1229,6 +1269,15 @@ def _harden(target: Path) -> None:
     at this layer can, see below — it makes the deployment read as what it is. Re-measured on a
     root box that day, and it is not only the plain `open`: a `ctypes` `fopen(fence, "w")` from
     inside the fenced interpreter went through too, which no audit hook can ever see.*
+
+    *AND THE HOOK NO LONGER LEAVES THAT RUNG ALONE (2026-09-08, the same day, from the other side).
+    `_SELF` was consulted in `_mutation_fenced` only, and a truncating `open` raises the `open`
+    event rather than a mutation one — so the branch that refuses the chmod, the unlink and the
+    rename never saw the cheapest spelling, and `open(<fence>, "w")` was the one call this rung had
+    to stop by itself. The open branch consults `_SELF` when the flags say WRITE, so on a privileged
+    runner the PYTHON spelling is refused too (driven: ALLOWED before, REFUSED after, with the write
+    bit handed back). What `harden_guarantee` says is reduced is now exactly the residual it names —
+    a `cp`, a `ctypes` `fopen`, a C extension — which raise no audit event for any hook to see.*
 
     WHAT IT DOES NOT DO, and why `_SELF` exists beside it: the owner of a file may always chmod it
     back, and `CapEff` says nothing about that — ownership, not a capability, is what `chmod`
@@ -1323,7 +1372,10 @@ def harden_guarantee(target) -> Optional[str]:
     deployment and false of a privileged runner, and NOTHING in this module could tell them apart —
     measured 2026-09-08 on a root box: the fenced child's `open(<fence>, "w")` went straight
     THROUGH (and so did a `ctypes` `fopen`, which no audit hook sees), the run was unfenced for
-    every process after it, and not one line anywhere said the rung was inert. Only the Docker tier
+    every process after it, and not one line anywhere said the rung was inert. The Python spelling
+    of that measurement no longer holds — `_hook`'s open branch consults `_SELF` on a WRITE since
+    the same day — but the `ctypes` half does, and it is the half no hook can ever reach, which is
+    why this sentence is still worth logging on a privileged runner. Only the Docker tier
     drops capabilities (`--cap-drop ALL`); the subprocess tier inherits the engine's.
     This does not make a privileged runner safe — nothing at this layer can, since the eval owns
     the file and the directory (see the marker on `_harden`) — it makes the deployment READ as what
@@ -1345,9 +1397,17 @@ def harden_guarantee(target) -> Optional[str]:
         reasons.append(override)
     if not reasons:
         return None
+    # WHAT IS ACTUALLY LEFT, named precisely, because this sentence is the product. It used to say
+    # "a node's eval code can overwrite the generated fence", and that was measured true of the
+    # plain `open` — until `_hook`'s open branch began consulting `_SELF` on a WRITE (2026-09-08),
+    # which refuses every PYTHON spelling at every uid. Overstating the residual is the same defect
+    # as understating it: an operator who reads this and hears "the fence is off" mistrusts a rung
+    # that is in force, and the one that is genuinely gone is the one no hook can ever see.
     return ("the read fence's KERNEL self-protection rung is ADVISORY here: " + "; ".join(reasons)
-            + ". A node's eval code can overwrite the generated fence and unfence every process "
-              "the run starts afterwards; only the audit-hook rung (`_SELF`) is in force")
+            + ". A NATIVE writer a node's eval code starts (a `cp`, a `ctypes` `fopen`, any "
+              "non-Python child) can overwrite the generated fence and unfence every process the "
+              "run starts afterwards; the audit-hook rung (`_SELF`) refuses the Python spellings "
+              "and sees none of those")
 
 
 # The exact bytes `install` last wrote, per fence directory — the ENGINE process's own copy of the

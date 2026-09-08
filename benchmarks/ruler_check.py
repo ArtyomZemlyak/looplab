@@ -124,7 +124,15 @@ def latest_readings(path=DRIFT_LOG, regime: str | None = None,
     return out
 
 
-CPSAT_ROOT = "/var/tmp/looplab-bench/AlgoTune/AlgoTuneTasks"
+# WHERE THE REFERENCE TREE IS ON THIS BOX — a machine constant, so it is DISCOVERED rather than
+# only asserted (CLAUDE.md: "a constraint of the MACHINE is discovered by the thing that runs on
+# it"). The literal is this bench box's checkout and stays the default; `ALGOTUNE_TASKS_ROOT`
+# overrides it for anything that is not that box. Without the override the only way to exercise the
+# CP-SAT branch across a process boundary was to have the checkout, so `campaign.sh`'s
+# `scoring_workers` answered `?` for every task on a clean machine and four suite files failed by
+# asserting the WRONG verdict rather than by skipping — a red suite about the fixture, not the rule.
+# Read at CALL time by `uses_cpsat`, which is what lets an in-process test set the module attribute.
+CPSAT_ROOT = os.environ.get("ALGOTUNE_TASKS_ROOT") or "/var/tmp/looplab-bench/AlgoTune/AlgoTuneTasks"
 
 
 def uses_cpsat(task: str, root: str | None = None) -> bool:

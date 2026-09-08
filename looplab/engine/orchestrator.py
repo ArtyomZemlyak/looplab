@@ -2622,6 +2622,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         proposing against a fold that holds the siblings — a different (and, on the field's own
         account, stronger) way to get it, but not the same bytes.
         """
+        # THE NODE-OPEN FLOOR, before anything is proposed or reserved. Every other create path
+        # asks it — the Card lane at `_handle_create_actions`, the chunked path per chunk, the
+        # serial path per node — and this lane, added later, asked it nowhere: with
+        # `node_open_budget_floor_usd` set and `steady_state_build` on, the floor was simply inert
+        # and the run kept opening nodes until the CEILING raised `BudgetExceeded` from inside a
+        # worker, where `_create_node_guarded` turns it into one node's terminal. Asked ONCE here
+        # rather than per iteration because the loop below runs inside a task group, where a raise
+        # would tear down lanes that are already building; the same "a lane of N node(s)" shape the
+        # Card lane uses.
+        self._refuse_node_open_below_floor(f"a steady-state build lane of {len(creates)} node(s)")
         # A SEMAPHORE and not a `CapacityLimiter`: the limiter is BORROWER-scoped — the task
         # that acquires must be the one that releases — and the whole point here is that the
         # MAIN task takes the slot (so it blocks before proposing) while the LANE gives it
@@ -6060,6 +6070,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._role_pool.append(pair)
         # workers are constructed lazily, after Engine.__init__ bound the primary role
         # graph. Attach every newly reachable accountant before the first concurrent paid request.
+        #
+        # SEED FIRST, THEN BIND, the order `Engine.__init__` uses and `seed_prior_spend`'s docstring
+        # requires: the tracker takes each accountant's baseline at bind time, so seeding after it
+        # would re-record the prior spend as new usage. `Engine.__init__` ran that pass ONCE, before
+        # this pool existed, so on a RESUME every accountant a pooled `role_factory()` mints here
+        # was reachable only afterwards and started at `spent = 0.0` — a second full
+        # `llm_budget_usd` on the widest-spending lanes, exactly the §213 overshoot the seeding
+        # exists to end. It was benign only where the factory happened to hand every pooled client
+        # the SAME accountant object; that is a property of a factory, not of this seam. Idempotent
+        # per accountant (`_PRIOR_SEEDED_ATTR`), so the repeat costs one log read.
+        seed_prior_spend(self)
         bind_cost_accountants(self)
         return [(self.researcher, self.developer)] + self._role_pool[: n - 1]
 
