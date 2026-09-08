@@ -792,6 +792,32 @@ BEFORE_FIRST_NODE_BANDS = {
 }
 
 
+def live_probes(bench: str) -> set:
+    """Probe names with a process on them right now -- the only ones whose shares can still move.
+
+    §360. `before_pct` and `after_pct` are shares of a probe's OWN spend, so both move for the whole
+    life of a run: `before_pct` is 100 % at the first node and falls with every dollar after it,
+    `after_pct` grows between nodes and collapses on each one (`probe_summary` says the second in as
+    many words, and §347 is the record of my building an alarm on it anyway). A live probe's figure
+    therefore cannot be compared with a finished probe's, and the corpus bands are built from
+    finished ones.
+
+    Driven by the defect it fixes: on 2026-09-08 the running `pgr2` had spent $0.4925 with its first
+    node at $0.3877, so its `before_pct` read 79 % -- and pagerank's band, one probe wide until that
+    morning, flipped to "OUTSIDE the pinned band: pagerank median 79 % outside 20-60". By the $1
+    ceiling the same probe would read about 39 %.
+
+    The reading is `os.sched_getaffinity` through `lanes.probes()`, not a terminal event: `freeB3`
+    and `remDL` carry no `run_finished` and stopped moving weeks ago, so "not finished" would have
+    dropped two legitimate historical probes out of the corpus.
+    """
+    try:
+        return {p.get("probe") for p in lanes.probes(bench + "/..") if p.get("probe")} | \
+               {p.get("probe") for p in lanes.probes() if p.get("probe")}
+    except OSError:
+        return set()
+
+
 def check_waste_after_the_last_node(bench: str):
     """"$3.6067 of $100.2691 corpus spend (3.6 %) lands AFTER the last evaluated node ... 16 of 69
     runs end holding one" (`engine/proposal_cues.py`)
@@ -820,8 +846,10 @@ def check_waste_after_the_last_node(bench: str):
         rows = json.loads(got.stdout)
     except ValueError:
         return False, f"probe_summary produced no json ({got.stdout[-160:]!r})"
+    live = live_probes(bench)
     with_node = [r for r in rows if r.get("reached_a_node") and isinstance(r.get("after_pct"),
-                                                                          (int, float))]
+                                                                          (int, float))
+                 and r.get("probe") not in live]
     if not with_node:
         return False, "no probe on this box reached an evaluated node"
     # THE KEY IS `spent`, and guessing it cost a run: `r.get("spend") or r.get("usd")` summed to
@@ -836,9 +864,16 @@ def check_waste_after_the_last_node(bench: str):
     if total <= 0:
         return False, "probe_summary reported no spend at all -- the money key changed name"
     corpus = 100.0 * after / total
+    # HELD OUT AND SAID SO. A check whose corpus silently changes size when a probe is running
+    # reports a different band each sweep with no line explaining why (§360).
+    aside = ""
+    names = {r.get("probe") for r in rows}
+    if live & names:
+        aside = (f" [{len(live & names)} live probe(s) held out ("
+                 + ", ".join(sorted(live & names)) + "): their share of their own spend still moves]")
     detail = (f"{len(with_node)} probe(s) with a node: {corpus:.1f} % of ${total:.4f} lands after "
               f"the last evaluated node (median per probe {median:.1f} %), {holding} end holding an "
-              f"unfinished draw -- the quoted figures are 3.6 % and 16 of 69")
+              f"unfinished draw -- the quoted figures are 3.6 % and 16 of 69" + aside)
     holds = abs(corpus - 3.6) <= 0.5 and holding == 16
     return holds, detail
 
@@ -1125,8 +1160,10 @@ def check_waste_before_the_first_node(bench: str):
         rows = json.loads(got.stdout)
     except ValueError:
         return False, f"probe_summary produced no json ({got.stdout[-160:]!r})"
+    live = live_probes(bench)
     reached = [r for r in rows
-               if r.get("reached_a_node") and isinstance(r.get("before_pct"), (int, float))]
+               if r.get("reached_a_node") and isinstance(r.get("before_pct"), (int, float))
+               and r.get("probe") not in live]
     if not reached:
         return False, "no probe on this box reached an evaluated node"
     by_task = collections.defaultdict(list)
@@ -1141,9 +1178,16 @@ def check_waste_before_the_first_node(bench: str):
         if band and not band[0] <= med <= band[1]:
             loud.append(f"{task} median {med:.0f} % outside {band[0]:.0f}-{band[1]:.0f}")
     everyone = sorted(float(r["before_pct"]) for r in reached)
+    # HELD OUT AND SAID SO. A check whose corpus silently changes size when a probe is running
+    # reports a different band each sweep with no line explaining why (§360).
+    aside = ""
+    names = {r.get("probe") for r in rows}
+    if live & names:
+        aside = (f" [{len(live & names)} live probe(s) held out ("
+                 + ", ".join(sorted(live & names)) + "): their share of their own spend still moves]")
     detail = (f"{len(reached)} probe(s): median {everyone[len(everyone) // 2]:.0f} % of spend goes "
               f"BEFORE the first evaluated node (max {max(everyone):.0f} %); by task: "
-              + "; ".join(said))
+              + "; ".join(said) + aside)
     if loud:
         detail += "; OUTSIDE the pinned band: " + ", ".join(loud)
     return not loud, detail

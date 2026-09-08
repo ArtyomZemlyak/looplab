@@ -201,6 +201,19 @@ def probe_budget(root: str, name: str, default: float = 1.0) -> float:
     return value if value > 0 else default
 
 
+def is_finished(root: str, name: str) -> bool:
+    """Is this run over -- `run_finished`, or a pause that is really the end of the money?
+
+    §360. The same rule `probe_calls` reports as `finished`, exposed on its own because the callers
+    that need it do not need the span walk beside it. It exists because the corpus checks were
+    reading LIVE probes: `before_pct` and `after_pct` are shares of a probe's own spend and move for
+    the whole life of a run, so a running probe's figure is not comparable with a finished one's.
+    `probe_summary` says so in as many words about `after%`, and the same is true of `before%` from
+    the other end -- it is 100 % at the first node and falls with every dollar after it.
+    """
+    return _run_finished(root, name) or _at_ceiling(root, name)
+
+
 def _at_ceiling(root: str, name: str, budget: float | None = None) -> bool:
     """A pause that is really the end of the money -- see `_paused`."""
     budget = probe_budget(root, name) if budget is None else budget
