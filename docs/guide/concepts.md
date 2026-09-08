@@ -2077,7 +2077,9 @@ Where each concept lives in the code:
 | The two pacing rules (node-count `cadence_due`, occupancy `occupancy_due`) | `engine/cadence.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
 | HTTP control-payload validation (`normalize_control` + the five per-event tables) | `serve/control_validation.py` |
+| The receipt PROTOCOL (identity, phase, the paranoid read/save) shared by every irreversible transaction | `core/receipt.py` |
 | Durable whole-run Replay/deletion receipts + the destructive-quiescence ladder | `serve/durable_op.py`, `serve/reset_transaction.py`, `serve/deletion_transaction.py` |
+| Durable receipt for the agent-facing node purge (its phase lattice + the crash fence) | `tools/node_purge_receipt.py`, `tools/run_control_tools.py` |
 | Serve-side paid work: metering lease + claim→terminal receipt ledger | `serve/paid_work.py`, `serve/paid_ledger.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |

@@ -650,8 +650,12 @@ hook). The `mcp` SDK is absent here, so `_mcp_transport.py` could not be importe
 | TO-16 | L | C | `tools/agents_md.py`, `retrieval.py`, `edit_match.py`, `log_tools.py`'s 262-line measurement docstring | Non-provider helpers with one consumer each in a package whose name promises providers. | Move beside their consumers; move the ledger to a doc it can cite by symbol. |
 
 Tracked: `run-lifecycle-primitives-cannot-move-down` (the injected `lifecycle=` has zero
-production callers), `machine-runs-tools-not-split`, `agent-node-purge-has-no-durable-receipt`,
-`cross-run-read-model-still-private`, `run-path-validators-not-unified`, two CODEX notes.
+production callers), `cross-run-read-model-still-private`, `run-path-validators-not-unified`, two
+CODEX notes. *(2026-09-08: `machine-runs-tools-not-split` and
+`agent-node-purge-has-no-durable-receipt` closed — doc 25 TO-02 and doc 34 D-01. The TO-03/TO-09
+rows above still describe the tools layer's dual write and the hand-copied generation preimage;
+those moved file, not state, and now live in `tools/run_control_tools.py` and
+`tools/run_command_adapter.py`.)*
 
 **Top moves.** (1) One contract scan for the whole package (names unique, `bind_state` arity,
 never-raise, every `(kind, tool)` in `_ACTION_RISK`, every capability name a spec name). (2) A

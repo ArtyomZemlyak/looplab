@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 from looplab.core.models import RunState
 from looplab.tools._base import fn_spec
+from looplab.tools.node_purge_receipt import purge_operation_id
 from looplab.tools.run_command_adapter import (
     _deletion_operation_id, _render_command_result, _render_deletion_result, _RunCommandAdapter)
 from looplab.tools.turn_mutation_fence import (
@@ -671,17 +672,25 @@ class RunControlTools:
                 "delete_node", rid, rd,
                 {"node_id": nid, "subtree": sorted(subtree), "purge": purge,
                  "expected_tail": expected_tail},
-                command_backed=False, expected_generation=formed_generation) as (_key, generation):
+                command_backed=False, expected_generation=formed_generation) as (key, generation):
             pass
+        # The purge's operation id comes FROM the journal key, which is doc 34 D-01's first question
+        # answered: the turn that stages the intent is the thing that owns the id, and a recovered
+        # turn reconstructs the same key and therefore the same id. `key` is "" for an embedder that
+        # constructs this provider with no journal, and `purge_operation_id` mints a uuid4 there.
+        operation_id = purge_operation_id(key) if purge else ""
         with self._commands.destructive_guard(
                 rd, "delete node", expected_generation=generation) as canonical:
             if self._live(canonical):
                 return f"(run {rid} is LIVE — stop it before physically rewriting its event log)"
             return self._commit_delete_node_snapshot(
-                rid, canonical, nid, subtree, expected_tail, purge=purge)
+                rid, canonical, nid, subtree, expected_tail, purge=purge,
+                operation_id=operation_id, expected_generation=generation)
 
     def _commit_delete_node_snapshot(self, rid: str, rd: Path, nid: int,
-                                     subtree: set[int], expected_tail: int, *, purge: bool) -> str:
+                                     subtree: set[int], expected_tail: int, *, purge: bool,
+                                     operation_id: str = "",
+                                     expected_generation: str = "") -> str:
         from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, _interprocess_lock
         from looplab.events.replay import fold
         from looplab.events.types import ASSISTANT_APPENDABLE, EV_NODE_TOMBSTONED
@@ -698,7 +707,9 @@ class RunControlTools:
             if lifecycle.engine_alive(rd):
                 return f"(run {rid} became LIVE while awaiting permission — stop it and retry)"
             if purge:
-                return self._purge_node_snapshot(rid, rd, nid, subtree, expected_tail)
+                return self._purge_node_snapshot(
+                    rid, rd, nid, subtree, expected_tail,
+                    operation_id=operation_id, expected_generation=expected_generation)
             with _interprocess_lock(rd / "engine.lock"):
                 store = EventStore(evp)
                 events = store.read_all()
@@ -729,15 +740,18 @@ class RunControlTools:
                 f"reversible; {live_left} live nodes left, best now #{state.best_node_id}. "
                 f"Use purge=true for an irreversible physical compaction.)")
 
-    # DEFERRED DECISION D-01 (docs/34): an irreversible multi-file transaction with NO durable
-    # receipt, while its three siblings (reset, deletion, trace clear) all go through
-    # `serve/durable_op.py::ReceiptProtocol`. A death between the event-log rewrite and the span
-    # publish leaves a renumbered log whose `seq` no longer matches the spans sidecar, with nothing
-    # on disk saying an operation was in flight. Adopting a receipt here needs answers this code
-    # cannot give itself — who owns the operation id when an AGENT initiates it, and what recovery
-    # should do with no operator in the loop. Read docs/34 before adding a fourth receipt protocol.
+    # DEFERRED DECISION D-01 (docs/34), RESOLVED 2026-09-08. This was an irreversible multi-file
+    # transaction with NO durable receipt while its three siblings (reset, deletion, trace clear)
+    # all kept one, so a death between the event-log rewrite and the span publish left a renumbered
+    # log whose `seq` no longer matched the spans sidecar, with nothing on disk saying an operation
+    # was in flight. It now writes one — `tools/node_purge_receipt.py`, the SCHEMA half of the same
+    # `core/receipt.py` protocol the other three use, NOT a fourth protocol — and the two answers
+    # doc 34 said this code could not give itself are stated there: the operation id comes from the
+    # turn's own mutation journal, and recovery REFUSES rather than resumes. Read docs/34 D-01
+    # before changing what a phase means.
     def _purge_node_snapshot(self, rid: str, rd: Path, nid: int,
-                             subtree: set[int], expected_tail: int) -> str:
+                             subtree: set[int], expected_tail: int, *,
+                             operation_id: str = "", expected_generation: str = "") -> str:
         """Physically compact exactly the stopped tree snapshot the operator approved."""
         import json
         import shutil
@@ -747,6 +761,10 @@ class RunControlTools:
         from looplab.events.eventstore import EventStore, _interprocess_lock, iter_event_jsonl
         from looplab.events.replay import fold
         from looplab.events.span_index import invalidate, span_destructive_write_guard
+        from looplab.tools.node_purge_receipt import (
+            NodePurgeReceiptError, advance_purge_receipt, describe_purge_recovery,
+            prepare_purge_receipt, purge_receipt_path, save_purge_receipt,
+            unresolved_purge_receipts)
 
         evp = rd / "events.jsonl"
         spans = rd / "spans.jsonl"
@@ -759,6 +777,24 @@ class RunControlTools:
               _interprocess_lock(Path(str(evp) + ".lock")),
               span_destructive_write_guard(spans, required=True)):
             self._commands._reject_unresolved_reset(rd, "purge nodes")
+            # An earlier purge of THIS RUN that never reached `succeeded` is a fail-closed fence on
+            # every later one, and it is the whole point of the receipt: the log is run-global, so a
+            # half-applied compaction of one subtree is not something a purge of another may be
+            # layered on top of. An unreadable receipt RAISES out of here rather than being skipped
+            # — "no operation" and "an operation whose record I cannot read" must never collapse.
+            try:
+                stalled = unresolved_purge_receipts(rd)
+            except NodePurgeReceiptError as exc:
+                return (f"(run {rid} has a node-purge receipt that cannot be read ({exc}) — "
+                        "refusing irreversible purge; inspect the run directory)")
+            if stalled:
+                # The oldest one is described because it is the one whose backup holds the run as it
+                # was; the COUNT is stated beside it so a reader is never shown one of several and
+                # left to think it is the only one.
+                oldest = min(stalled, key=lambda row: row[1]["created_at"])[1]
+                more = f" ({len(stalled)} unresolved in total)" if len(stalled) > 1 else ""
+                return (f"(run {rid} has an unresolved node purge{more} — refusing irreversible "
+                        "purge. " + describe_purge_recovery(oldest) + ")")
             source_store = EventStore(evp)
             events = source_store.read_all()
             source_bytes = evp.read_bytes()
@@ -860,22 +896,56 @@ class RunControlTools:
                     f"(run {rid} trace projections could not be retired — refusing irreversible "
                     "purge; repair the run-owned trace sidecars first)"
                 )
+
+            # THE RECEIPT, published after the last step that can still refuse and before the first
+            # one this transaction cannot take back, so a REFUSED purge leaves no record and fences
+            # nothing. It names the backup chosen above — recovery reads its restore source out of
+            # the record rather than guessing at a `bak-del<N>` suffix — plus the operation, the
+            # subtree and the tail this attempt was approved against.
+            receipt_path = purge_receipt_path(rd, operation_id) if operation_id else None
+            receipt = None
+            if receipt_path is not None:
+                try:
+                    receipt = save_purge_receipt(receipt_path, prepare_purge_receipt(
+                        rd, operation_id=operation_id, node_id=nid, subtree=subtree,
+                        expected_generation=expected_generation, expected_seq=expected_tail,
+                        backup=_backup.name))
+                except NodePurgeReceiptError as exc:
+                    prepared_trace.cleanup()
+                    return (f"(run {rid} purge receipt could not be published durably ({exc}) — "
+                            "refusing irreversible purge; nothing was rewritten)")
+
+            def _advance(phase: str) -> None:
+                """Record that *phase* COMPLETED. Lagging is the safe direction and is deliberate:
+                a receipt that failed to advance under-states progress, so the next attempt refuses
+                and a human looks — where an over-stated phase would say a step happened that did
+                not."""
+                nonlocal receipt
+                if receipt_path is not None and receipt is not None:
+                    receipt = advance_purge_receipt(receipt_path, receipt, phase)
+
             try:
                 shutil.copy(evp, _backup)
+                _advance("backed_up")
                 atomic_write_text(evp, "".join(json.dumps(record) + "\n" for record in kept))
+                _advance("log_rewritten")
                 if prepared_trace.temporary is not None:
                     trace_rewrite.publish_prepared_snapshot(prepared_trace, spans)
+                _advance("trace_published")
                 for deleted_id in subtree:
                     shutil.rmtree(rd / "nodes" / f"node_{deleted_id}", ignore_errors=True)
+                _advance("workdirs_removed")
+                _advance("succeeded")
             finally:
                 prepared_trace.cleanup()
 
         remaining = fold(EventStore(evp).read_all())
         broken = sorted({parent for node in remaining.nodes.values() for parent in node.parent_ids
                          if parent not in remaining.nodes})
+        operation = f"; operation {operation_id}" if operation_id else ""
         return (f"(deleted node(s) {sorted(subtree)} from {rid}; {len(remaining.nodes)} nodes left, "
                 f"best now #{remaining.best_node_id}, broken parent links: {broken or 'none'}. "
-                f"Backup: events.jsonl.bak-del{nid})")
+                f"Backup: {_backup.name}{operation})")
 
     def _delete_run(self, rid: str, rd: Path) -> str:
         if self._live(rd):
