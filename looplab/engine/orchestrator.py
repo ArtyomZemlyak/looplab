@@ -1727,7 +1727,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._search_answers: Optional[str] = None
         self._search_hidden_ids: frozenset = frozenset()
         self._holdout_idx: frozenset = self._build_holdout_idx(self._holdout_fraction)
-        self._apply_search_split()
+        # `refuse=False`: this construction reads the LIVE fraction, which `_reentry_repin` is about
+        # to overwrite with the one `run_started` pinned (invariant #6). The refusal is made there,
+        # against the value that actually decides the protocol — see `apply_search_split`.
+        self._apply_search_split(refuse=False)
         self._holdout_epoch = 0
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
@@ -5988,6 +5991,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_graded_output_name": ("holdout", None),
         "_apply_host_grade": ("holdout", None),
         "_host_score_split": ("holdout", None),
+        # The one ASYNC delegator in the table, and it went undeclared from 2026 until
+        # 2026-09-08 because the guard filtered on `ast.FunctionDef`, which does not match
+        # `ast.AsyncFunctionDef` — so an async delegator was invisible to it in BOTH
+        # directions. Lane `None` is correct and checked rather than assumed:
+        # `HoldoutGrader.holdout_phase` makes no provider call and carries no `in_llm_lane`.
+        "_holdout_phase": ("holdout", None),
         "_build_holdout_idx": ("holdout", None),
         "_apply_search_split": ("holdout", None),
         "_holdout_topk": ("holdout", None),
@@ -7059,11 +7068,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         "auto-paused: a Developer session crashed (LLM unreachable or a hard "
                         "error, unresolved within the node) — resume once it's fixed")
         self._consume_node_build_telemetry(
-            node_id, 0, researcher=researcher, developer=developer, report=built.last_report)
+            node_id, 0, researcher=researcher, developer=developer, report=built.last_report,
+            audit_extra=built.audit_extra)
 
     def _consume_node_build_telemetry(self, node_id: int, generation: int,
                                       *, researcher=None, developer=None,
-                                      report=AuditMixin._REPORT_OMITTED) -> None:
+                                      report=AuditMixin._REPORT_OMITTED,
+                                      audit_extra=AuditMixin._REPORT_OMITTED) -> None:
         """Attribute this build's role telemetry to the node it belongs to, then clear it.
 
         All three creation paths end with this triple, and it is the CONSUMING half of the pairing
@@ -7080,7 +7091,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         """
         # `report=` is THIS build's envelope copy when the caller has one — see
         # `_emit_agent_report` for the unlocked window the instance read still sits in.
-        self._emit_agent_report(node_id, report=report,
+        self._emit_agent_report(node_id, report=report, audit_extra=audit_extra,
                                 **({"developer": developer} if developer is not None else {}))
         self._emit_hypothesis_ranked(
             node_id, generation, **({"researcher": researcher} if researcher is not None else {}))
@@ -7545,7 +7556,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self.store.append(*crash_terminal)
                 if self._developer_crash_pause_due(fold(self.store.read_all()), node.id):
                     self.store.append(*crash_pause)
-        self._consume_node_build_telemetry(node.id, generation, report=built.last_report)
+        self._consume_node_build_telemetry(node.id, generation, report=built.last_report,
+                                           audit_extra=built.audit_extra)
 
     def _prepare_injected_node(
         self,
@@ -7778,7 +7790,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if developer_called:
             # `_inj` is bound by the same `if developer_called` above; a build that never called the
             # Developer does not reach this line at all.
-            self._consume_node_build_telemetry(node_id, 0, report=_inj.last_report)
+            self._consume_node_build_telemetry(node_id, 0, report=_inj.last_report,
+                                               audit_extra=_inj.audit_extra)
 
     def _activate_spec(self, proposal: dict) -> None:
         """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec
@@ -7993,8 +8006,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
         return self.holdout.build_holdout_idx(fraction, epoch)
 
-    def _apply_search_split(self) -> None:
-        return self.holdout.apply_search_split()
+    def _apply_search_split(self, *, refuse: bool = True) -> None:
+        return self.holdout.apply_search_split(refuse=refuse)
 
     def _holdout_topk(self, state: RunState) -> list[int]:
         return self.holdout.holdout_topk(state)

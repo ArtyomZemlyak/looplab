@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+import pathlib
 import textwrap
 import threading
 import time
@@ -44,7 +45,12 @@ from tests.factories import make_engine
 # ------------------------------------------------------------------------------- 1. THE ENVELOPE
 def test_the_envelope_is_the_registry_plus_code_and_is_immutable():
     fields = {f.name for f in dataclasses.fields(DeveloperResult)}
-    assert fields == set(DEVELOPER_OUTPUT_ATTRS) | {"code"}, (
+    # `audit_extra` is NAMED, not waived: it is the one output of a Developer call that the
+    # registry cannot hold, because `DEVELOPER_OUTPUT_ATTRS` registers attributes a Developer
+    # ASSIGNS and this is a METHOD a wrapper offers. It rode the shared instance until
+    # 2026-09-08, in the same unlocked window `last_report` was moved here to escape. Listing it
+    # keeps the rule below exact — a future field still cannot slip in unnamed.
+    assert fields == set(DEVELOPER_OUTPUT_ATTRS) | {"code", "audit_extra"}, (
         "a registry member with no envelope field is a side channel the engine can no longer read; "
         "an envelope field with no registry member is a channel no Developer produces")
     result = NodeBuildMixin._capture_developer_result(
@@ -196,6 +202,77 @@ async def test_the_engine_keeps_turning_while_a_repair_is_in_flight(tmp_path):
         "the envelope's files must be what the durable row carries")
 
 
+def test_the_wrapper_annotation_rides_the_envelope_not_the_shared_instance():
+    """`audit_extra()` was the last channel `_emit_agent_report` still called on the INSTANCE.
+
+    It is a wrapper-specific annotation (`ValidatingDeveloper`: attempts / fell_back / shipped_ok)
+    built from the wrapper's own state, and it was invoked AFTER `developer_call_lock` was
+    released — the same unlocked window `last_report` was moved onto `DeveloperResult` to escape.
+    Between a worker returning from `_run_developer` and reaching that line, a sibling build's
+    `_record` overwrites all three, so this node's `agent_validated` row carries ANOTHER node's
+    attempt count and fallback flag, with nothing red either way.
+
+    Driven: capture node A's envelope, let a "sibling" rewrite the shared instance, then emit. The
+    row must describe the call the envelope was taken from.
+
+    MUTATION: drop `audit_extra=` from the `_emit_agent_report` call, or
+    `audit_extra=audit_extra_of(developer)` from the capture -> this is red.
+    """
+    from looplab.core.validate import AgentReport
+
+    class _Wrapper:
+        """ONE shared instance, exactly as `ValidatingDeveloper` is shared across builds."""
+
+        def __init__(self):
+            self.last_report = AgentReport()
+            self.attempts = 1
+            self.fell_back = False
+
+        def audit_extra(self):
+            return {"attempts": self.attempts, "fell_back": self.fell_back, "shipped_ok": True}
+
+    dev = _Wrapper()
+    built = NodeBuildMixin._capture_developer_result(dev, _GOOD)
+    assert built.audit_extra == {"attempts": 1, "fell_back": False, "shipped_ok": True}, (
+        "the capture did not read the wrapper's annotation at all")
+
+    dev.attempts, dev.fell_back = 9, True      # …the sibling build, between capture and emit
+
+    rows: list[tuple] = []
+    engine = SimpleNamespace(store=SimpleNamespace(append=lambda t, d: rows.append((t, d))),
+                             developer=dev, _REPORT_OMITTED=AuditMixin._REPORT_OMITTED)
+    AuditMixin._emit_agent_report(engine, 7, developer=dev, report=built.last_report,
+                                  audit_extra=built.audit_extra)
+    assert rows, "no agent_validated row was appended"
+    data = rows[-1][1]
+    assert data["node_id"] == 7
+    assert (data["attempts"], data["fell_back"]) == (1, False), (
+        f"the ADR-7 audit row carries the SIBLING build's attempt count and fallback flag: {data}")
+
+    # …and the instance read stays the documented FALLBACK for a path that made no fresh call.
+    rows.clear()
+    AuditMixin._emit_agent_report(engine, 8, developer=dev, report=built.last_report)
+    assert rows[-1][1]["attempts"] == 9, (
+        "a path with no envelope must still read the instance — that is the stated fallback")
+
+    # …and junk from a stub reads as "no annotation", never as a raise out of a build.
+    class _Junk:
+        last_report = AgentReport()
+
+        def audit_extra(self):
+            return "not a dict"
+
+    assert NodeBuildMixin._capture_developer_result(_Junk(), _GOOD).audit_extra is None
+
+    class _Raiser:
+        last_report = AgentReport()
+
+        def audit_extra(self):
+            raise RuntimeError("a wrapper that cannot describe itself")
+
+    assert NodeBuildMixin._capture_developer_result(_Raiser(), _GOOD).audit_extra is None
+
+
 # ------------------------------------------------------------------- 4. THE LOOP (serial build)
 class _SlowBuilder:
     def __init__(self, ticks):
@@ -258,6 +335,55 @@ def test_every_build_site_leaves_the_loop_through_the_offload_helper():
     assert any(isinstance(n, ast.Name) and n.id == "proposal_limiter" for n in ast.walk(tree))
     assert any(isinstance(n, ast.Attribute) and n.attr == "_create_node"
                for n in ast.walk(function_tree(Engine._offload_node_build)))
+
+
+def test_a_site_that_carries_the_report_carries_the_annotation_too():
+    """THE WIRING HALF of the envelope's `audit_extra`, which no driven test can reach.
+
+    `_emit_agent_report` prefers the envelope for BOTH channels, but only when a caller hands them
+    over; a caller that passes `report=` and drops `audit_extra=` falls back to the instance read
+    for the annotation alone — which is the pre-2026-09-08 race, silently, on a site that looks
+    fixed. The two travel together or the receipt is half taken from another call.
+
+    AST, and per call site: driving `_emit_agent_report` directly cannot see a CALLER dropping the
+    kwarg, which is exactly the mutation this refuses.
+    """
+    import ast as _ast
+
+    from looplab.engine.orchestrator import Engine
+
+    checked = 0
+    for fn in (Engine._consume_node_build_telemetry,):
+        for call in _attr_calls(fn, "_emit_agent_report"):
+            kwargs = {k.arg for k in call.keywords}
+            if "report" not in kwargs:
+                continue
+            checked += 1
+            assert "audit_extra" in kwargs, (
+                "a site hands over the report from the envelope and lets the ANNOTATION fall back "
+                "to the shared instance — half this receipt then describes another build")
+    for fn in (Engine._create_node_scoped, Engine._rerun_node, Engine._create_injected_node):
+        for call in _attr_calls(fn, "_consume_node_build_telemetry"):
+            kwargs = {k.arg for k in call.keywords}
+            if "report" not in kwargs:
+                continue
+            checked += 1
+            assert "audit_extra" in kwargs, (
+                f"{fn.__qualname__} forwards the report and drops the annotation")
+    # …and the ablation lane, which emits directly rather than through the consumer.
+    from looplab.engine import ablation as _abl
+
+    abl_tree = _ast.parse(pathlib.Path(_abl.__file__).read_text(encoding="utf-8"))
+    for call in [n for n in _ast.walk(abl_tree) if isinstance(n, _ast.Call)
+                 and getattr(n.func, "attr", None) == "_emit_agent_report"]:
+        kwargs = {k.arg for k in call.keywords}
+        if "report" not in kwargs:
+            continue
+        checked += 1
+        assert "audit_extra" in kwargs, (
+            f"ablation.py:{call.lineno} forwards the report and drops the annotation")
+    assert checked >= 5, (
+        f"only {checked} report-carrying sites found — re-point this rule; the callers moved")
 
 
 def test_the_three_repair_path_calls_leave_through_the_sink_helper():
@@ -577,6 +703,79 @@ def test_a_best_of_n_audit_row_describes_the_candidate_that_SHIPPED():
     solo.implement(object())
     solo_inner.last_report = "moved on"     # …and it is a READ-THROUGH, not a stored copy
     assert solo.last_report == "moved on"
+
+    # THE `n == 1` CLEAR IS NOT DEAD CODE, and it stopped being defensive the day `last_report`
+    # gained a setter: `_discard_node_build_telemetry` writes `None` INTO `_chosen_report`, which
+    # is not the sentinel, so without the clear the next single-shot build would answer that
+    # discarded `None` forever instead of reading through to the inner.
+    solo.last_report = None                 # what the discard does
+    assert solo.last_report is None, "fixture: the discard's write must stand"
+    solo.implement(object())
+    solo_inner.last_report = "after the discard"
+    assert solo.last_report == "after the discard", (
+        "a single-shot build kept a discarded pick and stopped reading through")
+
+    # AND `repair_from`, the fourth site, which nothing drove: it clears for the same reason
+    # `repair` does — a repair is single-shot, so reporting the previous BUILD's chosen candidate
+    # would name a call this receipt was not taken from.
+    class _FromInner(_Inner):
+        def repair_from(self, _idea, _node, _err):
+            self.last_report = "repair-from-report"
+            return "fixed"
+
+    from_inner = _FromInner()
+    from_dev = BestOfNDeveloper(from_inner, n=2, listwise=False, foresight=False)
+    from_dev.implement(object())
+    assert from_dev.last_report == "report-1", "fixture: a build pick must be standing"
+    from_dev.repair_from(object(), object(), "err")
+    assert from_dev.last_report == "repair-from-report", (
+        "`repair_from` kept the previous build's chosen candidate on the receipt")
+
+
+def test_the_discard_can_still_clear_a_best_of_n_report():
+    """A read-only property silently disarmed `_discard_node_build_telemetry`.
+
+    The discard clears an abandoned build's channels with
+    `if hasattr(current, attr): setattr(current, attr, None); break`, inside a blanket
+    `except (AttributeError, TypeError): pass`. Against a property with NO setter that `setattr`
+    raises, the handler swallows it, the `break` never runs, and the walk nulls the INNER developer
+    instead — which was sufficient while `last_report` read through to that inner, and stopped being
+    sufficient the moment the wrapper began answering from its own chosen-candidate slot.
+
+    So the fix that made the audit row name the shipped candidate re-opened the failure the discard
+    exists to prevent: an abandoned build's report stands on the instance, and the one
+    `_emit_agent_report` still on the instance read (`speculation.py`'s producer emit) stamps it on
+    the NEXT node. Driven, and A/B'd against the parent commit — the discard worked before, and did
+    not after.
+
+    MUTATION: delete the `@last_report.setter` -> this is red.
+    """
+    from looplab.search.best_of_n import BestOfNDeveloper
+
+    class _Inner:
+        def __init__(self):
+            self.last_files, self.last_deleted, self.last_footprint = {}, [], None
+            self.last_report, self.calls = "before-any-build", 0
+
+        def implement(self, _idea):
+            self.calls += 1
+            self.last_report = f"cand-{self.calls}"
+            return "def solve():\n    return 1\n" if self.calls == 1 else "x"
+
+    inner = _Inner()
+    dev = BestOfNDeveloper(inner, n=2, listwise=False, foresight=False)
+    dev.implement(object())
+    assert dev.last_report == "cand-1"
+
+    dev.last_report = None                 # exactly what the discard does, on the wrapper it reaches
+    assert dev.last_report is None, (
+        "the abandoned build's report survived the discard and will be stamped on the next node")
+    # …and it does NOT fall back to the inner's, or the discard would be a no-op by another route.
+    assert inner.last_report == "cand-2"
+
+    # A later build still gets its own pick, so the setter is a clear and not a freeze.
+    dev.implement(object())
+    assert dev.last_report == "cand-3"
 
 
 def test_no_build_site_clears_the_footprint_on_its_own():

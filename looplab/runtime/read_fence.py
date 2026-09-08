@@ -130,10 +130,17 @@ mount run workdirs live on, so the original figure understates it) versus +311 n
 the prefix compare, i.e. unaffordable on a training process that reads thousands of shards. The only
 symlinks the engine itself creates into a source are the allow-listed mounts.
 
-The RARE events do resolve symlinks, and the asymmetry is the whole design: `os.chdir` and the
-mutation events happen a handful of times per process, so they can buy `realpath` (memoized per
-directory, `_real`) and a `/proc/self/fd` lookup (`_fd_path`, ~2 us and flat across filesystems)
-that the hot path cannot. Before that, `os.chdir(<a workdir symlink pointing at the source>)` was
+The RARE events do resolve symlinks, and the asymmetry is the whole design: `os.chdir`, the
+mutation events and — since 2026-09-08 — a WRITING `open` happen a handful of times per process,
+so they can buy `realpath` (memoized per directory, `_real`) and a `/proc/self/fd` lookup
+(`_fd_path`, ~2 us and flat across filesystems) that the hot path cannot. The writing `open` was
+the last one still comparing the unresolved spelling, and it is the branch that guards the run
+RECORD and this file: `/proc/self/root/<abs path>` needs no setup at all, `/proc/self/fd/N/<rest>`
+needs one descriptor, and a symlink to `/` made in the candidate's own workdir and then used under
+a BARE RELATIVE name took the syscall-free bail outright. Driven: a forged `node_evaluated` row
+into `events.jsonl` and an append to this file, with both rungs consulted and both answering None
+— i.e. every surface reported the fence intact while it was being rewritten through. The read
+residual below is unchanged and unaffordable for the same measured reason it always was. Before that, `os.chdir(<a workdir symlink pointing at the source>)` was
 neither refused nor recognised, and every bare relative name after it read the tree — which made the
 fast bail's stated justification false in a way `_CWD_REACHES_ROOT` alone could not see, because the
 flag is re-derived from the chdir ARGUMENT and that argument was a symlink.
@@ -634,9 +641,18 @@ _seen = set()
 # `O_APPEND` keeps concurrent launches' short lines atomic, exactly as the per-call
 # `open(..., "a")` relied on. A fence that cannot open its diagnostic still fences.
 _LOG_FD = -1
+_LOG_ID = None
+# OPENED UNDER THE PROBE SEAM TOO, and that is deliberate rather than an oversight. The seam
+# (`_PROBE_NAME`) yields the pure `_fenced()` predicate and installs no hook, but the two tests
+# that exercise `_record`'s BOUND in process — a read and a mutation of the same path, and the
+# stderr twin — exec this body with a real `log=` and then read the file, so gating the open on
+# `__name__` left them with no log at all. The cost is one descriptor per exec when a log path
+# is given; `tools/dev_probe.py` renders with `log=""`, so no engine path leaks one.
 if _LOG:
     try:
         _LOG_FD = os.open(_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        _st = os.fstat(_LOG_FD)
+        _LOG_ID = (_st.st_dev, _st.st_ino)
     except OSError:
         _LOG_FD = -1
 
@@ -677,12 +693,17 @@ if _RECORD:
 # (`_PROBE_NAME`), where the source is exec'd from a namespace that has no `__file__` — the probe
 # yields the pure `_fenced()` predicate and installs nothing, so it has no file to protect.
 #
-# COST: none on the READ hot path, by construction — `_SELF` is consulted on the mutation events a
-# training process never raises, and on an `open` only once the resolved-path branch has already
-# been taken AND the flags say WRITE. What it adds there is one string
-# concat and one `startswith` against a ONE-element tuple, and a create+close+remove loop
-# (N=20,000, best-of-5, one fresh process per variant) could not separate it from this box's
-# run-to-run noise in either direction. Startup pays one `realpath` of this file's directory.
+# COST, and the honest form of it. Not "none": a read that reaches the resolved-path branch pays
+# one extra `args[2]` load and one integer `&` before the branch returns — measured at +99..207 ns
+# per open on this box, which is real and is against a ~11,250 ns baseline. It is "none" only for
+# the read that takes `_resolve`'s syscall-free relative bail, which is the branch nearly every
+# open in a training process takes. What `_SELF` and `_RECORD` add PAST the flags test — a
+# `_mutation_path` resolution, one string concat, one `startswith` against a ONE-element tuple —
+# is on the WRITE branch only, and a create+close+remove loop (N=20,000, best-of-5, one fresh
+# process per variant) could not separate it from this box's run-to-run noise in either direction.
+# Startup pays one `realpath` of this file's directory. The claim was written as "none on the READ
+# hot path, by construction" and a measurement falsified the "none"; the construction argument was
+# always about the WRITE gate, which stands.
 try:
     _SELF = (_realpath(os.path.dirname(os.path.abspath(__file__))) + _SEP,)
 except Exception:
@@ -773,6 +794,13 @@ def _cwd_reaches_root():
     # A cwd under the RECORD but outside every writable prefix (a launcher standing in the run
     # dir itself) makes a bare relative write reach the record without a `..`: resolve.
     if _RECORD and d.startswith(_RECORD) and not (_WRITABLE and d.startswith(_WRITABLE)):
+        return True
+    # …and the same argument for the fence's OWN directory, which is neither a root nor the record.
+    # `install()` passes it as a WRITABLE prefix so `_record` can append its log, so the clause
+    # above answers False for it: a launcher whose cwd IS the fence directory could
+    # `open("sitecustomize.py", "w")` under a bare relative name, take the syscall-free bail, and
+    # never reach the `_SELF` rung at all.
+    if _SELF and d.startswith(_SELF):
         return True
     if not d.startswith(_ROOTS):
         return False
@@ -998,6 +1026,26 @@ def _mutation_path(path, dir_fd):
             if base is None:
                 return None
         r = _join(base, r)
+    return _resolve_links(r)
+
+
+def _resolve_links(r):
+    """An absolute path with its DIRNAME resolved and its final component kept verbatim.
+
+    Split out of `_mutation_path` because the `open` branch's WRITE rungs need exactly the same
+    resolution and were doing without it. `_resolve` is syscall-free by design -- the read hot path
+    cannot afford `realpath` (+88 %%, ~474 us on geesefs) -- so the string it hands back is a
+    NORMALIZED SPELLING, not an identity, and `/proc/self/root/<abs path>`, `/proc/self/fd/N/...`
+    and any self-made symlink into the fence directory all fail a byte-exact prefix compare against
+    `_SELF` / `_RECORD` while naming exactly those files. Driven 2026-09-08: a fenced child forged a
+    terminal into the run record and overwrote this file through `/proc/self/root`, with both rungs
+    consulted and both answering None.
+
+    A WRITE can afford what a read cannot -- the same trade the mutation branch already makes and
+    states ("a node deletes a handful of times and opens millions") -- and `_real` is memoized per
+    DIRECTORY, so a loop writing 10,000 files into one directory pays one call. The final component
+    stays verbatim for the reason `_mutation_path` records: these calls act on the LINK.
+    """
     head, _sep, tail = r.rpartition(_SEP)
     return _join(_real(head or _SEP), tail)
 
@@ -1012,9 +1060,12 @@ def _dir_fd(args, index):
 
 
 def _record(path, rung, event):
-    """Append one line to the run's fence diagnostic. Re-entrancy-guarded: this opens a file, which
-    raises `open` again — the guard makes that provably terminate rather than relying on the fence
-    log being outside every root.
+    """Append one line to the run's fence diagnostic, through the descriptor opened at import.
+
+    NOT RE-ENTRANCY-GUARDED, and it no longer needs to be: this opens nothing, so it raises no
+    `open` event and cannot re-enter the hook. The paragraphs below record why the guard that used
+    to be here was thread-local and why it had to go — both are history now, kept because the second
+    is the reason this function writes through a descriptor at all.
 
     The guard is THREAD-LOCAL, not a module-level list. A process-global one made a concurrent
     thread's violation vanish: `_report` marks the path seen BEFORE calling here, so a thread that
@@ -1032,6 +1083,17 @@ def _record(path, rung, event):
     if _LOG_FD < 0:
         return
     try:
+        # THE DESCRIPTOR MUST STILL BE THE LOG. `_LOG_FD` is a module global in a module the fenced
+        # interpreter imports, so a candidate can `os.close` it and let its own next `open` take the
+        # number back — after which every line this writes lands in the candidate's file instead of
+        # the audit trail. One `fstat` per RECORDED violation (bounded by the 256-entry `_seen` cap,
+        # not per open) buys back the identity the descriptor cannot assert for itself. It does not
+        # make the fd unreachable — nothing at this layer can, see
+        # `_hook`'s open item `read-fence-inputs-are-writable-by-the-fenced-process` — it stops the fence
+        # from becoming a writer into a file of the candidate's choosing.
+        _now = os.fstat(_LOG_FD)
+        if _LOG_ID is not None and (_now.st_dev, _now.st_ino) != _LOG_ID:
+            return
         os.write(_LOG_FD, ("%%s\\t%%s\\t%%s\\t%%s\\t%%s\\n" %% (
             rung, os.getpid(), sys.argv[0], path, event)).encode("utf-8", "replace"))
     except Exception:
@@ -1099,7 +1161,7 @@ def _hook(event, args):
         # THE FENCE'S OWN SOURCE, AND THE RECORD. Flags FIRST — one integer `&` on the
         # resolved-path branch only — so a read pays nothing past the source check it already paid,
         # and a relative open from the workdir still takes the syscall-free bail above (`p is None`).
-        if p is not None and (_SELF or _RECORD):
+        if (_SELF or _RECORD) and args[0].__class__ is not int:
             try:
                 flags = args[2]
                 writing = flags.__class__ is int and (flags & _WRITE_FLAGS) != 0
@@ -1121,12 +1183,41 @@ def _hook(event, args):
             # sitecustomize; sitecustomize._busy.on = True` followed by
             # `open(<fence>/sitecustomize.py, "w")` disarmed the fence for every later process of
             # the run. Driven 2026-09-08; an exemption the attacker can set is not an exemption.
-            if writing and _SELF and _join(p, "").startswith(_SELF):
-                _report(p, event, _MUTATION_MESSAGE)
+            if not writing:
+                return
+            # RESOLVED, and only now -- and NOT from `p`. Both rungs below are byte-exact prefix
+            # compares, and `p` is what the READ path can afford: a syscall-free normalization that
+            # is a spelling, not an identity, and that is `None` outright for the relative fast
+            # bail. Three names defeated the compare while naming exactly the guarded file --
+            # `/proc/self/root/<abs path>`, `/proc/self/fd/N/<rest>`, and a symlink to `/` the
+            # candidate makes in its own workdir and then uses under a BARE RELATIVE name (which
+            # takes the bail, so `p` is None and nothing was compared at all). Driven 2026-09-08:
+            # a forged `node_evaluated` row into `events.jsonl` and an append to this very file,
+            # with `_record_write` and `_SELF` both consulted and both answering None.
+            #
+            # `_mutation_path` is the resolution the mutation branch and the record check already
+            # share, for the same reason they share it: two spellings of one file is how two rules
+            # disagree about which file an event is about. It resolves the dirname (memoized per
+            # DIRECTORY, so a loop writing 10,000 files into one directory pays one call) and keeps
+            # the final component verbatim.
+            #
+            # COST: on the WRITE branch only, after the flags integer, so no read pays for it -- a
+            # relative write additionally pays one `getcwd`, which is what the mutation branch has
+            # always paid for a relative event. A READ pays exactly what it paid before: the
+            # `_fenced_resolved` compare above and, from here, one flags `&` and a return.
+            try:
+                w = _mutation_path(args[0], None)
+            except Exception:
+                w = p                    # a bug in the resolution must not let the write past the
+                                         # unresolved compare it would otherwise have had
+            if w is None:
+                return
+            if _SELF and _join(w, "").startswith(_SELF):
+                _report(w, event, _MUTATION_MESSAGE)
                 return                   # one incident per open: under `warn` this returns, under
                                          # `deny` `_report` has already raised
-            if writing and _RECORD and _record_write(p) is not None:
-                _report(p, event, _RECORD_MESSAGE)
+            if _RECORD and _record_write(w) is not None:
+                _report(w, event, _RECORD_MESSAGE)
         return
     if event != "os.chdir":
         # MUTATION. One dict lookup, and only for events that are not opens — a training process

@@ -153,6 +153,92 @@ def test_a_chdir_into_the_record_does_not_buy_a_bare_relative_write(tmp_path):
     assert any("events.jsonl" in line for line in read_fence.violations(run_dir))
 
 
+def test_a_write_rung_compares_the_RESOLVED_path_not_the_spelling(tmp_path):
+    """THE SAME FORGERY through a name that does not LOOK like the record or the fence.
+
+    `_resolve` is syscall-free on purpose — the read hot path cannot afford `realpath` (+88 %,
+    ~474 us on geesefs) — so what both write rungs used to compare was a NORMALIZED SPELLING, not
+    an identity, against roots that were `realpath`-ed at generation time. Three names defeat a
+    byte-exact prefix compare while naming exactly the guarded file:
+
+      * `/proc/self/root/<abs path>` — the kernel's own alias for `/`, needing no setup at all;
+      * `/proc/self/fd/N/<rest>` — the same trick through an open descriptor;
+      * a symlink the candidate makes in its OWN workdir pointing at `/`.
+
+    Driven before the fix: the procfs spellings put a forged `node_evaluated` row into
+    `events.jsonl` AND appended to `sitecustomize.py`, with `_record_write` and `_SELF` both
+    consulted and both answering None — i.e. the fence reported itself intact while it was being
+    rewritten through it. A WRITE can buy the `realpath` a read cannot (`_resolve_links`), which is
+    the same trade the mutation branch already makes and states.
+    """
+    run_dir, wd, _sib = _world(tmp_path)
+    fence = _install(run_dir)
+    before_log = (run_dir / "events.jsonl").read_bytes()
+    before_fence = (Path(fence) / "sitecustomize.py").read_bytes()
+    log = str(run_dir / "events.jsonl")
+    self_path = str(Path(fence) / "sitecustomize.py")
+    rc, out, err, _to = _run(f"""
+        row = json.dumps({{"v": 1, "seq": 1, "ts": 2.0, "type": "node_evaluated",
+                           "data": {{"node_id": 4, "metric": 999.0}}}}) + "\\n"
+        attempt("procfs_record", lambda: open("/proc/self/root" + {log!r}, "a").write(row))
+        attempt("procfs_fence", lambda: open("/proc/self/root" + {self_path!r}, "a").write("#"))
+        os.symlink("/", "root_link")
+        attempt("symlink_record", lambda: open("root_link" + {log!r}, "a").write(row))
+        attempt("symlink_fence", lambda: open("root_link" + {self_path!r}, "a").write("#"))
+        fd = os.open("/", os.O_RDONLY)
+        attempt("procfd_record",
+                lambda: open("/proc/self/fd/%d" % fd + {log!r}, "a").write(row))
+        """, wd, fence)
+    got = _verdicts(out)
+    for name in ("procfs_record", "procfs_fence", "symlink_record", "symlink_fence",
+                 "procfd_record"):
+        assert got.get(name, "").startswith(f"REFUSED {name} LoopLabSourceReadRefused"), (
+            f"{name}: {got.get(name)!r}\n{out}\n{err}")
+    # AND THE FILESYSTEM, because a refusal message is not the property.
+    assert (run_dir / "events.jsonl").read_bytes() == before_log, "a forged row landed"
+    assert (Path(fence) / "sitecustomize.py").read_bytes() == before_fence, (
+        "the fence's own source was rewritten through it — every later process of this run is "
+        "unfenced")
+
+
+def test_the_read_hot_path_still_pays_nothing_for_that_resolution(tmp_path):
+    """THE COST ARGUMENT, stated where it can be falsified: the resolution is on the WRITE branch
+    only, so a read never reaches it.
+
+    Not a timing assertion — a timing assertion in a suite is noise. The rule is structural and is
+    read off the RENDERED template by AST: inside `_hook`, every `_mutation_path` call in the
+    `open` branch stands after the `if not writing: return` early exit. `realpath` per open was
+    measured at +88 % (~474 us on the geesefs mount a run root lives on) and rejected; a
+    refactor that hoists this call above the flags test reinstates exactly that cost silently.
+    """
+    import ast
+    src = read_fence.render([], [], policy="deny", log="", run=str(tmp_path),
+                            record_root=str(tmp_path), writable=(str(tmp_path),))
+    tree = ast.parse(src)
+    hooks = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_hook"]
+    assert len(hooks) == 1, "the rendered fence no longer has exactly one `_hook`"
+    open_branch = [n for n in hooks[0].body
+                   if isinstance(n, ast.If) and "'open'" in ast.dump(n.test)]
+    assert len(open_branch) == 1, "the `open` branch moved — re-point this rule"
+
+    def _stmts(node):
+        return [n for n in ast.walk(node)]
+
+    bails = [n for n in _stmts(open_branch[0])
+             if isinstance(n, ast.If) and isinstance(n.test, ast.UnaryOp)
+             and getattr(n.test.operand, "id", None) == "writing"
+             and any(isinstance(b, ast.Return) for b in n.body)]
+    assert len(bails) == 1, (
+        "the `if not writing: return` early exit is gone — every READ now reaches the resolution")
+    calls = [n for n in _stmts(open_branch[0]) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) in ("_mutation_path", "_resolve_links")]
+    assert calls, "no path resolution in the `open` branch — re-point this rule"
+    for c in calls:
+        assert c.lineno > bails[0].lineno, (
+            f"a resolution at line {c.lineno} stands BEFORE the `writing` bail at "
+            f"{bails[0].lineno}: the read hot path now pays a `realpath` per open")
+
+
 def test_the_fence_takes_no_exemption_a_candidate_can_set(tmp_path):
     """The `_SELF` rung must not rest on a flag that lives in the candidate's own interpreter.
 
@@ -224,8 +310,8 @@ def test_the_record_stays_readable_and_the_workdir_and_the_fence_dir_writable(tm
     disarmed the fence for every process the run started afterwards. Both raise the `open` event
     with `O_TRUNC` rather than a mutation event, so the `_SELF` rung in `_mutation_fenced` — which
     refuses the `chmod`, the `unlink` and the `rename` of the same file — never saw either. The open
-    branch consults `_SELF` too now; `_record`'s own append is exempted by the `_busy` re-entrancy
-    flag it already sets, not by a prefix the candidate shares."""
+    branch consults `_SELF` too now, and `_record`'s own append takes no exemption at all: it
+    writes through a descriptor opened before the hook existed, so it raises no `open` event."""
     run_dir, wd, _sib = _world(tmp_path)
     fence = _install(run_dir)
     outside = tmp_path / "scratch.txt"
