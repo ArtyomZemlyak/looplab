@@ -884,6 +884,75 @@ def check_test_tracks_train(bench: str):
     return not loud and not unpinned, detail
 
 
+# The bridge stamps every evaluation with which half of the dataset it actually ran on, and why it
+# believes that. `patch_eval_subset.py` writes a marker into the harness and `looplab_eval.py` reads
+# it back, so `verified` is a check against the patched file rather than a repeat of what was asked.
+_SUBSET_EVIDENCE = re.compile(r'"subset_evidence"\s*:\s*(\{[^{}]*\})')
+
+
+def check_every_node_was_graded_on_train(bench: str):
+    """Every LoopLab node is evaluated on TRAIN; TEST is the graded split and the run must not see it.
+
+    NOTHING ON THIS BOX CHECKED IT. The rule is the reason `compare_arms` refuses to put a run's own
+    champion metric in the same column as arm A's test result (`_arm_b_final`: "every LoopLab node is
+    evaluated on TRAIN, mirroring AlgoTuner's agent loop"), and the whole arm-B column is worthless
+    if a single node was scored on the half it is graded against. A silent violation would not look
+    like a failure -- it would look like a good score.
+
+    Driven 2026-09-08 over every `node_evaluated` in the corpus: **392 nodes, 392 asked `train`, 392
+    verified, 0 without evidence**, every one by `patch_marker_present`. The check exists so that
+    stays a measurement instead of a thing everyone knows.
+
+    A node whose record carries NO evidence is reported, not passed over: unverifiable is not the
+    same as verified, and it is the state a future harness change would produce.
+    """
+    nodes = missing = 0
+    wrong: list = []
+    reasons: dict = {}
+    for path in glob.glob(f"{bench}/model-probes/*/runs/*/*/events.jsonl"):
+        probe = path.split("/model-probes/", 1)[1].split("/")[0]
+        if probe == "_ruler":
+            continue
+        try:
+            fh = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"node_evaluated"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("type") != "node_evaluated":
+                    continue
+                nodes += 1
+                got = _SUBSET_EVIDENCE.search(str((row.get("data") or {}).get("stdout_tail") or ""))
+                try:
+                    evidence = json.loads(got.group(1)) if got else None
+                except ValueError:
+                    evidence = None
+                if not isinstance(evidence, dict):
+                    missing += 1
+                    continue
+                reasons[evidence.get("reason")] = reasons.get(evidence.get("reason"), 0) + 1
+                if evidence.get("asked") != "train" or evidence.get("verified") is not True:
+                    wrong.append(f"{probe}/node {(row.get('data') or {}).get('node_id')}: "
+                                 f"asked={evidence.get('asked')!r} "
+                                 f"verified={evidence.get('verified')!r}")
+    if not nodes:
+        return False, "no evaluated node on this box, so the split cannot be checked"
+    detail = (f"{nodes} evaluated node(s): {nodes - missing - len(wrong)} asked train and verified"
+              + (f", by {', '.join(f'{k} x{v}' for k, v in sorted(reasons.items()))}" if reasons else ""))
+    if missing:
+        detail += (f"; {missing} carry NO subset evidence -- unverifiable, which is not the same "
+                   "as verified")
+    if wrong:
+        detail += "; GRADED ON THE WRONG HALF: " + "; ".join(wrong[:6])
+    return not (missing or wrong), detail
+
+
 def check_waste_before_the_first_node(bench: str):
     """§72: "трата ПОСЛЕ последнего узла" читается только рядом с тратой ДО первого -- и проверялась
     половина пары.
@@ -954,6 +1023,8 @@ CLAIMS = [
      check_money_cue_reaches_the_choosers),
     ("point 9: 3.6 % of spend lands after the last evaluated node, 16 of 69 runs",
      check_waste_after_the_last_node),
+    ("point 9: every node was graded on TRAIN, never on the graded half",
+     check_every_node_was_graded_on_train),
     ("point 9: the other half of the pair -- spend BEFORE the first node",
      check_waste_before_the_first_node),
     ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),
