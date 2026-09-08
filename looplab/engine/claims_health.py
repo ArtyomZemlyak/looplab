@@ -1089,6 +1089,11 @@ def _bounded_claim_projection(row: dict) -> dict:
             "statement": _MAX_SOURCE_STATEMENT, "scope": _MAX_SOURCE_ID, "metric": 200,
             "decision": 20, "note": 4000, "by": 120, "at": 120, "action_id": 160,
             "evidence_digest": 80, "claim_uid": 80, "key": 160,
+            # The projection's own receipt about HOW it found this decision (`claim_uid` vs one of
+            # the pre-structured statement keys). Whitelisted like the rest so the bounded read-model
+            # an operator/UI sees carries it too — a maturity overlay matched by statement spelling
+            # rather than by scope-precise identity must be visible AT the row (doc 25 EM-06).
+            "resolved_via": 40,
         }
         safe_decision = {key: value[:maximum] for key, maximum in text_fields.items()
                          if isinstance((value := decision.get(key)), str)}

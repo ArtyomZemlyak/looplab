@@ -481,18 +481,17 @@ def _global_key(legacy_key: str) -> str:
     from the structured fallback. The control-char prefix won't collide with a claim_uid ("clm_"+hex) or,
     in practice, a normalize_statement key — the only way to collide is a statement literally beginning
     with a NUL byte, which argv, LLM text and engine-written JSON logs never carry. The dict is only ever
-    read via `.get(key)`, never iterated, so the extra keys are safe."""
-    return "\x00global\x00" + legacy_key
+    read via `.get(key)`, never iterated, so the extra keys are safe.
 
-
-def _scoped_key(legacy_key: str, scope: str) -> str:
-    """A lean-projection index for a scope-only decision.
-
-    The structured UID remains authoritative.  This secondary key lets the default statement projection
-    retrieve an exact task verdict without putting scoped policy back at the shared legacy key, where the
-    latest task would overwrite every earlier task's decision.
+    This is NOT a shadow namespace for a second projection (doc 25 EM-06, 2026-09-08): its lean
+    sibling `_scoped_key` is deleted with the lean read path, and the ONE reader left is
+    `claims_assessments.py::_decision_for`, the STRUCTURED projection's explicitly-UNSCOPED
+    fallback. It stays live because a caller may hand `claim_assessments` a MERGED overlay — the
+    durable loader below never writes a scoped decision at the plain legacy key, but a caller that
+    does would otherwise erase the portfolio-wide verdict for every other scope. Retiring it is a
+    question about that fallback chain, not about the deleted mode.
     """
-    return "\x00scope\x00" + str(scope) + "\x00" + legacy_key
+    return "\x00global\x00" + legacy_key
 
 
 def load_claim_decisions(memory_dir) -> dict:
@@ -503,6 +502,12 @@ def load_claim_decisions(memory_dir) -> dict:
     statement key. Unscoped/unqualified rows remain the fallback for every scope. ``clear`` tombstones only
     the namespace it addresses. Last write wins within each exact namespace. Missing is empty; an unhealthy
     policy ledger raises instead of projecting a guessed valid subset.
+
+    Every row this can see carries a structured UID, so no row's ONLY index is a legacy one. That is a
+    property of the reader above, not a hope: ``_validate_claim_decision_row`` calls a missing/empty/
+    oversized/sanitizes-to-empty ``statement`` ``invalid_record`` and ``read_governance_rows`` RAISES on
+    that rather than projecting the readable subset. It is why the lean ``_scoped_key`` index could be
+    deleted on 2026-09-08 (doc 25 EM-06) with no durable decision becoming unreachable.
     """
     from pathlib import Path
 
@@ -537,9 +542,11 @@ def load_claim_decisions(memory_dir) -> dict:
             # Retain a distinct portfolio-wide fallback as well as the legacy lean key. A
             # caller may merge overlays that place a scoped decision at the plain key; that must not erase
             # the durable global verdict for every other scope.
+            #
+            # A SCOPED row gets no legacy index at all any more. It used to get `_scoped_key(k, scope)`,
+            # which only the deleted lean projection read; the structured projection finds the same row at
+            # `uid`, which is this list's first entry and can never be empty here (see the docstring).
             keys.extend((k, _global_key(k)))
-        elif k and scope and not metric:
-            keys.append(_scoped_key(k, scope))
         # One semantic UID may have several historical display spellings. Retire every index that points
         # at the same namespace before applying its newest row, so ``clear`` cannot be bypassed through an
         # older legacy statement key.
@@ -750,10 +757,10 @@ def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisio
                       scope_task: str = "", structured: bool = True) -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
-    research claims AND decisions consistently. `structured` (THE DEFAULT) uses the scope+polarity-safe
-    structured claim key — the same projection `record_claim_decision` validates an operator's
-    `evidence_digest` against, so a review surface that opts out hands out a digest the write path
-    cannot match; `scope_task` filters the D8 research claims to the bound task so a task-scoped caller
+    research claims AND decisions consistently. `structured` is a RETIRED keyword (doc 25 EM-06,
+    2026-09-08): there is ONE claim identity — the scope+polarity-safe structured claim key, the same
+    projection `record_claim_decision` validates an operator's `evidence_digest` against — and both
+    values project it; `scope_task` filters the D8 research claims to the bound task so a task-scoped caller
     does not re-read another task's research claims (mega-review) — the decisions overlay is applied
     scope-safely by `claim_assessments`."""
     if lessons is None:
@@ -773,9 +780,9 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
                      structured: bool = True, _governance: Optional[dict] = None) -> dict:
     """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
     claims + operator decisions + concept aliases + splits. One call so every atlas surface is consistent.
-    `structured` keeps the claim projection consistent with the researcher advisory; `scope_task` filters
-    the D8 research claims to the bound task so a task-scoped caller does not surface another task's
-    claims/contradictions (mega-review)."""
+    `structured` is retired and inert (doc 25 EM-06); `scope_task` filters the D8 research claims to
+    the bound task so a task-scoped caller does not surface another task's claims/contradictions
+    (mega-review)."""
     from pathlib import Path
 
     from looplab.engine.governance_health import observed_path_missing
