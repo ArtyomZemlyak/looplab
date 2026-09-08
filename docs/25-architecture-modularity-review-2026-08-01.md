@@ -4600,9 +4600,9 @@ fifth (dropping `len(raw) <= _MAX_ITEMS` from a list verifier) turned out to be 
 already slices to the bound, so `_refs(raw) == list(raw)` fails on a long list anyway and the guard
 is redundant in the original expression, which is preserved verbatim.
 
-#### SC-10 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
+#### SC-10 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[capability-store-core-not-shared]** `ShareStore` now matches `ReviewStore`'s locking contract, but the two remain separate implementations of one bearer-capability store — `ShareStore` still owns its own per-path lock table and has no analogue of `ReviewStore`'s O_EXCL reservation, abandoned-reservation healing or recovery contract. proof:present:_SHARE_STORE_LOCKS@looplab/serve/assistant.py
+> **OPEN[capability-store-core-not-shared]** the locking, reservation and publish core is now ONE implementation both stores parameterize, and the last divergence in guarantees is the CREATE-RECOVERY contract: a lost response to the share-create leaves the client with no token and a retry mints a SECOND live capability, where `ReviewStore.create_or_replay` reconstructs the exact original bearer from a client-held envelope. proof:absent:create_or_replay@looplab/serve/assistant.py
 
 **ShareStore duplicates ReviewStore's capability-link concept with weaker, inconsistent hardening**
 
@@ -4649,6 +4649,87 @@ and a partial extraction that leaves one path on the weaker primitive is worse t
 The duplication remains; the divergence in guarantees does not. Remaining differences, for whoever
 takes the extraction: `ReviewStore` also has `O_EXCL` id reservation, abandoned-reservation healing,
 and a recovery/replay contract that `ShareStore` has no analogue for.
+
+*Closure (2026-09-08) — the core IS extracted: `serve/capability_store.py`, and `ShareStore` now
+reserves with `O_EXCL` and heals abandoned reservations.*
+
+The 2026-08-04 pass closed the guarantee gap by writing `ReviewStore`'s locking contract out a SECOND
+time in `assistant.py`, and its own test file had to re-derive the sibling's mutation/read split from
+`reviews.py` source so "a change to one is visibly a change to both". That re-derivation is the
+symptom the extraction removes: what both stores share is now one implementation each parameterizes.
+
+**What moved, and why each piece is genuinely one protocol rather than two that look alike:**
+
+* `store_process_lock` — ONE per-path lock table for both stores. They key on different directories,
+  so sharing costs nothing, and it deletes the second place the "keyed on the instance, not the
+  path" regression can come back (that keying is the whole reason the process half of the guarantee
+  is not vacuous with two server objects over one directory).
+* `capability_store_lock` — the process lock (bounded timeout) then a REQUIRED, non-blocking OS
+  lock, with no thread-only fallback, taking each store's own error as a callable. The two SENTENCES
+  stay per-store on purpose: `ReviewStore` reports a timeout and a lock failure differently and
+  `ShareStore` reports them identically, so the core takes both and neither store's HTTP contract
+  moves. `prepare` is the one shape difference — `ShareStore` creates `.shares` inside the failure
+  boundary — and it is a parameter rather than a branch.
+* `reserve_unique_id` / `reserve_exact_id` — the `O_EXCL` reservation, which `ShareStore` did not
+  have. Its old loop was a check (`exists()` / `is_symlink()`) followed by a write, and the gap
+  between them is exactly where a writer that does not hold this store's lock — a rolling upgrade,
+  an uncoordinated legacy worker — can land and have its live capability's `token_hash` replaced by
+  a new secret's, silently revoking a link the owner still believes in. `O_EXCL | O_CREAT` refuses
+  an existing file AND a symlink (a dangling one included), so it IS the existence check and the
+  claim in one step. The store's own pathname boundary survives as the `verify` hook, re-checked per
+  candidate: the parent must still resolve inside the verified directory before anything is claimed.
+* `reservation_state` + `publish_reserved` + `remove_failed_reservation` — the crash contract. An
+  empty file is the fail-closed footprint of a process that died between reserving and publishing;
+  it authorizes nothing (`_validated_record` refuses it), it is never treated as free space, and a
+  publish that fails removes only the footprint THIS caller created while preserving any non-empty
+  uncertain result (the `os.replace` that landed before a later operation reported failure).
+* `token_digest` — the one hashing of a bearer value.
+
+`ShareStore._prune_locked` gained the other half of the healing and it is the subtle one: the sweep
+now SKIPS an empty file younger than a second and reclaims an older one. Removing a fresh reservation
+would hand a live creator's id to a second creator — the exact collision `O_EXCL` was just added to
+prevent — and it is reachable across workers, because the sweep runs under the store lock and an
+uncoordinated writer's claim does not. It passes `wait=False`: a sweep decides about somebody else's
+footprint and the mtime settles it, so it must not sleep per entry the way a caller claiming that one
+id does.
+
+**What stays local to each store, because sharing it would have LOOSENED it** — this is the half the
+2026-08-04 note was right about, now written down per member rather than as a reason not to start:
+
+* `resolve`. `ShareStore` returns ONE indistinguishable `None` for every failure, because a reader
+  who can tell a revoked link from a never-existing one has a session-existence oracle.
+  `ReviewStore` raises TYPED errors naming revoked / expired / generation, because its reader is the
+  owner's own guest and the surface must say why the link stopped working. A merged resolve picks
+  one, and either choice is a regression for the other store.
+* TTL validation. Not one rule spelled twice: `ShareStore` refuses a `bool` and a non-integer float,
+  while `ReviewStore`'s ordinary path truncates a float and only its recovery path demands an exact
+  `int`. Parameterizing every difference produces a validator whose configuration IS the duplicated
+  code, and the bounds and messages are per-surface anyway.
+* The record schemas and their validators. They read different durable records (a session +
+  transcript bound vs a run + generation + scopes), and both are fail-closed readings of
+  authorization state.
+
+`tests/test_share_store_cross_process.py` (12 → 20) DRIVES the new properties instead of pinning
+source, which is what the 2026-08-04 pass could not do for the interprocess half: the OS-lock refusal
+is driven by making the store's `.lock` a DIRECTORY (unopenable, so `required=True` refuses) and
+asserting the body never ran and no capability was minted; the reservation is driven by forcing the
+first minted id to collide with a live record and proving the existing capability still resolves; the
+crash contract is driven by leaving a real empty reservation behind and proving it authorizes
+nothing, that an ABANDONED one is swept, and that an IN-FLIGHT one survives a concurrent create; and
+the publish contract is driven both ways — a failing write heals its own reservation and reports the
+store's 503 without leaking the OS message, while a write that LANDED before a later failure is kept.
+Teeth-tested against five mutations, all five biting: dropping the fresh-reservation skip (1),
+dropping `O_EXCL` (3 — including a pre-existing `ReviewStore` collision test, which is the point of
+sharing the code), dropping the publish healing (1), yielding from the lock's exception handler (1),
+and re-keying the lock table per call (2).
+
+**Still open, and it is one thing:** the create-RECOVERY contract. `ReviewStore.create_or_replay`
+reconstructs the exact original bearer from a client-held envelope (a canonical request id plus a
+256-bit token secret, bound by durable identity/intent/token hashes), so a lost HTTP response is
+recoverable. `POST /api/assistant/sessions/{sid}/share` carries no such envelope: a lost response
+leaves the client with no token and a retry mints a SECOND live capability. That is not a property
+of the store — it is the create PROTOCOL, and porting it means changing an HTTP contract and the UI
+that speaks it, so it stays a named item rather than being smuggled into an extraction.
 
 #### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
