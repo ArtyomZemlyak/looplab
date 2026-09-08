@@ -381,7 +381,7 @@ RUNS_ARCHIVE="${SNAPSHOT_RUNS_ARCHIVE:-$DEST/../runs-archive}"
 archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / ARCH_STILL_SHORT.
   local S="$1" A="$2" B rel ssz dsz rc=0
   B="$(basename "$S")"
-  ARCH_REPAIRED=0; ARCH_STILL_SHORT=0; ARCH_SUPERSEDED=0
+  ARCH_REPAIRED=0; ARCH_STILL_SHORT=0; ARCH_SUPERSEDED=0; ARCH_REPAIRED_IN=""
   # WHERE THE SECONDS GO, because §207 could not say. This step took 121 s with no probe live, 601 s
   # with four and 1765 s once -- and the three candidate causes were all refuted by measurement
   # (0.06 ms per stat, 144 MiB/s to read the whole archive, 1.05 ms per exec in a shell that is not
@@ -461,7 +461,19 @@ archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / AR
       # as "re-copied SHORT of its source" tells the operator a previous cycle left a partial run
       # behind when nothing of the sort happened. The `-u` trap this counter exists to expose is a
       # destination that EXISTS and is shorter, so that is what it counts.
-      [ "$dsz" -ge 0 ] && ARCH_REPAIRED=$((ARCH_REPAIRED + 1))
+      # AND WHICH RUNS THEY WERE IN (§343). The bare count reads as an alarm and cannot be acted
+      # on: "3 re-copied SHORT of its source" appeared in every cycle for hours, and finding out it
+      # was the ONE live probe's three append-only logs -- events.jsonl, spans.jsonl and
+      # .spans-append.jsonl, growing between the `cp -ru` and the walk, exactly as they must -- took
+      # a `find -newermt` against the last snapshot. A previous cycle leaving a partial run behind
+      # reads identically, and that one IS an alarm. The run name is the first path element.
+      if [ "$dsz" -ge 0 ]; then
+        ARCH_REPAIRED=$((ARCH_REPAIRED + 1))
+        case " $ARCH_REPAIRED_IN " in
+          *" ${rel%%/*} "*) ;;
+          *) ARCH_REPAIRED_IN="${ARCH_REPAIRED_IN:+$ARCH_REPAIRED_IN }${rel%%/*}" ;;
+        esac
+      fi
     elif [ ! -e "$S/$rel" ]; then
       # THE SAME VANISHED-SOURCE RULE AS THE `stat` ABOVE, applied to the copy. `campaign.sh`
       # rm -rf's a task root at the head of every attempt, and it can land BETWEEN the stat and
@@ -524,7 +536,9 @@ while IFS= read -r D; do
       echo "  what was archived (these are append-only logs, so only growth is benign) -- most"
       echo "  often a task root deleted and re-run, whose new log may be shorter, equal OR longer"
     R=""
-    [ "$ARCH_REPAIRED" -gt 0 ] && R=", $ARCH_REPAIRED re-copied SHORT of its source"
+    [ "$ARCH_REPAIRED" -gt 0 ] && \
+      R=", $ARCH_REPAIRED re-copied SHORT of its source (in ${ARCH_REPAIRED_IN:-?}; a run that is \
+LIVE grows between the copy and the walk, and that is the benign case)"
     echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records$R)"
     echo "                        ${ARCH_T_SUPERSEDE}s prefix-check + ${ARCH_T_COPY}s cp -ru + ${ARCH_T_REPAIR}s repair"
     echo "$B $N $RUNS_ARCHIVE/$B" >> "$OUT/runs-manifest.txt"

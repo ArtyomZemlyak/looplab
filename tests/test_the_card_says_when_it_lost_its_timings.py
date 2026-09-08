@@ -27,8 +27,23 @@ SCRIPT = REPO / "benchmarks" / "algotune" / "make_task.py"
 ALGOTUNE = Path("/var/tmp/looplab-bench/AlgoTune")
 TIMES = REPO / "benchmarks" / "algotune" / ".baseline_times"
 
+def has_measured_timings(times_dir: Path) -> bool:
+    """Does this checkout actually hold baseline timings -- not just a directory named for them?
+
+    §344. The gate asked `TIMES.is_dir()` and its own reason said "this box's MEASURED baseline
+    timings". An EMPTY `.baseline_times/` satisfies the first and has none of the second, and one
+    turned up in a fresh worktree on 2026-09-08: both tests ran, the "real" card fell back to the
+    same file-name wording as the scratch copy, and `test_the_two_are_not_the_same_card` failed
+    saying the two cards were identical -- which was true, and said nothing about the code. Driven
+    on pristine `origin/master`: `mkdir benchmarks/algotune/.baseline_times` turns two skips into
+    two failures, and `rmdir` turns them back. A card needs a timing FILE, so that is the gate.
+    """
+    return any(p.is_file() and p.suffix == ".json" and not p.name.endswith(".provenance.json")
+               for p in times_dir.glob("*.json")) if times_dir.is_dir() else False
+
+
 needs_algotune = pytest.mark.skipif(
-    not (ALGOTUNE / ".hf_datasets").is_dir() or not TIMES.is_dir(),
+    not (ALGOTUNE / ".hf_datasets").is_dir() or not has_measured_timings(TIMES),
     reason="needs the AlgoTune checkout and this box's measured baseline timings")
 
 

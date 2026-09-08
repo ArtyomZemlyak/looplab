@@ -1215,30 +1215,14 @@ class CardReservationMixin:
 
             def _plan(events, tail):
                 nonlocal proposal_authority_seq
-                # OPEN[offloaded-serial-build-reserves-off-the-main-task] this reservation runs in
-                # an AnyIO WORKER on the serial lane: `orchestrator.py::_offload_build` (2026-09-06)
-                # offloads all of `_create_node`, reservation included. The `card_added` +
-                # `node_building` appended below are FOLDED and in none of the five writer
-                # registries, and the fence below was reasoned for a microsecond window.
-                # proof:`present:await self._offload_node_build(a)@looplab/engine/orchestrator.py`
-                #
-                # DRIVEN 2026-09-08, isolated 2x2, 40 trials a cell, real Engine and real store, the
-                # racer appending the BACKGROUND_APPENDABLE `research_completed`:
-                #     racer=off offload=off  0/40 | racer=off offload=on  0/40
-                #     racer=on  offload=off  0/40 | racer=on  offload=on  38/40 PAID PROPOSALS LOST
-                # and 8 % of nodes in a real wide CLI run. Two statements in the tree say this may
-                # not happen: `events/types.py`'s Card-ledger comment ("Main-task-written; NONE are
-                # BACKGROUND_APPENDABLE — a monotonic card_id cannot be background-minted") and
-                # `_offload_build`'s own docstring (a worker appends only its OWN node's rows;
-                # `card_added` is a board-level object).
-                #
-                # NOT FIXED HERE, because the choice is a decision this module already recorded
-                # making once. `_proposal_authority_seq`'s docstring: "twice before this the answer
-                # was to widen the list below; the list was never the defect" — so widening it a
-                # third time is the refused answer. The other candidate, keeping the reservation on
-                # the main task as the card lane (`reserved=`) and `_steady_state_build_lane` already
-                # do, restructures the serial spine. `orchestrator.py`'s `reserved is None` branch
-                # now writes a `discarded` beacon, so the loss is countable while this stands.
+                # *Closed 2026-09-08: the serial lane's reservation was running in an AnyIO
+                # worker (`_offload_build` took all of `_create_node`), which put the FOLDED
+                # `card_added` + `node_building` off the main task and left this fence's
+                # microsecond premise false — 38 of 40 paid proposals were silently discarded in an
+                # isolated 2x2 against 0/40 in every control. `orchestrator.py::
+                # _reserve_on_main_task` marshals the CAS back onto the loop, which restores both
+                # halves and the premise itself; widening this fence's exclusion list was refused
+                # because it would have bought the money half and left the mint in a worker.*
                 authority_seq = self._proposal_authority_seq(events)
                 if proposal_authority_seq is None:
                     proposal_authority_seq = authority_seq

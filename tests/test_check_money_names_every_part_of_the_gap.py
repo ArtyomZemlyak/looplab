@@ -369,11 +369,19 @@ def test_the_endpoint_line_dates_every_refusal(tmp_path):
 
 
 def test_endpoint_health_survives_a_missing_or_torn_ledger(tmp_path):
-    assert cm.endpoint_health(str(tmp_path / "nope.jsonl")) == {"newest": {}, "refusing": []}
+    # THE SHAPE GREW (§333): `streak` counts consecutive non-200s per arm, because the newest row
+    # is one sample of a thing with a duration -- `remDL13` sat under 63 consecutive 503s while the
+    # tool reported "last call came back 503". An empty ledger has no streak, and says so.
+    assert cm.endpoint_health(str(tmp_path / "nope.jsonl")) == {"newest": {}, "refusing": [],
+                                                                "streak": {}}
     torn = tmp_path / "meter.jsonl"
     torn.write_text('{"ts": "1.0", "arm": "a", "status": "200"}\nnot json\n{"ts": ',
                     encoding="utf-8")
-    assert cm.endpoint_health(str(torn))["newest"] == {"a": (1.0, "200")}
+    got = cm.endpoint_health(str(torn))
+    assert got["newest"] == {"a": (1.0, "200")}
+    # A torn tail is not a failure streak: the unparseable rows are skipped, and the one good row
+    # is a 200, which clears rather than starts a run.
+    assert got["streak"] == {}
 
 
 def test_the_endpoint_line_is_printed_with_the_age(tmp_path):

@@ -247,6 +247,27 @@ class WrapsDeveloper:
 # --------------------------------------------------------------------------- #
 
 
+def audit_extra_of(developer) -> Optional[dict]:
+    """`developer.audit_extra()` as a plain dict, or None — total over anything a stub can do.
+
+    Here rather than in the engine because it is part of the Developer contract this module owns,
+    and because BOTH sides need it: `engine/node_build.py::_capture_developer_result` calls it
+    inside the capture, under `developer_call_lock` (the wrapper builds the dict from its own
+    instance state, and that state is only this call's while the lock is held), and
+    `engine/audit.py::_emit_agent_report` calls it on the fallback path for a node whose build
+    made no fresh Developer call. Total over junk like every read in the capture: a stub whose
+    `audit_extra` raises, or returns a string, must read as "no annotation", never break a build.
+    """
+    fn = getattr(developer, "audit_extra", None)
+    if not callable(fn):
+        return None
+    try:
+        extra = fn()
+    except Exception:  # noqa: BLE001 — an optional audit annotation must never break a build
+        return None
+    return dict(extra) if isinstance(extra, dict) else None
+
+
 class ValidatingDeveloper(WrapsDeveloper):
     """Wrap a Developer and validate how it performed before the orchestrator spends a
     sandbox evaluation on its output (see `validate.py`).

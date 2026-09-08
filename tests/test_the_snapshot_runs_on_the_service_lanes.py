@@ -62,10 +62,17 @@ def test_the_snapshot_really_lands_on_those_cpus(tmp_path):
     # on `[2]` and failed this assertion — about the box, not about the pinning. Two cpus the box
     # really has make the same claim everywhere, and the skip below is honest about the one case
     # where it cannot be made at all.
+    #
+    # A STRICT SUBSET ON EVERY BOX THAT HAS ONE. Asking for two cpus made the lane EQUAL to what
+    # the process could use on a two-cpu container, so "pinned" and "unpinned" produce the same
+    # affinity line and the assertion below is satisfied by a `snapshot_timer.sh` with no
+    # `taskset` in it at all — which the trailing waiver `or len(usable) == 2` then blessed as
+    # honest. One cpu is a strict subset wherever there are two, so the claim is made everywhere
+    # instead of waived on the boxes CI actually runs on.
     usable = sorted(os.sched_getaffinity(0))
     if len(usable) < 2:
         pytest.skip("a single-cpu box cannot show a snapshot landing on a chosen subset")
-    lane = usable[:2]
+    lane = usable[:2] if len(usable) > 2 else usable[:1]
     env = dict(os.environ, BENCH_ROOT=str(bench), SNAPSHOT_DEST=str(tmp_path / "dest"),
                SNAPSHOT_SERVICE_LANE=",".join(str(c) for c in lane))
     proc = subprocess.Popen(["bash", str(run / "snapshot_timer.sh"), "_loop", "2"],
@@ -79,6 +86,7 @@ def test_the_snapshot_really_lands_on_those_cpus(tmp_path):
     assert seen, "the stub snapshot never ran"
     assert all(line.strip() == str(lane) for line in seen), (
         f"the snapshot ran on {seen}, not on the lane {lane} it was given")
-    # …and the lane is a strict SUBSET of what the process could otherwise have used, or "pinned"
-    # would be indistinguishable from "unpinned" on a two-cpu box.
-    assert len(lane) < len(usable) or len(usable) == 2, (lane, usable)
+    # …and the lane is a strict SUBSET of what the process could otherwise have used — no waiver,
+    # or "pinned" is indistinguishable from "unpinned" and the whole test is satisfied by a script
+    # that never calls `taskset`.
+    assert len(lane) < len(usable), (lane, usable)

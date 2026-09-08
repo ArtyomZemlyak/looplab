@@ -26,6 +26,8 @@ import sweep_claims  # noqa: E402
 STUB = '''#!/usr/bin/env python3
 import json, sys
 payload = {PAYLOAD}
+# HOW MANY ROOTS THE CHECK ACTUALLY HANDED OVER, so the sample is testable and not a promise.
+payload["logs"] = len([a for a in sys.argv[1:] if not a.startswith("--")])
 if "--json" not in sys.argv:
     # The COLUMNS, as the real tool prints them when nobody asks for json. A check that reads these
     # by eye is the §289 mistake, so the stub makes that path available and wrong-shaped on purpose.
@@ -49,8 +51,8 @@ def _bench(tmp_path, phases) -> str:
                            "usd": 1.0, "share_pct": sh} for p, s, r, sh in phases]}
     (tools / "cue_reach.py").write_text(STUB.replace("{PAYLOAD}", json.dumps(payload)),
                                         encoding="utf-8")
-    probe = root / "model-probes" / "p1" / "runs"
-    probe.mkdir(parents=True)
+    for name in ("p1", "p2", "p3", "p4", "p5"):
+        (root / "model-probes" / name / "runs").mkdir(parents=True)
     return str(root)
 
 
@@ -102,3 +104,23 @@ def test_cue_reach_json_says_the_same_as_its_table():
     for row in as_json["phases"]:
         assert row["phase"] in from_text, (row, sorted(from_text))
         assert abs(from_text[row["phase"]] - row["reach_pct"]) < 0.1, (row, from_text[row["phase"]])
+
+
+def test_the_revisit_line_is_judged_on_the_corpus_not_on_a_three_probe_window(tmp_path):
+    """§341. Порог, который несёт решение оставить панель предвидения слепой — «пересмотреть, если
+    вырастет за несколько процентов», — это утверждение о КОРПУСЕ. Окно из трёх проб не может ни
+    провалить его, ни очистить честно: 2026-09-08 три новейшие пробы все оказались `discrete_log`,
+    задачей с самой высокой долей этой фазы, окно показало 3.0 %, и проверка объявила порог
+    перейдённым. По всем 142 деревьям с этим спаном доля 2.06 % (по пробам: медиана 2.01, p75 2.63,
+    максимум 5.56 — 21 из 142 на 3 % и выше). Решение стоит; тревогу сделала выборка."""
+    bench = _bench(tmp_path, [("plan", 10, 100.0, 7.0), ("foresight_rank", 0, 0.0, 2.1),
+                              ("hyp_prioritize", 0, 0.0, 1.2)])
+    _, detail = sweep_claims.check_money_cue_reaches_the_choosers(bench)
+    assert "over 5 probe tree(s)" in detail, f"выборка не названа: {detail}"
+
+
+def test_every_probe_tree_is_handed_to_the_tool(tmp_path):
+    """Заглушка сообщает, СКОЛЬКО корней ей передали. Срез `[:3]` виден отсюда, а не из обещания."""
+    bench = _bench(tmp_path, [("foresight_rank", 0, 0.0, 2.1)])
+    _, detail = sweep_claims.check_money_cue_reaches_the_choosers(bench)
+    assert "over 5 probe tree(s)" in detail, f"проверка отдала не все деревья: {detail}"

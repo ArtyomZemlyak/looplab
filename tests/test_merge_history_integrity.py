@@ -53,6 +53,15 @@ _DELIBERATE_TRAILER = "Discards-Parent-Commits:"
 _KNOWN = {
     "9943819195311b4e1042bf2de09431a1f7f542f7": "repaired by 1ee13e14 (2026-08-05)",
     "6982c9cd636daf9ad43efbd3c9d0ed1b4eb860f8": "repaired by 33b1aefa (2026-07-19)",
+    # §344. Both surfaced when the bench line merged origin/master on 2026-09-08, and both were
+    # CHECKED rather than waved through: `git apply --check --reverse` of each dropped commit's own
+    # diff succeeds against the merged tree, i.e. the content is present and only the history's
+    # shape is wrong. An entry added without that check is an ignore-list, which is what the test
+    # below exists to stop this becoming.
+    "e87d5d608660cd4af5b2f5e8269d19bfc64c2a5a":
+        "dropped 90eced07 (CLAUDE.md census line); content present in the tree, re-checked 2026-09-08",
+    "4d25c834d52a6c83016aae3d1772edbc9f0eaf8b":
+        "dropped 81edd219 (toy-role import in test_feature_cv_gate.py); content present in the tree",
 }
 
 # The near-miss the "changed something" filter exists for: `aabe2bda`'s other parent is a merge whose
