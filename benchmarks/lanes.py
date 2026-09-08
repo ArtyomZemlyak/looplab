@@ -44,6 +44,42 @@ def is_bench_probe(argv, root: str = DEFAULT_ROOT) -> bool:
             and root in line)
 
 
+# THE FOUR BENCH LANES AND THE SERVICE PAIR, as the standing sweep list writes them (point 5). Kept
+# here rather than in each caller because a lane is a SET: `48-58,0-10` is the same lane as
+# `0-10,48-58`, and two callers comparing strings would disagree about that. `snapshot.sh` carries
+# the same service pair as `SNAPSHOT_SERVICE_LANE`; that copy is a shell default and cannot import
+# this one, so the pair is named in both and this comment is the link between them.
+BENCH_LANES = ("0-10,48-58", "11-21,59-69", "22-32,70-80", "33-43,81-91")
+SERVICE_LANE = "44-47,92-95"
+
+
+def lane_fault(cpus: set[int]) -> str | None:
+    """What is wrong with this probe's cpu set, or None when it sits exactly on a bench lane.
+
+    §358. `pulse` printed the lane and never judged it. Two things make that worth checking on this
+    box rather than assuming: every measuring tool here runs pinned to the SERVICE pair, so a probe
+    that overlapped it would be perturbed by the very sweep that measures it -- the second
+    instrument changing what the first measures; and a probe pinned to a SUBSET of a lane is the
+    exact shape of the stray rulers of 2026-09-07, which ran on two cpus, `{0, 48}`, and wrote into
+    the live cache for hours while every tool reported the lane they were born on.
+    """
+    if not cpus:
+        return "no cpu affinity at all"
+    service = parse_lane(SERVICE_LANE) & cpus
+    if service:
+        return (f"overlaps the SERVICE lane on cpu(s) {sorted(service)} -- every measuring tool on "
+                "this box is pinned there, so the sweep would be adding load to what it measures")
+    for spec in BENCH_LANES:
+        if cpus == parse_lane(spec):
+            return None
+    for spec in BENCH_LANES:
+        want = parse_lane(spec)
+        if cpus < want:
+            return (f"pinned to {len(cpus)} of the {len(want)} cpus of lane {spec} -- a SUBSET, "
+                    "which is how the stray rulers of 2026-09-07 ran on two cpus")
+    return f"is on no bench lane: {sorted(cpus)[:6]}{'...' if len(cpus) > 6 else ''}"
+
+
 def parse_lane(spec: str) -> set[int]:
     """`"0-10,48-58"` -> the cpu set. Single cpus (`"7"`) are allowed."""
     want: set[int] = set()

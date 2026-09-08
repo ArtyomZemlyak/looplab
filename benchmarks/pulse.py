@@ -594,6 +594,7 @@ def main(argv=None) -> int:
         if not found:
             print(f'{name:10s} {lanes._fmt(row["cpus"]):12s}  no events.jsonl yet')
             continue
+        fault = lanes.lane_fault(row["cpus"])
         got = pulse(found[0])
         # `args.now` only when it was INJECTED: otherwise the clock is read after the stat.
         age = log_age(found[0], args.now)
@@ -603,6 +604,8 @@ def main(argv=None) -> int:
               f'{got["zeros"]:5d} {got["errors"]:4d} {format_age(age)} '
               f'{(f"{call_age:8.0f}s" if call_age is not None else "       -"):>9s}  '
               f'{wchan(row["pid"])}')
+        if fault:
+            print(f'      LANE: {name} {fault}')
         if called and called[1] != "200":
             # THE STREAK, NOT THE LAST SAMPLE. §333: this line said "last call came back 503" while
             # the state was 60 consecutive 503s over 22 minutes -- the provider's own pool down
