@@ -1522,7 +1522,7 @@
           "type": "int",
           "default": 40,
           "placeholder": "40",
-          "help": "Per-eval-window cap on repeated-research LLM calls (0 = cadence-only). Past it the loop stops calling the LLM (the training-health monitor still runs)."
+          "help": "Per-eval-window cap on repeated-research LLM calls (0 = cadence-only), counted as PROVIDER CALLS: one research pass spends as many as it makes (at least one). Past it the loop stops calling the LLM (the training-health monitor still runs)."
         },
         {
           "key": "concurrent_consolidate",

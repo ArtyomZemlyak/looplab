@@ -120,8 +120,9 @@ from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
 from looplab.core.llm_budget import RunBudget
 from looplab.core.phase_events import phase_sink_scope
-from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
-                                     in_llm_lane, llm_broker_scope, llm_lane_scope)
+from looplab.core.llm_broker import (LLMConcurrencyBroker, ProviderCallMeter,
+                                     default_llm_lane_limits, in_llm_lane, llm_broker_scope,
+                                     llm_lane_scope, provider_call_meter)
 from looplab.search.card_selection import (
     META_CARD_ID, SpeculativeSelectionContext, card_budget_used, card_next_actions,
     refunded_node_reservations, speculative_card_actions, speculative_raw_actions,
@@ -5084,13 +5085,24 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         functools.partial(self._maybe_merge_hypotheses, snap))
                 if cap > 0 and calls >= cap:
                     return                   # research LLM budget spent; the health monitor still runs
+                # WHAT `calls` COUNTS IS PROVIDER REQUESTS, not passes (doc 27 P1). This used to be a
+                # bare `calls += 1` per pass, and a pass is a multi-turn agentic think plus its forced
+                # emit and its memo verification — so a ceiling spelled `concurrent_research_max_calls`
+                # was counting between one and several dozen calls at a time and undercounted the spend
+                # it exists to bound by exactly that factor. `ProviderCallMeter` is debited inside
+                # `llm_request_permit`, the one seam every outbound request passes, so what lands here
+                # is what the pass actually asked the provider for.
+                #
                 # Counted as an ATTEMPT, before the call rather than after it returns. Incrementing
                 # only on success meant a provider that consistently RAISES (broken auth, endpoint
                 # down, or a failure after tokens were already charged) never touched
                 # `concurrent_research_max_calls` and was re-called every `base` seconds for the whole
                 # eval window — the one budget backstop, blind to exactly the failure mode that can
-                # spend money without producing anything.
-                calls += 1
+                # spend money without producing anything. The `max(1, …)` floor and the `finally` are
+                # that property, kept exactly: a pass that raises before it reaches the provider (a
+                # refused thread hop, a role that fails to build) still spends one, so nothing can
+                # re-tick this loop for free.
+                pass_meter = ProviderCallMeter()
                 # ONE hop for the whole paid pass: receipt -> provider -> record. Only the FIRST pass
                 # carries the initially-due cadence/strategist trigger and thus a durable gate worth
                 # receipting; `_record_research_attempt` no-ops for the `repeat` passes that follow
@@ -5137,11 +5149,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # cadence advances either way. An explicit retry status for that window would be a
                 # second gate answering a question the receipt already answers.
                 this_trig, trig = trig, "repeat"
-                sig, recorded = await anyio.to_thread.run_sync(
-                    functools.partial(self._research_attempt_step, snap, this_trig,
-                                      manual=False, last_sig=last_sig,
-                                      converged_skips=converged),
-                    abandon_on_cancel=False)
+                # The meter rides the CONTEXT into the worker thread (`anyio.to_thread.run_sync`
+                # copies it), so every request the pass makes below — the think, its tools' own
+                # calls, the verify — is debited to this window whatever lane it declares.
+                try:
+                    with provider_call_meter(pass_meter):
+                        sig, recorded = await anyio.to_thread.run_sync(
+                            functools.partial(self._research_attempt_step, snap, this_trig,
+                                              manual=False, last_sig=last_sig,
+                                              converged_skips=converged),
+                            abandon_on_cancel=False)
+                finally:
+                    calls += max(1, pass_meter.calls)
                 if sig is None:
                     next_sleep = base
                     continue
