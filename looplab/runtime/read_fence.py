@@ -498,7 +498,7 @@ def confine_grants(candidates: Iterable, roots: Iterable) -> tuple:
 
     The companion of `fence_inputs` for the other shape of the same policy. `fence_inputs` answers
     "what is forbidden, and which carve-outs survive"; this answers "what may be granted", which is
-    what a Landlock allow-list and `render(confine=True)` both need — and a grant list is where the
+    what a Landlock allow-list needs (and what `render(confine=True)` would need) — and a grant list is where the
     two guarantees `fence_inputs` provides for the deny side have to be provided again:
 
       * every entry goes through `_norm_root` (realpath + trailing separator), so a grant of `/opt`
@@ -583,11 +583,15 @@ _ROOTS = %(roots)r
 _ALLOW = %(allow)r
 # CONFINE inverts the policy: instead of "refuse what is under a ROOT", it refuses EVERYTHING that is
 # not under `_ALLOW`. The engine's fence never sets it (a training process needs to read the box);
-# `tools/dev_probe.py` always does, because a probe's whole legitimate world is its own disposable
-# replica plus the interpreter, and a denylist keyed on the editable tree leaves every OTHER
-# directory on the machine readable. Measured 2026-08-19: with no editable root declared, the probe
-# fence was skipped entirely and a Developer used 150 `run_probe` calls to read the BENCHMARK
-# HARNESS's own validation and timing code. A denylist cannot express "only your own workdir".
+# `tools/dev_probe.py` did until 2026-09-08 and now sets it in NEITHER of its modes, because the
+# probe's read confinement lives in the KERNEL rung (`runtime/landlock.py`), which covers ctypes, a
+# native reader and a child across `execve` as this hook cannot -- and an allow-list hook beside that
+# rung refuses the rung's own `O_PATH` opens, killing the probe while it is ADDING a rule. What is
+# left here is the deny-prefix job in both of the probe's modes. Measured 2026-08-19, the incident
+# the inversion was written for: with no editable root declared, the probe fence was skipped entirely
+# and a Developer used 150 `run_probe` calls to read the BENCHMARK HARNESS's own validation and
+# timing code. A denylist cannot express "only your own workdir" -- what replaced it is a boundary
+# that can, one layer down.
 _CONFINE = %(confine)r
 _POLICY = %(policy)r
 _LOG = %(log)r
@@ -763,8 +767,10 @@ def _fenced_resolved(p):
     therefore cannot use `_fenced`'s return alone, and the 2026-09-07 merge answered that by
     INLINING the rule there — which silently dropped the `_CONFINE` clause, so a confined probe
     (`developer_probe_confine`) refused only reads under the editable roots and let everything else
-    through, the opposite of what confinement means. Split rather than duplicated, so the open path
-    keeps `p` and the rule stays in one place.
+    through, the opposite of what confinement means. (The probe rendered the inverted fence then;
+    since 2026-09-08 its confinement is the kernel rung and this template renders `confine=False`
+    for it either way. The rule below is unchanged and holds for any `confine=True` render.) Split
+    rather than duplicated, so the open path keeps `p` and the rule stays in one place.
     """
     if p is None:
         return None
@@ -1211,13 +1217,18 @@ def render(roots, allow, *, policy: str, log: str = "", run: str = "",
     `WORKDIR_ENV`. Both are resolved here, once, into the trailing-separator form the hot path
     compares.
 
-    `confine=False` (the default, and what the engine installs) keeps the historical DENYLIST:
-    refuse paths under `roots`, exempting `allow`. `confine=True` INVERTS it into an allow-list
-    — refuse everything outside `allow`, `roots` unused — which is the only shape that can
-    express "this process may read its own workdir and nothing else". See `_CONFINE` in the
+    `confine=False` (the default, and what every caller in the tree installs) keeps the historical
+    DENYLIST: refuse paths under `roots`, exempting `allow`. `confine=True` INVERTS it into an
+    allow-list — refuse everything outside `allow`, `roots` unused — which is the only shape that
+    can express "this process may read its own workdir and nothing else". See `_CONFINE` in the
     template for the incident that made the denylist insufficient for `tools/dev_probe.py`.
-    The two are ORTHOGONAL: `confine` decides what may be READ, `record_root` what may be
-    WRITTEN, and the probe renders `confine=True` with no record root at all."""
+    The two are ORTHOGONAL: `confine` decides what may be READ, `record_root` what may be WRITTEN,
+    and the probe renders neither — it has no record root at all, and since 2026-09-08 its hook is
+    the denylist in BOTH of its modes: with the kernel rung on, an allow-list hook would refuse the
+    rung's own `O_PATH` opens, and with the kernel rung off (`developer_probe_confine=false`) the
+    denylist IS the fence that switch promises back. `confine=True` therefore has no caller in the
+    tree today; it stays because the read-side inversion is a property of this template rather than
+    of any one caller, and `tests/test_read_fence.py` drives it directly."""
     record = _norm_root(record_root) if record_root else ""
     writable_prefixes = tuple(w for w in (_norm_root(x) for x in writable) if w)
     return _TEMPLATE % {
