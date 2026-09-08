@@ -340,6 +340,10 @@ _LAYOUT = {
     "node_diff": "tools",   # what actually differs between two nodes: code, params proposed vs applied
     "run_tools": "tools",
     "machine_runs_tools": "tools",
+    "run_control_tools": "tools",   # the assistant's run-MUTATING provider (doc 25 TO-02)
+    "run_launcher_tools": "tools",  # ...its launch-PROPOSAL provider (same split)
+    "run_command_adapter": "tools",  # ...the seam to the serve-owned command service
+    "turn_mutation_fence": "tools",  # ...one assistant turn's durable mutation journal
     "sandbox": "runtime",
     "scorer_fidelity": "search",
     "schemas": "serve",

@@ -6788,9 +6788,7 @@ PATHS, so a bare technique name shares no prefix with its full slug), and the em
 without which the empty string is a substring of every slug and a blank query resolves to an
 arbitrary card at 0.9. All three deliberate breaks fail loudly.
 
-#### TO-02 · HIGH · over-engineering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
-
-> **OPEN[machine-runs-tools-not-split]** the three named duplications are single-sourced; the module still holds `_TurnMutationFence`, `_RunCommandAdapter` and three unrelated providers, and has grown from 1,659 (finding) to 1,721 (resolution) to **1,966** lines (2026-08-19). proof:present:_TurnMutationFence@looplab/tools/machine_runs_tools.py
+#### TO-02 · HIGH · over-engineering · effort: medium — **RESOLVED (2026-09-08)**
 
 **machine_runs_tools.py is a 1659-line god-module: 3 providers + crash-recovery fence + command adapter, with _subtree defined three times**
 
@@ -6829,8 +6827,28 @@ subject, ignore the generation — were each caught. The single-pass break is th
 iteration order over `state.nodes` is not topological, so a one-pass version is right on most
 inputs and wrong when a descendant is visited before its parent joins.
 
-**Still open:** the module is 1,721 lines and still holds `_TurnMutationFence`, `_RunCommandAdapter`
-and three unrelated providers. That split is a separate change with its own verification.
+*Resolution (2026-09-08, the split):* the module is four modules. `machine_runs_tools.py` keeps the
+READ-ONLY `MachineRunsTools` and its two renderers and is 463 lines; `run_control_tools.py` holds the
+run-MUTATING provider plus the two shared fences and the two injected `serve` contracts
+(`RunLifecycleFns`, `TraceRewriteFns`) it is the only consumer of; `run_launcher_tools.py` holds the
+launch-proposal provider and its ~70-line prompt; `run_command_adapter.py` holds `_RunCommandAdapter`
+and the command-record/rendering helpers; `turn_mutation_fence.py` holds `_TurnMutationFence` and the
+`_MutationRecoveryBlocked` refusal type. 1,988 lines became 463 + 902 + 158 + 356 + 188.
+
+**Nothing is re-exported from the old name.** A back-compat alias would have kept every importer
+pointing at a module that no longer contains what it names — and, worse, split each class's
+monkeypatch seam in two (patching `machine_runs_tools.RunControlTools` would not have reached the
+`serve/assistant.py` that imported the canonical one). The six importers, two in-tree `::` citations
+(`events/trust_gate.py`, `events/types.py` — both re-derived by `claimpin.citation_defects`) and
+`tests/test_assistant_appendable.py`'s provider path were re-pointed in the same change.
+
+Verified by moving code and NOTHING else: every extracted block is byte-identical to what it
+replaced (comments included), the only edits being each new module's own header docstring and its
+imports. `tests/test_run_control_tools.py` (105), `test_node_subtree_and_fence.py` (13),
+`test_assistant_appendable.py`, `test_assistant_endpoint.py`, `test_cross_package_private_seams.py`,
+`test_foreign_run_reader.py`, `test_run_logs_trace.py`, `test_permission_ceremony.py` and both
+package-shape guards (`test_package_layout.py` two-way against `_LAYOUT`, `test_package_layering.py`)
+pass unchanged in what they assert.
 
 #### TO-03 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
@@ -8129,7 +8147,10 @@ fields they omit and why, against that definition.
 
 #### XP-03 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
-> **OPEN[run-lifecycle-primitives-cannot-move-down]** the injection seam landed (`RunLifecycleFns`), with the lazy `serve` import kept as the deliberate default fallback — so the cycle is still there whenever nothing injects. Moving the five primitives down means moving the whole run-lifecycle/launch-liveness subsystem; it wants its own change. This is also TO-03's remaining arm. proof:present:RunLifecycleFns@looplab/tools/machine_runs_tools.py
+> **OPEN[run-lifecycle-primitives-cannot-move-down]** the injection seam landed (`RunLifecycleFns`), with the lazy `serve` import kept as the deliberate default fallback — so the cycle is still there whenever nothing injects. Moving the five primitives down means moving the whole run-lifecycle/launch-liveness subsystem; it wants its own change. This is also TO-03's remaining arm. proof:present:RunLifecycleFns@looplab/tools/run_control_tools.py
+> *(proof re-pointed 2026-09-08: the item did not move, its subject did — TO-02's split put
+> `RunLifecycleFns` and its one consumer in `tools/run_control_tools.py`. Nothing about the
+> lazy `serve` fallback changed.)*
 
 **tools/machine_runs_tools.py is a serve-side component living in tools/, forming a tools<->serve cycle**
 
