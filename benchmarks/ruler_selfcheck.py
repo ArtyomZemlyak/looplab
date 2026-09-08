@@ -236,25 +236,33 @@ def baseline_dir() -> str:
     return os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR") or str(HERE / "algotune" / ".baseline_times")
 
 
-def observed_regime(task: str, subset: str) -> str | None:
-    """The regime key the run ACTUALLY divided by, read off the cache after the fact.
+def observed_regime(task: str, subset: str, evals=None) -> str | None:
+    """The regime key the run ACTUALLY divided by, taken from the evaluation's own report.
 
     Not the requested one. §305 asked for `ALGOTUNE_EVAL_WORKERS=1`, got twenty-two, wrote
     `__w22x1r3` and reported a number that read like a one-worker measurement; the override that
     caused it is gone (§306), but recording the intent would reintroduce the same class of lie for
-    free. What is on disk after the evaluation is what the reading was divided by.
+    free. What the arena resolved is what the reading was divided by.
 
     §314 is why this belongs in the row at all: max_clique_cpsat reads 1.5291 at twenty-two workers
     and 0.9922 at one, on the same quiet box against baselines built in each regime. Two rows
     carrying the same task name and no regime are not a series -- they are two different questions.
     """
-    hits = sorted(Path(baseline_dir()).glob(f"{task}__{subset}__*.json"),
-                  key=lambda q: q.stat().st_mtime, reverse=True)
-    for hit in hits:
-        if hit.name.endswith(".provenance.json"):
-            continue
-        tail = hit.stem.split("__")[-1]
-        return tail or None
+    # THE RUN'S OWN ANSWER FIRST (§350). Globbing the cache by mtime does NOT say what this run
+    # divided by: an evaluation that READS a cached entry leaves its mtime untouched, so the newest
+    # file is simply whichever regime was minted last. Both regimes exist for all four sweep tasks,
+    # and the serial entries were written on 09-06 while the wide ones date from 08-31 -- so every
+    # WIDE reading taken since has been stamped `lane22r3`. Four of them, taken on a quiet box on
+    # 2026-09-08, went into the SERIAL pool: the exact mixing §314 forbids, produced by the field
+    # that exists to prevent it. `looplab_eval.py` stamps `eval_regime()` on its own output
+    # (`out.setdefault("eval_regime", ...)`), which is what the arena actually resolved.
+    for row in evals or []:
+        key = ((row or {}).get("eval_regime") or {}).get("key")
+        if key:
+            return str(key).lstrip("_") or None
+    # NO FALLBACK TO THE CACHE LISTING. Returning a guess here is what put four wide readings in the
+    # serial pool; a row that cannot name its regime is handled by `sweep_claims` (§340), and that
+    # path is honest. None means "this run did not say".
     return None
 
 
@@ -526,6 +534,7 @@ def main(argv=None) -> int:
         # starts and ends inside a single rep is missed, and that is not the kind that moves a
         # median by 9 %.
         busy_seen = []
+        seen_evals = []
         for _ in range(max(1, args.reps)):
             busy_seen.append(busy_cpus_outside_lane())
             row = one_eval(args.task, solver, args.lane, args.subset)
@@ -534,6 +543,7 @@ def main(argv=None) -> int:
             if why:
                 bad.append(why)
                 continue
+            seen_evals.append(row)
             vals.append(float(row["speedup"]))
             if isinstance(row.get("eval_seconds"), (int, float)):
                 secs.append(float(row["eval_seconds"]))
@@ -592,7 +602,7 @@ def main(argv=None) -> int:
             ref_from = ref_sha = None
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
                        args.lane, max(seen) if seen else None,
-                       observed_regime(args.task, args.subset), direct, cached,
+                       observed_regime(args.task, args.subset, seen_evals), direct, cached,
                        reference_sha=ref_sha, reference_from=ref_from,
                        interpreter=bench_python())
         print(f"  recorded to {args.record}")
