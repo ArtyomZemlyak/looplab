@@ -84,6 +84,7 @@ from looplab.engine.novelty import NoveltyGateMixin
 from looplab.engine.strategy import StrategyCadenceMixin
 from looplab.engine.concept_cadence import ConceptCadenceMixin
 from looplab.engine.verifier_tiebreak import VerifierTiebreakMixin
+from looplab.engine.value_estimate import ValueEstimateMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
 from looplab.engine.finalize import (
     ensure_finish_report,
@@ -864,7 +865,7 @@ def _task_declared_env(task) -> bool:
 
 
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
-             ConceptCadenceMixin, VerifierTiebreakMixin,
+             ConceptCadenceMixin, VerifierTiebreakMixin, ValueEstimateMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
              AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
              CardReservationMixin,
@@ -1104,6 +1105,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # "drifts" forever, and without this the strategy path rebuilt the whole StrategyContext on
         # every loop pass to re-derive the same no-op. Nothing durable keys off it — see there.
         self._invalid_pin_verdict: Optional[tuple] = None
+        # In-process abstention memo for the value-estimate cadence (docs/BACKLOG.md §0.1 row 17):
+        # the `(node_id, attempt)` pairs whose estimate came back unusable. Declared HERE rather
+        # than minted on first use so it takes no row in `engine/attribute_sites.py`'s shrink-only
+        # backlog — a read of a name nothing assigns answers a default instead of raising, which is
+        # the whole reason that registry exists. Nothing durable keys off it: an abstention is
+        # live-only and a resumed process may retry each node once, which is bounded.
+        self._value_estimate_attempted: set[tuple[int, int]] = set()
         self.strategist_every = max(1, strategist_every)
         self.concept_retag_every = max(1, concept_retag_every)
         # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
@@ -5146,6 +5154,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # fold's final selector breaks the tie by soundness. Lazy (only real ties), replay-safe (persists one
         # verifier_group_scored event), advisory (never overrides a strictly-better metric). No-op when off.
         state = self._maybe_verify_ties(state)
+
+        # docs/BACKLOG.md §0.1 row 17: the LLM VALUE ESTIMATE for the MCTS candidates — how much a
+        # model thinks each branch still has left — frozen into the log so the tree can tell an
+        # unexpanded branch from a spent one at the same metric. Placed BEFORE the Strategist for
+        # the reason `_maybe_verify_ties` is: the policy that reads the estimates may be rebuilt by
+        # `_apply_strategy`, and an estimate bought after that rebuild would be spent on a weight
+        # the turn no longer uses. Replay-safe (the recorded per-node estimate is what the fold
+        # reads, never a live call), and a no-op unless the live policy's `value_weight` is > 0 —
+        # which is also the gate on the paid call itself, so today it costs nothing.
+        state = self._maybe_estimate_node_values(state)
 
         # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
         # the policy proposes the next actions. No-op when strategist is off (== today).

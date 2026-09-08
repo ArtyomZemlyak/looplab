@@ -662,13 +662,37 @@ site that proves it is open.
     `search/graded_novelty.py` / `novelty_recall.py` / `taxonomy_dedup.py`, which exist independently.
    **[RE-DERIVED 2026-08-21 — HOLDS.** `MCTSPolicy` is still the one class, `search/policy.py`
    imports no `graded_novelty`, and there is still no `lats.py`.
-   OPEN[mcts-has-no-llm-value-estimate] the tree values a node by its metric alone, so an unexplored
-   branch nobody has evaluated is indistinguishable from a bad one; retire this when a value
-   estimate exists.
-   proof:absent:value_estimate@looplab/search/policy.py
    *Mutated before it was written:* True as shipped, False the moment that module exists. Re-pointed
    2026-09-06 (doc 52 §2.2): `lats.py` was a file that might arrive under another name; the item's
-   own text names the fix — a value estimate in `policy.py` — so the proof is bound to that name.]
+   own text names the fix — a value estimate in `policy.py` — so the proof is bound to that name.
+   *CLOSED 2026-09-08 — the value estimate exists, and it is the HALF of the item the evidence
+   supports.* `search/policy.py::value_estimate` is the adjustment as a statable function:
+   `reward + weight × (2·prior − 1) / (1 + visits)`, ADDED to the UCB1 value term rather than
+   multiplied into the score for the reason `eval_cost_penalty` beside it is subtracted — the reward
+   is bounded in (0, 2) and `c ≈ 1.4` is calibrated against that scale, while the exploration term
+   counts visits and knows nothing about promise. Two properties decided the arithmetic and neither
+   is visible in a test where the priors differ: it is ZERO-CENTRED at an uninformative 0.5, so a
+   model that answers the same middling number for every branch moves nothing (the obvious spelling,
+   blending toward an absolute `2 × prior`, drags a run whose rewards sit at 1.47 downward and drags
+   the LEAST-VISITED candidate hardest — the exploration bonus running backwards, bought with paid
+   calls); and it DECAYS as `1/(1 + visits)`, the shape the exploration term already has, so the
+   estimate speaks loudest where the evidence is thinnest. `engine/value_estimate.py` is the paid
+   half — one bounded structured ask per unestimated MCTS candidate at the creation boundary
+   (≤ `VALUE_ESTIMATE_CADENCE_CAP` = 6, in the enrichment lane, under its own `value_estimate` span
+   so the money is attributable), asking how much the LINEAGE has left on what the branch TRIED and
+   what its children already got out of it, never on the metric the policy already reads exactly. The
+   answer is frozen as `node_value_estimated` → `Node.value_prior`, so the fold stays deterministic
+   (invariant #5) and a replay expands the same nodes; nothing is back-propagated across a merge
+   (ADR-5 §4) and nothing in champion selection reads it. Behind `Settings.mcts_value_weight`,
+   default `0.0`, where the score expression is byte-identical AND no call is bought — a run that
+   cannot use the number does not pay for it — and an UNESTIMATED node is likewise untouched, because
+   "nobody asked" is not "the model called it average". `tests/test_mcts_value_estimate.py` drives
+   the truth table, the byte-identity on a state that HAS priors, the pair the marker names (two
+   candidates tied on metric, one branch called spent and one wide open, the pick moving), the
+   fold's generation and range gates, and the cadence end to end against a stub client — including
+   that `BudgetExceeded` ends the run rather than the estimate. **The REFLECTION half of the entry
+   stays open and unmarked**: the tree still feeds no failed-branch self-reflection into the next
+   proposal, and `search/policy.py` still imports no `graded_novelty`.]
 18. **Parallel eval is in-process only (P2, L).** `engine/evaluate.py:1375` takes an
     `anyio.CapacityLimiter` and `orchestrator.py:1503,2383` open task groups; there is no `ray`,
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID

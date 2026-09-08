@@ -967,6 +967,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                            debug_depth=settings.debug_depth,
                            operator_bandit=settings.operator_bandit,
                            cost_weight=settings.mcts_cost_weight,   # doc 52 row 31: MCTS only
+                           # docs/BACKLOG.md §0.1 row 17: also MCTS only, and also the
+                           # gate on the paid estimate — 0 buys nothing.
+                           value_weight=settings.mcts_value_weight,
                            # doc 52 row 19: the arms' relative costs; the engine holds the models
                            model_arms={arm: cost for arm, (_m, cost)
                                        in parse_model_arms(settings.model_arms).items()}),

@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 208
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 209
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -226,7 +226,15 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # next to it is one: it decides whether this run's params, metrics and champion CODE leave the box
 # for an external server, so the operator has to be able to see it and turn it off. Exactly one key
 # added, none removed; both pins re-derived over the file rather than incremented.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5521c195af21a9aeee1e76e4ddc9782a4a742c148387ccc362b0424a76d0acdf"
+# 208 + 1 -> 209 on 2026-09-08: `mcts_value_weight` (docs/BACKLOG.md §0.1 row 17), the LLM
+# value estimate's weight in the MCTS value term. A row rather than an uncurated omission on
+# `mcts_cost_weight`'s own ground — it is a number an operator types to trade one thing
+# against another and is meaningless to anyone who cannot see its unit — and on a second:
+# above 0 it BUYS a bounded structured call per unestimated candidate per creation boundary,
+# so it is a spend switch, and a spend switch the operator cannot see is the kind this
+# catalogue exists to surface. Exactly one key added, none removed; both pins re-derived over
+# the file rather than incremented.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "c368907ccb3fd227f8d4014b86f358e65e60d2cab34fb49348bec28a7a4511c1"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

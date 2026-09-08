@@ -1118,6 +1118,18 @@ class Settings(BaseSettings):
     # a subtree nobody has measured counts as average, never as free. Only the `mcts` policy reads
     # it (greedy/evolutionary/asha ignore it, as they ignore `c`).
     mcts_cost_weight: float = 0.0
+    # THE LLM VALUE ESTIMATE (docs/BACKLOG.md §0.1 row 17): how much a model's opinion of a branch's
+    # remaining HEADROOM counts in the `mcts` policy's UCB1 value term. `0.0` = off and is the
+    # historical behaviour exactly — `search/policy.py::value_estimate` returns its reward argument,
+    # the score expression is unchanged, and the paid call is never made, so a run that cannot use
+    # the number does not buy it. That is also why it needs no `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row:
+    # off IS the pre-field value, so a resumed snapshot that predates the field gains no paid call.
+    # The unit is REWARD, on `_mcts_reward`'s bounded (0, 2) scale and zero-centred at an
+    # uninformative estimate: at `0.4` a once-visited branch the model calls spent loses 0.2 and one
+    # it calls wide open gains 0.2, decayed by `1 / (1 + visits)` as the subtree is really measured.
+    # Only the `mcts` policy reads it (greedy/evolutionary/asha ignore it, as they ignore `c`), and
+    # it buys ONE bounded structured call per unestimated candidate per creation boundary.
+    mcts_value_weight: float = 0.0
     # THE MODEL ARMS of the operator x model router (doc 52 row 19): `{arm: "model-id[@cost]"}` —
     # the models the bandit branch may route a BUILD to beside the configured Developer model (the
     # implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because it is a

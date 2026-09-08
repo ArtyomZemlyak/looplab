@@ -100,7 +100,15 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 208
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 209
+    # 208 + 1 -> 209 on 2026-09-08: `mcts_value_weight` (docs/BACKLOG.md §0.1 row 17), the LLM value
+    # estimate's weight in the MCTS value term. Verified by intersection as every entry below
+    # prescribes rather than by bumping the integer: removing exactly that key from the catalogue
+    # gives back the 208 keys of the previous tree, so this is one real addition with nothing renamed
+    # away underneath it. It is a ROW and not an uncurated omission twice over — it is an
+    # operator-typed number whose UNIT has to be visible (`mcts_cost_weight`'s ground), and above 0
+    # it BUYS a bounded structured call per unestimated candidate per creation boundary, which makes
+    # it a spend switch.
     # 207 + 1 -> 208 on 2026-09-08: `mlflow_tracking_uri` (docs/BACKLOG.md §16), the live MLflow
     # mirror. Verified by intersection as every entry below prescribes rather than by bumping the
     # integer: removing exactly that key from the catalogue gives back the 207 keys of the previous
@@ -335,7 +343,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # move together because it is a curated row.
     # 242 + 1 -> 243 on 2026-09-08: `mlflow_tracking_uri` — see the catalogue note above; the two
     # counts move together because it is a curated row.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 243
+    # 243 + 1 -> 244 on 2026-09-08: `mcts_value_weight` — see the catalogue note above; the two
+    # counts move together because it is a curated row.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 244
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

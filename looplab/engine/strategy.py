@@ -699,6 +699,12 @@ class StrategyCadenceMixin:
                 # would silently drop a cost constraint the operator set at launch, the same shape
                 # as the `ablation_capable` re-stamp below. An explicit `policy_params` entry wins.
                 pp.setdefault("cost_weight", getattr(self.policy, "cost_weight", 0.0))
+                # The value-estimate weight travels the same way and for the same reason
+                # (docs/BACKLOG.md §0.1 row 17): it is a run-level knob
+                # (`Settings.mcts_value_weight`) the engine does not hold, so a switch
+                # to `mcts` that dropped it would silently stop BUYING the estimates as
+                # well as stop reading them.
+                pp.setdefault("value_weight", getattr(self.policy, "value_weight", 0.0))
                 self.policy = make_policy(base, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
                                           ablate_every=self._ablate_every,
                                           debug_depth=self._debug_depth,

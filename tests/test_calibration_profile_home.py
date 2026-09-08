@@ -134,7 +134,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:1f500c53d7933c745a419d88639e55df9d825d136d7536c83706413d3c66badf"
+_EXPECTED_DIGEST = "sha256:627750854f6126b805e4dbae2da801e8e24f12c5910459aa41f11e9d60f387d3"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -591,7 +591,26 @@ _EXPECTED_DIGEST = "sha256:1f500c53d7933c745a419d88639e55df9d825d136d7536c837064
 #               decides whether a run's params, metrics and champion CODE leave the box for an
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
-_EXPECTED_FIELD_COUNT = 240
+#   2026-09-08  + mcts_value_weight  (docs/BACKLOG.md §0.1 row 17: the LLM value estimate the MCTS
+#               tree never had). The 'field set changed too' branch, verified that way rather than
+#               from the count: an AST scan of `Settings`' annotated assignments against the
+#               pre-change tree reports exactly `['mcts_value_weight']` added and `[]` removed, so a
+#               +2/-1 cannot be hiding behind the +1. `_EXPECTED_FIELD_COUNT` goes 240 -> 241 and
+#               both pins are re-set.
+#               INERT for a calibration replicate, and inert three times over: it ships 0.0, where
+#               `search/policy.py::value_estimate` returns its reward argument and the UCB
+#               expression is byte-identical to the one every issued receipt was calibrated under;
+#               0.0 is ALSO the gate on the paid call, so `engine/value_estimate.py` estimates
+#               nothing and the replicate makes no provider call it did not make before; and the
+#               calibration profile runs `greedy`, which never reads the weight at all. Re-pinned
+#               anyway on the rule every inert knob above was re-pinned under — the digest binds the
+#               COMPLETE non-variant envelope, and the guard is deliberately not clever enough to
+#               exempt a knob it can prove unreachable. What makes re-pinning right rather than
+#               merely necessary is what the field IS above 0: it buys a bounded structured call per
+#               unestimated candidate per creation boundary and then MOVES which node the tree
+#               expands, so a replicate calibrated with it on evaluates different nodes in a
+#               different order — exactly what a speculation receipt asserts about.
+_EXPECTED_FIELD_COUNT = 241
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

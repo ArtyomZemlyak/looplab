@@ -169,7 +169,12 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   207 + 1 -> 208 (2026-09-08): `mlflow_tracking_uri` (docs/BACKLOG.md §16) — the MLflow mirror
   //   that runs WHILE the run does. A row because it decides whether this run's params, metrics and
   //   champion code leave the box for an external tracking server; blank is off.
-  assert.equal(Object.keys(schema.fieldByKey).length, 208)
+  //   208 + 1 -> 209 (2026-09-08): `mcts_value_weight` (docs/BACKLOG.md §0.1 row 17) — the LLM
+  //   value estimate's weight in the MCTS value term. A row because it is a number an operator
+  //   types whose unit has to be shown, and because above 0 it BUYS a bounded structured call
+  //   per unestimated candidate per creation boundary. Verified by intersection: 208 keys
+  //   common to the previous keyset plus exactly that one, nothing renamed away.
+  assert.equal(Object.keys(schema.fieldByKey).length, 209)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   //   190 -> 193 (2026-09-06): the three bench-driven knobs of docs/60 §60.9 — `llm_stream_stall_
