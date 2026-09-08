@@ -255,12 +255,6 @@ def _windows_move_write_through(
         raise OSError(code, "durable Windows rename failed", dst)
 
 
-# ERROR_ALREADY_EXISTS (winerror.h). What `MoveFileExW` answers when the destination NAME is taken
-# and MOVEFILE_REPLACE_EXISTING was not requested — the one Windows publication failure that is a
-# lost race rather than a fault. See `_strict_publish_directory`.
-_ERROR_ALREADY_EXISTS = 183
-
-
 # The errnos that mean "this filesystem/kernel does not implement RENAME_NOREPLACE", as opposed to
 # "this rename failed". EINVAL is Linux's answer to an unrecognised flag and is what `fuse.geesefs`
 # returns here (measured 2026-08-13); ENOSYS/EOPNOTSUPP are what a filesystem returns when it does
@@ -474,38 +468,6 @@ def strict_replace(source: str | os.PathLike, destination: str | os.PathLike) ->
 _strict_replace = strict_replace
 
 
-# How old a `.<name>.<rand>.tmp` staging DIRECTORY must be before the Windows publisher will treat
-# it as abandoned. Its whole intended life is one `MoveFileExW` — microseconds — so an hour is not a
-# tuned number, it is "so far past any live writer that a suspended VM would still be safe". The
-# guard that actually protects a concurrent writer is `os.rmdir`, which refuses a directory that is
-# not empty; age only protects the one case rmdir cannot see, a racing writer whose own staging
-# directory is legitimately empty at this instant.
-_WINDOWS_STAGING_DIR_ABANDONED_S = 3600.0
-
-
-def _sweep_abandoned_staging_dirs(parent: Path, name: str) -> None:
-    """Remove staging directories a CRASHED Windows publisher left behind. POSIX never calls this.
-
-    `_strict_publish_directory` stages under `mkdtemp` and publishes by moving. Its own `except`
-    cleans up a FAILED move, but a process killed between the two leaves `.<name>.<rand>.tmp`
-    permanently, and nothing else in this repo sweeps a run directory. Best-effort by construction:
-    every failure here is another writer, a permission, or a race, none of which is a reason to fail
-    the publish this sweep is only tidying up before.
-    """
-    try:
-        entries = list(parent.glob(f".{name}.*.tmp"))
-    except OSError:
-        return
-    now = time.time()
-    for entry in entries:
-        try:
-            if not entry.is_dir() or (now - entry.stat().st_mtime) < _WINDOWS_STAGING_DIR_ABANDONED_S:
-                continue
-            os.rmdir(entry)     # refuses a non-empty directory: never destroys staged content
-        except OSError:
-            continue
-
-
 def _strict_publish_directory(directory: Path) -> None:
     """Create one missing directory with a durably published name."""
     if os.name != "nt":
@@ -514,36 +476,12 @@ def _strict_publish_directory(directory: Path) -> None:
         return
 
     # Windows has no portable Python directory-fsync primitive. Create a unique sibling directory,
-    # then publish the requested name with MOVEFILE_WRITE_THROUGH.
-    _sweep_abandoned_staging_dirs(directory.parent, directory.name)
+    # then publish the requested name with MOVEFILE_WRITE_THROUGH. Do not accept an unexpected
+    # concurrent destination: its creator may have used a weaker durability policy.
     temporary = Path(tempfile.mkdtemp(
         dir=str(directory.parent), prefix=f".{directory.name}.", suffix=".tmp"))
     try:
         _windows_move_write_through(temporary, directory, replace=False)
-    except OSError as exc:
-        # A CONCURRENT CREATOR IS TOLERATED, and only to the level POSIX already tolerates it.
-        # `MoveFileExW` without MOVEFILE_REPLACE_EXISTING answers ERROR_ALREADY_EXISTS when another
-        # writer won the race for this name; the POSIX branch above answers the identical race with
-        # `mkdir(exist_ok=True)`, which accepts a directory created by ANY process under ANY
-        # durability policy. Refusing here made two racing `strict_atomic_write_bytes` calls fail one
-        # of them on Windows for a race POSIX does not even notice — and an exception out of that
-        # helper means INDETERMINATE to its caller (see its docstring), so the refusal turned a
-        # benign race into a paid-work claim nobody can classify. What is knowingly given up is the
-        # case the original comment named: a foreign creator with a weaker policy. That exposure is
-        # EXACTLY the POSIX one, unchanged and untightenable from here — Windows offers no portable
-        # way to re-establish a durability receipt on a directory somebody else created — so this
-        # aligns the two platforms rather than weakening either. A non-directory winner is still a
-        # hard failure: the caller is about to `mkstemp` inside this name.
-        if getattr(exc, "winerror", None) != _ERROR_ALREADY_EXISTS or not directory.is_dir():
-            try:
-                os.rmdir(temporary)
-            except OSError:
-                pass
-            raise
-        try:
-            os.rmdir(temporary)
-        except OSError:
-            pass
     except BaseException:
         try:
             os.rmdir(temporary)
@@ -696,13 +634,33 @@ def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
     #
     # OPEN[atomicio-windows-parent-publication] unreachable from this repo's POSIX CI, so the
     # proof can only name the site that owns it. proof:present:_ensure_strict_parent@looplab/core/atomicio.py
-    # STILL OPEN, and now WRITTEN rather than absent: `_strict_publish_directory` tolerates a racing
-    # DIRECTORY winner (ERROR_ALREADY_EXISTS) the way POSIX mkdir(exist_ok=True) does, and
-    # `_sweep_abandoned_staging_dirs` removes the '.{name}.{rand}.tmp' directory a publisher killed
-    # between mkdtemp and the move leaves behind. Neither line has ever executed — both sit past an
-    # `os.name == "nt"` branch and this repo's CI is POSIX — so the tests that would decide them
-    # (`tests/test_atomicio.py`, the four Windows-skipped cases at the end) skip on every platform
-    # this project can run. The item stays open until someone runs them on Windows.
+    # STILL OPEN: Windows parent-dir publication (_ensure_strict_parent -> _strict_publish_directory,
+    # replace=False) makes two racing writers of the SAME missing parent fail one of them with
+    # ERROR_ALREADY_EXISTS, where POSIX mkdir(exist_ok=True) tolerates the identical race; and a
+    # crash between mkdtemp and the move leaves a permanent '.{name}.{rand}.tmp' directory no sweeper
+    # removes. Both are Windows-only and neither is reachable from the POSIX CI this repo runs.
+    #
+    # NARROWED 2026-09-08 — both halves are now WRITTEN and deliberately NOT shipped. Commit 6060f23e
+    # (reverted by the commit after it) has them, with four Windows-skipped cases at the end of
+    # `tests/test_atomicio.py`; running THOSE on a Windows box is what would verify either.
+    #
+    # The RACE half did not ship because the obvious fix is not the parity it looks like. Accepting a
+    # racing DIRECTORY winner on ERROR_ALREADY_EXISTS is not what the POSIX branch does: POSIX follows
+    # its tolerant `mkdir(exist_ok=True)` with `strict_fsync_parent`, which re-establishes the
+    # durability receipt for a directory ANY process created, however weak that creator's own policy
+    # was. Windows has no portable directory-handle sync, so tolerating there accepts an UNCONFIRMED
+    # publication inside the one helper in this module whose entire contract is fail-closed — a
+    # weakening dressed as an alignment, and exactly what the `replace=False` refusal was written to
+    # prevent. Closing it properly needs a Windows-only way to re-publish a directory entry somebody
+    # else created (a write-through rename of a throwaway sibling in the same parent is the candidate),
+    # and whether NTFS actually flushes the parent's metadata that way is not something this box can
+    # measure. The spurious refusal it costs meanwhile is real but bounded: two racing STRICT writers
+    # of one missing parent, one of them told INDETERMINATE about a claim that was fine.
+    #
+    # The LEFTOVER half is smaller — an age-guarded `os.rmdir` sweep of `.{name}.{rand}.tmp`
+    # directories, which rmdir's own refusal to remove a non-empty directory already makes fairly
+    # safe — and it did not ship on its own because a garbage collector that deletes directories on a
+    # durability path, which nobody has ever executed, is not worth a stranded empty directory.
     p = Path(path)
     _ensure_strict_parent(p.parent)
     fd, tmpname = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")
