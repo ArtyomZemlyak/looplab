@@ -59,6 +59,7 @@ from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
     _spawn_engine)
+from looplab.serve.http import generation_conflict
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES
 
@@ -596,11 +597,12 @@ class RunCommandService:
         with self.sequence(rd):
             self._reject_unresolved_reset(rd, f"start {kind} activity")
             if self.run_generation(rd) != generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "message": "The run was reset or replaced before this background work started.",
-                    "remediation": "Refresh the run and submit the request against its current generation.",
-                })
+                # No fence fields: the caller named a generation but this is the SERVER's own
+                # background-activity claim, and the run it would report has already been replaced.
+                raise generation_conflict(
+                    "The run was reset or replaced before this background work started.",
+                    remediation=("Refresh the run and submit the request against its current "
+                                 "generation."))
             now = time.time()
             owner = {"kind": str(kind)[:80], "pid": os.getpid(), "created_at": now}
             try:
@@ -2328,15 +2330,12 @@ class RunCommandService:
                             "the returned generation."),
                     })
                 if expected != current_generation:
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "expected_generation": expected,
-                        "current_generation": current_generation,
-                        "message": "The run was reset or replaced after this command was formed.",
-                        "remediation": (
+                    raise generation_conflict(
+                        "The run was reset or replaced after this command was formed.",
+                        expected=expected, current=current_generation,
+                        remediation=(
                             "Refresh the run, review its current state, and form a new command with "
-                            "a new idempotency key and current generation."),
-                    })
+                            "a new idempotency key and current generation."))
                 normalized_candidate = None
                 semantic_candidate = None
                 normalization_error = None

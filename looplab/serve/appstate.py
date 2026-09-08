@@ -19,6 +19,7 @@ import contextvars
 import os
 import stat
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
@@ -32,7 +33,8 @@ from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.events.authoring_projection import card_authoring
-from looplab.events.eventstore import integrity_wire, iter_event_jsonl, log_integrity
+from looplab.events.eventstore import (
+    EventStore, integrity_wire, iter_event_jsonl, log_integrity)
 from looplab.events.replay import fold
 from looplab.events.types import EV_NODE_CREATED
 from looplab.serve.deletion_transaction import (
@@ -136,6 +138,10 @@ _REQUEST_FOLD_MEMO: "contextvars.ContextVar[Optional[dict]]" = contextvars.Conte
 #: state per run; past this the memo stops answering, degrading to the previous behaviour.
 _REQUEST_FOLD_MEMO_MAX = 8
 
+#: How many runs' append-incremental event readers one server holds (`AppState.event_store`). Well
+#: above the runs a single session touches, far below "every run this server has ever served".
+_EVENT_STORE_CACHE_MAX = 64
+
 
 @contextmanager
 def request_fold_scope():
@@ -209,6 +215,10 @@ class AppState:
         # "dictionary changed size during iteration". Held only around the cheap dict ops, never the
         # (slow) span read + build below.
         self._trace_view_lock = threading.Lock()
+        # Per-run append-incremental `EventStore` readers — see `event_store` for the whole argument
+        # about why THIS one is safe to hold across requests when a folded `RunState` is not.
+        self._event_stores: "OrderedDict[str, EventStore]" = OrderedDict()
+        self._event_store_lock = threading.Lock()
         self.reports_dir = root / "reports"
         # Late-bound route callables (set by their owning router's build_router; see module docstring
         # and the `serve/router_wiring.py` registry that enumerates producer + consumers).
@@ -298,11 +308,60 @@ class AppState:
             evs = [e for e in evs if e.seq <= upto_seq]
         return evs
 
+    def event_store(self, rd: Path) -> EventStore:
+        """The run's `EventStore`, REUSED across requests (CODE_REVIEW, `eventstore.py::_scan_last_seq`).
+
+        `EventStore.__init__` walks the log once to learn its tail seq, and `routers/control.py`
+        built a fresh one per `POST /control` — so a session of N control appends paid N full scans
+        of a log that only ever grew by one record each time, which is the quadratic the finding
+        names. The store is exactly the object built to avoid that: its read cache keeps parsed
+        Events and reads only the bytes appended since the previous call.
+
+        **THIS IS NOT THE THING INVARIANT #4 FORBIDS, and the difference is the point.**
+        `request_fold_scope` memoizes a folded `RunState` for ONE request and never across, because
+        a `RunState` is MUTABLE — a second request handed the same object could observe another
+        request's edits. An `EventStore` holds no derived state a caller can mutate: it holds the
+        file's own bytes, and every `read_all()` re-stats the log and re-validates the cached prefix
+        against disk before extending it (replacement by inode, shrink, same-size rewrite and a
+        prefix rewrite each invalidate the cache and rebase `_seq`). A reset that archives
+        `events.jsonl` and starts a new one is therefore observed by the store itself, not papered
+        over by this map — which is why the engine has always held ONE store for a whole run.
+
+        What a REUSED store may not be asked without reading first is `divergence` and `_seq`: both
+        describe the bytes the store has consumed, so they are as fresh as the last `read_all()`.
+        Every caller here either reads or appends (`append` calls `read_all()` under the write lock
+        before deriving a seq), so neither is answered from a stale snapshot.
+
+        Bounded and LRU, because a server that has served a thousand runs must not hold a thousand
+        parsed logs. Eviction only drops the cache: the next caller builds a fresh store and pays the
+        one scan it would have paid anyway.
+        """
+        key = str(Path(rd))
+        with self._event_store_lock:
+            store = self._event_stores.get(key)
+            if store is not None:
+                self._event_stores.move_to_end(key)
+                return store
+        # Built OUTSIDE the lock: construction reads the whole log, and holding a process-wide lock
+        # across that would serialize every run's first control append behind the largest one. A
+        # concurrent builder for the same run simply loses the race and discards its own store.
+        built = EventStore(Path(rd) / "events.jsonl")
+        with self._event_store_lock:
+            existing = self._event_stores.get(key)
+            if existing is not None:
+                self._event_stores.move_to_end(key)
+                return existing
+            self._event_stores[key] = built
+            while len(self._event_stores) > _EVENT_STORE_CACHE_MAX:
+                self._event_stores.popitem(last=False)
+        return built
+
     def log_integrity(self, rd: Path) -> dict:
         """Is the prefix `events()` just returned the WHOLE log? — cached per file identity.
 
         `events()` reads through `iter_event_jsonl`, which STOPS at the first corrupt or non-dense
-        record and reports nothing, and this class never builds an `EventStore` — so until 2026-08-14
+        record and reports nothing, and no READ path here builds an `EventStore` (`event_store`
+        above serves the control-plane WRITERS and is not on this receipt's path) — so until 2026-08-14
         the divergence receipt was structurally unreachable from every HTTP surface: `/api/runs`,
         `/state`, the SSE stream, `/lifecycle`, `/nodes`, `/prov`, `/cost`, the review payload, the
         assistant's run context and the whole TUI. `runs/rubertlite-dense-retrieval` is what that

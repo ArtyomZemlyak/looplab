@@ -384,7 +384,8 @@ def _echo_log_integrity(store: EventStore, run_dir: Path) -> None:
 
 def log_integrity_from(store: EventStore) -> dict:
     """The shared receipt shape, from a store that has ALREADY scanned (no second read of the file).
-    `EventStore.__init__` calls `log_divergence`, so this is free at every CLI call site."""
+    `EventStore.__init__` seeds `divergence` from the one walk it does anyway, so this is free at
+    every CLI call site (it used to name a separate `log_divergence` pass; that pass is gone)."""
     div = store.divergence
     if div is None:
         return dict(INTEGRITY_COMPLETE)

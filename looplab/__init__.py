@@ -363,6 +363,7 @@ _LAYOUT = {
     "speculation_calibration": "search",
     "speculation_quality": "search",
     "source_identity": "core",    # provenance/source-identity primitives (stdlib-only, used by core)
+    "start_record": "serve",  # the durable run-START record protocol, de-closured (doc 25 SR-01)
     "strategist": "agents",
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)
     "stuck": "agents",

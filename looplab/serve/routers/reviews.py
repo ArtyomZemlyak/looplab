@@ -11,7 +11,8 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, SecretStr, StrictBool
 
 from looplab.core.node_evidence import node_attempt
-from looplab.serve.http import comment_cursor_error, comment_filter_invalid, refusal
+from looplab.serve.http import (
+    comment_cursor_error, comment_filter_invalid, generation_conflict, refusal)
 from looplab.serve.metrics_adapters import fenced_node_metrics
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, project_comments)
@@ -541,11 +542,11 @@ def build_router(srv) -> APIRouter:
                     "remediation": "Use the generation returned by the review state response.",
                 })
             if request_generation is not None and request_generation != bound_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "message": "The requested evidence belongs to a different run generation.",
-                    "remediation": "Reload the review state before requesting solution evidence.",
-                })
+                # No fence fields: a review link never publishes the run's generation to its
+                # reader, so there is nothing here for the client to compare against.
+                raise generation_conflict(
+                    "The requested evidence belongs to a different run generation.",
+                    remediation="Reload the review state before requesting solution evidence.")
             if seq is not None:
                 if request_generation is None:
                     raise HTTPException(400, {

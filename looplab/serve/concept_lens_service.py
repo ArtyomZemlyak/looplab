@@ -55,7 +55,7 @@ from looplab.serve.concept_frame import (
     bounded_lens_label, core_lens_inputs as concept_core_lens_inputs,
     lens_request as concept_lens_request, normalized_custom_lens_name,
     project_frame as project_concept_frame)
-from looplab.serve.http import json_object_bytes
+from looplab.serve.http import generation_conflict, json_object_bytes
 from looplab.serve.paid_ledger import (
     FAIL_CLOSED, PaidLedgerSpec, append_claim, confirm_terminal_receipt, fold_paid_ledger,
     record_terminal)
@@ -183,20 +183,12 @@ def assert_lens_generation(srv, rd: Path, *, core_generation: Optional[str],
     rd = srv.commands.validate_paths(rd)
     current_generation = srv.commands.run_generation(rd)
     if not current_generation or current_generation != expected_generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "expected_generation": expected_generation,
-            "current_generation": current_generation or None,
-            "message": stale_message,
-            "remediation": stale_remediation,
-        })
+        raise generation_conflict(stale_message, expected=expected_generation,
+                                  current=current_generation or None,
+                                  remediation=stale_remediation)
     if core_generation != current_generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "expected_generation": expected_generation,
-            "current_generation": current_generation,
-            "message": prepared_message,
-        })
+        raise generation_conflict(prepared_message, expected=expected_generation,
+                                  current=current_generation)
     return rd, current_generation
 
 
@@ -547,13 +539,10 @@ async def durable_derive_concept_lens(srv, run_id: str, request: Request, respon
             "message": "The run has no durable generation identity.",
         })
     if generation != expected_generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "expected_generation": expected_generation,
-            "current_generation": generation,
-            "message": "The run changed before paid lens creation began.",
-            "remediation": "Reload the Concepts view and submit a new request intentionally.",
-        })
+        raise generation_conflict(
+            "The run changed before paid lens creation began.",
+            expected=expected_generation, current=generation,
+            remediation="Reload the Concepts view and submit a new request intentionally.")
     base_frame = project_concept_frame(
         core, requested_lens="is_a", lens_pack=lens_pack)
     response.headers["Cache-Control"] = "no-store"
@@ -581,21 +570,15 @@ async def durable_derive_concept_lens(srv, run_id: str, request: Request, respon
                     "message": "The run has no durable generation identity.",
                 })
             if current_generation != expected_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation,
-                    "message": "The run changed before paid lens creation began.",
-                    "remediation": "Reload the Concepts view and submit a new request intentionally.",
-                })
+                raise generation_conflict(
+                    "The run changed before paid lens creation began.",
+                    expected=expected_generation, current=current_generation,
+                    remediation="Reload the Concepts view and submit a new request intentionally.")
             if core[RUN_GENERATION_FIELD] != current_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation,
-                    "message": "The run changed while the concept frame was being prepared.",
-                    "remediation": "Reload the Concepts view and submit a new request intentionally.",
-                })
+                raise generation_conflict(
+                    "The run changed while the concept frame was being prepared.",
+                    expected=expected_generation, current=current_generation,
+                    remediation="Reload the Concepts view and submit a new request intentionally.")
 
             job_identity = lens_identity(
                 rd, current_generation, raw_idempotency_key)
@@ -772,13 +755,10 @@ def durable_recover_concept_lens_receipt(srv, run_id: str, response: Response,
         store.read_all(), current_generation)
     _rd_after, generation_after = srv.commands.generation_fence(rd)
     if generation_after != current_generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "expected_generation": expected_generation,
-            "current_generation": generation_after or None,
-            "message": "The run changed while its recovery projection was read.",
-            "remediation": "Reload Concepts and inspect only the current generation.",
-        })
+        raise generation_conflict(
+            "The run changed while its recovery projection was read.",
+            expected=expected_generation, current=generation_after or None,
+            remediation="Reload Concepts and inspect only the current generation.")
     common = {
         "schema": _CONCEPT_LENS_RECOVERY_SCHEMA,
         "generation": current_generation,
