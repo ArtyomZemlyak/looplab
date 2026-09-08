@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 148 resolved, 38 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 150 resolved, 36 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -4847,9 +4847,13 @@ match. Each pins the same property — an unconfirmed or unreconstructable outco
 another deletion. Six independent breaks in the production module were each caught by exactly the
 test that guards the property they broke.
 
-#### SR-04 · MEDIUM · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### SR-04 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[concept-lens-subsystem-inside-runs-router]** the concept-lens subsystem still lives in `routers/runs.py` — 21 lens helpers plus the worker, ledger and three endpoints — though `serve/concept_frame.py` (731 lines, landed 2026-08-17) has since taken the pure projection half. proof:present:_run_concept_lens_worker@looplab/serve/routers/runs.py
+> *Closed 2026-09-08: `serve/concept_lens_service.py` now owns the whole paid subsystem — the
+> identities, both ledger folds, the bounded terminal projection, the provider worker and the four
+> command bodies — and `routers/runs.py` keeps four routes that are one delegating call each.
+> 4 054 → 3 080 lines. The instrument is `tests/test_concept_lens_service.py`; see the resolution
+> below, which answers the "Still open" note this marker pointed at.*
 
 **runs.py concept-lens subsystem (~1000 lines) with a triplicated generation-fence preamble**
 
@@ -4881,8 +4885,52 @@ today because `expected_generation` is regex-validated as 64 hex upstream, and t
 it teeth had to say so, pinning the fence's behaviour if that validation is ever relaxed rather than
 pretending the clause was already load-bearing.
 
-**Still open:** the ~1,000-line concept-lens subsystem still lives inside `routers/runs.py`; the
-`serve/concept_lens.py` service extraction is a separate change.
+*Resolution (2026-09-08, the subsystem).* `looplab/serve/concept_lens_service.py` (1 082 lines) is
+the service this finding asked for — named `_service` because `looplab/search/concept_lens.py`
+already exists and is what `derive_lens`/`default_lenses` come from; two modules called
+`concept_lens` in one import graph is a trap, not a tidy name. `routers/runs.py` goes 4 054 → 3 080
+lines and keeps four route decorators with the docstrings that ARE their OpenAPI descriptions, each
+one a single delegating call.
+
+What moved is everything the finding listed: the five identity/HMAC helpers, the bounded body
+reader, `assert_lens_generation`, the `PaidLedgerSpec` and BOTH folds (the legacy-compatible one and
+the strict recovery one), `validated_derived_lens` with its terminal matcher, the two bounded
+response projections, the two terminal writers, the provider worker, and the four command bodies.
+The moved bodies are verbatim; the mechanical edits are `srv` threaded explicitly where the closures
+captured it and `srv.run_dir(run_id)` in place of the captured `_run_dir`.
+
+**Two things were deliberately NOT moved, and each earns its place.** `_materialize_concept_core` —
+the bounded ConceptFrame fold plus its two process-wide caches — stays in the router, because the
+UNPAID `GET /concepts` is its other consumer: duplicating it would give the paid and unpaid paths
+two different bounded folds, and a cache whose lifetime is the app's does not belong to a command.
+Every command takes it as a keyword instead, exactly as `trace_clear.py` takes
+`known_engine_liveness`. And the three identity-shape constants (`_RUN_GENERATION_RE`, `_SHA256_RE`,
+`_MAX_SAFE_INTEGER`) are DEFINED in the service and imported by the router, which still reads them
+for its historical-detail and trace fences: one definition, and the direction is router to service
+rather than a second `re.compile` of the same shape beside the first.
+
+*The instrument.* `tests/test_concept_lens_service.py` — 17 tests against a stub `srv` with four
+members, seeding real `events.jsonl` ledgers through `EventStore`. It reaches the states HTTP cannot
+construct on demand, which is the entire point: a second claim on one identity, a terminal whose
+digest disagrees with the claim it answers, a previous generation's paid history that must not read
+as this generation's ambiguity, a derived receipt whose spec no longer validates (uncertain, never a
+lens, and it keeps the terminal's seq), an abandoned terminal that must say `billing_status:
+unknown` because after a crash the charge is genuinely unknowable, and an unrecognised `error_kind`
+coerced rather than echoed to the browser. Four of them drive the recovery COMMAND itself through
+orphaned / running / terminal / conflict off the same seeded run.
+
+Four structural tests hold the shape: no route decorator and no router object in the service, each
+of the four routes one delegating call with the materializer handed in (over the AST — a
+`pass  # return await durable_…` satisfies a positive source pin), the router defining none of the
+moved helpers and no second `PaidLedgerSpec`, and the materializer still living with the read model
+that shares it. The comment-only mutation was re-verified against a throwaway copy of the tree.
+
+*The seams the move creates.* Three tests imported lens helpers from the router and now import them
+from the service (`test_concept_lens_durability.py`, `test_lens_generation_fence.py`,
+`test_paid_ledger.py`), and `test_paid_ledger.py`'s `strict_fsync` guard was re-derived rather than
+re-pointed: `serve/routers/runs.py` KEEPS its row for the binding half — re-binding `strict_fsync`
+in the router would be exactly as damaging as before, and dropping the row would retire that guard
+silently — while the "calls the shared confirm" half moved to the module that now calls it.
 
 #### SR-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 

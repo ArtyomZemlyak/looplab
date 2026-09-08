@@ -101,14 +101,13 @@ def _recovery_abandon(client, generation, request_id, started_seq,
 
 
 def _write_orphan_claim(run_dir, key, generation, *, prompt="private recovery prompt"):
-    from looplab.serve.routers.runs import (
-        _concept_lens_identity,
-        _concept_lens_prompt_digest,
-    )
+    # The lens identities moved to `serve/concept_lens_service.py` with the rest of the paid
+    # subsystem (doc 25 SR-04); the router only wires the four routes now.
+    from looplab.serve.concept_lens_service import lens_identity, lens_prompt_digest
 
     opaque_key = _idempotency_key(key)
-    request_id = _concept_lens_identity(run_dir, generation, opaque_key)
-    request_digest = _concept_lens_prompt_digest(opaque_key, prompt)
+    request_id = lens_identity(run_dir, generation, opaque_key)
+    request_digest = lens_prompt_digest(opaque_key, prompt)
     store = EventStore(run_dir / "events.jsonl")
     started = store.append(EV_CONCEPT_LENS_STARTED, {
         "lens_request_id": request_id,
@@ -169,15 +168,14 @@ class _ImmediateLensClient:
 
 
 def _write_derived_terminal(run_dir, key, generation, *, root):
-    from looplab.serve.routers.runs import (
-        _concept_lens_identity,
-        _concept_lens_prompt_digest,
-    )
+    # The lens identities moved to `serve/concept_lens_service.py` with the rest of the paid
+    # subsystem (doc 25 SR-04); the router only wires the four routes now.
+    from looplab.serve.concept_lens_service import lens_identity, lens_prompt_digest
 
     prompt = "group by usage"
     opaque_key = _idempotency_key(key)
-    identity = _concept_lens_identity(run_dir, generation, opaque_key)
-    digest = _concept_lens_prompt_digest(opaque_key, prompt)
+    identity = lens_identity(run_dir, generation, opaque_key)
+    digest = lens_prompt_digest(opaque_key, prompt)
     store = EventStore(run_dir / "events.jsonl")
     store.append(EV_CONCEPT_LENS_STARTED, {
         "lens_request_id": identity,
