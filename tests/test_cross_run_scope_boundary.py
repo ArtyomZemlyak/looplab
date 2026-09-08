@@ -164,3 +164,87 @@ def test_the_atlas_reader_scopes_lessons_and_capsules_end_to_end(tmp_path):
     rendered = json.dumps(atlas_for_memory(tmp_path, scope_task="mine"))
     assert "theirs lesson text" not in rendered
     assert "axis/theirs" not in rendered
+
+
+# --- EM-08, closed 2026-09-08: one governed-projection re-entry, six call sites -----------------
+
+def test_the_governed_projection_governs_exactly_the_stores_the_caller_did_not_supply():
+    """The derivation that was copy-pasted, driven directly (doc 25 EM-08).
+
+    A projection that omits a store it then READS is governed by a ledger that never saw it: no
+    error, no exception, just quietly weaker guarantees. And a store the caller SUPPLIED is already
+    frozen by whoever loaded it, so locking it again would be a claim about bytes this call never
+    reads.
+
+    Mutations that fail it: govern every store regardless, govern none, or drop a fixed
+    `source_names` entry on the floor when `unsupplied` is also given.
+    """
+    import looplab.engine.governance_health as gh
+    from looplab.engine.governance_protocol import governed_projection
+
+    seen = {}
+
+    def fake_project(base, reenter, *, include_concepts, source_names):
+        seen.update(base=base, include_concepts=include_concepts, source_names=set(source_names))
+        return reenter({"ledger": "resolved"})
+
+    original = gh.project_governed_sources
+    gh.project_governed_sources = fake_project
+    try:
+        out = governed_projection(
+            "BASE", lambda governance: f"re-entered:{governance['ledger']}",
+            include_concepts=True,
+            unsupplied={"lessons.jsonl": None, "research_claims.jsonl": ["a caller's own rows"],
+                        "concept_capsules.jsonl": None},
+        )
+        assert out == "re-entered:resolved" and seen["base"] == "BASE"
+        assert seen["include_concepts"] is True
+        assert seen["source_names"] == {"lessons.jsonl", "concept_capsules.jsonl"}, (
+            "the supplied store must not be governed and the unsupplied ones must be")
+
+        # An EMPTY supplied store is still supplied: "this task has no lessons" and "we did not read
+        # lessons" are different claims, and only the second one needs the ledger's fence.
+        governed_projection("BASE", lambda governance: None,
+                            unsupplied={"lessons.jsonl": [], "research_claims.jsonl": None})
+        assert seen["source_names"] == {"research_claims.jsonl"}
+        assert seen["include_concepts"] is False
+
+        # A fixed name and a derived one compose; a name given both ways is listed once.
+        governed_projection("BASE", lambda governance: None,
+                            source_names=("research_claims.jsonl",),
+                            unsupplied={"research_claims.jsonl": None, "lessons.jsonl": None})
+        assert seen["source_names"] == {"research_claims.jsonl", "lessons.jsonl"}
+    finally:
+        gh.project_governed_sources = original
+
+
+def test_every_governed_projection_re_enters_through_the_one_helper():
+    """All six sites, and the two ways of reaching the helper are both accounted for.
+
+    Four projections call `governed_projection` directly; the Strategist note and the Researcher
+    advisory reach it through `cross_run_context.enter_governed`, the fixed-name wrapper that also
+    pins the cross-run trio. What must not come back is a hand-rolled `project_governed_sources`
+    call inside a `_governance is None` guard — that is the copy this closed, and the way it fails
+    is by governing one store fewer while still rendering.
+    """
+    import inspect
+
+    from looplab.engine import claim_steward, claims, claims_retrieval, concept_steward
+    from tests._source_scan import called_names
+
+    for func in (claims.atlas_for_memory, claims_retrieval.cross_run_retrieve,
+                 claim_steward.claim_curation_snapshot,
+                 concept_steward.concept_curation_snapshot):
+        called = set(called_names(func))
+        assert "governed_projection" in called, f"{func.__name__} no longer re-enters through the helper"
+        assert "project_governed_sources" not in called, (
+            f"{func.__name__} re-inlined the governance re-entry")
+
+    from looplab.engine import cross_run_context
+    assert "governed_projection" in set(called_names(cross_run_context.enter_governed))
+    for module in (__import__("looplab.engine.strategy", fromlist=["strategy"]),
+                   __import__("looplab.engine.proposal_cues", fromlist=["proposal_cues"])):
+        source = inspect.getsource(module)
+        assert "ctx.enter_governed" in source, f"{module.__name__} left the shared skeleton"
+        assert "project_governed_sources(" not in source, (
+            f"{module.__name__} re-inlined the governance re-entry")

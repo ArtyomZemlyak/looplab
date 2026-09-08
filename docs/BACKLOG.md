@@ -3543,8 +3543,8 @@ stripped, and the golden fixture moves by exactly eight `"repairs": 0` lines and
    `RunState` carried no repair count anywhere. The two integers ARE the "no new data" fix: they are
    derived, not carried, and they cost one `max()` per repair row.
 
-**STILL OPEN.** ⬜ **The node graph still cannot say which experiment is running.** `util.js::
-  OPEN[node-graph-cannot-name-running-experiment] proof:`present:eval_started: bool = Field(default=False, exclude=True)@looplab/core/models.py`
+**WAS STILL OPEN — closed 2026-09-08, see below.** ⬜ **The node graph still cannot say which
+experiment is running.** `util.js::
 workingId` returns the HIGHEST-ID pending node, and `Node.eval_started` — the folded durable proof
 that an evaluation was announced — is `exclude=True`, so it never reaches the wire
 (`narration.js::pendingWork` re-derives it from the raw event tail and says so in a comment). On v9
@@ -3553,6 +3553,32 @@ at the measured instant that made node **7** the "working" node, which had not b
 change to the state payload's field set and to a heuristic three surfaces read, it wants its own
 measurement of which runs evaluate in parallel, and it is a different defect from the one the chips
 had.
+
+*Closed 2026-09-08, in two halves, and the FIRST half is not the change this entry expected.* The
+wire half was never fixed by un-excluding the field: `Node.eval_started` and its three siblings are
+fold-internal on purpose (they were introduced for budget recovery, and the reader-defaulted
+`exclude=True` is what makes an old log fold byte-identically), so what shipped instead is a PUBLIC
+PROJECTION of the same receipts — `serve/node_activity.py::public_node_activity`, on every node as
+`activity: {status, generation, evidence, started_at?}` — with its own vocabulary (`building` /
+`queued` / `evaluating` / `pending`) and its own EVIDENCE field naming which durable row decided it.
+That is strictly more than the field would have carried: `queued` and `evaluating` are different
+answers, and the boundary promise is what makes the absence of a start row evidence rather than
+silence. `narration.js::pendingWork` now reads the projection and keeps its log scan only as
+compatibility for an older server.
+
+The second half — **which** experiment gets named — is what closed today, in
+`nodeActivity.js::primaryWorkingNode` (`workingId` is one line delegating to it, so the DAG's
+auto-collapse and any other single-subject consumer share one rule). `Math.max` is gone. The
+ordering is three clauses, each of them evidence: the EVALUATION lane outranks the build lane
+(a process of ours is running, against an LLM writing code for an experiment that does not exist
+yet — the opposite of the preference the old code had); within the lane the earliest
+`activity.started_at` wins, so the LONGEST-RUNNING experiment is the one named; a record carrying no
+usable timestamp never outranks one that does, because silence is not evidence. The highest id
+survives as the last tiebreak and only there — with no lane and no clock separating two nodes,
+moving which one is named would move a screen for no measured reason. On the v9 shape the rule
+names **5**, the longest-running of the two training nodes, where the entry's `Math.max` named 9 and
+then 7. Guard: `ui/test/nodeActivity.test.js` drives that exact shape plus the comparator's own
+truth table (`rankWork`, exported so the ordering is statable without a state object).
 
 ### §0.15 The engine asked the agent to choose a GPU footprint and told it the choice was free (2026-08-19)
 
@@ -3904,8 +3930,10 @@ the SERIAL half of a decision whose CONCURRENT half (`orchestrator._spawn_resear
 the three with zero quiescent prefixes. Opening the serial half mid-eval would put a main-task think
 and a background think at the same node count with only a read-then-write window between their shared
 `_cadence_research_marks` check and their receipts — a double-spend bought to reach work already being
-done. So four of five now call `at_creation_boundary` and the fifth is a stated refusal, pinned by
-`test_the_serial_deep_research_gate_is_deliberately_left_on_the_old_predicate`.
+done. So four of five call `at_creation_boundary` outright and the fifth calls it CONDITIONALLY —
+a refusal while `concurrent_research` is on, and the run's only research path when it is off — pinned
+by `test_the_serial_deep_research_gate_refuses_while_the_concurrent_half_is_live` and its twin
+`test_the_serial_gate_is_the_only_path_under_concurrent_research_false_and_now_fires` (F1i-b, below).
 
 **THE MONEY, and why these two need no memo.** §0.14's two consumers carry an in-process
 attempted-at-`n` memo because they record no `at_node` on their "nothing changed" path. These two
@@ -3925,15 +3953,21 @@ a status quo of never distilling at all.
 test reports `paid 0 distillations at one node count`. Each carries its kill-switch negative control
 in the same body, so `cadence_while_evaluating=false` still reproduces the historical predicate.
 
-**STILL OPEN — filed rather than patched.**
+**FILED RATHER THAN PATCHED HERE — AND SINCE CLOSED.**
 
-⬜ **F1i-b · the serial deep-research gate under `concurrent_research=false`.** Not the shipped default
-  OPEN[f1i-b-serial-deep-research-gate] proof:present:cadence_due@looplab/engine/cadence.py
-(`Settings.concurrent_research = True`), so no run on this box is affected, and every run in `runs/`
-carries `true`. Under `false` the concurrent half does not exist and the serial gate is the only path,
-which in a GPU-shaped run means deep research never fires at all. The fix is not the one-liner the
-other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
-under one claim rather than two reads. Do it when someone actually wants serial research.
+*F1i-b · the serial deep-research gate under `concurrent_research=false` — CLOSED 2026-09-08.* Under
+`false` the concurrent half does not exist (`_spawn_research` returns at its first line) and the
+serial gate is the only path, which in a GPU-shaped run meant deep research never fired at all. This
+entry asked for "the two paths to agree on a single spend, i.e. the mark check and the receipt under
+one claim rather than two reads" — and that is the fix for opening the gate GENERALLY, which is not
+what the hole needed. In the configuration the hole is about there is only ONE path, so there is
+nothing to agree with: `_maybe_deep_research` now reaches `cadence.at_creation_boundary` with
+`while_evaluating = cadence_while_evaluating AND NOT concurrent_research`, and with the shipped
+`concurrent_research=True` the predicate stays the historical one byte for byte. The money bound is
+the same one `lessons_distilled` and `report_generated` are held to and needs no in-process memo:
+`_record_research_attempt` writes its receipt BEFORE the provider call and `_cadence_research_marks`
+counts an ATTEMPT as a spent window, so one node-count buys exactly one think however many times the
+outer loop turns at it (`test_a_fixed_node_count_buys_exactly_one_serial_think`, 25 turns).
 
 **THIRTY DUPLICATE CARDS OF ONE IDEA HALVED A TWO-GPU BOX — measured live 2026-08-22.**
 
@@ -4413,6 +4447,23 @@ OPEN[first-propose-runs-with-every-gpu-idle] the opening propose is the longest 
   propose both run before any node exists, serially, on the loop thread. Measure the split between
   them before choosing — the numbers above are the SUM.
 
+  **2026-09-08 — examined and deliberately left open, because the prescription's own precondition
+  cannot be met offline.** The split it asks for is a property of the run corpus (each run's
+  `propose` spans against its run-opening research rows), and no `spans.jsonl` from any of the seven
+  runs above exists on this box — there is nothing to measure, and the two candidate overlaps are
+  chosen differently depending on which half of those 138 minutes is which. Both were looked at:
+  (a) overlapping the run-opening think with the FIRST PROPOSE is not available at all — the
+  proposal consumes the memo, and proposing first is precisely the pre-2026-08-12 behaviour
+  `_ground_run_start` exists to reverse (measured then: no run of 22 had ever recorded research at
+  `at_node=0`); (b) overlapping it with the run's own SETUP (`_enter_run` -> `_setup_phase`, the
+  other phase that runs with every GPU idle) IS structurally available and would remove
+  `min(setup, think)` of dead time, but it moves a paid provider call — and the `research_attempted`
+  / `research_completed` rows with it — into the prologue whose own comment records that rows
+  appended there moved a PAID-work decision (finalize recovery minted a fresh paid scope where it
+  should have resumed one) and broke thirteen tests across four files. A change whose entire value
+  is a wall-clock saving nobody here can measure, made against the one block in the engine
+  documented as unsafe to append from, is not one to land blind.
+
 ### 2. Trust scans — the question is not "why not every node", it is "why only one run"
 
 I filed this as "trust scans ran 4 times for 10 nodes (unexplained)". That is wrong, and the real
@@ -4788,15 +4839,23 @@ holds the line meanwhile is the same conjunct as everywhere else — through `--
 own false-stop rate is 1 decision / 1 of 49 productive attempts in BOTH arms, because all four
 `implementation` verdicts on productive runs are below the 0.8 bar.
 
-OPEN[monitor-fault-has-no-outcome-label] `TrainingVerdict.fault` routes a stop to REPAIR instead of
-a terminal, and nothing measures it. `recorded.fault` is `None` in 450 of 450 rows because the field
-postdates every preserved run — the extractor already reads it, so the corpus repairs itself the
-moment a run records one. What does NOT arrive with those rows is the LABEL: the outcome that says
-whether `implementation` was right is what the REPAIR then did, which is the same shape the triage
-bench needs (`node_repaired` + the next attempt's terminal) and is not the `wasted`/`productive`
-rule this dataset has. A run must also actually reach the branch — `train_monitor_kill` on, a
-`broken` at ≥ 0.8 confirmed twice, and `fault="implementation"` — which no preserved run did.
-proof:absent:LABEL_REPAIRED@looplab/judgebench/judge_corpus.py
+*Closed 2026-09-08 — the LABEL landed. `judge_corpus.py` now carries a SECOND, independent
+vocabulary beside `wasted`/`productive` (`FAULT_LABELS`: `repaired` / `unrepaired` / `unknown`),
+derived by `_fault_label` from facts the judge did not author — the `node_repaired` rows written
+AFTER the decision joined to the node's own terminal, which is the shape this entry asked for — and
+recomputable offline by `rederive_fault_label`, so a hand-edited label goes red with no `runs/`
+present. Four undecidable cases carry their own basis rather than one shared `unknown`
+(`no_fault_recorded`, `fault_not_routed:<fault>` for the `hypothesis`/`environment` attributions
+that are recorded and never repaired, `no_repair_after_decision`, `no_node_terminal`). One
+correction the work produced: this entry's "`None` in 450 of 450 rows" was wrong — 449 carry no
+fault and ONE does, `e5small-dr-unified-v3` n2, `broken` at confidence 0.95 over an uncaught
+`torch.OutOfMemoryError`, saying `environment`. It does not route, so the label still grades nothing.
+What is left is not a tree state a marker can hold: a run must actually REACH the branch
+(`train_monitor_kill` on, a `broken` at ≥ 0.8 confirmed twice, `fault="implementation"`). The
+tripwire for that is a test rather than a marker —
+`tests/test_judge_bench.py::test_every_fault_label_rederives_and_the_corpus_grades_none_of_them`
+pins the whole corpus at `unknown` with its exact basis counts, so the first run that records an
+`implementation` fault turns it red and the number becomes readable.*
 
 ### §0.20 A goal sentence nobody could check killed three nodes, and the prompt telling five roles to use every GPU outlived the correction (2026-08-20)
 
@@ -4852,7 +4911,9 @@ OPEN[claim-legacy-prompt-branches] Both pre-correction GPU paragraphs still ship
 library caller reads "declaring MORE than the ceiling does not get this experiment more hardware",
 which the scheduler contradicts. The engine path always stamps, so no run gets it; the byte-for-byte
 restoration is deliberate. What is missing is a decision about whether a false sentence may be the
-off-switch's value at all. proof:present:SERIALISES@looplab/agents/roles.py
+off-switch's value at all. The clause MOVED with the prompt fragments to
+`agents/role_prompts.py` on 2026-09-08 (doc 25 AG-02) and the proof is re-pointed at it; the
+item itself is untouched. proof:present:SERIALISES@looplab/agents/role_prompts.py
 
 OPEN[claim-effective-batch-event] `auto_find_batch_size` is refused as the memory answer on a
 measurement (transformers 4.51.0 keeps the DECLARED `per_device_train_batch_size` on `args` and the

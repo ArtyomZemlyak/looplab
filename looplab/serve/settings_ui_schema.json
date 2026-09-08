@@ -621,7 +621,7 @@
           "type": "float",
           "default": 0.0,
           "placeholder": "0 = no cap",
-          "help": "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit."
+          "help": "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit. It and llm_budget_usd are ONE ceiling since 2026-09-08: the tightest declared cap binds this reserve half AND the post-hoc accountant (with its node-open floor), and the refusal names the knob that was typed."
         },
         {
           "key": "llm_token_limit",
@@ -867,7 +867,7 @@
           "label": "LLM spend ceiling ($)",
           "type": "float",
           "default": 0.0,
-          "help": "Hard spend ceiling for this run's LLM calls, in US dollars, shared by every client the run builds (one accountant per Settings, not per client). 0 = no limit (the historical behaviour). On reaching it the next priced call raises BudgetExceeded, which every agent path treats as a hard stop that ENDS the run rather than degrading to a fallback. Priced calls only: a local model reports no cost and can never trip it. Not pinned into run_started, so a resume reads whatever is set now."
+          "help": "Hard spend ceiling for this run's LLM calls, in US dollars, shared by every client the run builds (one accountant per Settings, not per client). 0 = no limit (the historical behaviour). On reaching it the next priced call raises BudgetExceeded, which every agent path treats as a hard stop that ENDS the run rather than degrading to a fallback. Priced calls only: a local model reports no cost and can never trip it. Not pinned into run_started, which is NOT the same as re-read on resume: every resume adopts config.snapshot.json, so raise a stopped run's ceiling there (or in the per-run settings editor) rather than in the environment. Enforced in both halves of the run's budget — reserved at the broker's permit and committed post hoc — from one derivation shared with llm_cost_limit, whose tighter value binds if both are set."
         },
         {
           "key": "node_open_budget_floor_usd",
@@ -1522,7 +1522,7 @@
           "type": "int",
           "default": 40,
           "placeholder": "40",
-          "help": "Per-eval-window cap on repeated-research LLM calls (0 = cadence-only). Past it the loop stops calling the LLM (the training-health monitor still runs)."
+          "help": "Per-eval-window cap on repeated-research LLM calls (0 = cadence-only), counted as PROVIDER CALLS: one research pass spends as many as it makes (at least one). Past it the loop stops calling the LLM (the training-health monitor still runs)."
         },
         {
           "key": "concurrent_consolidate",

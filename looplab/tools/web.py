@@ -155,8 +155,10 @@ def _host_path(url: str) -> tuple:
 
     Percent-decoding is done ONCE (`unquote` is not applied to its own output — `%2570` decodes to
     `%70`, and decoding twice would fence a path that genuinely contains the literal text `%70`),
-    `..` is refused rather than resolved (a path that climbs out is not the prefix's page and is not
-    ours to reinterpret), and the root dot is stripped from the host, which `hostname` leaves on.
+    `..` is UNRESOLVABLE rather than resolved (a path that climbs out is not the prefix's page and
+    is not ours to reinterpret) — reported as `parts is None`, which `web_deny_match` turns into a
+    refusal on any prefix sharing the host, never into "no prefix covers this" — and the root dot is
+    stripped from the host, which `hostname` leaves on.
     """
     parsed = urllib.parse.urlsplit(str(url or "").strip())
     host = (parsed.hostname or "").lower().rstrip(".")
@@ -181,7 +183,7 @@ def web_deny_match(url: str, deny) -> str | None:
     that DIRECTORY — which it names with or without the slash (`.../AlgoTune/` covers the repo's
     landing page `.../AlgoTune` and everything under it, and not `.../AlgoTune-fork/`)."""
     host, parts, _query = _host_path(url)
-    if not host or parts is None:
+    if not host:
         return None
     for prefix in (deny or ()):
         p_host, p_parts, _p_query = _host_path(prefix)
@@ -189,6 +191,20 @@ def web_deny_match(url: str, deny) -> str | None:
             continue
         if host != p_host and not host.endswith("." + p_host):
             continue
+        # AN UNCANONICALIZABLE PATH FAILS CLOSED, and it did not until 2026-09-08. `_host_path`
+        # answers `parts is None` for a URL whose path carries a `..` segment, the docstring above
+        # calls that "refused", and the function returned None — which every caller reads as "no
+        # declared prefix covers this URL", i.e. ALLOWED. `.../AlgoTune/x/../solver.py` therefore
+        # walked around a prefix that names `.../AlgoTune/`, and GitHub, nginx and most CDNs
+        # normalize the request-URI themselves and serve the denied page with no redirect, so the
+        # per-hop re-check in `_SSRFRedirectHandler` never fires either: the measured behaviour this
+        # fence exists for (52 of 76 AlgoTune runs fetching their own graded task's published
+        # solver) was one path segment away. Refusing on the HOST is the over-fencing direction the
+        # docstring already chooses for `/OriPress/` and `%6F`: a `..` on an undeclared host is
+        # untouched, and a `..` on a declared one is not ours to reinterpret in the permissive
+        # direction either.
+        if parts is None:
+            return prefix
         # COMPONENT-wise, never a bare string prefix: two of the four prefixes `make_task.py` emits
         # are declared WITHOUT a trailing slash, and `startswith` made
         # `…/datasets/oripress/AlgoTune` fence `…/AlgoTune-Bench`, `…/AlgoTuneV2` and every other
@@ -516,7 +532,7 @@ class WebTools:
         snippets = _SNIPPET.findall(html)
         out = []
         denied = 0
-        for href, title in titles:
+        for row, (href, title) in enumerate(titles):
             url = _resolve(href)
             # THE OTHER HALF OF THE FENCE. `_fetch` refuses the denied page and `_search` handed the
             # model its exact URL and a 300-char snippet of it — and the measured behaviour the
@@ -528,7 +544,13 @@ class WebTools:
             if web_deny_match(url, self.deny):
                 denied += 1
                 continue
-            snip = _untag(snippets[len(out)]) if len(out) < len(snippets) else ""
+            # THE SNIPPET INDEX FOLLOWS `titles`, NOT `out`. `_RESULT` and `_SNIPPET` are two scans
+            # of the same page and pair up positionally; keying the lookup on the count of KEPT rows
+            # was correct only while nothing was ever skipped, and the `continue` above is the skip.
+            # With one row dropped every later result was rendered under its own URL with the
+            # PREVIOUS row's snippet — including up to 300 characters of the denied page's text,
+            # attributed to an allowed URL, which is precisely what the deny list is for.
+            snip = _untag(snippets[row]) if row < len(snippets) else ""
             out.append(f"{len(out) + 1}. {_untag(title)}\n   {url}\n   {snip[:300]}")
         if denied:
             out.append(f"({denied} result(s) withheld: they are under a prefix this run's task "

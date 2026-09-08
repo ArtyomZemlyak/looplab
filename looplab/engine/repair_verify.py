@@ -168,15 +168,29 @@ vocabulary this module carries. Measured over all 137 model-authored rationales:
 row in the corpus, the one above, and `mine_stage` against that same run's `mine_negatives.py` diff
 does NOT match it.
 
-OPEN[repair-unmet-five-unpatched-shapes] five of the 14 surviving `unmet` shapes are left
-deliberately unpatched, and `verified` is a FLOOR (at least one claimed token in the diff), not a
-guarantee. proof:present:changed_region@looplab/engine/repair_verify.py
+AN EXCEPTION CLASS NAME IS THE CRASH'S OWN VOCABULARY, and it is the third false-positive shape,
+withdrawn 2026-09-08. `sim-nosignal` node 5's rationale names `IndentationError`; the repair that
+fixes an indentation error writes that word nowhere, so a literal-token extractor convicted a repair
+for reporting what the dead process called itself. `names_an_exception_class` recognises the shape —
+Python's own `…Error` / `…Exception` / `…Warning` / `…Interrupt` suffixes, whole-token — and routes
+it through the SAME gate as a citation: it may still ACQUIT (a diff that really contains the name
+verifies the row exactly as before) and it may no longer CONVICT alone, so the demotion target is
+`unstated`. Deliberately NOT a `_NOT_A_CLAIM` row, which is where the 2026-08-15 text filed it: that
+set DROPS a token, and dropping takes the acquittal with the conviction — a row whose only met token
+was the exception name would move `verified` -> `unmet`, i.e. a weak signal would start convicting,
+which is the direction this rung refuses. See the comment on `_EXCEPTION_CLASS_RE`.
+
+OPEN[repair-unmet-five-unpatched-shapes] four of the 14 surviving `unmet` shapes are left
+deliberately unpatched — three crash-citation rows and one NEGATED claim, all four needing a reading
+of the sentence rather than of its tokens — and `verified` is a FLOOR (at least one claimed token in
+the diff), not a guarantee. proof:present:changed_region@looplab/engine/repair_verify.py
 
 WHAT IS STILL OPEN, having been measured rather than assumed. The 14 surviving `unmet` verdicts split
-7 / 2 / 5: SEVEN are genuine discrepancies, i.e. the rung working; TWO are withdrawn by the rules
-above (v8 node 3 attempts 2 and 4) and one further row keeps its verdict with a shortened list; and
-FIVE are shapes left deliberately unpatched. Three of those five are the crash-citation rows named
-above. `rubertlite-dr-unified-v6` node 1 attempt 1 is the fourth, a NEGATED claim — "drop those
+7 / 3 / 4: SEVEN are genuine discrepancies, i.e. the rung working; THREE are withdrawn by the rules
+above (v8 node 3 attempts 2 and 4, and — since 2026-09-08 — `sim-nosignal` node 5) and one further
+row keeps its verdict with a shortened list; and FOUR are shapes left deliberately unpatched. Three
+of those four are the crash-citation rows named above. `rubertlite-dr-unified-v6` node 1 attempt 1 is
+the fourth, a NEGATED claim — "drop those
 unsupported args" — satisfied by deleting the `"%params%"` placeholder that passed them, so the args
 it named appear nowhere in the diff precisely BECAUSE the promise was kept; a rule for that would
 have to understand the indirection, not the text.
@@ -192,9 +206,9 @@ params match the target's accepted flags is DECLINED on that number: it would pu
 business of parsing a candidate's own CLI, which docs/36 keeps it out of, to save an amount of time
 the loop already recovers. The measurement is stated here rather than in the Developer prompt that
 documents `%params%` (`adapters/repo_developer.py`), because prompt strings are contracts and this
-is a fact about outcomes, not an instruction. The fifth is `sim-nosignal` node 5, which names
-`IndentationError`, an exception class read as a claim — the `_NOT_A_CLAIM` frontier, not a new
-mechanism. Four of the seven genuine ones are also arguable — `rubertlite-dense-retrieval` node 11's family names the
+is a fact about outcomes, not an instruction. What used to be the fifth — `sim-nosignal` node 5,
+which names `IndentationError`, an exception class read as a claim — is the row the shape rule above
+now demotes to `unstated`. Four of the seven genuine ones are also arguable — `rubertlite-dense-retrieval` node 11's family names the
 BROKEN component ("the bug is in NegLogLikelihoodCos_S") and then edits a different file, which is a
 useful thing to flag but is a diagnosis rather than a promise. They are left `unmet` on purpose: a
 claim-clause whitelist would demote all four, and turning a repair that touched the wrong file into
@@ -420,6 +434,50 @@ _CITATION_RE = re.compile(
 # demoted to REPAIR_UNMET('nll_cos') — exactly the citation false positive this rung shipped to
 # remove — while the same sentence without the decimal answered `unstated`.
 _CLAUSE_ENDS = ";.\n"
+
+# --- A token that may CONVICT, second shape: an EXCEPTION CLASS is the crash's own vocabulary ----
+# `IndentationError`, `KeyError`, `torch.OutOfMemoryError`. A rationale that names one is reporting
+# what the dead process CALLED ITSELF — "the crash is an IndentationError in mine_stage.py" — which
+# is a diagnosis and not a promise, and the diff of the repair that fixes an indentation error
+# contains the word nowhere. Measured: this is `sim-nosignal` node 5, the fifth of the five unpatched
+# `unmet` shapes, and it is the only one of the five whose token is recognisable by SHAPE rather
+# than by understanding what the sentence meant.
+#
+# WHY IT IS A DEMOTION AND NOT A `_NOT_A_CLAIM` ROW, which is where the 2026-08-15 text filed it.
+# That set DROPS a token, and dropping removes the token's ACQUITTAL along with its conviction: a
+# rationale whose only met token was the exception name would move `verified` -> `unmet`, i.e. a
+# weak signal would start CONVICTING, which is the one direction this rung refuses. Routing it
+# through the same gate as a citation keeps both halves right — a diff that really does contain the
+# name still acquits the row exactly as before, and the name alone can no longer convict. The
+# demotion target is `unstated`, which is reported, so a model gains nothing by steering into it.
+#
+# By SHAPE and not by a list, because the list is unbounded: every library defines its own
+# exceptions and `_NOT_A_CLAIM` would have to grow one row per traceback anyone ever sees. The
+# suffixes are Python's own naming convention and are the same family
+# `engine/failure_diagnosis.py::_HEADLINE_RE` anchors a traceback's last line on — spelled here
+# rather than imported because this module is a LEAF (pure functions over bytes the loop already
+# holds) and a language fact is not a registry that can drift.
+#
+# ANCHORED at both ends, so it recognises a token that IS an exception name and never one that
+# merely ends in those letters mid-identifier: `_claim_met` still matches `ValueErrorHandler`
+# literally, and only a whole-token match is excused from convicting. The optional dotted prefix is
+# for the quoted spelling (`"torch.OutOfMemoryError"`), which `_QUOTED_RE` yields intact while
+# `_IDENT_RE` yields its last part.
+_EXCEPTION_CLASS_RE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*\.)?[A-Z][A-Za-z0-9]*(?:Error|Exception|Warning|Interrupt)$")
+
+
+def names_an_exception_class(token: str) -> bool:
+    """Is this token the NAME OF AN EXCEPTION — the crash's vocabulary rather than a promise?
+
+    Pure and total; a truth table, so it is drivable on its own (`tests/test_repair_verification.py`
+    does exactly that). It answers only about the token's SHAPE and deliberately not about the
+    sentence it sits in: a rationale really can promise `raise a ConfigError here`, and such a claim
+    is still reported — it simply cannot be the sole thing this rung convicts on, which is the
+    trade the module docstring argues.
+    """
+    return bool(_EXCEPTION_CLASS_RE.match((token or "").strip()))
+
 
 # --- An abbreviated identifier -------------------------------------------------------------------
 # `grad_accum` for `gradient_accumulation_steps`. Both bounds are load-bearing and both exist to keep
@@ -684,8 +742,14 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
     # really contains it; it may not CONVICT here. Demoting rather than dropping is the point: the
     # token stays in `claims`, and `unstated` says "I could not check this", which is a fact the
     # judge is already shown and which a model gains nothing by steering into.
+    # …and an EXCEPTION CLASS NAME is the same kind of thing one rung over: the crash's own word for
+    # itself, not a change the repair promised. Both filters are ORs into one decision rather than
+    # two passes, because they answer the same question — may this token, alone, convict? — and a
+    # token excused by either is still reported in `claims`.
     clauses = _citation_clauses(rationale if isinstance(rationale, str) else "")
-    convicting = tuple(t for t in unmet if not _is_citation_only(t, rationale, clauses))
+    convicting = tuple(t for t in unmet
+                       if not _is_citation_only(t, rationale, clauses)
+                       and not names_an_exception_class(t))
     if not convicting:
         return RepairVerification(REPAIR_UNSTATED, claims)
     return RepairVerification(REPAIR_UNMET, claims, convicting)

@@ -31,6 +31,10 @@ MOVED = ("make_roles", "build_unified_agent", "build_strategist_tools", "make_de
 # What the task half still owns.
 KEPT = ("TaskAdapter", "kinds", "normalize_task", "validate_task", "load_task")
 
+# The two `agents` modules `agents/factory.py` may name at MODULE level — see the layering test at
+# the bottom of this file, which re-derives the condition each one is admitted on.
+MODULE_LEVEL_AGENT_IMPORTS = ("looplab.agents.providers", "looplab.agents.developer_backends")
+
 
 @pytest.mark.parametrize("name", MOVED)
 def test_every_moved_name_is_the_same_object_through_both_paths(name):
@@ -96,7 +100,8 @@ def test_neither_module_is_a_god_module_again():
     unit — "the providers every agentic role shares" — that would move cleanly behind its existing
     re-export. Raise this number a third time and the guard means nothing.
     """
-    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 547)):
+    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 385),
+                     ("agents/developer_backends.py", 178)):
     #
     # 2026-08-29, MERGE with master: master's 530 is KEPT and not raised. The merged file is 529
     # lines -- master's additions plus this branch's two composition lines, `stage_guidance=` and
@@ -125,6 +130,13 @@ def test_neither_module_is_a_god_module_again():
     # constructions. Measured 546, so the raise keeps the one line of headroom the entry above
     # left. This is composition, which is what this file is for; the extraction candidate
     # (`make_roles`, `_shared_providers`) is still the answer the next time it is spent.
+    #
+    # 547 -> 385, 2026-09-08, doc 25 RA-01's remaining half: the extraction the paragraph above
+    # names was SPENT, on the other candidate. `make_roles`'s three developer-backend wirings moved
+    # to `agents/developer_backends.py` behind named gates, and the cap FOLLOWS the file down to
+    # measured + 1 (384 measured). A cap left at 547 over a 384-line file is 163 lines of slack
+    # nobody decided to bank — the same failure as raising it seven times further than the change
+    # needed, one direction over. The new module gets the same discipline: 177 measured, cap 178.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 
@@ -146,22 +158,27 @@ def test_the_factory_reaches_search_and_tools_only_through_function_local_import
             module_level |= {inner.module for inner in ast.walk(node)
                              if isinstance(inner, ast.ImportFrom) and inner.module
                              and "TYPE_CHECKING" not in ast.unparse(node.test)}
-    # `agents/providers.py` (the shared providers, extracted 2026-09-06) is the ONE agents module
-    # the factory may import at module level, because the re-export identity `adapters.tasks`
-    # relies on needs a module-level binding — and it is admissible only while it keeps the same
-    # property itself, which the second assertion holds: its own module-level imports reach
-    # nothing in `search`, `tools` or `agents`, so the cycle stays exactly as open as before.
+    # `agents/providers.py` (the shared providers, extracted 2026-09-06) and
+    # `agents/developer_backends.py` (the three developer-backend wirings, 2026-09-08) are the ONLY
+    # agents modules the factory may import at module level, because the re-export identity
+    # `adapters.tasks` relies on needs a module-level binding — and each is admissible only while
+    # it keeps the same property itself, which the second assertion holds SEPARATELY for each: its
+    # own module-level imports reach nothing in `search`, `tools` or `agents`, so the cycle stays
+    # exactly as open as before. The condition is RE-DERIVED per module rather than trusted, so
+    # adding a name to this tuple without the property is a red test, not a widened hole.
     offenders = sorted(m for m in module_level
                        if m.startswith(("looplab.search", "looplab.tools", "looplab.agents."))
-                       and m != "looplab.agents.providers")
+                       and m not in MODULE_LEVEL_AGENT_IMPORTS)
     assert offenders == [], f"module-level imports that must stay function-local: {offenders}"
-    providers_tree = ast.parse((_PKG / "agents/providers.py").read_text(encoding="utf-8"))
-    providers_level = {node.module for node in providers_tree.body
-                       if isinstance(node, ast.ImportFrom) and node.module}
-    assert not [m for m in providers_level
-                if m.startswith(("looplab.search", "looplab.tools", "looplab.agents."))], (
-        "agents/providers.py must keep every search/tools/agents import function-local, or the "
-        "factory's module-level import of it closes the cycle this guard exists to keep open")
+    for dotted in MODULE_LEVEL_AGENT_IMPORTS:
+        rel = dotted.replace("looplab.", "").replace(".", "/") + ".py"
+        allowed_tree = ast.parse((_PKG / rel).read_text(encoding="utf-8"))
+        allowed_level = {node.module for node in allowed_tree.body
+                         if isinstance(node, ast.ImportFrom) and node.module}
+        assert not [m for m in allowed_level
+                    if m.startswith(("looplab.search", "looplab.tools", "looplab.agents."))], (
+            f"{rel} must keep every search/tools/agents import function-local, or the "
+            "factory's module-level import of it closes the cycle this guard exists to keep open")
 
 
 def test_the_task_adapter_annotation_does_not_create_an_import_cycle():

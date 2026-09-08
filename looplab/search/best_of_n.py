@@ -8,7 +8,7 @@ with the ADR-7 cost rule. N=1 is a transparent pass-through (== today).
 """
 from __future__ import annotations
 
-from looplab.agents.roles import WrapsDeveloper
+from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, WrapsDeveloper
 from looplab.core.models import Idea
 from looplab.core.prompts import render
 from looplab.core.validate import validate_agent_code
@@ -209,15 +209,24 @@ class BestOfNDeveloper(WrapsDeveloper):
             self.last_n_scores = [_score(code)]
             return code
         self.last_n_scores = []          # per-node telemetry: reset so it holds only THIS node's N
-        cands: list[tuple[str, dict, list, object, float]] = []
+        cands: list[tuple[str, dict, list, object, float, dict]] = []
         for _ in range(self.n):
             code = gen_one()
             sc = _score(code)
             self.last_n_scores.append(sc)
             raw_footprint = getattr(self.inner, "last_footprint", None)
             footprint = dict(raw_footprint) if isinstance(raw_footprint, dict) else raw_footprint
+            # THE WHOLE REGISTRY, PER CANDIDATE, not the three this wrapper happened to need. N
+            # inner calls each overwrite the inner's side channels, so a scalar read AFTER the loop
+            # describes the LAST candidate — and this wrapper's shipping path used to read none of
+            # them at all, leaving `last_rollback_stage`, `last_budget_exhausted`, `last_edit_calls`
+            # and the rest at their FALSY defaults on the facade the engine reads
+            # (`_capture_developer_result`): "no rollback was requested", "the session finished on
+            # its own terms", "zero edits", on every best-of-N node. Snapshotting here is what makes
+            # `chosen` describe ONE call rather than a mixture of N.
             cands.append((code, getattr(self.inner, "last_files", {}) or {},
-                          getattr(self.inner, "last_deleted", []) or [], footprint, sc))
+                          getattr(self.inner, "last_deleted", []) or [], footprint, sc,
+                          {a: getattr(self.inner, a, None) for a in DEVELOPER_OUTPUT_ATTRS}))
         best_score = max(c[4] for c in cands)
         top = [c for c in cands if c[4] >= best_score - 1e-9]
         chosen = top[0]
@@ -259,6 +268,13 @@ class BestOfNDeveloper(WrapsDeveloper):
             kw = {"prompts": self.prompts} if self.prompts is not None else {}
             idx = _listwise_pick(self.client, idea, [c[0] for c in top], parser=self.parser, **kw)
             chosen = top[idx]
+        # The chosen candidate's OWN side channels first, then the three this wrapper owns
+        # explicitly (files/deleted/footprint are re-derived above so a copy is never shared).
+        for _attr, _value in chosen[5].items():
+            try:
+                setattr(self, _attr, _value)
+            except Exception:  # noqa: BLE001 - an optional audit channel must never block a build
+                pass
         self.last_files, self.last_deleted, self.last_footprint = chosen[1], chosen[2], chosen[3]
         return chosen[0]
 

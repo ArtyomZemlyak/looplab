@@ -180,9 +180,20 @@ Research only.
 >
 > **The index (15 items, each proof re-derived against the tree on 2026-08-19):**
 >
-> - **OPEN[prompt-bundle-unpinned-across-hot-reload]** the PromptStore is still re-read on every use
->   with no run/phase-pinned revision; the only run-start pins are the `run_started` settings and the
->   two `core/setup_identity.py` digests. proof:absent:revision@looplab/core/prompts.py
+> - **[closed 2026-09-08 — *the bundle has an identity now, and hot reload is kept.*
+>   `core/prompts.py::PromptStore.revision` is the identity of the body one key resolves to,
+>   `bundle_revision` the digest over the whole {key: revision} MAP (keyed, so a body moving between
+>   two keys is a different bundle, and an override that APPEARS or VANISHES mid-run is a change
+>   rather than a silent one), and `pin()` freezes that answer and starts reporting divergence.
+>   The pin deliberately does NOT lock the text — this row's own prescription keeps hot reload for
+>   future phases, and refusing a freshly edited override mid-phase would change shipped behaviour
+>   for every operator who tunes a prompt live — so a pinned store keeps serving the live body and
+>   records the move (`divergences()`, one WARNING per key per new revision). `NO_REVISION` is not a
+>   digest of `""`: "not overridden" and "overridden with an empty file" are different facts under a
+>   pin. Unpinned is the default, so every store constructed today is byte-identical and pays
+>   nothing. `tests/test_prompt_keys.py` drives the mid-run edit end to end, the frontmatter
+>   exclusion, the appear/vanish pair and the one-line-per-revision rule. The marker
+>   `prompt-bundle-unpinned-across-hot-reload` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-06 (doc 52 row 16) — `agent_phase_started` / `agent_checkpointed` /
 >   `agent_phase_completed` are registered `DIAGNOSTIC_EVENTS` (`events/types.py`), reported by
 >   `drive_tool_loop` through `core/phase_events.py::emit_phase_event` and written by the sink
@@ -192,10 +203,26 @@ Research only.
 >   doc 52's `deep-research-plan-is-not-durable`. `tests/test_research_record.py` drives the sink,
 >   the fallback exit and the redaction. The marker `inner-agent-phases-not-event-sourced` stood
 >   here; deleted per the index rule.]**
-> - **OPEN[paid-eval-has-no-attempt-scoped-receipt]** the ENGINE half of the receipt item — the
->   serve/governance half shipped. `EV_NODE_EVAL_STARTED` carries only `node_id`+`generation`: no
->   attempt-scoped invocation id and no completed receipt.
->   proof:absent:eval_invocation_id@looplab/engine/evaluate.py
+> - **[closed 2026-09-08 — *the evaluator boundary has a receipt now, and it is DERIVED so a resume
+>   can name what it is repeating.* `eval_invocation_claimed` / `eval_invocation_settled`
+>   (`events/types.py`, both DIAGNOSTIC) bracket the one statement that invokes the evaluator:
+>   `engine/evaluate.py::eval_invocation_id` derives the key from (run ref, node, generation,
+>   attempt) — deliberately not a fresh uuid, because a random key can only prove that *some*
+>   invocation was left open while a derived one lets the resumed process say "the invocation I am
+>   about to make is THAT one", which is the reconciliable idempotency key the annotation at that
+>   line asked for. `unsettled_eval_invocations` reads the pair LAST-ROW-WINS (counting claims
+>   against settles can never return to closed, so a crash two resumes ago would stamp every later
+>   attempt), and `_eval_run_attempt` stamps the repeat `after_interrupted_attempt` rather than
+>   presenting it as a first attempt — the same at-least-once honesty
+>   `eval_dispatch.py::_ensure_run_setup` already practises, and the same refusal to claim that an
+>   arbitrary evaluator's external side effect was undone. DIAGNOSTIC is load-bearing rather than
+>   incidental: these are per-ATTEMPT rows from the eval child, and a folded pair would land inside
+>   the speculative election's compare-and-swap window (the 17/5 -> 12/0 cost
+>   `_record_eval_start_boundary` documents). The node still reaches exactly one terminal.
+>   `tests/test_eval_invocation_receipt.py` drives it over two real Engines on one run directory: a
+>   BaseException inside the evaluator, an open claim with no terminal, then a second process that
+>   reads that claim and stamps its repeat. The marker `paid-eval-has-no-attempt-scoped-receipt`
+>   stood here; deleted per the index rule.]**
 > - **[closed 2026-09-06 (doc 52 row 15) — `core/llm_budget.py::RunBudget` is ONE reserve-commit
 >   budget per run, attached to the broker: `LLMConcurrencyBroker.borrow()` reserves a call's
 >   estimate (the run's own mean per committed call) before queuing and refuses with
@@ -203,33 +230,81 @@ Research only.
 >   `llm_token_limit`; the durable ledger's sink commits and a resume seeds from the `llm_usage`
 >   rows. `tests/test_run_budget.py` drives it. The marker `no-shared-reserve-commit-run-budget`
 >   stood here; deleted per the index rule.]**
-> - **OPEN[research-cap-counts-passes-not-provider-calls]** the cap is still incremented once per
->   research PASS in the spine, not debited at the provider broker, so the named ceiling undercounts
->   real spend. proof:absent:concurrent_research_max_calls@looplab/core/llm_broker.py
-> - **OPEN[eval-lanes-admit-without-reserving-time]** lanes still admit against
->   `cur.total_eval_seconds`, i.e. already-COMPLETED time, so several can enter under one remaining
->   allowance; the spine carries a live annotation prescribing the reservation.
->   proof:present:cur.total_eval_seconds@looplab/engine/orchestrator.py
+> - **[closed 2026-09-08 — the cap is debited at the provider broker.
+>   `core/llm_broker.py::ProviderCallMeter` counts one per request inside `llm_request_permit`, the
+>   single seam every outbound provider request of every client passes (both branches: an engine
+>   scoped to no broker still calls a provider), and `_research_overlap_loop` spends
+>   `concurrent_research_max_calls` on what a pass ACTUALLY asked the provider for instead of
+>   one-per-pass. Debited AFTER admission, so a request the run budget refused before it left costs
+>   the window nothing; floored at one per pass, which keeps the old attempt-counting backstop
+>   exactly — a pass that fails before it reaches the provider still cannot re-tick every cadence for
+>   free. A pass is an indivisible receipt -> provider -> record hop, so the comparison stays at the
+>   pass boundary; only the number compared changed. `tests/test_research_overlap.py` drives a pass
+>   making three real borrows against a cap of 7 (three passes, not seven) and
+>   `tests/test_llm_broker.py` drives the meter, its worker threads and the refused reservation. The
+>   marker `research-cap-counts-passes-not-provider-calls` stood here; deleted per the index rule.]**
+> - **[closed 2026-09-08 — *time is the second resource a lane reserves.*
+>   `resources.py::eval_time_admission_blocked` is the rule and `_reserve_eval_seconds` /
+>   `_release_eval_seconds` its ledger, keyed by the same `(node_id, generation)` lifecycle the
+>   DEVICE reservation is keyed by and released in the same `finally` — so the three admission sites
+>   in `_dispatch_evals` now ask one question (`_eval_time_admission_refused`) instead of each
+>   re-spelling `cur.total_eval_seconds >= max_es`, which is how they came to enforce a per-lane
+>   ceiling over a per-RUN ledger. What a lane reserves is the per-eval WALL-CLOCK ceiling the run is
+>   planned around (`shared.py::effective_eval_time_budget`, raised to a governed researcher
+>   override), NOT the sweep-stretched number and NOT the whole repair chain — that chain has its own
+>   between-attempts re-fold, and reserving for it here would starve lanes to guard something already
+>   guarded. The one clause that looks like a hole is the point of the design: an EMPTY ledger may
+>   never refuse, so the first lane still enters on completed time alone — otherwise a
+>   `max_eval_seconds` below one eval's timeout would admit nothing at all and a budget would read as
+>   a deadlock. The overshoot is back to the one evaluation the ceiling has always allowed.
+>   `tests/test_eval_time_reservation.py` drives the refusal over a real `Engine` (a stub host
+>   satisfies the ledger lookup with 0.0, so a source pin would have been vacuous) with the control
+>   case beside it. The marker `eval-lanes-admit-without-reserving-time` stood here; deleted per the
+>   index rule.]**
 > - **[closed 2026-09-06 (doc 52 row 12) — `agents/roles.py::DeveloperResult` is the frozen
 >   envelope of one Developer call (its field set IS `DEVELOPER_OUTPUT_ATTRS` plus `code`),
 >   captured by `engine/node_build.py::_run_developer` under the instance's own lock in the same
 >   step as the call; every build and repair site reads the envelope and none reads the shared
 >   instance afterwards, which is what let those calls leave the loop thread.
 >   `tests/test_developer_result.py` drives it.]**
-> - **OPEN[cancel-not-propagated-into-provider-request]** two of the three legs: nothing reaches an
->   in-flight provider request (`core/llm.py` has no `cancel_check` at all) and the external CLI is
->   killed on TIMEOUT rather than on a cancel token. The MCP leg shipped 2026-08-17.
->   proof:absent:cancel_check@looplab/core/llm.py
+> - **[closed 2026-09-08 — the remaining two legs. `core/llm_transient.py::cancel_check_scope` /
+>   `request_cancelled` / `sleep_or_cancel` are the cancel token as a ContextVar, re-exported through
+>   `core/llm.py` like `model_override` and read by the request itself: `_post` asks at the head of
+>   EVERY attempt (so a token that fires while attempt 1 is in flight stops attempt 2 from being
+>   sent), every backoff in `_RETRY_POLICY` waits through `_retry_sleep` and wakes on it (a
+>   `Retry-After` is honoured up to 120 s, so this is most of a cancelled call's wall clock), the
+>   blocking stream reader raises `LLMCancelled` mid-generation and the streamed one stops reading and
+>   closes the connection — which is what actually stops the provider generating — without falling
+>   through to the paid blocking fallback. `LLMCancelled` is an `LLMError` on purpose: the role layer
+>   already degrades around that family, and any fallback client re-checks the same ambient token at
+>   its own first attempt, so a cancelled context sends nothing new while the scope is up.
+>   `drive_tool_loop` publishes its own guarded `_cancelled` probe around the paid turn, so the token
+>   the assistant's Stop already held now reaches the request. The external CLI agent takes a
+>   `cancel_check` (else the ambient token), polls it in slices around `communicate` and tree-kills on
+>   a cancel with its own `cancelled` verdict, instead of living to its timeout. Driven against fake
+>   providers in `tests/test_cancel_reaches_the_provider.py` (attempts sent, backoff woken, chunks
+>   consumed, the loop's token visible inside the call) and `tests/test_cli_agent.py` (a 120 s agent
+>   under a 120 s timeout, stopped in under a second). The marker
+>   `cancel-not-propagated-into-provider-request` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-03 for the TIMEOUT half — `Settings.agent_timeout` (default 600.0, the
 >   constructor's own value, bounded 0 < t <= 24 h) is passed by `agents/factory.py`. It was not a
 >   default an operator could override, it was one nobody could REACH: the argument was never passed,
 >   so on every composed run the constructor value WAS the value, and no config, env var or form
 >   field could move it. `tests/test_agent_timeout_is_settings_bound.py` drives it through the real
->   `make_roles`.]** **OPEN[external-cli-usage-is-unpriced]** the other half of the original row:
->   `CliAgentDeveloper` returns no usage result, so an external coding agent's spend reaches neither
->   the `llm_usage` ledger nor `looplab tokens` — a run whose Developer is a CLI agent reports the
->   cost of everything except the role that writes the code.
->   proof:absent:CostAccountant@looplab/agents/cli_agent.py
+>   `make_roles`.]** **[closed 2026-09-08 for the USAGE half — `CliAgentDeveloper` holds a
+>   `CostAccountant` (the RUN's, handed to it by `agents/factory.py`, so it meters on the same
+>   ceiling) and commits ONE delta per launched invocation, under a `generation` span of its own so
+>   the spend is attributable in `looplab timings`/`looplab tokens` as well as in `llm_usage`. The
+>   delta is EXPLICITLY UNPRICED — one `calls`, zero `priced_calls`, no tokens — which is the ledger's
+>   existing "a paid call happened and we do not know what it cost", and the only honest answer here:
+>   the tokens are spent inside the child process against the endpoint we handed it, and nothing the
+>   agent prints on stdout is a receipt LoopLab can authenticate (the same rule that made
+>   `extra_metrics` carry its channel — nothing derivable from an artifact the subject writes can
+>   authenticate its author). A launcher that never started is charged nothing; a timed-out or
+>   cancelled one is. `AgentRun` carries the invocation's `duration_s`, `cancelled` and a `usage`
+>   slot a future metering transport fills in. `tests/test_cli_agent.py` drives the per-invocation
+>   delta, the missing binary, and the ledger's own walk reaching it through `ValidatingDeveloper`.
+>   The marker `external-cli-usage-is-unpriced` stood here; deleted per the index rule.]**
 > - **OPEN[agent-trajectory-eval-ladder-absent]** rungs 2-5 of §4 — curated trajectory cases, frozen
 >   outcome cases, confused-deputy/cross-run-scope, repeated stochastic trials with CIs — have no
 >   corpus. (Rung 1 exists and predates this document; see the correction above.)
@@ -263,9 +338,18 @@ Research only.
 >   servers are resolved from `LOOPLAB_MCP_CONFIG` / `LOOPLAB_MCP_SERVERS` / `.mcp.json`, all
 >   process-wide, so every session on a shared server gets the same server set whatever principal is
 >   driving it. proof:absent:principal_mcp_config@looplab/tools/mcp_tools.py
-> - **OPEN[prompt-governance-has-no-typed-registry]** repo onboarding joined the store, but the
->   additive typed registry the row asks for does not exist, so Genesis, assistants, reports, monitors
->   and stewards keep separate prompt families. proof:absent:PromptDefinition@looplab/core/prompts.py
+> - **[closed 2026-09-08 — *the registry is typed, and the residue it does not cover is now
+>   countable.* `core/prompts.py::PromptDefinition` (frozen: key + family + one line about the JOB it
+>   governs) is the row shape, `PROMPT_REGISTRY` the 19 rows, and `PROMPT_KEYS` is DERIVED from it so
+>   nothing re-spells the list — the two-way source scan's contract is unchanged. The half this row
+>   was actually about is `UNGOVERNED_PROMPT_FAMILIES`: the five families it names (Genesis,
+>   assistants, reports, monitors, stewards) each sit beside the module whose module-level constant
+>   holds their hard-coded text, asserted disjoint from `PROMPT_FAMILIES` and asserted to exist, so
+>   "canonical prompt store is only partially true" is a number that shrinks by DELETING a row
+>   rather than a sentence in a review. Migrating one is unchanged from how `repo_onboarder_system`
+>   joined: rows, a `render(prompts, "<key>", <the existing constant>)` with the shipped text as the
+>   byte-for-byte default, delete the row. `tests/test_prompt_keys.py` drives all four properties.
+>   The marker `prompt-governance-has-no-typed-registry` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-03 — `serve/control_validation.py::_normalize_set_strategy` accepts
 >   `strategy.developer` and validates it against `core/config.py::developer_switch_names()`, the one
 >   home the Strategist's own `available_developers` is derived from, so the operator and the model
@@ -286,12 +370,16 @@ Research only.
 > **Status update (2026-08-14) — the open architecture items above, re-verified against master
 > `d307542`.** One consolidated banner so the table's "Open …" dispositions stay honest:
 >
-> - **Prompt/context pinning — STILL OPEN.** No prompt-bundle/manifest pin exists; the PromptStore
->   still hot-reloads mid-run, and the only run-start pins are the settings in `run_started` plus
->   the two `core/setup_identity.py` digests (task payload + sorted config/workspace manifest).
->   *Close at the root:* stamp a content hash per rendered prompt family into `run_started`
->   (additive field) and let `render()` warn or refuse when live text diverges from the pinned hash
->   for an in-flight phase.
+> - **Prompt/context pinning — the PROMPT half landed 2026-09-08, the CONTEXT half is still open.**
+>   The bundle now has a manifest a caller can pin (`core/prompts.py::PromptStore.pin` /
+>   `bundle_revision`) and a pinned store WARNS when the live text diverges, which was the second
+>   clause of this row's own *close at the root*; the store still hot-reloads mid-run on purpose,
+>   which that clause required. What is NOT done is its FIRST half — nothing stamps the
+>   manifest into `run_started`, so the pin is available to a caller and no caller takes it yet, and
+>   the tool-schema/context manifest of §1 remains unpinned entirely. Neither residue carries a
+>   marker of its own yet: the run-start stamp is a one-line caller decision waiting on whoever owns
+>   `run_started`'s additive fields, and the context manifest is §1's typed `ContextEnvelope` rather
+>   than anything this store can supply.
 > - **Durable inner phases — STILL OPEN.** No `agent_phase_started` / `agent_checkpointed` /
 >   `agent_phase_completed` events exist in `events/types.py`; the inner trajectory still lives only
 >   in the diagnostic trace sidecar (`spans.jsonl` via `core/trace_append.py`), which is not folded

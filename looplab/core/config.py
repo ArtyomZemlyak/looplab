@@ -1409,6 +1409,21 @@ class Settings(BaseSettings):
     # a FLOOR on a gateway that reports no prices; `llm_token_limit` counts total tokens and is the
     # one that holds against a local model. 0 = no cap. Neither takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`
     # row: a cap can only REMOVE calls, and a pre-field snapshot resumes at 0 = today's behaviour.
+    #
+    # ONE CEILING WITH `llm_budget_usd`, since 2026-09-08 (`core/llm_budget.py::run_usd_ceiling`).
+    # This field and that one were two run-level USD caps enforced by two different halves — this
+    # one reserving at the broker's permit, that one committing on the shared `CostAccountant` —
+    # each with its own refusal sentence, so an operator who typed one got half a ceiling and an
+    # operator who typed both got a run that stopped at the lower number under a message naming the
+    # other. Both halves now read the TIGHTEST declared cap from one function, and every refusal
+    # names the knob that declared it. `llm_budget_usd` stays the documented spelling (it is the one
+    # the node-open floor, the resume instruction and the stop account already name).
+    #
+    # STILL NO LEGACY ROW, and the ground is the one above rather than an oversight: a resumed run
+    # that declared `llm_budget_usd` now also RESERVES against its own already-declared ceiling, so
+    # the change can only remove calls and can never spend past the number that run was launched
+    # with. The alternative — a new field whose only job is to opt an old snapshot out of enforcing
+    # the ceiling it set — would be a knob for un-enforcing an operator's own instruction.
     llm_cost_limit: float = Field(default=0.0, ge=0.0)
     llm_token_limit: int = Field(default=0, ge=0)
     # Cross-run memory (I19, ADR-10): if set, the best result of each run is stored as
@@ -1446,6 +1461,11 @@ class Settings(BaseSettings):
     # identically under either value, and pinning a resumed run to `false` would preserve the defect
     # for exactly the multi-hour runs it costs the most. `EngineOptions` keeps it OFF, like every
     # other Part IV/V knob, so a bare `Engine(...)` gains no unasked work.
+    # THE FIFTH CONSUMER READS IT CONJOINED (F1i-b, 2026-09-08): the serial deep-research gate
+    # `research_cadence.py::_maybe_deep_research` reaches the boundary only when
+    # `concurrent_research` is OFF, because that is the only configuration in which it is the run's
+    # ONLY research path and therefore cannot race the background half for one node-count's spend.
+    # With `concurrent_research` on — the shipped default — this knob leaves that gate untouched.
     cadence_while_evaluating: bool = True
     # PART IV Phase 2a live steering (§21.11/§21.13). When on, the `concept_retag_every` cadence (NOT
     # `strategist_every` — the producer gates on `_should_consult_concepts`, which uses the seed boundary
@@ -2079,6 +2099,14 @@ class Settings(BaseSettings):
     # consequences rather than a comment fix. Stated, not patched.
     #
     # Priced calls only -- a local model reports no cost and can never trip it.
+    #
+    # AND IT IS NOW RESERVED AS WELL AS COMMITTED (2026-09-08). `core/llm_budget.py::
+    # run_usd_ceiling` is the ONE derivation of the run's USD ceiling, read both here (through
+    # `run_cost_accountant`, the post-hoc half) and by the `RunBudget` the broker meters at
+    # `borrow()` (the reserve half),
+    # so this ceiling no longer races `llm_cost_limit`: the tighter of the two declarations binds
+    # both halves and the refusal names the knob that set it. Until then a run declaring only this
+    # field reserved nothing and overshot its own ceiling by up to N concurrent calls.
     llm_budget_usd: float = Field(default=0.0, ge=0.0)
     # Do not OPEN a new node once `llm_budget_usd - spent` is below this many dollars; finish the run
     # on the same `BudgetExceeded` the ceiling raises instead (`CostAccountant.require_headroom`).

@@ -141,18 +141,18 @@ def claim_curation_snapshot(memory_dir, *, lessons=None, structured: bool = True
                             _governance: dict | None = None) -> tuple[list[dict], str]:
     """Freeze one claim projection and its exact prompt digest before a durable paid claim."""
     from looplab.engine.claims import claims_for_memory
-    from looplab.engine.governance_health import project_governed_sources
+    from looplab.engine.governance_protocol import governed_projection
 
     if _governance is None:
-        source_names = ["research_claims.jsonl"]
-        if lessons is None:
-            source_names.append("lessons.jsonl")
-        return project_governed_sources(
+        return governed_projection(
             memory_dir,
             lambda governance: claim_curation_snapshot(
                 memory_dir, lessons=lessons, structured=structured,
                 max_proposals=max_proposals, _governance=governance),
-            source_names=source_names,
+            # The research store is ALWAYS governed here: this projection loads it itself whatever
+            # the caller passed, so it is a fixed name rather than an `unsupplied` entry.
+            source_names=("research_claims.jsonl",),
+            unsupplied={"lessons.jsonl": lessons},
         )
 
     claims = claims_for_memory(

@@ -278,6 +278,41 @@ def test_an_undecidable_layout_refuses_the_run_at_start(tmp_path):
                     n_seeds=1, max_nodes=1, holdout_fraction=0.5)
 
 
+def test_a_train_file_that_cannot_be_COUNTED_refuses_instead_of_grading_privately(tmp_path):
+    """The sibling above refuses at `carve`; this is the same question ONE STEP EARLIER, and it fell
+    through instead.
+
+    `carve` — and therefore `SplitUndecidable` and the refusal it raises — is only reached once
+    `_holdout_idx` is non-empty, and `build_holdout_idx` answers `frozenset()` for the mlebench kind
+    whenever `mlebench_split.train_row_count` cannot read a train CSV: an image competition whose
+    train is a DIRECTORY, a parquet, any layout `_asset_named` does not match, or a file that will
+    not parse. `apply_search_split` then took its `holdout_fraction=0` branch, and a real
+    competition launched with `holdout_fraction=0.5` graded EVERY node on the private answers — the
+    champion a max over N private draws, the very defect doc 52 row 3 is about — while recording
+    `protocol = private_per_node` beside a snapshot saying 0.5. No refusal anywhere, and the two
+    protocols were indistinguishable in the log unless someone compared those two numbers by hand.
+
+    `_holdout_indices` reserves at least one row whenever `fraction > 0` and `n >= 2`, so with a
+    fraction declared an empty partition means exactly "the rows could not be counted" — which is
+    undecidable, not legacy.
+    """
+    class _Unparseable(_Task):
+        def assets(self):
+            a = _assets()
+            a["train.csv"] = "not,a,parseable\ntrain file at all"   # counts 0 rows
+            return a
+
+    with pytest.raises(ConfigRefusal, match="could not be counted"):
+        make_engine(tmp_path / "run", task=_Unparseable(), researcher=_Stub(), developer=_Dev(),
+                    n_seeds=1, max_nodes=1, holdout_fraction=0.5)
+
+    # …and the SAME layout with the fraction at 0 is the explicit legacy protocol, untouched: the
+    # refusal is about a declaration that cannot be honoured, never about an unreadable train file.
+    engine = make_engine(tmp_path / "run0", task=_Unparseable(), researcher=_Stub(),
+                         developer=_Dev(), n_seeds=1, max_nodes=1, holdout_fraction=0.0)
+    assert engine._holdout_idx == frozenset() and engine._search_answers is None
+
+
 def test_a_recarve_draws_from_the_original_files(tmp_path):
     """Re-entry rebuilds the partition and carves again: from the public files, never from an
     already-carved train.csv (which would name different rows than the launch did)."""

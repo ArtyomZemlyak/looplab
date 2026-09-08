@@ -30,10 +30,13 @@ import {
 } from './assistantSessionModel.js'
 import { contextChipTitle, contextUsage, foldControl, newChatGate } from './assistantChromeModel.js'
 import {
-  assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
-  danglingAssistantTurn,
+  assistantRecoveryFailure, assistantRecoveryPayload, assistantTurnIndex,
+  completedAssistantReply, danglingAssistantTurn,
   unavailableAssistantRecovery,
 } from './assistantRecovery.js'
+import {
+  finalReplyText, restoredComposerInput, sendAbandonReason, sendTurnBlock, terminalTurnOutcome,
+} from './assistantTurnModel.js'
 import { stripPollMs, watchStrip } from './assistantWatchModel.js'
 import './assistant-polish.css'
 import {
@@ -41,7 +44,7 @@ import {
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
   assistantWatches, assistantWatchStop,
   assistantPermissions, assistantResolve, assistantCancel, assistantProgress,
-  assistantFork, assistantForkStatus, assistantShare, assistantUnshare,
+  assistantShare, assistantUnshare,
   commandActionForEvent, commandCanRetry, commandErrorMessage,
   commandEventForAction,
   commandFailureRecord, commandFeedback, commandRecordMatchesAction, getRunCommand, retryRunCommand,
@@ -54,6 +57,8 @@ import {
   storageGet, storageSet, storageRemove, runApiPath,
 } from './util.js'
 import { boundedRequest, deadlineRequest } from './requestDeadline.js'
+import { useAssistantFork } from './useAssistantFork.js'
+import { startTurnFallbackPolls } from './assistantTurnPolls.js'
 import { followClientRoute } from './accessibility.jsx'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
@@ -80,35 +85,9 @@ const commitAssistantRoute = href => {
     requestAnimationFrame(() => document.querySelector('[data-route-main]')?.focus({ preventScroll: true }))
   } else location.hash = href
 }
-const ASSISTANT_FORK_ACTION_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/
 const ASSISTANT_SESSION_RE = /^[\da-f]{16}$/
-const assistantForkRecoveryKey = sid =>
-  `ll.assistant-fork-recovery.${encodeURIComponent(String(sid || ''))}`
-const validAssistantForkRecovery = value => value && typeof value === 'object'
-  && !Array.isArray(value) && Object.keys(value).length === 2
-  && typeof value.actionId === 'string' && ASSISTANT_FORK_ACTION_RE.test(value.actionId)
-  && Number.isSafeInteger(value.expectedMessages) && value.expectedMessages >= 0
-const loadAssistantForkRecovery = sid => {
-  if (!ASSISTANT_SESSION_RE.test(String(sid || ''))) return null
-  const key = assistantForkRecoveryKey(sid)
-  const raw = storageGet(key)
-  if (typeof raw !== 'string') return null
-  if (raw.length > 256) { storageRemove(key); return null }
-  try {
-    const parsed = JSON.parse(raw)
-    if (validAssistantForkRecovery(parsed)) return parsed
-  } catch { /* invalid optional recovery state is discarded below */ }
-  storageRemove(key)
-  return null
-}
-const saveAssistantForkRecovery = (sid, recovery) => ASSISTANT_SESSION_RE.test(String(sid || ''))
-  && validAssistantForkRecovery(recovery)
-  && storageSet(assistantForkRecoveryKey(sid), JSON.stringify(recovery))
-const clearAssistantForkRecovery = (sid, actionId) => {
-  const current = loadAssistantForkRecovery(sid)
-  if (current?.actionId !== actionId) return false
-  return storageRemove(assistantForkRecoveryKey(sid))
-}
+// The fork recovery record's storage rules moved to `useAssistantFork.js` with the saga that is
+// their only reader (doc 25 UI-05).
 const messagesOwnLaunchIdentity = (messages, sessionId, identity) => Array.isArray(messages)
   && messages.some((message, messageIndex) => Array.isArray(message?.proposals)
     && message.proposals.some((proposal, proposalIndex) => launchDraftKey({
@@ -490,8 +469,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [shareUnknownSids, setShareUnknownSids] = useState(() => new Set())
   const [shareCopyFallbacks, setShareCopyFallbacks] = useState({})
   const [shareBusySid, setShareBusySid] = useState(null)
-  const [forkBusySid, setForkBusySid] = useState(null)
-  const [forkRecovery, setForkRecovery] = useState(null)
   const [shareAckNotice, setShareAckNotice] = useState(null)
   const [files, setFilesState] = useState([])     // attached text files [{name,size,content,truncated}]
   const [pendingFileReads, setPendingFileReads] = useState(0)
@@ -565,8 +542,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const permissionReadPendingRef = useRef(new Map())
   const toastRunIdRef = useRef(runId)
   const shareActionSessionRef = useRef(null)
-  const forkActionSessionRef = useRef(null)
-  const forkRecoveryRef = useRef(new Map())
   const deletingSessionsRef = useRef(new Set())
   const clearDirectConfirmation = React.useCallback(({ focus = false } = {}) => {
     try { directConfirmRef.current?.requestController?.abort() } catch { /* already settled */ }
@@ -653,12 +628,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }, 2500)
     return true
   }, [clearReplyAnnouncement])
-  useEffect(() => {
-    if (!sid) { setForkRecovery(null); return }
-    const recovery = forkRecoveryRef.current.get(sid) || loadAssistantForkRecovery(sid)
-    if (recovery) forkRecoveryRef.current.set(sid, recovery)
-    setForkRecovery(recovery ? { sid, ...recovery } : null)
-  }, [sid])
   // A composer belongs to the chat it was written in. Keep text and attachments in memory per session
   // so selecting another transcript cannot silently send the previous chat's draft. The unsaved
   // new-chat composer has its own slot; "+ New" deliberately resets that slot.
@@ -1382,6 +1351,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     return operation
   }
   openSessionRef.current = openSession
+  // The fork saga lives in its own hook (doc 25 UI-05): the durable recovery record, the
+  // single-flight owner ref three gates below consult, the reconciliation loop and the settlement.
+  // `readTurnState` is a FUNCTION on purpose — the saga's gate reads `runningRef`/`turnCaptureRef`
+  // and the message count at the moment of the CLICK, and half of those are refs that move without a
+  // render, so handing it values would make the gate one render stale.
+  const { forkBusySid, forkRecovery, forkActionSessionRef, forkCurrentSession } = useAssistantFork({
+    sid, sidRef, mountedRef, openSessionSeqRef, deletingSessionsRef, shareActionSessionRef,
+    flash, refreshSessions, openSession,
+    readTurnState: () => ({
+      busy: runningRef.current || turnCaptureRef.current || busy || commandBusy
+        || pending.length > 0 || msgs[msgs.length - 1]?.role === 'user',
+      messageCount: msgs.length,
+    }),
+  })
   const onAttentionPermissionFocused = React.useCallback((requestId, token) => {
     const focus = attentionPermissionFocusRef.current
     if (token !== attentionPermissionHandoffRef.current
@@ -2354,14 +2337,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         `--- ${f.name}${f.truncated ? ' (truncated)' : ''} ---\n${f.content}`).join('\n\n') + '\n'
     : ''
 
-  // Recover a turn whose SSE stream dropped (a buffering proxy can kill a long-lived stream): the
-  // background worker keeps running and persists the reply, so poll the session until the assistant
-  // message lands, then surface it — instead of stranding the user on "could not reach".
-  const completedAssistantReply = (messages, prior) => {
-    if (!assistantReplyCompletesTurn(messages, prior)) return null
-    const userIndex = assistantTurnIndex(messages, prior)
-    return userIndex >= 0 ? messages[userIndex + 1] || null : null
-  }
   const recoverReply = async (id, priorLen, prior, attempt, authoritativeFailure = null) => {
     if (!prior || !replyAttemptCurrent(attempt, id)) return false
     for (let i = 0; i < 180 && replyAttemptCurrent(attempt, id); i++) {   // ~6min > the 300s turn budget
@@ -2389,32 +2364,26 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // model receives (run context + attached files appended, not shown in the bubble).
   const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null,
     retryFiles = null, turnMode = null, clearComposer = false, acknowledgedShareMeta = null } = {}) => {
-    if (historicalRef.current) { flash(readOnlyAction); return }
-    if (openSessionPendingRef.current) {
-      flash('Wait for the selected Assistant chat to finish opening')
-      return
-    }
     const guardedSid = sidRef.current || sid
-    if (guardedSid && forkActionSessionRef.current === guardedSid) {
-      flash('Wait for this Assistant chat to finish forking before sending')
+    // The seven-fact send gate is `assistantTurnModel.js::sendTurnBlock` (doc 25 UI-05) — one order,
+    // one sentence per refusal, and a truth table over all seven. A refusal that asks for a
+    // public-link verification says so rather than being a dead end: `verifyShare` is what schedules
+    // the read that can lift it.
+    const sendBlocked = sendTurnBlock({
+      historical: historicalRef.current,
+      readOnlyMessage: readOnlyAction,
+      sessionOpening: !!openSessionPendingRef.current,
+      forkingSession: !!guardedSid && forkActionSessionRef.current === guardedSid,
+      shareActionActive: shareBusySid != null || !!shareActionSessionRef.current,
+      shareVerifying: !!guardedSid && shareVerificationRef.current.sid === String(guardedSid)
+        && !!shareVerificationRef.current.promise,
+      shareUnknown: !!guardedSid && shareUnknownSids.has(guardedSid),
+      turnActive: turnCaptureRef.current || runningRef.current || directCaptureRef.current,
+    })
+    if (sendBlocked) {
+      flash(sendBlocked.message)
+      if (sendBlocked.verifyShare) verifyShareStatus(guardedSid)
       return
-    }
-    if (shareBusySid != null || shareActionSessionRef.current) {
-      flash('Wait for the current public-link action before sending another turn')
-      return
-    }
-    if (guardedSid && shareVerificationRef.current.sid === String(guardedSid)
-        && shareVerificationRef.current.promise) {
-      flash('Still checking public-link status · nothing sent')
-      return
-    }
-    if (guardedSid && shareUnknownSids.has(guardedSid)) {
-      flash('Nothing sent · checking public-link status')
-      verifyShareStatus(guardedSid)
-      return
-    }
-    if (turnCaptureRef.current || runningRef.current || directCaptureRef.current) {
-      flash('Assistant or a run command is already starting'); return
     }
     let acknowledgedLiveShareIds = []
     if (guardedSid) {
@@ -2451,19 +2420,26 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // A just-fired Stop's cancel POST may still be in flight. Wait before consuming the composer or
     // publishing an optimistic turn, so a session choice made during this wait leaves the draft exact.
     if (cancelReqRef.current) { try { await cancelReqRef.current } catch { /* done */ } }
-    const commandClaimedDuringCancel = !!runId && (!!loadRunCommandLock(runId)
-      || (!!loadAssistantRunTransport(runId) && !directFailure))
-    const accessBecameReadOnly = historicalRef.current
-    if (!mountedRef.current || activeReplyAttemptRef.current !== localAttempt
-        || sessionSeq !== openSessionSeqRef.current || openSessionPendingRef.current
-        || directCaptureRef.current || commandClaimedDuringCancel || accessBecameReadOnly) {
+    // The SECOND gate: the cancel above is awaited, so everything the first gate established may
+    // have changed under it. `sendAbandonReason` states all seven shapes and which two the operator
+    // is told about — the two where somebody else now owns this run (`assistantTurnModel.js`).
+    const abandon = sendAbandonReason({
+      mounted: mountedRef.current,
+      attemptCurrent: activeReplyAttemptRef.current === localAttempt,
+      sessionCurrent: sessionSeq === openSessionSeqRef.current,
+      sessionOpening: !!openSessionPendingRef.current,
+      directCapture: !!directCaptureRef.current,
+      commandClaimed: !!runId && (!!loadRunCommandLock(runId)
+        || (!!loadAssistantRunTransport(runId) && !directFailure)),
+      readOnly: historicalRef.current,
+    })
+    if (abandon) {
       if (activeReplyAttemptRef.current === localAttempt) {
         activeReplyAttemptRef.current = null
         turnCaptureRef.current = false
         setTurnStarting(false)
       }
-      if (commandClaimedDuringCancel) flash('Draft not sent · a run command claimed this run first')
-      else if (accessBecameReadOnly) flash('Draft not sent · run access became read-only')
+      if (abandon.message) flash(abandon.message)
       return
     }
     if (ensureVisible && view === 'bar') setAssistantView('side')
@@ -2537,44 +2513,24 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const priorLen = localHistoryLength + 2
     setTurnStarting(false); setBusy(true); runningRef.current = true
     const ctrl = new AbortController(); abortRef.current = ctrl
-    let polling = true
-    // sid-guarded like every other callback: after a mid-turn session switch, a late poll result
-    // must not surface the DEPARTED session's confirm-cards over the one the user switched to.
-    ;(async () => {
-      while (polling && replyAttemptCurrent(localAttempt, id)) {
-        try {
-          const permissionSnapshot = await readPermissionSnapshot(id)
-          if (permissionSnapshot.ok && replyAttemptCurrent(localAttempt, id)) {
-            setPending(permissionSnapshot.pending)
-          }
-        } catch { /* transient */ }
-        await sleep(800)
-      }
-    })()
     let acc = ''
     let streamedFailure = ''
-    // Concurrent PROGRESS poll — the SSE fallback. Behind a buffering proxy (jupyter-server-proxy /
-    // nginx) the token/text/step SSE events arrive batched only at the END, leaving a dead "thinking"
-    // bubble the whole time. So ALSO poll /progress: while the real SSE tokens haven't arrived yet
-    // (acc still shorter than the server's mirrored answer-so-far), surface that live text + tool steps.
-    // Once tokens actually flow, acc overtakes it and the authoritative SSE content wins — this only
-    // fills the buffered gap, never fights a working stream.
-    ;(async () => {
-      while (polling && replyAttemptCurrent(localAttempt, id)) {
-        await sleep(1000)
-        if (!replyAttemptCurrent(localAttempt, id)) break
-        try {
-          const pp = await assistantProgress(id)
-          if (!replyAttemptCurrent(localAttempt, id)) break
-          if (!pp || !pp.active) continue
-          if (replyAttemptCurrent(localAttempt, id) && acc.length < (pp.text || '').length)
-            patchLast(prev => (prev && prev.role === 'assistant' && prev.streaming)
-              ? { content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (pp.text || prev.content),
-                  activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity }
-              : prev)
-        } catch { /* transient */ }
-      }
-    })()
+    // The two concurrent fallback polls beside the stream — permissions and the buffered-proxy
+    // progress mirror — are `assistantTurnPolls.js` now (doc 25 UI-05). They share this turn's
+    // ownership fence and its lifetime: `stop()` in the `finally` below ends both, and a result that
+    // arrives after it publishes nothing.
+    const fallbackPolls = startTurnFallbackPolls({
+      isCurrent: () => replyAttemptCurrent(localAttempt, id),
+      readPermissions: () => readPermissionSnapshot(id),
+      onPermissions: pending => setPending(pending),
+      readProgress: () => assistantProgress(id),
+      streamedText: () => acc,
+      onProgress: pp => patchLast(prev => (prev && prev.role === 'assistant' && prev.streaming)
+        ? { content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (pp.text || prev.content),
+            activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity }
+        : prev),
+      sleep,
+    })
     const safeAttempt = (fn) => (...a) => { if (replyAttemptCurrent(localAttempt, id)) fn(...a) }
     try {
       if (!replyAttemptCurrent(localAttempt, id)) return
@@ -2613,18 +2569,19 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           const durableMessages = session.messages
           if (!Array.isArray(durableMessages)) throw new Error('Invalid Assistant session transcript')
           const shareMetaValid = applyAssistantShareMeta(id, session.meta, terminalShareMetaRead)
-          const exactTurnIndex = assistantTurnIndex(durableMessages, localUserTurn)
-          const exactReply = durableMessages.length >= priorLen
-            ? completedAssistantReply(durableMessages, localUserTurn) : null
-          if (exactReply?.content) {
+          // What the TRANSCRIPT says happened, in one rule whose order is the point
+          // (`assistantTurnModel.js::terminalTurnOutcome`): a durable reply outranks the terminal
+          // frame, a staged user turn with no reply is retryable, anything else stays uncertain.
+          const outcome = terminalTurnOutcome(durableMessages, localUserTurn, priorLen)
+          if (outcome.kind === 'reply') {
             setMsgs(durableMessages)
-            const ready = announceReplyReady(exactReply.content,
+            const ready = announceReplyReady(outcome.reply.content,
               { sessionId: id, turn: localUserTurn, attempt: localAttempt })
-            setPreview(previewText(exactReply.content))
+            setPreview(previewText(outcome.reply.content))
             if (ready) setHasNew(viewRef.current === 'bar')
             return
           }
-          if (exactTurnIndex >= 0 && exactTurnIndex === durableMessages.length - 1) {
+          if (outcome.kind === 'staged') {
             setMsgs([...durableMessages, { role: 'assistant', content: failureText,
               streaming: false, recovering: false, recoveryNeeded: true }])
             setPreview(previewText(failureText)); setHasNew(false)
@@ -2643,7 +2600,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         flash('Assistant reply could not be confirmed · check the saved turn before retrying')
         return
       }
-      const rawReply = streamedFailure || (res && res.reply) || acc || (res && res.ok === false && res.error ? `Assistant error: ${res.error}` : '(no reply)')
+      const rawReply = finalReplyText({ streamedFailure, result: res, streamed: acc })
       const reply = assistantErrorInfo(rawReply) ? normalizedFailureText(rawReply) : rawReply
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
                   proposals: res && res.proposals, todos: res && res.todos, tokens: res && res.tokens,
@@ -2662,10 +2619,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         if (replyAttemptCurrent(localAttempt, id)) {
           if (shareStateChanged) setShareUnknown(id, true)
           if (inputCleared && inputAtSend) {
-            const currentInput = draftAtSend.input
-            const restoredInput = !currentInput ? inputAtSend
-              : currentInput === inputAtSend || currentInput.startsWith(`${inputAtSend}\n\n`)
-                ? currentInput : `${inputAtSend}\n\n${currentInput}`
+            // What the operator typed WHILE the refused request was in flight is theirs and is never
+            // discarded (`assistantTurnModel.js::restoredComposerInput`).
+            const restoredInput = restoredComposerInput(inputAtSend, draftAtSend.input)
             draftAtSend.input = restoredInput
             if (composerDraftRef.current === draftAtSend) setInputState(restoredInput)
           }
@@ -2723,7 +2679,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         })
       }
     } finally {   // only the attempt that still owns this session may release its shared UI state
-      polling = false
+      fallbackPolls.stop()
       if (activeReplyAttemptRef.current === localAttempt) {
         activeReplyAttemptRef.current = null
         turnCaptureRef.current = false
@@ -3349,214 +3305,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     : shareUnknown
       ? 'Public-link status unknown. You can keep editing this draft; sending is paused until the status is verified or public links are revoked.'
     : ''
-  const rememberForkRecovery = (sourceSid, recovery) => {
-    const stored = loadAssistantForkRecovery(sourceSid)
-    const durable = stored?.actionId === recovery.actionId
-      && stored.expectedMessages === recovery.expectedMessages
-      ? true : saveAssistantForkRecovery(sourceSid, recovery)
-    if (!durable) return false
-    forkRecoveryRef.current.set(sourceSid, recovery)
-    if (mountedRef.current && (sidRef.current || sid) === sourceSid) {
-      setForkRecovery({ sid: sourceSid, ...recovery })
-    }
-    return true
-  }
-  const forgetForkRecovery = (sourceSid, actionId) => {
-    if (forkRecoveryRef.current.get(sourceSid)?.actionId === actionId) {
-      forkRecoveryRef.current.delete(sourceSid)
-    }
-    clearAssistantForkRecovery(sourceSid, actionId)
-    if (mountedRef.current) {
-      setForkRecovery(current => current?.sid === sourceSid && current.actionId === actionId
-        ? null : current)
-    }
-  }
-  const presentForkChild = async (child, sourceSid, recovery, sourceChoiceSeq) => {
-    if (!mountedRef.current) return false
-    const childId = typeof child?.id === 'string' && ASSISTANT_SESSION_RE.test(child.id)
-      && child.parent === sourceSid && child.fork_action_id === recovery.actionId ? child.id : null
-    if (!childId) return false
-    const listed = await refreshSessions()
-    if (!mountedRef.current) return false
-    let confirmed = Array.isArray(listed) && listed.some(session => session?.id === childId)
-    if (sidRef.current === sourceSid && openSessionSeqRef.current === sourceChoiceSeq) {
-      const opened = await openSession(childId)
-      confirmed = confirmed || !!opened?.ok
-    } else if (confirmed) {
-      flash('Fork created · kept your newer chat selection')
-    }
-    if (!confirmed) return false
-    forgetForkRecovery(sourceSid, recovery.actionId)
-    return true
-  }
-  const reconcileFork = async (sourceSid, recovery) => {
-    const actionId = recovery.actionId
-    let sawPending = false
-    for (let attempt = 0; attempt < 5 && mountedRef.current; attempt++) {
-      if (attempt > 0) await sleep(350 * attempt)
-      try {
-        const child = await boundedRequest(
-          signal => assistantForkStatus(sourceSid, actionId, {
-            expectedMessages: recovery.expectedMessages, signal,
-          }), 4000)
-        return { kind: 'created', child }
-      } catch (error) {
-        const reportedAction = String(error?.detail?.action_id || '')
-        if (error?.code === 'assistant_fork_in_progress'
-            && (!reportedAction || reportedAction === actionId)) {
-          sawPending = true
-          continue
-        }
-        if (error?.code === 'assistant_fork_in_progress') {
-          return { kind: 'blocked', error }
-        }
-        if (error?.code === 'assistant_fork_deleted') return { kind: 'deleted', error }
-        if (error?.code === 'assistant_fork_action_conflict') return { kind: 'conflict', error }
-        if (error?.code === 'assistant_fork_deleting') return { kind: 'deleting', error }
-        if (error?.status === 404) return { kind: 'absent', error }
-        const status = Number(error?.status)
-        const ambiguous = error?.name === 'TimeoutError' || error?.name === 'AbortError'
-          || error?.status == null || status >= 500 || [408, 425, 429].includes(status)
-        if (!ambiguous) return { kind: 'unknown', error }
-      }
-    }
-    return { kind: sawPending ? 'pending' : 'unknown' }
-  }
-  const settleForkReconciliation = async (outcome, sourceSid, recovery, sourceChoiceSeq) => {
-    if (!mountedRef.current) return
-    if (outcome.kind === 'created') {
-      if (await presentForkChild(outcome.child, sourceSid, recovery, sourceChoiceSeq)) return
-      await refreshSessions()
-      if (mountedRef.current) flash('Fork result is uncertain · check the chat list before retrying')
-      return
-    }
-    if (outcome.kind === 'deleted') {
-      forgetForkRecovery(sourceSid, recovery.actionId)
-      await refreshSessions()
-      if (mountedRef.current) flash('That fork was deleted · fork again to create a new copy')
-      return
-    }
-    if (outcome.kind === 'conflict') {
-      forgetForkRecovery(sourceSid, recovery.actionId)
-      await refreshSessions()
-      if (mountedRef.current) flash('This saved fork request no longer matches the chat · review it and fork again')
-      return
-    }
-    if (outcome.kind === 'deleting') {
-      await refreshSessions()
-      if (mountedRef.current) flash('That fork is being deleted · check again before retrying')
-      return
-    }
-    if (outcome.kind === 'absent') {
-      flash('Fork is not published · check fork retries this exact request')
-      return
-    }
-    if (outcome.kind === 'blocked') {
-      flash('Another fork is in progress · check fork keeps this request safe')
-      return
-    }
-    await refreshSessions()
-    if (mountedRef.current) flash(outcome.kind === 'pending'
-      ? 'Fork is still finishing · use check fork to recover this exact request'
-      : 'Fork status is uncertain · use check fork before starting another')
-  }
-  const forkCurrentSession = async () => {
-    const forkSid = sidRef.current || sid
-    if (!forkSid) return
-    if (forkActionSessionRef.current) {
-      flash('Another Assistant fork is still in progress')
-      return
-    }
-    const storedRecovery = forkRecoveryRef.current.get(forkSid) || loadAssistantForkRecovery(forkSid)
-    if (!storedRecovery && (runningRef.current || turnCaptureRef.current || busy || commandBusy
-        || pending.length > 0 || msgs[msgs.length - 1]?.role === 'user')) {
-      flash('Wait for a complete Assistant reply before forking this chat')
-      return
-    }
-    if (deletingSessionsRef.current.has(forkSid)) {
-      flash('This chat is being deleted')
-      return
-    }
-    if (shareActionSessionRef.current) {
-      flash('Wait for the current share action before forking this chat')
-      return
-    }
-    const recovery = storedRecovery || {
-      actionId: createIdempotencyKey().toLowerCase(), expectedMessages: msgs.length,
-    }
-    if (!rememberForkRecovery(forkSid, recovery)) {
-      flash('Browser recovery storage is unavailable · enable it before forking safely')
-      return
-    }
-    const sourceChoiceSeq = openSessionSeqRef.current
-    forkActionSessionRef.current = forkSid
-    setForkBusySid(forkSid)
-    try {
-      const child = await boundedRequest(
-        signal => assistantFork(forkSid, recovery, { signal }), 12000)
-      if (!await presentForkChild(child, forkSid, recovery, sourceChoiceSeq)) {
-        const outcome = await reconcileFork(forkSid, recovery)
-        await settleForkReconciliation(outcome, forkSid, recovery, sourceChoiceSeq)
-      }
-    } catch (error) {
-      if (!mountedRef.current) return
-      if (error?.code === 'assistant_fork_session_deleting') {
-        forgetForkRecovery(forkSid, recovery.actionId)
-        flash('This chat is being deleted')
-      } else if (error?.code === 'assistant_fork_deleted') {
-        forgetForkRecovery(forkSid, recovery.actionId)
-        refreshSessions()
-        flash('That fork was deleted · fork again to create a new copy')
-      } else if (error?.code === 'assistant_fork_action_conflict') {
-        forgetForkRecovery(forkSid, recovery.actionId)
-        refreshSessions()
-        flash('This saved fork request no longer matches the chat · review it and fork again')
-      } else if (error?.code === 'assistant_fork_source_changed') {
-        forgetForkRecovery(forkSid, recovery.actionId)
-        refreshSessions()
-        flash('This chat changed before the fork started · review it and fork again')
-      } else if (['assistant_fork_turn_active', 'assistant_fork_turn_incomplete'].includes(error?.code)) {
-        forgetForkRecovery(forkSid, recovery.actionId)
-        flash('Wait for the current Assistant reply to finish or recover it before forking')
-      } else if (error?.status === 404) {
-        forgetForkRecovery(forkSid, recovery.actionId)
-        flash('This Assistant chat no longer exists')
-      } else if (error?.code === 'assistant_fork_in_progress'
-          && error?.detail?.action_id && error.detail.action_id !== recovery.actionId) {
-        const activeActionId = String(error.detail.action_id).toLowerCase()
-        const activeExpectedMessages = typeof error.detail.expected_messages === 'number'
-          ? error.detail.expected_messages : Number.NaN
-        const adopted = { actionId: activeActionId, expectedMessages: activeExpectedMessages }
-        if (!ASSISTANT_FORK_ACTION_RE.test(activeActionId)
-            || !Number.isSafeInteger(activeExpectedMessages) || activeExpectedMessages < 0
-            || activeExpectedMessages !== recovery.expectedMessages) {
-          flash('Another tab is forking a different chat snapshot · refresh before retrying')
-        } else {
-          forgetForkRecovery(forkSid, recovery.actionId)
-          if (!rememberForkRecovery(forkSid, adopted)) {
-            flash('Another fork is in progress · refresh the chat list before retrying')
-          } else {
-            const outcome = await reconcileFork(forkSid, adopted)
-            await settleForkReconciliation(outcome, forkSid, adopted, sourceChoiceSeq)
-          }
-        }
-      } else if (error?.code === 'assistant_fork_in_progress'
-          || error?.code === 'assistant_fork_deleting'
-          || error?.code === 'assistant_fork_child_deleting'
-          || error?.name === 'TimeoutError' || error?.name === 'AbortError'
-          || error?.status == null || Number(error.status) >= 500
-          || [408, 425, 429].includes(Number(error.status))) {
-        const outcome = await reconcileFork(forkSid, recovery)
-        await settleForkReconciliation(outcome, forkSid, recovery, sourceChoiceSeq)
-      } else {
-        forgetForkRecovery(forkSid, recovery.actionId)
-        flash('Could not fork this Assistant chat')
-      }
-    } finally {
-      if (forkActionSessionRef.current === forkSid) forkActionSessionRef.current = null
-      if (mountedRef.current) setForkBusySid(current => current === forkSid ? null : current)
-    }
-  }
+  // The fork saga — `forkCurrentSession` / `reconcileFork` / `settleForkReconciliation` and the
+  // recovery record they turn on — is `useAssistantFork.js` now, with its decisions in
+  // `assistantForkModel.js` (doc 25 UI-05). It is called above, beside `openSession`.
   // Doc 25 UI-05. The mint used to be a ~68-line async function inside a JSX `onClick`; both public-link
   // mutations now sit here, side by side, and share one statement of when they may start and what an
   // ambiguous outcome means (`assistantShareModel.js`).

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import pytest
 import shutil
 import subprocess
 import time
@@ -55,8 +56,18 @@ def test_the_snapshot_really_lands_on_those_cpus(tmp_path):
         f"date +%s.%N > {bench}/meter/moved-$$\n"
         "exit 0\n", encoding="utf-8")
     os.chmod(run / "snapshot.sh", 0o755)
+    # THE LANE COMES FROM THIS PROCESS'S OWN AFFINITY, not from a pair of cpu numbers the bench box
+    # happens to have. `taskset` pins to the INTERSECTION of what it is asked for and what the
+    # process may use, so a hard-coded `2,5` on a container whose cpuset is 0-3 landed the snapshot
+    # on `[2]` and failed this assertion — about the box, not about the pinning. Two cpus the box
+    # really has make the same claim everywhere, and the skip below is honest about the one case
+    # where it cannot be made at all.
+    usable = sorted(os.sched_getaffinity(0))
+    if len(usable) < 2:
+        pytest.skip("a single-cpu box cannot show a snapshot landing on a chosen subset")
+    lane = usable[:2]
     env = dict(os.environ, BENCH_ROOT=str(bench), SNAPSHOT_DEST=str(tmp_path / "dest"),
-               SNAPSHOT_SERVICE_LANE="2,5")
+               SNAPSHOT_SERVICE_LANE=",".join(str(c) for c in lane))
     proc = subprocess.Popen(["bash", str(run / "snapshot_timer.sh"), "_loop", "2"],
                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     try:
@@ -66,5 +77,8 @@ def test_the_snapshot_really_lands_on_those_cpus(tmp_path):
         proc.wait(timeout=10)
     seen = (bench / "affinity").read_text(encoding="utf-8").strip().splitlines()
     assert seen, "the stub snapshot never ran"
-    assert all(line.strip() == "[2, 5]" for line in seen), (
-        f"the snapshot ran on {seen}, not on the lane it was given")
+    assert all(line.strip() == str(lane) for line in seen), (
+        f"the snapshot ran on {seen}, not on the lane {lane} it was given")
+    # …and the lane is a strict SUBSET of what the process could otherwise have used, or "pinned"
+    # would be indistinguishable from "unpinned" on a two-cpu box.
+    assert len(lane) < len(usable) or len(usable) == 2, (lane, usable)

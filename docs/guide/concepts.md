@@ -151,14 +151,17 @@ need no memo, because they record their `at_node` on every path: `lessons_distil
 even with zero lessons, and the report writer stamps `at_node` outside its own try, so even a
 provider failure closes the window.
 
-**Four of the five call it; the fifth is a refusal.** The serial deep research
-(`_maybe_deep_research`) keeps the old predicate on purpose. Its phase never stopped happening —
+**Four of the five call it outright; the fifth calls it conditionally.** The serial deep research
+(`_maybe_deep_research`) keeps the old predicate while `concurrent_research` is on. Its phase never
+stopped happening —
 the *concurrent* half of that same decision (`_spawn_research`) carries no such guard, and
 `research_completed (trigger=cadence)` is alive in every run on this box, including the three with
 zero quiescent prefixes. Opening the serial half mid-eval would put a main-task think and a
 background think at the same node count with only a read-then-write window between their shared
-mark check and their receipts, buying a double-spend to reach work already being done. The residual
-hole — `concurrent_research=false`, not the shipped default — is filed as backlog F1i-b.
+mark check and their receipts, buying a double-spend to reach work already being done. Under
+`concurrent_research=false` there is no second path to race, so there the serial gate DOES reach the
+creation boundary — it is the run's only research path, and on a GPU-shaped run the old predicate
+meant it never fired at all (backlog F1i-b, closed 2026-09-08).
 
 `Settings.cadence_while_evaluating` (ON) is the kill switch back, and it carries a
 `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row pinning it `false` for a run resumed from a snapshot written
@@ -222,7 +225,21 @@ bought the same think, the same build, or the same install a second time. With t
   moved to the serial path — instead of silently re-issued to a provider;
 - `run_setup` is exactly-once for a command that reported an outcome and at-least-once across a kill
   in between, and that repeat is stamped `after_interrupted_attempt` in the log. LoopLab cannot make
-  an arbitrary operator command transactional, so prefer an idempotent one.
+  an arbitrary operator command transactional, so prefer an idempotent one;
+- **one evaluation ATTEMPT is receipted the same way**, and it is a different fact from
+  `node_eval_started`. That row is the node LIFECYCLE's boundary — one per node, no attempt — and it
+  answers "was this node ever dispatched". The evaluator itself is invoked once per attempt and may
+  finish paid or external side effects (a training run, a submission, a remote job) minutes before
+  the node's terminal event is appended, so a kill in that gap left the node
+  byte-indistinguishable from one whose evaluator never ran. `eval_invocation_claimed` goes down
+  immediately before the invocation and `eval_invocation_settled` immediately after, carrying the
+  outcome (`ok` / `failed` / `superseded` / `aborted` / `gpu_unpinnable`) and the seconds it charged.
+  The id is DERIVED from (run, node, generation, attempt) rather than minted, which is what lets the
+  resumed process name the invocation it is repeating — hand it to an evaluator as an idempotency
+  key if that evaluator has one — and a claim whose last row is still a claim is an invocation
+  nobody recorded the result of. The repeat is stamped `after_interrupted_attempt`, exactly like
+  `run_setup` above and with the same honesty: nothing here claims the side effect was undone.
+  Both rows are diagnostic — the fold ignores them, and the node still reaches exactly one terminal.
 
 **The environment a run actually got is a fact on the log, not something to reconstruct afterwards.**
 A repo task appends `deps_declared` once at run start: what its source tree declares (the requirement
@@ -855,7 +872,10 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   gone) and `check_false_positive` — the stage check is ANOTHER MODEL's reading of stdout, so "that
   reading was wrong" is a claim only a second reader can make. Neither admits a metric: both are
   absent from `NEVER_SALVAGED_REASONS`, so they can neither suppress one nor grant one. The engine's own structural answer stays on the row beside it
-  (`engine_reason`) and `reason_source` says who chose the word.
+  (`engine_reason`) and `reason_source` says who chose the word: `engine` (it measured it), `triage`
+  (the diagnostician answered), `undiagnosed` (one was asked and could not) or, since 2026-09-08,
+  `declared` — the eval itself STATED the reason on the stdout channel its candidate shares
+  (`rules_violation`), which is engine-final but is not a fact the engine observed.
 
   `diverged` is the one word BOTH may say, and only in one direction: the engine names it when its
   own watchdog killed the stage, and the diagnostician may name it ONLY where the engine's own
@@ -1480,7 +1500,7 @@ proposal the run has already paid for, which is the hazard invariant #1 records 
 `train_monitor_alert`.
 
 **A DIRECTION IS NEVER A CLAIM, and since 2026-08-26 that is enforced rather than only asked for.**
-`agents/roles.py::bind_idea_to_board_card` resolves two independent edges against the same visible
+`agents/state_brief.py::bind_idea_to_board_card` resolves two independent edges against the same visible
 board — `card_id` (a claim on a work item) and `parent_card_id` (a filing under a question) — and
 until then a direction could become either one. Both resolution paths reached it: a proposal naming a
 `DIRECTION_ID` in `card_id` bound to it (and had its own `hypothesis` overwritten by the direction's
@@ -1521,7 +1541,7 @@ provider rather than by granting `RunTools` wholesale, which would also hand ove
 rest. It records nothing: every field is already on the Card, and the fold is untouched.
 
 **So does the deep-research memo prompt**, which is the stage that fills the board: both halves render
-from one shared block (`agents/roles.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
+from one shared block (`agents/state_brief.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
 `SEED_STATEMENT_JSON` spelling, without the claim contract (a memo has no `card_id` field). Until
 2026-08-12 it saw none of it — four memos in one 90-minute evaluation registered 18 belief rows for
 about five ideas, three of them re-wordings of the question whose experiment was running while they
@@ -2066,7 +2086,7 @@ Where each concept lives in the code:
 | Append-only log / pure fold / SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Derived Card ledger (fold-time receipt bounds + the `derive_cards` post-pass) | `events/card_ledger.py` |
 | Sandbox seam + subprocess/Docker bodies | `runtime/sandbox.py` |
-| Researcher/Developer roles (toy + LLM) | `agents/roles.py`, `agents/unified_agent.py` |
+| Researcher/Developer roles (LLM; the toy pair is `agents/toy_roles.py`, the prompts `agents/role_prompts.py`, the state brief `agents/state_brief.py`, the wrappers `agents/role_wrappers.py`) | `agents/roles.py`, `agents/toy_roles.py`, `agents/unified_agent.py` |
 | Structured output + LLM client + cost accountant | `core/parse.py`, `core/llm.py` |
 | Durable per-run observed-usage ledger | `engine/costs.py` |
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
@@ -2074,7 +2094,9 @@ Where each concept lives in the code:
 | The two pacing rules (node-count `cadence_due`, occupancy `occupancy_due`) | `engine/cadence.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
 | HTTP control-payload validation (`normalize_control` + the five per-event tables) | `serve/control_validation.py` |
+| The receipt PROTOCOL (identity, phase, the paranoid read/save) shared by every irreversible transaction | `core/receipt.py` |
 | Durable whole-run Replay/deletion receipts + the destructive-quiescence ladder | `serve/durable_op.py`, `serve/reset_transaction.py`, `serve/deletion_transaction.py` |
+| Durable receipt for the agent-facing node purge (its phase lattice + the crash fence) | `tools/node_purge_receipt.py`, `tools/run_control_tools.py` |
 | Serve-side paid work: metering lease + claim→terminal receipt ledger | `serve/paid_work.py`, `serve/paid_ledger.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |
@@ -2085,13 +2107,13 @@ Where each concept lives in the code:
 | Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, the five-module concept cluster `search/concept_graph.py` (structure) → `search/concept_tagging.py` / `search/concept_lens.py` → `search/concept_analytics.py` → `search/concept_map.py` |
 | Live concept cadence (re-tag, consolidation, edges, coverage snapshot) | `engine/concept_cadence.py` |
 | Cross-run index, claims + agent reads | `engine/cross_run_index.py`, `engine/claims.py`, `tools/cross_run_tools.py` |
-| Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
+| Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_protocol.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
 | Claim/curation projections + typed owner governance HTTP | `serve/routers/cross_run.py` |
 | Claims & Curation UI + evidence validation | `ui/src/ClaimsCuration.jsx`, `ui/src/claimsCurationModel.js` |
 | Trace span exporter | `core/tracing.py` |
 | Search policies | `search/policy.py` |
 | Static HTML lineage tree | `events/htmlview.py` |
-| Task adapters + loader | `adapters/tasks.py`, `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
+| Task adapters + loader | `adapters/tasks.py`, `adapters/synthetic.py` (the five demo adapters' shared `SyntheticTaskBase` + `PerturbResearcher`), `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
 | Strategist / Deep-Research / report | `agents/strategist.py`, `agents/deep_research.py`, `serve/report.py` |
 
 

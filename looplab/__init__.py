@@ -41,6 +41,14 @@ _LAYOUT = {
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
+    # The four modules `roles.py` split into on 2026-09-08 (doc 25 AG-02). `roles.py` re-exports the
+    # first three; `toy_roles` is named directly by its importers, because the calibration envelope
+    # identifies the toy pair by dotted path and one live spelling is the point.
+    "role_prompts": "agents",   # the role prompt fragments + the suffix assemblers, moved VERBATIM
+    "state_brief": "agents",    # the board prompt window + `_state_brief`: what a proposal role SEES
+    "role_wrappers": "agents",  # WrapsResearcher/WrapsDeveloper/bind_state_on + ValidatingDeveloper
+    "toy_roles": "agents",      # the offline ToyResearcher/ToyObjectiveDeveloper backends
+    "developer_backends": "agents",  # the three developer-backend wirings `make_roles` composes (RA-01)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
@@ -109,6 +117,7 @@ _LAYOUT = {
     "task_kinds": "core",       # shared launch/backend defaults used by generated and interactive configs
     "task_facets": "engine",     # PART IV cross-run §21.20.2: agentic task faceting overlay (off the index)
     "governance_health": "engine",  # PART IV cross-run: paid-curation ledger health / fail-closed gates
+    "governance_protocol": "engine",  # the shared governance transaction: the durable ledger APPEND and the governed-projection re-entry (doc 25 EM-05/EM-08)
     "steward_invocation": "engine",  # PART IV cross-run: agentic steward invocation/session bookkeeping
     "curation_protocol": "engine",  # the FINALIZE at-most-once paid-curation transaction (doc 25 EM-03)
     "concept_tidy": "engine",      # the cross-run concept RATIFICATION stage (§22.4)
@@ -139,6 +148,8 @@ _LAYOUT = {
     "comparison": "core",
     "concepts": "core",       # canonical concept identity + materialization integrity contracts
     "concept_frame": "serve",   # bounded versioned concept frames served to the UI
+    "concept_lens_service": "serve",   # the paid concept-lens subsystem `routers/runs.py`
+                                       # shed (doc 25 SR-04)
     "config": "core",
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
@@ -331,16 +342,25 @@ _LAYOUT = {
     "run_files": "serve",
     "run_projections": "serve",   # the run-list projections AppState now owns (doc 25 SR-12)
     "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
+    "receipt": "core",   # the RECEIPT tier: a durable operation's identity/phase machine (doc 34 D-01)
     "run_deletion": "core",
     "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
     "run_reset": "core",
     "node_diff": "tools",   # what actually differs between two nodes: code, params proposed vs applied
     "run_tools": "tools",
     "machine_runs_tools": "tools",
+    "run_control_tools": "tools",   # the assistant's run-MUTATING provider (doc 25 TO-02)
+    "node_purge_receipt": "tools",  # ...the node purge's durable receipt schema (doc 34 D-01)
+    "run_launcher_tools": "tools",  # ...its launch-PROPOSAL provider (same split)
+    "run_command_adapter": "tools",  # ...the seam to the serve-owned command service
+    "turn_mutation_fence": "tools",  # ...one assistant turn's durable mutation journal
     "sandbox": "runtime",
     "scorer_fidelity": "search",
     "schemas": "serve",
     "scope_actions": "serve",   # the paid ACTION protocol above that store (doc 25 SR-02)
+    "scope_generate": "serve",   # the paid GENERATION protocol, the scope projections
+                                 # and the source-probe cache `routers/reports.py`
+                                 # shed (doc 25 SR-02)
     "scope_report": "serve",
     "scope_report_store": "serve",   # the durable store `routers/reports.py` shed (doc 25 SR-12)
     "scope_sources": "serve",
@@ -356,11 +376,14 @@ _LAYOUT = {
     "speculation": "engine",  # durable speculative Card build queue and worker contracts
     "speculation_calibration": "search",
     "speculation_quality": "search",
+    "seed_distance": "search",   # displacement from the lineage root, over node_diff's edit vocabulary
     "source_identity": "core",    # provenance/source-identity primitives (stdlib-only, used by core)
     "strategist": "agents",
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)
     "stuck": "agents",
     "surrogate": "search",
+    "synthetic": "adapters",   # SyntheticTaskBase + PerturbResearcher, the five demo adapters'
+                               # shared skeleton (doc 25 RA-06)
     "tasks": "adapters",
     "text": "core",              # the shared unicode word tokenizer (doc 25 EM-15)
     "timeseries": "adapters",

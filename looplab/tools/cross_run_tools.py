@@ -24,7 +24,7 @@ from pathlib import Path
 
 from looplab.core.atomicio import file_identity
 from looplab.core.text import normalize_text
-from looplab.tools._base import RESULT_CAP, fn_spec, jsonl_row_count
+from looplab.tools._base import RESULT_CAP, RowCountTooLarge, fn_spec, jsonl_row_count
 from looplab.trust.cross_run import (
     LessonScope, cross_run_text, scope_terms, valid_live_direction)
 
@@ -308,6 +308,13 @@ class CrossRunTools:
                     rows[filename] = 0     # an absent store is a KNOWN-empty one
                     continue
                 rows[filename] = jsonl_row_count(path)
+            except RowCountTooLarge as exc:
+                # BOTH branches are UNKNOWN -- "I could not look" -- and that is the point of
+                # separating them: a store that is merely LARGE is not an unreadable one, and
+                # saying "unreadable" about it sends an operator hunting a corrupt file that does
+                # not exist while the real fact (this corpus has outgrown the prompt-path counter)
+                # goes unsaid. The size is in the message because it is the actionable half.
+                unknown[filename] = str(exc)
             except OSError as exc:
                 unknown[filename] = f"unreadable store: {type(exc).__name__}"
         out: dict[str, int | str] = {}

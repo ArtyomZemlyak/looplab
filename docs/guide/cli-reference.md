@@ -20,6 +20,7 @@ looplab tokens          TOKEN breakdown by phase, reconciled against the durable
 looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
 looplab edit-types      What KIND of edit each experiment made, which kinds paid, and how much was already tried once (doc 52 row 31)
 looplab proxy-accuracy  Was the proxy that KILLED candidates any good? Pairwise ranking accuracy against the metrics that came back (doc 52 row 31)
+looplab seed-distance   How far each experiment moved from the SEED program it descends from, and how much of that movement is tuning (doc 52 row 31)
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
@@ -1149,6 +1150,62 @@ node that was evaluated anyway (a re-run, an injection), and the report counts t
 
 `proxy_kill_fraction=0` (the default) turns the kill off and keeps the score as an audit signal;
 this command is what that decision should be made on.
+
+---
+
+## `seed-distance`
+
+Read-only, no model. How far each experiment moved from the **seed program** it descends from, and
+how much of that movement is tuning rather than structure.
+
+```bash
+looplab seed-distance RUN_DIR
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (folds its `events.jsonl`; reads the committed `files` of each node and of its lineage ROOT) |
+
+The sibling of [`edit-types`](#edit-types) and deliberately not the same question. `edit-types`
+measures each parent→child **step**; this measures the whole walk, in **one** diff against the
+first-parent lineage root — so a change and its undo **cancel**, where a per-step tally counts two
+edits. Same classifier, same closed vocabulary (`looplab/tools/node_diff.py::EDIT_TYPES`), no second
+taxonomy; `looplab/search/seed_distance.py` only groups it into three bands plus the vocabulary's own
+residue, and that partition is asserted total at import:
+
+| Band | Types | Why |
+|---|---|---|
+| tuning | `hyperparameter`, `call_argument` | the knobs — the same knob written as a literal or as a keyword argument (`Adam(..., lr=1e-4)`) |
+| structural | `import`, `definition`, `control_flow`, `data_io` | what the program **is**: its dependencies, shape, path and where its data comes from |
+| cosmetic | `comment`, `whitespace`, `logging` | what a reader sees and the machine does not — excluded from every share's denominator |
+| *(residue)* | `other` | counted in the total, claimed by no band |
+
+```
+distance from the seed program over 2 descendant node(s) (1 seed(s) are their own reference; direction=min)
+ node  seed  depth  files  lines  tuning  struct  cosmetic  tuning%  re-added        gain
+    1     0      1      1      2       2       0         0     100%         0        +0.1
+    2     0      2      1      7       4       2         1      67%         0        +0.2
+  lines = added + removed against the SEED, so a change and its undo cancel; `re-added` is what this node's own lineage had already deleted.
+  tuning share of the movement, improved (2 node(s)): 83%; not improved: n/a
+  MLGym reports that models usually improve by finding better hyperparameters. 2 node(s) is an observation about this run, not a test of that.
+```
+
+`gain` is direction-aware and measured against the node's **own seed**, so the last two lines are the
+shape MLGym's sentence is in: the mean tuning share of the nodes that beat their seed, beside those
+that did not. The count is printed with it on purpose — a dozen nodes is an observation about one
+run, not a test of a field result.
+
+**The path is not thrown away with the displacement.** `re-added` is
+`node_diff.py::reintroduced_lines` on the same first-parent chain: lines this node adds that its own
+ancestry had already deleted. A lineage cycling in place therefore reads as re-introductions rather
+than as a node that never moved.
+
+**What it will not do.** It decides nothing — no selection, gate or proposal cue reads it, and doc 17
+§11's own warning ("novel ≠ good") is why: a distance *maximised* is a run rewarded for churn. A node
+whose file set is missing from the record is NOT measured and is counted separately, because an
+unreadable record is not a node that never moved. And this is the distance from the seed **program**;
+the semantic distance from a seed **corpus** (§11/§17's Scoop-Check, an embedder over a versioned
+external corpus) is a different, unbuilt artifact.
 
 ---
 

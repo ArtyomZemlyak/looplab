@@ -113,11 +113,11 @@ folded in where an agent showed the third pass was wrong:
 
 | Pool | What the pass found | Disposition |
 |---|---|---|
-| Docs 01–05 (design, ADRs) | ADR-11's hardening targets SHIPPED where they mattered (deny-by-default egress via `--network`, cgroup/ulimit caps, allow-listed installs, the reproduction manifest, approvals as command events); two SUPERSEDED (OpenTelemetry `gen_ai` conventions by doc 08's span model — still open as a low-rank bridge item, `otel-bridge-carries-no-genai-semconv`; gateway tokens by the sandbox's secret refusal); the dollar cap tracked (`no-shared-reserve-commit-run-budget`, promoted by the infrastructure agent) | one open DECISION untagged: "parallel sidecar ordering" (doc 03 §Open) |
+| Docs 01–05 (design, ADRs) | ADR-11's hardening targets SHIPPED where they mattered (deny-by-default egress via `--network`, cgroup/ulimit caps, allow-listed installs, the reproduction manifest, approvals as command events); two SUPERSEDED (OpenTelemetry `gen_ai` conventions by doc 08's span model — and the bridge item `otel-bridge-carries-no-genai-semconv` closed 2026-09-08, the conventions now mirrored beside our own names; gateway tokens by the sandbox's secret refusal); the dollar cap tracked (`no-shared-reserve-commit-run-budget`, promoted by the infrastructure agent) | one open DECISION untagged: "parallel sidecar ordering" (doc 03 §Open) |
 | Doc 06 | every partial done; LanceDB / MCP server bus / gVisor / gateway tokens are design substitutions recorded in the ADRs | nothing to tag |
 | Docs 10–12 (2026-07 roadmap) | shipped: T1, T2, T4, T5, T6, T7 (`core/llm.py::_ResponseCache`), P1, P3, P4 (off by default), M2/M3, D2, D4, D5, D7 (`weighted_parent`), D8, D9, D10, D11. **Corrected by the fourth pass**: T8 is HALF shipped — `merge_mode="auto"` resolves to `ensemble` for every LLM Developer and `engine/node_build.py::_ensemble_idea` is the A0b recombination merge, but the Developer receives a directive and never the parents' code (`speculation.py` hands it `parents[0]`); D3's stall rule EXISTS (`agents/strategist.py::improves_since_best` against `stall_window`, greedy⇄broad, deep research at 2×) and only the consult's TIMING ignores it; M1's in-run half exists (`events/digest.py::lineage_lessons` + `sibling_digest`), the cross-run half does not | markers rewritten: `merge-operator-is-mean-of-params-not-code`, `strategist-consult-is-cadence-not-stagnation-triggered`, `lessons-are-not-operator-scoped`, `no-plan-artifact-with-endgame-reserve` |
 | Docs 13–16 (July reviews) | closed lists; doc 16's SSE blocking read is fixed, the enum gaps closed 2026-09-02 | untagged, stated |
-| Doc 17 (capability matrix) | typed Developer result tracked (`developer-output-has-no-immutable-envelope`); manifest, default-deny auth, deadline watcher, temporal CV shipped; "no first-class Evaluator" is a naming question | `no-distance-from-seed-signal` (demoted by the search agent: no measured precedent; edit-TYPE annotation is what the field measured) |
+| Doc 17 (capability matrix) | typed Developer result tracked (`developer-output-has-no-immutable-envelope`); manifest, default-deny auth, deadline watcher, temporal CV shipped; "no first-class Evaluator" is a naming question | — (`no-distance-from-seed-signal` closed 2026-09-08 as the seed-relative displacement over the edit-TYPE vocabulary; §11's SEMANTIC distance over an external corpus is §17's Scoop-Check and unbuilt) |
 | Docs 18–24 (UI, workspace) | Approve/Ratify and DecisionFreshness shipped; doc 21's atlas claims shipped as F7; doc 20's direction → `eval-parallelism-is-in-process-only` (re-pointed) | accessibility evidence untagged (cost unmeasured) |
 | Doc 22 | phases 0–3 shipped; phase 4's golden never added | `parallel-build-has-no-golden-replay`; the shipped shape is a bulk-synchronous barrier → `parallel-build-is-a-bulk-synchronous-barrier` |
 | Docs 25, 27, 34 | markers stand (30 / 14 / 4); seven proofs re-pointed (§2.2) | — |
@@ -626,10 +626,22 @@ rungs (Landlock TCP at ABI 4, a network namespace) are named, not claimed. Measu
 `AF_INET` refused in a child. The probe carries `mutators` always. Off by default for the evidence
 `landlock` waits on. Deleted per the index rule.*
 
-OPEN[otel-bridge-carries-no-genai-semconv] the OTel bridge opens spans with LoopLab's own attribute
-names and no `gen_ai.operation.name` or `gen_ai.usage.*`; the GenAI conventions are Development-status
-with no release in their new repository (2026-06). Deferred until they cut one.
-proof:absent:gen_ai@looplab/core/tracing.py
+*Closed 2026-09-08: the marker `otel-bridge-carries-no-genai-semconv` stood here.
+`core/tracing.py::genai_semconv` restates a generation's or tool's facts in the GenAI conventions —
+`gen_ai.operation.name`, `gen_ai.request.model`, the request parameters and `gen_ai.usage.*`, plus
+`gen_ai.tool.name` for a real tool observation — and the bridge writes them BESIDE LoopLab's own
+names on the OTLP span, at open and again on every late `SpanHandle.set` (usage is stamped after the
+call returns and is the whole of the usage half). Additive on purpose: `spans.jsonl` is the same
+attribute map that `events/traceview.py`, `looplab timings` and `looplab tokens` read, so a rename
+would have broken every one of them; the mirror never touches the durable row. It guesses nothing —
+no `gen_ai.provider.name`/`gen_ai.system` (an OpenAI-COMPATIBLE endpoint may be Ollama, vLLM, a
+LiteLLM proxy or OpenAI, and a guessed provider is read by a collector as authoritative), no
+`gen_ai.response.model` (no span records what the endpoint answered with), and a wrong-typed or
+absent fact produces no key. The conventions being Development-status is why it stays a mapping of
+facts already held rather than a schema LoopLab depends on: a renamed key changes one table.
+`tests/test_otel_genai_semconv.py` drives the truth table and the bridge through a recording double,
+including that the durable row gains no `gen_ai.` key and that a hostile provider cannot fail a span.
+Deleted per the index rule.*
 
 ### 4.2 From doc 50's residue and the in-code `CODEX AGENT` notes
 
@@ -855,11 +867,25 @@ in order; `tests/data/golden_parallel_projection.json` is the checked-in order-i
 of what the search finds, which is the golden a nondeterministic byte order permits. Deleted per the
 index rule.*
 
-OPEN[no-distance-from-seed-signal] nothing measures how far a candidate moved from the seed program
-(doc 17 §11; MLGym's "models usually improve by finding better hyperparameters" is what it would
-show). Demoted: no measured precedent in the window; the edit-type marker is the field-measured
-diagnostic. Guessed names — re-point on landing.
-proof:absent:distance_from_seed@looplab/search+absent:seed_distance@looplab/search
+*Closed 2026-09-08 (row 31, the last code part): the marker `no-distance-from-seed-signal` stood
+here. `search/seed_distance.py::seed_distance` measures one node's DISPLACEMENT from the seed
+program it descends from — one diff against the lineage ROOT (`tools/node_diff.py::lineage`,
+first-parent), classified by that module's own closed `EDIT_TYPES` and no second vocabulary, so a
+change and its undo CANCEL where a per-step tally counts two edits. The bands are the only judgement
+added on top (tuning / structural / cosmetic + the vocabulary's named residue) and they are asserted
+TOTAL over `EDIT_TYPES` at import, so a tenth type cannot shrink a share's denominator unnoticed.
+`run_seed_distances` puts each node's direction-aware gain over its own seed beside its tuning share
+— which is the shape MLGym's sentence is in — and `looplab seed-distance` prints it with the count it
+was taken over, because 12 nodes is an observation about one run and not a test of a field result.
+The PATH is not lost with the displacement: `reintroduced_lines` rides on every row, so a lineage
+cycling in place reads as re-introductions rather than as a node that never moved.*
+
+*It DECIDES nothing and that is the finding's own instruction, not a staging post: doc 17 §11's
+"novel != good" is about exactly this family, and a distance maximised is a run rewarded for churn.
+`tests/test_seed_distance.py` drives the cancellation, the bands, the direction-aware gain, the
+missing-file-set answer (not the same as "did not move"), and pins that the only importer under
+`looplab/` is the CLI. What is NOT closed by this is doc 17 §11's SEMANTIC distance-from-seed — an
+embedder over a versioned external corpus — which is `§17`'s Scoop-Check and a different artifact.*
 
 *Closed 2026-09-06 (row 24 shipped): the marker `stage-assert-has-no-model-free-numeric-form` stood
 here. `STAGE_EXPECT_KEYS` is the closed triple `("files", "assert", "numeric")`:
@@ -976,8 +1002,8 @@ marker(s) it retires**, so the list re-derives from `grep -rn 'OPEN\['`.
 | 27 | **Verification of the seams**: a 2-wide parallel golden; a layering guard; per-attempt stage rows (after #21's baseline); a watermark that hashes data; the write tool's descriptor-relative reopen | each one test or one line, each a hole a review found | S × 5 | `parallel-build-has-no-golden-replay`, `layering-rules-are-not-machine-checked`, `stage-rows-are-last-wins-per-name`, `readmodel-watermark-ignores-event-data`, `write-tool-reopens-the-approved-path-by-name` |
 | 28 | **The kernel rungs, together**: the Landlock GPU validation on the box, the `EACCES` translation at the repair boundary landing WITH it, then the default flip; a seccomp / egress fence for the subprocess tier on Sandlock's shape | the refusal must not read as a missing file to the judge; the default tier can `connect()` anywhere | box + S + M | `landlock-is-opt-in-by-default`, `landlock-refusal-is-not-translated-for-triage`, `subprocess-tier-has-no-syscall-or-egress-fence` |
 | 29 | **Retire the legacy `/control` route**; the per-POST rescan shrinks with it; the SSE state stream as deltas; the cross-run flag per principal. *Status 2026-09-07: the principal (a) and the delta stream (b) shipped; the retirement (c) is open — 62 call sites in 9 test files, each a property to re-verify under `/commands`, counted at the marker.* | a lost-response retry re-appends paid intents; O(events × state) bytes per tab; a shared-hub gap | M | `legacy-control-route-is-not-retired`, `eventstore-rescans-the-log-per-control-post`, `sse-retransmits-the-whole-folded-state`, `cross-run-tools-are-a-process-wide-flag` |
-| 30 | **The event payload contract**, the PROV export carrying claims with verdicts, the GenAI semconv bridge when the spec ships | invariant #5 unverifiable; `/prov` exports no claim | M, S, deferred | **Shipped 2026-09-07** (both code parts): `events/types.py::EVENT_PAYLOAD_KEYS` is one contract row per registered type — description, `required`/`optional` payload vocabulary, `stored_whole` — with `tests/test_event_payload_contract.py` re-deriving BOTH sides from source (the fold's 437 reads through the helper chain; every writer's keys) and DRIVING invariant #5 by folding every type with an empty payload and re-folding the golden run with undeclared keys stripped; `docs/guide/event-reference.md` is generated from it. `/prov` now carries claims as individuals with their evidence spans and D8 verdicts (`tests/test_prov_claims.py`). `otel-bridge-carries-no-genai-semconv` stays deferred: the GenAI conventions are still Development-status with no release in their new repository. |
-| 31 | **Search diagnostics**: edit-type and re-introduction annotation over `node_diff.py`; a cost term in MCTS; the proxy's pairwise accuracy, foresight's selective accuracy and smoke→full rank fidelity measured on the box; the seed-distance scalar when a run pays for it | the field measures its judges; LoopLab's kill and prioritise on unmeasured ones | S, M, box × 3, S | **Shipped 2026-09-07** (every code part): `tools/node_diff.py::EDIT_TYPES` + `reintroduced_lines` with the `edits` section and `looplab edit-types`; `search/policy.py::eval_cost_penalty` behind `Settings.mcts_cost_weight` (0.0 = the historical score, byte for byte); `search/proxy.py::pairwise_accuracy` with `looplab proxy-accuracy`, which prints the number AND the bias it carries. Still open, all three MEASUREMENTS on the box: `proxy-accuracy-never-run-on-the-corpus` (the instrument now exists), `foresight-selective-accuracy-unmeasured`, `smoke-full-rank-fidelity-unmeasured`; and `no-distance-from-seed-signal` stays demoted — the edit-type diagnostic is the field-measured one that replaced it. |
+| 30 | **The event payload contract**, the PROV export carrying claims with verdicts, the GenAI semconv bridge when the spec ships | invariant #5 unverifiable; `/prov` exports no claim | M, S, deferred | **Shipped 2026-09-07** (both code parts): `events/types.py::EVENT_PAYLOAD_KEYS` is one contract row per registered type — description, `required`/`optional` payload vocabulary, `stored_whole` — with `tests/test_event_payload_contract.py` re-deriving BOTH sides from source (the fold's 437 reads through the helper chain; every writer's keys) and DRIVING invariant #5 by folding every type with an empty payload and re-folding the golden run with undeclared keys stripped; `docs/guide/event-reference.md` is generated from it. `/prov` now carries claims as individuals with their evidence spans and D8 verdicts (`tests/test_prov_claims.py`). The GenAI semconv bridge SHIPPED 2026-09-08 (§4.1's closure note): `core/tracing.py::genai_semconv` mirrors `gen_ai.*` onto the OTLP span BESIDE LoopLab's own names, leaving `spans.jsonl` byte-identical — additive, so the conventions still being Development-status costs one table if a key is renamed. |
+| 31 | **Search diagnostics**: edit-type and re-introduction annotation over `node_diff.py`; a cost term in MCTS; the proxy's pairwise accuracy, foresight's selective accuracy and smoke→full rank fidelity measured on the box; the seed-distance scalar when a run pays for it | the field measures its judges; LoopLab's kill and prioritise on unmeasured ones | S, M, box × 3, S | **Shipped 2026-09-07** (every code part): `tools/node_diff.py::EDIT_TYPES` + `reintroduced_lines` with the `edits` section and `looplab edit-types`; `search/policy.py::eval_cost_penalty` behind `Settings.mcts_cost_weight` (0.0 = the historical score, byte for byte); `search/proxy.py::pairwise_accuracy` with `looplab proxy-accuracy`, which prints the number AND the bias it carries. Still open, all three MEASUREMENTS on the box: `proxy-accuracy-never-run-on-the-corpus` (the instrument now exists), `foresight-selective-accuracy-unmeasured`, `smoke-full-rank-fidelity-unmeasured`; `search/seed_distance.py` + `looplab seed-distance` landed 2026-09-08 as the displacement half of the same vocabulary (`no-distance-from-seed-signal` closed): the seed-relative distance the per-step tally cannot state, recorded and read by nothing that decides. |
 | 32 | **The memo's own measures**: provenance coverage per section; a number-fidelity audit against cited metrics; literature in the novelty gates (after #16); competing hypotheses in failure diagnosis | 57.9 % synthesis accuracy is the field's number for the unchecked fields; 59 % fabricated among accepted | S, S, M, M | **Shipped 2026-09-07** (three of four): `trust/memo_verify.py::provenance_coverage` on every memo it writes; `engine/novelty.py::literature_overlap` on the novelty audit rows and, under `Settings.novelty_literature`, in the re-proposal; `engine/failure_diagnosis.py::coerce_hypotheses` under `Settings.diagnosis_hypotheses`, recorded and read by nothing that decides. Still open: `memo-quoted-numbers-unmatched-against-cited-metrics` (the row asks for the corpus match rate FIRST, which is a box measurement) and the new `graded-novelty-level-ignores-the-literature-overlap`. |
 | 33 | **Throughput beyond the box and the noun's own benchmark**: the build barrier into a steady-state lane; a cross-machine pool with static per-worker GPU pinning and remote execution once it can reach four workers; the trace export for operator training; an experiment-level benchmark adapter | rank saturates at 4 GPUs; the best full-set number ran on ≤2; Frontis trained on exactly this corpus | M, L, S, box | **Partly shipped 2026-09-07**: `looplab export-sft` (the S item, closed) and the steady-state lane behind `Settings.steady_state_build` — the lane is driven and off, and its marker stays open for the DEFAULT flip, which needs a box run comparing wall clock and proposal quality. `eval-parallelism-is-in-process-only` (the cross-machine pool, L) and `no-research-lifecycle-benchmark-number` (box) are untouched. |
 | 34 | The remaining product rows and ledgers when their trigger fires or the file is open: MLflow autolog, Pareto in selection under `select`, a drift detector, the MCTS value estimate, the FE operator, a forecasting backend; CODE_REVIEW's Windows job object and categorical leakage; doc 29's F3 byte total; the doc 25 / 27 / 34 ledgers | real gaps with driven falsifiers, lower leverage | — | **One shipped 2026-09-07**: `target-leakage-misses-non-monotone-and-categorical` — `trust/leakage.py::categorical_leak` sees both shapes and REPORTS them beside the verdict; arming it is `categorical-leak-rung-never-measured`, which needs a false-positive rate over real tasks. `windows-tree-kill-is-not-atomic` needs a Windows box; `f3-workspace-byte-total` is a measurement; the six BACKLOG product markers and the 48 ledger markers stay as the row says — when their trigger fires or the file is open. |
@@ -988,8 +1014,10 @@ In the order they pay: (1) #11, the profile A/B with its three arms; (2) the hac
 (`developer-hack-rate-unmeasured`) — before the campaign; (3) the serial-build harm report beside #12
 (`serial-node-build-holds-the-loop`); (4) #23, the campaign; (5) the prior citation-rate audit
 (`prior-injection-hit-rate-unmeasured`); (6) the first-propose split
-(`first-propose-runs-with-every-gpu-idle`); (7) ASHA's promotion mask — the 2.08 starved hours are
-already in hand, the soundness question is not (`asha-promotion-mask-blocks-all-production`); (8)
+(`first-propose-runs-with-every-gpu-idle`); (7) ASHA's promotion mask left this queue on
+2026-09-08 — the soundness question was answerable offline after all, so the refusal became a
+RESERVATION over the one expansion the masked node is already doing rather than a veto over the
+whole lane, and the 2.08 starved hours it was holding are bought back without a box; (8)
 `TrainingVerdict.fault`'s outcome label (`monitor-fault-has-no-outcome-label`); (9) researcher
 questions (`researcher-questions-not-appended`); (10) the Landlock validation with the `EACCES`
 translation (#28); (11) the two caches' counts; (12) crash lead time

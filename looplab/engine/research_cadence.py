@@ -257,16 +257,113 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
     says WHY each of the others was dropped. A caller that reports a refusal to a human wants the
     classifier, because the four causes do not have one explanation between them.
 
-    NO PRODUCTION CALLER TODAY, and the docstring said the opposite ("what every caller that only
-    needs the list keeps calling, unchanged") from the commit that split the rule out: the engine's
-    one consumer, `_admissible_beliefs`, calls the classifier directly because it also records the
-    refusal counts. This is kept as the tree's NAME for the rule — nine comments across four files
-    cite it, `DEEP_RESEARCH_OPEN_BELIEF_CAP`'s own comment above among them — and as the thin
-    surface a caller that genuinely wants only the list may use. It is one line over the
-    classifier, so it
-    cannot answer a different question; what it must not do is read as the path production takes.
+    ONE PRODUCTION CALLER, and the docstring twice said something else. It first claimed to be "what
+    every caller that only needs the list keeps calling, unchanged" (there were none), and was then
+    corrected to "NO PRODUCTION CALLER TODAY" — true from the commit that split the rule out until
+    2026-09-08, when `_register_idea_questions` became exactly the caller this surface describes: it
+    wants the admitted list and nothing else, because a per-node question sweep runs on every loop
+    iteration and a receipt per iteration is churn, not a record. The deep-research path still calls
+    the CLASSIFIER through `_admissible_beliefs`, because it reports its refusals to a human and the
+    four causes do not have one explanation between them.
+
+    This is also the tree's NAME for the rule — nine comments across four files cite it,
+    `DEEP_RESEARCH_OPEN_BELIEF_CAP`'s own comment above among them. It is one line over the
+    classifier, so it cannot answer a different question.
     """
     return classify_research_beliefs(open_statements, directions, cap=cap, counted=counted).admitted
+
+
+def open_belief_populations(board) -> "tuple[list[str], list[str]]":
+    """The TWO populations `classify_research_beliefs` needs, out of ONE folded board.
+
+    Hoisted so the two writers that put questions on the board — the deep-research memo through
+    `_admissible_beliefs` and the Researcher's own registered questions through
+    `_register_idea_questions` — derive them once rather than twice. A dedup universe spelled at two
+    sites is two universes, and the direction it fails in is the one this cap was written for: the
+    second writer registers a card for a question already open under the first.
+
+    A DIRECTION THAT HAS BEEN TAKEN UP NO LONGER OCCUPIES A SLOT, and without this the cap is
+    permanent. `open_research_beliefs()` means "open and carrying no EVIDENCE", and a direction never
+    carries any — since the `parent_card_id` edge shipped, the experiments answering it are CHILD
+    cards with evidence of their own, so the direction stays evidence-free for the whole run by
+    design.
+
+    Measured live on `runs/e5small-dr-unified-v5`: FOUR research memos completed and only the FIRST
+    one's directions were ever registered — five of them, seq 35-39. Memos 2, 3 and 4 produced
+    concrete directions (a `dcl_threshold` sweep among them, visible in their `hint` rows) and
+    contributed ZERO to the board, because five childless beliefs met a cap of five and nothing ever
+    frees it. The run paid for three think-hard reviews and could not act on any of them.
+
+    Counting only CHILDLESS directions is the whole fix: the cap still bounds "unanswered questions
+    on the board", which is the resource it was written to protect, and a question somebody is
+    already working on stops competing for that room. The proposal FEED is untouched — a direction
+    with one child and twelve experiments left to run must still be visible — so this narrows what
+    the cap counts, never what the model sees.
+
+    TWO POPULATIONS OUT OF ONE FOLD, and the narrowing belongs to exactly one of them. The first
+    return value is every open direction — the DEDUP universe, because restating a question somebody
+    is already answering is precisely the duplicate to refuse. The second drops the taken-up ones,
+    because those no longer compete for board room. Handing one narrowed list to both (which
+    production did for a day) let a later memo register a SECOND card for a question already under
+    way, and since a direction never accrues evidence the open population then grew unbounded past
+    the five-row prompt window.
+
+    FILTERED BEFORE THE COLLAPSE — see `open_research_beliefs`' own docstring. As a list
+    comprehension AFTER it, a belief whose first-elected card owned an action was not narrowed but
+    DELETED: its pure sibling never became the representative, so the question left the dedup
+    universe and a later memo restating it opened a second row for work already under way.
+
+    RAISES rather than degrades, deliberately: both callers already wrap their board read in the
+    fallback their own docstring documents, and those two fallbacks are different (one degrades to
+    the pre-bound behaviour and records `board_read=False`, the other declines to offer at all).
+    Choosing one here would silently give the other the wrong one.
+    """
+    taken_up = {c.parent_card_id for c in board.cards.values() if c.parent_card_id}
+    beliefs = board.open_research_beliefs(only=is_pure_belief)
+    return ([c.seed_statement for c in beliefs],
+            [c.seed_statement for c in beliefs if c.id not in taken_up])
+
+
+def idea_registered_questions(state) -> "list[tuple]":
+    """Every question the run's own IDEAS asked, as `(at_node, statement, concepts)` in node order.
+
+    THE CARRIER'S READER (doc 27 / `core/models.py::Idea.open_questions`). `Idea.open_questions` is
+    the Researcher's channel for "I noticed something worth investigating and it is not what I am
+    proposing now", and it shipped as a carrier with nothing reading it: a registered question rode
+    `node_created` and became no board row, so the field was the "stamped and nothing consumes it"
+    shape this repo has paid for before. This is the read.
+
+    PURE, and separate from the append for the reason every rule in this module is separate from its
+    writer: the join is statable and can be driven with no engine, no store and no fold.
+
+    EVERY node's idea, including a tombstoned or aborted one. A question is a noticed research
+    direction, not a claim about the experiment that noticed it — discarding the proposal does not
+    unnotice the question, and filtering here would make the board's content depend on which nodes
+    later failed.
+
+    THE CONCEPT JOIN IS POSITIONAL and resolved by the ONE shared `question_concept_rows`, per idea:
+    `question_concepts[i]` describes `open_questions[i]`. Spelling it a second time here is how a
+    question gets filed under a concept set belonging to a different question — that function's own
+    docstring carries the driven counter-example. A question with no concepts is returned with none
+    and is registered exactly as it would have been.
+
+    Blank entries are dropped, and DUPLICATES ARE NOT: two ideas that noticed the same thing are two
+    rows here, and collapsing them is the admission rule's job (`normalized_belief_key`), which is
+    the one place this repo decides what "the same question" means.
+    """
+    rows: list[tuple] = []
+    for node_id in sorted(getattr(state, "nodes", None) or {}):
+        idea = getattr(state.nodes.get(node_id), "idea", None)
+        questions = list(getattr(idea, "open_questions", None) or []) if idea is not None else []
+        if not questions:
+            continue
+        by_statement = question_concept_rows(
+            questions, getattr(idea, "question_concepts", None) or [])
+        for question in questions:
+            statement = str(question or "").strip()
+            if statement:
+                rows.append((node_id, statement, by_statement.get(statement) or []))
+    return rows
 
 
 # HOW MANY DIRECTIONS THE PUSHED HINT CARRIES — a bound on a PROMPT, not on the record.
@@ -464,6 +561,86 @@ class ResearchCadenceMixin:
     """The engine's research-cadence cluster (deep research + hypothesis merge + report). See the
     module docstring for the mixin convention (`self` is the Engine)."""
 
+    # ------------------------------------ the Researcher's OWN questions (doc 27)
+    def _register_idea_questions(self, state: RunState) -> RunState:
+        """Put the questions the Researcher NOTICED but is not pursuing onto the open board.
+
+        THE CARRIER SHIPPED AND NOTHING READ IT. `Idea.open_questions` (with its positional
+        `Idea.question_concepts` beside it) rides `durable_idea_payload` -> `node_created` ->
+        `Idea(**d["idea"])` and reaches the fold intact — driven end to end in
+        `tests/test_open_questions_ask.py` — and then stopped: no engine path turned one into a board
+        row, so a Researcher that answered the ask got a field in an event and no consequence. Until
+        this landed only deep research and the operator could ASK; the Researcher could answer a
+        direction (`parent_card_id`) and read the board (`read_questions`), and had no way to ask.
+
+        WHY HERE AND NOT AT NODE CREATION, which is the question `core/models.py` staged this on.
+        `EV_HYPOTHESIS_ADDED` is FOLDED, so appending it inside a reservation's window moves the
+        seq a `_reserve_node_build` CAS retry reads — invariant #1's own note for
+        `train_monitor_alert` — and `_emit_node_created` is itself a compare-and-swap append. This
+        method runs on the MAIN task from the between-nodes cadence block, which is where
+        `_maybe_merge_hypotheses` already appends folded `hypothesis_merged` rows for the same
+        reason, so nothing here needs the `BACKGROUND_APPENDABLE` licence the memo's own append
+        asserts.
+
+        REPLAY-SAFE WITHOUT A COUNTER PAIR, and the gate is the BOARD rather than a receipt
+        (invariant #3). A question that reached the board is on it, so `classify_research_beliefs`
+        refuses the second offer as `restated` — the same rule, over the same populations, that makes
+        `admit(open, ds)` idempotent for a re-run memo. That is why this reads the shared
+        `open_belief_populations` and `admit_research_beliefs` rather than a private dedup: a second
+        spelling of "already open" is a second board, and the writer that loses is whichever ran
+        last.
+
+        SILENT ADMISSION, deliberately, and this is one of two places it differs from the memo path.
+        `_admissible_beliefs` records an `EV_BELIEF_ADMISSION` receipt and warns, because a memo is a
+        PAID think whose refusals an operator is owed an account of. This sweep runs on every loop
+        iteration over the same questions; a receipt per iteration would be churn rather than a
+        record, and the questions themselves are already durable on `node_created`. What a cap
+        refuses here is therefore re-offered next iteration — which is correct: room frees as
+        directions gain children, and a question the board had no room for at node 3 is a question it
+        may have room for at node 9.
+
+        Returns the re-folded state when it wrote, and the state it was given when it did not — the
+        `_maybe_merge_hypotheses` shape, so the caller never pays a `read_all()` for a no-op.
+        """
+        if not self._track_hypotheses:
+            return state
+        rows = idea_registered_questions(state)
+        if not rows:
+            return state
+        # UNGUARDED, and deliberately so: `_admissible_beliefs` wraps its board read because it
+        # FOLDS THE LOG itself (a multi-megabyte `read_all()` that can genuinely fail mid-run), and
+        # this one is handed the fold the caller already holds — there is no I/O here to contain.
+        # It is the same read `_maybe_merge_hypotheses` makes unguarded on this same task, one
+        # method over, and containing a pure projection of an in-memory `RunState` would hide a
+        # model defect rather than a transient.
+        open_statements, unanswered = open_belief_populations(state)
+        # FIRST ASKER WINS the `at_node` and the concepts: two ideas noticing the same thing is one
+        # question, and the row should name where it was first noticed. The admission rule collapses
+        # them again by `normalized_belief_key`, so this only decides which row's metadata rides.
+        offered: dict = {}
+        for at_node, statement, concepts in rows:
+            offered.setdefault(statement, (at_node, concepts))
+        # NOTHING NEW SHORT-CIRCUITS BEFORE THE CLASSIFIER, which is the steady state on every
+        # iteration after the first: once a question is on the board it is `restated` forever, and
+        # the run must not pay a classification pass per loop for a set that cannot change.
+        board_keys = {normalized_belief_key(text) for text in open_statements}
+        fresh = [text for text in offered if normalized_belief_key(text) not in board_keys]
+        if not fresh:
+            return state
+        wrote = False
+        for statement in admit_research_beliefs(open_statements, fresh, counted=unanswered):
+            at_node, concepts = offered[statement]
+            # `source` names the CHANNEL, not the model: "researcher" is what separates a question
+            # the proposal noticed from `deep_research`'s recommended direction, and the two are
+            # answerable to different cadences. `at_node` is the node whose idea asked it, which is
+            # what the memo path's `at_node` means too (where the question came from), so the board
+            # reads the same way whichever writer filled it.
+            self.store.append(EV_HYPOTHESIS_ADDED, {
+                "statement": statement, "source": "researcher", "at_node": at_node,
+                **({"concepts": concepts} if concepts else {})})
+            wrote = True
+        return fold(self.store.read_all()) if wrote else state
+
     # ---------------------------------------------------- research cadence (P2)
     def _maybe_deep_research(self, state: RunState) -> RunState:
         """Run the Deep-Research stage when there's demand, then re-fold. Three triggers, each gated
@@ -471,7 +648,18 @@ class ResearchCadenceMixin:
         (`deep_research_every`, once per node-count), or a Strategist `request_research` decided at
         this node-count. No-op when the stage is off or already served. Records a
         `research_completed` memo that is neutral for direct node/champion ranking and feeds its
-        directions back as standing hints that can steer later proposals."""
+        directions back as standing hints that can steer later proposals.
+
+        It also carries the Researcher's OWN registered questions onto the board first — see
+        `_register_idea_questions` for why that sweep lives at this entry point and why it runs
+        ahead of, and independently of, all three triggers."""
+        # THE RESEARCHER'S OWN QUESTIONS, before any of the triggers below and outside every one of
+        # their gates: this is the research cluster's one main-task entry point, so the sweep lands
+        # here rather than in the orchestrator's cadence block, which would spread one cluster over
+        # two files. It is unrelated to whether a deep-research pass is due — it spends nothing, it
+        # reads a carrier the fold already holds, and it must keep working on a run with the
+        # deep-research stage switched off entirely.
+        state = self._register_idea_questions(state)
         n = len(state.nodes)
         # Manual: serve outstanding requests first, regardless of node-count (operator asked now).
         # Requests whose paid attempt is still unreconciled count as served here: their think was
@@ -480,21 +668,41 @@ class ResearchCadenceMixin:
         if (len(state.research_requests)
                 > state.research_served + self._outstanding_manual_research(state)):
             return self._run_deep_research(state, trigger="manual", manual=True)
-        # Auto triggers only at a creation decision point (no pending evals), never re-firing at a
-        # node-count already researched (the at_node gate makes resume a no-op).
-        # THIS IS THE ONE MEMBER OF THE F1i FAMILY THAT KEEPS THE OLD PREDICATE, deliberately. The
-        # other four moved to `cadence.at_creation_boundary` because their phase stopped happening;
-        # this one's did not — `_spawn_research` runs the SAME decision concurrently and never
-        # carried the guard, so `research_completed (trigger=cadence)` is alive in all six runs in
-        # `runs/`, including the three with zero quiescent prefixes. Opening this gate mid-eval buys
-        # a double-spend (two thinks racing between the shared `_cadence_research_marks` read and
-        # their receipts) to reach work already being done. The `concurrent_research=false` hole is
-        # `docs/BACKLOG.md` F1i-b; `tests/test_cadence_while_evaluating.py` pins the refusal.
+        # Auto triggers only at a creation decision point, never re-firing at a node-count already
+        # researched (the at_node gate makes resume a no-op).
+        #
+        # THIS MEMBER OF THE F1i FAMILY REACHES THE BOUNDARY ONLY WHEN IT IS THE RUN'S ONLY
+        # RESEARCH PATH, which is the whole of F1i-b and the whole of the refusal beside it. The
+        # other four moved to `cadence.at_creation_boundary` outright because their phase stopped
+        # happening; this one's did not — `_spawn_research` runs the SAME decision concurrently and
+        # never carried the guard, so `research_completed (trigger=cadence)` is alive in all six
+        # runs in `runs/`, including the three with zero quiescent prefixes. Opening this gate
+        # mid-eval WHILE that half is live buys a double-spend — two thinks racing between the
+        # shared `_cadence_research_marks` read and their receipts — to reach work already being
+        # done, so `concurrent_research` is a conjunct of the kill switch rather than a separate
+        # test: with it ON the predicate is byte-for-byte the historical one.
+        #
+        # Under `concurrent_research=false` there is no second path to race. `_spawn_research`
+        # returns False at its first line, `_research_overlap_loop` is never started, and this gate
+        # is the only way a scheduled think can ever fire — which in a GPU-shaped run (`v7`, `v9`
+        # and the live `e5small-dr-unified-v2` each end with three pending nodes and ZERO quiescent
+        # prefixes) meant deep research never fired at all. One path needs no agreement between two:
+        # `_research_attempt_step` writes its `research_attempted` receipt BEFORE the provider call
+        # and `_cadence_research_marks` counts it, so the durable gate alone bounds the loop to one
+        # paid think per node-count however many times the outer loop turns at it — the same money
+        # rule `_maybe_distill_lessons` and `_maybe_refresh_report` are held to, and the reason
+        # neither of them needs the in-process attempted-at-`n` memo either.
+        #
         # `n == 0` used to be part of THIS clause; it is now the run-opening branch below, because
         # "no nodes yet" is not "nothing to research" — see `_ground_run_start`. The at_node gate is
         # evaluated FIRST so a run-opening memo already in the log makes the branch a no-op on
         # resume, exactly as it does for every later node-count.
-        if state.pending_nodes() or self._already_researched_at(state, n):
+        if self._already_researched_at(state, n):
+            return state
+        if not at_creation_boundary(len(state.pending_nodes()),
+                                    while_evaluating=(
+                                        getattr(self, "_cadence_while_evaluating", False)
+                                        and not getattr(self, "concurrent_research", False))):
             return state
         if n == 0:
             return self._ground_run_start(state)
@@ -1209,40 +1417,12 @@ class ResearchCadenceMixin:
         board_read = True
         try:
             board = fold(self.store.read_all()) if board is None else board
-            # A DIRECTION THAT HAS BEEN TAKEN UP NO LONGER OCCUPIES A SLOT, and without this clause
-            # the cap is permanent. `open_research_beliefs()` means "open and carrying no EVIDENCE",
-            # and a direction never carries any — since the `parent_card_id` edge shipped, the
-            # experiments answering it are CHILD cards with evidence of their own, so the direction
-            # stays evidence-free for the whole run by design.
-            #
-            # Measured live on `runs/e5small-dr-unified-v5`: FOUR research memos completed and only
-            # the FIRST one's directions were ever registered — five of them, seq 35-39. Memos 2, 3
-            # and 4 produced concrete directions (a `dcl_threshold` sweep among them, visible in
-            # their `hint` rows) and contributed ZERO to the board, because five childless beliefs
-            # met a cap of five and nothing ever frees it. The run paid for three think-hard reviews
-            # and could not act on any of them.
-            #
-            # Counting only CHILDLESS directions is the whole fix: the cap still bounds "unanswered
-            # questions on the board", which is the resource it was written to protect, and a
-            # question somebody is already working on stops competing for that room. The proposal
-            # FEED is untouched — a direction with one child and twelve experiments left to run must
-            # still be visible — so this narrows what the cap counts, never what the model sees.
-            # TWO POPULATIONS OUT OF ONE FOLD, and the narrowing belongs to exactly one of them.
-            # `open_statements` is every open direction — the DEDUP universe, because restating a
-            # question somebody is already answering is precisely the duplicate to refuse. `counted`
-            # drops the taken-up ones, because those no longer compete for board room. Handing one
-            # narrowed list to both (which this did for a day) let a later memo register a SECOND
-            # card for a question already under way, and since a direction never accrues evidence the
-            # open population then grew unbounded past the five-row prompt window.
-            taken_up = {c.parent_card_id for c in board.cards.values() if c.parent_card_id}
-            # FILTERED BEFORE THE COLLAPSE — see `open_research_beliefs`' own docstring. As a
-            # list comprehension AFTER it, a belief whose first-elected card owned an action
-            # was not narrowed but DELETED: its pure sibling never became the representative,
-            # so the question left the dedup universe and a later memo restating it opened a
-            # second row for work already under way.
-            beliefs = board.open_research_beliefs(only=is_pure_belief)
-            open_statements = [c.seed_statement for c in beliefs]
-            unanswered = [c.seed_statement for c in beliefs if c.id not in taken_up]
+            # THE TWO POPULATIONS, derived ONCE for both writers that put questions on this board —
+            # this one and `_register_idea_questions`. Every measurement behind the narrowing (the
+            # taken-up clause, `runs/e5small-dr-unified-v5`'s four memos and one registration, why
+            # one narrowed list must not serve both, and the filter-before-collapse rule) moved with
+            # it into `open_belief_populations` rather than being restated here.
+            open_statements, unanswered = open_belief_populations(board)
         except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
             board_read = False
             open_statements = unanswered = []

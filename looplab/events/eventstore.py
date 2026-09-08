@@ -20,7 +20,8 @@ from typing import Any, Iterator, Optional, Sequence
 
 import orjson
 
-from looplab.core.atomicio import best_effort_fsync, strict_fsync, strict_fsync_parent
+from looplab.core.atomicio import (best_effort_fsync, same_file_entry, strict_fsync,
+                                   strict_fsync_parent)
 from looplab.core.models import Event
 from looplab.core.run_deletion import assert_run_deletion_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
@@ -1088,7 +1089,9 @@ class EventStore:
                 size = st.st_size if st is not None else 0
                 mtime_ns = st.st_mtime_ns if st is not None else None
                 ctime_ns = st.st_ctime_ns if st is not None else None
-                identity = (st.st_dev, st.st_ino) if st is not None else None
+                # The REPLACEMENT tier by name (doc 25 SC-11). Growth is the normal path for this
+                # log and must keep the cached prefix; a new inode under the same name must not.
+                identity = same_file_entry(st) if st is not None else None
             except OSError:
                 size = 0
                 mtime_ns = None

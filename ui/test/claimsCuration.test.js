@@ -1050,9 +1050,12 @@ test('the mounted ledger settles sources progressively and fences timed-out or s
 })
 
 test('Claims & Curation has a discoverable owner-only route and complete resource states', async () => {
+  // The ledger reads and their sanitizers left api.js for `crossRunLedger.js` (doc 25 UI-02's
+  // declined Atlas half, 2026-09-08); these pins follow the code — read against api.js they would
+  // pass over a file that no longer holds the HTTP contract they are about.
   const [app, runList, ledger, api, css, globalMenu] = await Promise.all([
-    source('App.jsx'), source('RunList.jsx'), source('ClaimsCuration.jsx'), source('api.js'),
-    source('claims-curation.css'), source('GlobalMenu.jsx'),
+    source('App.jsx'), source('RunList.jsx'), source('ClaimsCuration.jsx'),
+    source('crossRunLedger.js'), source('claims-curation.css'), source('GlobalMenu.jsx'),
   ])
   const { GLOBAL_DESTINATIONS } = await import('../src/globalNav.js')
 
@@ -1203,7 +1206,7 @@ test('curation preview stays bounded to steward outcome counts', async () => {
 })
 
 // ---------------------------------------------------------------------------------------------
-// `api.js::CROSS_RUN_STATE_FIELDS` is an ALLOWLIST: a wire field absent from it never reaches React
+// `crossRunLedger.js::CROSS_RUN_STATE_FIELDS` is an ALLOWLIST: a wire field absent from it never reaches React
 // state. So the list and the fields `claimsCurationModel.normalizeClaim` reads are ONE contract, and
 // nothing held them together — a field dropped from the list turns its render branch into code no
 // server response can reach, which is exactly what had happened to five of them (`decision`,
@@ -1253,7 +1256,8 @@ test('every wire field the claim model reads is on the api allowlist', async () 
   // `receipt.<field>`; `projectCrossRunValue` keeps only names listed in `CROSS_RUN_STATE_FIELDS`. A
   // name read on one side and absent from the other is a render branch no input can reach, and it is
   // silent — the field simply arrives `undefined`.
-  const [model, api] = await Promise.all([source('claimsCurationModel.js'), source('api.js')])
+  const [model, api] = await Promise.all([
+    source('claimsCurationModel.js'), source('crossRunLedger.js')])
   const literal = api.match(/const CROSS_RUN_STATE_FIELDS = `([^`]*)`/)
   assert.ok(literal, 'the allowlist literal must stay findable')
   const allowed = new Set(literal[1].split(/\s+/).filter(Boolean))
@@ -1268,6 +1272,6 @@ test('every wire field the claim model reads is on the api allowlist', async () 
   const wire = [...read].filter(name => !/[A-Z]/.test(name))
   const missing = wire.filter(name => !allowed.has(name))
   assert.deepEqual(missing, [],
-    `these wire fields are read by claimsCurationModel.js but stripped by the api.js allowlist, so `
+    `these wire fields are read by claimsCurationModel.js but stripped by the crossRunLedger.js allowlist, so `
     + `every branch that depends on them is unreachable: ${missing.join(', ')}`)
 })

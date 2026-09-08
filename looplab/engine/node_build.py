@@ -281,13 +281,12 @@ class NodeBuildMixin:
         if parent is not None and callable(impl_from):
             if co_parents and accepts_co_parents(impl_from):
                 return self._run_developer(developer, impl_from, idea, parent,
-                                           co_parents=tuple(co_parents), bind_state_to=state)
-            return self._run_developer(developer, impl_from, idea, parent, bind_state_to=state)
-        return self._run_developer(developer, developer.implement, idea, bind_state_to=state)
+                                           bind_to=state, co_parents=tuple(co_parents))
+            return self._run_developer(developer, impl_from, idea, parent, bind_to=state)
+        return self._run_developer(developer, developer.implement, idea, bind_to=state)
 
-    def _run_developer(self, developer, fn, *args, bind_state_to=_OMIT,
-                       **kwargs) -> DeveloperResult:
-        """ONE Developer call — CLEAR, call, capture — as one atomic step under the instance's lock
+    def _run_developer(self, developer, fn, *args, bind_to=_OMIT, **kwargs) -> DeveloperResult:
+        """ONE Developer call — BIND, CLEAR, call, capture — as one atomic step under the instance's lock
         (`developer_call_lock`). The lock is what makes two offloaded calls on a SHARED instance
         safe: they queue here, in a worker, instead of on the event loop.
 
@@ -310,12 +309,22 @@ class NodeBuildMixin:
         the optional output on a repair now reads as "no estimate" instead of inheriting the last
         build's. A call site may no longer clear on its own: an unlocked write is the defect, and a
         LOCKED one at the site would not fix it either, since the gap between that lock and this one
-        is all an intervening call needs (`tests/test_developer_result.py`)."""
+        is all an intervening call needs (`tests/test_developer_result.py`).
+
+        AND THE BIND IS THE FOURTH MEMBER, for the same reason and after the same miss. When the
+        clear moved in, its unlocked sibling did not: `_implement_result` and `_repair_result` each
+        called `bind_state(state)` on the shared Developer ABOVE this lock. `bind_state` is a plain
+        write (`repo_developer` stores `self._memory_state = state`), so with two offloaded calls on
+        one instance worker A could bind its fold, block here, and run its build against the fold
+        worker B bound while A was waiting — the Developer's memory and cross-run providers
+        answering about a different lifecycle than the node being built. `bind_to` defaults to
+        `_OMIT` rather than None because `_repair_result` legitimately binds None (no state given),
+        and a call that asks for no bind at all must be distinguishable from that."""
         with developer_call_lock(developer):
-            if bind_state_to is not _OMIT:
-                bind = getattr(developer, "bind_state", None)
-                if callable(bind):
-                    bind(bind_state_to)
+            if bind_to is not _OMIT:
+                bind_state = getattr(developer, "bind_state", None)
+                if callable(bind_state):
+                    bind_state(bind_to)
             self._reset_developer_footprint(developer)
             code = fn(*args, **kwargs)
             return self._capture_developer_result(developer, code)
@@ -382,12 +391,24 @@ class NodeBuildMixin:
             if current is None or id(current) in seen:
                 continue
             seen.add(id(current))
-            if hasattr(current, "last_footprint"):
+            # ONLY ON THE OBJECT THAT OWNS THE ATTRIBUTE. `search/foresight.py::
+            # ForesightPanelResearcher` is a READ-ONLY `__getattr__` proxy with no `__setattr__`,
+            # and under the shipped defaults (`unified_agent`, `foresight`, `foresight_panel=2`)
+            # it IS the engine's `developer`. `hasattr` there resolves THROUGH to the wrapped
+            # agent, so this clear used to land in the PROXY's own `__dict__` and shadow the inner
+            # agent's real value for the rest of the run: `_capture_developer_result` read None off
+            # the proxy on every build from the second one on, `_finalize_developer_footprint` fell
+            # back to the Researcher's proposal every time, and a build that RAISED its own resource
+            # estimate was scheduled at the old one — exactly what the envelope prevents. Walking to
+            # `base` (below) reaches the real slot; declining to CREATE the attribute is what stops
+            # the proxy from shadowing it. An object that has never set it is already "cleared".
+            if "last_footprint" in getattr(current, "__dict__", {}):
                 try:
                     current.last_footprint = None
                 except Exception:  # noqa: BLE001 - optional audit output must never block a build
                     pass
-            for attr in ("inner", "developer", "fallback"):
+            # `base` is the `__getattr__` proxy's delegate; the other three are the wrapper chain.
+            for attr in ("inner", "developer", "fallback", "base"):
                 try:
                     child = getattr(current, attr, None)
                 except Exception:  # noqa: BLE001 - a plugin property may be defensive/remote
@@ -465,9 +486,8 @@ class NodeBuildMixin:
         developer = developer or self.developer
         rf = getattr(developer, "repair_from", None)
         if callable(rf):
-            return self._run_developer(developer, rf, idea, node, err, bind_state_to=state)
-        return self._run_developer(developer, developer.repair, idea, node.code, err,
-                                   bind_state_to=state)
+            return self._run_developer(developer, rf, idea, node, err, bind_to=state)
+        return self._run_developer(developer, developer.repair, idea, node.code, err, bind_to=state)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,

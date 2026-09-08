@@ -787,10 +787,6 @@ class Idea(BaseModel):
     # same executable action. That is what makes asking FREE, which is the whole point: a Researcher
     # that had to spend its proposal to record a question would record none.
     #
-    # OPEN[researcher-questions-not-appended] the CARRIER ships here and no engine path reads it yet,
-    # so a registered question would ride `node_created` and become no board row.
-    # proof:absent:idea_registered_questions@looplab/engine/research_cadence.py
-    #
     # RE-MEASURED 2026-08-30 AND THE 2026-08-29 PREMISE WAS WRONG. That note said "the Researcher is
     # never ASKED for one", inferred from `open_questions` occurring ZERO times in `agents/roles.py`,
     # `agents/unified_agent.py` and `search/panel.py`. Grepping those files is the wrong instrument:
@@ -805,39 +801,47 @@ class Idea(BaseModel):
     # in `tests/test_open_questions_ask.py`), so nothing is being dropped; the Researcher simply
     # never volunteers one.
     #
-    # WHAT CHANGED, and it is the only untested lever: the user turn now ASKS IN PROSE. This repo has
-    # already measured that prose outranks a schema-level cue, and that turn enumerated
-    # params/rationale/space/hypothesis and never questions. The append half stays open and stays
-    # gated on what comes back — a fresh run under this prompt is the measurement, and if it is zero
-    # again the honest close is `DECLINED` with that number, not a second question channel.
-    # `Idea.open_questions` still has no consumer outside this model and the memo path's own
-    # same-named field.
+    # WHAT CHANGED (2026-08-30), and it was the only untested lever: the user turn now ASKS IN PROSE.
+    # This repo has already measured that prose outranks a schema-level cue, and that turn enumerated
+    # params/rationale/space/hypothesis and never questions. A fresh run under this prompt is the
+    # measurement, and if it is zero again the honest close is `DECLINED` with that number, not a
+    # second question channel.
     #
-    # THE PRIOR QUESTION IS THEREFORE WHETHER IT SHOULD BE WIRED AT ALL, not how. The deep-research
+    # THE PRIOR QUESTION WAS THEREFORE WHETHER IT SHOULD BE WIRED AT ALL, not how. The deep-research
     # channel already delivers questions end to end and was seen doing it on v10: 4 `open_questions`
     # -> 4 `hypothesis_added` -> 4 `direction` cards, and 2 of them gained `experiment` children whose
     # `parent_card_id` survived the fold. A second question channel earns its keep only if a
     # Researcher mid-PROPOSAL has questions the deep-research pass does not, and nobody has measured
-    # that. Ask for it in the emit schema first, look at what comes back, and only then build the
-    # append — the reverse order ships another field nothing fills.
+    # that — which is why the ASK went first and the append came after, and why the note below states
+    # the outstanding zero rather than treating the wiring as the answer.
     #
-    # WHY IT IS STAGED rather than inlined: `EV_HYPOTHESIS_ADDED` is FOLDED, so appending it from the
-    # main task inside a reservation's window moves `speculation._proposal_authority_seq`'s max-seq
-    # CAS and discards a proposal the run has already PAID for — the exact hazard invariant #1
-    # records for `train_monitor_alert`. The append must land outside that window, reuse
-    # `research_cadence.admit_research_beliefs` (so the two writers agree about a full board) and
-    # `question_concept_rows` (so both spell the positional join once). Shipping the carrier alone is
-    # the "stamped and nothing consumes it" shape this repo has paid for before, which is exactly why
-    # it wears a marker instead of a promise.
+    # WHY IT WAS STAGED rather than inlined: `EV_HYPOTHESIS_ADDED` is FOLDED, so appending it from
+    # the main task inside a reservation's window moves the seq a `_reserve_node_build` CAS retry
+    # reads — the exact hazard invariant #1 records for `train_monitor_alert`. The append had to land
+    # outside that window, reuse `research_cadence.admit_research_beliefs` (so the two writers agree
+    # about a full board) and `question_concept_rows` (so both spell the positional join once).
+    # Shipping the carrier alone is the "stamped and nothing consumes it" shape this repo has paid
+    # for before, which is exactly why it wore a marker instead of a promise.
     #
-    # The proof is over the FIX'S OWN SYMBOL (CLAUDE.md tier 1) and NOT over the string
-    # `open_questions`: that literal already occurs in `research_cadence.py`'s memo path and
-    # docstrings, so an `absent:` predicate on it is false the day it is written — the guard caught
-    # exactly that, along with the slug being declared in three files instead of one.
-    # `idea_registered_questions` exists nowhere yet; the commit that adds it turns this proof red,
-    # and a red guard here means the item SHIPPED, so delete the marker. The predicate is ONE
-    # whitespace-free token by construction — the guard splits on space, so `absent:def foo@path`
-    # parses as the predicate `absent:def`, which it rejected.
+    # THE APPEND LANDED 2026-09-08 to all three of those constraints, and the marker
+    # `researcher-questions-not-appended` was deleted per the index rule.
+    # `engine/research_cadence.py::idea_registered_questions` is the pure read of this carrier and
+    # `ResearchCadenceMixin::_register_idea_questions` the writer: it runs on the MAIN task from the
+    # between-nodes cadence block (`_maybe_deep_research`'s first line — the research cluster's one
+    # main-task entry point, and never a node-creation site, which is a compare-and-swap append),
+    # derives the dedup universe and the cap population through the now-shared
+    # `open_belief_populations`, and admits through `admit_research_beliefs`, which is what makes it
+    # idempotent on resume with no counter pair: a question already on the board is refused as
+    # `restated` by the same rule that makes a re-run memo idempotent. The row carries
+    # `source="researcher"` so the channel is distinguishable from `deep_research`'s.
+    #
+    # WHAT IS STILL UNMEASURED, and the paragraph above it is why this is stated rather than
+    # celebrated: the last count was **0 of 155** `node_created` rows carrying a filled
+    # `open_questions`, so the append is a consumer for a field the Researcher has not yet been
+    # observed to fill under the prose ask. If a fresh run under that prompt is zero again, the
+    # honest reading is that the CHANNEL is unused — a `DECLINED` on the ask with that number — and
+    # not that this writer is wrong. `tests/test_researcher_questions_board.py` drives the writer
+    # end to end off a real event log, which is the half that no longer depends on a live model.
     open_questions: list[str] = Field(
         default_factory=list,
         description=(
@@ -1283,6 +1287,14 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
     "gpu_unavailable", "gpu_unpinnable", "proxy_skipped", "superseded", "card_dropped",
     "aborted", "developer_crash", "idea_rejected", "monitor_broken", "asha_underperforming",
     "frozen",
+    # THE MODEL RAN OUT OF MOVES ON THIS CARD (`core/models.py::DEVELOPER_STUCK_PREFIX`), minted by
+    # `engine/speculation.py` and three orchestrator sites. Registered late: the guard test is
+    # one-way (registered -> minted) and could not see a reason that was minted and unregistered,
+    # so every reader deriving "is this an engine terminal" from this tuple answered no for it.
+    # Distinct from `developer_crash` — nothing is wrong with the provider — and distinct from
+    # `crash`, which means the CANDIDATE's process died and is repairable; a stuck build produced
+    # no code to repair. Whether it is BENIGN is a separate question this tuple does not answer.
+    "developer_stuck",
     # THE ENGINE ITSELF RAISED (`engine/evaluate.py::EvaluateMixin._contain_eval_crash`). Deliberately
     # here and not in `FAILURE_REASONS`: `crash` means the CANDIDATE's process died and is therefore
     # repairable, so classifying a disk-full or a read-only run directory as one hands the Developer

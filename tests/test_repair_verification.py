@@ -23,7 +23,8 @@ from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_MIN
                                           REPAIR_INERT, REPAIR_UNMET,
                                           REPAIR_UNSTATED, REPAIR_VERDICTS, REPAIR_VERIFIED,
                                           _assigned_numeric_paths, changed_region, claimed_tokens,
-                                          declared_param_overrides, inert_streak, verify_repair)
+                                          declared_param_overrides, inert_streak,
+                                          names_an_exception_class, verify_repair)
 from looplab.engine.triage import AGENT_TRIAGE_ACTIONS, TRIAGE_ACTIONS, coerce_triage_action
 from looplab.engine.metric_salvage import SALVAGE_CAUSE_TRIAGE_ACTION
 from looplab.events.eventstore import EventStore
@@ -648,6 +649,82 @@ def test_a_citation_may_acquit_but_never_convict_and_never_reaches_verified():
     after = "node 1 reached 0.73; I will set rdrop_alpha"
     assert not _is_citation_only("rdrop_alpha", after)
     assert _verdict(after, ["train.py"], "train.py\n@@\n-x = 1\n").verdict == REPAIR_UNMET
+
+
+@pytest.mark.parametrize("token,is_exception", [
+    ("IndentationError", True),
+    ("KeyError", True),
+    ("torch.OutOfMemoryError", True),       # the quoted, dotted spelling `_QUOTED_RE` yields intact
+    ("DeprecationWarning", True),
+    ("KeyboardInterrupt", True),
+    ("ValueErrorHandler", False),           # ends in a name, is not one — anchored at both ends
+    ("error_handler", False),
+    ("mine_stage.py", False),
+    ("grad_accum", False),
+    ("Error", False),                       # the suffix alone names nothing
+    ("", False),
+    (None, False),
+])
+def test_an_exception_class_is_recognised_by_shape_and_nothing_else_is(token, is_exception):
+    """The truth table, driven directly, because the rule is a SHAPE and a shape is exactly the kind
+    of thing that quietly widens. The negatives are the load-bearing half: `ValueErrorHandler` is an
+    ordinary identifier a repair can genuinely promise, and excusing it would take a real claim out
+    of the convicting set for the rest of time."""
+    assert names_an_exception_class(token) is is_exception
+
+
+def test_an_exception_class_may_acquit_but_never_convict_alone():
+    """`sim-nosignal` node 5's shape, and the asymmetry that makes it safe.
+
+    A rationale naming `IndentationError` is reporting what the dead process called ITSELF. The
+    repair that fixes an indentation error writes that word nowhere, so the literal-token extractor
+    convicted it — the fifth of the five unpatched `unmet` shapes, and the only one recognisable
+    without reading the sentence.
+
+    Both directions are asserted because the whole argument for demoting rather than DROPPING the
+    token is the first one: a `_NOT_A_CLAIM` row would take the acquittal away with the conviction,
+    and a row whose only met token was the exception name would move `verified` -> `unmet`, i.e. a
+    weak signal would start convicting."""
+    fixed = "the crash is a plain IndentationError in the mine stage; re-indent the loop body"
+    # 1. IT MAY NOT CONVICT ALONE. `unstated` — the verdict that already means "I could not check
+    #    this" — and never `verified`, which would be the record vouching for the repair.
+    demoted = _verdict(fixed, ["train.py"], "train.py\n@@\n-x = 1\n+x = 2\n")
+    assert demoted.verdict == REPAIR_UNSTATED and demoted.unmet == ()
+    # 2. NOTHING IS DROPPED: the token is still on the record as a claim, exactly like a citation.
+    assert "IndentationError" in demoted.claims
+    # 3. IT MAY STILL ACQUIT. A diff that really contains the name verifies the row as before —
+    #    this is the behaviour a `_NOT_A_CLAIM` row would have destroyed.
+    kept = _verdict(fixed, ["train.py"],
+                    "train.py\n@@\n-    x = 1\n+  except IndentationError:\n+    pass\n")
+    assert kept.verdict == REPAIR_VERIFIED
+    # 4. AND IT EXCUSES NOTHING ELSE. A real promise in the same rationale still convicts, with the
+    #    exception name dropped from the list the judge is shown.
+    mixed = _verdict("the crash is an IndentationError; fix mine_stage.py to re-indent the loop",
+                     ["mine_negatives.py"], "mine_negatives.py\n@@\n+    pass\n")
+    assert mixed.verdict == REPAIR_UNMET
+    assert "mine_stage.py" in mixed.unmet and "IndentationError" not in mixed.unmet
+
+
+def test_the_exception_rule_leaves_a_real_corpus_row_convicted():
+    """The regression floor for the widening, and it is a REAL row rather than a fixture written to
+    pass: `rubertlite-dense-retrieval` n40's rationale (verbatim from `bench-out/cand.durable.jsonl`,
+    the durable-arm replay of this rung's own inputs — the repair rationale IS the triage rationale)
+    names `FileNotFoundError` AND `model_soup.py`, and the repair edited the eval harness instead.
+
+    The exception name drops out of the accusation; the accusation stands. A rule that excused the
+    row wholesale would be the claim-clause whitelist this module refuses."""
+    rationale = (
+        "The soup stage exited 0 but produced no stdout, so the engine's check_failed fired "
+        "(no_metric/check_failed is the engine's out-of-band verdict, not a diagnosis). Underlying "
+        "cause is a mechanical FileNotFoundError: model_soup.py references a hardcoded path "
+        "(models/rubertlite_run_37/last.ckpt, then rubertlite-20e-v7/last.ckpt) that doesn't "
+        "exist, so the script dies before printing anything. The idea")
+    v = _verdict(rationale, ["looplab_eval.py"],
+                 "looplab_eval.py\n@@\n-    ckpt = 'models/x/last.ckpt'\n+    ckpt = resolve()\n")
+    assert v.verdict == REPAIR_UNMET
+    assert "model_soup.py" in v.unmet, "the file it named and did not touch still convicts"
+    assert "FileNotFoundError" not in v.unmet
+    assert "FileNotFoundError" in v.claims
 
 
 def test_the_historical_corpus_cases_the_docstring_cites_keep_their_verdicts():

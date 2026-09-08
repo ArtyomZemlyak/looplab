@@ -408,18 +408,12 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     from looplab.engine.claims import claim_assessments, load_claim_lessons, load_research_claims
     from pathlib import Path
 
-    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
+    from looplab.engine.governance_health import observed_path_missing
+    from looplab.engine.governance_protocol import governed_projection
     from looplab.engine.memory import (ConceptCapsuleStore, _filter_capsule_rows,
                                        _portfolio_concept_overview_data)
     if _governance is None:
-        source_names = []
-        if lessons is None:
-            source_names.append("lessons.jsonl")
-        if research_claims is None:
-            source_names.append("research_claims.jsonl")
-        if capsules is None:
-            source_names.append("concept_capsules.jsonl")
-        return project_governed_sources(
+        return governed_projection(
             memory_dir,
             lambda governance: cross_run_retrieve(
                 memory_dir, query, k=k, lessons=lessons, capsules=capsules,
@@ -428,7 +422,9 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                 structured=structured, intent=intent, scope_receipt=scope_receipt,
                 _governance=governance,
             ),
-            include_concepts=True, source_names=source_names,
+            include_concepts=True,
+            unsupplied={"lessons.jsonl": lessons, "research_claims.jsonl": research_claims,
+                        "concept_capsules.jsonl": capsules},
         )
     base = Path(memory_dir) if memory_dir else None
     if capsules is None:

@@ -26,7 +26,10 @@ class AuditMixin:
     """The engine's audit/trust-emitter cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
 
-    def _emit_agent_report(self, node_id: int, generation: int = 0, developer=None) -> None:
+    _REPORT_OMITTED = object()
+
+    def _emit_agent_report(self, node_id: int, generation: int = 0, developer=None,
+                           report=_REPORT_OMITTED) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
         `ValidatingDeveloper`), record the verdict as an `agent_validated` event so each
         node carries a trail of how the external coding agent performed. No-op for
@@ -34,8 +37,30 @@ class AuditMixin:
 
         Serial node creation stamps the shared `self.developer.last_report` against `node_id`.
         Under Variant-1 parallel build the caller passes `developer=` THIS build's pooled developer
-        so a concurrent sibling build's `last_report` is never mis-attributed to this node."""
-        report = getattr(developer if developer is not None else self.developer, "last_report", None)
+        so a concurrent sibling build's `last_report` is never mis-attributed to this node.
+
+        `report=` IS THE ENVELOPE'S COPY, and it is what a caller that made the call should pass.
+        Pooling the developer per build was only half the fix: every build now runs in a worker
+        (`orchestrator.py::_offload_build`), and `last_report` is read HERE, after
+        `developer_call_lock` has been released. Between a worker returning from `_run_developer`
+        and reaching this line, a sibling's `_discard_node_build_telemetry` can `setattr(current,
+        'last_report', None)` — also unlocked — so this node emits no `agent_validated` row at all;
+        with the opposite interleaving it emits the sibling's report against this node's id. Both
+        are silent: the ADR-7 audit trail is wrong or missing with nothing red. `DeveloperResult`
+        captures `last_report` UNDER the lock, so a caller holding the envelope is holding the
+        report this node's own call produced.
+
+        The instance read stays as the fallback for the paths that made no fresh Developer call
+        (`speculation.py::_create_precoded_node` commits a producer's pre-built code), and it is
+        `_REPORT_OMITTED` rather than None that selects it, because a build whose Developer genuinely
+        reported nothing must not silently fall back to whatever the instance is carrying.
+
+        `audit_extra()` below is still an instance read and still has this race. It is a
+        wrapper-specific ANNOTATION (`ValidatingDeveloper`'s attempts / fell_back / shipped_ok) with
+        no envelope field to carry it; naming it here rather than fixing it silently."""
+        if report is self._REPORT_OMITTED:
+            report = getattr(developer if developer is not None else self.developer,
+                             "last_report", None)
         if report is not None:
             data = {"node_id": node_id, **report.summary()}
             extra = getattr(developer if developer is not None else self.developer, "audit_extra", None)

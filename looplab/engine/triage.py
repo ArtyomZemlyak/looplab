@@ -255,10 +255,6 @@ def _failure_reason(res) -> str:
     # from its own source. A second declarable reason therefore needs its own branch — and if one
     # is added to the registry without it, that same test goes red with "registry names X, which no
     # producer ever emits", which is the failure this shape exists to guarantee.
-    # OPEN[declared-reason-row-carries-no-source-tag] the first candidate-writable reason that is
-    # ENGINE-FINAL also SUPPRESSES the diagnostician's look, and nothing on the durable row says
-    # the fact was stated rather than measured.
-    # proof:absent:REASON_SOURCE_DECLARED@looplab/engine/failure_diagnosis.py
     # REVIEW 2026-08-30 (trust-surface): the residual this renames (`crash`/`no_metric`) would get
     # the tool-backed diagnostician, a `reason_summary` and possibly a repair; one printed JSON
     # line converts it into a terminal nothing examines, NON_REPAIRABLE, travelling into every
@@ -267,6 +263,12 @@ def _failure_reason(res) -> str:
     # only, below every authenticated flag); what is missing is the label: stamp the reason's
     # source on the row (the `extra_metrics_provenance` distinction, one registry over) so a reader
     # can tell a measured fact from a stated one.
+    # CLOSED 2026-09-08: the label landed. `failure_diagnosis.reason_source_for` is the ONE
+    # derivation of the `reason_source` column for every non-diagnosed path, and it answers
+    # `REASON_SOURCE_DECLARED` for every member of `DECLARABLE_REASONS` — so the durable
+    # `node_failed`/`node_repaired` row now reads `declared` where it used to read `engine`, and a
+    # digest can tell this STATED terminal from a measured one. Nothing else moved: the reason is
+    # still engine-final, still NON_REPAIRABLE, still ends its node.
     _declared = getattr(res, "declared_reason", None) or ""
     if _declared == "rules_violation" and _declared in DECLARABLE_REASONS:
         return "rules_violation"
@@ -326,6 +328,7 @@ from looplab.engine.failure_diagnosis import (       # noqa: E402,F401  (re-expo
     HYPOTHESIS_CAUSE_CAP,
     HYPOTHESIS_DISCRIMINATOR_CAP,
     OVERRIDE_EVIDENCE_REQUIRED,
+    REASON_SOURCE_DECLARED,
     REASON_SOURCE_ENGINE,
     REASON_SOURCE_TRIAGE,
     REASON_SOURCE_UNDIAGNOSED,
@@ -338,6 +341,7 @@ from looplab.engine.failure_diagnosis import (       # noqa: E402,F401  (re-expo
     coerce_findings,
     diagnosed_failure_reason,
     reason_override_refused,
+    reason_source_for,
     resolve_findings,
 )
 

@@ -3244,6 +3244,23 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                         subject_glob=subject_glob)
             if stages else _run_single(command, _ex, timeout=timeout))
     if _run.early is not None:
+        # THE DECLARED REASON TRAVELS ON EVERY EXIT, not only the all-stages-passed tail below.
+        # `declared_failure_reason` was read once, there, so the STAGED path never carried it — and
+        # the staged path is what `_resolve_stages` builds for every repo task and what
+        # `benchmarks/algotune/make_task.py` emits. The AlgoTune bridge prints
+        # `{"looplab_failure_reason": "rules_violation"}` and exits 2; `_run_stages` returned at the
+        # failed stage with the field unset, `engine/triage.py::_failure_reason` fell through to
+        # `exit_code != 0` and answered `crash`, which is in `REPAIRABLE_REASONS` — so the engine
+        # paid a triage judge plus `inline_repair_attempts` Developer repairs, on every node, trying
+        # to fix a candidate the arena had refused before it was imported, and told the next
+        # proposer a lie about why. Driven: the same bridge through the single-command path answered
+        # `rules_violation`; through a one-stage manifest it answered `crash`.
+        #
+        # Set here rather than at the seven `run.early = RunResult(` sites: one funnel every exit
+        # passes through cannot be the one an eighth site forgets. Never OVERWRITTEN — a producer
+        # that already stated a reason keeps it.
+        if getattr(_run.early, "declared_reason", None) is None:
+            _run.early.declared_reason = declared_failure_reason(_run.early.stdout)
         return _run.early
     # THE SUBJECT BINDING for the single-command path, and the backstop for a staged one that never
     # reached its final stage. The staged path binds at the SCORE stage's start (see `_run_stages`),
@@ -3346,7 +3363,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     #
     # ONLY TWO CHANNELS HERE, and that is a fact about this tier rather than an omission. The third,
     # `EXTRA_METRIC_ENGINE`, names keys printed by source the ENGINE spliced into the artifact — and
-    # the one splicer that exists, `agents/roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
+    # the one splicer that exists, `agents/toy_roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
     # `solution.py` artifact and never a repo eval COMMAND. A repo task's argv runs the operator's
     # own program over the agent's working set; nothing the engine authored is inside it, so every
     # undeclared number on its stdout really is the candidate's. If that ever stops being true, the

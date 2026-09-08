@@ -4,6 +4,14 @@ The scheduler deals in *logical* GPU ids (the ordinals visible to the engine), w
 processes and Docker need the corresponding physical ids from ``CUDA_VISIBLE_DEVICES``.  Memory
 inventory is deliberately optional: if the nvidia-smi inventory cannot be joined losslessly to the
 visible logical set, admission falls back to count-only instead of guessing.
+
+TIME IS THE SECOND RESOURCE A LANE RESERVES, and it lives here for that reason: the run's
+eval-second ceiling (`max_eval_seconds`) is a pool exactly as the device free-list is, and the
+admission that hands out devices is the admission that commits the seconds those devices will
+burn.  `eval_time_admission_blocked` is the rule and `_reserve_eval_seconds` /
+`_release_eval_seconds` are its ledger — both keyed by the same `(node_id, generation)` lifecycle
+the device reservation is keyed by, and both process-local for the same reason (a resume folds the
+log and finds a completed charge or nothing at all).
 """
 from __future__ import annotations
 
@@ -20,6 +28,7 @@ from typing import BinaryIO, Optional
 
 import anyio
 
+from looplab.core.atomicio import same_file_entry
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
 from looplab.runtime import landlock, read_allowlist, read_fence, seccomp
@@ -73,8 +82,11 @@ def _try_acquire_gpu_host_lease(path: Path) -> Optional[BinaryIO]:
     try:
         opened = os.fstat(descriptor)
         entry = path.lstat()
+        # `same_file_entry` is the REPLACEMENT tier (doc 25 SC-11): the question here is only
+        # whether the name we lstat'd is the inode we now hold open, and the lease file's CONTENT
+        # legitimately changes under us. A hand-spelled pair is how that vocabulary drifted.
         if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(entry.st_mode)
-                or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)):
+                or same_file_entry(entry) != same_file_entry(opened)):
             raise GpuPinUnenforceable(
                 "host GPU allocation lease is not a stable regular file")
         if opened.st_size == 0:
@@ -312,6 +324,44 @@ def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[i
     return (physical, joined) if len(joined) == len(ids) else (physical, {})
 
 
+def eval_time_admission_blocked(spent: float, reserved: float, estimate: float,
+                                max_es: Optional[float]) -> bool:
+    """May ONE MORE evaluation lane enter under the run's remaining eval-second allowance?
+
+    THE DEFECT THIS REPLACES (doc 27 `eval-lanes-admit-without-reserving-time`). Every admission
+    gate compared `total_eval_seconds` — time that has already been CHARGED, i.e. time whose
+    evaluation has already landed a terminal — against `max_eval_seconds`. Nothing subtracted the
+    time the lanes ALREADY RUNNING are going to charge, so with `max_parallel=4` and one second of
+    allowance left, four lanes each read "1 s remaining, that is more than 0" and each entered.
+    A "hard cumulative" ceiling that N lanes can cross simultaneously is a ceiling times N, and on
+    the runs this matters for one lane is hours of GPU.
+
+    THE RULE, in three clauses, each chosen against a way the naive version breaks a live run:
+
+    * `spent >= max_es` — the ceiling is crossed on completed charges alone. Unchanged: this is
+      the historical gate, and it stays FIRST so nothing about a reservation can weaken it.
+    * `reserved <= 0` — NOTHING is in flight, so this lane is the one the ceiling's bounded
+      overshoot has always allowed. It must be able to enter even when its own estimate is larger
+      than the whole remaining allowance, or a run whose `max_eval_seconds` is below one eval's
+      timeout would admit NOTHING, ever: no eval, no charge, no progress, and a budget that reads
+      as a deadlock rather than as a stop. The overshoot is one evaluation, exactly as before.
+    * otherwise `spent + reserved + estimate > max_es` — the balance is committed. The SECOND and
+      later concurrent lanes are the ones the finding is about, and they are the ones this refuses.
+
+    `estimate` is the worst-case charge of the lane being admitted (`_eval_seconds_estimate`), 0.0
+    when the run cannot know it; with an unknown estimate the clause degrades to "stop admitting
+    once the in-flight worst case has committed the balance", which is still strictly stricter than
+    counting completed time alone. `max_es is None` (no ceiling) never blocks.
+    """
+    if max_es is None:
+        return False
+    if spent >= max_es:
+        return True
+    if reserved <= 0.0:
+        return False
+    return (spent + reserved + estimate) > max_es
+
+
 class ResourceSchedulingMixin:
     """Resource-manager methods inherited by :class:`looplab.engine.orchestrator.Engine`."""
 
@@ -346,6 +396,9 @@ class ResourceSchedulingMixin:
             self._gpu_epoch = 0
         if not hasattr(self, "_eval_gpu_reservations"):
             self._eval_gpu_reservations = {}
+        if not hasattr(self, "_eval_time_reservations"):
+            # The eval-SECOND half of the same lifecycle reservation (see the module docstring).
+            self._eval_time_reservations = {}
 
     def _memory_envelope(self, gpu_count: int) -> Optional[int]:
         """Largest per-GPU request for which ``gpu_count`` devices can fit."""
@@ -742,6 +795,58 @@ class ResourceSchedulingMixin:
                 nid == int(node_id) and gen != int(generation)
                 for (nid, gen) in self._eval_gpu_reservations
             )
+
+    def _eval_seconds_estimate(self, node=None) -> float:
+        """The worst-case eval seconds ONE admission may charge — the number a lane reserves.
+
+        The per-eval WALL-CLOCK ceiling the run is planned around (`effective_eval_time_budget`,
+        i.e. the eval spec's own time budget on a repo/command task and `Settings.timeout`
+        otherwise), raised to a governed researcher override when this node carries one — that
+        override is a real ceiling for THIS node and clamped by `max_eval_timeout`, so ignoring it
+        would under-reserve exactly the nodes that run longest.
+
+        DELIBERATELY NOT STRETCHED, in two directions, and both are choices against over-reserving:
+        the sweep multiplier is not applied (`effective_eval_time_budget` documents why it quotes
+        the base number), and the reservation covers ONE attempt rather than the whole repair chain
+        (`1 + inline_repair_attempts` timeouts). The chain has its own bound one level down —
+        `_eval_decide_repair` re-folds `total_eval_seconds` between attempts and stops the chain at
+        the ceiling — so reserving for it here would starve lanes to guard something already
+        guarded. A lane reserves the charge it is certain it can incur, not the worst tail.
+
+        0.0 means "not knowable" (a partially built Engine, a stub host, a non-finite timeout), and
+        the admission rule degrades to the reserved-only clause rather than guessing.
+        """
+        from looplab.engine.shared import (effective_eval_time_budget,
+                                           effective_researcher_eval_timeout)
+
+        candidates = [effective_eval_time_budget(self)]
+        if node is not None:
+            candidates.append(effective_researcher_eval_timeout(self, getattr(node, "idea", None)))
+        seconds = [float(c) for c in candidates if c is not None]
+        return max(seconds) if seconds else 0.0
+
+    def _reserve_eval_seconds(self, node_id: int, generation, seconds: float) -> None:
+        """Commit this lifecycle's worst-case eval charge against the run's allowance."""
+        self._ensure_resource_state()
+        with self._gpu_condition:
+            # Last write wins per lifecycle, exactly like the device reservation above: a
+            # re-admission of the same (node, generation) replaces its own claim rather than
+            # double-charging the allowance it is still holding.
+            self._eval_time_reservations[(int(node_id), generation)] = max(0.0, float(seconds))
+
+    def _release_eval_seconds(self, node_id: int, generation) -> None:
+        """Hand back the unused portion: the evaluation has settled and its REAL cost is now in the
+        log, where `total_eval_seconds` charges it. Released beside the devices, in the dispatcher's
+        own `finally`, so a raise on any path cannot leak an allowance nobody is spending."""
+        self._ensure_resource_state()
+        with self._gpu_condition:
+            self._eval_time_reservations.pop((int(node_id), generation), None)
+
+    def _reserved_eval_seconds(self) -> float:
+        """Worst-case eval seconds every IN-FLIGHT lane may still charge."""
+        self._ensure_resource_state()
+        with self._gpu_condition:
+            return float(sum(self._eval_time_reservations.values()))
 
     def _physical_gpu_ids(self, logical_ids) -> list[str]:
         mapping = getattr(self, "_gpu_physical_ids", {})

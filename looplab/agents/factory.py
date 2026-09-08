@@ -29,19 +29,20 @@ from looplab.core.llm import (make_llm_client, make_llm_client_for, resolve_llm_
 # Re-imported here so `adapters/tasks.py`'s back-compat re-export and every `factory.<name>`
 # patch seam still name the SAME objects.
 from looplab.agents.providers import _make_abstractor, _memora_cache_path, _shared_providers  # noqa: F401
+# EXTRACTED 2026-09-08 (doc 25 RA-01's remaining half): the three developer-backend WIRINGS
+# `make_roles` composes — the in-house repo code-writer, the external coding agent and the
+# best-of-N wrap — live in `agents/developer_backends.py`, each behind its own named gate.
+# `_agent_model` went with the branch that is its only consumer and is re-exported here, because
+# `adapters/tasks.py` carries it across the package boundary and the identity must hold
+# (`tests/test_agent_factory_split.py`). The module-level import is admissible for the same reason
+# `agents/providers.py`'s is, and on the same condition: it keeps every `search`/`tools`/`agents`
+# import function-local, so the cycle stays exactly as open as before.
+from looplab.agents.developer_backends import (  # noqa: F401
+    _agent_model, best_of_n_developer, external_cli_developer, in_house_repo_developer)
 from looplab.core.prompts import PromptStore
 
 if TYPE_CHECKING:                      # `adapters.tasks` re-exports from HERE, so a runtime import
     from looplab.adapters.tasks import TaskAdapter   # would be a cycle; annotations are strings.
-
-
-def _agent_model(backend: str, model: str) -> str:
-    """Map our model id to the agent's provider/model string for a local Ollama model."""
-    if backend == "aider":
-        return f"ollama_chat/{model}"   # aider's ollama provider id
-    if backend in ("opencode", "goose", "continue"):
-        return f"ollama/{model}"        # provider/model
-    return model
 
 
 def _set_role_client(obj, client) -> None:
@@ -258,12 +259,6 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         _kw["runtime_caps"] = _caps
     researcher, developer = task.llm_roles(client, **_kw)
 
-    # In-house repo code-writer: a RepoTask ships a NoOp in-house developer because repo editing was
-    # designed for external coding agents (opencode/aider/…). When none is configured, give the agent
-    # an in-house LLM developer that reads the repo + AUTHORS the files the eval needs (e.g. the eval
-    # entrypoint) within the surface, via the shared tool loop — so a repo task runs on JUST the
-    # in-house LLM. An external coding-agent preset (below) still takes precedence when requested.
-    from looplab.agents.cli_agent import PRESETS
     # A cli_overrides hyperparameter-search RepoTask (`params` set) is a NO-code-edit mode: the
     # experiment varies via CLI overrides, not edits, so the baseline (NoOp) developer is correct.
     # Compute the guard BEFORE either developer branch so the in-house editor isn't wired for a
@@ -279,81 +274,21 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # holds that direction, and a module-level import would close the search<->agents cycle.
     from looplab.agents.established import established_context_from_settings
     _established = established_context_from_settings(settings)
-    if (settings.developer_backend not in PRESETS
-            and not _param_search
-            and callable(getattr(task, "repo_spec", None))
-            and task.repo_spec().get("editables")):
-        from looplab.adapters.repo_task import LLMRepoDeveloper
-        from looplab.tools.dev_commands import DeveloperCommandRuntime
-        from looplab.agents.agent import loop_opts_from_settings as _loop_opts
-        _handoff_dev = True
-        developer = LLMRepoDeveloper(  # C4: plan decomposition + hard per-session backstop
-            client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings), established=_established,
-            plan_decompose=getattr(settings, "developer_plan_decompose", True),
-            plan_min_steps=getattr(settings, "developer_plan_min_steps", 2),
-            plan_max_steps=getattr(settings, "developer_plan_max_steps", 8),
-            session_max_turns=getattr(settings, "developer_session_max_turns", 500),
-            session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 1200.0),
-            stage_guidance=bool(getattr(settings, "developer_stage_guidance", True)),
-            step_feedback_command=getattr(settings, "developer_step_feedback_command", "") or "",
-            cross_run_read_tools=getattr(settings, "cross_run_read_tools", False),   # PART V §22 (dev-scoped)
-            memory_dir=getattr(settings, "memory_dir", None),
-            # F2 · the PROBE (tools/dev_probe.py). Plain values, not the Settings object, like every
-            # knob above: `make_roles` is the ONE place a setting becomes a role's behaviour.
-            probe=getattr(settings, "developer_probe", True),
-            probe_timeout_s=getattr(settings, "developer_probe_timeout_s", 60.0),
-            probe_confine=getattr(settings, "developer_probe_confine", True), probe_max_calls=getattr(settings, "developer_probe_max_calls", 0),  # noqa: E501
-            # Snapshot the eval trust tier here; the role/tool never reads live Settings.
-            command_runtime=DeveloperCommandRuntime.from_settings(settings))
-
-    # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
-    # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.
-    # An external coding-agent preset also stays off for a param-search run (see _param_search above):
-    # do NOT wire the editing agent even if a developer_backend preset was requested.
-    if settings.developer_backend in PRESETS and not _param_search:
-        from looplab.agents.cli_agent import CliAgentDeveloper, opencode_config
-        # An EXTERNAL coding agent carries its own `.model`/`.host` — it has no role `.client` for
-        # `_set_role_client` to rebind (that helper explicitly skips clientless objects, naming this
-        # very case). So the developer-stage overrides applied further down never reached it and the
-        # agent silently ran on the shared `llm_model`/`llm_base_url` while the operator saw
-        # `developer_model` accepted. Resolve them HERE, at the constructor that actually owns them.
-        dev_target = resolve_llm_target(settings, role=_developer_role)
-        dev_base_url = dev_target.base_url
-        agent_model = _agent_model(settings.developer_backend, dev_target.model)
-        # Drop a self-contained provider config in the agent's workdir so OpenCode talks
-        # to the local Ollama endpoint and never fetches the external model registry.
-        workdir_files = {}
-        if settings.developer_backend == "opencode":
-            workdir_files["opencode.json"] = opencode_config(dev_base_url, agent_model)
-        # RepoTask: the agent edits an existing repo (seed_dir) within its edit-surface;
-        # the validator runs in repo_mode and the fallback is the task's baseline developer.
-        repo_spec_fn = getattr(task, "repo_spec", None)
-        repo_spec = repo_spec_fn() if callable(repo_spec_fn) else None
-        brief = task.agent_brief() if repo_spec else getattr(developer, "brief", "")
-        surface = repo_spec["edit_surface"] if repo_spec else settings.agent_surface
-        # Phase 4: seed all editable repos into the agent's worktree (each at its subdir).
-        seed_dirs = repo_spec["editables"] if repo_spec else None
-        # Preserve the task-owned original Developer as validation fallback: it may be an LLM
-        # writer, a deterministic/template implementation, or the repo baseline.
-        original_developer = developer
-        agent_developer = CliAgentDeveloper(
-            model=agent_model,
-            base_url=dev_base_url, brief=brief,
-            spec=PRESETS[settings.developer_backend],
-            cmd_override=([settings.agent_cmd] if settings.agent_cmd else None),
-            timeout=settings.agent_timeout, workdir_files=workdir_files,
-            patch_gate=(settings.agent_patch_gate or bool(repo_spec)),
-            surface=surface, seed_dirs=seed_dirs,
-            protect=(repo_spec["protected_names"] if repo_spec else None),
-            editable_prefixes=([e["name"] for e in repo_spec["editables"]
-                                if e["name"] not in (".", "")] if repo_spec else None))
-        if settings.validate_agent:
-            from looplab.agents.roles import ValidatingDeveloper
-            developer = ValidatingDeveloper(
-                agent_developer, fallback=original_developer,
-                max_retries=settings.agent_max_retries, repo_mode=bool(repo_spec))
-        else:
-            developer = agent_developer
+    # THE THREE DEVELOPER-BACKEND WIRINGS, each behind its own named gate
+    # (`agents/developer_backends.py`, doc 25 RA-01): they are three different Developers rather
+    # than three stages of one, and each returns None for "this backend does not apply", so what
+    # is left here is the SHARED setup every backend takes.
+    _repo_developer = in_house_repo_developer(task, settings, client, param_search=_param_search,
+                                              established=_established)
+    if _repo_developer is not None:
+        developer, _handoff_dev = _repo_developer, True
+    # An external coding-agent preset takes precedence over the in-house editor when requested,
+    # which is why the two are applied in this order.
+    _agent_developer = external_cli_developer(task, settings, developer,
+                                             param_search=_param_search,
+                                             developer_role=_developer_role)
+    if _agent_developer is not None:
+        developer = _agent_developer
 
     # Hot-reloadable prompt store (I18, ADR-8).
     prompts = PromptStore(settings.prompt_dir) if settings.prompt_dir else None
@@ -397,6 +332,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # defect as a Developer silently ignoring a structural idea, just routed through `space`.
     # `honors_idea_space` is a POSITIVE marker (absent means no) so a third-party or templated
     # Developer is fail-closed by omission, and `WrapsDeveloper` forwards it read-through.
+    from looplab.agents.cli_agent import PRESETS
     _offer_sweep = (settings.developer_backend not in PRESETS and not callable(rs_fn)
                     and bool(getattr(developer, "honors_idea_space", False)))
     try:
@@ -422,19 +358,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             offer_sweep=_offer_sweep,      # P6/P21: sweep offer only where idea.space is honored
             handoff=_handoff_dev,          # P25: summary call only for the run_phase repo Developer
         )
-    # C2 best-of-N: wrap the in-house LLM developer to generate N candidates and keep the best by an
-    # execution-free reward. Skipped for external coding agents (cost rule) and the no-edit param mode.
-    if (settings.best_of_n > 1 and settings.developer_backend not in PRESETS
-            and not _param_search):
-        from looplab.search.best_of_n import BestOfNDeveloper, refuse_unrankable_best_of_n
-        refuse_unrankable_best_of_n(developer, settings.best_of_n)  # C5/C2 · docs/BACKLOG.md §0.18
-        developer = BestOfNDeveloper(developer, n=settings.best_of_n,
-                                     listwise=getattr(settings, "best_of_n_listwise", True),
-                                     parser=getattr(settings, "llm_parser", "tool_call"),
-                                     foresight=getattr(settings, "foresight", True),
-                                     direction=getattr(task, "direction", "min"),
-                                     goal=getattr(task, "goal", ""),
-                                     min_confidence=getattr(settings, "foresight_min_confidence", 0.0))
+    # The third gate, applied last because it RANKS whatever the two above settled on.
+    _ranked_developer = best_of_n_developer(task, settings, developer, param_search=_param_search)
+    if _ranked_developer is not None:
+        developer = _ranked_developer
+
     # H3 per-role model presets + §4.1 per-role temperature: point the Researcher / Developer at their
     # own model/endpoint AND/OR sampling temperature when configured (e.g. Developer on a strong coding
     # model at a low temp, Researcher on a fast breadth model at a higher temp). A temperature-only

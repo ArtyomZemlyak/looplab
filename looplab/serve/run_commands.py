@@ -29,18 +29,19 @@ import threading
 import time
 import unicodedata
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from fastapi import HTTPException
 import orjson
 
-from looplab.core.atomicio import atomic_write_text
-from looplab.core.pathsafe import filesystem_identity
+from looplab.core.atomicio import atomic_write_text, same_file_entry
+from looplab.core.pathsafe import filesystem_identity, is_reparse, validate_run_child
 from looplab.core.models import Event
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
-from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
+from looplab.engine.finalize import is_guarded_abort
 from looplab.events.comment_projection import COMMENT_MAX_VERSION
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, EventStoreLockError,
@@ -284,6 +285,57 @@ PAUSE_POSTCONDITIONS = frozenset({"paused", "paused_and_stopped"})
 # left to extend. Keeping the machinery would have been a guard over a branch no command can reach.
 
 
+@dataclass(frozen=True)
+class ClaimEscapeHatch:
+    """The CONSTANTS of one operator escape hatch — its name on the wire and how it refuses.
+
+    There are two escape hatches (`resolve_active_claims`, `resolve_spawn_claim`) and they run the
+    same protocol: refuse a non-canonical run, take the run's sequencer, never clear a provably live
+    owner, hold everything ambiguous inside a cold-start safety window, demand an exact confirmation
+    phrase, REVALIDATE liveness immediately before the destructive step, and answer every refusal as
+    a structured 409 the UI matches on by `code`. Only the strings differ, so only the strings live
+    here and the protocol itself is `RunCommandService.guarded_claim_resolution` (doc 25 SC-12).
+
+    Why a frozen record rather than six keyword arguments at each call: the wire contract is the
+    part a copy drifts in first — the two copies already spelled the same safety-window refusal two
+    different ways, and only the `code` half of that is deliberate (the UI keys the spawn path on
+    `engine_start_uncertain`) — and a record makes the hatches ENUMERABLE, so a test can state
+    "every hatch demands a phrase and refuses 409 with its own code" over the table rather than once
+    per hatch, which is what kept the drift invisible.
+    """
+
+    canonical_refusal: str          # 400 detail when the run is not a canonical direct child
+    uncertain_code: str             # 409 code while the ambiguous tier is inside its safety window
+    uncertain_message: str
+    phrase: str                     # the exact confirmation the operator must repeat
+    confirmation_code: str          # 409 code when that phrase is absent or wrong
+    confirmation_message: str
+    # Which timestamps date the subject, in preference order. A quarantined spawn claim is dated
+    # from its QUARANTINE, not its creation: the claim may be hours old while the decision to treat
+    # it as unknown is seconds old, and it is the decision the safety window is about.
+    age_keys: tuple = ("created_at",)
+
+
+ACTIVE_CLAIM_HATCH = ClaimEscapeHatch(
+    canonical_refusal="active-claim run must be a canonical direct child",
+    uncertain_code="active_claim_uncertain",
+    uncertain_message="An unknown command/activity claim is still inside its safety window.",
+    phrase="I verified no LoopLab command or run activity is active",
+    confirmation_code="active_claim_confirmation_required",
+    confirmation_message="Claim ownership is unknown; automatic death proof is impossible.",
+)
+
+SPAWN_CLAIM_HATCH = ClaimEscapeHatch(
+    canonical_refusal="spawn-claim run must be a canonical direct child",
+    uncertain_code="engine_start_uncertain",
+    uncertain_message="The unknown spawn claim is still inside its cold-start safety window.",
+    phrase="I verified no LoopLab engine process is running",
+    confirmation_code="spawn_claim_confirmation_required",
+    confirmation_message="Process identity is unavailable; automatic child-death proof is impossible.",
+    age_keys=("quarantined_at", "created_at"),
+)
+
+
 class RunCommandService:
     def __init__(self, srv, *, engine_alive: Callable[[Path], bool] = _engine_alive,
                  engine_liveness: Optional[Callable[[Path], Optional[bool]]] = None,
@@ -479,18 +531,14 @@ class RunCommandService:
         its completion poll needs a missing-safe read without relaxing direct-child or reparse checks.
         """
         root = self.srv.root.resolve()
-        requested = Path(rd)
-        try:
-            run_info = requested.lstat()
-            canonical = requested.resolve()
-        except (FileNotFoundError, OSError) as exc:
-            raise HTTPException(404, "no such run") from exc
-        run_attributes = int(getattr(run_info, "st_file_attributes", 0) or 0)
-        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-        if (canonical == root or canonical.parent != root or not stat.S_ISDIR(run_info.st_mode)
-                or requested.is_symlink()
-                or bool(run_attributes & reparse_flag)):
+        # The same direct-child rule its three siblings apply, through the one spelling
+        # (doc 25 SC-03). This copy had lost the Windows JUNCTION probe the others make, so a
+        # junction was admitted here and refused everywhere else — the drift a shared predicate is
+        # for. The events.jsonl half stays below because only THIS reader tolerates its absence.
+        child = validate_run_child(root, rd, must_exist=True)
+        if child.defect is not None:
             raise HTTPException(404, "no such run")
+        canonical = child.path
 
         events = canonical / "events.jsonl"
         try:
@@ -499,10 +547,11 @@ class RunCommandService:
             return ""
         except OSError as exc:
             raise HTTPException(409, "run event path cannot be validated") from exc
-        attributes = int(getattr(info, "st_file_attributes", 0) or 0)
         try:
-            invalid = (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
-                       or bool(attributes & reparse_flag) or events.resolve().parent != canonical)
+            # `is_reparse` is the shared spelling of the symlink/reparse pair (doc 25 SC-03); this
+            # site used to rebuild it from the mode bit and the Windows attribute by hand.
+            invalid = (is_reparse(info) or not stat.S_ISREG(info.st_mode)
+                       or events.resolve().parent != canonical)
         except OSError as exc:
             raise HTTPException(409, "run event path cannot be validated") from exc
         if invalid:
@@ -510,7 +559,7 @@ class RunCommandService:
         try:
             with open(events, "rb") as stream:
                 opened = os.fstat(stream.fileno())
-                if ((info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)
+                if (same_file_entry(info) != same_file_entry(opened)
                         or not stat.S_ISREG(opened.st_mode)):
                     raise HTTPException(503, "run event identity changed during observation")
                 raw = stream.readline(MAX_EVENT_BATCH_BYTES + 1)
@@ -668,6 +717,74 @@ class RunCommandService:
         # clear a claim owned by THIS server process — its worker/activity context may still run.
         return bool(row) and self._owner_exactly_alive(row, own_process_counts=True)
 
+    # ---- the operator escape hatch: ONE scaffold, two hatches (doc 25 SC-12) -----------------
+    # `resolve_active_claims` and `resolve_spawn_claim` are the only two routes in this service that
+    # destroy ownership evidence on an operator's word, and they ran the same four-step guard as two
+    # verbatim copies: cold-start safety window -> exact confirmation phrase -> REVALIDATE liveness
+    # -> unlink. The order is the whole safety argument. Revalidating BEFORE the confirmation gate,
+    # or unlinking on the liveness read taken above the phrase check, re-opens exactly the window
+    # both hatches exist to close: an owner that becomes provable while the operator is typing.
+    # A convention cannot hold an ordering that only matters under a race, so the ordering is
+    # STRUCTURAL here — the destructive step is a callable this helper invokes, after the gates.
+
+    def _canonical_claim_run(self, rd: Path, hatch: ClaimEscapeHatch) -> Path:
+        """The run a claim hatch may act on: a canonical, non-symlink, direct child of the root.
+
+        Shared because the rule is one rule; the refusal text stays per-hatch so an operator reading
+        a 400 still learns which hatch refused.
+        """
+        root = self.srv.root.resolve()
+        canonical = rd.resolve()
+        if canonical == root or canonical.parent != root or rd.is_symlink():
+            raise HTTPException(400, hatch.canonical_refusal)
+        return canonical
+
+    def guarded_claim_resolution(self, hatch: ClaimEscapeHatch, subjects, *,
+                                 confirmation: str, revalidate: Callable[[], object],
+                                 retire: Callable[[], dict]) -> dict:
+        """Run one escape hatch's gates in the ONE order that is safe, then retire.
+
+        `subjects` are the paths whose age must clear the safety window (a spawn claim: one; the
+        activity hatch: every unresolved claim and every unreadable record). `revalidate` re-reads
+        liveness at the last possible moment and returns a 409 detail — a dict envelope or a bare
+        string — when an owner has become provable, else None. `retire` performs the destructive
+        step and returns the route's response body; it is reached only through this method, which is
+        what makes "revalidate, THEN unlink" a property of the code rather than of a reviewer.
+        """
+        now = time.time()
+        # The window is derived from the startup timeout rather than fixed: it has to outlast a cold
+        # start on the slowest box the operator is running, and 5s is the floor for a fast one.
+        minimum_age = max(5.0, self.startup_timeout * 2 + 1)
+        for subject in subjects:
+            row = self._load(subject) or {}
+            try:
+                stamped = next((row.get(key) for key in hatch.age_keys if row.get(key)), None)
+                created_at = float(stamped if stamped is not None else subject.stat().st_mtime)
+            except (OSError, TypeError, ValueError, OverflowError):
+                # An unreadable or nonsensical timestamp dates the subject to NOW, which keeps it
+                # inside the window and refuses. A record can also be briefly unreadable simply
+                # because it is BEING written — `_read_existing` heals that case itself — so the same
+                # safety window applies.
+                created_at = now
+            if now - created_at < minimum_age:
+                raise HTTPException(409, {
+                    "code": hatch.uncertain_code,
+                    "message": hatch.uncertain_message,
+                    "remediation": "Wait, inspect the process table, then retry explicit resolution.",
+                })
+        if confirmation != hatch.phrase:
+            raise HTTPException(409, {
+                "code": hatch.confirmation_code,
+                "message": hatch.confirmation_message,
+                "remediation": f"After inspection, repeat with confirmation exactly: {hatch.phrase}",
+            })
+        # Revalidate immediately before the destructive step. If any exact owner appeared or became
+        # provable, refuse ALL of it rather than partially overriding live ownership.
+        conflict = revalidate()
+        if conflict is not None:
+            raise HTTPException(409, conflict)
+        return retire()
+
     def resolve_active_claims(self, rd: Path, confirmation: str = "") -> dict:
         """Retire orphaned execution/activity claims without ever clearing a proven live owner.
 
@@ -687,11 +804,7 @@ class RunCommandService:
         deleted — renamed out of the `cmd_*.json` glob, so the plane is free while the bytes remain on
         disk for whoever has to explain them.
         """
-        phrase = "I verified no LoopLab command or run activity is active"
-        root = self.srv.root.resolve()
-        canonical = rd.resolve()
-        if canonical == root or canonical.parent != root or rd.is_symlink():
-            raise HTTPException(400, "active-claim run must be a canonical direct child")
+        canonical = self._canonical_claim_run(rd, ACTIVE_CLAIM_HATCH)
         with self.sequence(canonical):
             directory = self._directory(canonical)
             claims = [
@@ -733,55 +846,41 @@ class RunCommandService:
             if not unresolved and not damaged:
                 return {"ok": True, "resolved": bool(retired), "count": retired,
                         "reason": "owners_definitively_gone"}
-            now = time.time()
-            minimum_age = max(5.0, self.startup_timeout * 2 + 1)
-            for claim in unresolved + damaged:
-                try:
-                    created_at = float((self._load(claim) or {}).get("created_at")
-                                       or claim.stat().st_mtime)
-                except (OSError, TypeError, ValueError, OverflowError):
-                    created_at = now
-                if now - created_at < minimum_age:
-                    # A record can also be briefly unreadable simply because it is BEING written —
-                    # `_read_existing` heals that case itself — so the same safety window applies.
-                    raise HTTPException(409, {
-                        "code": "active_claim_uncertain",
-                        "message": "An unknown command/activity claim is still inside its safety window.",
-                        "remediation": "Wait, inspect the process table, then retry explicit resolution.",
-                    })
-            if confirmation != phrase:
-                raise HTTPException(409, {
-                    "code": "active_claim_confirmation_required",
-                    "message": "Claim ownership is unknown; automatic death proof is impossible.",
-                    "remediation": f"After inspection, repeat with confirmation exactly: {phrase}",
-                })
 
-            # Revalidate immediately before unlinking. If any exact owner appeared/becomes provable,
-            # leave every remaining claim intact rather than partially overriding live ownership.
-            if any(self._execution_owner_exactly_alive(claim) for claim in unresolved):
-                raise HTTPException(409, "an active claim owner became live during resolution")
-            for claim in unresolved:
-                try:
-                    claim.unlink()
-                    retired += 1
-                except OSError as exc:
-                    raise HTTPException(503, f"could not resolve active claim: {exc}") from exc
-            for record_path in damaged:
-                # QUARANTINE, never unlink. The record is the only account of a command whose outcome
-                # nobody knows; what has to stop is its hold on the control plane, not its existence.
-                # `.quarantined-<ts>` leaves the `cmd_*.json` glob every scanner uses.
-                target = record_path.with_name(f"{record_path.name}.quarantined-{int(now)}")
-                try:
-                    if record_path.is_symlink():
-                        record_path.unlink()   # a planted link owns no bytes worth preserving
-                    else:
-                        os.replace(record_path, target)
-                    retired += 1
-                except OSError as exc:
-                    raise HTTPException(
-                        503, f"could not quarantine an unreadable command record: {exc}") from exc
-            return {"ok": True, "resolved": True, "count": retired,
-                    "reason": "operator_verified_unknown_claims"}
+            def _live_owner_appeared():
+                if any(self._execution_owner_exactly_alive(claim) for claim in unresolved):
+                    return "an active claim owner became live during resolution"
+                return None
+
+            def _retire_unknown_claims() -> dict:
+                count = retired
+                for claim in unresolved:
+                    try:
+                        claim.unlink()
+                        count += 1
+                    except OSError as exc:
+                        raise HTTPException(503, f"could not resolve active claim: {exc}") from exc
+                for record_path in damaged:
+                    # QUARANTINE, never unlink. The record is the only account of a command whose
+                    # outcome nobody knows; what has to stop is its hold on the control plane, not its
+                    # existence. `.quarantined-<ts>` leaves the `cmd_*.json` glob every scanner uses.
+                    stamp = int(time.time())
+                    target = record_path.with_name(f"{record_path.name}.quarantined-{stamp}")
+                    try:
+                        if record_path.is_symlink():
+                            record_path.unlink()   # a planted link owns no bytes worth preserving
+                        else:
+                            os.replace(record_path, target)
+                        count += 1
+                    except OSError as exc:
+                        raise HTTPException(
+                            503, f"could not quarantine an unreadable command record: {exc}") from exc
+                return {"ok": True, "resolved": True, "count": count,
+                        "reason": "operator_verified_unknown_claims"}
+
+            return self.guarded_claim_resolution(
+                ACTIVE_CLAIM_HATCH, unresolved + damaged, confirmation=confirmation,
+                revalidate=_live_owner_appeared, retire=_retire_unknown_claims)
 
     def _recent_spawn_claim(self, rd: Path) -> bool:
         path = self._spawn_claim_path(rd)
@@ -1014,11 +1113,7 @@ class RunCommandService:
         Known live children are never force-cleared. For an unreadable/identity-unknown claim the
         operator must provide an exact confirmation after independently checking the process table.
         """
-        phrase = "I verified no LoopLab engine process is running"
-        root = self.srv.root.resolve()
-        canonical = rd.resolve()
-        if canonical == root or canonical.parent != root or rd.is_symlink():
-            raise HTTPException(400, "spawn-claim run must be a canonical direct child")
+        canonical = self._canonical_claim_run(rd, SPAWN_CLAIM_HATCH)
         with self.sequence(canonical):
             path = self._spawn_claim_path(canonical)
             if not path.exists():
@@ -1048,35 +1143,26 @@ class RunCommandService:
                         "remediation": "Inspect the process; never clear a live LoopLab child claim.",
                     })
 
-            try:
-                created_at = float((row or {}).get("quarantined_at")
-                                   or (row or {}).get("created_at") or path.stat().st_mtime)
-            except (OSError, TypeError, ValueError, OverflowError):
-                created_at = time.time()
-            minimum_age = max(5.0, self.startup_timeout * 2 + 1)
-            if time.time() - created_at < minimum_age:
-                raise HTTPException(409, {
-                    "code": "engine_start_uncertain",
-                    "message": "The unknown spawn claim is still inside its cold-start safety window.",
-                    "remediation": "Wait, inspect the process table, then retry explicit resolution.",
-                })
-            if confirmation != phrase:
-                raise HTTPException(409, {
-                    "code": "spawn_claim_confirmation_required",
-                    "message": "Process identity is unavailable; automatic child-death proof is impossible.",
-                    "remediation": f"After inspection, repeat with confirmation exactly: {phrase}",
-                })
-            liveness = self._engine_state(canonical)  # final check before destructive unlink
-            if liveness is not False:
-                if liveness is None:
-                    raise HTTPException(
-                        409, self._engine_unknown_error("resolve the engine spawn claim"))
-                raise HTTPException(409, "engine became live while resolving its spawn claim")
-            try:
-                path.unlink()
-            except OSError as exc:
-                raise HTTPException(503, f"could not resolve spawn claim: {exc}") from exc
-            return {"ok": True, "resolved": True, "reason": "operator_verified_unknown_claim"}
+            def _engine_became_live():
+                # The final check before a destructive unlink, and it is tri-state: only a definite
+                # `False` — no engine — may proceed. UNKNOWN is not permission.
+                state = self._engine_state(canonical)
+                if state is False:
+                    return None
+                if state is None:
+                    return self._engine_unknown_error("resolve the engine spawn claim")
+                return "engine became live while resolving its spawn claim"
+
+            def _retire_spawn_claim() -> dict:
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    raise HTTPException(503, f"could not resolve spawn claim: {exc}") from exc
+                return {"ok": True, "resolved": True, "reason": "operator_verified_unknown_claim"}
+
+            return self.guarded_claim_resolution(
+                SPAWN_CLAIM_HATCH, [path], confirmation=confirmation,
+                revalidate=_engine_became_live, retire=_retire_spawn_claim)
 
     @contextmanager
     def sequence(self, rd: Path, *, timeout: Optional[float] = None):
@@ -1187,9 +1273,14 @@ class RunCommandService:
         permit indirection.
         """
         root = self.srv.root.resolve()
-        canonical = rd.resolve()
-        if canonical == root or canonical.parent != root:
+        # `must_exist=False`: this is the CONTAINMENT half only, which is what this method has
+        # always asked of the directory (`AppState.run_dir` already judged the entry itself, and a
+        # caller reaching here with a bare path gets the same answer it used to). The service-file
+        # rules below are this method's own and stay here — a run may legitimately be mid-creation.
+        child = validate_run_child(root, rd, must_exist=False)
+        if child.defect is not None:
             raise HTTPException(404, "no such run")
+        canonical = child.path
         events = canonical / "events.jsonl"
         if not events.exists():
             raise HTTPException(404, "no such run")

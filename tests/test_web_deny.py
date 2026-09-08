@@ -59,6 +59,31 @@ def test_the_match_covers_the_host_its_subdomains_and_the_path_prefix_only():
     assert web_deny_match("not a url", deny) is None
 
 
+def test_a_path_that_cannot_be_canonicalized_fails_CLOSED_on_the_declared_host():
+    """`..` was the one spelling that walked around a prefix, and it walked the PERMISSIVE way.
+
+    `_host_path` answers `parts is None` for a path carrying a `..` segment — deliberately, since a
+    path that climbs out is not the prefix's page and resolving it would be reinterpreting the
+    operator's declaration. `web_deny_match` then returned None, and both callers read None as "no
+    declared prefix covers this URL": `_fetch` does `if prefix: raise`, `_search` does
+    `if web_deny_match(...): continue`. So one extra segment fetched the graded task's published
+    solver, and GitHub — like nginx and most CDNs — normalizes the request-URI itself and serves the
+    denied page with NO redirect, so `_SSRFRedirectHandler`'s per-hop re-check never fires either.
+
+    The sibling above pins the harmless direction (`%6F`, `//`, `/./`, `/OriPress/`, the trailing-dot
+    FQDN all over-fence); this is the same rule applied to the one case that went the other way.
+    """
+    deny = normalize_web_deny(list(_DENY))
+    assert web_deny_match("https://github.com/oripress/AlgoTune/x/../solver.py", deny) == \
+        "https://github.com/oripress/AlgoTune/"
+    assert web_deny_match("https://github.com/foo/../oripress/AlgoTune/solver.py", deny) == \
+        "https://github.com/oripress/AlgoTune/"
+    # Encoded, because one `unquote` pass happens before the segments are split.
+    assert web_deny_match("https://github.com/oripress/AlgoTune/x/%2E%2E/solver.py", deny)
+    # …and it fences by HOST only: a `..` on a host no prefix declares is nobody's business here.
+    assert web_deny_match("https://arxiv.org/a/../abs/2507.15887", deny) is None
+
+
 # --------------------------------------------------------------------------------- the refusal
 
 def _armed(monkeypatch):
@@ -277,3 +302,31 @@ def test_a_refused_SEARCH_is_a_tool_result_and_not_an_escaping_exception():
     assert result.structured["refused"] == "web_deny"
     assert result.structured["web_fetch_refused"] == prefix
     assert "refused" in str(result.content) and "unavailable" not in str(result.content)
+
+
+def test_a_dropped_result_does_not_hand_the_next_row_the_denied_page_s_snippet():
+    """The other half of the search fence: the rows that SURVIVE must still describe themselves.
+
+    `_RESULT` and `_SNIPPET` are two scans of the same page that pair up positionally. The snippet
+    lookup was keyed on `len(out)` — the count of KEPT rows — which is the same number as the
+    enumeration index only while nothing is ever skipped, and the deny filter's `continue` is the
+    skip. With the denied row dropped, every later result was rendered under its own URL carrying
+    the PREVIOUS row's snippet: up to 300 characters of the denied page's text, attributed to an
+    allowed URL, inside the tool result the fence exists to keep it out of.
+    """
+    tools = WebTools(enabled=True, deny=("https://github.com/oripress/AlgoTune/",))
+    tools._get = lambda url, data=None: (
+        '<a class="result__a" href="https://github.com/oripress/AlgoTune/solver.py">Solver</a>'
+        '<a class="result__snippet">PUBLISHED SOLVER SOURCE</a>'
+        '<a class="result__a" href="https://arxiv.org/abs/1">A paper</a>'
+        '<a class="result__snippet">an abstract about trees</a>'
+        '<a class="result__a" href="https://example.com/blog">A blog</a>'
+        '<a class="result__snippet">a blog post about trees</a>')
+
+    out = tools.execute("web_search", {"query": "kd tree solver"})
+
+    assert "PUBLISHED SOLVER SOURCE" not in out, "the denied page's snippet reached the model"
+    assert "1 result(s) withheld" in out
+    # Each surviving row keeps ITS OWN snippet, and the ordinals stay dense.
+    assert "1. A paper\n   https://arxiv.org/abs/1\n   an abstract about trees" in out
+    assert "2. A blog\n   https://example.com/blog\n   a blog post about trees" in out

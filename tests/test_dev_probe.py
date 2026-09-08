@@ -117,6 +117,10 @@ def test_a_confined_probe_refuses_to_run_at_all_where_the_kernel_cannot_confine_
     out = DevProbeTools(timeout_s=30).execute("run_probe", {"code": "print('should not run')"})
     assert "should not run" not in out, "a probe RAN on a kernel that cannot confine it"
     assert "andlock" in out or "confine" in out, out
+    # …and it NAMES the switch that takes the other trade. `core/config.py`'s own field comment
+    # promises "the refusal names it", and until 2026-09-08 no refusal on this path did — an
+    # operator on a Landlock-less box read "refusing to run" with nothing to act on.
+    assert "developer_probe_confine" in out, out
 
 
 @pytest.fixture()
@@ -790,16 +794,21 @@ def test_the_hook_and_the_kernel_are_told_the_same_thing_about_every_path():
 
 def test_a_grant_of_a_tier_does_not_admit_its_sibling():
     """`/opt` must not admit `/optfoo` — the `/src` vs `/srcfoo` bug `_norm_root`'s own docstring
-    says it exists to prevent, arriving through the grant list, where under `_CONFINE` the hot path
-    is a bare `startswith` against exactly these strings."""
+    says it exists to prevent, arriving through the grant list, where the kernel rung's hot path is
+    a bare prefix compare against exactly these strings.
+
+    Driven over the GRANT LIST rather than through the hook, and that is not a weakening: the grants
+    ARE the boundary in the mode that has them (`_read_allow` hands this tuple to Landlock, which
+    grants a whole subtree per rule and cannot subtract), and the hook is the deny-prefix fence in
+    both modes since 2026-09-08, so `/optfoo` is not a path it ever judged."""
     tools = DevProbeTools({"editables": [{"name": ".", "path": "/opt/looplab-fence-test-absent"}]},
-                          timeout_s=30, confine_reads=False)   # the HOOK is the confinement here
+                          timeout_s=30)
     grants = tools._confined_allow(Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
-    fenced = _fence_predicate(tools, grants)
     for g in grants:
         assert g.endswith(os.sep), f"a grant without a trailing separator: {g}"
     for sibling in ("/optfoo/secret", "/usrfoo/secret", "/etcfoo/secret"):
-        assert fenced(sibling) is not None, f"a sibling of a granted tier was admitted: {sibling}"
+        admitted = any((sibling + os.sep).startswith(g) for g in grants)
+        assert not admitted, f"a sibling of a granted tier was admitted: {sibling}"
 
 
 def test_a_task_with_no_editable_tree_installs_no_hook_at_all(tmp_path):
@@ -811,10 +820,13 @@ def test_a_task_with_no_editable_tree_installs_no_hook_at_all(tmp_path):
     fence_dir.mkdir()
     assert DevProbeTools({}, timeout_s=5)._install_fence(fence_dir) is False
     assert list(fence_dir.iterdir()) == []
-    # ...and when the HOOK is the confinement, an empty root list is not inert at all: its allow
-    # list is the whole boundary, so the fence must still be written.
-    assert DevProbeTools({}, timeout_s=5, confine_reads=False)._install_fence(fence_dir) is True
-    assert (fence_dir / "sitecustomize.py").exists()
+    # ...and with the kernel rung OFF the answer is the same one, because that mode is the
+    # PRE-2026-08-21 probe restored (`developer_probe_confine`'s legacy row) and that probe
+    # installed no fence for a task declaring no tree. It rendered an allow-list hook instead until
+    # 2026-09-08, which made the escape hatch stricter than the fence it names — see
+    # `test_the_hook_only_probe_is_the_fence_the_legacy_row_promises`.
+    assert DevProbeTools({}, timeout_s=5, confine_reads=False)._install_fence(fence_dir) is False
+    assert list(fence_dir.iterdir()) == []
 
 
 def test_the_probe_of_a_task_with_no_editable_tree_is_still_confined(tmp_path):
@@ -826,6 +838,147 @@ def test_the_probe_of_a_task_with_no_editable_tree_is_still_confined(tmp_path):
     victim.write_text("HOW SOLUTIONS ARE CHECKED", encoding="utf-8")
     out = _probe(f"print(open({str(victim)!r}).read())", repo_spec={})
     assert "HOW SOLUTIONS ARE CHECKED" not in out and "exit=0" not in out
+
+
+# ------------------------------- rule 1, the OTHER two ways it can be absent: a root the derivation
+#                                  DROPS, and the escape hatch rendering a fence nobody asked for
+#
+# Both were live items (`dropped-fence-roots-are-swallowed-by-the-probe`,
+# `probe-confine-off-is-not-the-historical-probe`) and both are about the same bar: a probe may fail
+# loudly, it may never run silently unfenced — and it may never quietly enforce a boundary its own
+# knob says it is not enforcing. The tests below run on ANY kernel: one asserts a refusal that
+# happens in the derivation, the other drives the hook-only mode, which needs no Landlock.
+
+
+def _granted(grants, path) -> bool:
+    """Would the KERNEL rung admit `path`? The grants are trailing-separator prefixes."""
+    return any((os.path.realpath(str(path)) + os.sep).startswith(g) for g in grants)
+
+
+def test_a_root_too_broad_to_fence_refuses_the_probe_rather_than_running_unfenced(tmp_path):
+    """`fence_inputs` DROPS an editable root `_too_broad` would turn into "python cannot start" and
+    REPORTS it — "so an operator whose whole fence evaporated can see why". All three probe call
+    sites unpacked that report into `_dropped` and dropped it on the floor.
+
+    Driven with the layout that made it real rather than a fabricated one: `sys.prefix` is `/usr` on
+    a system-python box, so an operator declaring their prefix (or `$HOME`) as the editable tree got
+    roots=[], a grant list holding that very prefix, no hook installed and an empty read-deny — a
+    probe unfenced for exactly the tree the task named, with nothing said anywhere.
+
+    MUTATION: put the report back in a `_dropped` throwaway and the first assertion flips — the
+    probe launches and prints its own program's output past a fence that does not exist."""
+    for root in ("/usr", str(Path.home()), "/"):
+        tools = DevProbeTools({"editables": [{"name": ".", "path": root}]},
+                              timeout_s=5, confine_reads=False)
+        # (1) end to end, on the mode that runs on every kernel: the probe REFUSES, and the program
+        #     it was handed never ran.
+        result = tools.execute_result("run_probe", {"code": "print('the-probe-executed')"})
+        assert result.is_error and "the-probe-executed" not in result.content
+        assert "too broad to fence" in result.content, result.content
+        assert os.path.realpath(root) in result.content, result.content
+        # (2) …at EVERY derivation, not only the one `_probe` happens to reach first. These are the
+        #     three sites that used to swallow the report, and two of them feed the kernel rung.
+        for derive in (lambda t: t._read_deny(),
+                       lambda t: t._confined_allow(tmp_path / "probe" / "work"),
+                       lambda t: t._install_fence(tmp_path / "fence")):
+            with pytest.raises(dev_probe.ProbeRefusal):
+                derive(DevProbeTools({"editables": [{"name": ".", "path": root}]}, timeout_s=5))
+    # (3) and nothing was installed on the way past: no fence directory, no half-built boundary.
+    (tmp_path / "fence").mkdir()
+    with pytest.raises(dev_probe.ProbeRefusal):
+        DevProbeTools({"editables": [{"name": ".", "path": "/usr"}]},
+                      timeout_s=5)._install_fence(tmp_path / "fence")
+    assert list((tmp_path / "fence").iterdir()) == []
+
+
+@pytest.fixture()
+def hook_only_world(tmp_path):
+    """The shapes the two modes disagree about: the operator's tree, a harness BESIDE it, and the
+    run directory. `harness/` stands in for the AlgoTune checkout the confinement was built for."""
+    src = tmp_path / "src" / "repo"
+    (src / "experiments").mkdir(parents=True)
+    (src / "experiments" / "final.txt").write_text("A HUMAN'S CHECKPOINT", encoding="utf-8")
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    (harness / "validation_pipeline.py").write_text("HOW SOLUTIONS ARE CHECKED", encoding="utf-8")
+    run_dir = tmp_path / "runs" / "demo"
+    run_dir.mkdir(parents=True)
+    (run_dir / "events.jsonl").write_text('{"type": "run_started"}\n', encoding="utf-8")
+    spec = {"editables": [{"name": ".", "path": str(src)}]}
+    return spec, src, harness, run_dir
+
+
+def test_the_hook_only_probe_is_the_fence_the_legacy_row_promises(hook_only_world):
+    """`developer_probe_confine=false` must be the PRE-2026-08-21 probe, because that is what its
+    `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row pins for every run whose snapshot predates the field: a
+    deny-prefix hook over the editable roots, and no other read policed.
+
+    It was rendered as an ALLOW-LIST over the derived grants instead, which made the escape hatch
+    STRICTER than the fence it claims to restore — so a run resumed across the branch got a
+    different probe than its own first half had been answering, the exact drift that legacy table
+    exists to prevent (driven then: a read outside every root, which the historical probe answered,
+    came back refused).
+
+    MUTATION: render the off-branch with `confine=True` again and the harness/run-dir reads below
+    turn into refusals while the editable-tree assertion stays green — i.e. the knob silently means
+    something other than what it says."""
+    spec, src, harness, run_dir = hook_only_world
+    tools = DevProbeTools(spec, timeout_s=30, confine_reads=False)
+    # (1) the half that must NOT change: the operator's tree is refused, by the hook alone.
+    out = tools.execute("run_probe",
+                        {"code": f"print(open({str(src / 'experiments' / 'final.txt')!r}).read())"})
+    assert "A HUMAN'S CHECKPOINT" not in out and "exit=0" not in out
+    # (2) …and the half the allow-list had silently taken away: everything outside every root is
+    #     readable, which is the trade this switch names and the reason an operator takes it.
+    for readable, witness in ((harness / "validation_pipeline.py", "HOW SOLUTIONS ARE CHECKED"),
+                              (run_dir / "events.jsonl", "run_started")):
+        out = tools.execute("run_probe", {"code": f"print(open({str(readable)!r}).read())"})
+        assert "exit=0" in out and witness in out, out
+
+
+def test_the_confined_default_polices_the_run_directory_and_the_rest_of_the_box(hook_only_world):
+    """The module docstring's two residual claims, driven — they said the opposite until 2026-09-08
+    ("a read is not policed by any of this"; "the run directory is readable"), and a maintainer
+    reading them mispredicted the shipped default in both directions.
+
+    The CONFINED half is asserted on the grant list rather than on a child, because the grants ARE
+    what the kernel rung is handed and a box without Landlock (this one, and every Docker sandbox
+    whose seccomp answers ENOSYS) cannot run a confined probe at all. The HOOK-ONLY half is driven
+    end to end, so the pair states both sentences of the residual."""
+    spec, src, harness, run_dir = hook_only_world
+    tools = DevProbeTools(spec, timeout_s=5)
+    grants = tools._confined_allow(Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
+    for refused in (run_dir / "events.jsonl", run_dir, harness / "validation_pipeline.py",
+                    src / "experiments" / "final.txt"):
+        assert not _granted(grants, refused), f"the confined probe would still read {refused}"
+    # …and it is a fence, not a broken interpreter: the tiers python needs are still granted.
+    assert _granted(grants, sysconfig.get_paths()["stdlib"])
+    # The other sentence of the same residual: with the knob off the run directory IS readable, and
+    # that is a context concern rather than a record one (rule 2 stands whatever it read).
+    out = DevProbeTools(spec, timeout_s=30, confine_reads=False).execute(
+        "run_probe", {"code": f"print(open({str(run_dir / 'events.jsonl')!r}).read())"})
+    assert "exit=0" in out and "run_started" in out, out
+
+
+def test_the_escape_hatch_does_not_run_the_confinements_own_refusal_ladder(tmp_path):
+    """`_confined_allow` refuses a task whose grader sits inside the stdlib tier, because a read
+    ALLOW-LIST cannot exclude it without losing `os.py`. That is a fact about the allow-list, and
+    with `developer_probe_confine=false` there is no allow-list: the hook denies the grader by
+    PREFIX, needs no tier punched, and the run is not the derivation's business at all. Running the
+    ladder anyway made the escape hatch refuse the very runs it exists to let through."""
+    stdlib = Path(sysconfig.get_paths()["stdlib"])
+    protect = {"jsongrader": (str(stdlib / "json"),)}
+    with pytest.raises(dev_probe.ProbeRefusal):                 # confined: still refused, loudly
+        DevProbeTools({}, timeout_s=5, protect_roots=protect)._confined_allow(tmp_path / "work")
+    fence_dir = tmp_path / "fence"
+    fence_dir.mkdir()
+    hatch = DevProbeTools({}, timeout_s=5, protect_roots=protect, confine_reads=False)
+    assert hatch._install_fence(fence_dir) is True
+    # …and the fence it wrote still refuses the grader, which is why the hatch is a trade and not a
+    # hole: the deny prefix reaches every path under the declared package.
+    fenced = _fence_predicate(hatch, ())
+    assert fenced(str(stdlib / "json" / "decoder.py")) is not None
+    assert fenced(str(stdlib / "os.py")) is None
 
 
 def _interpreter_witness() -> str:
@@ -911,11 +1064,13 @@ def _fence_predicate(tools, grants):
     # `_fence_spec()`, not `repo_spec`: the grader roots (`protect_roots`) are folded into the
     # editable list the fence is derived from, and a predicate over the bare spec would render a
     # fence the probe never installs.
-    roots, hook_allow, _dropped, swallowed = read_fence.fence_inputs(tools._fence_spec(), allow=grants)
+    roots, hook_allow, swallowed = tools._fence_inputs(allow=grants)
     assert not swallowed, f"a grant contains a root: {swallowed}"
-    confine = not tools.confine_reads
-    src = read_fence.render(roots, grants if confine else hook_allow, policy="deny",
-                            run="developer-probe", confine=confine)
+    # ONE SHAPE IN BOTH MODES since 2026-09-08 (`probe-confine-off-is-not-the-historical-probe`): the
+    # hook the probe installs is the deny-prefix fence whether or not the kernel rung is on, so a
+    # predicate rendered with `confine=True` here would be about a file the probe never writes.
+    src = read_fence.render(roots, hook_allow, policy="deny",
+                            run="developer-probe", confine=False)
     ns = {"__name__": read_fence._PROBE_NAME}
     exec(compile(src, "<fence>", "exec"), ns)       # probe name: no audit hook installed
     return ns["_fenced"]
