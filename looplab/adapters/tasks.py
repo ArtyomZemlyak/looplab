@@ -49,6 +49,11 @@ class TaskAdapter(Protocol):
       grounding pre-phase) and `tools/run_tools.py` (`DataTools`).
     - `leakage_inputs() -> dict` — split/timestamp info for the leakage audit; consumed by
       `engine/orchestrator.py`.
+    - `shift_inputs() -> dict` — `{"reference": {col: values}, "current": {col: values}, "source":
+      str}`: the training sample beside the deployment one, for the ADVISORY distribution-shift
+      record (`trust/drift.py`); consumed by `engine/audit.py`. `{}` means "no comparable pair was
+      declared", which is recorded as such. An adapter without it falls back to the train/test rows
+      `leakage_inputs()` already publishes, so most tasks need not implement it.
     - `host_grader() -> dict` — out-of-process grading spec (labels/grader run host-side, outside
       the sandbox); consumed by `engine/orchestrator.py`.
     - `data_samples() -> dict[str, str]` — raw data samples for tasks that read data by absolute
@@ -90,7 +95,7 @@ class TaskAdapter(Protocol):
 # with no remaining consumer is registry rot (red test). Renaming a hook on one side alone —
 # the historical "the run silently stages/scores nothing" failure — is now a test failure.
 TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
-    "llm_roles", "assets", "columns", "leakage_inputs", "host_grader", "data_samples",
+    "llm_roles", "assets", "columns", "leakage_inputs", "shift_inputs", "host_grader", "data_samples",
     "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "onboarder_llm_roles", "params",
     "comparison_contract", "external_fallback_uses_llm",
     # Scheduler-facing capability declaration probed by engine/resources.py — registered so an

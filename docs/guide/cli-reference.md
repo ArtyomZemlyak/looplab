@@ -2154,6 +2154,12 @@ looplab export-mlflow RUN_DIR [--tracking-uri URI] [--experiment NAME]
 | `--tracking-uri URI` | local `./mlruns` | MLflow tracking URI |
 | `--experiment NAME` | — | MLflow experiment name |
 
+This command exports a run that has already happened. To have MLflow receive a run **while it runs**
+— a child MLflow run per node as each one lands, with `node_metric` / `best_metric` series on the
+parent — set [`mlflow_tracking_uri`](configuration.md) (`LOOPLAB_MLFLOW_TRACKING_URI`) before
+`looplab run` / `looplab resume`. It is blank (off) by default because a tracking server is an
+egress boundary.
+
 ## `export-notebook`
 
 Export the run's champion solution as a runnable Jupyter notebook.

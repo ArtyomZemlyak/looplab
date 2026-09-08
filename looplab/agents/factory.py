@@ -386,9 +386,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # ASK THE DEVELOPER, don't infer it from the backend (2026-08-05). The two clauses below name the
     # backends that CANNOT sweep; they silently missed the largest class that also cannot — the
     # TEMPLATED Developers the param-tuning adapters return from `llm_roles`
-    # (`ClassificationDeveloper`, `RegressionDeveloper`, `TimeSeriesDeveloper`; MLEBench/dataset/
-    # code_regression hand their LLM path an `LLMDeveloper` and are unaffected). None of the three
-    # reads `idea.space`, none is a PRESET, and none has a `repo_spec` — so the offer was made and
+    # (`ClassificationDeveloper`, `RegressionDeveloper`; MLEBench/dataset/code_regression — and, since
+    # 2026-09-08, timeseries — hand their LLM path an `LLMDeveloper` and are unaffected). Neither
+    # reads `idea.space`, neither is a PRESET, and neither has a `repo_spec` — so the offer was made and
     # the grid was dropped on the floor. Measured on a live
     # `examples/classification_task.json` run: the Researcher put `degree` in `space` (not `params`)
     # on 2 of 8 nodes, `implement` fell back to its `degree` DEFAULT, and both nodes ran a

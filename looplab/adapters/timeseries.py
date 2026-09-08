@@ -1,15 +1,29 @@
-"""I2 · Time-series forecasting TaskAdapter (ADR-2). A net-new task kind: pick a forecaster's
-smoothing weight + seasonal period to minimize a rolling-origin BACKTEST error (MASE) on a synthetic
-seasonal+trend series. Pure-Python end to end (the generated solution embeds the series + a
-self-contained exponential/seasonal forecaster + backtest), so it runs in the sandbox with no
-forecasting-library dependency — the same shape as RegressionTask but for sequential data.
+"""I2 · Time-series forecasting TaskAdapter (ADR-2). A net-new task kind: forecast a synthetic
+seasonal+trend series, scored by a rolling-origin BACKTEST (MASE) the ADAPTER owns.
+
+WHAT THIS ADAPTER OWNS, AND WHAT IT NO LONGER DOES (2026-09-08, docs/BACKLOG.md §14). It used to own
+the FORECASTER as well: a `_TS_TEMPLATE` string with an exponential/seasonal blend written inline and
+handed to BOTH role pairs, so even under `backend=llm` the model only ever picked two floats and no
+run ever wrote a forecaster — the task validated LoopLab's plumbing rather than any forecasting
+capability. What it ships now is the DATA and the METRIC, as three assets staged into every eval
+workdir (and protected from edits there, like every `assets()` entry):
+
+  * `series.json`  — the data: the series plus the number of backtest origins;
+  * `backtest.py`  — the METRIC: a rolling-origin one-step-ahead backtest scored as MASE;
+  * `baseline.py`  — a DECLARED BASELINE: the seasonal blend that used to BE the solution.
+
+The forecaster is the candidate's job. `llm_roles` hands the model an `LLMDeveloper` that writes the
+script against those three files — the same shape `CodeRegressionTask` uses — and the offline
+`build_roles` pair stays deterministic by running the DECLARED BASELINE at the parameters the
+searcher picks, which is what keeps `backend=toy` a full end-to-end run with no model on the wire.
 
 The eval is a backtest with a forecasting metric (MASE = model MAE / naive-1-step MAE; <1 beats the
 naive baseline), the standard scale-free TS metric. Validates LoopLab's generality beyond i.i.d.
-tabular tasks; a real AutoGluon-TS/Darts backend is a drop-in replacement for the templated forecaster.
+tabular tasks.
 """
 from __future__ import annotations
 
+import json
 import random
 from typing import Optional
 
@@ -18,7 +32,11 @@ from pydantic import BaseModel, field_validator
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
-from looplab.agents.roles import LLMResearcher
+from looplab.agents.roles import LLMDeveloper, LLMResearcher
+
+SERIES_ASSET = "series.json"      # the data
+HARNESS_ASSET = "backtest.py"     # the metric
+BASELINE_ASSET = "baseline.py"    # the declared baseline
 
 
 def make_series(seed: int, n: int, period: int, trend: float, noise: float) -> list[float]:
@@ -32,34 +50,91 @@ def make_series(seed: int, n: int, period: int, trend: float, noise: float) -> l
     return out
 
 
-# The generated solution: a seasonal-blend forecaster (alpha*last + (1-alpha)*seasonal) backtested
-# over the last H steps; metric = MASE (model MAE / naive-1-step MAE).
-_TS_TEMPLATE = '''\
+# The METRIC, shipped as an asset so the candidate is scored by code it did not write.
+_BACKTEST_HARNESS = '''\
+"""Rolling-origin backtest for the seasonal-forecast task — the METRIC, not a model.
+
+`score(forecast)` walks the last `h` origins of the series, asks `forecast(history)` for the point
+that follows each prefix, and returns MASE (model MAE / naive-1-step MAE): below 1 beats the naive
+forecast. The forecaster never sees the future because it is only ever handed a PREFIX.
+
+THE ORIGIN SET IS FIXED BY THE SERIES AND `h` ALONE, deliberately. The inline template this harness
+replaced started its walk at `max(period + 1, n - h)` — a bound that moved with the candidate's own
+seasonal period, so two nodes were scored over different windows and their MASEs were not
+comparable. A metric one of the candidate's hyperparameters can move is not a metric.
+"""
 import json
 
-Y = {Y}
-ALPHA = {alpha}
-PERIOD = {period}
-H = {h}
+
+def load_series(path="series.json"):
+    """The task's data as `(y, h)`: the series and the number of backtest origins."""
+    with open(path, encoding="utf-8") as f:
+        spec = json.load(f)
+    return [float(v) for v in spec["y"]], int(spec["h"])
 
 
-def forecast(hist, alpha, period):
-    last = hist[-1]
-    seasonal = hist[-period] if len(hist) >= period else last
-    return alpha * last + (1.0 - alpha) * seasonal
+def origins(n, h):
+    """The scored indices, oldest first. Index 0 is never an origin: it has no history to forecast
+    from, and the naive denominator needs `y[t - 1]`."""
+    return list(range(max(1, n - max(0, int(h))), n))
 
 
-n = len(Y)
-period = max(1, int(PERIOD))
-start = max(period + 1, n - H)
-errs, naive = [], []
-for t in range(start, n):
-    yhat = forecast(Y[:t], ALPHA, period)
-    errs.append(abs(Y[t] - yhat))
-    naive.append(abs(Y[t] - Y[t - 1]))
-mae = sum(errs) / len(errs) if errs else float("inf")
-denom = sum(naive) / len(naive) if naive else 1.0
-mase = mae / denom if denom > 0 else mae
+def score(forecast, y=None, h=None):
+    """MASE of `forecast` over `origins(len(y), h)`; reads the shipped series when not given one."""
+    if y is None or h is None:
+        y, h = load_series()
+    errs, naive = [], []
+    for t in origins(len(y), h):
+        errs.append(abs(y[t] - float(forecast(y[:t]))))
+        naive.append(abs(y[t] - y[t - 1]))
+    if not errs:
+        return float("inf")
+    mae = sum(errs) / len(errs)
+    denom = sum(naive) / len(naive)
+    return mae / denom if denom > 0 else mae
+'''
+
+
+# The DECLARED BASELINE, shipped beside the metric: what the candidate has to beat.
+_BASELINE = '''\
+"""The DECLARED BASELINE for the seasonal-forecast task — the number to beat, not the solution.
+
+A seasonal blend: `alpha * last + (1 - alpha) * history[-period]`. This is the forecaster the
+adapter used to embed as THE solution (docs/BACKLOG.md §14). It ships as an asset so a candidate can
+import it, beat it or ignore it, and so the offline role pair has something deterministic to
+evaluate without a model writing code.
+"""
+
+
+def seasonal_blend(alpha=0.5, period=7):
+    """A one-step-ahead forecaster `f(history) -> float` for `backtest.score`."""
+    a = min(1.0, max(0.0, float(alpha)))
+    p = max(1, int(period))
+
+    def forecast(history):
+        last = history[-1]
+        seasonal = history[-p] if len(history) >= p else last
+        return a * last + (1.0 - a) * seasonal
+
+    return forecast
+'''
+
+
+# What the OFFLINE role pair emits: the declared baseline at the searcher's two knobs. It writes no
+# forecaster of its own — both the model and the metric are imported from the shipped assets.
+_BASELINE_SOLUTION = '''\
+"""The DECLARED BASELINE at alpha={alpha}, period={period} — emitted by the offline role pair.
+
+No forecaster is written here: `baseline.py` (the declared baseline) and `backtest.py` (the metric)
+are assets the task ships. Under `backend=llm` an `LLMDeveloper` writes a real forecaster in this
+file instead."""
+import json
+
+import backtest
+import baseline
+
+y, h = backtest.load_series()
+mase = backtest.score(baseline.seasonal_blend({alpha}, {period}), y, h)
 print(json.dumps({{"metric": mase}}))
 '''
 
@@ -85,24 +160,26 @@ class TimeSeriesResearcher:
                     rationale=f"perturb node {parent.id} (alpha={pa})")
 
 
-class TimeSeriesDeveloper:
-    def __init__(self, series: list[float], h: int = 12):
-        self.series = series
-        self.h = h
+class TimeSeriesBaselineDeveloper:
+    """The offline (`backend=toy`) Developer: run the DECLARED BASELINE at the searcher's knobs.
+
+    Deliberately NOT a forecaster factory — it emits six lines that import the two shipped assets, so
+    the only forecasting code in this task's tree is the baseline the operator declared and whatever
+    the candidate writes. Named `Baseline` for the reason `dataset_task.py`'s offline Developer is
+    (`DatasetBaselineDeveloper`): what it produces is the floor, not the answer."""
 
     def implement(self, idea: Idea) -> str:
-        return _TS_TEMPLATE.format(
-            Y=self.series,
+        return _BASELINE_SOLUTION.format(
             alpha=float(idea.params.get("alpha", 0.5)),
             period=int(round(idea.params.get("period", 4))),
-            h=self.h,
         )
 
 
 class TimeSeriesTask(BaseModel):
     kind: str = "timeseries"
     id: str = "seasonal_forecast"
-    goal: str = "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE"
+    goal: str = ("forecast a seasonal+trend series: write a forecaster that minimizes the "
+                 "rolling-origin backtest MASE")
     direction: str = "min"
 
     @field_validator("direction")
@@ -124,23 +201,54 @@ class TimeSeriesTask(BaseModel):
     def columns(self) -> dict[str, list]:
         return {"t": list(range(self.n)), "y": self._series()}
 
+    def assets(self) -> dict[str, str]:
+        """The data + the metric + the declared baseline, staged into every eval workdir (and
+        protected from edits there). The series is DATA here rather than a literal spliced into the
+        solution, which is what lets the candidate own the forecaster."""
+        return {
+            SERIES_ASSET: json.dumps({"y": self._series(), "h": int(self.backtest_h)}),
+            HARNESS_ASSET: _BACKTEST_HARNESS,
+            BASELINE_ASSET: _BASELINE,
+        }
+
     def build_roles(self):
         return (TimeSeriesResearcher(max_period=self.max_period, seed=self.seed),
-                TimeSeriesDeveloper(self._series(), h=self.backtest_h))
+                TimeSeriesBaselineDeveloper())
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):
-        hint = (f"Choose 'alpha' (float 0..1, blend of last value vs seasonal value) and 'period' "
-                f"(integer 1..{self.max_period}, the seasonal cycle length). Lower backtest MASE is "
-                "better (MASE < 1 beats the naive forecast).")
+        hint = (f"Choose 'alpha' (float 0..1, how much weight the forecaster puts on the most recent "
+                f"value rather than the seasonal one) and 'period' (integer 1..{self.max_period}, "
+                "the seasonal cycle length it assumes). The Developer WRITES the forecaster from "
+                "those two numbers, so a proposal may also change the model family (damped trend, "
+                "seasonal naive, drift, a blend of them) in its rationale. Lower backtest MASE is "
+                "better (MASE < 1 beats the naive forecast; the declared baseline in baseline.py is "
+                "the number to beat).")
         bounds = {"alpha": (0.0, 1.0), "period": (1.0, float(self.max_period))}
+        # The I/O CONTRACT, and it is a contract: the metric and the data are files the task ships
+        # and the eval protects, so a solution that recomputes the backtest itself is scoring itself.
+        brief = (
+            "The script MUST read the series with the shipped harness: `import backtest` then "
+            f"`y, h = backtest.load_series()` (it reads './{SERIES_ASSET}', a JSON object with 'y', "
+            "a list of floats, and 'h', the number of backtest origins). Write a ONE-STEP-AHEAD "
+            "forecaster `f(history) -> float` returning the value that follows `history` (a prefix "
+            "of the series), and score it with `mase = backtest.score(f, y, h)` — do NOT write your "
+            "own backtest loop, the harness is the metric. "
+            f"'./{BASELINE_ASSET}' holds the DECLARED BASELINE (`seasonal_blend(alpha, period)`); "
+            'beat it. Print EXACTLY one final line of JSON: {"metric": <float>} where <float> is '
+            "that MASE (lower is better). Use ONLY numpy and the Python standard library — "
+            "statsmodels, sktime, darts, pandas and scipy are NOT installed and importing them will "
+            "crash. Print nothing after that JSON line."
+        )
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
-                TimeSeriesDeveloper(self._series(), h=self.backtest_h))
+                LLMDeveloper(client, brief=brief))
 
     def external_fallback_uses_llm(self) -> bool:
-        return False  # the fallback fills a deterministic local template
+        return True  # output validation retains the script-writing LLMDeveloper (as code_regression)
 
     def gpu_capable(self) -> bool:
-        """Both role pairs end in `TimeSeriesDeveloper`, a fixed seasonal-naive numpy template — the
-        roles only pick `alpha`/`period`, never code. Keeps this task out of the host GPU pool lease
+        """The LLM path writes the code here, but the brief above pins it to numpy + the standard
+        library — the same offline stack `core/hardware.py::task_runtime_caps` locks this task to,
+        and it never offers it the torch capability sentence — while the offline path only ever runs
+        the declared baseline. Keeps this task out of the host GPU pool lease
         (`engine/resources.py::_task_gpu_capable`)."""
         return False

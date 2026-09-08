@@ -134,7 +134,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:e52ed9295f43ebe0a22007ed040641edc0c25c041f15bebe40f1d254d8211a68"
+_EXPECTED_DIGEST = "sha256:1f500c53d7933c745a419d88639e55df9d825d136d7536c83706413d3c66badf"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -574,7 +574,24 @@ _EXPECTED_DIGEST = "sha256:e52ed9295f43ebe0a22007ed040641edc0c25c041f15bebe40f1d
 #               threshold, so the prompt bytes a replicate's Developer sees are now a function of a
 #               value the envelope did not record. The default matching the former literal makes
 #               today's behaviour identical; it does not make the envelope the same.
-_EXPECTED_FIELD_COUNT = 239
+#   2026-09-08  + mlflow_tracking_uri  (docs/BACKLOG.md §16: the MLflow mirror that runs WHILE the
+#               run does). The 'field set changed too' branch, verified that way rather than from
+#               the count: an AST scan of `Settings`' annotated assignments against the pre-change
+#               tree reports exactly `['mlflow_tracking_uri']` added and `[]` removed, so a +2/-1
+#               cannot be hiding behind the +1. `_EXPECTED_FIELD_COUNT` goes 239 -> 240 and both
+#               pins are re-set.
+#               INERT for a calibration replicate, and inert twice over: the profile ships it "" —
+#               the OFF value and the shipped default, so no follower thread is ever started — and
+#               the mirror is a pure READER of the event log besides, appending nothing, holding no
+#               lock and spending no tokens, so even a replicate run WITH a URI would evaluate the
+#               same nodes in the same order. Re-pinned anyway on the rule every inert knob above
+#               was re-pinned under: the digest binds the COMPLETE non-variant envelope and the
+#               guard is deliberately not clever enough to exempt a knob it can prove unreachable.
+#               What makes re-pinning right rather than merely necessary is what the field IS: it
+#               decides whether a run's params, metrics and champion CODE leave the box for an
+#               external server, and an envelope that cannot state that is not the envelope a later
+#               receipt would be compared against.
+_EXPECTED_FIELD_COUNT = 240
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

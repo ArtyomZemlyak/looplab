@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 207
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 208
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -220,7 +220,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # so it is RE-DERIVED over the merged keyset, which the 2026-08-31 entry prescribes.
 # Verified by intersection rather than by adding the integers: 207 unique keys, 197 common
 # to this branch's file plus master's ten, no duplicate and none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "28a36daf8fed55a2558039bdf92e96923beac5fa79c5a99ce6fa02c086e1117a"
+# 207 + 1 -> 208 on 2026-09-08: `mlflow_tracking_uri` (docs/BACKLOG.md §16), the MLflow mirror that
+# runs WHILE the run does. A row rather than an uncurated omission for the reason `redact_output`
+# next to it is one: it decides whether this run's params, metrics and champion CODE leave the box
+# for an external server, so the operator has to be able to see it and turn it off. Exactly one key
+# added, none removed; both pins re-derived over the file rather than incremented.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5521c195af21a9aeee1e76e4ddc9782a4a742c148387ccc362b0424a76d0acdf"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

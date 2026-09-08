@@ -99,8 +99,16 @@ def _budget_leaf(exc: BaseException, _depth: int = 0):
     return budget_stop_leaf(exc, _depth)
 
 
-def _run_engine_guarded(eng: Engine):
+def _run_engine_guarded(eng: Engine, *, mlflow_uri: str = ""):
     """Drive the engine loop to completion, funneling any fatal abort into a terminal event.
+
+    `mlflow_uri` (`Settings.mlflow_tracking_uri`, "" = off and the shipped default) starts the
+    MLflow MIRROR around the drive: a follower thread tails the run's event log and publishes each
+    node as it lands, so a tracking server sees the run WHILE IT RUNS instead of only when a human
+    remembers `looplab export-mlflow` (docs/BACKLOG.md §16). Here rather than inside the Engine
+    because the mirror is a reader of the durable log and owes the loop nothing — the same reason it
+    can fail without costing the run — and because this function already owns the run's drive for
+    both `run` and `resume`.
 
     THIS FUNCTION OWNS THE RUN'S TRACE LIFETIME, because it owns the run's TERMINAL. Its outer
     handler writes `run_finished` and buys the finish report several frames above `Engine.run`'s own
@@ -112,11 +120,14 @@ def _run_engine_guarded(eng: Engine):
 
     Shared by `run` and `resume` (previously duplicated verbatim in both).
     """
+    from looplab.events.mlflow_export import autolog
+
     _defer = getattr(eng, "defer_trace_retirement", None)
     if callable(_defer):
         _defer()
     try:
-        return _drive_engine_to_terminal(eng)
+        with autolog(eng.run_dir, tracking_uri=mlflow_uri):
+            return _drive_engine_to_terminal(eng)
     finally:
         # Unconditional: a refusal that never entered the loop must not leave a live exporter behind
         # the lifecycle lock either. `retire_tracer` is idempotent and a no-op on a stub engine.
@@ -985,7 +996,7 @@ def run(
         # ``run`` can recover an incomplete process with no resume intent; the helper still records
         # this exact lock-owner change when an old eval admission needs retiring.
         _record_engine_owner_boundary(eng)
-        state = _run_engine_guarded(eng)
+        state = _run_engine_guarded(eng, mlflow_uri=settings.mlflow_tracking_uri)
     _print_result(state)
     _note = wrap_up_degradation_note(eng)
     if _note:
@@ -1122,7 +1133,7 @@ def resume(
                 # exact new-owner boundary. Seq-gated in the fold, so one serve satisfies all piled
                 # requests and clears every stale live admission together.
                 _record_engine_owner_boundary(eng)
-                state = _run_engine_guarded(eng)
+                state = _run_engine_guarded(eng, mlflow_uri=settings.mlflow_tracking_uri)
                 break
         if not wait_for_handoff:
             typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
@@ -1250,6 +1261,8 @@ def finalize(
         if not current.finished:
             # Normal live/stopped path: the loop sees stop_requested at its first decision boundary,
             # emits the common final report + run_finished, and performs the durable wrap-up.
+            # No MLflow mirror here on purpose: this wrap-up creates no node, so there is nothing to
+            # mirror LIVE, and the finished run is exportable with `looplab export-mlflow`.
             _run_engine_guarded(eng)
     _note = wrap_up_degradation_note(eng)
     typer.echo(f"finalized {run_dir}" + (f" — {_note}" if _note else ""))

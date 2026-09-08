@@ -157,6 +157,7 @@ _LAYOUT = {
     "critic": "trust",
     "cross_run": "trust",   # cross-run identity/scope-boundary checks among the trust monitors
     "cv": "trust",
+    "drift": "trust",   # deterministic distribution-shift detector, advisory (docs/BACKLOG.md §15)
     "harden": "trust",
     "dataset_task": "adapters",
     "deep_research": "agents",

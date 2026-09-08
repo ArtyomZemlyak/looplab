@@ -1289,7 +1289,7 @@ below use it.
 | [`quadratic`](#quadratic) | Pick numeric params | Closed-form objective | `examples/toy_task.json` |
 | [`regression`](#regression) | Select model complexity | K-fold CV (built-in) | `examples/regression_task.json` |
 | [`classification`](#classification) | Pick a feature map + tune a classifier | K-fold CV (built-in) | `examples/classification_task.json` |
-| [`timeseries`](#timeseries) | Tune a forecaster | Backtest (built-in) | `examples/timeseries_task.json` |
+| [`timeseries`](#timeseries) | **Write a forecaster** | Backtest (built-in, shipped as an asset) | `examples/timeseries_task.json` |
 | [`code_regression`](#code_regression) | **Write the code** | CV printed by the solution | `examples/code_regression_task.json` |
 | [`mlebench`](#mlebench) | Beat a private grader | Held-out grader | `examples/mlebench_task.json` |
 | [`mlebench_real`](#mlebench_real) | **Real Kaggle competition** | Official grader | `examples/mlebench_real_spooky.json` |
@@ -1384,12 +1384,12 @@ reaches **0.905**. That gap is the gradient the search climbs.
 
 ## `timeseries`
 
-Choose a forecaster's smoothing weight + seasonal period to minimize backtest error (MASE).
+Forecast a synthetic seasonal+trend series; the metric is a rolling-origin backtest (MASE).
 
 ```jsonc
 {
   "benchmark": "timeseries", "id": "seasonal_forecast",
-  "goal": "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE",
+  "goal": "forecast a seasonal+trend series: write a forecaster that minimizes the rolling-origin backtest MASE",
   "direction": "min",
   "n": 120, "period": 7, "trend": 0.05, "noise": 0.5, "seed": 0,
   "max_period": 12, "backtest_h": 20
@@ -1402,7 +1402,15 @@ Choose a forecaster's smoothing weight + seasonal period to minimize backtest er
 | `period` | True seasonal period |
 | `trend` | Trend slope |
 | `max_period` | Largest period the search may try |
-| `backtest_h` | Backtest horizon |
+| `backtest_h` | Backtest horizon (how many rolling origins are scored) |
+
+The task ships three assets into every eval workdir and protects them from edits: `series.json`
+(the data), `backtest.py` (the **metric** — `score(f, y, h)` walks the last `backtest_h` origins and
+returns MASE) and `baseline.py` (a **declared baseline**, the seasonal blend the candidate has to
+beat). With `backend: llm` the Developer **writes the forecaster** against that contract; offline
+(`backend: toy`) the deterministic pair runs the declared baseline at the searcher's `alpha`/
+`period`, so the kind still completes end to end with no model on the wire. Like `code_regression`
+the solution prints its own metric — the harness is protected, but there is no private grader.
 
 ## `code_regression`
 

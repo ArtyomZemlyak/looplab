@@ -82,8 +82,8 @@ older binary can still load a snapshot a newer one wrote.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **207 of the 242 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 207 catalogued keys.
+server-owned curated catalogue with **208 of the 243 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 208 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -1019,6 +1019,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 | `memora_anchors` | `LOOPLAB_MEMORA_ANCHORS` | `6` | Max cue anchors kept per memory |
 | `memora_consolidate_threshold` | `LOOPLAB_MEMORA_CONSOLIDATE_THRESHOLD` | `0.86` | Cosine at/above which a new memory is consolidated into an existing entry (0.0–1.0) |
 | `skills_dir` | `LOOPLAB_SKILLS_DIR` | — | Dir of root `*.md` skills and recursive `**/SKILL.md` packages the Researcher can list/load. Authoring edits root files through flat CAS/recovery names and shows nested packages read-only; bounded traversal skips symlinks/path escapes and discloses an incomplete scan |
+| `mlflow_tracking_uri` | `LOOPLAB_MLFLOW_TRACKING_URI` | `""` (off) | MLflow tracking URI to **mirror the run into while it runs**: a follower thread tails the run's event log and publishes each evaluated node as it lands (a child MLflow run per node with its params/metrics, plus `node_metric`/`best_metric` series on the parent run), instead of nothing reaching MLflow until someone runs `looplab export-mlflow`. Blank is OFF and is the default, because an external tracking server is an **egress** boundary — only a URI you set starts it, and the champion's code is redacted on the way out exactly as the export redacts it. Needs the optional `mlflow` package; without it the setting degrades to the after-the-fact export with no error. The mirror only READS the log: it never appends, holds no lock, and a dead server costs the mirror and not the search |
 | `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files — see the [override-key table](llm-and-agents.md#prompt-override-keys-prompt_dir) for every `<key>.md` and who consumes it |
 | `researcher_tools` | `LOOPLAB_RESEARCHER_TOOLS` | `true` | Let the Researcher read its own experiments + task data mid-loop |
 | `cross_run_tools` | `LOOPLAB_CROSS_RUN_TOOLS` | `true` | Read-only tools over sibling runs (same task, same run-root) |

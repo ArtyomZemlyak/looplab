@@ -2507,6 +2507,15 @@ class Settings(BaseSettings):
     # created nodes (0 = off; it still regenerates on a manual `report_refresh` from the UI). The
     # deterministic report always renders from the node set regardless of this knob.
     report_every: int = 3
+    # MLflow AUTOLOGGING (2026-09-08, docs/BACKLOG.md §16): a tracking URI to MIRROR this run into
+    # while it runs — `events/mlflow_export.py::autolog` tails the run's event log from a follower
+    # thread and publishes each node terminal as it lands (a child run per node, `node_metric` /
+    # `best_metric` series on the parent). "" is OFF and is the shipped default, because sending a
+    # run to a tracking server is EGRESS and only an operator naming a server may start it; MLflow
+    # is an optional dependency, so an unset or uninstalled mirror degrades to today's behaviour
+    # (`looplab export-mlflow` after the run) with no error. The mirror is a READER: it never
+    # appends to the log, takes no lock, and a dead URI costs the mirror, never the search.
+    mlflow_tracking_uri: str = ""
     # Agent Skills (I18, ADR-9): dir of SKILL.md the Researcher can list/load as tools.
     skills_dir: str | None = None
     # Prompt store (I18, ADR-8): dir of editable, hot-reloaded role prompt .md files.

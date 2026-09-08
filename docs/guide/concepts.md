@@ -1177,6 +1177,14 @@ A reported number is only useful if it generalizes. The trust layer is leakage-f
   candidate is scored the same way.
 - **Leakage detectors** — train/test contamination, target leakage, and temporal leakage are
   flagged.
+- **Distribution shift** — at setup the run also records how far the deployment sample is from the
+  training one, column by column (PSI + a two-sample KS statistic for numeric columns, total
+  variation distance plus the share of unseen categories for categorical ones), as a `data_shift`
+  event. It is **advisory and read by nothing that decides**: shift is the normal case on a real
+  task, so it is a fact beside a worse metric, never a refusal. The pair compared is whatever the
+  task declares — a `train*` table beside a `test*`/`valid*` one in a data mount, else the
+  train/test rows the leakage gate already asks for; a task that declares no pair records nothing,
+  because "not compared" and "compared, no shift" are different facts.
 - **Variance gate** — a candidate must beat the incumbent by more than ~1 standard error to be
   promoted, so noise doesn't crown a lucky run.
 - **Optional multi-seed confirmation** — when `confirm_top_k` and `confirm_seeds` enable it, re-run the
@@ -2081,7 +2089,7 @@ Where each concept lives in the code:
 | Serve-side paid work: metering lease + claim→terminal receipt ledger | `serve/paid_work.py`, `serve/paid_ledger.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |
-| Leakage detectors + data profiler | `trust/leakage.py`, `core/profile.py` |
+| Leakage detectors + data profiler + the advisory distribution-shift record | `trust/leakage.py`, `core/profile.py`, `trust/drift.py` |
 | Vector store + agentic retrieval | `tools/vectorstore.py`, `tools/retrieval.py`, `tools/knowledge_tools.py`, `agents/agent.py` |
 | Typed tool capabilities/results, MCP structure/cancellation, and operator-pinned Developer commands | `tools/_base.py`, `agents/tool_loop.py`, `tools/mcp_tools.py`, `tools/dev_commands.py`, `engine/workspace_seed.py` |
 | Cross-run case library | `engine/memory.py` |
