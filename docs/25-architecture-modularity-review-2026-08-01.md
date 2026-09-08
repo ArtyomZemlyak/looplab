@@ -4538,9 +4538,7 @@ run-path identity ladder) is untouched — it is HTTP argument validation, not t
 holds no locks. `reset_route` still imports `errno` without using it; that predates this change
 (pyflakes reports it identically before and after) and removing it is a different diff.
 
-#### SC-15 · LOW · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
-
-> **OPEN[tui-render-helpers-not-in-tui-format]** the reconciliation split and the staging prologue landed; the rendering helpers still live on the `Tui` class (`_draw_dashboard`, `_draw_run`, `_render_spec`, `_render_chat`, `_status_panel`) rather than in `tui_format.py`, and the class is **922** lines re-measured 2026-08-19. proof:present:_draw_dashboard@looplab/serve/tui.py
+#### SC-15 · LOW · under-decomposition · effort: medium — **RESOLVED (2026-09-08)**
 
 **tui.py Tui class mixes rendering, wizards, chat persistence, and a client-side command-recovery state machine; _reconcile_pending interleaves two protocols**
 
@@ -4590,6 +4588,25 @@ with the docstring popped, because both docstrings describe the *other* protocol
 raw `inspect.getsource` scan matches its own explanation.
 
 Not done: moving rendering helpers to `tui_format`, and the ~880-line class itself.
+
+*Closed 2026-09-08 — the rendering half landed.* `_draw_dashboard`, `_draw_run`, `_render_spec`,
+`_render_chat` and `_status_panel` (plus the `_runs_table` builder only `_draw_dashboard` reads, and
+the `_esc` / `_command_failure_line` escape pair they share) are `tui_format` functions:
+`draw_dashboard`, `draw_run`, `render_spec`, `render_chat`, `status_panel`, `runs_table`. Bodies
+moved verbatim; the only edits are `self.console` -> an explicit first `console` argument and the
+two facts a renderer cannot know — `self.api.base` and `self._interactive()` — becoming keyword
+arguments the caller supplies **per redraw**, so the live marker still asks the terminal on every
+pass rather than being captured once. `render_spec` takes the server's readiness verdict as a value
+instead of calling `self._validate` itself, which makes doc 52 row 8 ("the TUI carries no launch
+readiness rule of its own") structural: the module that draws the panel cannot reach the Api client.
+No delegating methods were left behind — a method that forwards would keep the class as the only
+documented way in — so `Tui` is **853** lines from 922, and `looplab.serve.tui` re-exports every
+moved name, which is why `tui._esc` and the ten `_command_failure_line` call sites are untouched.
+The class's remaining concerns (the wizards, chat persistence and the durable command-recovery state
+machine) are unchanged and out of this change's scope. Guards: `tests/test_tui.py` — the two
+markup-escape tests now drive the module functions, and three new tests DRAW each screen from a
+`Console` over a `StringIO` alone (no Api, no run root, no terminal), which is the property the move
+buys; a fourth asserts none of the five is a `Tui` attribute any more.
 
 #### SC-16 · LOW · over-engineering · effort: small — **RESOLVED (2026-08-08)**
 

@@ -1,8 +1,10 @@
-"""The TUI's pure helpers + server autostart, split verbatim out of `serve/tui.py` (docs/15 §P5.2):
-metric/age formatting, phase glyphs, genesis-spec rendering/gating, chat-history shaping, input
-parsing and redraw signatures (all side-effect-free, so tests/test_tui.py exercises them without a
-live server or a terminal), plus the `ensure_server`/`_free_port`/`_stop_child` autostart trio the
-REPL's `main` uses. `serve/tui.py` re-exports every name, so the old import paths keep working."""
+"""The TUI's pure helpers + rendering + server autostart, split verbatim out of `serve/tui.py`
+(docs/15 §P5.2): metric/age formatting, phase glyphs, genesis-spec rendering/gating, chat-history
+shaping, input parsing and redraw signatures (all side-effect-free, so tests/test_tui.py exercises
+them without a live server or a terminal), the five screen renderers that used to be `Tui` methods
+(doc 25 SC-15 — they take the Console they write to, so they still need no server and no terminal),
+plus the `ensure_server`/`_free_port`/`_stop_child` autostart trio the REPL's `main` uses.
+`serve/tui.py` re-exports every name, so the old import paths keep working."""
 from __future__ import annotations
 
 import os
@@ -254,6 +256,140 @@ def run_sig(state: dict) -> tuple:
     scored = sum(1 for n in nodes.values() if n.get("metric") is not None and not n.get("error"))
     return (state.get("phase"), state.get("finished"), state.get("engine_running"),
             len(nodes), scored, in_flight, state.get("best_node_id"), state.get("stop_reason"))
+
+
+# ----------------------------------------------------------------------------- rich rendering
+# (doc 25 SC-15's remaining half: the five render helpers used to be METHODS on `serve/tui.py::Tui`,
+# where the only way to see what a surface draws was to construct the whole REPL — an Api client, a
+# run root and a Console — and the only way to change a line was to touch the file that also holds
+# the wizards, the chat persistence and the durable command-recovery state machine. They are pure
+# functions of (console, data): every one takes the Console it writes to as its first argument
+# instead of reaching for `self.console`, and the two that used to consult `self._interactive()` or
+# `self.api.base` take those as keyword arguments — so the CALLER keeps every decision that needs a
+# live server or a real terminal, and the rendering keeps none. Bodies moved verbatim; the only
+# edits are `self.console` -> `console`, `self._runs_table`/`self._status_panel`/`self._render_chat`
+# -> the module functions, and the two injected values above.)
+
+def _esc(value) -> str:
+    """Escape one server/LLM/user-supplied value before it enters a rich markup f-string. A stray
+    ``[/tag]`` in a command label, error, run id, or chat line otherwise raises rich ``MarkupError``
+    and aborts the TUI; for a PERSISTED row (``_reconcile_pending``) that re-crashes on every reopen."""
+    from rich.markup import escape
+    return escape(str(value))
+
+
+def runs_table(runs: list):
+    from rich.table import Table
+    from rich import box
+    t = Table(box=box.SIMPLE_HEAD, expand=True, pad_edge=False)
+    t.add_column("#", justify="right", style="dim", width=3)
+    t.add_column("run", style="bold", no_wrap=True)
+    t.add_column("status", no_wrap=True)
+    t.add_column("nodes", justify="right", width=6)
+    t.add_column("best", justify="right", width=12)
+    t.add_column("task", no_wrap=True, style="dim")
+    t.add_column("updated", justify="right", style="dim", no_wrap=True)
+    for i, r in enumerate(runs, 1):
+        glyph, colour, label = phase_meta(r)
+        best = r.get("best_confirmed")
+        best = r.get("best_metric") if best is None else best
+        t.add_row(str(i), _esc(r.get("run_id", "?")), f"[{colour}]{glyph} {_esc(label)}[/{colour}]",
+                  str(r.get("nodes", 0)), fmt_metric(best),
+                  _esc((r.get("task_id") or r.get("goal") or "—")[:28]), fmt_ago(r.get("mtime")))
+    return t
+
+
+def status_panel(run_id: str, state: dict):
+    from rich.panel import Panel
+    glyph, colour, label = phase_meta(state)
+    nodes = state.get("nodes") or {}
+    best_id = state.get("best_node_id")
+    best = None
+    if best_id is not None and str(best_id) in {str(k) for k in nodes}:
+        bn = nodes.get(str(best_id)) or nodes.get(best_id) or {}
+        best = bn.get("confirmed_mean")
+        best = bn.get("metric") if best is None else best
+    running = sum(1 for n in nodes.values() if n.get("status") == "pending")
+    ok = sum(1 for n in nodes.values() if n.get("metric") is not None and not n.get("error"))
+    lines = [
+        f"[{colour}]{glyph} {_esc(label)}[/{colour}]"
+        + (f"   direction={state.get('direction')}" if state.get("direction") else ""),
+        f"nodes: [bold]{len(nodes)}[/bold] total · {ok} scored · {running} in flight",
+        f"best:  [bold]{fmt_metric(best)}[/bold]" + (f"  (node {best_id})" if best_id is not None else ""),
+    ]
+    if state.get("goal"):
+        lines.append(f"goal:  {_esc(state['goal'])}")
+    if state.get("stop_reason"):
+        lines.append(f"[dim]stopped: {_esc(state['stop_reason'])}[/dim]")
+    return Panel("\n".join(lines), title=f"[bold]{_esc(run_id)}[/bold]", border_style=colour, expand=True)
+
+
+def draw_dashboard(console, runs: list, *, base: str, live: bool) -> None:
+    """The dashboard screen. `base` is the server the TUI is talking to and `live` says whether this
+    is a real terminal that auto-refreshes — both decided by the caller (the Api client and
+    `Tui._interactive()` respectively), because neither is a question about the drawing."""
+    console.clear()
+    live_mark = "[green]● live[/green]" if live else ""
+    console.print("[bold cyan]LoopLab[/bold cyan] [dim]· terminal control plane[/dim]   "
+                  f"[dim]{_esc(base)}[/dim]  {live_mark}")
+    if runs:
+        console.print(runs_table(runs))
+    else:
+        console.print("[dim]no runs yet — type a goal below to start your first one.[/dim]\n")
+    console.print("[dim]Pick a run by number · type a goal to start one · "
+                  "[bold]n[/bold]ew · [bold]r[/bold]efresh · [bold]q[/bold]uit[/dim]")
+
+
+def render_spec(console, spec: Optional[dict], reason: Optional[str]) -> None:
+    """The proposed-run panel. `reason` is the SERVER's readiness verdict (None = launchable), asked
+    by `Tui._validate` over `/api/validate` — the TUI carries no launch-readiness rule of its own
+    (doc 52 row 8), and this module may not grow one: it renders the verdict it is handed."""
+    from rich.panel import Panel
+    body = "\n".join(spec_lines(spec))
+    foot = "[green]ready — type [bold]launch[/bold] to start[/green]" if reason is None else f"[yellow]{_esc(reason)}[/yellow]"
+    console.print(Panel(_esc(body) + "\n\n" + foot, title="proposed run", border_style="green", expand=True))
+
+
+def draw_run(console, run_id: str, state: Optional[dict], history: list, *, live: bool) -> None:
+    console.clear()
+    if state is None:
+        console.print(f"[red]could not load {_esc(run_id)} — is the server still up?[/red]")
+    else:
+        console.print(status_panel(run_id, state))
+    render_chat(console, history)
+    live_mark = "[green]● live[/green] · " if live else ""
+    console.print(f"[dim]{live_mark}Chat with the boss · [bold]s[/bold]tatus · "
+                  "[bold]stop/finalize/resume[/bold] · [bold]?[/bold] help · "
+                  "[bold]back[/bold] · [bold]q[/bold]uit[/dim]")
+
+
+def render_chat(console, history: list, tail: int = 8) -> None:
+    from rich.markdown import Markdown
+    shown = [m for m in history if m.get("role") in ("user", "assistant", "action", "summary")]
+    if not shown:
+        console.print("[dim](no chat yet — ask the boss anything, or tell it what to change)[/dim]")
+        return
+    for m in shown[-tail:]:
+        role = m.get("role")
+        if role == "user":
+            console.print(f"[bold green]you ›[/bold green] {_esc(m.get('content', ''))}")
+        elif role == "action":
+            act = m.get("action") or {}
+            mark = {"done": "[green]✓[/green]", "pending": "[yellow]…[/yellow]",
+                    "failed": "[red]✗[/red]"}.get(m.get("status"), "[cyan]·[/cyan]")
+            console.print(f"  {mark} [cyan]{_esc(act.get('label') or act.get('type', 'action'))}[/cyan]")
+        elif role == "summary":
+            console.print(f"[dim]— recap: {_esc(m.get('content', ''))}[/dim]")
+        else:
+            console.print("[bold cyan]boss ›[/bold cyan]")
+            console.print(Markdown(m.get("content", "")))
+
+
+def _command_failure_line(label, error) -> str:
+    """Escape server/LLM-supplied text before it enters a rich markup string: a stray ``[/tag]`` in a
+    label or error message otherwise raises rich ``MarkupError`` and aborts the TUI — and, because
+    ``_reconcile_pending`` re-prints the persisted row, it re-crashes on every reopen of the run."""
+    return f"  [red]✗[/red] {_esc(label)} — {_esc(error)}"
 
 
 # ----------------------------------------------------------------------------- server autostart
