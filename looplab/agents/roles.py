@@ -205,6 +205,16 @@ class DeveloperResult:
     # instance after the lock — see `engine/audit.py::_emit_agent_report`, the site that decides
     # it, for the race and its measurement. Filled by `role_wrappers.py::audit_extra_of`.
     audit_extra: Optional[dict] = None
+    # THE SECOND NAMED NON-REGISTRY FIELD, and for the same reason as `audit_extra`: it is a
+    # Developer output the engine reads with `getattr` after the call, but it is not in
+    # `DEVELOPER_OUTPUT_ATTRS` — `search/best_of_n.py` writes it inside `implement` and CLEARS it
+    # inside `repair`/`repair_from` ("repair uses no predictive ranker"). So a repair on the SHARED
+    # developer, running in another worker, nulls the pick a build just made: driven, the build's
+    # `foresight_selected` was silently never written, and in the mirror order one node's pick is
+    # emitted against another's id. Adding it to the registry would be wrong — the registry's
+    # members are mirrored by `WrapsDeveloper`/`ValidatingDeveloper` and consumed on emit, and this
+    # one is neither — so it is carried here and named in the field-set pin, like `audit_extra`.
+    last_foresight_pick: Optional[dict] = None
 
     @classmethod
     def failed(cls, code: str) -> "DeveloperResult":

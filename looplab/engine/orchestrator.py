@@ -7146,12 +7146,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                         "error, unresolved within the node) — resume once it's fixed")
         self._consume_node_build_telemetry(
             node_id, 0, researcher=researcher, developer=developer, report=built.last_report,
-            audit_extra=built.audit_extra)
+            audit_extra=built.audit_extra, foresight_pick=built.last_foresight_pick)
 
     def _consume_node_build_telemetry(self, node_id: int, generation: int,
                                       *, researcher=None, developer=None,
                                       report=AuditMixin._REPORT_OMITTED,
-                                      audit_extra=AuditMixin._REPORT_OMITTED) -> None:
+                                      audit_extra=AuditMixin._REPORT_OMITTED,
+                                      foresight_pick=AuditMixin._REPORT_OMITTED) -> None:
         """Attribute this build's role telemetry to the node it belongs to, then clear it.
 
         All three creation paths end with this triple, and it is the CONSUMING half of the pairing
@@ -7173,7 +7174,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._emit_hypothesis_ranked(
             node_id, generation, **({"researcher": researcher} if researcher is not None else {}))
         self._emit_foresight_selected(
-            node_id, generation,
+            node_id, generation, foresight_pick=foresight_pick,
             **({"researcher": researcher} if researcher is not None else {}),
             **({"developer": developer} if developer is not None else {}))
 
@@ -7676,7 +7677,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 if self._developer_crash_pause_due(fold(self.store.read_all()), node.id):
                     self.store.append(*crash_pause)
         self._consume_node_build_telemetry(node.id, generation, report=built.last_report,
-                                           audit_extra=built.audit_extra)
+                                           audit_extra=built.audit_extra,
+                                           foresight_pick=built.last_foresight_pick)
 
     def _prepare_injected_node(
         self,
@@ -7910,7 +7912,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # `_inj` is bound by the same `if developer_called` above; a build that never called the
             # Developer does not reach this line at all.
             self._consume_node_build_telemetry(node_id, 0, report=_inj.last_report,
-                                               audit_extra=_inj.audit_extra)
+                                               audit_extra=_inj.audit_extra,
+                                               foresight_pick=_inj.last_foresight_pick)
 
     def _activate_spec(self, proposal: dict) -> None:
         """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec

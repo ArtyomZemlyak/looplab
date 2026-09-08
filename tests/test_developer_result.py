@@ -50,7 +50,8 @@ def test_the_envelope_is_the_registry_plus_code_and_is_immutable():
     # ASSIGNS and this is a METHOD a wrapper offers. It rode the shared instance until
     # 2026-09-08, in the same unlocked window `last_report` was moved here to escape. Listing it
     # keeps the rule below exact — a future field still cannot slip in unnamed.
-    assert fields == set(DEVELOPER_OUTPUT_ATTRS) | {"code", "audit_extra"}, (
+    assert fields == set(DEVELOPER_OUTPUT_ATTRS) | {"code", "audit_extra",
+                                                    "last_foresight_pick"}, (
         "a registry member with no envelope field is a side channel the engine can no longer read; "
         "an envelope field with no registry member is a channel no Developer produces")
     result = NodeBuildMixin._capture_developer_result(
@@ -273,6 +274,82 @@ def test_the_wrapper_annotation_rides_the_envelope_not_the_shared_instance():
     assert NodeBuildMixin._capture_developer_result(_Raiser(), _GOOD).audit_extra is None
 
 
+def test_the_predictive_pick_rides_the_envelope_and_a_repair_cannot_null_it():
+    """`last_foresight_pick` is a Developer output the engine read off the SHARED instance.
+
+    It is not in `DEVELOPER_OUTPUT_ATTRS` — `search/best_of_n.py` writes it inside `implement` and
+    CLEARS it inside `repair`/`repair_from` ("repair uses no predictive ranker: clear the prior
+    pick"). Both of those now run in workers, so a repair on the shared developer nulls the pick a
+    build just made, in the window between `_run_developer` releasing the lock and
+    `_emit_foresight_selected` reading it back: `foresight_selected` silently never written for
+    that node, and in the mirror order one node's pick emitted against another's id.
+
+    Driven: capture, let the repair land, emit. And the CONSUME still has to clear the instance —
+    what to publish comes from the call, what to clear is the role.
+
+    MUTATION: drop `foresight_pick=` from the emit call, or the capture from
+    `_capture_developer_result` -> this is red.
+    """
+    class _BestOfNish:
+        """The shape `best_of_n` has: sets the pick on implement, clears it on repair."""
+
+        def __init__(self):
+            self.last_files, self.last_deleted, self.last_footprint = {}, [], None
+            self.last_report = None
+            self.last_foresight_pick = None
+
+        def implement(self, _idea):
+            self.last_foresight_pick = {"chosen": 1, "confidence": 0.9}
+            return _GOOD
+
+        def repair(self, _idea, _code, _err):
+            self.last_foresight_pick = None      # "repair uses no predictive ranker"
+            return _GOOD
+
+    dev = _BestOfNish()
+    built = NodeBuildMixin._capture_developer_result(dev, dev.implement(object()))
+    assert built.last_foresight_pick == {"chosen": 1, "confidence": 0.9}, (
+        "the capture did not read the predictive pick at all")
+
+    dev.repair(object(), "code", "err")          # …the concurrent repair, on the SAME instance
+    assert dev.last_foresight_pick is None, "fixture: the repair must have cleared the instance"
+
+    rows: list[tuple] = []
+    class _Engine(AuditMixin):
+        store = SimpleNamespace(append=lambda t, d, **kw: rows.append((t, d)))
+        researcher = SimpleNamespace(last_foresight=None)
+
+    engine = _Engine()
+    engine.developer = dev
+    AuditMixin._emit_foresight_selected(engine, 11, 0, developer=dev,
+                                        foresight_pick=built.last_foresight_pick)
+    picks = [d for _t, d in rows if d.get("node_id") == 11]
+    assert picks and picks[0]["chosen"] == 1, (
+        f"the node's own predictive pick was lost to a concurrent repair: {rows}")
+
+    # …and the instance is still consumed, so a following non-predicting action cannot re-emit it.
+    dev.last_foresight_pick = {"chosen": 9}      # a sibling's, left standing on the shared object
+    rows.clear()
+    AuditMixin._emit_foresight_selected(engine, 12, 0, developer=dev,
+                                        foresight_pick={"chosen": 2})
+    assert [d["chosen"] for _t, d in rows if d.get("node_id") == 12] == [2], rows
+    assert dev.last_foresight_pick is None, (
+        "the consume must clear whatever the ROLE holds — leaving a sibling's pick standing is the "
+        "leak this consume exists to stop")
+
+    # …and the case that separates "consume the ROLE" from "consume when we emitted": this build
+    # predicted NOTHING (`foresight_pick=None`) while the shared instance holds a sibling's dict.
+    # Nothing is emitted for this node, and the sibling's pick must still not survive to be
+    # re-emitted against the NEXT one — which is the whole purpose of the consume.
+    dev.last_foresight_pick = {"chosen": 7}
+    rows.clear()
+    AuditMixin._emit_foresight_selected(engine, 13, 0, developer=dev, foresight_pick=None)
+    assert not [d for _t, d in rows if d.get("node_id") == 13], (
+        "a build that predicted nothing must publish nothing, not the instance's leftover")
+    assert dev.last_foresight_pick is None, (
+        "a sibling's pick survived on the shared role and will be emitted against the next node")
+
+
 # ------------------------------------------------------------------- 4. THE LOOP (serial build)
 class _SlowBuilder:
     def __init__(self, ticks):
@@ -338,12 +415,12 @@ def test_every_build_site_leaves_the_loop_through_the_offload_helper():
 
 
 def test_a_site_that_carries_the_report_carries_the_annotation_too():
-    """THE WIRING HALF of the envelope's `audit_extra`, which no driven test can reach.
+    """THE WIRING HALF of the envelope's per-call channels, which no driven test can reach.
 
-    `_emit_agent_report` prefers the envelope for BOTH channels, but only when a caller hands them
-    over; a caller that passes `report=` and drops `audit_extra=` falls back to the instance read
-    for the annotation alone — which is the pre-2026-09-08 race, silently, on a site that looks
-    fixed. The two travel together or the receipt is half taken from another call.
+    The emitters prefer the envelope for every channel, but only when a caller hands them over; a
+    caller that passes `report=` and drops `audit_extra=` or `foresight_pick=` falls back to the
+    instance read for that one — the pre-2026-09-08 race, silently, on a site that looks fixed.
+    They travel together or the receipt is part-taken from another call.
 
     AST, and per call site: driving `_emit_agent_report` directly cannot see a CALLER dropping the
     kwarg, which is exactly the mutation this refuses.
@@ -368,8 +445,17 @@ def test_a_site_that_carries_the_report_carries_the_annotation_too():
             if "report" not in kwargs:
                 continue
             checked += 1
-            assert "audit_extra" in kwargs, (
-                f"{fn.__qualname__} forwards the report and drops the annotation")
+            for channel in ("audit_extra", "foresight_pick"):
+                assert channel in kwargs, (
+                    f"{fn.__qualname__} forwards the report and drops `{channel}` — that channel "
+                    "falls back to the shared instance, which is the race the envelope exists for")
+    # …and the consumer forwards the pick on to the emitter it belongs to.
+    picks = [c for c in _attr_calls(Engine._consume_node_build_telemetry,
+                                    "_emit_foresight_selected")]
+    assert picks, "no `_emit_foresight_selected` call found — re-point this rule"
+    for call in picks:
+        assert "foresight_pick" in {k.arg for k in call.keywords}, (
+            "`_consume_node_build_telemetry` reads the pick off the shared developer again")
     # …and the ablation lane, which emits directly rather than through the consumer.
     from looplab.engine import ablation as _abl
 
