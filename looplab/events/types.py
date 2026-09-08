@@ -1011,7 +1011,7 @@ SETUP_THREAD_APPENDABLE: frozenset[str] = frozenset({
 
 # Invariant #1's FOURTH writer, and the one it did not name. The invariant says "UI/CLI append only
 # control intents (allow-listed in `serve/protocol.py::CONTROL_EVENTS`)" — the ASSISTANT'S TOOL
-# LAYER is neither, and `tools/machine_runs_tools.py::MachineRunsTools` appends these two FOLDED
+# LAYER is neither, and `tools/run_control_tools.py::RunControlTools` appends these two FOLDED
 # types directly. Neither is in `CONTROL_EVENTS`; `node_tombstoned` has no other writer in the tree
 # at all. So the seam existed, was reachable by an LLM, and was declared nowhere.
 #

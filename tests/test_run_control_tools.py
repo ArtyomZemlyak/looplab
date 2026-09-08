@@ -14,7 +14,7 @@ from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.serve.run_commands import run_generation_token
 from looplab.serve.server import make_app
-from looplab.tools.machine_runs_tools import RunControlTools, TraceRewriteFns
+from looplab.tools.run_control_tools import RunControlTools, TraceRewriteFns
 
 
 def _trace_rewrite_fns() -> TraceRewriteFns:

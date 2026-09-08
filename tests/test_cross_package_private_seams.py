@@ -286,7 +286,7 @@ def test_the_run_mutating_tool_takes_its_serve_primitives_by_injection():
     the serve implementations, so this is a boundary made VISIBLE rather than one already moved:
     the remaining upward import lives in exactly one named place a caller can replace.
     """
-    from looplab.tools.machine_runs_tools import RunControlTools, RunLifecycleFns
+    from looplab.tools.run_control_tools import RunControlTools, RunLifecycleFns
 
     calls = []
 

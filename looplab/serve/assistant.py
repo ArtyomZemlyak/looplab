@@ -1636,8 +1636,9 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     """
     from looplab.agents.agent import CompositeTools
     from looplab.tools.reposcout import RepoScoutTools
-    from looplab.tools.machine_runs_tools import (
-        MachineRunsTools, RunControlTools, RunLauncherTools, TraceRewriteFns)
+    from looplab.tools.machine_runs_tools import MachineRunsTools
+    from looplab.tools.run_control_tools import RunControlTools, TraceRewriteFns
+    from looplab.tools.run_launcher_tools import RunLauncherTools
 
     def trace_rewrite_fns() -> TraceRewriteFns:
         # Composition boundary: the tool package remains below ``serve`` and receives the three

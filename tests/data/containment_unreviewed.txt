@@ -95,9 +95,9 @@ looplab/tools/env_inspect.py::EnvInspectTools._pkg_info#1
 looplab/tools/env_inspect.py::EnvInspectTools._py_api#0
 looplab/tools/env_inspect.py::_installed_names#0
 looplab/tools/env_inspect.py::_installed_names#1
-looplab/tools/machine_runs_tools.py::RunControlTools._live#0
-looplab/tools/machine_runs_tools.py::RunControlTools._live#1
-looplab/tools/machine_runs_tools.py::RunLauncherTools.execute#1
+looplab/tools/run_control_tools.py::RunControlTools._live#0
+looplab/tools/run_control_tools.py::RunControlTools._live#1
+looplab/tools/run_launcher_tools.py::RunLauncherTools.execute#1
 looplab/tools/memory_tools.py::MemoryTools.execute#0
 looplab/tools/node_diff.py::known_nodes#0
 looplab/tools/skills.py::SkillTools.execute#0

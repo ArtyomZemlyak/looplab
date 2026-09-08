@@ -334,12 +334,18 @@ _LAYOUT = {
     "run_files": "serve",
     "run_projections": "serve",   # the run-list projections AppState now owns (doc 25 SR-12)
     "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
+    "receipt": "core",   # the RECEIPT tier: a durable operation's identity/phase machine (doc 34 D-01)
     "run_deletion": "core",
     "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
     "run_reset": "core",
     "node_diff": "tools",   # what actually differs between two nodes: code, params proposed vs applied
     "run_tools": "tools",
     "machine_runs_tools": "tools",
+    "run_control_tools": "tools",   # the assistant's run-MUTATING provider (doc 25 TO-02)
+    "node_purge_receipt": "tools",  # ...the node purge's durable receipt schema (doc 34 D-01)
+    "run_launcher_tools": "tools",  # ...its launch-PROPOSAL provider (same split)
+    "run_command_adapter": "tools",  # ...the seam to the serve-owned command service
+    "turn_mutation_fence": "tools",  # ...one assistant turn's durable mutation journal
     "sandbox": "runtime",
     "scorer_fidelity": "search",
     "schemas": "serve",
