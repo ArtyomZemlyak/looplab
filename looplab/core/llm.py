@@ -403,25 +403,11 @@ def cost_is_reported(value) -> bool:
     The acceptance test is exactly `_safe_cost`'s and is stated here ONCE so the two cannot drift:
     any value this rejects is a value `_safe_cost` turns into a zero that must not be read as free.
 
-    OPEN[reported-zero-is-an-invoice-here-and-not-in-the-meter] this function ACCEPTS `0.0` as a
-    stated amount, and `benchmarks/meter/proxy.py::_body_cost` REFUSES the identical zero, having
-    closed exactly this on 2026-09-06: "a zero, a negative number and a value that is not a number
-    are all 'the upstream did not price this'". Two rules for one fact, one layer apart, under a
-    doc-25 COST-01 heading that says the rule is stated once.
-    proof:`present:return math.isfinite(cost) and cost >= 0.0@looplab/core/llm.py`
+    *Closed 2026-09-08: a reported `0.0` is now refused here as it already was in
+    `benchmarks/meter/proxy.py::_body_cost`, so the rule is stated once again. See the
+    comment on the return below for the driven 16-of-16 vs 1-of-16 measurement and why the
+    asymmetry decided the direction.*
 
-    WHY IT MATTERS, driven 2026-09-08: `RunBudget`'s reserve estimate is committed / priced_calls,
-    so every zero counted as "priced" divides the estimate down. Identical traffic, identical
-    `llm_cost_limit` $1.00, 16-way fan-out — a gateway stamping `usage.cost: 0.0` admitted 16 of 16
-    and spent $8.50; the same gateway OMITTING the key admitted 1 of 16 and spent $1.00. The meter's
-    own argument is that the corporate gateway IS LiteLLM, which emits that zero for a model group
-    it has no price for.
-
-    NOT DECIDED HERE, and the two candidates fail in opposite directions: accepting the zero is the
-    "budget never binds" defect the meter names; refusing it reads a genuinely free provider as
-    unpriced, which is what this function was written to keep distinguishable in the first place
-    (see the two measured runs above). Which one an operator should get changes when a run stops
-    spending, so it is theirs, not a tidy-up.
     """
     if value is None or isinstance(value, (bool, str, bytes, bytearray)):
         return False
@@ -429,7 +415,27 @@ def cost_is_reported(value) -> bool:
         cost = float(value)
     except (OverflowError, TypeError, ValueError):
         return False
-    return math.isfinite(cost) and cost >= 0.0
+    # A REPORTED ZERO IS NOT AN INVOICE, and this is the same rule
+    # `benchmarks/meter/proxy.py::_body_cost` settled on 2026-09-06 rather than a second one: "a
+    # zero, a negative number and a value that is not a number are all 'the upstream did not price
+    # this'". Two rules for one fact, one layer apart, under a doc-25 COST-01 heading that says the
+    # rule is stated once — and the production path was the one still accepting it.
+    #
+    # The number does not move: `_safe_cost(0.0)` was 0.0 before and is 0.0 now. What moves is
+    # `priced_calls`, and that is where the money was. `RunBudget`'s reserve estimate is
+    # committed / priced_calls, so every zero counted as priced divides the estimate down. Driven
+    # 2026-09-08 through the real add -> ledger sink -> commit path, identical traffic, identical
+    # `llm_cost_limit` $1.00, 16-way fan-out: a gateway stamping `usage.cost: 0.0` admitted 16 of
+    # 16 and spent $8.50; the same gateway OMITTING the key admitted 1 of 16 and spent $1.00.
+    #
+    # THE DIRECTION WAS CHOSEN ON THE ASYMMETRY, not on taste. Accepting the zero is the "budget
+    # never binds" defect the meter names, and the corporate gateway IS LiteLLM, which emits
+    # exactly this zero for a model group it has no price for. Refusing it costs a genuinely free
+    # provider its "free" label — it reads as unpriced, imputation runs, the estimate is not
+    # diluted. Nobody overspends from the conservative side. And the distinction the docstring
+    # above wants to keep is not available from the data anyway: a free provider and an unpriced
+    # one write the same `0.0`.
+    return math.isfinite(cost) and cost > 0.0
 
 
 def inferred_priced_calls(cost: float, calls: int) -> int:
