@@ -20,7 +20,7 @@ from __future__ import annotations
 import anyio
 
 from factories import make_engine
-from looplab.agents.roles import ToyObjectiveDeveloper
+from looplab.agents.toy_roles import ToyObjectiveDeveloper
 from looplab.core.models import Event, developer_artifact_footprint
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold, is_hard_signal
