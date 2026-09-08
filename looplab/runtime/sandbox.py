@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from looplab.core.errors import ConfigRefusal
-from looplab.runtime.read_fence import FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath
+from looplab.runtime.read_fence import (FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath,
+                                        reassert as _reassert_fence)
 from looplab.runtime import landlock as _landlock
 from looplab.runtime import seccomp as _seccomp
 
@@ -553,6 +554,13 @@ class RunResult:
     # stops the record attributing a number to parameters the node never used. It gates nothing and
     # cannot fail a node. None when the node declares no comparable coordinate or no carrier read.
     applied_params: Optional[dict] = None
+    # EFFECTIVE TRAIN BATCH (`runtime/effective_batch.py`): what the training PROCESS recorded about
+    # the one coordinate the field above cannot speak for — `trainer_state.json::train_batch_size`,
+    # bound at the same metric read. `applied_params` states its own bound (a document, never an
+    # execution), and `auto_find_batch_size` is exactly where that bound costs: the declared number
+    # stays in every saved config while the batch that ran survives only in the trainer's own state
+    # file. None on every task that is not a transformers training, which is silence and not a claim.
+    effective_train_batch: Optional[dict] = None
     # HOST-SIDE SCORING (doc 52 row 10a, `adapters/repo_task.py::HostScorerSpec`): when the task
     # declared a host scorer, `metric` above is ITS number and these two carry what the candidate
     # said about itself. `self_metric` is the candidate's own printed number, read off the last
@@ -914,6 +922,17 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # in the env: it is inert without the PYTHONPATH entry and it tells an operator inspecting a
     # container that the run had a fence.
     if not _docker_run:
+        # RE-ASSERT THE FENCE FIRST (2026-09-08). The generated `sitecustomize.py` is created once
+        # per engine and lives in a directory the eval OWNS, so every filesystem rung over it rests
+        # on ownership and a node can take it back: measured, `open(fence, "w")` from inside the
+        # fenced interpreter on a privileged runner, and a `/bin/rm` child on ANY runner, both
+        # succeed and leave every LATER process of the run unfenced — other nodes included. This
+        # call compares the file against the engine's own in-memory copy (which a node cannot
+        # reach) and repairs it, so the blast radius of a tamper is the launch that did it rather
+        # than the rest of the run. It is a repair, not a prevention: a tamper landing between here
+        # and the child's `execve` still wins. Costs one 33 KB read (0.027 ms median, 0.15 % of a
+        # fenced process's startup) and is a no-op for a fence this process did not install.
+        _reassert_fence(full_env.get(FENCE_DIR_ENV) or "")
         prepend_pythonpath(full_env, full_env.get(FENCE_DIR_ENV) or "")
         # THE LAUNCH'S OWN WORKDIR, for the fence's record rule (2026-09-06): the one directory
         # under the run record this process may write. Set, never defaulted — `wd` is per LAUNCH

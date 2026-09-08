@@ -905,16 +905,30 @@ copy's 910,829 B (+2.1 %) and the full W=1 cycle is 0.376 s against 0.346 s — 
 is a measured loss. Full derivation: docs/37-node-workspace-worktree-measurement-2026-08-13.md.
 This entry is PERMANENT. Do not re-open it without reading doc 37.
 
-> **Status update (2026-08-14).** Re-verified against the tree, and doc 37's ask — carry this row as
-> DECLINED WITH MEASUREMENT, never as deferred — is what the heading now says (a stray duplicate
-> heading from the rename was removed here). Doc 37 §8's R1 follow-up (record the workspace's real
-> size as a fold-ignored diagnostic) is NOT yet in code: `engine/workspace.py` still appends
-> `workspace_seeded` with only the `materialized` name list and no byte total. The root close is one
-> OPEN[f3-workspace-byte-total] doc 37 §8's R1 follow-up, nested inside a DECLINED entry.
+> **Status update (2026-08-14, amended 2026-09-08).** Re-verified against the tree, and doc 37's
+> ask — carry this row as DECLINED WITH MEASUREMENT, never as deferred — is what the heading now
+> says (a stray duplicate heading from the rename was removed here).
+>
+> *Half of doc 37 §8's R1 landed 2026-09-08.* That rung asks two things in one sentence: a per-node
+> byte total **that names the largest subtrees**, and for it to be a **recorded** fact. The first is
+> now `looplab workspace-bytes` (`looplab/cli/workspace_bytes.py`, a section in
+> `docs/guide/cli-reference.md`, `tests/test_workspace_bytes.py`): a bounded walk of a run's
+> `nodes/*` that prints each workspace's bytes, its largest subtrees **and that node's
+> `workspace_seeded` claim on the same rows** — so the 0.9 MB sentence that got the copy blamed for
+> 727 GB can no longer be read on its own. The walk spends ONE budget of directory entries; crossing
+> it stops the walk, prints every total as a FLOOR with the larger call that continues, and names
+> what it never reached, because doc 37 §9 records this walk as unbounded in general and a number
+> that silently truncated is worse than a refusal.
+>
+> What remains is the RECORDED half, and it keeps the slug:
+> OPEN[f3-workspace-byte-total] the RUN must record its own workspace size, not only an operator who
 > proof:absent:workspace_bytes@looplab/engine/workspace.py
-> additive field — a byte sum taken during the seed walk, added to that payload with a reader-side
-> default (invariant #5-safe) — followed by the written retention policy doc 37 §8 requires before
-> any checkpoint reclaim.
+> thinks to ask: `engine/workspace.py` still appends `workspace_seeded` with the `materialized` name
+> list and no byte total, so a run whose workspaces have been deleted — or that ran on a box you no
+> longer have — still cannot answer the question the instrument above answers on disk. One additive
+> field (a byte sum taken during the seed walk, reader-side default, invariant #5-safe) or the
+> eval-end per-node receipt doc 37 §8 R1 names; then the written retention policy that document
+> requires before any checkpoint reclaim.
 
 **Asked:** "move to git worktree?"
 

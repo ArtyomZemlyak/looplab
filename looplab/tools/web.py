@@ -124,7 +124,24 @@ def normalize_web_deny(entries) -> tuple:
     naming the entry, because a prefix that can never match is a fence that fences nothing while
     the task file says it does — the same reason `envsafe.validate_env_map` refuses rather than
     drops. Whitespace is stripped, the scheme and host are lower-cased (both are case-insensitive
-    by RFC 3986), the path is kept as written. Duplicates collapse, order is kept."""
+    by RFC 3986), the path is kept as written. Duplicates collapse, order is kept.
+
+    TWO SHAPES THE MATCHER CANNOT HONOUR, and the rule above decides both:
+
+    * a path carrying `..`. `_host_path` answers `parts is None` for it and `web_deny_match` SKIPS
+      such a prefix outright (`continue`) — so the operator's declaration fenced nothing at all
+      while the task file said it did, which is precisely what this function exists to refuse. It
+      is refused here rather than reinterpreted, because a prefix that climbs out of itself does
+      not name a page and resolving it in either direction would be us guessing which one.
+    * a QUERY. The comparison is host + path COMPONENTS; `web_deny_match` reads neither side's
+      query. Keeping it in the stored form made the declaration read as "this page with this
+      query" while the fence covered the whole path — the stored form has to be the compared
+      form, or every message that names the prefix names something the fence does not do. It is
+      DROPPED rather than refused, unlike the `..`: dropping widens the fence to the path, which
+      is the over-fencing direction this module chooses everywhere else (`/OriPress/`, `%6F`, a
+      `..` on a declared host), whereas refusing would reject a declaration that already covers
+      what its author meant. The fragment was always dropped, and is client-side by RFC 3986.
+    """
     out: list[str] = []
     for raw in (entries or ()):
         text = str(raw or "").strip()
@@ -135,8 +152,13 @@ def normalize_web_deny(entries) -> tuple:
             raise ValueError(
                 f"web_deny: {text!r} is not an absolute http(s) URL prefix (it needs a scheme and "
                 "a host, e.g. 'https://github.com/org/repo/')")
+        if _host_path(text)[1] is None:
+            raise ValueError(
+                f"web_deny: {text!r} carries a `..` segment, so it names no page and "
+                "`web_deny_match` can never match it — the declaration would fence nothing while "
+                "the task file says it does. Write the prefix the page actually lives at.")
         norm = urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(),
-                                        parsed.path, parsed.query, ""))
+                                        parsed.path, "", ""))
         if norm not in out:
             out.append(norm)
     return tuple(out)
@@ -155,8 +177,10 @@ def _host_path(url: str) -> tuple:
 
     Percent-decoding is done ONCE (`unquote` is not applied to its own output — `%2570` decodes to
     `%70`, and decoding twice would fence a path that genuinely contains the literal text `%70`),
-    `..` is refused rather than resolved (a path that climbs out is not the prefix's page and is not
-    ours to reinterpret), and the root dot is stripped from the host, which `hostname` leaves on.
+    `..` is UNRESOLVABLE rather than resolved (a path that climbs out is not the prefix's page and
+    is not ours to reinterpret) — reported as `parts is None`, which `web_deny_match` turns into a
+    refusal on any prefix sharing the host, never into "no prefix covers this" — and the root dot is
+    stripped from the host, which `hostname` leaves on.
     """
     parsed = urllib.parse.urlsplit(str(url or "").strip())
     host = (parsed.hostname or "").lower().rstrip(".")
@@ -181,14 +205,33 @@ def web_deny_match(url: str, deny) -> str | None:
     that DIRECTORY — which it names with or without the slash (`.../AlgoTune/` covers the repo's
     landing page `.../AlgoTune` and everything under it, and not `.../AlgoTune-fork/`)."""
     host, parts, _query = _host_path(url)
-    if not host or parts is None:
+    if not host:
         return None
     for prefix in (deny or ()):
         p_host, p_parts, _p_query = _host_path(prefix)
         if not p_host or p_parts is None:
+            # UNREACHABLE for a declaration that went through `normalize_web_deny`, which now
+            # REFUSES both shapes at the task file. It stays because this function is public and
+            # takes any iterable, and because skipping is the only thing it can do with a prefix
+            # that names no page — but skipping is FAIL-OPEN, so the refusal belongs upstream where
+            # the operator can see it, not here where it silently unfences their declaration.
             continue
         if host != p_host and not host.endswith("." + p_host):
             continue
+        # AN UNCANONICALIZABLE PATH FAILS CLOSED, and it did not until 2026-09-08. `_host_path`
+        # answers `parts is None` for a URL whose path carries a `..` segment, the docstring above
+        # calls that "refused", and the function returned None — which every caller reads as "no
+        # declared prefix covers this URL", i.e. ALLOWED. `.../AlgoTune/x/../solver.py` therefore
+        # walked around a prefix that names `.../AlgoTune/`, and GitHub, nginx and most CDNs
+        # normalize the request-URI themselves and serve the denied page with no redirect, so the
+        # per-hop re-check in `_SSRFRedirectHandler` never fires either: the measured behaviour this
+        # fence exists for (52 of 76 AlgoTune runs fetching their own graded task's published
+        # solver) was one path segment away. Refusing on the HOST is the over-fencing direction the
+        # docstring already chooses for `/OriPress/` and `%6F`: a `..` on an undeclared host is
+        # untouched, and a `..` on a declared one is not ours to reinterpret in the permissive
+        # direction either.
+        if parts is None:
+            return prefix
         # COMPONENT-wise, never a bare string prefix: two of the four prefixes `make_task.py` emits
         # are declared WITHOUT a trailing slash, and `startswith` made
         # `…/datasets/oripress/AlgoTune` fence `…/AlgoTune-Bench`, `…/AlgoTuneV2` and every other
@@ -516,7 +559,7 @@ class WebTools:
         snippets = _SNIPPET.findall(html)
         out = []
         denied = 0
-        for href, title in titles:
+        for row, (href, title) in enumerate(titles):
             url = _resolve(href)
             # THE OTHER HALF OF THE FENCE. `_fetch` refuses the denied page and `_search` handed the
             # model its exact URL and a 300-char snippet of it — and the measured behaviour the
@@ -528,7 +571,13 @@ class WebTools:
             if web_deny_match(url, self.deny):
                 denied += 1
                 continue
-            snip = _untag(snippets[len(out)]) if len(out) < len(snippets) else ""
+            # THE SNIPPET INDEX FOLLOWS `titles`, NOT `out`. `_RESULT` and `_SNIPPET` are two scans
+            # of the same page and pair up positionally; keying the lookup on the count of KEPT rows
+            # was correct only while nothing was ever skipped, and the `continue` above is the skip.
+            # With one row dropped every later result was rendered under its own URL with the
+            # PREVIOUS row's snippet — including up to 300 characters of the denied page's text,
+            # attributed to an allowed URL, which is precisely what the deny list is for.
+            snip = _untag(snippets[row]) if row < len(snippets) else ""
             out.append(f"{len(out) + 1}. {_untag(title)}\n   {url}\n   {snip[:300]}")
         if denied:
             out.append(f"({denied} result(s) withheld: they are under a prefix this run's task "

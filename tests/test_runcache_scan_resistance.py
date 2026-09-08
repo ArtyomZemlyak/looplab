@@ -130,12 +130,16 @@ def test_the_default_is_the_historical_behaviour(tmp_path):
     assert _cached(cache) == ["run-001", "run-002", "run-003"], "plain LRU, hot insert, drop oldest"
 
 
-def test_every_full_population_sweep_passes_the_flag():
+def test_every_full_population_sweep_passes_the_flag(tmp_path):
     """The rule the cache's own docstring states: a read is a SCAN when its population is
     `run_ids()`. AST over the real loops, so a new listing tool that forgets it goes red.
 
-    MUTATION: drop `scan=True` at any of the three sites -> that tool's walk evicts the working set
-    again, silently, and only a timing measurement would ever notice.
+    TWO SPELLINGS ARE ADMISSIBLE and only two: `_state(..., scan=True)`, and `_summary(...)`, which
+    is a sweep read BY CONSTRUCTION (it takes no flag and passes `scan=True` itself — asserted
+    below, so this is not a rename that lost the property).
+
+    MUTATION: drop `scan=True` at any site that still reads `_state` -> that tool's walk evicts the
+    working set again, silently, and only a timing measurement would ever notice.
     """
     import ast
 
@@ -151,13 +155,30 @@ def test_every_full_population_sweep_passes_the_flag():
         tree = function_tree(func)
         calls = [node for node in ast.walk(tree)
                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                 and node.func.attr == "_state"]
-        assert calls, f"{func.__qualname__} no longer reads state — re-point this guard"
+                 and node.func.attr in ("_state", "_summary")]
+        assert calls, f"{func.__qualname__} no longer reads a run — re-point this guard"
         for call in calls:
+            if call.func.attr == "_summary":
+                continue                               # scan-by-construction; see the check below
             flags = {kw.arg: getattr(kw.value, "value", None) for kw in call.keywords}
             assert flags.get("scan") is True, (
                 f"{func.__qualname__} sweeps {population}() without scan=True, so its folds evict "
                 f"the runs the turn is working with")
+
+    # The construction the loop above leans on, DRIVEN rather than assumed: a `summary()` MISS must
+    # reach the fold as a scan read, or the projection would quietly reintroduce the eviction the
+    # exemption above grants it.
+    cache = RunStateCache(_root(tmp_path, 2))
+    seen: list[bool] = []
+    inner = cache.state
+
+    def _recording(run_id, *, scan=False):
+        seen.append(scan)
+        return inner(run_id, scan=scan)
+
+    cache.state = _recording
+    assert cache.summary("run-000") is not None
+    assert seen == [True], f"a summary miss folded with scan={seen} — it must land COLD"
 
 
 def test_a_SWEEP_MISS_IS_ACTUALLY_CACHED_at_capacity(tmp_path):

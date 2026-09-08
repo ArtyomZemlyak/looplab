@@ -14,15 +14,25 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from looplab.core import tracing
 from looplab.core.config import DEVELOPER_BACKENDS
+from looplab.core.llm import CostAccountant, request_cancelled
 from looplab.core.models import Idea, developer_artifact_footprint
 from looplab.core.validate import AgentRun
 
 _SEED = 'import json\n\n# TODO: implement the solution.\nprint(json.dumps({"metric": 0.0}))\n'
+
+
+def _tails(*parts) -> str:
+    """Join whatever a stopped agent printed into one bounded tail (bytes or text, either order)."""
+    text = "".join((x.decode("utf-8", "replace") if isinstance(x, bytes) else str(x))
+                   for x in parts if x)
+    return text[-2000:]
 
 
 def opencode_config(host: str, model: str) -> str:
@@ -217,9 +227,26 @@ PRESETS: dict[str, CliAgentSpec] = {
 }
 
 
+class _ExternalAgentCancelled(Exception):
+    """Private control signal: the cancel token fired while the agent subprocess was running.
+
+    Carries whatever the agent had printed by then, so the record of a cancelled run says as much as
+    the record of a timed-out one. Never leaves this module — `_run` turns it into an `AgentRun`.
+    """
+
+    def __init__(self, stdout=None, stderr=None):
+        super().__init__("external agent cancelled")
+        self.stdout, self.stderr = stdout, stderr
+
+
 class CliAgentDeveloper:
     # T8/A0b: an external coding agent writes real code -> merge_mode="auto" = ensemble merge.
     is_code_generating = True
+
+    # How often a running agent notices a cancel, and therefore the longest a Stop waits on it. The
+    # agent is a multi-minute subprocess, so this is imperceptible beside its own latency; it is the
+    # slice `communicate` waits, not a busy-poll.
+    CANCEL_POLL_S = 0.5
 
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  brief: str = "", spec: Optional[CliAgentSpec] = None,
@@ -227,7 +254,8 @@ class CliAgentDeveloper:
                  workdir_files: Optional[dict] = None,
                  patch_gate: bool = False, surface: Optional[list] = None,
                  seed_dir: Optional[str] = None, seed_dirs: Optional[list] = None,
-                 protect: Optional[list] = None, editable_prefixes: Optional[list] = None):
+                 protect: Optional[list] = None, editable_prefixes: Optional[list] = None,
+                 accountant: Optional[CostAccountant] = None, cancel_check=None):
         # seed_dir(s): seed the agent's worktree from existing repo tree(s) (RepoTask) instead
         # of a single solution.py — the agent edits real repo files; the patch gate diffs
         # against that worktree and returns the accepted in-surface edits as `last_files`.
@@ -252,6 +280,19 @@ class CliAgentDeveloper:
         self.protect = protect or []
         # Named multi-editable repo subdirs — scopes each repo's surface to its own subdir.
         self.editable_prefixes = editable_prefixes or []
+        # THE RUN'S LEDGER (doc 27 `external-cli-usage-is-unpriced`). An external coding agent is the
+        # role that writes the code, and its spend used to reach neither `llm_usage` nor
+        # `looplab tokens`: a run whose Developer is a CLI agent reported the cost of everything
+        # except the developer. It has no `.client`, so `engine/costs.py::find_cost_accountants`
+        # walks it by its `accountant` attribute like every other paid role — hand it the RUN's
+        # shared accountant (`agents/factory.py`) and its invocations join the same ceiling.
+        self.accountant = accountant or CostAccountant()
+        # The CANCEL TOKEN (doc 27 `cancel-not-propagated-into-provider-request`): the external agent
+        # used to be killed only by its TIMEOUT, so a stopped run kept a multi-minute subprocess (and
+        # its GPU/CPU children) alive to the deadline. Optional and guarded; with none supplied the
+        # ambient request token is read, so a caller that scopes `cancel_check_scope` reaches here
+        # exactly as it reaches an in-process client.
+        self.cancel_check = cancel_check
         # Per-invocation audit signal, read by the ValidatingDeveloper (ADR-7):
         self.last_run: Optional[AgentRun] = None  # process-level result of the last run
         self.last_seed: str = ""                  # file content handed to the last run
@@ -291,6 +332,70 @@ class CliAgentDeveloper:
         subst = {"{message}": message, "{model}": self.model, "{file}": file}
         base = list(base) if base is not None else self._launch_base()
         return [subst.get(tok, tok) for tok in base]
+
+    def _cancelled(self) -> bool:
+        """Guarded cancel probe: this developer's own token, else the ambient request token.
+
+        Same shape and same reason as `agents/tool_loop.py::_cancelled` and
+        `core/llm_transient.py::request_cancelled` — a broken observer must never be able to kill a
+        live agent, so a predicate that raises answers False.
+        """
+        if self.cancel_check is not None:
+            try:
+                return bool(self.cancel_check())
+            except Exception:  # noqa: BLE001 — a broken cancel probe must not stop a running agent
+                return False
+        return request_cancelled()
+
+    def _communicate(self, p):
+        """Wait for the agent, honouring the CANCEL TOKEN as well as the deadline.
+
+        One `communicate(timeout=self.timeout)` could only ever end on the deadline, which is why a
+        stopped run kept its agent (and the language server / training subprocess it spawned) alive
+        to the end of the timeout. Slicing the wait costs nothing: `Popen.communicate` accumulates
+        partial output ACROSS timed-out calls (CPython keeps it on the instance), so the exception
+        raised at the real deadline still carries everything the agent printed, exactly as the one
+        long call did — and the deadline it names is `self.timeout`, not the slice.
+        """
+        deadline = time.monotonic() + max(0.0, float(self.timeout))
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                return p.communicate(timeout=max(0.0, min(self.CANCEL_POLL_S, remaining)))
+            except subprocess.TimeoutExpired as e:
+                if self._cancelled():
+                    raise _ExternalAgentCancelled(e.stdout, e.stderr) from None
+                if remaining <= self.CANCEL_POLL_S:
+                    raise subprocess.TimeoutExpired(p.args, self.timeout,
+                                                    output=e.stdout, stderr=e.stderr) from None
+
+    def _account_invocation(self, run: AgentRun, gen) -> None:
+        """Put ONE external-agent invocation into the run's ledger, EXPLICITLY UNPRICED.
+
+        `CostAccountant.add(None, None)` is the ledger's existing shape for exactly this fact: one
+        `calls`, zero `priced_calls`, no tokens — "we know a paid call happened and we do not know
+        what it cost", which is what `docs/guide/llm-and-agents.md` already means by unpriced. It is
+        not the same as recording nothing: before this, a run whose Developer was a CLI agent
+        reported the cost of every role EXCEPT the one that wrote the code, and nothing in
+        `looplab tokens` said so.
+
+        Nothing here parses the agent's stdout for a token count. The bytes are written by the agent
+        itself, and the extra-metrics rule applies verbatim: nothing derivable from an artifact the
+        subject writes can authenticate its author. A number LoopLab cannot check is worse than a
+        stated unknown, because only the unknown is visible as a gap.
+
+        Charged only for a launch that actually RAN (`launched`), timed out and cancelled included —
+        those spent tokens; a missing binary spent nothing.
+        """
+        if not run.launched:
+            return
+        gen.set("agent", self.spec.name).set("exit_code", run.exit_code)
+        gen.set("duration_s", round(run.duration_s, 3)).set("unpriced", True)
+        if run.timed_out or run.cancelled:
+            gen.set("outcome", "timed_out" if run.timed_out else "cancelled")
+        # No handler: `add` raises only `BudgetExceeded`, which is the operator's ceiling doing its
+        # job and must reach the caller like it does from any other paid role.
+        self.accountant.add(None, usage=run.usage)
 
     def _run(self, message: str, seed_code: str) -> str:
         self.last_seed = seed_code
@@ -335,53 +440,76 @@ class CliAgentDeveloper:
             # reusing the sandbox tier's `_kill_tree` (psutil → killpg/taskkill fallback).
             group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
                      else {"start_new_session": True})
-            try:
-                # encoding/errors explicit: agents print UTF-8 glyphs (·, →) that the
-                # Windows locale codec (cp1252) can't decode — the default text=True
-                # crashes the stdout reader thread mid-run and loses the captured output.
-                with subprocess.Popen(argv, cwd=str(wd), env=env, stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                                      errors="replace", **group) as p:
-                    from looplab.runtime.sandbox import _kill_tree
-                    try:
-                        out, err = p.communicate(timeout=self.timeout)
-                        self.last_run = AgentRun(launched=True, exit_code=p.returncode,
-                                                 stdout_tail=(out or "")[-2000:],
-                                                 stderr_tail=(err or "")[-2000:])
-                    except subprocess.TimeoutExpired as e:
-                        _kill_tree(p)                  # the WHOLE tree, not just the direct child
+            # THE SPAN THE INVOCATION SPENDS UNDER (CLAUDE.md: a phase that spends opens a span).
+            # An external agent is a generation like any other role's — one model, one request, one
+            # duration — so it opens the same `generation` observation, and `CostAccountant.add`
+            # stamps this span from below (`tracing.record_paid_call`). Without it the developer's
+            # own money was the one phase `looplab timings`/`looplab tokens` could not see at all.
+            # A null handle outside a traced run, so the offline/CLI paths are unchanged.
+            started = time.monotonic()
+            with tracing.generation(op="cli_agent", model=self.model) as gen:
+                try:
+                    # encoding/errors explicit: agents print UTF-8 glyphs (·, →) that the
+                    # Windows locale codec (cp1252) can't decode — the default text=True
+                    # crashes the stdout reader thread mid-run and loses the captured output.
+                    with subprocess.Popen(argv, cwd=str(wd), env=env, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                                          errors="replace", **group) as p:
+                        from looplab.runtime.sandbox import _kill_tree
                         try:
-                            drained = p.communicate(timeout=10)  # reap the group; drain/free the pipes
-                        except Exception:  # noqa: BLE001 — SIGKILL'd tree; __exit__ still closes the fds
-                            drained = (None, None)
-                        # KEEP what the agent printed before it hung. `TimeoutExpired` carries the
-                        # output captured up to the deadline, and the reap above drains whatever
-                        # landed after it; recording only `str(e)` threw both away, so the operator
-                        # and the repair loop saw a bare "timed out" for a run that may have said
-                        # exactly where it got stuck. The timeout notice stays, appended to stderr.
-                        def _tail(*parts) -> str:
-                            text = "".join(
-                                (x.decode("utf-8", "replace") if isinstance(x, bytes) else str(x))
-                                for x in parts if x)
-                            return text[-2000:]
-
-                        self.last_run = AgentRun(
-                            launched=True, timed_out=True,
-                            stdout_tail=_tail(e.stdout, drained[0]),
-                            stderr_tail=_tail(e.stderr, drained[1], "\n", str(e)))
-                    except BaseException:
-                        # ANY other error (KeyboardInterrupt / MemoryError / an OSError raised mid-
-                        # communicate) must NOT leave a detached tree: with start_new_session the child is
-                        # its OWN session leader, so a terminal SIGINT never reaches it — only the engine
-                        # parent raises. Tree-kill before propagating (restores subprocess.run's kill-on-
-                        # any-exception) so Popen.__exit__ can't hang on a live child and no grandchild
-                        # survives. An OSError here re-raises to the outer handler (launched=False), as before.
-                        _kill_tree(p)
-                        raise
-            except OSError as e:
-                # binary missing / not executable -> leave the seed; the validator flags
-                # `agent_launched=False` and the loop's eval/debug copes.
-                self.last_run = AgentRun(launched=False, stderr_tail=str(e)[-2000:])
+                            out, err = self._communicate(p)
+                            self.last_run = AgentRun(launched=True, exit_code=p.returncode,
+                                                     stdout_tail=(out or "")[-2000:],
+                                                     stderr_tail=(err or "")[-2000:])
+                        except _ExternalAgentCancelled as cancelled:
+                            # THE SAME REAP AS THE TIMEOUT BRANCH BELOW, for the same reason: the
+                            # agent owns a process GROUP, so stopping it means the tree and not the
+                            # direct child. What differs is only the verdict recorded — a cancelled
+                            # agent did not fail to finish in time, it was told to stop, and
+                            # `validate_agent_code` must not read it as a hung run.
+                            _kill_tree(p)
+                            try:
+                                drained = p.communicate(timeout=10)
+                            except Exception:  # noqa: BLE001 — SIGKILL'd tree; __exit__ still closes the fds
+                                drained = (None, None)
+                            self.last_run = AgentRun(
+                                launched=True, cancelled=True,
+                                stdout_tail=_tails(cancelled.stdout, drained[0]),
+                                stderr_tail=_tails(cancelled.stderr, drained[1], "\n",
+                                                   "cancelled by the caller"))
+                        except subprocess.TimeoutExpired as e:
+                            _kill_tree(p)              # the WHOLE tree, not just the direct child
+                            try:
+                                drained = p.communicate(timeout=10)  # reap the group; drain/free the pipes
+                            except Exception:  # noqa: BLE001 — SIGKILL'd tree; __exit__ still closes the fds
+                                drained = (None, None)
+                            # KEEP what the agent printed before it hung. `TimeoutExpired` carries the
+                            # output captured up to the deadline, and the reap above drains whatever
+                            # landed after it; recording only `str(e)` threw both away, so the operator
+                            # and the repair loop saw a bare "timed out" for a run that may have said
+                            # exactly where it got stuck. The timeout notice stays, appended to stderr.
+                            # (`_tails` was this branch's own nested `_tail`; it moved to module scope
+                            # unchanged when the cancel branch above needed the same joining rule.)
+                            self.last_run = AgentRun(
+                                launched=True, timed_out=True,
+                                stdout_tail=_tails(e.stdout, drained[0]),
+                                stderr_tail=_tails(e.stderr, drained[1], "\n", str(e)))
+                        except BaseException:
+                            # ANY other error (KeyboardInterrupt / MemoryError / an OSError raised mid-
+                            # communicate) must NOT leave a detached tree: with start_new_session the child is
+                            # its OWN session leader, so a terminal SIGINT never reaches it — only the engine
+                            # parent raises. Tree-kill before propagating (restores subprocess.run's kill-on-
+                            # any-exception) so Popen.__exit__ can't hang on a live child and no grandchild
+                            # survives. An OSError here re-raises to the outer handler (launched=False), as before.
+                            _kill_tree(p)
+                            raise
+                except OSError as e:
+                    # binary missing / not executable -> leave the seed; the validator flags
+                    # `agent_launched=False` and the loop's eval/debug copes.
+                    self.last_run = AgentRun(launched=False, stderr_tail=str(e)[-2000:])
+                # ONE record per invocation, whatever ended it, and the ledger entry that follows it.
+                self.last_run.duration_s = max(0.0, time.monotonic() - started)
+                self._account_invocation(self.last_run, gen)
             if (self.patch_gate or self.seed_dirs) and seed_sha:
                 return self._collect_gated(wd, seed_sha)
             if self.patch_gate or self.seed_dirs:
