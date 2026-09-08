@@ -838,9 +838,13 @@ def repair_claimed_without_writing(summary, *, wrote: bool) -> str:
 #: (`autojunk` off, see `_kept_ratio`) a 20 kB character-wise ratio measures **37 seconds** on this
 #: box against 0.02 s for the same file line-wise — unaffordable inside the attempt loop, which runs
 #: this once per changed file. The second is that "how much of the file is still standing" is a
-#: question about lines anyway. 1 500 lines per side bounds the worst case near 0.2 s; over it both
-#: sides are truncated, which can only move `kept` toward 0 (under-crediting retention) and never
-#: invent a similarity that is not there.
+#: question about lines anyway. 1 500 lines per side bounds the worst case near 0.2 s. Over it both
+#: sides are truncated to the same HEAD, and that does NOT only under-credit -- this comment claimed
+#: it did until 2026-09-08: a 2 000-line file whose repair rewrites lines 1 501-2 000 completely
+#: compares as identical and reports kept=1.0 against a true 0.75. The number cannot say what it did
+#: not look at, so the ROW says so instead -- `_kept_row` stamps `kept_truncated` whenever either
+#: side ran past this bound, which keeps the module's under-report-never-mis-report rule with a fact
+#: rather than with a promise.
 _ATTRIBUTION_DIFF_LINES = 1_500
 #: Path-list bounds for a durable event column, same rule as `PARAM_OVERRIDE_CAP`: under-report,
 #: never mis-report.
@@ -859,21 +863,33 @@ def _kept_ratio(before: str, after: str) -> float:
     the opposite of what this measures. See `_ATTRIBUTION_DIFF_LINES` for the bound and for why the
     comparison is over lines.
     """
-    # OPEN[kept-ratio-overcredits-past-the-cap] truncating BOTH sides to the same head means a file
-    # rewritten entirely past the cap compares as identical, and the bound's own comment claims the
-    # error can only run the other way.
-    # proof:`line:toward 0&&under-crediting@looplab/engine/repair_verify.py`
-    # REVIEW 2026-08-30 (record-honesty): reproduced — a 2,000-line file whose repair rewrites
-    # lines 1,501-2,000 completely returns kept=1.0 against a true 0.75, so the durable
-    # `node_repaired.attribution.wrote` row says "nothing of this file changed" beside a `changed`
-    # entry saying it did, for exactly the whole-file-replacement case the field exists to make
-    # legible — against this module's own under-report-never-mis-report rule. When either side
-    # exceeds the cap, either stamp `truncated: true` on the entry or compare head+tail windows.
+    # Over the first `_ATTRIBUTION_DIFF_LINES` of each side and SILENT about the rest, which is why
+    # a caller building a durable row goes through `_kept_row` and not through this. See the bound.
     a = (before or "").splitlines()[:_ATTRIBUTION_DIFF_LINES]
     b = (after or "").splitlines()[:_ATTRIBUTION_DIFF_LINES]
     if not a and not b:
         return 1.0
     return round(difflib.SequenceMatcher(None, a, b, autojunk=False).ratio(), 3)
+
+
+def _kept_row(path: str, before: str, after: str) -> dict:
+    """One `wrote` entry: the retention ratio, and whether the comparison saw the whole file.
+
+    `kept` alone MIS-REPORTS a file rewritten past `_ATTRIBUTION_DIFF_LINES` -- both sides truncate
+    to the same head, so a 2 000-line file whose repair replaced lines 1 501-2 000 reads kept=1.0
+    against a true 0.75, i.e. "nothing of this file changed" beside a `changed` entry saying it did,
+    for exactly the whole-file-replacement case the field exists to make legible. The bound itself
+    cannot go (it is what keeps `SequenceMatcher`'s quadratic cost inside the attempt loop) and a
+    head+tail window would only move which slice goes unread, so the ROW carries the fact instead:
+    `kept_truncated` present means the number was measured over the first `_ATTRIBUTION_DIFF_LINES`
+    lines only. Stamped from the two line COUNTS, never from a flag a caller passes, so the key
+    cannot claim a bound that did not bind.
+    """
+    row = {"path": path, "kept": _kept_ratio(before, after)}
+    if (len((before or "").splitlines()) > _ATTRIBUTION_DIFF_LINES
+            or len((after or "").splitlines()) > _ATTRIBUTION_DIFF_LINES):
+        row["kept_truncated"] = True
+    return row
 
 
 def named_files(*texts) -> tuple:
@@ -943,12 +959,12 @@ def repair_attribution(*, prose, prev_files, prev_code, files, code, changed, de
             # what it is rather than compared against nothing.
             rows.append({"path": path, "removed": True})
         else:
-            rows.append({"path": path, "kept": _kept_ratio(before, after)})
+            rows.append(_kept_row(path, before, after))
     # The whole-file artifact has no path and is reported under the one spelling `changed_region`
     # already uses, so a reader meets a single name for the source that has none.
     if (code or "") != (prev_code or ""):
         rows.append({"path": _WHOLE_FILE, "new": True} if not (prev_code or "")
-                    else {"path": _WHOLE_FILE, "kept": _kept_ratio(prev_code, code)})
+                    else _kept_row(_WHOLE_FILE, prev_code, code))
     touched = set(changed_paths)
     named = named_files(*(prose or ()))
     return {

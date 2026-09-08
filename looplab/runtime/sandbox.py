@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from looplab.core.errors import ConfigRefusal
-from looplab.runtime.read_fence import FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath
+from looplab.runtime.read_fence import (FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath,
+                                        reassert as _reassert_fence)
 from looplab.runtime import landlock as _landlock
 from looplab.runtime import seccomp as _seccomp
 
@@ -914,6 +915,17 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # in the env: it is inert without the PYTHONPATH entry and it tells an operator inspecting a
     # container that the run had a fence.
     if not _docker_run:
+        # RE-ASSERT THE FENCE FIRST (2026-09-08). The generated `sitecustomize.py` is created once
+        # per engine and lives in a directory the eval OWNS, so every filesystem rung over it rests
+        # on ownership and a node can take it back: measured, `open(fence, "w")` from inside the
+        # fenced interpreter on a privileged runner, and a `/bin/rm` child on ANY runner, both
+        # succeed and leave every LATER process of the run unfenced — other nodes included. This
+        # call compares the file against the engine's own in-memory copy (which a node cannot
+        # reach) and repairs it, so the blast radius of a tamper is the launch that did it rather
+        # than the rest of the run. It is a repair, not a prevention: a tamper landing between here
+        # and the child's `execve` still wins. Costs one 33 KB read (0.027 ms median, 0.15 % of a
+        # fenced process's startup) and is a no-op for a fence this process did not install.
+        _reassert_fence(full_env.get(FENCE_DIR_ENV) or "")
         prepend_pythonpath(full_env, full_env.get(FENCE_DIR_ENV) or "")
         # THE LAUNCH'S OWN WORKDIR, for the fence's record rule (2026-09-06): the one directory
         # under the run record this process may write. Set, never defaulted — `wd` is per LAUNCH

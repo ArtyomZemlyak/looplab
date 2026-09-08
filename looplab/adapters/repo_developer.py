@@ -1299,15 +1299,15 @@ class LLMRepoDeveloper:
         except Exception:  # noqa: BLE001 — an extra rung never breaks the build it is helping
             return ""
         text = str(getattr(result, "content", "") or "")
-        # OPEN[step-feedback-keeps-the-head-of-the-output] when the cap binds it keeps the START of
-        # a command's output and drops the END — the half this module everywhere else treats as the
-        # one a reader must not lose.
-        # proof:`present:text[:_STEP_FEEDBACK_CAP]@looplab/adapters/repo_developer.py`
-        # REVIEW 2026-08-30 (consistency): the measured corpus (median 782, max 2,614 chars) makes
-        # the 6,000 cap inert today; the day a runaway command hits it, the failure text at the
-        # tail is what vanishes. `_clip(keep="tail")` / `stream_tails` are the house rule and one
-        # import away.
-        return text[:_STEP_FEEDBACK_CAP]
+        # TAIL, and the cut SAYS SO -- the house rule for command output (`tools/_base.py::clip`,
+        # the same call `dev_commands`/`dev_probe`/`shell_tools` make). A head cut dropped the END,
+        # which for a command is where the failure and the final metric line are, and it dropped it
+        # SILENTLY: a clipped output was byte-indistinguishable from a complete one. The measured
+        # corpus (median 782, p90 2,541, max 2,614 chars) means the 6,000 cap binds on nothing that
+        # has actually been produced, so today this is byte-identical; it changes the day a runaway
+        # command hits the cap, which is the day it matters.
+        from looplab.tools._base import clip
+        return clip(text, _STEP_FEEDBACK_CAP, keep="tail", note="…(truncated)…\n")
 
     def _budget_note(self) -> str:
         """The run's remaining LLM spend, worded for the session that is spending it, or "".

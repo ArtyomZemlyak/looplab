@@ -653,6 +653,36 @@ def test_public_state_drops_all_nested_raw_payloads_and_redacts_secrets(tmp_path
     assert secret in (client.get("/api/runs/demo/nodes/0").json().get("stdout_tail") or "")
 
 
+def test_public_state_drops_the_stderr_tail_of_a_scored_node(tmp_path):
+    """The sibling of the stdout property above, for the field a SCORED node carries.
+
+    /state is the one DENY-style surface (the reviews router's allow-list excludes both tails), and
+    a node that scored is exactly as able to have printed a secret as one that crashed. Driven as a
+    PROPERTY and not against `appstate.py`'s `pop`: the tail is stripped twice over there (the pop
+    plus `_PUBLIC_STATE_RAW_KEYS`), so a test aimed at either rung passes while the other still
+    holds — measured 2026-09-08, deleting either one alone leaks nothing. What must never change is
+    the answer /state gives.
+    """
+    from looplab.events.eventstore import EventStore
+    secret = "AKIAIOSFODNN7EXAMPLE1234"
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0,
+                                "stderr_tail": f"Traceback: token={secret} on stderr"})
+    client = TestClient(make_app(tmp_path))
+    state = client.get("/api/runs/demo/state").json()["state"]
+    assert state["nodes"]["0"].get("metric") == 1.0      # premise: the node folded and is projected
+    assert "stderr_tail" not in state["nodes"]["0"]
+    assert secret not in str(state)
+    # ...and the full tail is still reachable on the token-gated detail, like the stdout one.
+    detail = client.get("/api/runs/demo/nodes/0").json()
+    assert secret in (detail.get("stderr_tail") or "")
+
+
 def test_provenance_keeps_parent_generation_after_reset(tmp_path):
     """A child remains derived from the parent bytes it used, not a later in-place replacement."""
     rd = tmp_path / "demo"

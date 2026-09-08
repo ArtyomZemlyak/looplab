@@ -1030,18 +1030,30 @@ def test_the_hook_rung_refuses_a_mutation_of_the_fences_own_file_at_any_uid(tmp_
                for line in read_fence.violations(run_dir))
 
 
-def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(tmp_path):
+def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(tmp_path,
+                                                                              monkeypatch):
     """The control for the test above: the capability it denies has to exist to be worth denying.
 
     Same world, same child. The write bit is handed back from the pytest process — which is NOT
     fenced, so `_SELF` never sees it — and the identical `open(fence, "w")` then succeeds, and the
     next process of the run reads the human's checkpoint. This is the pre-fix behaviour, reproduced
     inside the suite, and it is what makes the sibling test's `STAGE2 ESCAPED not in out` a claim
-    about `_harden` rather than about the child failing to try."""
+    about `_harden` rather than about the child failing to try.
+
+    THE THIRD RUNG HAS TO BE TAKEN AWAY TOO (2026-09-08). `run_argv` now calls
+    `read_fence.reassert`, which compares the file against the engine's own in-memory copy and puts
+    the mode back before the child starts — so with that copy present this control stops
+    characterizing anything: the widened bit is repaired, the write is refused, and the test goes
+    red UNPRIVILEGED while still passing under root, where DAC-override made the repair moot. That
+    is two properties wearing one name, which is the exact shape this file has been bitten by, so
+    the trusted copy is dropped here BY NAME: no copy is the state `reassert` is specified to leave
+    alone (a resumed engine, a hand-set marker), and it is the only state in which this control
+    measures what it says it measures — the un-hardened world, at every uid."""
     src, _sib, run_dir, wd, _models = _world(tmp_path)
     target = src / "experiments" / "baseline" / "final" / "model.safetensors"
     fence = _install(run_dir, src)
     generated = Path(fence) / "sitecustomize.py"
+    monkeypatch.delitem(read_fence._INSTALLED, fence, raising=False)
     os.chmod(generated, 0o644)                  # exactly what `_harden` had done, undone
 
     # Only the overwrite, so the assertions below describe THE ESCAPE and nothing else: this test
@@ -1065,6 +1077,154 @@ def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(t
     assert "STAGE2 ESCAPED open-w" in out, out
     assert "STAGE3 READ" in out, out
     assert generated.read_text(encoding="utf-8") == "# gone"
+
+
+# ------------------------------------------------------- the fence's own self-protection, stated
+
+# The KERNEL rung's own attempt, and nothing else: a plain write, which raises no MUTATION audit
+# event and is therefore refused by the file mode or by nobody. Kept apart from `_TAMPER` because
+# `harden_guarantee` is asked about the file AFTERWARDS and a deleted file is a third answer.
+_TAMPER_WRITE = """
+    import os
+    fence = os.environ[{marker!r}] + "/sitecustomize.py"
+    try:
+        open(fence, "w").write("# neutralised\\n")
+        print("STAGE2 ESCAPED open-w")
+    except Exception as exc:
+        print("STAGE2 blocked open-w", type(exc).__name__)
+"""
+
+_TAMPER = """
+    import os, subprocess, sys
+    fence = os.environ[{marker!r}] + "/sitecustomize.py"
+    # A NON-PYTHON child: no audit event of any kind, and `unlink` consults the DIRECTORY's write
+    # bit, never the file's 0444 — so this vector is uid-INDEPENDENT and is the one the marker's
+    # `-S` sentence understated. Measured 2026-09-08: rc=0 at euid 0 AND at euid 1001.
+    print("STAGE2 rm rc=", subprocess.run(["rm", "-f", fence]).returncode)
+    print("STAGE2 fence exists:", os.path.exists(fence))
+    later = subprocess.run([sys.executable, "-c", "print(open(%r).read())" % {target!r}],
+                           env=os.environ.copy(), capture_output=True, text=True)
+    print("STAGE3", "READ" if {checkpoint!r} in later.stdout else "refused")
+"""
+
+
+def test_the_kernel_rung_reports_whether_it_binds_and_a_real_child_agrees(tmp_path):
+    """`harden_guarantee` is a claim about THIS box, and the box is asked to confirm it.
+
+    THE TRAP THIS IS WRITTEN AGAINST, and it is not hypothetical: the sibling
+    `test_a_node_cannot_rewrite_the_fence_that_fences_it` skips under root, which is correct for
+    ITS claim, and the suite therefore reported zero failures on a root box where
+    `open(<fence>, "w")` from inside a fenced child went straight through. A uid-scoped skip cannot
+    be the answer here, because the property is an IFF and both sides of it are uid-dependent
+    together: the sentence the module now prints and the escape the box actually admits must agree.
+    So this test never skips — on an unprivileged box both sides are false, on a privileged one
+    both are true, and a mutation that makes them disagree is red on EITHER."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    generated = Path(fence) / "sitecustomize.py"
+    assert generated.stat().st_mode & 0o777 == read_fence.FENCE_FILE_MODE
+
+    rc, out, _err, timed_out = _run(
+        _TAMPER_WRITE.format(marker=read_fence.FENCE_DIR_ENV), wd, fence)
+    assert not timed_out and rc == 0, out
+    # Non-vacuity: the child must have REACHED the write. A crash or a swallowed argv fails here.
+    assert ("STAGE2 ESCAPED open-w" in out) or ("STAGE2 blocked open-w" in out), out
+
+    reduced = read_fence.harden_guarantee(generated)
+    escaped = "STAGE2 ESCAPED open-w" in out
+    assert escaped == (reduced is not None), (
+        "the module's own sentence about its kernel rung disagrees with what the box did: "
+        f"escaped={escaped!r} harden_guarantee={reduced!r}\n{out}")
+    if reduced is not None:
+        # …and it names WHICH half is missing, because "advisory" without the reason is the
+        # unstated precondition the marker was about.
+        assert "ADVISORY" in reduced and ("CAP_DAC_OVERRIDE" in reduced or "euid 0" in reduced)
+
+
+@pytest.mark.parametrize("mode, named", [(0o444, False), (0o644, True), (0o666, True),
+                                         (0o400, False), (0o200, True)])
+def test_a_hardening_that_did_not_take_is_reported_whatever_the_uid(tmp_path, mode, named):
+    """The OTHER half of the kernel rung, and this half is uid-independent: `_harden` is
+    best-effort by design (a raise there would be turned into an entirely unfenced run), so a
+    `chmod` that silently failed must not read as a rung in force. Driven by putting the bits back
+    from OUTSIDE the fenced process, which is exactly the state a failed `_harden` leaves."""
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    generated = Path(_install(run_dir, src)) / "sitecustomize.py"
+    os.chmod(generated, mode)
+    reduced = read_fence.harden_guarantee(generated)
+    assert (reduced is not None and "write bits" in reduced) == named, (mode, reduced)
+    # A file that is not there at all is not a rung in force either — and it is a state a node can
+    # produce (`rm`), so it must never answer `None`.
+    generated.unlink()
+    assert read_fence.harden_guarantee(generated) is not None
+
+
+def test_a_tampered_fence_is_repaired_before_the_next_launch(tmp_path):
+    """The `read-fence-self-protection-ends-at-an-unfenced-child` item, BOUNDED.
+
+    The tamper below is a `/bin/rm` CHILD, chosen because it is the one vector that works at every
+    uid: the 0444 bit is about the FILE and `unlink` consults the DIRECTORY, and no audit event is
+    raised by a process that is not this interpreter. Before the repair rung, that single call
+    unfenced every process the run started afterwards — other nodes included — for the rest of the
+    run. Measured 2026-09-08 at euid 0 and euid 1001.
+
+    THE CONTROL is inside the same child and is what makes this a claim about `run_argv` rather
+    than about the tamper failing: a child the eval spawns ITSELF, not through the choke point,
+    reads the operator's checkpoint. That is the residual the marker keeps, and it must stay
+    reproducible here — if it ever goes quiet, this test is passing for the wrong reason."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    generated = Path(fence) / "sitecustomize.py"
+
+    rc, out, _err, timed_out = _run(
+        _TAMPER.format(marker=read_fence.FENCE_DIR_ENV, target=str(target),
+                       checkpoint=CHECKPOINT), wd, fence)
+    assert not timed_out and rc == 0, out
+    assert "STAGE2 rm rc= 0" in out and "STAGE2 fence exists: False" in out, out
+    assert "STAGE3 READ" in out, ("the control: a child the eval spawns itself is NOT repaired, "
+                                  "and if that stops reproducing this test proves nothing\n" + out)
+
+    # The next launch through the choke point is fenced again, and the file is back to both rungs.
+    rc2, out2, err2, _to = _run("print(open(%r).read())" % str(target), wd, fence)
+    assert rc2 != 0 and CHECKPOINT not in out2, out2
+    assert "LoopLabSourceReadRefused" in err2, err2
+    assert "LoopLab source-tree READ FENCE" in generated.read_text(encoding="utf-8")
+    assert not generated.stat().st_mode & 0o222
+
+    # …and a MODE-only tamper (content restored, write bits back) is repaired too: that is the
+    # shape `install`'s early return used to leave standing for the rest of the run.
+    os.chmod(generated, 0o666)
+    assert read_fence.reassert(fence)
+    assert not generated.stat().st_mode & 0o222
+
+
+def test_reassert_never_invents_a_fence_it_did_not_install(tmp_path):
+    """Fail-safe: the repair compares against the ENGINE's own in-memory copy, which is the only
+    copy a node cannot reach. A marker naming a directory this process never installed into has no
+    trusted source to restore, and guessing one from the bytes on disk would be restoring the very
+    thing under attack — so `reassert` must do NOTHING there rather than something plausible."""
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    fence = Path(_install(run_dir, src))
+    generated = fence / "sitecustomize.py"
+    real = generated.read_text(encoding="utf-8")
+
+    stranger = tmp_path / "not-ours"
+    (stranger / read_fence.FENCE_DIRNAME).mkdir(parents=True)
+    planted = stranger / read_fence.FENCE_DIRNAME / "sitecustomize.py"
+    planted.write_text("# not a fence\n", encoding="utf-8")
+    assert read_fence.reassert(str(stranger / read_fence.FENCE_DIRNAME)) is None
+    assert read_fence.reassert("") is None
+    assert planted.read_text(encoding="utf-8") == "# not a fence\n"
+
+    # …while the one it DID install is still repaired, so the guard above is not just "returns
+    # None for everything".
+    os.chmod(generated, 0o644)
+    generated.write_text("# tampered\n", encoding="utf-8")
+    assert read_fence.reassert(str(fence))
+    assert generated.read_text(encoding="utf-8") == real
+    assert not generated.stat().st_mode & 0o222
 
 
 def test_install_re_asserts_the_hardening_when_the_bytes_already_match(tmp_path):

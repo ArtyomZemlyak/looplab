@@ -811,6 +811,16 @@ class ResourceSchedulingMixin:
             _LOG.warning("read fence could not be installed under %s (%s); evals run UNFENCED",
                          self.run_dir, exc)
             resolved = None
+        if resolved:
+            # THE KERNEL RUNG'S PRECONDITION, said out loud (`read_fence.harden_guarantee`). The
+            # fence's self-protection has two rungs, and the kernel one (mode 0444) is inert
+            # wherever the launch holds CAP_DAC_OVERRIDE — only the Docker tier drops capabilities,
+            # the subprocess tier inherits this process's. Measured on a root box: the fenced
+            # child's `open(<fence>, "w")` goes THROUGH and nothing anywhere said so. One line per
+            # run, beside the two warnings below, so a privileged deployment reads as what it is.
+            reduced = read_fence.harden_guarantee(Path(resolved) / "sitecustomize.py")
+            if reduced:
+                _LOG.warning("%s", reduced)
         if dropped:
             # A dropped root is the one case where the operator's fence silently shrinks, so say so.
             _LOG.warning("read fence ignoring editable root(s) %s: fencing a path that broad would "

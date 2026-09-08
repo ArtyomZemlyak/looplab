@@ -1548,19 +1548,16 @@ class Server(ThreadingHTTPServer):
         # Everything else on this object is assigned by `main()` (or by a test); this one is not,
         # because a missing calibrator would price an abort at zero prompt tokens in silence.
         self.prompt_scale = PromptTokens()
-        # ON BY DEFAULT, and that is the decision, not an oversight. A guard against a runaway
-        # generation that has to be switched on is not a guard: the 62.9 h in this module's
-        # docstring were spent by a proxy that had every other protection and no ceiling. `main()`
-        # and tests may reassign it; `0` disables it.
-        # OPEN[meter-ceiling-comment-contradicts-its-default] the paragraph above and the constant
-        # it assigns state opposite decisions about a money guard.
-        # proof:`line:ON BY DEFAULT&&not an oversight@benchmarks/meter/proxy.py`
-        # REVIEW 2026-08-30 (stale-claim): `DELTA_CEILING_DEFAULT` is 0 — off — and its own comment
-        # says "OFF UNLESS ASKED, and this reverses the value it shipped with a few hours ago",
-        # with `test_the_ceiling_is_off_unless_someone_asks_for_it` pinning the zero. The reversal
-        # updated the constant and its test and left this site instructing the next editor in
-        # exactly the wrong direction. One of the two paragraphs is wrong; today it is this one.
-        # Rewrite it to state the shipped decision (and why), or flip the default back on purpose.
+        # OFF BY DEFAULT, and that is the decision: `DELTA_CEILING_DEFAULT` is 0, its own comment
+        # says why (the ceiling is a CHANGE TO THE RULER, and the watchdog restarts this proxy
+        # mid-campaign, so a default-on ceiling would price task-arms before and after a transient
+        # blip with two different instruments), and
+        # `test_the_ceiling_is_off_unless_someone_asks_for_it` pins the zero. Until 2026-09-01 this
+        # paragraph said the opposite -- "ON BY DEFAULT, and that is the decision, not an
+        # oversight" -- because the reversal updated the constant and its test and not this site,
+        # which then instructed the next editor in exactly the wrong direction. Turn it on for the
+        # NEXT campaign with `--delta-ceiling 135000` / `METER_DELTA_CEILING=135000`; `main()` and
+        # tests may reassign it, and `0` disables it.
         self.delta_ceiling = DELTA_CEILING_DEFAULT
 
     # A CLIENT HANGING UP IS NOT AN INCIDENT. `http.server` prints a full traceback for every

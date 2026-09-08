@@ -339,6 +339,10 @@ def fn_spec(name: str, description: str, props: dict, required: Optional[list] =
         "parameters": {"type": "object", "properties": props, "required": required or []}}}
 
 
+#: The read window `jsonl_row_count` counts through. A WINDOW, not a ceiling on the store: the
+#: count is exact at any size, this only bounds what is resident while it is taken.
+_ROW_COUNT_CHUNK = 1 << 20
+
 # ------------------------------------------------------------------------------ tool inventory
 #
 # WHAT IT IS. The optional `inventory()` hook (see `ToolProvider`) lets a provider publish how much
@@ -376,17 +380,30 @@ def jsonl_row_count(path) -> int:
     which must never be collapsed into a zero.
     """
     with open(path, 'rb') as handle:
-        # OPEN[jsonl-row-count-reads-the-whole-store] the whole file, plus a list of all its rows,
-        # in memory — on the synchronous prompt-assembly path, per inventory sweep, over stores
-        # that grow monotonically across runs.
-        # proof:present:handle.read().split@looplab/tools/_base.py
-        # REVIEW 2026-08-30 (robustness): the sibling reader this replaces (`core/memory_window`)
-        # caps at 2 MiB for exactly this path, and `SiblingRunTools.inventory`'s own comment
-        # refuses a ~2.5 s fold here — while this read is unbounded and runs 2-3x per prompt
-        # (`collect_inventory` + the `hide_empty_tools` offer). Count lines in chunks (constant
-        # memory), and above a byte ceiling answer the contract's UNKNOWN — "could not look" is a
-        # value this vocabulary already has.
-        return sum(1 for row in handle.read().split(b'\n') if row.strip())
+        # OPEN[jsonl-row-count-reads-the-whole-store] NARROWED 2026-09-08, half of it landed: the
+        # memory is now constant (chunked, below), MEASURED 37.4 MB -> 5.4 MB peak and 0.32 s ->
+        # 0.09 s on a 14.7 MB / 200k-row store. What is still open is the TIME: the read is still
+        # unbounded and still synchronous, so a store that has grown across runs is walked end to
+        # end 2-3x per prompt. The close is a byte ceiling above which this answers the contract's
+        # UNKNOWN — "could not look" is a value this vocabulary already has (`core/memory_window`
+        # caps at 2 MiB for exactly this path) — and it needs the two callers' reason strings to
+        # stop saying "unreadable store" about a store that is merely large.
+        # proof:absent:_ROW_COUNT_CEILING@looplab/tools/_base.py
+        # CHUNKED, because this runs on the synchronous prompt-assembly path 2-3x per prompt
+        # (`collect_inventory` + the `hide_empty_tools` offer) over stores that grow monotonically
+        # across runs — `read().split()` held the whole file AND a list of every row in memory at
+        # once. The split rule is unchanged and must stay unchanged: ONLY `b"\n"` ends a record
+        # (see the docstring), so the tail of each chunk is carried into the next rather than
+        # counted, and a final unterminated row still counts.
+        count, carry = 0, b""
+        while True:
+            chunk = handle.read(_ROW_COUNT_CHUNK)
+            if not chunk:
+                break
+            rows = (carry + chunk).split(b'\n')
+            carry = rows.pop()              # may be a partial record; the next chunk completes it
+            count += sum(1 for row in rows if row.strip())
+        return count + (1 if carry.strip() else 0)
 
 
 INVENTORY_CONTRACT = "int = a count the provider stands behind; str = the reason it has none"

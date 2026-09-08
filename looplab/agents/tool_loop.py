@@ -950,15 +950,20 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             on_step(ev)
         except Exception:               # noqa: BLE001 - transparency must not change behaviour
             pass
-    # OPEN[turn-zero-duplicate-budget-reminder] seeding the ledger empty makes the first loop
-    # iteration inject a "Reminder — BUDGET: $0.0000 ..." user message that duplicates the budget
-    # line both wired callers already lead their opening turn with.
-    # proof:`present:_last_budget_note = [""]@looplab/agents/tool_loop.py`
-    # REVIEW 2026-08-30 (prompt-noise): reproduced with a stub client — nothing has been spent,
-    # `budget_note()` renders the same text as the opener, `"" != note`, and the reminder lands
-    # before the first model call, against the budget block's own "a turn that spent nothing adds
-    # nothing". Seed with one render before the loop (or let the caller pass the opening figure).
-    _last_budget_note = [""]        # last note actually injected; see the budget block below
+    def _budget_now() -> str:           # the CURRENT figure, or "" — one guarded read, two callers
+        if budget_note is None:
+            return ""
+        try:
+            return budget_note() or ""
+        except Exception:               # noqa: BLE001 - an extra rung must not end a session
+            return ""
+
+    # SEEDED WITH ONE RENDER, not empty: the wired caller leads its opening user turn with the same
+    # `budget_note()` text (`deep_research.py::research`), so an empty seed made turn zero inject a
+    # "Reminder — BUDGET: $0.0000 ..." duplicate of a line already in the prompt — against the
+    # budget block's own "a turn that spent nothing adds nothing" rule below. Rendered here, at the
+    # moment the caller built its opener, so the two agree; every later turn still injects on CHANGE.
+    _last_budget_note = [_budget_now()]     # last note injected; see the budget block below
 
     def _text(content):                 # interstitial assistant prose (a message written BEFORE a tool
         if on_text is None:             # round) — surfaced live so the chat reads like Claude Desktop
@@ -1146,10 +1151,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # turn that spent nothing adds nothing, and never when the caller supplies no callable --
         # every existing caller keeps a byte-identical message list.
         if budget_note is not None:
-            try:
-                _note = budget_note() or ""
-            except Exception:               # noqa: BLE001 - an extra rung must not end a session
-                _note = ""
+            _note = _budget_now()
             if _note and _note != _last_budget_note[0]:
                 _last_budget_note[0] = _note
                 messages.append({"role": "user", "content": "Reminder — " + _note.strip()})

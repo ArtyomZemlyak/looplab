@@ -1260,13 +1260,12 @@ def main() -> int:
     # under it left site-packages at 358 entries unchanged and the module imported from the target
     # via PYTHONPATH. Per-invocation directory, so two concurrent evaluations cannot shadow each
     # other either.
-    # OPEN[bridge-leaks-a-piptarget-dir-per-eval] this tempdir is created per invocation and never
-    # joins the artefact cleanup, so a campaign leaks one compiled-extension directory per eval
-    # onto the disk the watchdog alarms at 15 GB free.
-    # proof:absent:(_pip_target)@benchmarks/algotune/looplab_eval.py
-    # REVIEW 2026-08-30 (hygiene): `_ARTEFACTS` above is exactly the registry for this (keep-flag
-    # respected, best-effort removal); one append after the mkdtemp closes it.
+    # REGISTERED FOR THE SWEEP: one compiled-extension directory per eval, on the disk the campaign
+    # watchdog alarms at 15 GB free, is a leak a long campaign notices. `_ARTEFACTS` is exactly the
+    # registry for it -- best-effort removal after the JSON line is printed, and kept when
+    # `ALGOTUNE_KEEP_EVAL_ARTEFACTS=1` says a disputed score needs the evidence.
     _pip_target = tempfile.mkdtemp(prefix="looplab-piptarget-")
+    _ARTEFACTS.append(Path(_pip_target))
     env["PIP_TARGET"] = _pip_target
     env["PYTHONPATH"] = os.pathsep.join([_pip_target] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
 

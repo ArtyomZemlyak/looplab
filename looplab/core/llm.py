@@ -697,21 +697,22 @@ def _stream_usage(value) -> dict:
 #     is ours. Refusing every other member made the template unreachable on a qwen model.
 # A key whose value is not a mapping cannot be inspected, so it counts as the whole knob — fail
 # closed, since an operator writing `reasoning: "high"` means the depth.
-# OPEN[reasoning-depth-knobs-missing-live-spellings] the registry omits depth spellings real
-# endpoints accept, so the clash refusal silently admits for them exactly the double-spelling it
-# exists to refuse.
-# proof:`absent:"think":@looplab/core/llm.py`
-# REVIEW 2026-08-30 (registry-coverage): unregistered but live: top-level `enable_thinking`
-# (SGLang/vLLM take it in `extra_body` directly, outside `chat_template_kwargs`), and Ollama's
-# native boolean knob for the same thing. An operator setting `llm_reasoning="high"` beside one of
-# those in `llm_reasoning_extra` ships both spellings and the provider picks — the measured
-# $0.019/25-minute failure mode, un-refused. The conflict test is parametrized from this registry,
-# so each addition is one line here and zero elsewhere.
+# EVERY LIVE SPELLING OF THE DEPTH, because the clash refusal is only as wide as this table: a
+# spelling an endpoint accepts and this table omits is a double-setting the guard admits in silence,
+# which is the measured $0.019 / 25-minute failure mode itself (two `propose` calls burning the full
+# completion cap, both ERROR). The conflict test is parametrized from here, so a spelling is one
+# line here and zero elsewhere.
 REASONING_DEPTH_KNOBS: dict = {
     "reasoning_effort": None,                                   # OpenAI / Ollama-v1 / DeepSeek
     "thinking": None,                                           # Anthropic: type + budget_tokens
     "reasoning": ("effort", "enabled", "max_tokens"),           # OpenRouter (`exclude` is not depth)
     "chat_template_kwargs": ("enable_thinking", "thinking_budget"),   # Qwen3 on vLLM/SGLang
+    # The same two switches spelled at the TOP level of the body: vLLM/SGLang take `enable_thinking`
+    # in `extra_body` directly, outside `chat_template_kwargs`, and Ollama's native API spells it
+    # `think`. Both set the depth, so both contradict `llm_reasoning` exactly as their scoped
+    # siblings above do.
+    "enable_thinking": None,                                    # vLLM / SGLang, top-level extra_body
+    "think": None,                                              # Ollama native
 }
 
 

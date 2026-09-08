@@ -4780,6 +4780,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # actually is: `card_build`, 608.6 min over 13 calls — the serial-node-build item, not this one.
     # LEFT OPEN because the description is accurate and a costlier Strategist could change the
     # number; what is recorded is that nobody should spend the risk until it does.
+    #
+    # DRIVEN 2026-09-08, so the hold is now measured rather than asserted: a tick-counter task read
+    # from INSIDE a blocking stub at each site, over a real `engine.run()`, counted 177->177
+    # (strategist), 38->38 (report), 36->36 (concept), 34->34 (verifier). Zero ticks, all four. The
+    # mechanism is one line: `_run_cadences` is a plain `def` with no `await` in it, called as
+    # `state = self._run_cadences(state)` from the async spine, so nothing in it could ever yield.
+    # `foresight_rank` (2.7 min above) is a FIFTH paid cadence this prose does not name; the
+    # finalize report holds too but is not one of these -- it runs on a run that is already ending.
+    #
+    # TWO CONSTRAINTS ANY FUTURE OFFLOAD MUST MEET, both found by building one and neither obvious
+    # from this site, recorded so the next attempt does not re-derive them:
+    #   * all nine row types these cadences write are FOLDED and none is in `DIAGNOSTIC_EVENTS`, so
+    #     a bare `to_thread` is out. The load-bearing one is `verifier_group_scored`: it MOVES the
+    #     champion tie-break, so a worker-thread append landing inside a Card reservation's window
+    #     is exactly the `score_moved` conjunct `card_reservation.py::_proposal_receipt_fence`
+    #     discards an already-paid proposal on.
+    #   * `novelty.py::_offload_under_proposal_sink` cannot be reused as-is: its sink intercepts
+    #     `_append_proposal_event` only, and it publishes its buffer under the receipt fence's
+    #     ELECTION rule. A cadence carries no receipt and must publish unconditionally.
     def _run_cadences(self, state: RunState) -> RunState:
         # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
         # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision

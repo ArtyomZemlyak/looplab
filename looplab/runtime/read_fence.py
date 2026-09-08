@@ -102,10 +102,15 @@ WHAT IT DOES NOT FENCE (by construction, and each is deliberate)
   2026-08-25, could therefore simply be overwritten by the process it fences — refuse the read,
   `open(<run_dir>/.looplab-fence/sitecustomize.py, "w")`, and every process the run starts after
   that is unfenced. Relocating it does not help (there is nowhere outside the operator's tree that
-  the denylist covers), so it is protected by two rungs of its own instead: the kernel one
-  (`_harden`, mode 0444) and the hook one (`_SELF`, which refuses every mutation event aimed at the
-  fence directory whatever `_ROOTS`/`_ALLOW` say). Both are needed and neither is sufficient —
-  measured, with one rung removed at a time;
+  the denylist covers), so it is protected by three rungs of its own instead: the kernel
+  one (`_harden`, mode 0444, which binds only where the launch lacks CAP_DAC_OVERRIDE —
+  `harden_guarantee` is what says whether it does on this box), the hook one (`_SELF`, which
+  refuses every mutation event aimed at the fence directory whatever `_ROOTS`/`_ALLOW` say), and,
+  since 2026-09-08, the REPAIR one (`reassert`, called by `run_argv` at every launch, which
+  restores the file from the engine's own in-memory copy). The first two are needed and neither is
+  sufficient — measured, with one rung removed at a time — and the third is there because neither
+  covers a writer that is not this interpreter: a `/bin/rm` CHILD removes the file at ANY uid,
+  since `unlink` consults the DIRECTORY's write bit and not the file's;
 * `data:` / `references:` mount SOURCES — allow-listed explicitly, because a data source is legally
   allowed to live INSIDE the editable tree and mounts are exactly the sanctioned read channel;
 * the engine's own machinery — seeding (`engine/workspace.py`), the git plumbing, the fault
@@ -225,6 +230,13 @@ WORKDIR_ENV = "LOOPLAB_EVAL_WORKDIR"
 # has to IMPORT it, writable by nobody — see `_harden` for why this is the rung that carries the
 # self-protection and `_SELF` in the template for the rung that guards it.
 FENCE_FILE_MODE = 0o444
+
+# CAP_DAC_OVERRIDE, the capability that makes `FENCE_FILE_MODE` advisory: a holder bypasses the
+# file-permission check entirely, so the 0444 bit refuses nothing. Read from `CapEff` rather than
+# inferred from the uid alone, because the two come apart in both directions — a container can run
+# a non-root uid that still carries the bit through file capabilities, and a root process can have
+# been stripped of it (`--cap-drop ALL`, which is what `sandbox.py` passes on the Docker tier).
+_CAP_DAC_OVERRIDE = 1
 
 # The policy rungs, in increasing strictness. See `Settings.read_fence` for why `deny` is the
 # default rather than `warn`.
@@ -1207,18 +1219,16 @@ def _harden(target: Path) -> None:
     (`ctypes`, a C extension, a `cp`) that raise no audit event at all and that the whole module
     docstring lists as beyond an audit hook's reach.
 
-    OPEN[fence-kernel-rung-rests-on-ambient-caps] the sentence above is a fact about ONE deployment,
-    not a property this code establishes: only the Docker tier drops capabilities, the subprocess
-    tier inherits the engine's, and on a privileged runner the write bit refuses nothing.
-    proof:absent:geteuid@looplab/runtime/read_fence.py
-    REVIEW 2026-08-30 (trust-boundary): driven on a root container (CapEff carries the DAC-override
-    bit): the hook rung holds (chmod/unlink/rename refused) and the plain `open(fence, "w")` goes
-    THROUGH — the one vector this rung exists for, since that write raises no mutation audit event.
-    `sandbox.py` passes `--cap-drop ALL` on the Docker tier only. Production (unprivileged jovyan)
-    is fine; the gap is the UNSTATED precondition — the module promises a kernel refusal it cannot
-    give wherever the eval runs privileged, with nothing logged. Cheap close: detect the effective
-    uid/cap state here and log one line naming the reduced guarantee (the landlock launcher's own
-    pattern), so a privileged deployment reads as what it is.
+    *That sentence was a fact about ONE deployment and the module could not tell which one it was
+    running in — only the Docker tier drops capabilities (`--cap-drop ALL`), the subprocess tier
+    inherits the engine's, and on a privileged runner the write bit refuses nothing. Closed
+    2026-09-08 by `harden_guarantee`, which decides both halves of the precondition (the file
+    really carries no write bit, and this process really lacks CAP_DAC_OVERRIDE) and returns the
+    ONE sentence naming what is reduced; `engine/resources.py` logs it once per run beside the
+    dropped-root and swallowed-allow warnings. It does not make a privileged runner safe — nothing
+    at this layer can, see below — it makes the deployment read as what it is. Re-measured on a
+    root box that day, and it is not only the plain `open`: a `ctypes` `fopen(fence, "w")` from
+    inside the fenced interpreter went through too, which no audit hook can ever see.*
 
     WHAT IT DOES NOT DO, and why `_SELF` exists beside it: the owner of a file may always chmod it
     back, and `CapEff` says nothing about that — ownership, not a capability, is what `chmod`
@@ -1244,24 +1254,157 @@ def _harden(target: Path) -> None:
     2026-08-25, 11 of 11 probes refused (`open(fence, "w")`, chmod back, unlink, unlink via
     `dir_fd`, rename away, rename over, truncate, chmod of the directory, `shutil.rmtree` of it,
     rename of it, symlink over the file), in BOTH layouts (run dir inside and outside the editable
-    root). They do not hold against a process that is not fenced in the first place: measured in the
-    same session, `subprocess.run([sys.executable, "-S", ...])` with `PYTHONPATH` stripped chmods
-    this file to 0644, rewrites it, and the NEXT process of the run reads the operator's checkpoint.
-    That child is the module docstring's own stated residual (`-S`/`-E`/`-I` or a stripped
-    `PYTHONPATH`), but the ESCALATION is specific to this file and is why the marker stays: every
-    other use of that residual costs the node one unfenced process, while rewriting this file
-    unfences every process the run starts afterwards.
-    What would close it is a rung that does not rest on OWNERSHIP — `chmod` asks who owns the inode,
-    never what capabilities the caller holds, so `CapEff` 0 does not help here the way it does for
-    the write bit. The candidates, in the order this repo would pay for them: the Landlock ruleset
-    already in `runtime/landlock.py` extended to cover the fence directory read-only (it is `off` by
-    default today, see `Settings.landlock`); or re-asserting `install` per LAUNCH rather than once
-    per engine, which repairs a tampered fence instead of preventing it and costs a 24 KB read at
-    every `run_argv`. Neither is measured yet, so neither is claimed here."""
+    root). They do not hold against a process that is not this interpreter, and the cheapest such
+    process is NOT the `-S` child the first version of this note named — re-measured 2026-09-08 at
+    euid 0 AND euid 1001, `subprocess.run(["rm", "-f", <fence>])` removes it outright, because
+    `unlink` consults the DIRECTORY's write bit and never the file's 0444, and a non-Python child
+    raises no audit event at all. The `-S` child (chmod back, rewrite) works too, as does a
+    `ctypes` `fopen` under a privileged runner.
+    The DIRECTORY bit is not the answer either, and that was measured rather than argued: 0555 on
+    the fence dir does refuse `rm`, `mv` and a shell truncate — and its stated price is removable,
+    since pre-compiling the pyc at install time takes `sitecustomize` import from 2,351 us back to
+    246 us, i.e. indistinguishable from a writable directory (2026-09-08, unprivileged; the
+    `NOT the DIRECTORY` paragraph above measured only the un-precompiled variant) — but a
+    `/bin/chmod 755 <fence dir>` CHILD then puts the bit back, because chmod asks who OWNS the
+    inode and the eval owns everything the engine wrote for it. Every rung expressible in the
+    filesystem rests on ownership, and on the subprocess tier the engine and the eval are one uid.
+    What is in force since 2026-09-08 is REPAIR rather than prevention: `reassert`, called from
+    `run_argv`, compares the file against the engine's own in-memory copy — the one copy a node
+    cannot reach — and restores it before each launch. That measured 0.03 ms per launch and it
+    bounds the damage to the launch that did the tampering; it does not close this item, because
+    the children that launch spawns itself never pass the choke point, and a tamper landing between
+    the re-assert and the child's `execve` still wins.
+    What would CLOSE it is a rung that does not rest on ownership, and there are exactly two:
+    Landlock over the fence directory (`runtime/landlock.py`; it binds on root too and is inherited
+    across `exec`, but it is `off` by default, unvalidated on a real GPU eval, and simply ABSENT on
+    some boxes — `landlock_create_ruleset` reported no version at all on the 2026-09-08 box), or
+    separating the uid that writes the fence from the uid that runs the eval, which is a deployment
+    decision this module cannot make. `runtime/seccomp.py` is not a candidate: a classic-BPF filter
+    sees syscall numbers and register values, never paths."""
     try:
         os.chmod(target, FENCE_FILE_MODE)
     except OSError:
         pass
+
+
+def _dac_override() -> str:
+    """Why this process's file-mode checks are advisory, or "" when the kernel really enforces them.
+
+    STATABLE rather than buried in a log line, because the sentence `_harden` used to make — "the
+    owner write bit genuinely binds" — is a fact about ONE deployment and the module had no way to
+    say which one it was running in. `CapEff` first (the precise question is the capability, not the
+    uid); `os.geteuid()` is the fallback for a box with no readable `/proc/self/status` and for
+    Windows, where `os.geteuid` does not exist at all and the whole rung is advisory anyway."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("CapEff:"):
+                    if int(line.split()[1], 16) & (1 << _CAP_DAC_OVERRIDE):
+                        return "this process holds CAP_DAC_OVERRIDE, which ignores file modes"
+                    return ""
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        if os.geteuid() == 0:                                   # type: ignore[attr-defined]
+            return "this process runs as euid 0, which ignores file modes"
+    except AttributeError:
+        return "this platform has no effective-uid check; the write bit is advisory here"
+    return ""
+
+
+def harden_guarantee(target) -> Optional[str]:
+    """`None` when the KERNEL rung of the fence's self-protection actually binds for `target`;
+    otherwise ONE sentence naming exactly what is reduced.
+
+    THE DEFECT THIS CLOSES (the `fence-kernel-rung-rests-on-ambient-caps` item, 2026-08-30
+    review).
+    `_harden` promised "`CapEff` is 0 for a node process in this container, so the owner write bit
+    is not advisory here: it is the kernel refusing the `open`". That is true of the production
+    deployment and false of a privileged runner, and NOTHING in this module could tell them apart —
+    measured 2026-09-08 on a root box: the fenced child's `open(<fence>, "w")` went straight
+    THROUGH (and so did a `ctypes` `fopen`, which no audit hook sees), the run was unfenced for
+    every process after it, and not one line anywhere said the rung was inert. Only the Docker tier
+    drops capabilities (`--cap-drop ALL`); the subprocess tier inherits the engine's.
+    This does not make a privileged runner safe — nothing at this layer can, since the eval owns
+    the file and the directory (see the marker on `_harden`) — it makes the deployment READ as what
+    it is, which is the difference between a stated residual and an unstated one.
+
+    Both halves are required and both are checked, because either alone is the whole rung: the
+    file must carry no write bit (`_harden` is best-effort and a failed `chmod` is silent), and the
+    caller must not hold the capability that ignores it."""
+    reasons = []
+    try:
+        mode = os.stat(target).st_mode & 0o777
+    except OSError as exc:
+        return f"the fence file {target} could not be stat'ed ({exc.strerror}), so the kernel rung " \
+               f"of its self-protection cannot be said to be in force"
+    if mode & 0o222:
+        reasons.append(f"{target} carries write bits ({mode:04o}), so `_harden`'s chmod did not take")
+    override = _dac_override()
+    if override:
+        reasons.append(override)
+    if not reasons:
+        return None
+    return ("the read fence's KERNEL self-protection rung is ADVISORY here: " + "; ".join(reasons)
+            + ". A node's eval code can overwrite the generated fence and unfence every process "
+              "the run starts afterwards; only the audit-hook rung (`_SELF`) is in force")
+
+
+# The exact bytes `install` last wrote, per fence directory — the ENGINE process's own copy of the
+# fence, which a node's eval cannot reach because it is memory in a different process. Keyed by the
+# directory rather than the file so `reassert` needs nothing but the marker `run_argv` already
+# carries. Bounded by the number of run directories one engine installs into, i.e. one.
+_INSTALLED: dict = {}
+
+
+def reassert(fence_dir) -> Optional[str]:
+    """Repair a tampered fence before the next launch imports it. `None` when nothing was wrong.
+
+    WHY REPAIR AND NOT PREVENTION. The fence file is created by the engine and read by the eval,
+    and on the subprocess tier those are the SAME uid — so the eval OWNS the file and its
+    directory, and every rung expressed in the filesystem rests on ownership. Measured 2026-09-08,
+    unprivileged, against a fence hardened to 0444 in a directory hardened to 0555 with the pyc
+    pre-compiled (i.e. the `NOT the DIRECTORY` candidate `_harden` rejected on cost, with the cost
+    removed — 2,351 us -> 246 us of `sitecustomize` import, indistinguishable from a writable
+    directory): `rm`, `mv` and a shell truncate were all refused, and then `chmod 755 <fence dir>`
+    from a `/bin/chmod` CHILD succeeded, because chmod asks who owns the inode and never what
+    permissions or capabilities the caller holds. The directory bit buys nothing a determined node
+    cannot take back, at any uid. So the file cannot be made unwritable from inside this layer, and
+    what is left is to notice.
+
+    WHAT IT BOUNDS. Before this, one write to the fence — `open(fence, "w")` on a privileged
+    runner, a `/bin/rm` child on any runner — unfenced EVERY process the run started afterwards,
+    including every other node's eval, for the rest of the run. `run_argv` is the universal launch
+    choke point, so re-asserting here bounds the damage to the launch that did it (plus a launch
+    that races it: a tamper landing between this call and the child's `execve` still wins, which is
+    inherent to a repair rung and is why the marker stays open).
+
+    COST, measured 2026-09-08 on this box, N=300, the branch where nothing is wrong (one 33 KB
+    read plus a `stat`): 0.025 ms best, 0.027 ms median, against an 18-19 ms fenced-process
+    startup — 0.15 %. A launch already pays a `fork`+`execve`; this is not visible beside it.
+    """
+    src = _INSTALLED.get(str(fence_dir or ""))
+    if not src:
+        # Not a fence THIS process installed: a resumed engine that has not reached `install` yet,
+        # a test harness, a hand-set marker. There is no trusted copy to compare against, and
+        # guessing one from the file on disk is exactly the thing under attack, so do nothing.
+        return None
+    target = Path(fence_dir) / "sitecustomize.py"
+    try:
+        found = target.read_text(encoding="utf-8")
+        mode_ok = not (os.stat(target).st_mode & 0o222)
+    except OSError:
+        found, mode_ok = "", False          # deleted or renamed away — rewrite it
+    if found == src and mode_ok:
+        return None
+    what = "content" if found != src else "mode"
+    try:
+        atomic_write_text(target, src)
+        _harden(target)
+    except OSError as exc:
+        # Same posture as `install`: a fence that cannot be repaired must not take down the launch.
+        return f"read fence at {target} was tampered with ({what}) and could NOT be repaired: {exc}"
+    return f"read fence at {target} had been tampered with ({what}); repaired before this launch"
 
 
 def install(run_dir, *, roots, allow, policy: str, record: bool = True) -> Optional[str]:
@@ -1286,6 +1429,7 @@ def install(run_dir, *, roots, allow, policy: str, record: bool = True) -> Optio
             # unwritable, and a run that finds the right content has no idea whether the previous
             # writer was this function or a node that put the content back after widening the bits.
             _harden(target)
+            _INSTALLED[str(d)] = src
             return str(d)
     except OSError:
         pass
@@ -1301,6 +1445,9 @@ def install(run_dir, *, roots, allow, policy: str, record: bool = True) -> Optio
     # and the new inode arrives at `mkstemp`'s 0600 and is hardened below.
     atomic_write_text(target, src)
     _harden(target)
+    # The ENGINE's own copy of what it wrote, for `reassert` at every later launch. Recorded after
+    # the write, so a failed write leaves no claim that the fence on disk is this source.
+    _INSTALLED[str(d)] = src
     return str(d)
 
 
