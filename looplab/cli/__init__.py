@@ -1079,8 +1079,8 @@ def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: b
 # against the `app` above. This block MUST stay at the bottom — the groups import the shared
 # builders back from this (still-initializing) package, which is safe only because everything they
 # need is already defined by this point.
-from looplab.cli import (audit_cmds, concept_cmds, export_cmds, governance_cmds,  # noqa: E402,F401
-                         maintenance_cmds, memory_cmds,
+from looplab.cli import (audit_cmds, concept_cmds, corpus_cmds, export_cmds,  # noqa: E402,F401
+                         governance_cmds, maintenance_cmds, memory_cmds,
                          inspect_cmds, run_cmds, ui_cmds)
 
 # Back-compat re-exports: when `looplab/cli.py` was one flat module, every command was an attribute
