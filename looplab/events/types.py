@@ -1785,7 +1785,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "never_evaluated", "node_id", "reason", "reason_evidence",
             "reason_evidence_resolved", "reason_findings", "reason_hypotheses",
             "reason_override_refused", "reason_source", "reason_summary", "scope", "step",
-            "triage_rationale"
+            "triage_action", "triage_rationale"
         ),
     ),
     "node_repaired": PayloadContract(

@@ -234,15 +234,34 @@ def subscript_string_keys(scope, name: str, *, after: int, before: int) -> set[s
     dict literal this payload resolved to and `before` the append call, so only the writes that
     can actually reach THAT payload are collected.
     """
+    def _subscripts(target):
+        """Every `name["k"]` this assignment TARGET binds, unpacking included.
+
+        `data["triage_action"], data["triage_rationale"] = (…)` is one `Assign` whose single
+        target is a `Tuple` of two Subscripts, and a walk that only accepted a bare Subscript saw
+        NEITHER — `node_failed.triage_action` reached the durable log with no contract row while
+        this scan reported the type fully covered, which is the same class of miss the subscript
+        hop itself was added for. Starred and nested targets unpack the same way.
+        """
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                yield from _subscripts(elt)
+        elif isinstance(target, ast.Starred):
+            yield from _subscripts(target.value)
+        elif isinstance(target, ast.Subscript):
+            yield target
+
     out: set[str] = set()
     for node in scope:
+        if not (after < getattr(node, "lineno", 0) < before):
+            continue
         for target in (node.targets if isinstance(node, ast.Assign) else
-                       [node.target] if isinstance(node, ast.AnnAssign) else []):
-            if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
-                    and target.value.id == name and isinstance(target.slice, ast.Constant)
-                    and isinstance(target.slice.value, str)
-                    and after < getattr(node, "lineno", 0) < before):
-                out.add(target.slice.value)
+                       [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign)) else []):
+            for sub in _subscripts(target):
+                if (isinstance(sub.value, ast.Name) and sub.value.id == name
+                        and isinstance(sub.slice, ast.Constant)
+                        and isinstance(sub.slice.value, str)):
+                    out.add(sub.slice.value)
     return out
 
 

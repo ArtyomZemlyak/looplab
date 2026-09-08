@@ -124,7 +124,24 @@ def normalize_web_deny(entries) -> tuple:
     naming the entry, because a prefix that can never match is a fence that fences nothing while
     the task file says it does — the same reason `envsafe.validate_env_map` refuses rather than
     drops. Whitespace is stripped, the scheme and host are lower-cased (both are case-insensitive
-    by RFC 3986), the path is kept as written. Duplicates collapse, order is kept."""
+    by RFC 3986), the path is kept as written. Duplicates collapse, order is kept.
+
+    TWO SHAPES THE MATCHER CANNOT HONOUR, and the rule above decides both:
+
+    * a path carrying `..`. `_host_path` answers `parts is None` for it and `web_deny_match` SKIPS
+      such a prefix outright (`continue`) — so the operator's declaration fenced nothing at all
+      while the task file said it did, which is precisely what this function exists to refuse. It
+      is refused here rather than reinterpreted, because a prefix that climbs out of itself does
+      not name a page and resolving it in either direction would be us guessing which one.
+    * a QUERY. The comparison is host + path COMPONENTS; `web_deny_match` reads neither side's
+      query. Keeping it in the stored form made the declaration read as "this page with this
+      query" while the fence covered the whole path — the stored form has to be the compared
+      form, or every message that names the prefix names something the fence does not do. It is
+      DROPPED rather than refused, unlike the `..`: dropping widens the fence to the path, which
+      is the over-fencing direction this module chooses everywhere else (`/OriPress/`, `%6F`, a
+      `..` on a declared host), whereas refusing would reject a declaration that already covers
+      what its author meant. The fragment was always dropped, and is client-side by RFC 3986.
+    """
     out: list[str] = []
     for raw in (entries or ()):
         text = str(raw or "").strip()
@@ -135,8 +152,13 @@ def normalize_web_deny(entries) -> tuple:
             raise ValueError(
                 f"web_deny: {text!r} is not an absolute http(s) URL prefix (it needs a scheme and "
                 "a host, e.g. 'https://github.com/org/repo/')")
+        if _host_path(text)[1] is None:
+            raise ValueError(
+                f"web_deny: {text!r} carries a `..` segment, so it names no page and "
+                "`web_deny_match` can never match it — the declaration would fence nothing while "
+                "the task file says it does. Write the prefix the page actually lives at.")
         norm = urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(),
-                                        parsed.path, parsed.query, ""))
+                                        parsed.path, "", ""))
         if norm not in out:
             out.append(norm)
     return tuple(out)
@@ -188,6 +210,11 @@ def web_deny_match(url: str, deny) -> str | None:
     for prefix in (deny or ()):
         p_host, p_parts, _p_query = _host_path(prefix)
         if not p_host or p_parts is None:
+            # UNREACHABLE for a declaration that went through `normalize_web_deny`, which now
+            # REFUSES both shapes at the task file. It stays because this function is public and
+            # takes any iterable, and because skipping is the only thing it can do with a prefix
+            # that names no page — but skipping is FAIL-OPEN, so the refusal belongs upstream where
+            # the operator can see it, not here where it silently unfences their declaration.
             continue
         if host != p_host and not host.endswith("." + p_host):
             continue

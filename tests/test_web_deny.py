@@ -330,3 +330,36 @@ def test_a_dropped_result_does_not_hand_the_next_row_the_denied_page_s_snippet()
     # Each surviving row keeps ITS OWN snippet, and the ordinals stay dense.
     assert "1. A paper\n   https://arxiv.org/abs/1\n   an abstract about trees" in out
     assert "2. A blog\n   https://example.com/blog\n   a blog post about trees" in out
+
+
+def test_a_declaration_the_matcher_cannot_honour_is_refused_or_narrowed_at_the_task_file():
+    """The DECLARATION side of the same rule the URL side got on 2026-09-08.
+
+    `web_deny_match` skips a prefix whose own path carries `..` (`p_parts is None` -> `continue`),
+    which is FAIL-OPEN: the operator's entry fenced nothing at all while the task file said it did
+    — the exact failure `normalize_web_deny`'s docstring cites `envsafe.validate_env_map` for. And
+    a QUERY was kept in the stored form while the comparison reads neither side's query, so the
+    entry read as "this page with this query" and covered the whole path.
+    """
+    import pytest
+
+    from looplab.tools.web import normalize_web_deny, web_deny_match
+
+    # 1. `..` in a DECLARED prefix: refused where the operator can see it, not skipped in silence.
+    for bad in ("https://github.com/oripress/../oripress/AlgoTune/",
+                "https://github.com/oripress/AlgoTune/..",
+                "https://github.com/a/%2E%2E/b/"):
+        with pytest.raises(ValueError) as exc:
+            normalize_web_deny([bad])
+        assert "`..`" in str(exc.value) and bad in str(exc.value), str(exc.value)
+    # …and the fail-open behaviour it replaces, shown directly against the raw matcher.
+    assert web_deny_match("https://github.com/oripress/AlgoTune/solver.py",
+                          ["https://github.com/oripress/../oripress/AlgoTune/"]) is None, (
+        "an unnormalized `..` prefix still fences nothing — which is why the refusal is upstream")
+
+    # 2. a QUERY: dropped, so the STORED form is the COMPARED form and every message that names
+    # the prefix names what the fence actually does.
+    norm = normalize_web_deny(["https://kaggle.com/c/x/leaderboard?tab=public#top"])
+    assert norm == ("https://kaggle.com/c/x/leaderboard",), norm
+    assert web_deny_match("https://kaggle.com/c/x/leaderboard?tab=private", norm) == norm[0], (
+        "the fence covers the path either way — the declaration must SAY so")
