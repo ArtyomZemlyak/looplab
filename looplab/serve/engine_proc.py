@@ -1,16 +1,21 @@
-"""Engine-process plumbing for the UI server: liveness probing (`_engine_alive`), spawning
-detached engine runs (`_spawn_engine`), and the JupyterHub-only reaper that stops spawned engines
-when the single-user server shuts down. Extracted verbatim from `serve/server.py` (BACKLOG §4);
-`looplab.serve.server` re-exports `_engine_alive`/`_kill_process_tree` so the historical
-`looplab.server._engine_alive` import path keeps working for tests and callers."""
+"""Engine-process plumbing for the UI server: SPAWNING detached engine runs (`_spawn_engine`), the
+resume claim/reconcile machinery, the HTTP-shaped lock wrappers, and the JupyterHub-only reaper that
+stops spawned engines when the single-user server shuts down. Extracted verbatim from
+`serve/server.py` (BACKLOG §4); `looplab.serve.server` re-exports `_engine_alive`/`_kill_process_tree`
+so the historical `looplab.server._engine_alive` import path keeps working for tests and callers.
+
+The run-directory LIFECYCLE FENCES themselves — `engine.lock` liveness, the per-run lifecycle lock,
+the launch-pending predicates and their launch marker — moved DOWN to
+`looplab/engine/run_lifecycle.py` on 2026-09-08 (doc 25 XP-03) so `tools/machine_runs_tools.py` can
+take its `RunLifecycleFns` defaults DOWNWARD instead of importing this package upward. They are
+re-exported below, unchanged: every `looplab.serve.engine_proc.<name>` import path and every
+`monkeypatch.setattr(engine_proc, "_engine_alive", …)` seam still resolves here, and this module's
+own callers still read them out of this module's globals, so a patch of either name still lands."""
 from __future__ import annotations
 
 import atexit
-import errno
-import hashlib
 import os
 import signal
-import stat
 import subprocess
 import sys
 import threading
@@ -19,7 +24,30 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from looplab.core.pathsafe import is_reparse
+# Re-exported, not redefined (see the module docstring): these are the run-lifecycle fences, and
+# their home is now below both `serve` and `tools`. They are PUBLIC there and keep their historical
+# `_`-prefixed spelling here, so every existing import site and every
+# `monkeypatch.setattr(engine_proc, "_engine_alive", …)` still resolves — and this module's own
+# functions still read them out of this module's globals, so such a patch still lands.
+from looplab.core.atomicio import file_identity
+from looplab.engine import run_lifecycle
+from looplab.engine.run_lifecycle import (  # noqa: F401 - re-exported for the historical import path
+    RESUME_RECONCILE_GRACE_S as _RESUME_RECONCILE_GRACE_S,
+    RUN_LAUNCH_MARKER as _RUN_LAUNCH_MARKER,
+    clear_run_launching as _clear_run_launching,
+    engine_alive as _engine_alive,
+    engine_liveness as _engine_liveness,
+    fresh_resume_launch_pending as _fresh_resume_launch_pending,
+    fresh_run_launch_pending as _fresh_run_launch_pending,
+    launch_claim_is_fresh as _launch_claim_is_fresh,
+    mark_run_launching as _mark_run_launching,
+    run_launch_marker_path as _run_launch_marker_path,
+    run_lifecycle_key as _run_lifecycle_key,
+    run_lifecycle_lock as _run_lifecycle_lock,
+    run_lifecycle_lock_path as _run_lifecycle_lock_path,
+    sweep_stale_lifecycle_locks,
+    within_resume_grace as _within_resume_grace,
+)
 
 
 def _on_shared_hub() -> bool:
@@ -31,129 +59,6 @@ def _on_shared_hub() -> bool:
     every single-user server; absent on the default local single-user path."""
     return bool(os.environ.get("JUPYTERHUB_SERVICE_PREFIX")
                 or os.environ.get("JUPYTERHUB_API_TOKEN"))
-
-
-def _engine_liveness(rd: Path) -> Optional[bool]:
-    """True when held, False when definitively free/absent, None when the probe is inconclusive."""
-    lock = rd / "engine.lock"
-    try:
-        run_entry = rd.lstat()
-    except FileNotFoundError:
-        return False  # required for a not-yet-materialized, validated new-start path
-    except OSError:
-        return None
-    if is_reparse(run_entry) or not stat.S_ISDIR(run_entry.st_mode):
-        return None
-    try:
-        canonical_run = rd.resolve(strict=True)
-    except (FileNotFoundError, OSError):
-        return None
-
-    def _run_dir_unchanged() -> bool:
-        try:
-            current = rd.lstat()
-            return bool(
-                stat.S_ISDIR(current.st_mode)
-                and not is_reparse(current)
-                and (current.st_dev, current.st_ino, current.st_mode)
-                == (run_entry.st_dev, run_entry.st_ino, run_entry.st_mode)
-                and rd.resolve(strict=True) == canonical_run
-            )
-        except (FileNotFoundError, OSError):
-            return False
-
-    try:
-        # ``Path.exists`` follows links, so checking it first misclassified a dangling
-        # ``engine.lock`` symlink as authoritative absence.  Inspect the directory entry itself:
-        # any link/reparse/special inode is untrusted ownership evidence, never permission to
-        # mutate the run or launch another writer.
-        entry = lock.lstat()
-    except FileNotFoundError:
-        # Revalidate the directory identity before authorizing a no-lock verdict; it may have been
-        # swapped to a symlink/reparse point between the directory and lock metadata probes.
-        return False if _run_dir_unchanged() else None
-    except OSError:
-        return None
-    try:
-        if is_reparse(entry) or not stat.S_ISREG(entry.st_mode):
-            return None
-        if lock.resolve(strict=True).parent != canonical_run:
-            return None
-    except FileNotFoundError:
-        # The lock entry changed or became dangling after lstat. It was observed, so this is not
-        # proof of absence.
-        return None
-    except OSError:
-        return None
-    fd = None
-    try:
-        # Open an existing inode only and refuse a link swap on platforms with O_NOFOLLOW.  The
-        # fstat identity check closes the regular-file replacement race on the remaining platforms.
-        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(lock, flags)
-        opened = os.fstat(fd)
-        if ((entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
-                or not stat.S_ISREG(opened.st_mode)):
-            os.close(fd)
-            fd = None
-            return None
-        f = os.fdopen(fd, "r+b", buffering=0)
-        fd = None
-    except FileNotFoundError:
-        # Unlike a clean initial lstat miss, disappearance after an observed entry is a race.
-        return None
-    except OSError:
-        if fd is not None:
-            os.close(fd)
-        return None
-
-    def _lock_entry_unchanged() -> bool:
-        try:
-            current = lock.lstat()
-            return bool(
-                stat.S_ISREG(current.st_mode)
-                and not is_reparse(current)
-                and (current.st_dev, current.st_ino, current.st_mode)
-                == (entry.st_dev, entry.st_ino, entry.st_mode)
-                == (opened.st_dev, opened.st_ino, opened.st_mode)
-                and lock.resolve(strict=True).parent == canonical_run
-            )
-        except (FileNotFoundError, OSError):
-            return False
-
-    def _ownership_paths_unchanged() -> bool:
-        return _run_dir_unchanged() and _lock_entry_unchanged()
-
-    try:
-        if os.name == "nt":
-            import msvcrt
-            f.seek(0)
-            try:
-                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as exc:
-                if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-                    return True if _ownership_paths_unchanged() else None
-                return None
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-            return False if _ownership_paths_unchanged() else None
-        import fcntl
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True if _ownership_paths_unchanged() else None
-        except OSError:
-            return None
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        return False if _ownership_paths_unchanged() else None
-    except OSError:
-        return None
-    finally:
-        f.close()
-
-
-def _engine_alive(rd: Path) -> bool:
-    """Conservative boolean compatibility API: only a proven-free lock is treated as stopped."""
-    return _engine_liveness(rd) is not False
 
 
 def _spawn_liveness(rd: Path) -> Optional[bool]:
@@ -225,41 +130,6 @@ _engine_spawn_gate = threading.RLock()
 class EngineSpawnOutcomeUnknown(RuntimeError):
     """A spawner was entered, so an exception cannot prove that no child was created."""
 
-# Resume, reset, and delete are one lifecycle transaction per run.  engine.lock fences a RUNNING
-# engine, but it does not cover the claim -> Popen -> child-lock startup gap.  Pair a process-local
-# RLock with a sibling interprocess lock whose inode survives deletion of the run directory; this
-# prevents another server worker from archiving/removing a run after a durable launch claim but
-# before its child owns engine.lock.
-_run_lifecycle_locks_guard = threading.Lock()
-_run_lifecycle_locks: dict[str, threading.RLock] = {}
-
-
-def _run_lifecycle_key(rd: Path) -> str:
-    return os.path.normcase(str(rd.resolve()))
-
-
-def _run_lifecycle_lock_path(rd: Path) -> Path:
-    digest = hashlib.sha256(_run_lifecycle_key(rd).encode("utf-8")).hexdigest()[:24]
-    return rd.resolve().parent / f".looplab-lifecycle-{digest}.lock"
-
-
-@contextmanager
-def _run_lifecycle_lock(rd: Path):
-    """Cross-thread/process fence for resume-claim, reset, and delete of one run."""
-    from looplab.events.eventstore import _interprocess_lock
-
-    key = _run_lifecycle_key(rd)
-    with _run_lifecycle_locks_guard:
-        local = _run_lifecycle_locks.setdefault(key, threading.RLock())
-    # REQUIRED, not best-effort. Without it, `_interprocess_lock` swallows an unsupported lock backend
-    # and this degrades to the in-process RLock alone — so two server processes (or two startup
-    # reconcilers) could claim and spawn the SAME resume, and race event appends before engine.lock
-    # exists to catch them. reset/delete are pure check-then-act around `_fresh_resume_launch_pending`,
-    # so they have no CAS to fall back on. Callers map the resulting EventStoreLockError to a 503; the
-    # same fail-closed contract `_put_run_config_locked` already uses for run config.
-    with local, _interprocess_lock(_run_lifecycle_lock_path(rd), required=True):
-        yield
-
 
 @contextmanager
 def run_lifecycle_lock_http(rd: Path):
@@ -295,10 +165,10 @@ def engine_write_lock_http(rd: Path):
     """
     from fastapi import HTTPException
     from looplab.events.eventstore import (
-        EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+        EventStoreLockError, InterprocessLockContended, interprocess_lock)
 
     try:
-        with _interprocess_lock(rd / "engine.lock", required=True, blocking=False):
+        with interprocess_lock(rd / "engine.lock", required=True, blocking=False):
             yield
     except InterprocessLockContended as exc:
         raise HTTPException(409, {
@@ -313,49 +183,6 @@ def engine_write_lock_http(rd: Path):
             "remediation": "Inspect engine.lock and storage locking before retrying.",
         }) from exc
 
-
-def sweep_stale_lifecycle_locks(root: Path, *, max_age_s: float = 3600.0) -> int:
-    """Best-effort startup GC of orphaned per-run lifecycle lock files (F22). These live in the runs
-    root and are deliberately never deleted inline (their inode is the fence during a run's own delete),
-    so a long-lived server slowly accumulates one `.looplab-lifecycle-*.lock` dot-file per run ever
-    resumed/reset/deleted. Remove one ONLY when it is (a) OLD — untouched for `max_age_s`, while a real
-    lifecycle op touches its lock within seconds.
-
-    POSIX is a deliberate NO-OP (see the loop): there is no way to remove a `flock` pathname without
-    risking two lock domains over one run, and the accumulation it would clean is bounded by run count.
-    Windows can unlink safely because the OS refuses to remove a file that is open/locked, which is
-    exactly the check this GC needs. Skips silently on any error. Returns the count removed."""
-    import time
-    try:
-        candidates = list(root.glob(".looplab-lifecycle-*.lock"))
-    except OSError:
-        return 0
-    now = time.time()
-    removed = 0
-    for lp in candidates:
-        try:
-            if now - lp.stat().st_mtime < max_age_s:
-                continue                       # recently touched → an op may be using it; leave it
-        except OSError:
-            continue
-        if os.name == "nt":
-            try:                               # Windows refuses to unlink an open/locked file → skip
-                lp.unlink()
-                removed += 1
-            except OSError:
-                pass
-            continue
-        # POSIX: DO NOT UNLINK. `flock` is per-INODE, and holding the lock while unlinking is not
-        # enough — a lifecycle op already blocked in `flock(LOCK_EX)` on this inode can still be
-        # waiting (`flock` gives no FIFO fairness, so the sweeper's LOCK_NB can win the race the
-        # instant a holder releases). It then acquires the now-unlinked inode, while the very next
-        # `_run_lifecycle_lock` caller's `open(lp, "a+")` creates a FRESH inode and locks that: two
-        # live lock domains over one run, i.e. reset/delete/resume-claim running concurrently with the
-        # single fence they rely on. The `max_age_s` filter does not help — it excludes recently
-        # TOUCHED files, not waiters. The leak this was cleaning is one empty dot-file per run ever
-        # resumed/reset/deleted (bounded by run count); the split-brain is unbounded corruption.
-        continue
-    return removed
 
 # A resume can arrive after ``run_finished`` has landed but before the old engine releases its
 # singleton lock (final read-model/trace writes still run).  Returning ``already_running`` in that
@@ -423,11 +250,6 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
     return pid
 
 
-# P1-1 recoverable-intent reconciler grace: wait this long after a durable resume_requested before
-# re-spawning it, so the ORIGINAL detached spawn has time to acquire the lock + append resume_served.
-# Only a resume that stays unserved past this window is treated as a died-on-startup zombie.
-_RESUME_RECONCILE_GRACE_S = 30.0
-
 # P1-4 bounded logs: ceiling for the append-only engine.stderr.log before `_spawn_engine` truncates it
 # to its recent tail — so a crash-looping (or reconciler-re-spawned) engine can't grow it without bound.
 _ENGINE_STDERR_CAP = 8 * 1024 * 1024
@@ -453,18 +275,6 @@ def _resolve_task_file(rd: Path) -> Optional[str]:
     return None
 
 
-def _within_resume_grace(ts: float, now: float) -> bool:
-    """A wall-clock lease is fresh only when its age is non-negative and below the grace."""
-    elapsed = now - float(ts or 0.0)
-    return 0.0 <= elapsed < _RESUME_RECONCILE_GRACE_S
-
-
-def _launch_claim_is_fresh(state, now: float) -> bool:
-    """Whether a detached CLI launch is already in flight for this unserved intent."""
-    return (state.last_resume_launch_seq > state.last_resume_served_seq
-            and _within_resume_grace(state.last_resume_launch_ts, now))
-
-
 def _resume_request_mode(state) -> str:
     """Return the durable command attached to the latest unserved UI handoff."""
     return ("finalize"
@@ -483,83 +293,6 @@ def _cli_args_for_resume_state(rd: Path, cli_args: list[str], state) -> list[str
             args.extend(["--task-file", str(task_file)])
         return args
     return list(cli_args)
-
-
-def _fresh_resume_launch_pending(rd: Path, *, now: Optional[float] = None) -> bool:
-    """Whether reset/delete must fence a newly accepted resume before child engine.lock ownership.
-
-    Callers hold ``_run_lifecycle_lock`` around this check and their mutation. The request grace
-    covers append -> claim; the claim grace covers claim -> Popen -> child lock. An abandoned old
-    request eventually expires, so a zombie run remains operator-deletable.
-    """
-    from looplab.events.eventstore import EventStore
-    from looplab.events.replay import fold
-
-    now = time.time() if now is None else now
-    try:
-        store = EventStore(rd / "events.jsonl")
-        if store.divergence is not None:
-            return False
-        state = fold(store.read_all())
-    except Exception:  # noqa: BLE001 - corrupt/legacy zombies remain operator-deletable
-        return False
-    return bool(state.resume_pending()
-                and (_launch_claim_is_fresh(state, now)
-                     or _within_resume_grace(state.last_resume_request_ts, now)))
-
-
-_RUN_LAUNCH_MARKER = ".looplab-launching"
-
-
-def _run_launch_marker_path(rd: Path) -> Path:
-    return rd / _RUN_LAUNCH_MARKER
-
-
-def _mark_run_launching(rd: Path) -> None:
-    """Stamp the fresh-run launch marker just before a reset/replay Popen (F9), held under the lifecycle
-    lock. Reset spawns a fresh `run` engine on an ARCHIVED (emptied) event log, so a resume-style
-    launch claim in the log can't fence it; this short-lived FILE bridges the same gap — Popen -> the
-    detached child acquiring engine.lock — so a concurrent delete/reset can't rmtree the dir out from
-    under a starting engine. Best-effort: if it can't be written the reset still proceeds (today's
-    behavior), just without the extra fence."""
-    try:
-        _run_launch_marker_path(rd).write_text(str(time.time()), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def _clear_run_launching(rd: Path) -> None:
-    """Drop the launch marker (a failed Popen: no child is starting, so nothing to fence)."""
-    try:
-        _run_launch_marker_path(rd).unlink()
-    except OSError:
-        pass
-
-
-def _fresh_run_launch_pending(rd: Path, *, now: Optional[float] = None) -> bool:
-    """Whether a fresh-run (reset/replay) launch is in flight: the marker exists and is within the same
-    grace the resume claim uses. Once the child holds engine.lock `_engine_alive` takes over; an engine
-    that died on startup lets the marker expire so the run stays operator-deletable (F9)."""
-    marker = _run_launch_marker_path(rd)
-    # A just-closed file on Windows/network storage can briefly expose inaccessible or slightly
-    # future metadata. Retry that ambiguous publication once; an actually future timestamp remains
-    # rejected, while ordinary/expired markers stay on the zero-sleep path.
-    for attempt in range(2):
-        try:
-            ts = marker.stat().st_mtime
-        except OSError:
-            if attempt == 0:
-                time.sleep(0.001)
-                continue
-            return False
-        observed_now = time.time() if now is None else now
-        if observed_now >= ts:
-            return _within_resume_grace(ts, observed_now)
-        if attempt == 0 and now is None:
-            time.sleep(0.001)
-            continue
-        return False
-    return False
 
 
 def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict] = None,
@@ -759,10 +492,14 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
         except Exception:  # noqa: BLE001 - unreadable state stays recoverable; keep waiting
             return None
 
-    def _log_sig() -> Optional[tuple[int, int]]:
+    def _log_sig() -> Optional[tuple[int, ...]]:
+        # `file_identity`, not the (size, mtime_ns) pair this used to spell: the waiter is asking
+        # "has anything happened to the log since I last looked", and a REPLACEMENT (a reset that
+        # atomically swapped a fresh events.jsonl in) is the loudest thing that can happen to it —
+        # invisible to size+mtime when the new file happens to match, and exactly the case where
+        # continuing to wait is wrong (doc 25 SC-11).
         try:
-            st = (run_dir / "events.jsonl").stat()
-            return st.st_size, st.st_mtime_ns
+            return file_identity((run_dir / "events.jsonl").stat())
         except OSError:
             return None
 
@@ -908,8 +645,12 @@ def install_resume_reconcile_hooks(
             latest_ts = max(float(state.last_resume_request_ts or 0.0),
                             float(state.last_resume_launch_ts or 0.0))
             elapsed = now - latest_ts
-            delay = (_RESUME_RECONCILE_GRACE_S - elapsed
-                     if 0.0 <= elapsed < _RESUME_RECONCILE_GRACE_S else 0.0)
+            # Read THROUGH the owning module, not off the re-exported copy above: the grace is one
+            # number, and `within_resume_grace` (which decides whether the same intent is still
+            # fresh) reads it from `run_lifecycle`. A bound copy here would give a test that lowers
+            # the grace two different answers in the same reconcile pass (doc 25 XP-03).
+            grace = run_lifecycle.RESUME_RECONCILE_GRACE_S
+            delay = (grace - elapsed if 0.0 <= elapsed < grace else 0.0)
             if delay <= 0:
                 try:
                     reconcile_pending_resume(

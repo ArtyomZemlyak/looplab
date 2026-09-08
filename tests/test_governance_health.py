@@ -440,7 +440,7 @@ def test_governed_source_projection_uses_one_canonical_lock_order(tmp_path, monk
         finally:
             assert active.pop() == name
 
-    monkeypatch.setattr(eventstore_module, "_interprocess_lock", observed_lock)
+    monkeypatch.setattr(eventstore_module, "interprocess_lock", observed_lock)
 
     def project(governance):
         assert active == [
@@ -519,7 +519,7 @@ def test_cross_run_cli_payloads_are_built_inside_one_governed_source_snapshot(
         finally:
             assert active.pop() == path.name
 
-    monkeypatch.setattr(eventstore_module, "_interprocess_lock", observed_lock)
+    monkeypatch.setattr(eventstore_module, "interprocess_lock", observed_lock)
 
     def wrap(target, name):
         def checked(*args, **kwargs):
@@ -578,7 +578,7 @@ def test_claims_cli_locks_the_exact_explicit_evidence_file(tmp_path, monkeypatch
         finally:
             assert active.pop() == path.name
 
-    monkeypatch.setattr(eventstore_module, "_interprocess_lock", observed_lock)
+    monkeypatch.setattr(eventstore_module, "interprocess_lock", observed_lock)
     original = claims_module.claim_assessments
 
     def checked(*args, **kwargs):
@@ -627,7 +627,7 @@ def test_capsule_stat_failure_is_unknown_and_cli_surfaces_are_bounded(tmp_path, 
 
 
 def test_governed_source_projection_fences_policy_and_evidence_writers(tmp_path):
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     lessons_path = tmp_path / "lessons.jsonl"
     lessons_path.write_text(json.dumps({
@@ -654,7 +654,7 @@ def test_governed_source_projection_fences_policy_and_evidence_writers(tmp_path)
 
     def write_evidence():
         evidence_started.set()
-        with _interprocess_lock(
+        with interprocess_lock(
                 tmp_path / "lessons.jsonl.lock", required=True):
             with lessons_path.open("ab") as handle:
                 handle.write(json.dumps({
@@ -692,7 +692,7 @@ def test_governed_source_projection_fences_policy_and_evidence_writers(tmp_path)
 
 def test_absent_governed_source_bootstrap_cannot_mix_new_evidence_with_revision_zero(tmp_path):
     """A missing memory root must join the ordinary lock order before its callback can read files."""
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     memory = tmp_path / "not-created-yet"
     entered, release = Event(), Event()
@@ -711,7 +711,7 @@ def test_absent_governed_source_bootstrap_cannot_mix_new_evidence_with_revision_
             memory, statement="new policy", decision="pinned",
             expected_revision=0, action_id="bootstrap-policy")
         path = memory / "lessons.jsonl"
-        with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+        with interprocess_lock(Path(str(path) + ".lock"), required=True):
             path.write_text(json.dumps({
                 "statement": "new evidence", "outcome": "supported",
                 "evidence": [1], "run_id": "r", "task_id": "t",

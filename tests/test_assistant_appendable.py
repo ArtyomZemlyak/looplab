@@ -2,7 +2,7 @@
 
 Engine invariant #1 names three writers of folded events — the engine's main task, two registried
 thread-side seams, and "UI/CLI append only control intents (allow-listed in
-`serve/protocol.py::CONTROL_EVENTS`)". `tools/machine_runs_tools.py::MachineRunsTools` is a FOURTH:
+`serve/protocol.py::CONTROL_EVENTS`)". `tools/run_control_tools.py::RunControlTools` is a FOURTH:
 it appends `trust_gate_changed` and `node_tombstoned` directly, neither is in `CONTROL_EVENTS`, and
 `node_tombstoned` has no other writer in the tree at all. The seam existed, was reachable by an LLM,
 and was declared nowhere.
@@ -30,7 +30,9 @@ from looplab.events.types import ASSISTANT_APPENDABLE, EV_NODE_TOMBSTONED, EV_TR
 from looplab.events import types as event_types
 from looplab.serve.protocol import CONTROL_EVENTS
 
-PROVIDER = Path(__file__).resolve().parents[1] / "looplab" / "tools" / "machine_runs_tools.py"
+# The mutating provider moved out of `machine_runs_tools.py` into its own module on 2026-09-08
+# (doc 25 TO-02). The seam is the class, not the file it happened to share with three others.
+PROVIDER = Path(__file__).resolve().parents[1] / "looplab" / "tools" / "run_control_tools.py"
 SOURCE = PROVIDER.read_text(encoding="utf-8-sig", errors="replace")
 
 

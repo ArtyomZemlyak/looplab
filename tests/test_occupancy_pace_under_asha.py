@@ -22,6 +22,14 @@ test that `_occupancy_paced_creates` calls `occupancy_due` was GREEN throughout 
 because the call exists and is reached — it is the answer that was empty. So every test here runs
 the real selection over a real board and asserts on what came back, and the scope tests below assert
 the guard STILL refuses, so "delete the guard" cannot pass this file either.
+
+2026-09-08: the SECOND masking guard stopped being a refusal. A masked promotion whose Card does not
+carry its own expansion no longer empties the discretionary lane; the exact expansion it is already
+doing is RESERVED (`card_selection.py::_masked_promotion_expansions`, read off the node's
+`parent_ids`) in both consumers of the masked view, and the rest of the lane answers. The pair below
+is one board apart — the same shape with the masked promotion on a survivor and on a non-survivor —
+because "it produced something" and "it refused" are each satisfiable by the wrong implementation
+alone, and only the pair pins the narrowing.
 """
 from __future__ import annotations
 
@@ -165,23 +173,51 @@ def test_an_asha_bracket_the_masked_view_cannot_know_is_still_refused():
         "the masked view reads that slot as free and the policy would propose a replacement draft")
 
 
-def test_a_masked_promotion_without_its_exact_durable_action_is_still_refused():
-    """The second clause of the predicate, unchanged in force.
+def _promotion_board(masked_parent: int) -> RunState:
+    """Three settled seeds and one in-flight promotion of `masked_parent`, carrying NO Card at all.
 
-    The masked node is a PROMOTION (it has parents) whose Card does not carry
-    `("improve", its parents)`. Masking it would make the parent look unexpanded and permit a
-    duplicate same-rung child, so the whole query still refuses.
+    The clause-2 shape exactly: the masked node is a PROMOTION whose Card does not carry
+    `("improve", its parents)` — here because there is no Card. One argument, because the ONLY
+    difference between the two tests below is whether the parent the masked node is already
+    expanding is the survivor ASHA would pick, and that difference is the whole finding.
     """
-    state = _board(
+    return _board(
         _node(0, status=NodeStatus.evaluated, metric=0.5, card_id="card-0"),
         _node(1, status=NodeStatus.evaluated, metric=0.6, card_id="card-1"),
         _node(2, status=NodeStatus.evaluated, metric=0.7, card_id="card-2"),
-        # a promotion child of node 2, pending, carrying NO card at all
-        _node(3, status=NodeStatus.pending, parents=(2,), card_id=None),
+        _node(3, status=NodeStatus.pending, parents=(masked_parent,), card_id=None),
     )
-    assert _lanes(state, "asha", running=frozenset({3}), n_seeds=3) == [], (
-        "a masked promotion with no exact durable action was allowed to drive selection — the "
-        "parent reads as unexpanded and the same rung can be filled twice")
+
+
+def test_the_exact_expansion_a_masked_promotion_is_already_doing_is_still_refused():
+    """The negative control for clause 2's REPLACEMENT: the one action that really is unsound.
+
+    Node 3 is already improving node 0, and node 0 (min direction, metric 0.5) is exactly the
+    survivor ASHA picks over a view node 3 has been deleted from — `asha_expansion` credits a live
+    child to every parent it names, so hiding node 3 frees node 0. `improve parent=0` is therefore a
+    duplicate same-rung child, `_masked_promotion_expansions` reserves it, and with nothing else
+    producible the query answers nothing. Deleting the node-derived half of that reservation turns
+    this red while every test above stays green.
+    """
+    assert _lanes(_promotion_board(0), "asha", running=frozenset({3}), n_seeds=3) == [], (
+        "the lane offered the exact promotion its own masked in-flight node is already running — "
+        "the parent reads as unexpanded and the same rung is filled twice")
+
+
+def test_a_masked_promotion_no_longer_holds_the_survivors_it_never_named():
+    """The narrowing, driven: the SAME shape, one parent apart, must now produce.
+
+    Node 3 improves node 2; the survivor ASHA promotes is node 0. Nothing about node 0 is hidden
+    from the masked view, so refusing here bought no soundness — it was 2.08 starved hours over 6
+    intervals on `runs/rubertlite-dr-unified-v8`, the entire residue after the clause-1 fix. What
+    the lane may not do is offer node 3's own parent, and that is asserted rather than assumed:
+    "it produced something" is exactly the assertion a lane that ignored the mask would also pass.
+    """
+    produced = _lanes(_promotion_board(2), "asha", running=frozenset({3}), n_seeds=3)
+    assert produced, (
+        "a free slot, complete seeding and an in-flight promotion of a NON-survivor produced "
+        "nothing — clause 2 refused the whole discretionary lane over one parent")
+    assert all(action.get("parent_id") != 2 for action in produced), produced
 
 
 # --------------------------------------------------------------------------------------------
