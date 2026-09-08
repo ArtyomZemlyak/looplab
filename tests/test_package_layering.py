@@ -98,6 +98,11 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("engine", "adapters"): "the engine names a task type only at the seams that need one — "
                             "holdout splits, MLE-bench grading, the toy task (doc 50 RA-10)",
     ("judgebench", "adapters"): "`bait` reads the MLE-bench extras at audit time",
+    ("judgebench", "agents"): "the agent-trajectory ladder drives the real `drive_tool_loop` "
+                              "inside one bench case (doc 27 §4 rungs 2/4/5); deferred so the "
+                              "bait commands do not pull the agent stack in at import",
+    ("judgebench", "tools"): "the same ladder composes the real tool providers per case, for the "
+                             "same reason: a bench that stubs the provider measures the stub",
     ("judgebench", "engine"): "`score` re-runs the engine's triage/train-monitor rules over a "
                               "bench case",
     ("judgebench", "events"): "`bait` folds a run's log at audit time",

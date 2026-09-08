@@ -28,6 +28,18 @@ that reused the condemned stage output, and the allocator's own words in the log
 looplab.judgebench` is the entry point for both (`score` / `extract` and `score-triage` /
 `extract-triage`).
 
+**A third kind of row lives here too, and it is authored rather than recorded.** `trajectory.py` +
+`trajectory_score.py` are rungs 2, 4 and 5 of the agent eval ladder in `docs/27` §4: curated
+trajectory cases with expected and forbidden tool calls, prompt-injection / confused-deputy /
+cross-run-scope containment cases, and the repeated stochastic trials with confidence intervals
+that turn a yes/no into a rate. They are in THIS package because they answer the same shape of
+question — is a change to this engine's agent layer better, measured, rather than believed — and
+because they are the same kind of developer tool over the same `python -m looplab.judgebench` entry
+point (`score-trajectory`). What they do NOT share is the label problem above: a trajectory case is
+graded against a contract the case itself states, so there is no outcome to recover and no incumbent
+to agree with. Its own honesty hazard is a different one and its module docstring names it: offline
+the model is SCRIPTED, so a pass says an effect is unreachable, never that a model declines.
+
 The failure bench also carries the one thing an accuracy number cannot: **the COST of each error**.
 Its answer selects a repair directive, gates the dependency install and meets the salvage refusal,
 so `crash`-for-`oom` (a wasted round) and `oom`-for-`diverged` (rounds spent moving the wrong dial)
@@ -67,6 +79,11 @@ from looplab.judgebench.triage_corpus import (
     rederive_label as rederive_triage_label, write_dataset as write_triage_dataset)
 from looplab.judgebench.triage_score import (
     ERROR_COSTS, cost_of, head_replay_candidate, score_dataset as score_triage_dataset)
+# `trajectory` / `trajectory_score` are deliberately NOT re-exported here. They reach `agents` and
+# `tools` to drive the real loop, and this `__init__` is imported by `cli/audit_cmds.py` for the
+# bait instruments — re-exporting would pull the whole agent stack into a command that does not use
+# it. Import them by module (`from looplab.judgebench import trajectory`), which is also what
+# `__main__.py` does.
 
 __all__ = [
     "ERROR_COSTS", "LABEL_BASES", "LiveRunRefused", "TRIAGE_LABEL_UNKNOWN",

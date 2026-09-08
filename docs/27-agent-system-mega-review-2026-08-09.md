@@ -124,7 +124,7 @@ Research only.
 | P1 | Cancellation is checked between blocking calls, while speculative build workers may be awaited to completion | pause/abort can wait for an LLM/external process that no longer has a useful consumer | **Open execution item:** attempt-owned cancellation token, quarantined late result and durable cancel receipt |
 | P1 | External CLI agents use a composition-independent 600-second default and have no structured priced/unpriced usage result | timeout, cancellation and cost governance differ from in-process Developers | **Open contract item:** Settings-bound timeout plus immutable external-agent result with duration/cause/usage or explicit `unpriced` |
 | P1 | MCP adapter flattens current structured results/security metadata; timeout does not cancel the outstanding operation; cache is process-global | unsafe basis for broad autonomous connector access | **Declaration boundary fixed, expansion still blocked:** malformed/oversized schemas are isolated before routing, ordinary safe names stay compatible, and ambiguous/unsafe/long origin pairs receive deterministic provider-safe full-digest names. Typed results, cancellation, principal-keyed cache and authorization binding remain required before wider role access |
-| P1 | Agent trajectory/security eval corpus is absent | state replay and outcome benchmarks cannot catch bad tool routing, handoffs or prompt injection | **Open quality item:** add the eval ladder below |
+| P1 | Agent trajectory/security eval corpus is absent | state replay and outcome benchmarks cannot catch bad tool routing, handoffs or prompt injection | **Built 2026-09-08:** rungs 2/4/5 are `looplab/judgebench/trajectory.py` + `trajectory_score.py` over `tests/data/agent_trajectory/harness.v1.jsonl`; rung 3 is the judge benches beside them and is still one judge of four |
 | P2 | Fresh `agent_stage_models` / `agent_stage_base_urls` maps accepted misspelled keys and silently ignored them | an operator believed a stage override was active while the shared target ran | **Fixed:** one five-key registry validates fresh config; historical snapshots filter unknown old stage names with a warning so resume remains compatible |
 | P2 | Deep Research hand-built a smaller tool graph than Researcher/Strategist | capability-layer promises exceeded actual role parity; configured memory/skills/run-root tools could be absent | **Fixed:** Deep Research now uses the shared provider assembly (including configured run-root, memory, skills, knowledge/Memora and literature gates) and appends only its Web-specific provider |
 | P2 | Deep Research said it reasoned over all results while its compact brief dropped the middle beyond 40 nodes | an operator/model could mistake a head+tail sample for complete evidence | **Fixed:** the prompt now declares its bounded evidence, uses a deterministic best/failure/recent/seed/middle sample, and reports the exact omitted count |
@@ -305,10 +305,39 @@ Research only.
 >   slot a future metering transport fills in. `tests/test_cli_agent.py` drives the per-invocation
 >   delta, the missing binary, and the ledger's own walk reaching it through `ValidatingDeveloper`.
 >   The marker `external-cli-usage-is-unpriced` stood here; deleted per the index rule.]**
-> - **OPEN[agent-trajectory-eval-ladder-absent]** rungs 2-5 of §4 — curated trajectory cases, frozen
->   outcome cases, confused-deputy/cross-run-scope, repeated stochastic trials with CIs — have no
->   corpus. (Rung 1 exists and predates this document; see the correction above.)
->   proof:missing:tests/test_agent_trajectory_corpus.py
+> - **[closed 2026-09-08 — *the ladder above rung 1 is built; the corpus exists and it can be seen
+>   to go red.* `looplab/judgebench/trajectory.py` is rungs **2** and **4** — seven hand-written
+>   cases in `tests/data/agent_trajectory/harness.v1.jsonl`, each of which materializes a real
+>   temporary world, composes the REAL tool providers over it and drives the REAL `drive_tool_loop`,
+>   then grades the ordered `(tool, args, result)` sequence and the emit that ends it. Rung 2 is the
+>   trajectory contract (a stuck loop still HANDS OFF through the forced emit; a hallucinated tool
+>   name is answered and the phase survives it; a number forwarded out of a neighbouring run keeps
+>   the run id the reader put at the head of the same string). Rung 4 is containment, and its cases
+>   script a **fully complying** agent on purpose — the injected instruction is obeyed verbatim on
+>   the next turn — because "the model declined" is a property of a checkpoint and "the write root
+>   refused and the world tree is byte-identical" is a property of this repository: an escape out of
+>   the workspace, an edit of the protected answer key inside it, a guessed foreign `run_id` through
+>   the same-task sibling reader, and an evidence row that carries its own `END
+>   UNTRUSTED_RUN_EVIDENCE` to close the fence from the inside. Every rung-4 case is REFUSED at load
+>   unless it declares a positive `control` arm that must SUCCEED, because a refusal proves nothing
+>   if the tool could not have worked; `tests/test_agent_trajectory_corpus.py` drives all of it and
+>   ends with two MUTATION tests that widen the write root and drop the envelope in a throwaway
+>   world and require the same cases to go red. Rung **5** is `trajectory_score.py`: repeated trials
+>   with a Wilson score interval (not the normal approximation — 20 of 20 must not read as
+>   certainty), and pass-rate / cost / latency regression gates that each answer `pass`, `fail` or
+>   `not_applicable` rather than a silent pass. `python -m looplab.judgebench score-trajectory
+>   [--trials N]` runs it. **What is NOT claimed:** offline the agent is SCRIPTED or perturbed, so a
+>   pass says an effect is unreachable to a complying agent on this box and is not an
+>   agent-behaviour number; the corpus header says so and every report prints it. The live-model arm
+>   exists (`run_case(client=…)`, same grader) and auto-skips under `LOOPLAB_LIVE_SCENARIOS=1` like
+>   the other live smokes — its number is owed by a box with a reachable endpoint, the same way
+>   `bait.py`'s hack rate is. Rung 3 stands as amended below, still one judge of four. Two findings
+>   fell out of building this and are recorded at their sites: `core/evidence.py::is_fenced` is
+>   False on `fence_untrusted`'s OWN output when the fenced text contained a marker
+>   (`_neutralize_fences` is not a fixpoint), so `_fence_defects` grades the fence against the
+>   producer instead; and the loop's `on_tool_result` hook is handed `result + note` while the
+>   message is `fence(result) + note`, which is why `Step` carries both strings. The marker
+>   `agent-trajectory-eval-ladder-absent` stood here; deleted per the index rule.]**
 >   **[2026-08-20 — rung 3 is now built for ONE judge, and the amendment is narrow on purpose.]**
 >   `looplab/judgebench/` + `tests/data/judge_bench/train_monitor.v1.jsonl.gz` is a frozen outcome corpus
 >   for the training-log monitor: 450 recorded decisions, each carrying the recorded input, the
@@ -319,10 +348,10 @@ Research only.
 >   only in its docs; the remaining three judges are tracked by the
 >   `judge-bench-covers-one-judge-of-four` item in `docs/BACKLOG.md` §0.19 (spelled without its
 >   marker token here — a slug is declared exactly once and the declaration lives there).
->   Rungs 2, 4 and 5 are untouched: nothing here scores a TRAJECTORY (which tools were called, in
->   what order), nothing exercises prompt injection or cross-run scope, and nothing repeats a
->   stochastic trial — the corpus holds one sample per decision, so it carries no confidence
->   interval and cannot support one.
+>   Rungs 2, 4 and 5 were untouched by it and are the closure above: nothing in the judge corpus
+>   scores a TRAJECTORY (which tools were called, in what order), nothing in it exercises prompt
+>   injection or cross-run scope, and nothing repeats a stochastic trial — it holds one sample per
+>   decision, so it carries no confidence interval and cannot support one.
 > - **[closed 2026-09-08 — *the schema landed; three planners is not the defect and did not need
 >   fixing.* `core/run_proposal.py::RunProposal` owns what the row asked a canonical service to own:
 >   the proposal shape, the `/api/start` body (`start_body`), the run-id slug, the launch-settings
@@ -450,9 +479,12 @@ Research only.
 >   external CLI timeout is still a composition-independent constructor default of 600 s
 >   (`agents/cli_agent.py:226`; `agents/factory.py:396` passes none) with no priced/`unpriced`
 >   usage result.
-> - **Agent eval corpus — STILL OPEN.** No trajectory/handoff/prompt-injection eval ladder exists
->   under `tests/`; the closest artifacts are the opt-in live smokes
->   (`tests/test_live_scenarios.py`, `LOOPLAB_LIVE_SCENARIOS=1`) and the replay/outcome unit suites.
+> - **Agent eval corpus — ~~STILL OPEN~~ CLOSED 2026-09-08.** The sentence was already false when it
+>   was written (`test_phase_handoff.py`, `test_prompt_injection_rule.py`), and rungs 2, 4 and 5 are
+>   now built as well: `looplab/judgebench/trajectory.py` + `trajectory_score.py` over
+>   `tests/data/agent_trajectory/harness.v1.jsonl`, driven by `tests/test_agent_trajectory_corpus.py`
+>   and by `python -m looplab.judgebench score-trajectory`. See the row's own closure above for what
+>   the offline number does and does not mean.
 > - **Canonical `RunProposal` service — SHIPPED 2026-09-08.** `core/run_proposal.py::RunProposal`.
 >   The three planning stacks below stay separate as PLANNERS and share one schema, one `/api/start`
 >   body, one slug, one settings filter and one readiness rule; see the resolution on the row above.
