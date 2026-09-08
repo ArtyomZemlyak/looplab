@@ -411,15 +411,15 @@ def _scored_names(stmts: list, scored: set, collectors: set) -> int:
             if value is None:
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names = {ast.unparse(t) for t in targets}
-            if any(isinstance(c, ast.Call) and _test_scored(c) for c in ast.walk(value)):
-                for t in targets:                      # `results[k] = score(...)` collects too
-                    if isinstance(t, ast.Subscript):
-                        collectors.add(ast.unparse(t.value))
-                    else:
-                        scored.add(ast.unparse(t))
-            elif any(isinstance(c, ast.Name) and c.id in scored for c in ast.walk(value)):
-                for t in targets:                      # `results[k] = acc` collects; `x = acc` aliases
+            # ONE arm, not two identical ones: an assignment whose value CALLS a test-scorer and one
+            # whose value merely READS a scored name are collected and aliased the same way
+            # (`results[k] = score(...)` / `results[k] = acc` collect; `x = score(...)` / `x = acc`
+            # alias), and short-circuiting keeps the cheap `Name` walk off the common path. The
+            # `names` set the two arms used to be preceded by was computed — one `ast.unparse` per
+            # target of every assignment in every scanned solution — and read by nothing.
+            if (any(isinstance(c, ast.Call) and _test_scored(c) for c in ast.walk(value))
+                    or any(isinstance(c, ast.Name) and c.id in scored for c in ast.walk(value))):
+                for t in targets:
                     if isinstance(t, ast.Subscript):
                         collectors.add(ast.unparse(t.value))
                     else:

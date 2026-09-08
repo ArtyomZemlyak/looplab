@@ -172,7 +172,21 @@ class LLMEmbedder:
         return vecs
 
     def _bill(self, body) -> None:
-        """Commit one provider call to the accountant. Never raises.
+        """Commit one provider call to the accountant. Raises only `BudgetExceeded`.
+
+        IT USED TO RAISE NOTHING, AND THAT IS WHERE THE RUN CEILING LEAKED. `accountant.add` is
+        where `BudgetExceeded` is raised (`core/llm.py`), and the blind handler below swallowed it
+        as telemetry — so the one call that knows the run is out of money threw the news away.
+        Driven 2026-09-08: 20 embeds of $0.25 against a $1.00 ceiling committed $5.00 and raised
+        nothing, a 400 % overshoot, and the knowledge index re-embeds on every case-store append,
+        so it repeats for the life of the run. CLAUDE.md pins the rule this was missing: every
+        blind handler around a paid call in the run path re-raises `BudgetExceeded` FIRST.
+        Everything else stays contained — a malformed usage payload must never break an embed, and
+        `test_billing_never_breaks_an_embed` (which raises `RuntimeError`) still passes.
+
+        The import is FUNCTION-LOCAL on purpose: this module has no `looplab` imports at all (it is
+        the dependency-free store seam), and one exception name is not a reason to give it an
+        import-time edge into `core`.
 
         An embeddings response carries `usage.prompt_tokens`/`total_tokens` and no completion half;
         a gateway may add `cost`. Absent or malformed fields are simply not forwarded — `add` still
@@ -189,8 +203,12 @@ class LLMEmbedder:
                 value = usage.get(key)
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     payload[key] = value
+        from looplab.core.llm import BudgetExceeded
+
         try:
             accountant.add(payload.get("cost"), usage=payload or None)
+        except BudgetExceeded:
+            raise                      # the run is out of money: that is not telemetry
         except Exception:  # noqa: BLE001 - the call already succeeded; telemetry never breaks it
             pass
 

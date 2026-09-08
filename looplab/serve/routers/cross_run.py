@@ -599,9 +599,9 @@ def build_router(srv) -> APIRouter:
                limit: int = Query(80, ge=1, le=200),
                offset: int = Query(0, ge=0, le=1_000_000)):
         """Scope/polarity-safe claims with stable IDs and bounded offset pagination."""
-        from looplab.engine.claims import (
-            _filter_claim_assessments, _safe_claim_source_summary,
-            _safe_research_source_summary, claims_for_memory,
+        from looplab.engine.claims import claims_for_memory
+        from looplab.engine.knowledge_views import (
+            filter_claim_assessments, safe_claim_source_summary, safe_research_source_summary,
         )
         from looplab.engine.governance_health import project_governed_sources
 
@@ -610,9 +610,9 @@ def build_router(srv) -> APIRouter:
             rows = claims_for_memory(
                 memory_dir, scope_task=scope_task,
                 structured=True, decisions=governance["decisions"])
-            research_source = _safe_research_source_summary(
+            research_source = safe_research_source_summary(
                 getattr(rows, "research_source", None)) or {}
-            claim_source = _safe_claim_source_summary(
+            claim_source = safe_claim_source_summary(
                 getattr(rows, "claim_source", None)) or {}
             return rows, research_source, claim_source, governance["claim_revision"]
 
@@ -622,7 +622,7 @@ def build_router(srv) -> APIRouter:
                 source_names=("lessons.jsonl", "research_claims.jsonl"),
             ))
         if contested:
-            rows = _filter_claim_assessments(
+            rows = filter_claim_assessments(
                 rows, lambda row: row.get("epistemic") == "mixed")
         total = len(rows)
         page = [_public_cross_run_row(row) for row in rows[offset:offset + limit]]

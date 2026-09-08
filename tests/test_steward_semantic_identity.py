@@ -127,7 +127,7 @@ def test_same_snapshot_across_runs_bills_once_and_visible_change_reopens(tmp_pat
 
 def test_claim_paid_snapshot_fences_evidence_mutation_through_digest(tmp_path, monkeypatch):
     import looplab.engine.claim_steward as steward_module
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     _seed_claim(tmp_path, "evidence before snapshot")
     path = tmp_path / "lessons.jsonl"
@@ -136,7 +136,7 @@ def test_claim_paid_snapshot_fences_evidence_mutation_through_digest(tmp_path, m
 
     def mutate():
         started.set()
-        with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+        with interprocess_lock(Path(str(path) + ".lock"), required=True):
             _seed_claim(tmp_path, "evidence after snapshot")
             landed.set()
 
@@ -162,7 +162,7 @@ def test_claim_paid_snapshot_fences_evidence_mutation_through_digest(tmp_path, m
 
 def test_concept_paid_snapshot_fences_capsule_mutation_through_digest(tmp_path, monkeypatch):
     import looplab.engine.concept_steward as steward_module
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     _seed_concept(tmp_path, "retrieval/before")
     path = tmp_path / "concept_capsules.jsonl"
@@ -174,7 +174,7 @@ def test_concept_paid_snapshot_fences_capsule_mutation_through_digest(tmp_path, 
 
     def mutate():
         started.set()
-        with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+        with interprocess_lock(Path(str(path) + ".lock"), required=True):
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(later) + "\n")
             landed.set()
@@ -518,7 +518,7 @@ def test_legacy_row_cannot_satisfy_semantic_paid_identity(tmp_path, monkeypatch)
 
 
 def test_v2_run_never_creates_a_run_keyed_legacy_lock(tmp_path):
-    # Regression: `_interprocess_lock` opens (creates) a `<name>.lock` and never unlinks it. The legacy
+    # Regression: `interprocess_lock` opens (creates) a `<name>.lock` and never unlinks it. The legacy
     # (v1) claim path is keyed by the UNIQUE run_id, so acquiring its lock unconditionally accreted one
     # orphan lock per run in `.curation_invocations/` forever — an unbounded disk/inode leak. A v2-only
     # run (no pre-existing legacy claim) must not create that lock at all.
