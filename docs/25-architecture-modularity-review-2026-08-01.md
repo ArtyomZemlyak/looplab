@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 153 resolved, 33 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 156 resolved, 30 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -4837,9 +4837,7 @@ run-path identity ladder) is untouched — it is HTTP argument validation, not t
 holds no locks. `reset_route` still imports `errno` without using it; that predates this change
 (pyflakes reports it identically before and after) and removing it is a different diff.
 
-#### SC-15 · LOW · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
-
-> **OPEN[tui-render-helpers-not-in-tui-format]** the reconciliation split and the staging prologue landed; the rendering helpers still live on the `Tui` class (`_draw_dashboard`, `_draw_run`, `_render_spec`, `_render_chat`, `_status_panel`) rather than in `tui_format.py`, and the class is **922** lines re-measured 2026-08-19. proof:present:_draw_dashboard@looplab/serve/tui.py
+#### SC-15 · LOW · under-decomposition · effort: medium — **RESOLVED (2026-09-08)**
 
 **tui.py Tui class mixes rendering, wizards, chat persistence, and a client-side command-recovery state machine; _reconcile_pending interleaves two protocols**
 
@@ -4889,6 +4887,25 @@ with the docstring popped, because both docstrings describe the *other* protocol
 raw `inspect.getsource` scan matches its own explanation.
 
 Not done: moving rendering helpers to `tui_format`, and the ~880-line class itself.
+
+*Closed 2026-09-08 — the rendering half landed.* `_draw_dashboard`, `_draw_run`, `_render_spec`,
+`_render_chat` and `_status_panel` (plus the `_runs_table` builder only `_draw_dashboard` reads, and
+the `_esc` / `_command_failure_line` escape pair they share) are `tui_format` functions:
+`draw_dashboard`, `draw_run`, `render_spec`, `render_chat`, `status_panel`, `runs_table`. Bodies
+moved verbatim; the only edits are `self.console` -> an explicit first `console` argument and the
+two facts a renderer cannot know — `self.api.base` and `self._interactive()` — becoming keyword
+arguments the caller supplies **per redraw**, so the live marker still asks the terminal on every
+pass rather than being captured once. `render_spec` takes the server's readiness verdict as a value
+instead of calling `self._validate` itself, which makes doc 52 row 8 ("the TUI carries no launch
+readiness rule of its own") structural: the module that draws the panel cannot reach the Api client.
+No delegating methods were left behind — a method that forwards would keep the class as the only
+documented way in — so `Tui` is **853** lines from 922, and `looplab.serve.tui` re-exports every
+moved name, which is why `tui._esc` and the ten `_command_failure_line` call sites are untouched.
+The class's remaining concerns (the wizards, chat persistence and the durable command-recovery state
+machine) are unchanged and out of this change's scope. Guards: `tests/test_tui.py` — the two
+markup-escape tests now drive the module functions, and three new tests DRAW each screen from a
+`Console` over a `StringIO` alone (no Api, no run root, no terminal), which is the property the move
+buys; a fourth asserts none of the five is a `Tui` attribute any more.
 
 #### SC-16 · LOW · over-engineering · effort: small — **RESOLVED (2026-08-08)**
 
@@ -8603,9 +8620,7 @@ was already there under a different chunk pair — with byte deltas only: total 
 473,457 B (+258 B), owner run DAG route 357,643 → 357,890 B (+247 B). Dock.jsx lost 40 net lines,
 AssistantBar.jsx 30.
 
-#### UI-02 · HIGH · over-engineering · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
-
-> **OPEN[api-js-control-map-and-atlas-sanitizers]** all four recommended modules landed; what this resolution declined is still open — the `CONTROL` map (139 lines) and the Atlas sanitizers (86, blocked behind the `researchAtlasModel.js` cycle), plus the ninth concern the finding never named, the paid concept-lens family. proof:present:runCommand(rid,@ui/src/api.js
+#### UI-02 · HIGH · over-engineering · effort: large — **RESOLVED (2026-09-08)**
 
 **api.js re-accreted into a 2,216-line god-module of 8 distinct concerns**
 
@@ -8783,6 +8798,39 @@ endpoint function", which is what an API module is for. The paid concept-lens fa
 api.js:62-167 today) is a ninth concern neither the finding nor this change names; it is the closest
 thing left to a coherent extraction, and it would want a sibling of scopeReportActions.js rather than a
 seventh top-level module.
+
+*Closed 2026-09-08 — the three declined concerns landed, and the Atlas blocker was gone.* Three more
+members, bodies verbatim, api.js 1,325 -> 958 lines and nine re-export lists instead of six:
+
+* **`controlActions.js` (196)** — the `CONTROL` map and `appendAction`. The reason given for
+  declining it is the reason it moved: "the only remaining resident that reaches `runCommand`,
+  `jobAwait` and the endpoint plumbing at once" describes a CONSUMER of three members, which sits
+  above them rather than beside them, and a vocabulary is exactly the thing that should be readable
+  without 1,000 lines of endpoint functions around it.
+* **`conceptLensApi.js` (131)** — the ninth concern, as its own module rather than the
+  scopeReportActions.js sibling this note imagined: the two protocols share no code, only a shape,
+  and merging them would have put two paid identities in one file to save a filename.
+* **`crossRunLedger.js` (120)** — the sanitizers plus the four `/api/cross-run/*` reads they bound.
+  The stated blocker no longer exists in either direction: the F7 rename retired
+  `researchAtlasModel.js` (its successor `claimsCurationModel.js` takes both names from the barrel,
+  as does `ClaimsCuration.jsx`), and hosting them in a module of their own — one that imports only
+  the fetch client — means no consumer is re-pointed and no member imports a barrel. The one
+  hazard found in doing it is written down in the file: `apiBarrel.test.js` scans a member's TEXT
+  for barrel imports, so the quoted import line in the paragraph above had to be paraphrased rather
+  than transcribed, because a member that merely QUOTES one reads to that scanner exactly like a
+  member that has one.
+
+`apiBarrel.test.js` grew the three modules and three canaries (`CONTROL`, `submitConceptLens`,
+`projectLedgerSource`) and three DRIVEN tests, which is what the extraction is worth checking for:
+every control still reaches fetch through the one command lifecycle carrying the generation fence
+(and a review tab is still refused before the wire); every paid concept-lens entry still refuses an
+unfenced or unkeyed submission WITHOUT reaching fetch; the ledger allowlist and its caps still bound
+what a cross-run read may hand React. Three source pins in two other files followed the code rather
+than passing vacuously over a file that no longer holds their subject — `cardKanban.test.js`'s card
+controls (now read against `controlActions.js`, with an anti-vacuity length check on the slice) and
+`claimsCuration.test.js`'s HTTP-contract and allowlist pins (now `crossRunLedger.js`). The endpoint
+residue the finding calls "every endpoint function" is deliberately still in api.js: that is what an
+API module is for.
 
 #### UI-03 · HIGH · mergeable-entities · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
@@ -9020,9 +9068,7 @@ anchor appears exactly once):
 (162 vs 158 fields), both failing identically before this change and unrelated to it. `npm run build`
 exits 0.
 
-#### UI-05 · MEDIUM · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
-
-> **OPEN[assistantbar-runllm-and-fork-saga]** `runLLM` (still ~350 lines with two concurrent fallback poll loops), the `forkCurrentSession`/`reconcileFork`/`settleForkReconciliation` recovery saga and a real mount harness are all still undone — and AssistantBar.jsx has grown from the 2,031 lines the finding measured to **4,469** (2026-08-19), the largest measured regression in this ledger. proof:present:forkCurrentSession@ui/src/AssistantBar.jsx
+#### UI-05 · MEDIUM · under-decomposition · effort: large — **RESOLVED (2026-09-08)**
 
 **AssistantBar.jsx: 2,031-line component mixing 3 view layouts, session lifecycle, stream+recovery, share management, and the duplicated command machine**
 
@@ -9084,6 +9130,46 @@ recorded in CLAUDE.md's `ui/` row.
 Left undone: `runLLM` (still ~350 lines with two concurrent fallback poll loops — the finding names it
 and it is genuinely the next target), `forkCurrentSession` / `reconcileFork` / `settleForkReconciliation`
 (a second recovery saga, untouched), and a real mount harness for the component. ui suite 741 -> 768.
+
+*Closed 2026-09-08 — all three, in the same pure-model shape as the first round.* The mount harness
+landed earlier (`ui/test/mountAssistantBar.test.js`, through the shared `_mount.js`); the two sagas
+landed now, and AssistantBar.jsx is **4,220** lines from 4,469.
+
+**The fork saga left the file entirely.** `useAssistantFork.js` (216) owns the durable recovery
+record, the single-flight `forkActionSessionRef` three other gates consult, the reconciliation loop
+and the settlement; `assistantForkModel.js` (167) states its four decisions with no React and no
+I/O — may a fork START, what one status POLL's error says, what the SUBMIT's error means, and what
+each outcome SETTLES to. Nothing in the suite had ever reached any of them. Two properties are worth
+naming because they are what a truth table now pins: AMBIGUITY IS NOT FAILURE (a timeout, a 5xx, a
+null status or an abort all reconcile — only an authoritative code or a 404 may forget a saved
+request), and ANOTHER TAB'S REQUEST IS ADOPTED ONLY WHEN IT IS PROVABLY THE SAME SNAPSHOT (the
+server names the in-flight action id and the message count it was taken over; a mismatch in either
+is a different transcript, and adopting it would present a child of a conversation this tab never
+saw). One ordering that reads like a bug and is not is now written down and driven: a SAVED recovery
+record outranks the busy-turn gate, because the interruption is exactly what leaves the turn
+incomplete and refusing there would strand the request "check fork" exists to finish.
+
+**`runLLM` kept its choreography and lost its decisions.** `assistantTurnModel.js` (109) holds the
+seven-fact send gate, the second gate that re-checks everything after the awaited cancel, the
+progress-mirror comparison, the terminal-frame verdict, the final-reply-text ladder and the
+draft-restoration rule; `assistantTurnPolls.js` (57) holds the two concurrent fallback polls, which
+share one lifetime and one ownership fence — invisible while they were two bare
+`;(async () => { … })()` blocks a hundred lines apart closing over a `let polling` a distant
+`finally` flipped. `completedAssistantReply` moved to `assistantRecovery.js` beside the two identity
+rules it is the third reader of. What is left is 329 lines that are genuinely component work
+(composer capture, the optimistic pair, `setMsgs`, the restoration branch, the `finally`), and the
+honest reading of the remaining length is that it is choreography, not decisions: there is no
+branch ladder left inline.
+
+Guards: `ui/test/assistantForkModel.test.js` (5), `assistantTurnModel.test.js` (6) and
+`assistantTurnPolls.test.js` (5) — the last one drives the polls with fake readers and a fake clock,
+which is how the two properties nothing could check before are now checked: a result that arrives
+after a session switch publishes NOTHING, and `stop()` is final even for a read already in flight.
+Three pins in `assistantBarResourceTruth.test.js` followed the code and got stronger doing it: the
+read-only-during-Stop-handoff rule and the terminal-frame binding are now DRIVEN over the extracted
+rules (a regex over a longhand conjunction never checked that another tab's trailing user turn is
+refused), with a source pin kept for the one thing that stays an ORDER — the cancel is awaited, and
+only then is read-only re-read, before the draft is consumed.
 
 #### UI-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 

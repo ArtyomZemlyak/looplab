@@ -3543,8 +3543,8 @@ stripped, and the golden fixture moves by exactly eight `"repairs": 0` lines and
    `RunState` carried no repair count anywhere. The two integers ARE the "no new data" fix: they are
    derived, not carried, and they cost one `max()` per repair row.
 
-**STILL OPEN.** ⬜ **The node graph still cannot say which experiment is running.** `util.js::
-  OPEN[node-graph-cannot-name-running-experiment] proof:`present:eval_started: bool = Field(default=False, exclude=True)@looplab/core/models.py`
+**WAS STILL OPEN — closed 2026-09-08, see below.** ⬜ **The node graph still cannot say which
+experiment is running.** `util.js::
 workingId` returns the HIGHEST-ID pending node, and `Node.eval_started` — the folded durable proof
 that an evaluation was announced — is `exclude=True`, so it never reaches the wire
 (`narration.js::pendingWork` re-derives it from the raw event tail and says so in a comment). On v9
@@ -3553,6 +3553,32 @@ at the measured instant that made node **7** the "working" node, which had not b
 change to the state payload's field set and to a heuristic three surfaces read, it wants its own
 measurement of which runs evaluate in parallel, and it is a different defect from the one the chips
 had.
+
+*Closed 2026-09-08, in two halves, and the FIRST half is not the change this entry expected.* The
+wire half was never fixed by un-excluding the field: `Node.eval_started` and its three siblings are
+fold-internal on purpose (they were introduced for budget recovery, and the reader-defaulted
+`exclude=True` is what makes an old log fold byte-identically), so what shipped instead is a PUBLIC
+PROJECTION of the same receipts — `serve/node_activity.py::public_node_activity`, on every node as
+`activity: {status, generation, evidence, started_at?}` — with its own vocabulary (`building` /
+`queued` / `evaluating` / `pending`) and its own EVIDENCE field naming which durable row decided it.
+That is strictly more than the field would have carried: `queued` and `evaluating` are different
+answers, and the boundary promise is what makes the absence of a start row evidence rather than
+silence. `narration.js::pendingWork` now reads the projection and keeps its log scan only as
+compatibility for an older server.
+
+The second half — **which** experiment gets named — is what closed today, in
+`nodeActivity.js::primaryWorkingNode` (`workingId` is one line delegating to it, so the DAG's
+auto-collapse and any other single-subject consumer share one rule). `Math.max` is gone. The
+ordering is three clauses, each of them evidence: the EVALUATION lane outranks the build lane
+(a process of ours is running, against an LLM writing code for an experiment that does not exist
+yet — the opposite of the preference the old code had); within the lane the earliest
+`activity.started_at` wins, so the LONGEST-RUNNING experiment is the one named; a record carrying no
+usable timestamp never outranks one that does, because silence is not evidence. The highest id
+survives as the last tiebreak and only there — with no lane and no clock separating two nodes,
+moving which one is named would move a screen for no measured reason. On the v9 shape the rule
+names **5**, the longest-running of the two training nodes, where the entry's `Math.max` named 9 and
+then 7. Guard: `ui/test/nodeActivity.test.js` drives that exact shape plus the comparator's own
+truth table (`rankWork`, exported so the ordering is statable without a state object).
 
 ### §0.15 The engine asked the agent to choose a GPU footprint and told it the choice was free (2026-08-19)
 
