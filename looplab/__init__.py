@@ -50,6 +50,8 @@ _LAYOUT = {
     "toy_roles": "agents",      # the offline ToyResearcher/ToyObjectiveDeveloper backends
     "developer_backends": "agents",  # the three developer-backend wirings `make_roles` composes (RA-01)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
+    "task_schema": "adapters",  # the composable/legacy task-schema front-end `normalize_task`,
+                                # extracted from `tasks.py` on 2026-09-08 (doc 25 RA-01's cap)
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
