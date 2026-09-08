@@ -3441,7 +3441,6 @@ driven cases in `tests/test_concept_graph.py`, including the live precheck. Dele
 rule.*
 
 ⬜ **The classifier REWRITES, it does not add.** `_on_node_concepts` assigns
-  OPEN[classifier-rewrites-authored-membership] proof:`present:st.node_concepts[nid] = bounded@looplab/events/replay.py`
 (`st.node_concepts[nid] = bounded`), authored provenance has no protection (only OPERATOR does), and
 the authored ids survive only in the raw log — `events/digest.py` explicitly forbids readers from
 resurrecting `idea.concepts`. Measured on v8, which is the precedent: **2 of 24 authored ids survive
@@ -3452,6 +3451,23 @@ child's inherited set. This is the designed behaviour — the proposer must not 
 taxonomy, and §0.12 measured the authored regime as self-confirming — but it is a record-side effect
 and it is recorded here rather than discovered later. No live run is disturbed by this change: a
 running engine does not reload its source.
+
+*Closed 2026-09-08 — the REPLACEMENT stands; the record no longer loses what it replaced.* The fold
+keeps the proposer's own claim beside the membership in `RunState.node_concepts_authored`
+(`core/models.py::authored_node_concepts` is the read side), written by the authoring envelope alone
+and cleared only by the boundaries that abandon the IDEA — a propose reset, a subject change, a
+replacement that authors something else. It is FULL SETS ONLY, because a delta node's operands were
+never lost: `_on_node_concepts` does not clear `node_concept_deltas`, so a second copy would be a
+record that can drift from the one the materialization reads. Every effective-membership write now
+goes through one publisher (`replay.py::_publish_node_membership`), which is where the rule that a
+replacement may not touch the authored claim is stated, so a fourth producer inherits it instead of
+re-deriving it. Nothing about admission moved: the authored claim is not evidence,
+`classifier_verified_node_concepts` is still the one door, and `events/digest.py::_folded_axes` still
+forbids resurrecting `idea.concepts` into any axis. `looplab concept-authorship` is the instrument
+that turns the hand measurement above into a command — per node the authored set, the folded set,
+what survived and what was replaced, with both sides resolved through the run's consolidation renames
+so a RENAMED id is not reported as a classifier replacement. Driven by
+`tests/test_authored_concepts.py`'s authored-record section (nine cases, all folding real logs).
 
 **ALTERNATIVES REJECTED.**
 1. *A third pace under `cadence.py`* (§0.12's own proposal). Refused by `cadence.py`'s stated rule:
@@ -4968,21 +4984,60 @@ and refuses the `<mod>.py:NNN` form outright; it found 4 dead symbol citations a
 all fixed. `docs/guide/concepts.md`'s inline-repair list enumerated ELEVEN reasons under a sentence
 saying twelve, and the enumeration is now derived from `FAILURE_REASONS`.
 
-OPEN[claim-legacy-prompt-branches] Both pre-correction GPU paragraphs still ship as the
-`gpu_footprint_cue=false` branch AND as what an UNSTAMPED role gets — a bare `LLMResearcher` in a
-library caller reads "declaring MORE than the ceiling does not get this experiment more hardware",
-which the scheduler contradicts. The engine path always stamps, so no run gets it; the byte-for-byte
-restoration is deliberate. What is missing is a decision about whether a false sentence may be the
-off-switch's value at all. The clause MOVED with the prompt fragments to
-`agents/role_prompts.py` on 2026-09-08 (doc 25 AG-02) and the proof is re-pointed at it; the
-item itself is untouched. proof:present:SERIALISES@looplab/agents/role_prompts.py
+**[CLOSED 2026-09-08 — the decision is NO, and the off-switch became SILENCE rather than a
+sentence.]** Both pre-correction GPU paragraphs shipped as the `gpu_footprint_cue=false` branch AND
+as what an UNSTAMPED role got — a bare `LLMResearcher` in a library caller read "declaring MORE than
+the ceiling does not get this experiment more hardware", which the scheduler contradicts. What was
+missing was a decision about whether a false sentence may be the off-switch's value at all.
 
-OPEN[claim-effective-batch-event] `auto_find_batch_size` is refused as the memory answer on a
-measurement (transformers 4.51.0 keeps the DECLARED `per_device_train_batch_size` on `args` and the
-reduced one only in `trainer_state.json` + a `logger.debug`), so a run would report a batch it never
-trained at. It becomes admissible the moment the EFFECTIVE batch is lifted into a durable LoopLab
-event — an `extra_metrics`-shaped problem, since the number comes off the candidate's own process.
-proof:absent:effective_train_batch@looplab/events/types.py
+**It may not, and the byte-for-byte argument does not reach this switch.** A byte-for-byte restoration
+is owed to a run ALREADY IN FLIGHT — that is what `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` is for — and
+`gpu_footprint_cue` deliberately has NO row there, because it buys no paid call and mounts no
+intervention. So nothing resumes onto that branch: what `false` actually reached was an operator
+asking for it today and a library caller who never asked for anything, i.e. two LIVE prompts. A knob
+may narrow a prompt; it may not be the value under which the prompt is wrong.
+
+Both branches now keep only what was never in dispute — the ceiling arithmetic, the ordinary
+declaration, and the rule that the training/eval command must target the count you declare — and say
+NOTHING about what a larger count buys (`agents/roles.py::_FOOTPRINT_BUDGET_QUIET`,
+`engine/proposal_cues.py::_gpu_budget_hint_text`'s quiet branch). `true` is unchanged, so no run's
+prompt bytes moved. `tests/test_gpu_footprint_choice.py` drives it: the two refuted clauses are gone
+from BOTH branches and from the unstamped role's real turn, and `false` is still strictly narrower
+than `true` (it keeps the numbers and the command rule, drops the trade, the memory clause and the
+probe invitation) rather than a second claim. The three surfaces that promised a byte-for-byte
+restoration — `docs/guide/configuration.md`, the settings catalogue and its curation note — say what
+`false` now is. doc 45 §2's "still open, stated rather than patched" paragraph is closed with it.
+
+**[CLOSED 2026-09-08 — the batch is lifted; the refusal's own condition is met.]**
+`auto_find_batch_size` was refused as the memory answer on a measurement (transformers 4.51.0 keeps
+the DECLARED `per_device_train_batch_size` on `args` and the reduced one only in `trainer_state.json`
++ a `logger.debug`), so a run would report a batch it never trained at. `runtime/effective_batch.py`
+reads `trainer_state.json::train_batch_size` off the node's own workdir at the METRIC READ — the same
+instant, the same freshness floor and the same `bind_one` identity/containment rule as
+`applied_params`' resolved tier, beside which it is bound in `eval_dispatch` — and
+`EV_EFFECTIVE_TRAIN_BATCH` records it after the terminal.
+
+**It is the fourth side of the metric record and it is what `applied_params` cannot be.** That module
+states its own bound out loud — *a statement about a DOCUMENT, not about an execution* — and the
+batch under `auto_find_batch_size` is exactly where the bound costs: every saved config keeps the
+declared number. Three refusals are built in rather than promised. Nothing is DERIVED: the record
+carries what the artifact holds and never multiplies by accumulation steps or world size to invent an
+"effective batch" the file cannot support. Two trainings in one pipeline are two facts: readings are
+deduplicated on the value and the scalar is published only when they AGREE, never tie-broken on
+`global_step`. And ABSENCE IS SILENCE: no artifact means no row at all, which is the permanent state
+of every task here that is not a transformers training — so the log does not fill with rows recording
+that this box does not use HuggingFace.
+
+Deliberately NOT an `extra_metrics` channel, which is how the marker framed it: the number comes off
+an artifact the CANDIDATE wrote, and nothing derivable from such an artifact can authenticate its
+author (CLAUDE.md), so it may not be spliced as an `engine`-channel metric — and it is not a
+secondary metric at all, it is a coordinate the process recorded about itself. Diagnostic, so it
+ranks nothing, gates nothing and can be appended by the eval worker thread (invariant 1).
+`tests/test_effective_train_batch.py` drives both halves over real workdirs and a real run.
+
+**What this does NOT do is adopt `auto_find_batch_size`.** The refusal's stated condition is met, so
+the option is admissible; whether the GPU cue should now recommend it is a PROMPT decision, made
+where prompts are decided and not as a side effect of building the record.
 
 **[CLOSED 2026-09-03 — located by SYMBOL, and there were SEVEN, not four.]** A `grep -rn '\.py:[0-9]'`
 over `ui/src/` (which is what the item asked `citation_defects()` to be widened to) found three more

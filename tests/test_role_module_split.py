@@ -111,7 +111,7 @@ def test_the_researcher_prompt_is_still_assembled_from_the_shared_fragments():
     # The two budget clauses are ALTERNATIVES spliced at one position, never both.
     choice = role_prompts._researcher_system(footprint_choice=True)
     assert role_prompts._FOOTPRINT_BUDGET_CHOICE in choice
-    assert role_prompts._FOOTPRINT_BUDGET_LEGACY not in choice
+    assert role_prompts._FOOTPRINT_BUDGET_QUIET not in choice
 
 
 # ------------------------------------------------------------- 2. one object through both paths

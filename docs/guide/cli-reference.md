@@ -29,6 +29,7 @@ looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV 
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab novelty-recall  Audit executed proposals for paraphrases the novelty gate missed (PART IV E3)
 looplab lesson-guard    Audit distilled lessons for over-generalization and contradiction (PART IV D6/E4)
+looplab concept-authorship How much of each proposer's authored concept set survived the classifier's answer (PART IV D5)
 looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cross-run Step 1)
 looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
@@ -1416,6 +1417,33 @@ looplab lesson-guard RUN_DIR [--model ID]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run whose distilled lessons should be audited |
 | `--model ID` | configured model | Override the verifier model |
+
+---
+
+## `concept-authorship`
+
+PART IV D5, the READ side. The classifier cadence REPLACES a node's concept membership rather than
+merging into it, so once it has run, what the PROPOSER said the node was about is invisible to every
+read surface (`events/digest.py::_folded_axes` forbids resurrecting the frozen `idea.concepts`, and
+rightly: a deliberately cleared node must not keep classifying under its old authored axis). The fold
+therefore keeps the authored set beside the membership in `RunState.node_concepts_authored`, and this
+is the instrument over it: per node the authored set, the folded set, what survived and what was
+replaced, plus the run totals and a survival rate.
+
+Pure projection — no model call, no write, nothing appended. Both sides are canonicalized through the
+run's consolidation rename map first, so a concept a later merge RENAMED is not reported as a
+classifier replacement. A run whose log predates the record reports zero authored nodes, which is the
+honest reading of a log that never carried the claim.
+
+```bash
+looplab concept-authorship RUN_DIR [--limit 30] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run whose folded memberships to compare against their authoring |
+| `--limit N` | `30` | How many node rows to print (the totals are always over the whole run) |
+| `--json` | off | Emit the whole report as JSON |
 
 ---
 

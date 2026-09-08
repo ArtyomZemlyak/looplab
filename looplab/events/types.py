@@ -772,6 +772,34 @@ EV_DEPS_DECLARED = "deps_declared"
 # immaterial — a property of the READERS, not of the event.
 # `engine/evaluate.py::_durable_full_retrains` reads it straight off the log.
 EV_FULL_RETRAIN_CHARGED = "full_retrain_charged"
+# WHAT THE TRAINING PROCESS SAYS IT ACTUALLY RAN AT — `trainer_state.json::train_batch_size`, read
+# off the node's own workdir at the metric read (`runtime/effective_batch.py`). One row per evaluated
+# node that HAS such an artifact; every task that is not a transformers training records none, and
+# that silence is the point (see the module's ABSENCE IS SILENCE rule).
+#
+# WHY IT IS AN EVENT AND NOT A FIELD ON `metric_provenance`. The record it completes is
+# `applied_params`, which states its own bound — a statement about a DOCUMENT, never about an
+# execution — and the batch is the coordinate where that bound has a measured cost:
+# `docs/45-claim-surfaces-2026-08-20.md` §3.2 REFUSED `auto_find_batch_size` as the memory answer
+# because transformers 4.51.0 keeps the DECLARED `per_device_train_batch_size` on `args` while the
+# reduced one survives only in `trainer_state.json` and a `logger.debug` line, so a run would report
+# a batch it never trained at. That document named the condition that lifts the refusal — the
+# effective batch lifted into a DURABLE LoopLab event — and a field merged onto another event's
+# payload is not that: it would be readable only through the terminal that carries it, absent from
+# every node whose terminal is a failure, and invisible to a reader asking "what did this box
+# actually train at" without folding.
+#
+# NOT AN `extra_metrics` CHANNEL, deliberately. The number comes off an artifact the CANDIDATE wrote,
+# and CLAUDE.md's rule is that nothing derivable from such an artifact can authenticate its author —
+# so it may not be spliced as an `engine`-channel metric, and it is not a secondary METRIC at all: it
+# is a coordinate the process recorded about itself. It ranks nothing, gates nothing and cannot cost
+# a node its terminal.
+#
+# DIAGNOSTIC, on `full_retrain_charged`'s ground and with the same caveat: the fold ignores it, and
+# what makes its POSITION immaterial is that `_proposal_receipt_fence` excludes DIAGNOSTIC_EVENTS
+# wholesale — a property of the readers, not of the event. Diagnostic is also what lets the eval
+# worker thread append it at all (invariant 1).
+EV_EFFECTIVE_TRAIN_BATCH = "effective_train_batch"
 # ONE stage ROLLBACK decision — the Developer asserting that a LATER stage's failure was caused by an
 # EARLIER stage that had already been counted successful, and the engine's answer. Written on BOTH
 # outcomes (`accepted` true/false, with `refusal` naming which rung of the ladder said no) because the
@@ -1073,7 +1101,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION, EV_NODE_BUILD_DELTA,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
-    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,
+    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN, EV_EFFECTIVE_TRAIN_BATCH,
     EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
@@ -1465,6 +1493,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "Why the run could not compare its environment against the one it started in.",
         required=("reason",),
         optional=(),
+    ),
+    "effective_train_batch": PayloadContract(
+        "What the training process itself recorded as the batch it ran at, read off the node's own "
+        "workdir at the metric read.",
+        required=("disagree", "generation", "node_id", "read_at", "readings", "train_batch_size"),
+        optional=("files_seen", "truncated"),
     ),
     "env_changed": PayloadContract(
         "A resume observed that the Python/library environment differs from the one the run started in.",

@@ -89,17 +89,33 @@ _FOOTPRINT_HEAD = (
     "`footprint` null (or omit it) when GPU needs are UNSPECIFIED; unspecified is distinct from "
     "`gpus=1`. Use `gpus=0` only for a deliberately CPU-only experiment. ")
 # The BUDGET clause, in two alternatives spliced at the SAME position (the `_system_body` pattern).
-# `_FOOTPRINT_BUDGET_LEGACY` is the historical text verbatim and is what an unset
-# `_gpu_footprint_cue` still gets, so a role nobody stamped asks exactly the question it always did.
-# It is replaced rather than appended to because the two say OPPOSITE things about the same
-# declaration, and the engine's own GPU BUDGET cue is being corrected in the same change — one
-# prompt carrying both readings is worse than either alone.
-_FOOTPRINT_BUDGET_LEGACY = (
+# It is replaced rather than appended to because the two say different things about the same
+# declaration, and the engine's own GPU BUDGET cue was corrected in the same change — one prompt
+# carrying both readings is worse than either alone.
+#
+# THE OFF BRANCH IS SILENCE, NOT THE HISTORICAL PARAGRAPH, and that is a decision (2026-09-08,
+# `docs/45-claim-surfaces-2026-08-20.md` §2 closed). Until today `false` — and every UNSTAMPED role,
+# i.e. a bare `LLMResearcher` in a library caller — got the pre-correction text verbatim, closing on
+# "declaring MORE than the ceiling does not get this experiment more hardware … the run SERIALISES at
+# the same per-experiment cost". Both halves are false against the shipped scheduler
+# (`resources.py::_resource_request_for_node` takes a DECLARED count over AUTO, `_acquire_gpus`
+# reserves exactly that many all-or-nothing, `_resource_eval_env` fences the child to them), and
+# `tests/test_gpu_footprint_choice.py::test_the_scheduler_honours_the_declaration_the_old_text_denied`
+# drives that rather than asserting it.
+#
+# WHY THE BYTE-FOR-BYTE RESTORATION DOES NOT SURVIVE THAT. An off-switch restores historical bytes so
+# a run ALREADY IN FLIGHT keeps the treatment it consented to — that is what
+# `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` is for, and `gpu_footprint_cue` deliberately has NO row there
+# (it buys no paid call and mounts no intervention), so no resume ever lands on this branch. What
+# `false` actually reaches is an operator asking for it today and a library caller who never asked
+# for anything — neither of them a restoration, both of them a live prompt. So the switch now
+# removes the clause instead of contradicting itself: `false` states the ordinary share, which was
+# never in dispute, and says NOTHING about what a larger count buys. A knob may narrow a prompt; it
+# may not be the value under which the prompt is wrong.
+_FOOTPRINT_BUDGET_QUIET = (
     "When the user turn states "
-    "a GPU BUDGET, the count it names is a per-experiment CEILING and `gpus=1` is the ORDINARY "
-    "case, not an exception: declaring MORE than the ceiling does not get this experiment more "
-    "hardware — the extra devices come out of the sibling experiments that would otherwise run at "
-    "the same time, so the run SERIALISES at the same per-experiment cost. ")
+    "a GPU BUDGET, the count it names is the ORDINARY per-experiment share and `gpus=1` on a "
+    "one-device share is the default rather than a rule. ")
 _FOOTPRINT_BUDGET_CHOICE = (
     "When the user turn states "
     "a GPU BUDGET, the count it names is the ORDINARY per-experiment share and `gpus=1` on a "
@@ -120,11 +136,14 @@ _FOOTPRINT_TAIL = (
 def footprint_guidance(footprint_choice: bool = False) -> str:
     """The Researcher's footprint contract, with the budget clause the run is actually running.
 
-    `Settings.gpu_footprint_cue`; the default is the LEGACY clause so an unstamped role — a bare
-    `LLMResearcher` in a library caller, a test double — keeps the historical prompt byte for byte.
+    `Settings.gpu_footprint_cue`; the default is the QUIET clause, so an unstamped role — a bare
+    `LLMResearcher` in a library caller, a test double — is told the ordinary share and nothing
+    about what a larger count buys. It is deliberately NOT the pre-correction paragraph any more:
+    see `_FOOTPRINT_BUDGET_QUIET` for why an off-switch may narrow a prompt and may not be the value
+    under which it is false.
     """
     return _FOOTPRINT_HEAD + (_FOOTPRINT_BUDGET_CHOICE if footprint_choice
-                              else _FOOTPRINT_BUDGET_LEGACY) + _FOOTPRINT_TAIL
+                              else _FOOTPRINT_BUDGET_QUIET) + _FOOTPRINT_TAIL
 
 
 _FOOTPRINT_GUIDANCE = footprint_guidance()

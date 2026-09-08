@@ -1689,6 +1689,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             if stage == "propose":
                 st.node_concepts.pop(n.id, None)
                 st.node_concept_provenance.pop(n.id, None)
+                st.node_concepts_authored.pop(n.id, None)   # the claim belonged to the abandoned Idea
                 st.node_concepts_at_vocab.pop(n.id, None)   # keep the B1 staleness map in sync
                 st.node_concepts_at_pending.pop(n.id, None)  # …and the F1i evidence gate beside it
                 # the raw delta belongs to the Idea being abandoned. Clear it at the reset
@@ -2500,6 +2501,26 @@ def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCt
     # every FoldCursor snapshot.
     st.concept_coverage_snapshots.append(_coverage_snapshot_row(d))
 
+def _publish_node_membership(st: RunState, nid: int, values, provenance: str) -> None:
+    """The ONE write of a node's EFFECTIVE concept membership and the producer that owns it.
+
+    Three handlers publish a membership — the authoring envelope, the classifier cadence and the
+    operator edit — and every one of them REPLACES what was there. That is correct for the membership
+    (the last valid writer wins is the whole read-model contract) and it is what silently destroyed
+    the PROPOSER's own claim: the cadence handler assigned its bounded values straight onto the
+    membership map and nothing else in the fold held them, so `RunState.node_concepts_authored` is
+    written by the authoring envelope alone and this function may never touch it. Stating that here,
+    at the one site every replacement goes through, is the point of the funnel: a fourth producer
+    added later inherits the rule instead of re-deriving it.
+
+    The two sidecars this DOES write are the pair no writer may set apart from the other — a
+    membership whose provenance still names the previous producer is exactly the trust inversion
+    `classifier_verified_node_concepts` fails closed on.
+    """
+    st.node_concepts[nid] = list(values)
+    st.node_concept_provenance[nid] = provenance
+
+
 def _fold_node_concept_envelope(st: RunState, ctx: "_FoldCtx", n: Node, d: dict, current) -> None:
     """Fold ONE `node_created`'s concept envelope into the membership sidecars.
 
@@ -2602,6 +2623,22 @@ def _fold_node_concept_envelope(st: RunState, ctx: "_FoldCtx", n: Node, d: dict,
         st.node_concepts_at_pending.pop(n.id, None)
         st.node_concept_deltas.pop(n.id, None)
         ctx.concept_subject_invalidated.add(n.id)
+    # THE PROPOSER'S OWN CLAIM, RECORDED WHOEVER ENDS UP OWNING THE MEMBERSHIP (`node_concepts_authored`).
+    # Decided HERE — before the membership branches and outside `receipt_protected` — because this
+    # record follows the IDEA and never the membership: the concept envelope is excluded from the
+    # subject-equality test above, so a protected re-emission may legitimately carry a NEW authored set
+    # while the classifier keeps the membership, and a record derived inside the branches would freeze
+    # the first authoring forever. Full sets only; a `delta` node's operands stay in
+    # `node_concept_deltas` (which no classifier writer clears), and an unsupported mode authors
+    # nothing this fold is willing to read.
+    if unsupported_mode or delta_mode:
+        st.node_concepts_authored.pop(n.id, None)
+    elif n.idea.concepts or recognized_mode == "full":
+        # An explicit `full` + [] is an authored KNOWN-EMPTY set, the same distinction the membership
+        # branch below draws, and it is not the same statement as "this node authored nothing".
+        st.node_concepts_authored[n.id] = [str(c) for c in n.idea.concepts]
+    else:
+        st.node_concepts_authored.pop(n.id, None)
     if delta_mode and not unsupported_mode and not receipt_protected:
         # PART V (B): the node authored a DELTA vs the run base + its parents. Store the tolerant reader's
         # bounded valid operands here; the append-only Event remains the lossless audit source. The fold
@@ -2618,8 +2655,8 @@ def _fold_node_concept_envelope(st: RunState, ctx: "_FoldCtx", n: Node, d: dict,
         # Full is an exact replacement. An explicit `full` + [] is therefore a known-empty membership,
         # while an old no-mode/no-concepts payload stays genuinely absent for replay compatibility.
         st.node_concept_deltas.pop(n.id, None)
-        st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
-        st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
+        _publish_node_membership(st, n.id, [str(c) for c in n.idea.concepts],
+                                 NODE_CONCEPT_PROVENANCE_AUTHORED)
         st.node_concepts_at_vocab.pop(n.id, None)
         st.node_concepts_at_pending.pop(n.id, None)
     elif not receipt_protected:
@@ -2674,8 +2711,7 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     concepts = d.get("concepts")
     bounded, overflow, invalid = bounded_raw_concept_values(concepts)
-    st.node_concepts[nid] = bounded
-    st.node_concept_provenance[nid] = incoming_provenance
+    _publish_node_membership(st, nid, bounded, incoming_provenance)
     ctx.concept_input_capped.discard(nid)
     ctx.concept_input_invalid.discard(nid)
     if overflow:
@@ -2736,8 +2772,7 @@ def _on_concept_tag_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
             return
     concepts = d.get("concepts")
     bounded, overflow, invalid = bounded_raw_concept_values(concepts)
-    st.node_concepts[nid] = bounded
-    st.node_concept_provenance[nid] = NODE_CONCEPT_PROVENANCE_OPERATOR
+    _publish_node_membership(st, nid, bounded, NODE_CONCEPT_PROVENANCE_OPERATOR)
     ctx.concept_mode_untrusted.discard(nid)
     ctx.concept_input_capped.discard(nid)
     ctx.concept_input_invalid.discard(nid)

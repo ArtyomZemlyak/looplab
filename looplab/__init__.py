@@ -53,6 +53,7 @@ _LAYOUT = {
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
+    "concept_authorship": "events",  # how much of each proposer's authored concept set survived the classifier
     "bundle": "engine",  # the RO-Crate reviewer bundle export (doc 52 row 23); composes events + engine, so not `events`
     "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
     "attribute_sites": "engine",  # the Engine attribute declaring-site registry (doc 52 row 21)
@@ -316,6 +317,8 @@ _LAYOUT = {
     #                              would consult + the produced artifacts' content identity
     "applied_params": "runtime",   # what the CONFIGURATION that ran said the declared coordinates
     #                              were worth, bound at the metric read
+    "effective_batch": "runtime",   # what the training PROCESS recorded about the one
+    #                              coordinate a document cannot speak for, at the same read
     "param_carriers": "core",      # the ONE reading of what number a configuration DOCUMENT
     #                              assigns a declared dotted path (shared by the guard and the record)
     "readmodel": "events",

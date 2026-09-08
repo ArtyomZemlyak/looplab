@@ -181,6 +181,22 @@ surface resolves ids through it), and a per-row stamp cannot express that. Once 
 quiescent pass re-tags what the in-flight one wrote — bounded by the existing `_RETAG_CAP` — so a
 run that reaches a quiet moment ends with exactly the evidence it would have had before.
 
+**What the classifier replaces is kept (2026-09-08).** The cadence REWRITES a node's membership
+rather than merging into it, which is the designed behaviour — the proposer must not certify its own
+taxonomy — but until now the ids the proposer authored survived only in the raw event log, since
+`events/digest.py::_folded_axes` (rightly) forbids every read surface from resurrecting
+`idea.concepts`: a node whose tags were deliberately cleared must not keep classifying under its old
+authored axis. The fold now keeps the authored claim beside the membership in
+`RunState.node_concepts_authored` (`core/models.py::authored_node_concepts` reads it). It follows the
+IDEA and never the membership — a new authored envelope replaces it, a propose reset or a subject
+change clears it, and a classifier or operator row cannot touch it — and it is display/audit only:
+`classifier_verified_node_concepts` remains the single door admission and cross-run evidence cross.
+`concept_mode: "delta"` nodes are not duplicated into it, because their authored operands already
+live in `node_concept_deltas`, which no classifier writer clears. `looplab concept-authorship` is the
+instrument over the pair: per node the authored set, the folded set, what survived and what was
+replaced, with both sides resolved through the run's consolidation renames so a RENAMED id is never
+reported as a classifier replacement.
+
 ## Event log = canonical replay state
 
 **Every event type, what it records and the keys its payload carries: [Event reference](event-reference.md)** — generated from `looplab/events/types.py::EVENT_PAYLOAD_KEYS`, which is also what pins engine invariant #5 (a payload key is additive, and every reader defaults it).

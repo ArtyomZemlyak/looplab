@@ -86,8 +86,13 @@ GROUPS = {
                      # answer — and nothing in the loop reads either.
                      "tokens", "repair-candidates", "edit-types", "proxy-accuracy",
                      "seed-distance"},
+    # `concept-authorship` is this domain's READ side, on `prior-citations`' ground: a pure
+    # projection over the fold that compares what each proposer AUTHORED as its node's concepts
+    # against the membership the classifier left, calling no model and writing nothing. It is here
+    # rather than in `inspect_cmds` because the subject is the concept taxonomy — the same record
+    # `concept-coverage` builds and `--persist` writes — and not one run's account of itself.
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
-                     "research-targets", "novelty-recall", "lesson-guard"},
+                     "research-targets", "novelty-recall", "lesson-guard", "concept-authorship"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",
                         "concept-steward", "concept-ratify", "claim-decide", "task-facets",
                         "task-facets-set", "claim-steward", "cross-run-digest", "cross-run-search",
