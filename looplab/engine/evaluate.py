@@ -2322,7 +2322,16 @@ class EvaluateMixin:
                     # (`test_a_terminal_for_a_SUPERSEDED_generation_is_not_written` drives exactly
                     # that pair). What this skips is the one case where nothing is owed and nothing
                     # is stuck: the node reached a terminal of its own.
-                    _self_closed = node is not None and node.status is not NodeStatus.pending
+                    # THIS lifecycle's own terminal, not just "the node is closed". A crash naming
+                    # a SUPERSEDED generation writes no terminal either (the guard above), and there
+                    # the fault is still real and must still pause — the node moved on, the box
+                    # fault did not. Reading only the status conflated the two: a reset node whose
+                    # NEW attempt had already finished swallowed the pause for the old attempt's
+                    # ENOSPC, so one disk-full became N failed nodes with the account only in the
+                    # logger (driven). `attempt == generation` is what makes this a fact about the
+                    # lifecycle that raised rather than about whichever one is current.
+                    _self_closed = (node is not None and node.attempt == generation
+                                    and node.status is not NodeStatus.pending)
                     if not _self_closed and not (state.paused or state.finished
                                                  or state.stop_requested):
                         self.store.append(EV_PAUSE, {

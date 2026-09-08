@@ -579,6 +579,52 @@ def test_a_best_of_n_audit_row_describes_the_candidate_that_SHIPPED():
     assert solo.last_report == "moved on"
 
 
+def test_the_discard_can_still_clear_a_best_of_n_report():
+    """A read-only property silently disarmed `_discard_node_build_telemetry`.
+
+    The discard clears an abandoned build's channels with
+    `if hasattr(current, attr): setattr(current, attr, None); break`, inside a blanket
+    `except (AttributeError, TypeError): pass`. Against a property with NO setter that `setattr`
+    raises, the handler swallows it, the `break` never runs, and the walk nulls the INNER developer
+    instead — which was sufficient while `last_report` read through to that inner, and stopped being
+    sufficient the moment the wrapper began answering from its own chosen-candidate slot.
+
+    So the fix that made the audit row name the shipped candidate re-opened the failure the discard
+    exists to prevent: an abandoned build's report stands on the instance, and the one
+    `_emit_agent_report` still on the instance read (`speculation.py`'s producer emit) stamps it on
+    the NEXT node. Driven, and A/B'd against the parent commit — the discard worked before, and did
+    not after.
+
+    MUTATION: delete the `@last_report.setter` -> this is red.
+    """
+    from looplab.search.best_of_n import BestOfNDeveloper
+
+    class _Inner:
+        def __init__(self):
+            self.last_files, self.last_deleted, self.last_footprint = {}, [], None
+            self.last_report, self.calls = "before-any-build", 0
+
+        def implement(self, _idea):
+            self.calls += 1
+            self.last_report = f"cand-{self.calls}"
+            return "def solve():\n    return 1\n" if self.calls == 1 else "x"
+
+    inner = _Inner()
+    dev = BestOfNDeveloper(inner, n=2, listwise=False, foresight=False)
+    dev.implement(object())
+    assert dev.last_report == "cand-1"
+
+    dev.last_report = None                 # exactly what the discard does, on the wrapper it reaches
+    assert dev.last_report is None, (
+        "the abandoned build's report survived the discard and will be stamped on the next node")
+    # …and it does NOT fall back to the inner's, or the discard would be a no-op by another route.
+    assert inner.last_report == "cand-2"
+
+    # A later build still gets its own pick, so the setter is a clear and not a freeze.
+    dev.implement(object())
+    assert dev.last_report == "cand-3"
+
+
 def test_no_build_site_clears_the_footprint_on_its_own():
     """The walk has ONE caller, and it is the one holding the lock.
 

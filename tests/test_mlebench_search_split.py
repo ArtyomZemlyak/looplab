@@ -28,6 +28,7 @@ from looplab.adapters import mlebench_grade, mlebench_split
 from looplab.core.errors import ConfigRefusal
 from looplab.core.models import Idea
 from looplab.events.eventstore import EventStore
+from looplab.events.replay import fold
 from tests.factories import make_engine
 
 CLASSES = ["EAP", "HPL", "MWS"]
@@ -273,9 +274,16 @@ def test_an_undecidable_layout_refuses_the_run_at_start(tmp_path):
             a = _assets()
             a["sample_submission.csv"] = _csv(["id", "p_fish", "p_bird"], [["e1", "0", "0"]])
             return a
+    # AT THE RE-PIN, not at construction: `Engine.__init__` builds the split from the LIVE
+    # fraction and `_reentry_repin` overwrites it with the one `run_started` recorded (invariant
+    # #6), so the pre-pin construction is not the moment to refuse a run. A fresh run's own
+    # `run_started` is appended by `_setup_phase` immediately before that re-pin, so the refusal
+    # still lands before any node is created — which is what "at run start" has to mean.
+    engine = make_engine(tmp_path / "run", task=_Odd(), researcher=_Stub(), developer=_Dev(),
+                         n_seeds=1, max_nodes=1, holdout_fraction=0.5)
     with pytest.raises(ConfigRefusal, match="holdout_fraction=0"):
-        make_engine(tmp_path / "run", task=_Odd(), researcher=_Stub(), developer=_Dev(),
-                    n_seeds=1, max_nodes=1, holdout_fraction=0.5)
+        anyio.run(engine.run)
+    assert not [n for n in fold(EventStore(tmp_path / "run" / "events.jsonl").read_all()).nodes]
 
 
 def test_a_train_file_that_cannot_be_COUNTED_refuses_instead_of_grading_privately(tmp_path):
@@ -302,15 +310,30 @@ def test_a_train_file_that_cannot_be_COUNTED_refuses_instead_of_grading_privatel
             a["train.csv"] = "not,a,parseable\ntrain file at all"   # counts 0 rows
             return a
 
+    engine = make_engine(tmp_path / "run", task=_Unparseable(), researcher=_Stub(),
+                         developer=_Dev(), n_seeds=1, max_nodes=1, holdout_fraction=0.5)
     with pytest.raises(ConfigRefusal, match="could not be counted"):
-        make_engine(tmp_path / "run", task=_Unparseable(), researcher=_Stub(), developer=_Dev(),
-                    n_seeds=1, max_nodes=1, holdout_fraction=0.5)
+        anyio.run(engine.run)      # at the re-pin — see the sibling above for why, not at __init__
+    assert not [n for n in fold(EventStore(tmp_path / "run" / "events.jsonl").read_all()).nodes]
+
+    # AND THE PIN WINS, which is the whole reason the refusal moved. A run recorded with the
+    # explicit legacy protocol resumes even where the live setting is a positive default: the
+    # refusal is about the value the LOG decided, never the one the environment happens to carry.
+    legacy = tmp_path / "legacy"
+    zero = make_engine(legacy, task=_Unparseable(), researcher=_Stub(), developer=_Dev(),
+                       n_seeds=1, max_nodes=1, holdout_fraction=0.0)
+    anyio.run(zero.run)
+    resumed = make_engine(legacy, task=_Unparseable(), researcher=_Stub(), developer=_Dev(),
+                          n_seeds=1, max_nodes=1, holdout_fraction=0.5)
+    anyio.run(resumed.run)         # the pinned 0.0 decides; a refusal here is unresumable-forever
+    assert resumed._holdout_fraction == 0.0
 
     # …and the SAME layout with the fraction at 0 is the explicit legacy protocol, untouched: the
     # refusal is about a declaration that cannot be honoured, never about an unreadable train file.
-    engine = make_engine(tmp_path / "run0", task=_Unparseable(), researcher=_Stub(),
-                         developer=_Dev(), n_seeds=1, max_nodes=1, holdout_fraction=0.0)
-    assert engine._holdout_idx == frozenset() and engine._search_answers is None
+    ok = make_engine(tmp_path / "run0", task=_Unparseable(), researcher=_Stub(),
+                     developer=_Dev(), n_seeds=1, max_nodes=1, holdout_fraction=0.0)
+    anyio.run(ok.run)
+    assert ok._holdout_idx == frozenset() and ok._search_answers is None
 
 
 def test_a_recarve_draws_from_the_original_files(tmp_path):

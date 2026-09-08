@@ -152,12 +152,33 @@ class BestOfNDeveloper(WrapsDeveloper):
         envelope — so a best-of-N node's ADR-7 audit trail described a candidate that did not ship,
         beside files and a footprint that did.
 
-        Falls back to the read-through whenever no N-candidate pick is standing: `n == 1`, a repair
-        (single-shot, and `_sync_audit` clears the pick), or before the first build."""
+        Falls back to the read-through whenever no N-candidate pick is standing: `n == 1`, either
+        repair path (both clear it explicitly — `_sync_audit` does NOT, it assigns ten other names),
+        or before the first build."""
         chosen = getattr(self, "_chosen_report", self._NO_CHOSEN_REPORT)
         if chosen is not self._NO_CHOSEN_REPORT:
             return chosen
         return getattr(self._wrapped, "last_report", None)
+
+    @last_report.setter
+    def last_report(self, value) -> None:
+        """AND IT IS WRITABLE, because a read-only property here silently disarmed the DISCARD.
+
+        `engine/audit.py::_discard_node_build_telemetry` clears an abandoned build's channels with
+        `if hasattr(current, attr): setattr(current, attr, None); break`, inside a blanket
+        `except (AttributeError, TypeError): pass`. Against a property with no setter that `setattr`
+        RAISES, the handler swallows it, the `break` is skipped, and the walk nulls the INNER
+        developer instead — which was sufficient while `last_report` read through to that inner, and
+        stopped being sufficient the moment this property started answering from `_chosen_report`.
+        Driven, and A/B'd against the parent commit: the discard cleared the report before, and did
+        not after, so an abandoned build's chosen candidate stood on the instance and
+        `speculation.py`'s producer emit — the one `_emit_agent_report` deliberately left on the
+        instance read — stamped it on the NEXT node. That is verbatim the failure
+        `_discard_node_build_telemetry`'s own docstring exists to prevent.
+
+        Assigning None means "no report", which is what the discard means; it does not fall back to
+        the inner's, or the discard would be a no-op by another route."""
+        self._chosen_report = value
 
     def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call",
                  foresight: bool = True, direction: str = "min", goal: str = "",

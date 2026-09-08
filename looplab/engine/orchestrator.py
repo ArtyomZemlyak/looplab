@@ -1727,7 +1727,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._search_answers: Optional[str] = None
         self._search_hidden_ids: frozenset = frozenset()
         self._holdout_idx: frozenset = self._build_holdout_idx(self._holdout_fraction)
-        self._apply_search_split()
+        # `refuse=False`: this construction reads the LIVE fraction, which `_reentry_repin` is about
+        # to overwrite with the one `run_started` pinned (invariant #6). The refusal is made there,
+        # against the value that actually decides the protocol — see `apply_search_split`.
+        self._apply_search_split(refuse=False)
         self._holdout_epoch = 0
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
@@ -7993,8 +7996,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
         return self.holdout.build_holdout_idx(fraction, epoch)
 
-    def _apply_search_split(self) -> None:
-        return self.holdout.apply_search_split()
+    def _apply_search_split(self, *, refuse: bool = True) -> None:
+        return self.holdout.apply_search_split(refuse=refuse)
 
     def _holdout_topk(self, state: RunState) -> list[int]:
         return self.holdout.holdout_topk(state)
