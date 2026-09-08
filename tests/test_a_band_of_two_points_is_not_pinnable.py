@@ -40,14 +40,14 @@ def test_the_thin_and_the_narrow_cases_are_different_sentences():
     assert "too few probes for a band" in src and "band computable but TOO THIN TO PIN" in src
 
 
-def test_an_unpinned_task_with_enough_probes_still_fails_the_claim():
-    """Задача, у которой доказательств столько же, сколько у соседей, обязана нагонять оператора:
-    иначе проверка перестанет просить пришпилить вообще."""
+def test_every_unpinned_task_still_fails_the_claim():
+    """Первый заход §364 позволил тонкой задаче ПРОЙТИ — и тест §337, который эту проверку и
+    сторожит, покраснел. Правильно: непришпиленная задача это та, которую НИЧТО не судит, а зелёное
+    «TEST tracks TRAIN, per task» при несудимой задаче — ровно то молчание, ради которого §337 и
+    заведён. §364 меняет СОВЕТ, а не вердикт."""
     src = (BENCH / "sweep_claims.py").read_text(encoding="utf-8")
-    assert "return not loud and not unpinned, detail" in src, \
-        "непришпиленная задача перестала валить утверждение"
-    assert "narrow" not in src.split("return not loud and not unpinned")[1][:40], \
-        "тонкая полоса не должна валить утверждение -- по ней нечего делать"
+    assert "return not loud and not unpinned and not narrow, detail" in src, \
+        "тонкая полоса снова проходит молча"
 
 
 def test_the_live_check_holds_and_names_pagerank():
@@ -56,4 +56,4 @@ def test_the_live_check_holds_and_names_pagerank():
         return
     assert "pagerank" in said, said
     if "n=2" in said:
-        assert "TOO THIN TO PIN" in said and "UNPINNED task(s): pagerank" not in said, said
+        assert "TOO THIN TO PIN" in said and "UNPINNED task(s): pagerank" in said, said

@@ -1020,14 +1020,21 @@ def check_test_tracks_train(bench: str):
         detail += ("; UNPINNED task(s): " + ", ".join(sorted(set(unpinned)))
                    + " -- add the measured band to TEST_TRAIN_BANDS with the date")
     if narrow:
-        detail += ("; band computable but TOO THIN TO PIN: "
-                   + ", ".join(f"{t} (n={len(by_task[t])}, the thinnest pinned band rests on "
-                               f"{MIN_PROBES_TO_PIN})" for t in sorted(set(narrow)))
-                   + " -- pinning it now would be a rule its own probes cannot fail")
+        # STILL UNPINNED, AND STILL A FAILURE. The first cut of §364 let a thin task pass, and the
+        # §337 test that guards this claim went red -- rightly. An unpinned task is one NOTHING is
+        # judging, and a green "TEST tracks TRAIN, per task" while a task goes unjudged is the
+        # silence §337 exists to break. What §364 changes is the ADVICE, not the verdict: the
+        # operator is told to run more probes rather than to pin a band its own two probes cannot
+        # fail.
+        detail += ("; UNPINNED task(s): " + ", ".join(sorted(set(narrow)))
+                   + " -- band computable but TOO THIN TO PIN ("
+                   + ", ".join(f"{t} n={len(by_task[t])}" for t in sorted(set(narrow)))
+                   + f", the thinnest pinned band rests on {MIN_PROBES_TO_PIN}): pinning it now "
+                   "would be a rule its own probes cannot fail -- run more probes")
     if thin:
         detail += ("; too few probes for a band: " + ", ".join(sorted(thin))
                    + f" (under {MIN_PROBES_FOR_A_BAND}); not judged")
-    return not loud and not unpinned, detail
+    return not loud and not unpinned and not narrow, detail
 
 
 # The bridge stamps every evaluation with which half of the dataset it actually ran on, and why it
