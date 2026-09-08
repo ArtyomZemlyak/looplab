@@ -43,6 +43,9 @@ except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is fo
 
 from looplab.core import tracing
 from looplab.core.llm_broker import llm_request_permit
+# ONE derivation of the run's USD ceiling, shared with the reserve half (`core/llm_budget.py`):
+# this module owns the COMMIT half, and the two used to read different `Settings` fields.
+from looplab.core.llm_budget import DEFAULT_COST_KNOB, run_usd_ceiling
 # Re-exported for backward compatibility: dozens of importers (and tests) do
 # `from looplab.core.llm import LLMError / BudgetExceeded`. The definitions live in
 # `looplab.core.errors` so `parse` can import them without importing this module.
@@ -2178,8 +2181,14 @@ class OpenAICompatibleClient:
 
 class CostAccountant:
     def __init__(self, limit: Optional[float] = None, warn_frac: float = 0.8,
-                 on_delta: Optional[Callable[[dict], None]] = None):
+                 on_delta: Optional[Callable[[dict], None]] = None,
+                 limit_knob: str = DEFAULT_COST_KNOB):
         self.limit = limit
+        # WHICH SETTINGS KNOB this ceiling came from, because the refusal has to name the number an
+        # operator must change and there is more than one way to declare it (`run_usd_ceiling`).
+        # Defaulted to `llm_budget_usd`, which is what every historical message said and what a
+        # caller constructing a bare accountant still means.
+        self.limit_knob = str(limit_knob or DEFAULT_COST_KNOB)
         self.warn_frac = warn_frac
         self.spent = 0.0
         self.warned = False
@@ -2327,8 +2336,8 @@ class CostAccountant:
             # knob and not only the arithmetic.
             raise BudgetExceeded(
                 f"LLM spend ceiling reached: ${committed_spent:.4f} of the ${self.limit:.4f} "
-                f"set by `llm_budget_usd`. The run stops here rather than spending more. "
-                f"To continue, raise `llm_budget_usd` in this run's `config.snapshot.json` "
+                f"set by `{self.limit_knob}`. The run stops here rather than spending more. "
+                f"To continue, raise `{self.limit_knob}` in this run's `config.snapshot.json` "
                 f"(0 = no limit) and resume -- an env var will NOT do it, every resume adopts "
                 f"the snapshot (engine invariant #6).")
         return committed_spent
@@ -2370,10 +2379,10 @@ class CostAccountant:
         if remaining < floor - 1e-9:
             raise BudgetExceeded(
                 f"LLM spend ceiling reached before opening {what}: ${max(0.0, remaining):.4f} of "
-                f"the ${limit:.4f} set by `llm_budget_usd` remains, below the "
+                f"the ${limit:.4f} set by `{self.limit_knob}` remains, below the "
                 f"`node_open_budget_floor_usd` of ${floor:.4f} a new node needs. The run stops "
                 f"here rather than open work it cannot finish. To continue, raise "
-                f"`llm_budget_usd` (or lower `node_open_budget_floor_usd`, 0 = off) in this "
+                f"`{self.limit_knob}` (or lower `node_open_budget_floor_usd`, 0 = off) in this "
                 f"run's `config.snapshot.json` and resume -- an env var will NOT do it, every "
                 f"resume adopts the snapshot (engine invariant #6).")
 
@@ -2956,8 +2965,15 @@ def run_cost_accountant(settings) -> "CostAccountant":
     existing = getattr(settings, _RUN_ACCOUNTANT_ATTR, None)
     if isinstance(existing, CostAccountant):
         return existing
-    accountant = CostAccountant(
-        limit=(float(getattr(settings, "llm_budget_usd", 0.0) or 0.0) or None))
+    # ONE CEILING FOR THE RUN, read here and at `RunBudget` from the same function. `llm_budget_usd`
+    # and `llm_cost_limit` were two run-level USD caps enforced by two different halves — post hoc
+    # here, reserved at the broker's permit there — so an operator who typed one got half a ceiling
+    # (doc 52 row 15's fan-out overshoot on one side, no `node_open_budget_floor_usd` stop on the
+    # other). `run_usd_ceiling` takes the tightest DECLARED cap and the knob that declared it, so
+    # this accountant refuses at the same number the reserve half does, and names the same knob.
+    limit, knob = run_usd_ceiling(getattr(settings, "llm_cost_limit", 0.0),
+                                  getattr(settings, "llm_budget_usd", 0.0))
+    accountant = CostAccountant(limit=limit, limit_knob=knob or DEFAULT_COST_KNOB)
     try:
         object.__setattr__(settings, _RUN_ACCOUNTANT_ATTR, accountant)
     except Exception:  # noqa: BLE001 - an exotic settings object still gets a working accountant

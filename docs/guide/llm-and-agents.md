@@ -201,6 +201,14 @@ has. The committed half is fed by the durable `llm_usage` ledger and seeded from
 the cap survives a restart; `looplab tokens` reconciles against that same ledger. Both default to
 0 = no cap (doc 52 row 15).
 
+**One ceiling, two halves (2026-09-08).** `llm_cost_limit` and `llm_budget_usd` were briefly two
+run-level USD caps enforced by two different halves — reserved before the call here, committed
+after it on the shared `CostAccountant` — so declaring one bought half a ceiling: only
+`llm_budget_usd` gets the `node_open_budget_floor_usd` stop, and only the reserve half stops the
+fan-out overshoot. `core/llm_budget.py::run_usd_ceiling` is now the ONE derivation both halves
+read: the tightest cap you actually declared binds both, and every refusal names the knob you
+typed. `llm_budget_usd` remains the documented spelling.
+
 ## Reasoning / thinking
 
 `llm_reasoning` controls the chain-of-thought sent in the request (defaults to `high` — the agent
