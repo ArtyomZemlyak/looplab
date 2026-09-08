@@ -41,10 +41,21 @@ _LAYOUT = {
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
+    # The four modules `roles.py` split into on 2026-09-08 (doc 25 AG-02). `roles.py` re-exports the
+    # first three; `toy_roles` is named directly by its importers, because the calibration envelope
+    # identifies the toy pair by dotted path and one live spelling is the point.
+    "role_prompts": "agents",   # the role prompt fragments + the suffix assemblers, moved VERBATIM
+    "state_brief": "agents",    # the board prompt window + `_state_brief`: what a proposal role SEES
+    "role_wrappers": "agents",  # WrapsResearcher/WrapsDeveloper/bind_state_on + ValidatingDeveloper
+    "toy_roles": "agents",      # the offline ToyResearcher/ToyObjectiveDeveloper backends
+    "developer_backends": "agents",  # the three developer-backend wirings `make_roles` composes (RA-01)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
+    "task_schema": "adapters",  # the composable/legacy task-schema front-end `normalize_task`,
+                                # extracted from `tasks.py` on 2026-09-08 (doc 25 RA-01's cap)
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
+    "concept_authorship": "events",  # how much of each proposer's authored concept set survived the classifier
     "bundle": "engine",  # the RO-Crate reviewer bundle export (doc 52 row 23); composes events + engine, so not `events`
     "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
     "attribute_sites": "engine",  # the Engine attribute declaring-site registry (doc 52 row 21)
@@ -74,6 +85,7 @@ _LAYOUT = {
     "audit": "engine",   # engine audit/trust-emitter mixin
     "concept_cadence": "engine",  # PART IV/V concept re-tag + snapshot mixin (doc 25 EC-09)
     "concept_capsules": "engine",  # durable per-run concept record + portfolio views (doc 25 EM-10)
+    "knowledge_views": "engine",  # the PUBLIC cross-run knowledge read model (doc 25 XP-01/TO-09 §6.6)
     "concept_shelf": "engine",   # the per-run concept surface the memory views sort by
     "concept_graph": "search",   # PART IV D5 concept vocabulary + axis-DAG + curated skeletons
     "concept_analytics": "search",  # ...its pure coverage/metrics/alarm read-models (doc 25 SE-09)
@@ -109,6 +121,7 @@ _LAYOUT = {
     "task_kinds": "core",       # shared launch/backend defaults used by generated and interactive configs
     "task_facets": "engine",     # PART IV cross-run §21.20.2: agentic task faceting overlay (off the index)
     "governance_health": "engine",  # PART IV cross-run: paid-curation ledger health / fail-closed gates
+    "governance_protocol": "engine",  # the shared governance transaction: the durable ledger APPEND and the governed-projection re-entry (doc 25 EM-05/EM-08)
     "steward_invocation": "engine",  # PART IV cross-run: agentic steward invocation/session bookkeeping
     "curation_protocol": "engine",  # the FINALIZE at-most-once paid-curation transaction (doc 25 EM-03)
     "concept_tidy": "engine",      # the cross-run concept RATIFICATION stage (§22.4)
@@ -117,6 +130,7 @@ _LAYOUT = {
     "assistant": "serve",
     "assistant_watch": "serve",  # the durable always-on watch record + scheduler (F4): a wake-up outlives its HTTP request, so the instruction is stored rather than held in a timer
     "assistant_commands": "serve",
+    "capability_store": "serve",  # the bearer-capability store core shared by ShareStore/ReviewStore (doc 25 SC-10)
     "atomicio": "core",
     "best_of_n": "search",
     "card_ledger": "events",  # the derived Card ledger: receipt bounds + derive_cards (doc 25 EV-01)
@@ -139,6 +153,8 @@ _LAYOUT = {
     "comparison": "core",
     "concepts": "core",       # canonical concept identity + materialization integrity contracts
     "concept_frame": "serve",   # bounded versioned concept frames served to the UI
+    "concept_lens_service": "serve",   # the paid concept-lens subsystem `routers/runs.py`
+                                       # shed (doc 25 SR-04)
     "config": "core",
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
@@ -154,6 +170,7 @@ _LAYOUT = {
     "critic": "trust",
     "cross_run": "trust",   # cross-run identity/scope-boundary checks among the trust monitors
     "cv": "trust",
+    "drift": "trust",   # deterministic distribution-shift detector, advisory (docs/BACKLOG.md §15)
     "harden": "trust",
     "dataset_task": "adapters",
     "deep_research": "agents",
@@ -304,6 +321,8 @@ _LAYOUT = {
     #                              would consult + the produced artifacts' content identity
     "applied_params": "runtime",   # what the CONFIGURATION that ran said the declared coordinates
     #                              were worth, bound at the metric read
+    "effective_batch": "runtime",   # what the training PROCESS recorded about the one
+    #                              coordinate a document cannot speak for, at the same read
     "param_carriers": "core",      # the ONE reading of what number a configuration DOCUMENT
     #                              assigns a declared dotted path (shared by the guard and the record)
     "readmodel": "events",
@@ -331,16 +350,29 @@ _LAYOUT = {
     "run_files": "serve",
     "run_projections": "serve",   # the run-list projections AppState now owns (doc 25 SR-12)
     "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
+    "receipt": "core",   # the RECEIPT tier: a durable operation's identity/phase machine (doc 34 D-01)
     "run_deletion": "core",
     "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
+    "run_lifecycle": "engine",  # the run dir's lifecycle fences + config-write lock, moved DOWN out
+                                # of `serve/` so `tools/` takes its defaults downward (doc 25 XP-03)
+    "run_proposal": "core",   # the ONE launch-proposal schema the CLI, TUI and Web planners share
+                              # (doc 27); `core` because those three sit in three packages
     "run_reset": "core",
     "node_diff": "tools",   # what actually differs between two nodes: code, params proposed vs applied
     "run_tools": "tools",
     "machine_runs_tools": "tools",
+    "run_control_tools": "tools",   # the assistant's run-MUTATING provider (doc 25 TO-02)
+    "node_purge_receipt": "tools",  # ...the node purge's durable receipt schema (doc 34 D-01)
+    "run_launcher_tools": "tools",  # ...its launch-PROPOSAL provider (same split)
+    "run_command_adapter": "tools",  # ...the seam to the serve-owned command service
+    "turn_mutation_fence": "tools",  # ...one assistant turn's durable mutation journal
     "sandbox": "runtime",
     "scorer_fidelity": "search",
     "schemas": "serve",
     "scope_actions": "serve",   # the paid ACTION protocol above that store (doc 25 SR-02)
+    "scope_generate": "serve",   # the paid GENERATION protocol, the scope projections
+                                 # and the source-probe cache `routers/reports.py`
+                                 # shed (doc 25 SR-02)
     "scope_report": "serve",
     "scope_report_store": "serve",   # the durable store `routers/reports.py` shed (doc 25 SR-12)
     "scope_sources": "serve",
@@ -356,11 +388,15 @@ _LAYOUT = {
     "speculation": "engine",  # durable speculative Card build queue and worker contracts
     "speculation_calibration": "search",
     "speculation_quality": "search",
+    "seed_distance": "search",   # displacement from the lineage root, over node_diff's edit vocabulary
     "source_identity": "core",    # provenance/source-identity primitives (stdlib-only, used by core)
+    "start_record": "serve",  # the durable run-START record protocol, de-closured (doc 25 SR-01)
     "strategist": "agents",
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)
     "stuck": "agents",
     "surrogate": "search",
+    "synthetic": "adapters",   # SyntheticTaskBase + PerturbResearcher, the five demo adapters'
+                               # shared skeleton (doc 25 RA-06)
     "tasks": "adapters",
     "text": "core",              # the shared unicode word tokenizer (doc 25 EM-15)
     "timeseries": "adapters",
@@ -390,6 +426,7 @@ _LAYOUT = {
     "vectorstore": "tools",
     "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
     "verifier_tiebreak": "engine",  # R1-c calibrated-verifier metric tie-break mixin (doc 25 EC-09)
+    "value_estimate": "engine",  # the LLM value estimate cadence (docs/BACKLOG.md §0.1 row 17)
     # The D8 memo-claim verifier. It was `trust/verify.py` — two letters from `trust/verifier.py`,
     # which is a DIFFERENT verifier (doc 25 CT-09). Both legacy spellings live in `_RENAMED` below,
     # because this map's contract is canonical-stem -> package and `verify` is no longer a stem.

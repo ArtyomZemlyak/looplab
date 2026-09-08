@@ -208,6 +208,34 @@ def test_a_node_that_already_wrote_its_own_terminal_does_not_get_a_second(tmp_pa
     assert _state(engine).nodes[node_id].error_reason == "no_metric"
 
 
+def test_a_node_that_closed_itself_does_not_pause_the_run_on_a_teardown_fault(tmp_path):
+    """A SUCCESSFUL node whose span exporter dies on the way out must not stop the run.
+
+    The terminal guard above has always declined the second terminal for a lifecycle that wrote its
+    own; the PAUSE was a separate `if` on the run's state alone, so it fired anyway. `spans.jsonl`
+    hitting ENOSPC, a closed tracer, any exporter fault inside the enclosing
+    `with self.tracer.span("evaluate", ...)` — the node is `evaluated`, the metric is recorded, and
+    the run needed an operator resume for telemetry. The pause is for a fault this handler could not
+    otherwise contain (a repeated one at dispatch is how one fault becomes N failed nodes); a
+    lifecycle that reached a terminal of its own is not that.
+    """
+    engine = make_engine(tmp_path)
+    node_id = _node(engine)
+
+    async def _drive():
+        async with engine._write_lock:
+            engine.store.append("node_evaluated", {
+                "node_id": node_id, "generation": 0, "metric": 0.5, "eval_seconds": 1.0})
+        await engine._contain_eval_crash(node_id, 0, OSError("span exporter: no space left"))
+
+    anyio.run(_drive)
+    state = _state(engine)
+    assert state.paused is False, "a node that succeeded paused the run for a teardown fault"
+    assert not [e for e in engine.store.read_all() if e.type == "node_failed"]
+    assert state.nodes[node_id].status is NodeStatus.evaluated
+    assert state.nodes[node_id].metric == 0.5
+
+
 def test_a_terminal_for_a_SUPERSEDED_generation_is_not_written(tmp_path):
     """The containment names the generation the body BOUND, not whatever is current when it fails:
     after a concurrent reset those are different lifecycles, and a terminal on the wrong one is

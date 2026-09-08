@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 207
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 210
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -120,7 +120,8 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # saying a larger one "does NOT get this experiment more hardware" and that the run "serialises at
 # the same per-experiment cost". The scheduler contradicts both halves. It buys no paid call and
 # moves nothing the operator's numbers rest on; it is a row because a prompt is a contract and OFF
-# must restore both historical paragraphs byte for byte — and because the operator is the one who
+# is a paragraph the operator can ask for — the QUIET one since 2026-09-08, because the historical
+# text closed on a false sentence and nothing resumes onto this switch — and because the operator is the one who
 # has to know that their own task statement still overrides it, which is what has kept every Card
 # on this box at `{"gpus": 1}`.)
 # (181 since `cadence_while_evaluating`: may the node-count cadences fire at a creation decision
@@ -220,7 +221,24 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # so it is RE-DERIVED over the merged keyset, which the 2026-08-31 entry prescribes.
 # Verified by intersection rather than by adding the integers: 207 unique keys, 197 common
 # to this branch's file plus master's ten, no duplicate and none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "28a36daf8fed55a2558039bdf92e96923beac5fa79c5a99ce6fa02c086e1117a"
+# 209 + 1 -> 210 on 2026-09-08, at the SAME merge sequence: `mcts_value_weight` was the third
+# row of the day, from a third branch, and its own pin said 209 because it was cut against a
+# tree holding neither of the other two. Re-derived over the merged keyset with the delta
+# CHECKED rather than assumed: exactly `mcts_value_weight` added, nothing removed.
+# 207 + 2 -> 209 on 2026-09-08, at the MERGE: two rows landed on the same day from two branches
+# and NEITHER side's digest describes the result, because each was pinned against a tree without the
+# other's row. Re-derived over the merged keyset, the way the 2026-08-31 entry above prescribes, and
+# verified by INTERSECTION rather than by adding the integers: 207 keys common to both files plus
+# exactly `lesson_operator_scope` and `mlflow_tracking_uri`, no duplicate and none removed.
+# +`lesson_operator_scope` (doc 52 §4.3), whether the Developer's cross-run prior is ranked by the
+# operator about to fire. A row because it changes a PROMPT — the same ground `memo_verdict_cue` and
+# `evidence_envelope` are rows on — and because OFF is the shipped default, so the operator turning
+# it ON is the one who needs to see it.
+# +`mlflow_tracking_uri` (docs/BACKLOG.md §16), the MLflow mirror that runs WHILE the run does. A row
+# rather than an uncurated omission for the reason `redact_output` next to it is one: it decides
+# whether this run's params, metrics and champion CODE leave the box for an external server, so the
+# operator has to be able to see it and turn it off.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "8f8354eafdb4fde7dd887cbd3486a951a56288c89aecb6f5cb4b7c85af815f54"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

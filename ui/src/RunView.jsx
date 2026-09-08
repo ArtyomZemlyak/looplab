@@ -35,16 +35,15 @@ import { GLOBAL_DESTINATIONS, INSTALLATION_ROUTE_VIEWS } from './globalNav.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { conceptPaneTarget } from './conceptInspect.js'
 import { createInspectorDraftStore } from './inspectorDraftStore.js'
-import { installNavigationLossGuard } from './navigationLossGuard.js'
-import {
-  authoringRecoveryStorageKey, inspectAuthoringRecoveryStorage,
-} from './authoringRecoveryStorage.js'
 import {
   clearCommentOperationIntent, clearDamagedCommentOperation,
   listCommentOperationRecoveries, readCommentOperationRecoveryRevision,
   refreshCommentOperationRecoveries, subscribeCommentOperationRecoveries,
 } from './commentRecoveryStorage.js'
 import { useStartOverCoordination, useStartOverRecovery } from './useStartOverRecovery.js'
+import { commentDraftEntryUnsafe } from './retainedWorkModel.js'
+import { useRetainedWork } from './useRetainedWork.js'
+import { useWorkspaceFocusOwner } from './useWorkspaceFocusOwner.js'
 import {
   FORK_FROM_SEQ_ACTION, forkGestureAccess, readOnlyNodeActionRefused,
 } from './forkFromSeqModel.js'
@@ -91,26 +90,6 @@ const publishTraceClearRecovery = (scope, kind) => {
   while (signals.size > 64) signals.delete(signals.keys().next().value)
   traceClearRecoverySnapshot = { revision: signal.revision, signals }
   for (const listener of traceClearRecoveryListeners) listener()
-}
-
-const commentDraftEntryUnsafe = ([scope, fields], runId) => {
-  if ((!scope.startsWith(`comment-composer:${runId}@`)
-      && !scope.startsWith(`comment-card:${runId}@`))
-      || !fields || typeof fields !== 'object' || Array.isArray(fields)) return false
-  const busy = fields.busy === true || (typeof fields.busy === 'string' && !!fields.busy)
-  const draft = (typeof fields.text === 'string' && fields.text.length > 0)
-    || (fields.dirty === true && typeof fields.draftText === 'string')
-  const recovery = !!fields.retryIntent || !!fields.uncertainIntent
-    || !!fields.editRetryIntent || !!fields.uncertainEdit
-    || !!fields.resolutionRetryIntent || !!fields.uncertainResolution
-    || !!fields.damagedRecovery
-  return busy || draft || recovery
-}
-
-const commentDraftText = ([, fields]) => {
-  if (typeof fields?.text === 'string' && fields.text.length > 0) return fields.text
-  if (fields?.dirty === true && typeof fields.draftText === 'string') return fields.draftText
-  return ''
 }
 
 // All optional panels intentionally share one deferred module request. The first opened panel pays
@@ -361,63 +340,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     inspectorDraftStoreRef.current.revision,
     inspectorDraftStoreRef.current.revision,
   )
-  const retainedCommentEntries = useMemo(() => reviewMode ? []
-    : inspectorDraftStoreRef.current.entries()
-      .filter(entry => commentDraftEntryUnsafe(entry, String(runId))),
-  [reviewMode, runId, inspectorDraftRevision])
-  const retainedCommentScopes = useMemo(
-    () => [...new Set(retainedCommentEntries.map(([scope]) => scope))],
-    [retainedCommentEntries],
-  )
-  const retainedCommentDrafts = useMemo(() => retainedCommentEntries
-    .map(commentDraftText).filter(Boolean), [retainedCommentEntries])
-  const retainedCommentRecovery = useMemo(
-    () => reviewMode
-      ? { available: true, valid: [], damaged: [] }
-      : listCommentOperationRecoveries(String(runId)),
-    [reviewMode, runId, commentRecoveryRevision],
-  )
-  const retainedCommentDurableCount = retainedCommentRecovery.valid.length
-    + retainedCommentRecovery.damaged.length
-  const retainedCommentRecoveryUnavailable = !reviewMode && !retainedCommentRecovery.available
-  const retainedCommentProtectedCreateCandidates = [
-    ...retainedCommentRecovery.valid.filter(intent => intent.kind === 'create'
-      && (!generation || intent.expectedGeneration === generation)),
-    ...retainedCommentRecovery.damaged.filter(recovery => recovery.identity?.kind === 'create'
-      && (!generation || recovery.identity.expectedGeneration === generation))
-      .map(recovery => recovery.identity),
-    ...retainedCommentEntries.flatMap(([, fields]) => {
-      const candidates = [fields?.uncertainIntent?.recovery, fields?.damagedRecovery?.identity]
-      return candidates.filter(identity => identity?.kind === 'create'
-        && (!generation || identity.expectedGeneration === generation))
-    }),
-  ]
-  const retainedCommentProtectedCreates = [...new Map(
-    retainedCommentProtectedCreateCandidates.map(identity => [[
-      identity.expectedGeneration, identity.nodeId, identity.nodeGeneration,
-    ].join('\u0000'), identity]),
-  ).values()]
-  const retainedCommentDamagedProtectedCreateCount = retainedCommentProtectedCreates
-    .filter(identity => !identity.operationId).length
-  const retainedCommentValidProtectedCreateCount = retainedCommentProtectedCreates.length
-    - retainedCommentDamagedProtectedCreateCount
-  const retainedCommentScopeHasProtectedCreate = scope => retainedCommentProtectedCreates.some(
-    identity => {
-      const base = `comment-composer:${String(runId)}@${identity.expectedGeneration}:${identity.nodeId}:${identity.nodeGeneration}`
-      return scope === base || scope.startsWith(`${base}:`)
-    },
-  )
-  const retainedCommentReleasableEntries = retainedCommentRecoveryUnavailable ? []
-    : retainedCommentEntries.filter(([scope]) => !retainedCommentScopeHasProtectedCreate(scope))
-  const retainedCommentReleasableIntents = retainedCommentRecovery.valid.filter(
-    intent => intent.kind !== 'create' || (generation && intent.expectedGeneration !== generation))
-  const retainedCommentReleasableDamaged = retainedCommentRecovery.damaged.filter(
-    recovery => recovery.identity?.kind !== 'create'
-      || (generation && recovery.identity.expectedGeneration !== generation))
-  const retainedCommentReleasableCount = retainedCommentReleasableEntries.length
-    + retainedCommentReleasableIntents.length + retainedCommentReleasableDamaged.length
-  const retainedCommentWorkUnsafe = retainedCommentEntries.length > 0
-    || retainedCommentDurableCount > 0 || retainedCommentRecoveryUnavailable
   const viewSeq = routeState.sequence
   const selectedCardId = routeState.cardId
   const selectedId = routeState.nodeId
@@ -425,246 +347,31 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const panel = routeState.panel
   const activePanelNavigationGuard = panelNavigationGuard?.route === panel
     ? panelNavigationGuard : null
-  const retainedConfigDraft = panel === 'config'
-    ? inspectorDraftStoreRef.current.readField(`panel:config:${String(runId)}`, 'draft', null)
-    : null
-  const retainedConfigStoredDraftUnsafe = retainedConfigDraft?.schema === 'looplab.config-draft/v1'
-    && retainedConfigDraft?.unsafe === true
-  const retainedConfigDraftUnsafe = retainedConfigStoredDraftUnsafe
-    || (activePanelNavigationGuard?.route === 'config'
-      && activePanelNavigationGuard.unsafe === true)
-  const retainedConfigScope = `panel:config:${String(runId)}`
-  const retainedAuthoringScope = 'panel:authoring'
-  const retainedAuthoringDocuments = panel === 'authoring'
-    ? inspectorDraftStoreRef.current.readField(retainedAuthoringScope, 'documents', null)
-    : null
-  const retainedAuthoringDocumentEntries = retainedAuthoringDocuments
-    && typeof retainedAuthoringDocuments === 'object' && !Array.isArray(retainedAuthoringDocuments)
-    ? Object.entries(retainedAuthoringDocuments).filter(([, document]) => document
-      && typeof document === 'object' && !Array.isArray(document))
-    : []
-  const retainedAuthoringDocumentValues = retainedAuthoringDocumentEntries
-    .map(([, document]) => document)
-  const retainedAuthoringDraftCount = retainedAuthoringDocumentValues
-    .filter(document => document.draftText !== document.savedText).length
-  const retainedAuthoringUncertainSaves = panel === 'authoring'
-    ? inspectorDraftStoreRef.current.readField(
-      retainedAuthoringScope, 'uncertainSaves', null) : null
-  const retainedAuthoringDamagedRecoveries = panel === 'authoring'
-    ? inspectorDraftStoreRef.current.readField(
-      retainedAuthoringScope, 'damagedRecoveries', null) : null
-  const retainedAuthoringUncertainSaveEntries = retainedAuthoringUncertainSaves
-    && typeof retainedAuthoringUncertainSaves === 'object'
-    && !Array.isArray(retainedAuthoringUncertainSaves)
-    ? Object.entries(retainedAuthoringUncertainSaves).filter(([, recovery]) => recovery
-      && typeof recovery === 'object' && !Array.isArray(recovery)) : []
-  const retainedAuthoringDamagedRecoveryValues = retainedAuthoringDamagedRecoveries
-    && typeof retainedAuthoringDamagedRecoveries === 'object'
-    && !Array.isArray(retainedAuthoringDamagedRecoveries)
-    ? Object.values(retainedAuthoringDamagedRecoveries).filter(recovery => recovery
-      && typeof recovery === 'object' && !Array.isArray(recovery)) : []
-  const retainedAuthoringFenceActive = panel === 'authoring'
-    && (generationMismatch || generationPending)
-  const retainedAuthoringStorageRecovery = retainedAuthoringFenceActive
-    ? inspectAuthoringRecoveryStorage()
-    : { available: true, count: 0, records: [] }
-  const retainedAuthoringRecoveryIdentities = new Map()
-  const addRetainedAuthoringRecovery = (key, raw, source) => {
-    if (typeof key !== 'string' || typeof raw !== 'string') return false
-    let byRaw = retainedAuthoringRecoveryIdentities.get(key)
-    if (!byRaw) {
-      byRaw = new Map()
-      retainedAuthoringRecoveryIdentities.set(key, byRaw)
-    }
-    const previous = byRaw.get(raw) || { durable: false, memory: false }
-    byRaw.set(raw, {
-      durable: previous.durable || source === 'storage',
-      memory: previous.memory || source === 'memory',
-    })
-    return true
-  }
-  const retainedAuthoringMemoryRecoveryDocumentScopes = new Set()
-  const retainedAuthoringHasMemoryRecovery = retainedAuthoringUncertainSaveEntries.length > 0
-    || retainedAuthoringDamagedRecoveryValues.length > 0
-    || retainedAuthoringDocumentEntries.some(([, document]) =>
-      document.recoveryOperationId || document.recoveryStorageRaw)
-  let retainedAuthoringOpaqueMemoryRecoveryCount = 0
-  if (retainedAuthoringFenceActive) {
-    for (const recovery of retainedAuthoringStorageRecovery.records) {
-      addRetainedAuthoringRecovery(recovery.key, recovery.raw, 'storage')
-    }
-    for (const [scope, recovery] of retainedAuthoringUncertainSaveEntries) {
-      retainedAuthoringMemoryRecoveryDocumentScopes.add(scope)
-      addRetainedAuthoringRecovery(recovery.storageKey, recovery.storageRaw, 'memory')
-    }
-    for (const recovery of retainedAuthoringDamagedRecoveryValues) {
-      if (typeof recovery.identity?.scope === 'string') {
-        retainedAuthoringMemoryRecoveryDocumentScopes.add(recovery.identity.scope)
-      }
-      addRetainedAuthoringRecovery(recovery.key, recovery.raw, 'memory')
-    }
-    for (const [scope, document] of retainedAuthoringDocumentEntries) {
-      if (!document.recoveryOperationId && !document.recoveryStorageRaw) continue
-      const represented = addRetainedAuthoringRecovery(
-        authoringRecoveryStorageKey(document.kind, document.name),
-        document.recoveryStorageRaw,
-        'memory',
-      )
-      if (!represented && !retainedAuthoringMemoryRecoveryDocumentScopes.has(scope)) {
-        retainedAuthoringOpaqueMemoryRecoveryCount += 1
-      }
-    }
-  }
-  let retainedAuthoringDurableRecoveryCount = 0
-  let retainedAuthoringMemoryOnlyRecoveryCount = retainedAuthoringFenceActive
-    ? retainedAuthoringOpaqueMemoryRecoveryCount
-    : retainedAuthoringHasMemoryRecovery ? 1 : 0
-  for (const byRaw of retainedAuthoringRecoveryIdentities.values()) {
-    for (const recovery of byRaw.values()) {
-      if (recovery.durable) retainedAuthoringDurableRecoveryCount += 1
-      else if (recovery.memory) retainedAuthoringMemoryOnlyRecoveryCount += 1
-    }
-  }
-  const retainedAuthoringRecoveryCount = retainedAuthoringDurableRecoveryCount
-    + retainedAuthoringMemoryOnlyRecoveryCount
-  const retainedAuthoringDraftUnsafe = retainedAuthoringDraftCount > 0
-    || retainedAuthoringRecoveryCount > 0
-    || (activePanelNavigationGuard?.route === 'authoring'
-      && activePanelNavigationGuard.unsafe === true)
-  const retainedPanelDraftUnsafe = retainedConfigDraftUnsafe || retainedAuthoringDraftUnsafe
-  const retainedPanelScope = retainedConfigDraftUnsafe
-    ? retainedConfigScope : retainedAuthoringDraftUnsafe ? retainedAuthoringScope : ''
-  const retainedPanelRoute = retainedConfigDraftUnsafe
-    ? 'config' : retainedAuthoringDraftUnsafe ? 'authoring' : null
-  const retainedAuthoringDiscardItems = [
-    retainedAuthoringDraftCount > 0
-      ? `${retainedAuthoringDraftCount} unsaved in-memory Authoring draft${retainedAuthoringDraftCount === 1 ? '' : 's'}` : '',
-    retainedAuthoringMemoryOnlyRecoveryCount > 0
-      ? `${retainedAuthoringMemoryOnlyRecoveryCount} recovery snapshot${retainedAuthoringMemoryOnlyRecoveryCount === 1 ? '' : 's'} that ${retainedAuthoringMemoryOnlyRecoveryCount === 1 ? 'exists' : 'exist'} only in this tab` : '',
-  ].filter(Boolean)
-  const retainedAuthoringDiscardStatement = retainedAuthoringDiscardItems.length > 0
-    ? `Leaving this run will discard ${retainedAuthoringDiscardItems.join(' and ')}.`
-    : 'No in-memory Authoring draft will be discarded.'
-  const retainedPanelLeaveSummary = activePanelNavigationGuard?.unsafe
-      && activePanelNavigationGuard.route === retainedPanelRoute
-      && activePanelNavigationGuard.leaveSummary
-    ? activePanelNavigationGuard.leaveSummary
-    : retainedConfigDraftUnsafe
-      ? 'Leaving this run will discard an unsaved Run settings draft.'
-      : `${retainedAuthoringDiscardStatement}${retainedAuthoringDurableRecoveryCount > 0
-        ? ` ${retainedAuthoringDurableRecoveryCount} durable recovery record${retainedAuthoringDurableRecoveryCount === 1 ? '' : 's'} will remain protected in browser storage.`
-        : ''}`
-  const retainedPanelLeaveMessage = `${retainedPanelLeaveSummary} Leave this run?`
-  const retainedPanelCloseMessage = activePanelNavigationGuard?.unsafe
-      && activePanelNavigationGuard.route === retainedPanelRoute
-      && activePanelNavigationGuard.closeMessage
-    ? activePanelNavigationGuard.closeMessage
-    : retainedConfigDraftUnsafe
-      ? 'This tab is retaining an unsaved Run settings draft. Close the panel and discard it?'
-      : `${retainedAuthoringDiscardItems.length > 0
-        ? `Closing Authoring will discard ${retainedAuthoringDiscardItems.join(' and ')}.`
-        : 'No in-memory Authoring draft will be discarded.'}${retainedAuthoringDurableRecoveryCount > 0
-        ? ` ${retainedAuthoringDurableRecoveryCount} durable recovery record${retainedAuthoringDurableRecoveryCount === 1 ? '' : 's'} will remain protected in browser storage.`
-        : ''} Close Authoring?`
-  const retainedCommentLeaveMessage = [
-    retainedCommentDrafts.length > 0
-      ? `${retainedCommentDrafts.length} unsaved comment draft${retainedCommentDrafts.length === 1 ? '' : 's'} will leave this in-memory workspace`
-      : '',
-    retainedCommentDurableCount > 0
-      ? `${retainedCommentDurableCount} exact comment recovery record${retainedCommentDurableCount === 1 ? '' : 's'} will remain protected in this browser tab`
-      : '',
-    retainedCommentEntries.length > retainedCommentDrafts.length
-      ? `${retainedCommentEntries.length - retainedCommentDrafts.length} other active Comments state${retainedCommentEntries.length - retainedCommentDrafts.length === 1 ? '' : 's'} will leave the in-memory workspace`
-      : '',
-    retainedCommentRecoveryUnavailable
-      ? 'Comments recovery storage cannot be inspected, so an exact saved command may still be protected in this tab'
-      : '',
-  ].filter(Boolean).join('; ')
-  const retainedRunLeaveMessage = [
-    retainedPanelDraftUnsafe ? retainedPanelLeaveSummary : '',
-    retainedCommentWorkUnsafe ? retainedCommentLeaveMessage : '',
-  ].filter(Boolean).join(' ') + ' Leave this run?'
-  const retainedNavigationAllowRef = useRef(false)
-  const clearRetainedCommentMemory = () => {
-    for (const scope of retainedCommentScopes) inspectorDraftStoreRef.current.clear(scope)
-  }
-  const clearRetainedPanelMemory = () => {
-    const controller = panelNavigationGuardRef.current
-    if (controller?.route === retainedPanelRoute) {
-      controller.dispose()
-      if (panelNavigationGuardRef.current === controller) {
-        panelNavigationGuardRef.current = null
-        setPanelNavigationGuard(current => current === controller ? null : current)
-      }
-    }
-    if (retainedPanelDraftUnsafe && retainedPanelScope) {
-      inspectorDraftStoreRef.current.clear(retainedPanelScope)
-    }
-  }
-  const retainedNavigationTarget = targetHash => {
-    const runHash = `#/run/${encodeURIComponent(String(runId))}`
-    const sameRun = targetHash === runHash || targetHash.startsWith(`${runHash}?`)
-    if (!sameRun) return { sameRun: false, panel: null, keepsMutablePanel: false }
-    const queryIndex = targetHash.indexOf('?')
-    const params = queryIndex < 0
-      ? new URLSearchParams() : new URLSearchParams(targetHash.slice(queryIndex + 1))
-    const targetPanels = params.getAll('panel')
-    const targetGenerations = params.getAll('gen')
-    const targetPanel = targetPanels.length === 1 ? targetPanels[0] : null
-    const targetGeneration = targetGenerations.length === 1 ? targetGenerations[0] : null
-    const keepsMutablePanel = targetPanels.length === 1 && targetGenerations.length === 1
-      && targetPanel === retainedPanelRoute && !params.has('seq')
-      && targetGeneration === generation
-    return { sameRun: true, panel: targetPanel, keepsMutablePanel }
-  }
-  const retainedNavigationShouldBlock = targetHash => {
-    const target = retainedNavigationTarget(targetHash)
-    if (!target.sameRun) return retainedPanelDraftUnsafe || retainedCommentWorkUnsafe
-    return retainedPanelDraftUnsafe && !target.keepsMutablePanel
-  }
-  const retainedGuardedHash = location.hash
-  const retainedGuardedHistoryState = window.history.state
-  useEffect(() => {
-    retainedNavigationAllowRef.current = false
-    if (!retainedPanelDraftUnsafe && !retainedCommentWorkUnsafe) return undefined
-    return installNavigationLossGuard({
-      allowRef: retainedNavigationAllowRef,
-      guardedHash: retainedGuardedHash,
-      guardedState: retainedGuardedHistoryState,
-      message: targetHash => retainedNavigationTarget(targetHash).sameRun
-        ? retainedPanelCloseMessage : retainedRunLeaveMessage,
-      shouldBlock: retainedNavigationShouldBlock,
-      onAllow: targetHash => {
-        const target = retainedNavigationTarget(targetHash)
-        if (retainedPanelDraftUnsafe && !target.keepsMutablePanel) {
-          clearRetainedPanelMemory()
-        }
-        if (!target.sameRun && retainedCommentWorkUnsafe) clearRetainedCommentMemory()
-      },
-    })
-  }, [runId, generation, retainedCommentWorkUnsafe, retainedRunLeaveMessage, retainedPanelCloseMessage,
-    retainedCommentScopes.join('\u0000'), retainedPanelDraftUnsafe, retainedPanelRoute,
-    retainedPanelScope, retainedGuardedHash, retainedGuardedHistoryState])
-  const confirmRetainedPanelClose = () => {
-    if (!retainedPanelDraftUnsafe) return true
-    if (!window.confirm(retainedPanelCloseMessage)) return false
-    retainedNavigationAllowRef.current = true
-    clearRetainedPanelMemory()
-    return true
-  }
-  const leaveRetainedPanelRoute = () => {
-    if (!retainedPanelDraftUnsafe && !retainedCommentWorkUnsafe) { onBack?.(); return }
-    if (!window.confirm(retainedRunLeaveMessage)) return
-    if (retainedPanelDraftUnsafe) {
-      retainedNavigationAllowRef.current = true
-      clearRetainedPanelMemory()
-    }
-    if (retainedCommentWorkUnsafe) {
-      retainedNavigationAllowRef.current = true
-      clearRetainedCommentMemory()
-    }
-    onBack?.()
-  }
+  // Doc 25 UI-03's named residue, extracted 2026-09-08: the ~250 lines of retained-work
+  // derivations that used to sit here. What this tab is still HOLDING for the operator — an
+  // unsent comment draft, a command whose outcome is unknown, an unsaved Run settings or
+  // Authoring draft — is derived in `retainedWorkModel.js` and choreographed in
+  // `useRetainedWork.js`; the names below are the ones the body already used, so every consumer
+  // (the navigation-loss guard, the panel-close confirm, the fence screen's notices, the
+  // Comments discard path) reads exactly as it did. The panel guard REGISTRY stays here: the
+  // lazy panels are handed `publishPanelNavigationGuard` as a prop.
+  const {
+    retainedCommentEntries, retainedCommentRecovery, retainedCommentDrafts,
+    retainedCommentDurableCount, retainedCommentRecoveryUnavailable,
+    retainedCommentProtectedCreates, retainedCommentDamagedProtectedCreateCount,
+    retainedCommentValidProtectedCreateCount, retainedCommentReleasableEntries,
+    retainedCommentReleasableIntents, retainedCommentReleasableDamaged,
+    retainedCommentReleasableCount, retainedCommentWorkUnsafe, retainedAuthoringDraftCount,
+    retainedAuthoringDurableRecoveryCount, retainedAuthoringMemoryOnlyRecoveryCount,
+    retainedAuthoringDraftUnsafe, retainedConfigStoredDraftUnsafe, retainedConfigDraftUnsafe,
+    retainedPanelDraftUnsafe, retainedPanelRoute, retainedRunLeaveMessage,
+    confirmRetainedPanelClose, leaveRetainedPanelRoute,
+  } = useRetainedWork({
+    runId, generation, reviewMode, panel, routeFenceActive: generationMismatch || generationPending,
+    inspectorDraftStore: inspectorDraftStoreRef.current, activePanelNavigationGuard,
+    panelNavigationGuardRef, setPanelNavigationGuard, commentRecoveryRevision,
+    inspectorDraftRevision, onBack,
+  })
   const requestedRouteView = routeState.view
   // The obsolete Direction focus route is retired by runRouteState with a visible migration notice.
   // Keep this compatibility argument null until the old aggregate API is removed; Concepts owns the
@@ -1043,13 +750,25 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [compactTimelineOpen, setCompactTimelineOpen] = useState(false)
   const overlayPanelOpen = !!(panel && panelAllowed(panel))
   const timelineCollapsed = compactWorkspace ? !compactTimelineOpen : dockC
-  const previousCompactWorkspaceRef = useRef(compactWorkspace)
   const compactInspectorCloseRef = useRef(null)
   const compactInspectorTriggerRef = useRef(null)
   const compactInspectorRef = useRef(null)
   const sideRailRef = useRef(null)
   const timelineCollapseRef = useRef(null)
-  const workspaceFocusOwnerRef = useRef(null)
+  // The five workspace surfaces the focus switchyard classifies and re-focuses into, as ONE stable
+  // bag of the REFS — not of the elements. The swap is exactly when those elements change identity,
+  // so a snapshot taken during render would hand the hook the layout that is about to unmount; the
+  // hook dereferences at event time and again in the post-swap frame.
+  const workspaceSurfacesRef = useRef(null)
+  if (!workspaceSurfacesRef.current) {
+    workspaceSurfacesRef.current = {
+      compactInspectorTrigger: compactInspectorTriggerRef,
+      compactInspectorClose: compactInspectorCloseRef,
+      compactInspector: compactInspectorRef,
+      sideRail: sideRailRef,
+      timelineCollapse: timelineCollapseRef,
+    }
+  }
   const focusInspectorFromGroup = (nodeId) => {
     const targetId = Number(nodeId)
     if (!Number.isSafeInteger(targetId) || targetId < 0) return
@@ -1245,57 +964,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     const frame = requestAnimationFrame(focus)
     return () => { cancelled = true; cancelAnimationFrame(frame); stopTrackingUserIntent() }
   }, [groupSurfaceReady, groupNavigation, groupExitFocus, selectedId, view, groupMode])
-  useEffect(() => {
-    const rememberWorkspaceFocus = event => {
-      const target = event.target
-      if (compactInspectorTriggerRef.current?.contains(target)) {
-        workspaceFocusOwnerRef.current = 'compact-inspector-trigger'
-      } else if (sideRailRef.current?.contains(target)) {
-        workspaceFocusOwnerRef.current = 'desktop-side-rail'
-      } else if (target.closest?.('.workspace-scrim')) {
-        workspaceFocusOwnerRef.current = 'inspector-surface'
-      } else if (target.closest?.('.splitter.v')) {
-        workspaceFocusOwnerRef.current = 'side-splitter'
-      } else if (target.closest?.('.splitter.h')) {
-        workspaceFocusOwnerRef.current = 'timeline-splitter'
-      } else if (compactInspectorRef.current?.contains(target)) {
-        workspaceFocusOwnerRef.current = 'inspector-surface'
-      } else if (target.closest?.('#run-events-timeline')) {
-        workspaceFocusOwnerRef.current = 'timeline-body'
-      } else if (timelineCollapseRef.current?.contains(target)) {
-        workspaceFocusOwnerRef.current = 'timeline-collapse'
-      } else {
-        workspaceFocusOwnerRef.current = null
-      }
-    }
-    document.addEventListener('focusin', rememberWorkspaceFocus)
-    return () => document.removeEventListener('focusin', rememberWorkspaceFocus)
-  }, [])
-  useEffect(() => {
-    if (previousCompactWorkspaceRef.current === compactWorkspace) return
-    const wasCompact = previousCompactWorkspaceRef.current
-    previousCompactWorkspaceRef.current = compactWorkspace
-    const focusOwner = workspaceFocusOwnerRef.current
-    requestAnimationFrame(() => {
-      if (overlayPanelOpen || document.querySelector('[aria-modal="true"]')) return
-      const selectedNode = [...(document.querySelectorAll('[data-node-select-id]') || [])]
-        .find(element => element.dataset.nodeSelectId === String(selectedId))
-      let target = null
-      if (focusOwner === 'timeline-splitter' || (focusOwner === 'timeline-body' && timelineCollapsed)) {
-        target = timelineCollapseRef.current
-      } else if (wasCompact && ['compact-inspector-trigger', 'inspector-surface'].includes(focusOwner)) {
-        target = sideC
-          ? sideRailRef.current
-          : compactInspectorCloseRef.current || compactInspectorRef.current
-      } else if (!wasCompact && ['desktop-side-rail', 'inspector-surface', 'side-splitter'].includes(focusOwner)) {
-        target = compactInspectorTriggerRef.current || selectedNode
-      }
-      target?.focus({ preventScroll: true })
-    })
-    // Compact surfaces are temporary. Never replay stale open state after crossing the breakpoint.
-    setCompactInspectorOpen(false)
-    setCompactTimelineOpen(false)
-  }, [compactWorkspace, overlayPanelOpen, selectedGroup, selectedId, sideC, timelineCollapsed])
+  // The workspace focus SWITCHYARD (doc 25 UI-03), extracted 2026-09-08. Both halves were
+  // if/else truth tables reachable only by rendering the whole run route and resizing it; they
+  // are now `workspaceFocusModel.js` (`workspaceFocusOwner` / `workspaceRefocusSlots`) with the
+  // subscription, the remembering ref and the post-swap frame in `useWorkspaceFocusOwner.js`.
+  // Focus is not cosmetic here: crossing the breakpoint UNMOUNTS the surface the operator was
+  // on, and with nothing to catch focus a keyboard operator loses their place mid-run.
+  useWorkspaceFocusOwner({
+    surfaces: workspaceSurfacesRef, compactWorkspace, overlayPanelOpen, sideC, timelineCollapsed,
+    selectedGroup, selectedId,
+    onCrossed: () => { setCompactInspectorOpen(false); setCompactTimelineOpen(false) },
+  })
   useEffect(() => {
     if (compactWorkspace) return
     storageSet('ll.sideW', sideW); storageSet('ll.dockH', dockH)

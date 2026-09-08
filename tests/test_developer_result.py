@@ -35,6 +35,7 @@ import pytest
 
 from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, DeveloperResult, developer_call_lock
 from looplab.core.models import Idea
+from looplab.engine.audit import AuditMixin
 from looplab.engine.node_build import NodeBuildMixin
 from tests._source_scan import function_tree
 from tests.factories import make_engine
@@ -400,6 +401,182 @@ def test_the_clear_is_inside_the_locked_window_and_not_at_the_call_site():
     stale.last_footprint = {"gpus": 8}             # a predecessor's leftover on the instance
     assert NodeBuildMixin._run_developer(
         engine, stale, stale.implement, {"i": 3}).last_footprint is None
+
+
+def test_the_state_BIND_is_inside_the_locked_window_too(tmp_path):
+    """The clear's unlocked sibling, missed when the clear moved in.
+
+    `_implement_result` and `_repair_result` each called `bind_state(state)` on the shared Developer
+    ABOVE `_run_developer`'s lock. `bind_state` is a plain write (`repo_developer` stores
+    `self._memory_state = state`), so with two offloaded calls on one instance worker A could bind
+    its fold, block on the lock, and then run its build against the fold worker B bound while A was
+    waiting — the Developer's memory and cross-run providers answering about a different lifecycle
+    than the node being built. Same class as the footprint clear, same window, one method apart.
+
+    Driven, not pinned: the bind is one `with` away from looking correct in either arrangement.
+    """
+    class _Dev:
+        """Records the state that was bound WHEN THE CALL RAN, which is the only one that matters."""
+        def __init__(self):
+            self.bound = None
+            self.saw: dict = {}
+            self.last_footprint, self.last_files = None, {}
+
+        def bind_state(self, state, parent=None):
+            self.bound = state
+
+        def implement(self, idea):
+            time.sleep(0.15)                       # the paid call's window
+            self.saw[idea["i"]] = self.bound       # what THIS call was working against
+            return "code"
+
+        def repair(self, idea, _code, _err):
+            self.saw[idea["i"]] = self.bound
+            return "repaired"
+
+    engine = NodeBuildMixin.__new__(type("_E", (NodeBuildMixin,), {}))
+    dev = _Dev()
+    state_a, state_b = {"fold": "A"}, {"fold": "B"}
+
+    def _build():
+        NodeBuildMixin._run_developer(engine, dev, dev.implement, {"i": 1}, bind_to=state_a)
+
+    def _sibling():
+        time.sleep(0.05)                           # lands inside the build's window
+        NodeBuildMixin._run_developer(engine, dev, dev.repair, {"i": 2}, "code", "err",
+                                      bind_to=state_b)
+
+    threads = [threading.Thread(target=_build), threading.Thread(target=_sibling)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert dev.saw[1] is state_a, (
+        "a concurrent call re-bound the Developer inside this build's window: the bind must happen "
+        "inside the same `developer_call_lock` window as the call and the capture")
+    assert dev.saw[2] is state_b
+
+    # …and a caller that asks for NO bind is distinguishable from one that binds None, which is
+    # what `_repair_result` does when it was given no state.
+    quiet = _Dev()
+    quiet.bound = state_a
+    NodeBuildMixin._run_developer(engine, quiet, quiet.implement, {"i": 3})
+    assert quiet.saw[3] is state_a, "an omitted bind must not overwrite what was already bound"
+    NodeBuildMixin._run_developer(engine, quiet, quiet.implement, {"i": 4}, bind_to=None)
+    assert quiet.saw[4] is None, "binding None is a bind, not an omission"
+
+
+def test_the_agent_report_is_emitted_from_the_envelope_not_the_shared_instance():
+    """`DeveloperResult.last_report` was captured under the lock and then read by nobody.
+
+    `_emit_agent_report` read `last_report` off the ACTIVE developer, and it runs AFTER
+    `developer_call_lock` has been released. Between a worker returning from `_run_developer` and
+    reaching that line, a sibling's `_discard_node_build_telemetry` does `setattr(current,
+    'last_report', None)` — also unlocked — so this node emits no `agent_validated` row at all; with
+    the opposite interleaving it emits the sibling's report against this node's id. Both are silent,
+    which is what makes the ADR-7 audit trail wrong or missing with nothing red.
+
+    The instance is CLOBBERED here between the call and the emit, which is the schedule stated as a
+    fixture: with the envelope's copy the row still describes the call that produced it.
+    """
+    class _Report:
+        def __init__(self, name):
+            self.name = name
+
+        def summary(self):
+            return {"report": self.name}
+
+    class _Dev:
+        def __init__(self):
+            self.last_report, self.last_files, self.last_footprint = None, {}, None
+
+        def implement(self, _idea):
+            self.last_report = _Report("mine")
+            return "code"
+
+    appended: list = []
+
+    class _Engine(NodeBuildMixin, AuditMixin):
+        store = SimpleNamespace(append=lambda t, d: appended.append((t, d)))
+
+    engine = _Engine.__new__(_Engine)
+    dev = _Dev()
+    built = NodeBuildMixin._run_developer(engine, dev, dev.implement, {"i": 1})
+
+    dev.last_report = None            # a sibling's `_discard_node_build_telemetry`, unlocked
+    engine._emit_agent_report(7, 0, developer=dev, report=built.last_report)
+    assert [d["report"] for _t, d in appended] == ["mine"], appended
+    assert appended[0][1]["node_id"] == 7
+
+    # …and the other interleaving: the sibling left ITS report behind, and the envelope wins.
+    appended.clear()
+    dev.last_report = _Report("a sibling's")
+    engine._emit_agent_report(7, 0, developer=dev, report=built.last_report)
+    assert [d["report"] for _t, d in appended] == ["mine"], appended
+
+    # An OMITTED report still falls back to the instance — the paths that made no fresh Developer
+    # call (a pre-coded producer commit) have no envelope to hand over.
+    appended.clear()
+    engine._emit_agent_report(7, 0, developer=dev)
+    assert [d["report"] for _t, d in appended] == ["a sibling's"], appended
+    # …but a build whose Developer genuinely reported NOTHING must not fall back to it.
+    appended.clear()
+    engine._emit_agent_report(7, 0, developer=dev, report=None)
+    assert appended == [], appended
+
+
+def test_a_best_of_n_audit_row_describes_the_candidate_that_SHIPPED():
+    """The eleventh registered member, and the one a `setattr` could not reach.
+
+    `WrapsDeveloper.last_report` reads THROUGH to the inner developer — correct for a single-shot
+    wrapper, wrong for best-of-N: N candidates each overwrite the inner's report, so the read-through
+    describes candidate N while `last_files`, the footprint and the other eight describe the one
+    that was PICKED. `_emit_agent_report` writes that value to the durable `agent_validated` row and
+    `_capture_developer_result` copies the same read-through into the envelope, so a best-of-N
+    node's ADR-7 audit trail described a candidate that did not ship, beside files that did.
+
+    A property cannot be assigned, so the per-candidate snapshot loop raised `AttributeError` on
+    exactly this member and swallowed it — the mixture was invisible. It goes through the wrapper's
+    own `last_report` property now, and the single-shot paths still read through.
+    """
+    from looplab.search.best_of_n import BestOfNDeveloper
+
+    class _Inner:
+        def __init__(self):
+            self.last_files, self.last_deleted, self.last_footprint = {}, [], None
+            self.last_report, self.calls = "before-any-build", 0
+
+        def implement(self, _idea):
+            self.calls += 1
+            self.last_report = f"report-{self.calls}"
+            # Candidate 1 scores better, so candidate 2 is the one that must NOT be reported.
+            return "def solve():\n    return 1\n" if self.calls == 1 else "x"
+
+        def repair(self, _idea, _code, _err):
+            self.last_report = "repair-report"
+            return "fixed"
+
+    inner = _Inner()
+    dev = BestOfNDeveloper(inner, n=2, listwise=False, foresight=False)
+    shipped = dev.implement(object())
+
+    assert shipped.startswith("def solve"), "fixture: candidate 1 must be the pick"
+    assert inner.last_report == "report-2", "fixture: the inner must have moved on"
+    assert dev.last_report == "report-1", "the audit row describes a candidate that did not ship"
+    assert NodeBuildMixin._capture_developer_result(dev, shipped).last_report == "report-1"
+
+    # A repair is single-shot: the pick is dropped and the read-through applies again, or a repair
+    # would report the previous BUILD's chosen candidate.
+    dev.repair(object(), "code", "err")
+    assert dev.last_report == "repair-report"
+
+    # …and n == 1 is a transparent pass-through, as it has always been.
+    solo_inner = _Inner()
+    solo = BestOfNDeveloper(solo_inner, n=1, listwise=False, foresight=False)
+    solo.implement(object())
+    solo_inner.last_report = "moved on"     # …and it is a READ-THROUGH, not a stored copy
+    assert solo.last_report == "moved on"
 
 
 def test_no_build_site_clears_the_footprint_on_its_own():

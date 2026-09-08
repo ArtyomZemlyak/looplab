@@ -20,7 +20,8 @@ from typing import Any, Iterator, Optional, Sequence
 
 import orjson
 
-from looplab.core.atomicio import best_effort_fsync, strict_fsync, strict_fsync_parent
+from looplab.core.atomicio import (best_effort_fsync, same_file_entry, strict_fsync,
+                                   strict_fsync_parent)
 from looplab.core.models import Event
 from looplab.core.run_deletion import assert_run_deletion_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
@@ -251,7 +252,7 @@ class InterprocessLockContended(RuntimeError):
 
 
 @contextmanager
-def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: bool = True):
+def interprocess_lock(lock_path: Path, *, required: bool = False, blocking: bool = True):
     """Best-effort exclusive cross-process lock (msvcrt on Windows, fcntl on POSIX). The live UI
     server appends control events to the SAME events.jsonl the engine subprocess writes; without
     serialization their appends can interleave into a torn line (which `iter_jsonl` truncates at,
@@ -267,7 +268,17 @@ def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: boo
       wrapped in ``EventStoreLockError`` when ``required``, re-raised as the bare ``OSError``
       otherwise. It does not degrade. A mount where events.jsonl is appendable but its ``.lock``
       cannot be created therefore aborts the append rather than running it unlocked, which is the
-      long-standing engine-writer behaviour and is preserved on purpose."""
+      long-standing engine-writer behaviour and is preserved on purpose.
+
+    PUBLIC since 2026-09-08 (doc 25 XP-01/TO-09 §6.6). It spent its whole life as
+    `_interprocess_lock` while twenty-seven modules across `serve/`, `cli/`, `engine/` and `tools/`
+    imported it — the single most-depended-on underscore name in the tree — so the underscore was
+    claiming a freedom to rename that had already been spent four packages over. NO back-compat
+    alias was kept, deliberately: six test modules re-bind this name on the module object to prove a
+    fail-closed path (`monkeypatch.setattr(eventstore, ...)`), and an alias would leave every one of
+    them patching a name no caller reads — a guard that passes while proving nothing. A missing
+    attribute makes `monkeypatch.setattr` raise, so the removal is LOUD at the one place it matters.
+    """
     f = None
     locked = False
     try:
@@ -503,7 +514,7 @@ def repair_log(path: str | os.PathLike) -> dict:
     lock is the last-resort fence for anything that repairs a log another writer can still reach.)"""
     p = Path(path)
     from looplab.core.atomicio import atomic_write_bytes
-    with _interprocess_lock(Path(str(p) + ".lock"), required=True):
+    with interprocess_lock(Path(str(p) + ".lock"), required=True):
         assert_run_reset_write_allowed(p.parent)
         assert_run_deletion_write_allowed(p.parent)
         # Authoritative INSIDE the lock. A caller's earlier peek proves nothing: the log may have been
@@ -671,14 +682,40 @@ class EventStore:
         # no-op — no torn line / duplicate seq. Held OUTSIDE the flock (consistent order, no deadlock).
         self._append_lock = threading.Lock()
         self._divergence: Optional[dict] = None
-        self._seq = self._scan_last_seq()
         # Fail closed on a MID-FILE divergence (a corrupt COMPLETE line followed by MORE records —
         # a FUSE/NFS/S3 mount can flip a middle byte; a single local writer never can). read_all()
         # stops at it, so a later append is durable-but-invisible to fold (arch-review §3 P0-4).
         # Seed the diagnostic here; incremental read_all revalidates changed bytes before each
         # append, so corruption introduced after construction also fails closed without rescanning
         # unchanged history. Reads keep returning the recoverable prefix for repair/inspection.
-        self._divergence = log_divergence(self.path) or self._divergence
+        #
+        # ONE WALK, NOT TWO (the CODE_REVIEW row on `_scan_last_seq`). The seeding was a SECOND pass
+        # — `self._divergence = log_divergence(self.path) or self._divergence`, an unconditional
+        # `read_bytes()` + re-decode of every complete line — on top of the `read_all()` this
+        # `_scan_last_seq()` already does. It was redundant, exactly: `read_all` consumes the log
+        # through `scan_jsonl_region`, whose `consumed` offset NEVER covers a rejected line, so an
+        # unconsumed newline in the remainder means the first rejected record is COMPLETE — and on
+        # that (and only that) branch `read_all` itself calls the same `log_divergence` and stores
+        # the same dict. At construction `_cache_bytes` is 0, so that walk sees the whole file and
+        # the two answers are the same answer. A healthy log therefore pays ONE pass instead of two,
+        # and a divergent one still pays the exact-detail walk on the branch that needs it.
+        self._seq = self._scan_last_seq()
+        # THE ONE THING THE CACHE CANNOT SAY. `read_all` treats an OSError on the region read as
+        # "no new bytes" (`new = b""`), so a log we could not OPEN looks exactly like an empty one
+        # from the cache alone — and `cli/__init__.py::log_integrity_from` would then publish
+        # `complete: True` for a file nobody read, which is the "we could not look" rendering as "we
+        # looked and it is fine" that `log_integrity`'s own contract forbids. The dropped second pass
+        # used to raise that OSError out of `__init__`; keep it raising. Consuming zero bytes with no
+        # divergence means the file holds no COMPLETE line at all (a corrupt FIRST line sets the
+        # divergence above), so this walk is only ever reached for a one-torn-line file or an
+        # unreadable one — never for a healthy log, which is the whole point of the paragraph above.
+        if self._cache_bytes == 0 and self._divergence is None:
+            try:
+                unread = self.path.stat().st_size > 0
+            except OSError:
+                unread = False
+            if unread:
+                self._divergence = log_divergence(self.path)
 
     @property
     def divergence(self) -> Optional[dict]:
@@ -698,7 +735,7 @@ class EventStore:
         # a durable marker alone prevents crash replay, but it does not stop two live
         # processes that both observed the marker as absent.  Hold this required interprocess guard
         # across the complete paid-attempt window; EventStore.append uses its own distinct lock.
-        with _interprocess_lock(
+        with interprocess_lock(
             Path(str(self.path) + ".paid-effects.lock"),
             required=required,
         ):
@@ -876,7 +913,7 @@ class EventStore:
         callback here: `cur` is only knowable inside the critical section, and a payload serialized
         against a tail read outside it would carry a seq another writer already used.
         """
-        with self._append_lock, _interprocess_lock(
+        with self._append_lock, interprocess_lock(
                 Path(str(self.path) + ".lock"), required=require_lock):
             # Reset publishes its marker while owning this SAME append lock.  Checking inside the
             # critical section closes marker-check -> append races, and the replacement engine is
@@ -1088,7 +1125,9 @@ class EventStore:
                 size = st.st_size if st is not None else 0
                 mtime_ns = st.st_mtime_ns if st is not None else None
                 ctime_ns = st.st_ctime_ns if st is not None else None
-                identity = (st.st_dev, st.st_ino) if st is not None else None
+                # The REPLACEMENT tier by name (doc 25 SC-11). Growth is the normal path for this
+                # log and must keep the cached prefix; a new inode under the same name must not.
+                identity = same_file_entry(st) if st is not None else None
             except OSError:
                 size = 0
                 mtime_ns = None

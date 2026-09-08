@@ -29,7 +29,7 @@ from looplab.events.types import (
     EV_RESUME, EV_RUN_ABORT, EV_SET_STRATEGY,
     EV_SPEC_APPROVED)
 from looplab.serve.assistant import safe_provider_failure
-from looplab.serve.http import json_object
+from looplab.serve.http import generation_conflict, json_object
 from looplab.serve.llm_context import (
     BOSS_EVIDENCE_GUARD, _client_tokens, _node_context, boss_prompt_parts)
 from looplab.serve.paid_ledger import (
@@ -876,13 +876,10 @@ def build_router(srv) -> APIRouter:
                         "remediation": "Wait for run_started, refresh the run, and try again.",
                     })
                 if generation != expected:
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "expected_generation": expected,
-                        "current_generation": generation,
-                        "message": "The run was reset or replaced before report refresh arrived.",
-                        "remediation": "Reload the replacement run before generating its report.",
-                    })
+                    raise generation_conflict(
+                        "The run was reset or replaced before report refresh arrived.",
+                        expected=expected, current=generation,
+                        remediation="Reload the replacement run before generating its report.")
                 # The event log is the restart-safe idempotency ledger. `started` lands
                 # before provider construction; success/failure is a terminal receipt. An orphaned start
                 # is intentionally uncertain and can never be replayed into a second paid call.

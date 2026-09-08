@@ -141,6 +141,49 @@ def _no_repo_dotenv_in_tests(_isolation_patch):
     _isolation_patch.setattr(dotenv, "dotenv_values", _guarded)
 
 
+@pytest.fixture(scope="session")
+def _session_isolation_patch():
+    """The session-scoped twin of `_isolation_patch`, for the floor below."""
+    patch = pytest.MonkeyPatch()
+    yield patch
+    patch.undo()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_looplab_home_for_the_whole_session(_session_isolation_patch, tmp_path_factory):
+    """The FLOOR under `_isolate_looplab_home`, because a function-scoped fixture cannot be one.
+
+    pytest instantiates higher-scoped fixtures FIRST, so every module- and session-scoped fixture in
+    the suite runs BEFORE the per-test isolation below and therefore with the developer's real
+    environment. Measured 2026-09-08: 25 such fixtures across 18 files, and
+    `tests/test_phase_progress.py::offline_run` (module scope) runs a real `looplab run`, which took
+    69 interprocess locks on the real `~/.looplab/memory` and WROTE to it — 80 synthetic
+    `toy_quadratic` rows were sitting in this box's real `lessons.jsonl`, the same store a real run
+    reads its cross-run priors and case library from. The GPU-lease and dotenv guards have the same
+    hole for the same reason: a higher-scoped fixture that builds an LLM client reads the real
+    `.env`, and a GPU-capable adapter in one takes the REAL host lease.
+
+    This does not replace the per-test fixture — that one still gives each TEST its own directory,
+    which is what keeps two tests from sharing a store. This one only has to make the DEFAULT
+    unreachable for the whole process, so a fixture that runs outside the per-test window lands in a
+    session tmp dir instead of the operator's home."""
+    home = tmp_path_factory.mktemp("_ll_home_session")
+    _session_isolation_patch.setenv("LOOPLAB_MEMORY_DIR", str(home / "memory"))
+    _session_isolation_patch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(home / "knowledge"))
+    _session_isolation_patch.setenv("LOOPLAB_UI_TOKEN_FILE", str(home / "ui-token"))
+    # Same floor for the host GPU-pool lease, and by the same mechanism its per-test sibling uses:
+    # the path is a MODULE ATTRIBUTE, not an env var, and both bindings must be patched because
+    # `orchestrator` imported the name directly. The lease is ONE file per OS user and exclusive
+    # across processes, so a higher-scoped fixture taking the real one blocks on whatever else this
+    # box is running and reads as a hang -- which is how it was misdiagnosed once already.
+    from looplab.engine import orchestrator as _orch, resources as _res
+
+    _session_lease = home / "gpu-pool.lock"
+    for _module in (_res, _orch):
+        _session_isolation_patch.setattr(_module, "default_gpu_host_lease_path",
+                                         lambda _p=_session_lease: _p, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_looplab_home(_isolation_patch, tmp_path):
     """Cross-run memory and the knowledge base are ON BY DEFAULT — they point at the developer's real

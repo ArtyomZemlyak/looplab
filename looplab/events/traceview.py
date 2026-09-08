@@ -56,6 +56,12 @@ TRACE_DETAIL_SPAN_CAP = 256
 # cap is invisible in practice and the receipt discloses it when it is not.
 TRACE_CARD_RESEARCH_CAP = 256
 TRACE_CARD_NODE_CAP = 256
+# The span name a card's RESEARCH is recorded under. A literal, in ONE place, because the rule now
+# has two readers: `project_card_trace` below and `span_index.SpanIndex`'s card dimension, which
+# selects the rows this projection is handed. A misspelling in either copy matches nothing and the
+# research section silently empties while the response stays 200 — the same failure mode
+# `serve/appstate.py::card_trace_view` states for the event-type registry constant.
+CARD_RESEARCH_ROOT_NAME = "propose"
 TRACE_CONVERSATION_SPAN_CAP = 512
 # The EPISODE MAP's per-response ceiling (`node_episodes`). Not a span window: an episode row carries
 # identity, timing and counts, never contents, and the map is derived from light spans in memory. The
@@ -1966,6 +1972,26 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
     }
 
 
+def card_research_root_card(span) -> Optional[str]:
+    """The card a ROOT `propose` span is stamped with — `""` when it is a research root carrying no
+    stamp, and `None` when the span is not a research root at all.
+
+    THE THIRD STATE IS THE POINT, and it is why this is a function rather than an inlined pair of
+    `get`s. `project_card_trace` matches research TWO ways: by the stamp, and by a root sharing a
+    trace with one of the card's nodes — the second is how a node reset's RE-proposal is reachable,
+    and it matches roots that carry NO stamp. A predicate that folded "not a root" and "root without
+    a card" together would drop exactly those. `span_index` reads the stamped case to build its card
+    dimension, so both the selection and the projection speak this one rule (doc 25 EV-10's family:
+    two self-consistent bodies of one attribution rule is how the indexed and the no-index route end
+    up answering differently with nothing going red).
+    """
+    if span.get("parent_id") or span.get("name") != CARD_RESEARCH_ROOT_NAME:
+        return None
+    attributes = span.get("attributes")
+    stamped = attributes.get("card_id") if isinstance(attributes, dict) else None
+    return str(stamped or "")
+
+
 # THE CARD IS THE UNIT OF RESEARCH. A Card is one hypothesis; the Researcher proposes it and the
 # Developer builds one or more NODES under it. Before `orchestrator.stamp_proposal_span` there was no
 # join between the two halves at all (no span carried a card id, no card event carried a trace id),
@@ -1976,7 +2002,7 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
 # produced. Sections are LIGHT rows, not trees: each names its trace so the reader opens only the one
 # they want, through `/trace/by_trace/{trace_id}` and `/nodes/{n}/trace`, both already bounded.
 def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
-                       node_trace_ids: Optional[dict] = None,
+                       node_trace_ids: Optional[dict] = None, claimed=None,
                        _normalized: bool = False) -> dict:
     """Ordered sections for ONE card: its research, then its nodes.
 
@@ -1992,6 +2018,23 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
         the replacement after the span closes, so the span cannot name it, but the trace can.
     Never by time or by adjacency: a guessed link would put another hypothesis's reasoning under this
     card, which is worse than showing none.
+
+    `spans` NEED NOT BE THE WHOLE RUN, and since docs/34 D-03 closed (2026-09-08) it is not: the
+    caller selects the card's candidate traces and its nodes' rows through
+    `span_index.SpanIndex.card_trace_spans`, whose selection is a SUPERSET of every row the two
+    rules above can match. This function is unchanged by that — it stays pure over whatever span
+    list it is given, and over a whole run it answers exactly what it always did (pinned by
+    `tests/test_card_trace_projection.py::test_narrowed_selection_matches_the_whole_run_projection`).
+
+    `claimed` is the node-claims map, exactly as `_conversation_bands` takes it and for the same
+    reason: the two halves of a claim live in different traces and a contested trace is a run-GLOBAL
+    refusal, so a map re-derived from a narrowed selection could award a trace the whole-run reading
+    awards to nobody. `None` falls back to deriving it from `spans`, which is right for the whole-run
+    and direct callers that hand over everything they have.
+
+    The span axis of the receipt then describes the CARD's spans rather than the run's — the number
+    a reader of THIS response can act on. Truncation is reported on the research and node axes,
+    which are the two this projection actually caps.
     """
     spans = spans if _normalized else _normalize_spans(spans)
     owned_traces = {str(tid) for tid in (node_trace_ids or {}).values() if tid}
@@ -2012,9 +2055,13 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
     # card's own FIRST proposal, which is precisely the row the oldest-first rule exists to keep.
     matches: list[tuple] = []
     for tid, trace_spans in by_trace.items():
-        for root in (s for s in trace_spans if not s.get("parent_id") and s.get("name") == "propose"):
-            attributes = root.get("attributes") or {}
-            stamped = str(attributes.get("card_id") or "")
+        for root in trace_spans:
+            # ONE spelling of "is this a research root, and which card does it name", shared with the
+            # index dimension that SELECTS these rows — see `card_research_root_card`. `None` means
+            # not a root at all; `""` means a root carrying no stamp, which rule two still matches.
+            stamped = card_research_root_card(root)
+            if stamped is None:
+                continue
             if stamped != str(card_id) and str(tid) not in owned_traces:
                 continue
             # `_finite_number` is TOTAL: a missing, non-numeric, non-finite, out-of-range or
@@ -2040,7 +2087,7 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
     for _sort_start, _tid_text, tid, root in matches[:TRACE_CARD_RESEARCH_CAP]:
         trace_spans = by_trace[tid]
         attributes = root.get("attributes") or {}
-        stamped = str(attributes.get("card_id") or "")
+        stamped = card_research_root_card(root) or ""
         roll = _rollup(trace_spans)
         research.append({
             "name": "propose",
@@ -2070,7 +2117,7 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
     # run-scoped build a node claims (`claimed_build_traces`) — on the Card lane that is most of it.
     # A row reading "2 spans" beside a button that opens 561 is the defect this section already
     # records once, from the other side.
-    claimed = claimed_build_traces(spans, _normalized=True)
+    claimed = claimed_build_traces(spans, _normalized=True) if claimed is None else claimed
     for node_id in ordered_nodes[:TRACE_CARD_NODE_CAP]:
         # `str(_node_id_of(s) or "")` is the bug this codebase already has a whole test file about:
         # node 0's id is FALSY, so that spelling silently gives node 0 an empty section while every

@@ -43,11 +43,14 @@ except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is fo
 
 from looplab.core import tracing
 from looplab.core.llm_broker import llm_request_permit
+# ONE derivation of the run's USD ceiling, shared with the reserve half (`core/llm_budget.py`):
+# this module owns the COMMIT half, and the two used to read different `Settings` fields.
+from looplab.core.llm_budget import DEFAULT_COST_KNOB, run_usd_ceiling
 # Re-exported for backward compatibility: dozens of importers (and tests) do
 # `from looplab.core.llm import LLMError / BudgetExceeded`. The definitions live in
 # `looplab.core.errors` so `parse` can import them without importing this module.
 from looplab.core.errors import (  # noqa: F401
-    BudgetExceeded, LLMCredentialError, LLMError, credential_cause)
+    BudgetExceeded, LLMCancelled, LLMCredentialError, LLMError, credential_cause)
 # Safe top-level import (no cycle): parse imports only from looplab.core.errors now.
 from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # Split siblings (docs/15 §P5.2): retry/backoff + error classification (`llm_transient`), the
@@ -65,7 +68,8 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 from looplab.core.llm_transient import (  # noqa: F401
     BACKOFF_CAP_S, LLM_FAILURE_CAUSES, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff,
     _err_body, _inband_stream_error, _is_reasoning_reject, _is_stream_options_reject,
-    _is_throttle_403, _retry_after_of, _retry_after_seconds, _sdk_transient, classify_llm_failure)
+    _is_throttle_403, _retry_after_of, _retry_after_seconds, _sdk_transient, cancel_check_scope,
+    classify_llm_failure, raise_if_cancelled, request_cancelled, sleep_or_cancel)
 from looplab.core.llm_streaming import (  # noqa: F401
     _chunk_has_content, _shutdown_pool_sockets, _sse_is_done, _sse_is_error, _stream_raw_socket,
     _stream_with_idle_guard, defer_inband_error)
@@ -708,21 +712,22 @@ def _stream_usage(value) -> dict:
 #     is ours. Refusing every other member made the template unreachable on a qwen model.
 # A key whose value is not a mapping cannot be inspected, so it counts as the whole knob — fail
 # closed, since an operator writing `reasoning: "high"` means the depth.
-# OPEN[reasoning-depth-knobs-missing-live-spellings] the registry omits depth spellings real
-# endpoints accept, so the clash refusal silently admits for them exactly the double-spelling it
-# exists to refuse.
-# proof:`absent:"think":@looplab/core/llm.py`
-# REVIEW 2026-08-30 (registry-coverage): unregistered but live: top-level `enable_thinking`
-# (SGLang/vLLM take it in `extra_body` directly, outside `chat_template_kwargs`), and Ollama's
-# native boolean knob for the same thing. An operator setting `llm_reasoning="high"` beside one of
-# those in `llm_reasoning_extra` ships both spellings and the provider picks — the measured
-# $0.019/25-minute failure mode, un-refused. The conflict test is parametrized from this registry,
-# so each addition is one line here and zero elsewhere.
+# EVERY LIVE SPELLING OF THE DEPTH, because the clash refusal is only as wide as this table: a
+# spelling an endpoint accepts and this table omits is a double-setting the guard admits in silence,
+# which is the measured $0.019 / 25-minute failure mode itself (two `propose` calls burning the full
+# completion cap, both ERROR). The conflict test is parametrized from here, so a spelling is one
+# line here and zero elsewhere.
 REASONING_DEPTH_KNOBS: dict = {
     "reasoning_effort": None,                                   # OpenAI / Ollama-v1 / DeepSeek
     "thinking": None,                                           # Anthropic: type + budget_tokens
     "reasoning": ("effort", "enabled", "max_tokens"),           # OpenRouter (`exclude` is not depth)
     "chat_template_kwargs": ("enable_thinking", "thinking_budget"),   # Qwen3 on vLLM/SGLang
+    # The same two switches spelled at the TOP level of the body: vLLM/SGLang take `enable_thinking`
+    # in `extra_body` directly, outside `chat_template_kwargs`, and Ollama's native API spells it
+    # `think`. Both set the depth, so both contradict `llm_reasoning` exactly as their scoped
+    # siblings above do.
+    "enable_thinking": None,                                    # vLLM / SGLang, top-level extra_body
+    "think": None,                                              # Ollama native
 }
 
 
@@ -1341,6 +1346,14 @@ class OpenAICompatibleClient:
         inband = defer_inband_error(stream)
         try:
             for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
+                # A cancel mid-generation stops the READ, and the `finally` below closes the stream:
+                # closing the socket is what actually stops the provider generating, so this is the
+                # only place a cancel can save a long answer's remaining tokens. Raising (rather than
+                # returning the partial deltas) on purpose — a half-accumulated tool call is not an
+                # answer, and `_post` would treat an empty one as a keepalive stall and RETRY it.
+                if request_cancelled():
+                    raise LLMCancelled("the LLM stream was cancelled by the caller mid-generation; "
+                                       "the connection was closed and the answer discarded")
                 if getattr(ev, "usage", None):
                     # Same tolerant extractor `complete_text_stream` uses: a provider (or a test mock)
                     # whose final chunk carries `usage` as a PLAIN DICT has no `.model_dump()`, and the
@@ -1494,6 +1507,17 @@ class OpenAICompatibleClient:
         (None, "_policy_unclassified"),
     ))
 
+    def _retry_sleep(self, delay: float) -> None:
+        """Wait out ONE backoff between attempts — a cancellation point, not a `time.sleep`.
+
+        Every wait in the ladder below goes through here, which is what makes a cancel prompt rather
+        than eventual: a `Retry-After` is honoured up to `RETRY_AFTER_CAP_S` (120 s) and our own
+        backoff up to `BACKOFF_CAP_S` (30 s), so a token that fires the instant a 429 lands used to
+        buy two more minutes of nothing before anyone read it. Raises `LLMCancelled` on a cancel;
+        with no predicate installed it is `time.sleep` with a 0.25 s poll (see `sleep_or_cancel`).
+        """
+        sleep_or_cancel(delay, self.base_url)
+
     def _retry_or_raise(self, exc: BaseException, attempt: int, use_stream: bool) -> bool:
         """This client's per-exception retry policy for ONE failed attempt (doc 25 CO-05).
 
@@ -1576,7 +1600,7 @@ class OpenAICompatibleClient:
                 classify_llm_failure(exc), delay, attempt + 2, self._max_retries + 1,
                 "That is the wait the endpoint itself asked for (Retry-After)." if ra else
                 "Our own exponential backoff; the endpoint sent no Retry-After.")
-            time.sleep(delay)
+            self._retry_sleep(delay)
             return False
         raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
 
@@ -1595,14 +1619,14 @@ class OpenAICompatibleClient:
         if stalled:
             self._stream_stalls += 1
         if transient and attempt < self._max_retries:
-            time.sleep(_backoff(attempt))
+            self._retry_sleep(_backoff(attempt))
             return stalled
         raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
 
     def _policy_forbidden(self, exc, attempt: int, use_stream: bool) -> bool:
         # 403 — often a burst/rate-limit throttle, not hard-forbidden.
         if _is_throttle_403(_err_body(exc)) and attempt < self._max_retries:
-            time.sleep(_backoff(attempt))
+            self._retry_sleep(_backoff(attempt))
             return False
         raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
 
@@ -1615,7 +1639,7 @@ class OpenAICompatibleClient:
         # AttributeError from our own _accumulate_stream/_tool_call_slot code must NOT be
         # masked here as a "gateway hiccup" — let a real accumulation bug propagate loudly.
         if attempt < self._max_retries:
-            time.sleep(_backoff(attempt))
+            self._retry_sleep(_backoff(attempt))
             return False
         raise LLMError(f"LLM request to {self.base_url} returned an unparseable body") from exc
 
@@ -1645,7 +1669,7 @@ class OpenAICompatibleClient:
         # generation that generated nothing, and costs a backoff.
         if use_stream and attempt < self._max_retries:
             self._stream_stalls += 1
-            time.sleep(_backoff(attempt))
+            self._retry_sleep(_backoff(attempt))
             return True
         raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
 
@@ -1764,6 +1788,10 @@ class OpenAICompatibleClient:
         _stalled_prev = False               # this call's previous attempt stalled mid-stream
         stream_attempts: list[bool] = []    # per-attempt `use_stream`, stamped on the generation span
         for attempt in range(self._max_retries + 1):
+            # THE CANCEL REACHES THE REQUEST HERE (doc 27), per ATTEMPT and not once per call: a token
+            # that fires while attempt 1 is in flight must stop attempt 2 from being sent. `_retry_sleep`
+            # is the other half — the ladder's sleeps — and says why an absent token costs nothing.
+            raise_if_cancelled(self.base_url)
             # Build the request per attempt so a param-compat retry (see `_retry_or_raise`) can drop
             # the reasoning toggle. `_reasoning_ok` starts True and flips off permanently for THIS
             # client the first time the endpoint rejects our reasoning param.
@@ -1829,7 +1857,7 @@ class OpenAICompatibleClient:
                     self._stream_stalls += 1
                     self._account_keepalive_stall(parsed)
                 if attempt < self._max_retries:
-                    time.sleep(_backoff(attempt))
+                    self._retry_sleep(_backoff(attempt))
                     continue
                 raise LLMError(f"LLM returned non-JSON/empty after {self._max_retries + 1} attempts")
         if body is None:  # loop exhausted retries on a transient code without ever succeeding
@@ -1942,6 +1970,7 @@ class OpenAICompatibleClient:
         usage_observed = False
         stream_completed = False
         delegated_to_fallback = False
+        cancelled = False               # the caller's token fired mid-stream (see the read loop)
 
         def _fallback_to_blocking():
             """Hand this answer to the BLOCKING path and yield whatever it produces.
@@ -2010,6 +2039,16 @@ class OpenAICompatibleClient:
                                     if observed is not None:
                                         usage_observed = True
                                         usage = _normalize_usage(_stream_usage(observed))
+                                    if request_cancelled():
+                                        # STOP READING and let the `finally` close the stream — the
+                                        # socket close is what stops the provider generating. This
+                                        # path BREAKS rather than raising (unlike the blocking
+                                        # accumulator): the consumer already holds every delta it
+                                        # was yielded, so the partial answer is exactly what a Stop
+                                        # is asking for, and the usage the stream did report is
+                                        # still charged by the `finally` below.
+                                        cancelled = True
+                                        break
                                     if not ev.choices:
                                         continue
                                     piece = getattr(ev.choices[0].delta, "content", None) or ""
@@ -2029,6 +2068,11 @@ class OpenAICompatibleClient:
                         # APIError handlers below, which a clean EOF does not raise. Delegate the same
                         # way those do; `account_here` in the `finally` still charges this envelope
                         # when the provider reported usage for it.
+                        if cancelled:
+                            # NEVER fall through to the blocking fallback on a cancel: that is a
+                            # second, whole paid call for an answer nobody is waiting for. Ending
+                            # here leaves the caller the deltas it already received.
+                            return
                         if not pieces:
                             yield from _fallback_to_blocking()
                             return
@@ -2177,8 +2221,14 @@ class OpenAICompatibleClient:
 
 class CostAccountant:
     def __init__(self, limit: Optional[float] = None, warn_frac: float = 0.8,
-                 on_delta: Optional[Callable[[dict], None]] = None):
+                 on_delta: Optional[Callable[[dict], None]] = None,
+                 limit_knob: str = DEFAULT_COST_KNOB):
         self.limit = limit
+        # WHICH SETTINGS KNOB this ceiling came from, because the refusal has to name the number an
+        # operator must change and there is more than one way to declare it (`run_usd_ceiling`).
+        # Defaulted to `llm_budget_usd`, which is what every historical message said and what a
+        # caller constructing a bare accountant still means.
+        self.limit_knob = str(limit_knob or DEFAULT_COST_KNOB)
         self.warn_frac = warn_frac
         self.spent = 0.0
         self.warned = False
@@ -2326,8 +2376,8 @@ class CostAccountant:
             # knob and not only the arithmetic.
             raise BudgetExceeded(
                 f"LLM spend ceiling reached: ${committed_spent:.4f} of the ${self.limit:.4f} "
-                f"set by `llm_budget_usd`. The run stops here rather than spending more. "
-                f"To continue, raise `llm_budget_usd` in this run's `config.snapshot.json` "
+                f"set by `{self.limit_knob}`. The run stops here rather than spending more. "
+                f"To continue, raise `{self.limit_knob}` in this run's `config.snapshot.json` "
                 f"(0 = no limit) and resume -- an env var will NOT do it, every resume adopts "
                 f"the snapshot (engine invariant #6).")
         return committed_spent
@@ -2369,10 +2419,10 @@ class CostAccountant:
         if remaining < floor - 1e-9:
             raise BudgetExceeded(
                 f"LLM spend ceiling reached before opening {what}: ${max(0.0, remaining):.4f} of "
-                f"the ${limit:.4f} set by `llm_budget_usd` remains, below the "
+                f"the ${limit:.4f} set by `{self.limit_knob}` remains, below the "
                 f"`node_open_budget_floor_usd` of ${floor:.4f} a new node needs. The run stops "
                 f"here rather than open work it cannot finish. To continue, raise "
-                f"`llm_budget_usd` (or lower `node_open_budget_floor_usd`, 0 = off) in this "
+                f"`{self.limit_knob}` (or lower `node_open_budget_floor_usd`, 0 = off) in this "
                 f"run's `config.snapshot.json` and resume -- an env var will NOT do it, every "
                 f"resume adopts the snapshot (engine invariant #6).")
 
@@ -2410,10 +2460,28 @@ class LiteLLMClient:
         last: Optional[BaseException] = None
         for attempt in range(4):
             try:
+                # Same cancellation point as `_post`, per attempt and before the permit: a cancelled
+                # caller must not have a NEW request sent on its behalf, whichever transport the
+                # role happens to be wired to (see the `except LLMCancelled` re-raise below, without
+                # which the blind normalizer would launder this into a retryable `LLMError`).
+                raise_if_cancelled(str(self.model))
                 # match the OpenAI-compatible transport seam. One attempt borrows one
                 # atomic total+lane slot; backoff/retry waiting itself consumes no shared capacity.
                 with llm_request_permit():
                     return litellm.completion(model=self._model_for_call(), **kwargs)
+            except BudgetExceeded:
+                # THE HARD RUN-BUDGET STOP IS NOT A PROVIDER ERROR, and it is raised from INSIDE
+                # this permit: `llm_broker.borrow()` reserves against `RunBudget` before queueing.
+                # Normalizing it to `LLMError` handed the role layer's documented `except LLMError`
+                # retry+fallback an exhausted ceiling to DEGRADE around, and `tool_loop.resilient`'s
+                # `except BudgetExceeded: raise` funnel never saw it, because it was no longer one.
+                # CLAUDE.md's rule for every blind handler around a paid call in the run path.
+                raise
+            except LLMCancelled:
+                # The caller cancelled: not a provider error either, and the same argument applies —
+                # normalizing it would hand the role layer's `except LLMError` retry+fallback a
+                # cancel to degrade around, and each degraded attempt would re-check the same token.
+                raise
             except Exception as e:  # noqa: BLE001 - normalize EVERY provider error to LLMError
                 last = e
                 name = type(e).__name__.lower()
@@ -2421,7 +2489,7 @@ class LiteLLMClient:
                     "ratelimit", "timeout", "apiconnection", "serviceunavailable",
                     "internalserver", "overloaded", "apierror"))
                 if transient and attempt < 3:
-                    time.sleep(_backoff(attempt))
+                    sleep_or_cancel(_backoff(attempt), str(self.model))
                     continue
                 raise LLMError(f"litellm completion for {self.model} failed: {e}") from e
         # Not reachable today — every iteration returns or raises, since `attempt < 3` is False on
@@ -2955,8 +3023,15 @@ def run_cost_accountant(settings) -> "CostAccountant":
     existing = getattr(settings, _RUN_ACCOUNTANT_ATTR, None)
     if isinstance(existing, CostAccountant):
         return existing
-    accountant = CostAccountant(
-        limit=(float(getattr(settings, "llm_budget_usd", 0.0) or 0.0) or None))
+    # ONE CEILING FOR THE RUN, read here and at `RunBudget` from the same function. `llm_budget_usd`
+    # and `llm_cost_limit` were two run-level USD caps enforced by two different halves — post hoc
+    # here, reserved at the broker's permit there — so an operator who typed one got half a ceiling
+    # (doc 52 row 15's fan-out overshoot on one side, no `node_open_budget_floor_usd` stop on the
+    # other). `run_usd_ceiling` takes the tightest DECLARED cap and the knob that declared it, so
+    # this accountant refuses at the same number the reserve half does, and names the same knob.
+    limit, knob = run_usd_ceiling(getattr(settings, "llm_cost_limit", 0.0),
+                                  getattr(settings, "llm_budget_usd", 0.0))
+    accountant = CostAccountant(limit=limit, limit_knob=knob or DEFAULT_COST_KNOB)
     try:
         object.__setattr__(settings, _RUN_ACCOUNTANT_ATTR, accountant)
     except Exception:  # noqa: BLE001 - an exotic settings object still gets a working accountant

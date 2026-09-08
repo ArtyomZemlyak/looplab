@@ -72,7 +72,29 @@ def test_latest_readings_does_not_mix_the_regimes():
         assert round(serial["max_clique_cpsat"][0], 4) == 0.9922
 
 
-def test_rules_at_one_worker_is_not_claimed_without_a_one_worker_reading():
+def _cpsat_root(monkeypatch, tmp_path, *tasks):
+    """A CP-SAT reference tree for `tasks`, and `ruler_check.CPSAT_ROOT` pointed at it.
+
+    `uses_cpsat` reads `<CPSAT_ROOT>/<task>/<task>.py` off the real filesystem and answers False
+    when it is not there — the right answer for an inventory, and the wrong one for a test about
+    the CP-SAT branch. Without this the two tests below asserted a verdict the classifier could not
+    reach on any box without an AlgoTune checkout at `/var/tmp/looplab-bench`, and they failed by
+    reading `off by more than the tolerance` rather than by skipping: a red suite on a clean
+    machine, about the fixture rather than the rule. The module reads the root AT CALL TIME
+    precisely so a test can set it (see `uses_cpsat`'s own comment).
+    """
+    root = tmp_path / "AlgoTuneTasks"
+    for task in tasks:
+        (root / task).mkdir(parents=True)
+        (root / task / f"{task}.py").write_text("from ortools.sat.python import cp_model\n",
+                                                encoding="utf-8")
+    monkeypatch.setattr(ruler_check, "CPSAT_ROOT", str(root))
+    assert ruler_check.uses_cpsat(tasks[0]), "the fixture must make the task read as CP-SAT"
+    return root
+
+
+def test_rules_at_one_worker_is_not_claimed_without_a_one_worker_reading(monkeypatch, tmp_path):
+    _cpsat_root(monkeypatch, tmp_path, "max_clique_cpsat")
     rows = [{"task": "max_clique_cpsat", "subset": "test",
              "times": [10.0] * 50 + [130.0] * 50}]
     readings = {"max_clique_cpsat": (1.6028, "2026-09-06T06:51:26")}
@@ -88,10 +110,11 @@ def test_rules_at_one_worker_is_not_claimed_without_a_one_worker_reading():
     assert "concurrency, not the solver" in seen["why"]
 
 
-def test_a_serial_reading_that_does_not_read_unity_does_not_rescue_the_task():
+def test_a_serial_reading_that_does_not_read_unity_does_not_rescue_the_task(monkeypatch, tmp_path):
     """Existence is not a verdict. Measured the same evening, both serial and both on an idle box:
     max_clique_cpsat read 0.9922 in one sitting and 1.0967 in the next. A check that accepted any
     serial row would price a candidate against whichever sitting happened to be last."""
+    _cpsat_root(monkeypatch, tmp_path, "min_dominating_set")
     rows = [{"task": "min_dominating_set", "subset": "test",
              "times": [10.0] * 50 + [130.0] * 50}]
     readings = {"min_dominating_set": (1.3175, "2026-09-06T06:40:00")}

@@ -3485,3 +3485,59 @@ def test_the_salvage_action_literal_agrees_with_the_engine_that_writes_it():
     from looplab.events.replay import _SALVAGE_CAUSE_TRIAGE_ACTION
 
     assert _SALVAGE_CAUSE_TRIAGE_ACTION == SALVAGE_CAUSE_TRIAGE_ACTION
+
+
+# --- EV-04: the scalar bound guards are ONE rule, driven through the fold ------------------------
+#
+# 21 hand-rolled `0 <= x <= N` bound expressions lived in this module, each re-deciding whether an
+# `int` subclass and a `bool` count. `core/jsonutil.py::bounded_int` is now the single answer; these
+# drive the two decisions through real event logs rather than pinning the call.
+
+@pytest.mark.parametrize("recorded, expected", [
+    (0, 0),               # the low end is inclusive
+    (255, 255),           # the high end is inclusive — the retired site spelled it `< 256`
+    (256, None),          # one past it is refused
+    (-1, None),
+    (True, None),         # `isinstance(True, int)` is True: a bool priority would sort as 1
+    ("7", None),
+    (7.0, None),
+])
+def test_an_operator_priority_pin_folds_only_for_an_exact_bounded_int(recorded, expected):
+    """`card_reprioritized` is the tightest of the converted sites: its bound was the one spelled
+    with an EXCLUSIVE upper end, so a conversion that read it as inclusive would silently widen the
+    accepted range by one. Driven through `fold`, not asserted about the source."""
+    state = fold([
+        Event(seq=0, type="run_started",
+              data={"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"}),
+        Event(seq=1, type="card_added",
+              data={"id": "card-1", "statement": "s", "operator": "improve", "source": "operator"}),
+        Event(seq=2, type="card_reprioritized",
+              data={"id": "card-1", "priority": recorded, "source": "operator", "pinned": True}),
+    ])
+    assert state.card_priority_pins.get("card-1") == expected
+
+
+def test_a_bool_token_count_never_arithmetics_as_one(tmp_path):
+    """The bool half, driven: `_llm_counter` used to spell its own `isinstance`/bool pair beside the
+    bound. A hand-edited `{"total_tokens": true}` must fold to 0, not to 1."""
+    p = tmp_path / "events.jsonl"
+    s = EventStore(p)
+    s.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+    s.append("llm_usage", {"usage_id": "a" * 32, "node_id": 0, "phase": "build",
+                           "total_tokens": True, "prompt_tokens": 5, "cost": 0.0})
+    state = fold(s.read_all())
+    assert state.llm_cost["total_tokens"] == 0
+    assert state.llm_cost["prompt_tokens"] == 5
+
+
+def test_replay_no_longer_hand_rolls_the_bounded_int_shape():
+    """A NEGATIVE pin, which stays a substring on purpose: what must not come back is the TEXT.
+
+    Both retired spellings are checked, because the drift EV-04 named was that this module used two
+    of them for one concept."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "looplab" / "events"
+              / "replay.py").read_text(encoding="utf-8-sig")
+    assert "is int and 0 <=" not in source
+    assert "is not int or not 0 <=" not in source

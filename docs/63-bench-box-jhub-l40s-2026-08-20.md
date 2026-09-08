@@ -247,23 +247,44 @@ identified call away from working.
 
 ## 8. The campaign as launched, 2026-08-20
 
-OPEN[docs52-launch-block-contradicts-docs51-regime] the launch block below and docs/51 §10 cannot
-both be true of one campaign.
-proof:`present:ALGOTUNE_EVAL_WORKERS=auto@docs/63-bench-box-jhub-l40s-2026-08-20.md`
-REVIEW 2026-08-25 (docs): docs/51 §10 measures the parallel eval regime inflating the metric ~75 %
-and mandates the opposite of this block ("leave `ALGOTUNE_EVAL_WORKERS` unset ... every campaign so
-far is serial"). A reader reproducing from this block gets numbers docs/51 declares invalid (the
-solver pass parallel while the reference stays serial — the oracle half ships OFF and broken); a
-reader following docs/51 runs serial, where the bridge's reference-timed-in-pass guard cannot fire
-at all (its glob never matches serial-regime cache names — see the annotation at
-`_baseline_fingerprint` in `benchmarks/algotune/looplab_eval.py`). Either way one of the two shipped
-protections is inoperative. Fix: date-stamp this block as superseded by docs/51 §10 (or drop the
-`auto`), and make campaign.sh refuse or warn when a >1 value is inherited from the environment —
-the regime is "part of the measurement" by the driver's own header.
+**RESOLVED 2026-09-08 — this block is a RECORD of what was launched on 2026-08-20, not a recipe.**
+The contradiction it carried was real: the review of 2026-08-25 read it against "docs/51 §10" and
+found the opposite rule, and both halves of that pointer were wrong in a way worth writing down.
+
+*The citation.* Every `docs/51 §N` in the benchmark tree means today's
+[docs/62](62-algotune-arm-operational-notes-2026-08-20.md) and every `docs/52 §N` means this
+document — the two were renumbered and the pointers were not, so the reader was sent to "51.
+External works synergy" §10, *What must not change*, which says nothing about eval workers. The
+pointers in `benchmarks/algotune/campaign.sh` and `looplab_eval.py::_baseline_fingerprint` are
+corrected in the same change.
+
+*Which document the CODE agrees with.* Neither, as written. `campaign.sh::declare_baseline_ruler`
+exports `ALGOTUNE_EVAL_WORKERS="${ALGOTUNE_EVAL_WORKERS:-auto}"` — so the driver's default IS the
+parallel regime (it matches the reference cache `run_probe.sh` keys, `__w<N>x1r3`), and docs/62
+§10's operational sentence *"leave `ALGOTUNE_EVAL_WORKERS` unset"* no longer produces the serial
+ruler it mandates: unset now means `auto`. That sentence is the one the code falsifies, and it is
+corrected there to **set `ALGOTUNE_EVAL_WORKERS=1`**, with the measurement (1.0011 serial vs 1.7795
+at two workers) unretracted. This block's `auto` is therefore not "wrong", it is DATED: it records
+the instrument this campaign was measured on, and its numbers are comparable only to numbers from
+the same width.
+
+*And the half of the 2026-08-25 review that has since gone stale:* the bridge's
+reference-timed-in-pass guard no longer misses serial-regime cache names — `_baseline_fingerprint`'s
+glob was widened to `<task>__<subset>*` on 2026-08-25, which matches both the bare and the
+regime-suffixed spelling.
+
+*What landed in code:* `declare_baseline_ruler` now NAMES an inherited width above one before it
+exports anything (an inherited `2` keys an arena this box has never written, so the reference is
+re-measured in the same pass and reports itself at ~1.0), and the launch banner's regime NOTE says
+in so many words that leaving the variable unset does not get you the serial ruler
+(`tests/test_algotune_campaign_declares_its_ruler.py`).
+
+**Launched 2026-08-20 with (superseded as a recipe — for the serial ruler docs/62 §10 mandates,
+export `ALGOTUNE_EVAL_WORKERS=1`):**
 
 ```
-20 tasks | 4 lanes x 22 cores (of 96, quota 90) | ALGOTUNE_EVAL_WORKERS=auto | $0.02 per task-arm
-model gateway/deepseek-v4-flash through the meter, per-task paths
+20 tasks | 4 lanes x 22 cores (of 96, quota 90) | eval workers: the driver default (parallel)
+model gateway/deepseek-v4-flash through the meter, per-task paths | $0.02 per task-arm
 ```
 
 Few lanes, many cores per lane — the shape instance-level parallelism makes possible, and it retires

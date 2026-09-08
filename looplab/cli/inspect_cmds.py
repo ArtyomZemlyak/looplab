@@ -1175,3 +1175,20 @@ def proxy_accuracy(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
         typer.echo("  BELOW THE FIELD'S OWN BAR (predict-before-execute reports 61.5 % pairwise) "
                    "while this run let it kill: `proxy_kill_fraction=0` turns the kill off and "
                    "keeps the score as an audit signal.")
+
+
+@app.command(name="seed-distance")
+def seed_distance(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
+    """How far each experiment moved from the seed program it descends from (read-only, no model).
+
+    `edit-types` says what KIND of edit each parent->child STEP made; this says how far the whole
+    walk actually got — one diff against the LINEAGE ROOT, in the same `tools/node_diff.py`
+    vocabulary, so a change and its undo cancel — and how much of that movement is tuning rather
+    than structure. Nothing in the loop reads it (doc 52 row 31).
+    """
+    from looplab.search.seed_distance import render_seed_distances, run_seed_distances
+
+    store = _require_run_dir(run_dir)
+    _echo_log_integrity(store, run_dir)
+    for line in render_seed_distances(run_seed_distances(fold(store.read_all()))):
+        typer.echo(line)

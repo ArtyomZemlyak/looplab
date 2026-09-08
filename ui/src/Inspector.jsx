@@ -1136,6 +1136,7 @@ const STAGE = {
   lessons:        ['doc', 'Lessons', 'reflect / distil cross-run lessons', '#9a8fb0'],
   lessons_distill: ['doc', 'Lessons', 'reflect / distil cross-run lessons', '#9a8fb0'],
   lessons_refresh: ['doc', 'Lessons', 'reflect / distil cross-run lessons', '#9a8fb0'],
+  skills_promote: ['doc', 'Skills', 'promote a settled card\u2019s technique', '#9a8fb0'],
   novelty:        ['gitbranch', 'Novelty gate', 'dedup near-duplicate proposals', '#a89a6f'],
 }
 const stageMeta = (name) => STAGE[name] || ['dot', name, '', 'var(--accent)']

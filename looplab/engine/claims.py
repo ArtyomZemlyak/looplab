@@ -27,11 +27,26 @@ from looplab.engine.governance_health import (
     confirm_governance_durable,
     observed_path_missing,
     read_governance_rows,
-    raise_governance_storage_unavailable,
+    # Kept after `record_claim_decision` stopped calling it directly: `claims.py` is a BARREL over
+    # the post-split modules and `tests/test_claims.py::test_the_barrel_re_exports_the_same_objects`
+    # holds it to re-exporting every name they own.
+    raise_governance_storage_unavailable,  # noqa: F401 — barrel re-export, not a local caller
     validate_action_ids,
     validate_local_revisions,
     validate_optional_text,
     validate_revision_fields,
+)
+# The claim ledger is a governance ledger, and it now composes the SHARED protocol steps rather
+# than hand-rolling them (doc 25 EM-05): one required-lock spelling, one idempotency-before-CAS
+# lookup, one expected-revision rule, one durable append with its fsync/parent-fsync/refusal
+# translation. What stays local is what is genuinely claim-specific — the LOGICAL revision derived
+# by `_logical_decision_rows`, the sanitize-on-replay projection, and the two `ClaimDecision*`
+# conflict types an operator surface reports by name.
+from looplab.engine.governance_protocol import (
+    action_replay,
+    durable_governance_append,
+    governance_lock,
+    validate_expected_revision,
 )
 from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, normalize_statement
 from looplab.trust.cross_run import (
@@ -75,19 +90,19 @@ from looplab.engine.claims_health import (  # noqa: F401
     _RESEARCH_VERIFICATION_FIELDS,
     _bounded_claim_projection,
     _claim_rows_snapshot_digest,
-    _claim_source_rows,
+    claim_source_rows,
     _claim_source_semantic_projection,
     _claim_source_summary,
     _claim_text,
     _empty_claim_read_health,
     _empty_claim_read_segment,
     _epistemic,
-    _filter_claim_assessments,
-    _filter_claim_source_rows,      # re-exported: a guarded post-split import contract
+    filter_claim_assessments,
+    filter_claim_source_rows,      # re-exported: a guarded post-split import contract
     _identity_text,
     _indexable_research_claim,
     _lesson_claim_stance,
-    _load_claim_source_path,
+    load_claim_source_path,
     _metric_identity,
     _node_ids,
     _parse_node_id,
@@ -97,8 +112,8 @@ from looplab.engine.claims_health import (  # noqa: F401
     _research_verification,
     _safe_claim_read_health,
     _safe_claim_read_segment,
-    _safe_claim_source_summary,
-    _safe_research_source_summary,
+    safe_claim_source_summary,
+    safe_research_source_summary,
     _string_list,
     _source_guarded_epistemic,
     _unknown_claim_source_summary,
@@ -321,11 +336,9 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         rec["action_id"] = aid
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    from looplab.core.atomicio import strict_fsync, strict_fsync_parent
-    from looplab.events.eventstore import _interprocess_lock
     # Idempotency lookup, revision CAS, allocation and append are one critical section. A
     # pre-lock check lets two UI writers both accept revision N and silently create divergent policy.
-    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+    with governance_lock(path):
         # governance corruption is not a zero-row revision. Refuse every operator
         # write until the ledger is explicitly repaired; a later pin/clear must never hide the
         # quarantine behind a fresh, apparently healthy revision.
@@ -333,22 +346,25 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         logical = _logical_decision_rows(rows)
         created = not path.exists()
         if aid:
-            existing = next((r for r in logical
-                             if _identity_text(r.get("action_id"), _MAX_DECISION_ACTION_ID) == aid), None)
+            # Resolved BEFORE the CAS, over the LOGICAL rows: a transport retry carrying the
+            # original — now stale — revision must return its first durable receipt.
+            existing, exact = action_replay(
+                logical, rec, aid, payload=_decision_payload,
+                action_id_of=lambda row: _identity_text(row.get("action_id"),
+                                                        _MAX_DECISION_ACTION_ID))
             if existing is not None:
-                if _decision_payload(existing) == _decision_payload(rec):
-                    confirm_governance_durable(path)
-                    return sanitize_cross_run_projection(
-                        existing, max_chars=16_000, max_items=64, max_total_items=256)
-                raise ClaimDecisionIdempotencyConflict(
-                    f"action_id {aid!r} was already used for a different claim decision")
+                if not exact:
+                    raise ClaimDecisionIdempotencyConflict(
+                        f"action_id {aid!r} was already used for a different claim decision")
+                confirm_governance_durable(path)
+                # A replay returns the SANITIZED projection, not the raw row: this receipt crosses
+                # an API/CLI boundary carrying persisted operator text.
+                return sanitize_cross_run_projection(
+                    existing, max_chars=16_000, max_items=64, max_total_items=256)
         current = len(logical)
-        if expected_revision is not None:
-            if (isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
-                    or expected_revision < 0):
-                raise ValueError("expected_revision must be a non-negative integer")
-            if expected_revision != current:
-                raise ClaimDecisionConflict(expected_revision, current)
+        validate_expected_revision(expected_revision)
+        if expected_revision is not None and expected_revision != current:
+            raise ClaimDecisionConflict(expected_revision, current)
         def _persist(governance=None):
             if validate is not None:
                 validate()
@@ -363,15 +379,8 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
                     decisions=governance["decisions"])
                 validate_evidence(evidence_snapshot)
             stored = {**rec, "revision": current + 1}
-            try:
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(stored) + "\n")
-                    f.flush()
-                    strict_fsync(f.fileno())
-                if created:
-                    strict_fsync_parent(path)
-            except (OSError, TimeoutError, RuntimeError) as exc:
-                raise_governance_storage_unavailable(path, exc)
+            durable_governance_append(path, json.dumps(stored) + "\n",
+                                      created=created, require_durable=True)
             return stored
 
         if validate_evidence is None:
@@ -570,7 +579,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     from pathlib import Path
 
     from looplab.events.eventstore import (
-        _interprocess_lock, replace_jsonl_rows_atomic_preserving_quarantine,
+        interprocess_lock, replace_jsonl_rows_atomic_preserving_quarantine,
     )
     if not memory_dir:
         return 0
@@ -673,7 +682,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     # Hold the same interprocess lock the case/capsule/decision sidecar stores use — and RE-READ inside it —
     # so concurrent runs survive. Raw-line preservation additionally keeps unreadable/future records visible
     # to store-health readers instead of laundering quarantine into an apparently complete file.
-    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+    with interprocess_lock(Path(str(path) + ".lock"), required=True):
         replace_jsonl_rows_atomic_preserving_quarantine(
             path,
             rows,
@@ -725,7 +734,7 @@ def load_research_claims(memory_dir) -> list[dict]:
 
     # `map`, not a comprehension re-wrapped by hand: a row-shape projection must not be able to lose
     # the read receipt this store was read with (doc 25 EM-09).
-    return _load_claim_source_path(path, research=True).map(_durable_projection)
+    return load_claim_source_path(path, research=True).map(_durable_projection)
 
 
 def load_claim_lessons(memory_dir) -> list[dict]:
@@ -734,18 +743,19 @@ def load_claim_lessons(memory_dir) -> list[dict]:
 
     if not memory_dir:
         return _ClaimSourceRows()
-    return _load_claim_source_path(Path(memory_dir) / "lessons.jsonl", research=False)
+    return load_claim_source_path(Path(memory_dir) / "lessons.jsonl", research=False)
 
 
 def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
-                      scope_task: str = "", fuzzy: bool = False,
-                      structured: bool = False) -> list[dict]:
+                      scope_task: str = "", structured: bool = True) -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
-    research claims AND decisions consistently. `fuzzy` (opt-in) merges paraphrased claims (CR1b);
-    `structured` (opt-in) uses the scope+polarity-safe structured claim key (the full CR); `scope_task`
-    filters the D8 research claims to the bound task so a task-scoped caller does not re-read another task's
-    research claims (mega-review) — the decisions overlay is applied scope-safely by `claim_assessments`."""
+    research claims AND decisions consistently. `structured` (THE DEFAULT) uses the scope+polarity-safe
+    structured claim key — the same projection `record_claim_decision` validates an operator's
+    `evidence_digest` against, so a review surface that opts out hands out a digest the write path
+    cannot match; `scope_task` filters the D8 research claims to the bound task so a task-scoped caller
+    does not re-read another task's research claims (mega-review) — the decisions overlay is applied
+    scope-safely by `claim_assessments`."""
     if lessons is None:
         lessons = load_claim_lessons(memory_dir)
     lessons = _valid_claim_source_rows(lessons, research=False)
@@ -755,12 +765,12 @@ def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisio
         task_id=scope_task, lessons=lessons, research=research)
     dec = load_claim_decisions(memory_dir) if decisions is None else decisions
     return claim_assessments(lessons, research_claims=research, decisions=dec,
-                             fuzzy=fuzzy, structured=structured)
+                             structured=structured)
 
 
 def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims=None,
                      decisions=None, scope_task: str = "", max_items: int = 8,
-                     structured: bool = False, _governance: Optional[dict] = None) -> dict:
+                     structured: bool = True, _governance: Optional[dict] = None) -> dict:
     """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
     claims + operator decisions + concept aliases + splits. One call so every atlas surface is consistent.
     `structured` keeps the claim projection consistent with the researcher advisory; `scope_task` filters
@@ -768,17 +778,11 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     claims/contradictions (mega-review)."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
-    from looplab.engine.memory import ConceptCapsuleStore, _dedup_valid_capsules
+    from looplab.engine.governance_health import observed_path_missing
+    from looplab.engine.governance_protocol import governed_projection
+    from looplab.engine.memory import ConceptCapsuleStore, dedup_valid_capsules
     if _governance is None:
-        source_names = []
-        if lessons is None:
-            source_names.append("lessons.jsonl")
-        if research_claims is None:
-            source_names.append("research_claims.jsonl")
-        if capsules is None:
-            source_names.append("concept_capsules.jsonl")
-        return project_governed_sources(
+        return governed_projection(
             memory_dir,
             lambda governance: atlas_for_memory(
                 memory_dir, lessons=lessons, capsules=capsules,
@@ -786,7 +790,9 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
                 scope_task=scope_task, max_items=max_items, structured=structured,
                 _governance=governance,
             ),
-            include_concepts=True, source_names=source_names,
+            include_concepts=True,
+            unsupplied={"lessons.jsonl": lessons, "research_claims.jsonl": research_claims,
+                        "concept_capsules.jsonl": capsules},
         )
     base = Path(memory_dir) if memory_dir else None
     if lessons is None:
@@ -799,7 +805,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
         capsules = (ConceptCapsuleStore(cp).all()
                     if cp and not observed_path_missing(cp) else [])
     capsule_source = capsules if isinstance(capsules, (list, tuple)) else []
-    capsules = _dedup_valid_capsules(capsule_source)
+    capsules = dedup_valid_capsules(capsule_source)
     research = load_research_claims(memory_dir) if research_claims is None else research_claims
     research = _valid_claim_source_rows(research, research=True)
     lessons, capsules, research = scope_cross_run_sources(
@@ -825,8 +831,6 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
 # The lessons+research assessment projections, re-exported so `engine.claims` keeps its historical
 # surface (doc 25 EM-01). Imported before the retrieval barrel below, which reads these names.
 from looplab.engine.claims_assessments import (  # noqa: F401,E402
-    _fuzzy_merge_claims,
-    _stmt_tokens,
     _ingest_evidence,
     _register_incarnation,
     _structured_assessments,

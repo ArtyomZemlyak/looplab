@@ -19,6 +19,8 @@ import secrets
 import threading
 import time
 from collections.abc import Iterable, Mapping
+from contextvars import ContextVar
+from copy import deepcopy
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -28,7 +30,8 @@ from looplab.core.errors import budget_stop_leaf
 from looplab.core.llm import BudgetExceeded, model_override
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
-from looplab.events.types import (EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
+from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
+                                  EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
                                   trace_export_unhealthy, trace_export_health_signature,
                                   run_exit_reason,
     EV_ABLATE,
@@ -63,7 +66,7 @@ from looplab.engine.card_reservation import (CardReservationMixin, _BuildReserva
                                             discarded_proposal_receipt)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
-from looplab.engine.costs import bind_cost_accountants, seed_prior_spend
+from looplab.engine.costs import bind_cost_accountants, find_cost_accountants, seed_prior_spend
 from looplab.engine.crash_repair import CrashRepairMixin
 from looplab.engine.eval_dispatch import EvalDispatchMixin
 from looplab.engine.eval_stages import EvalStagesMixin
@@ -72,7 +75,7 @@ from looplab.engine.node_build import NodeBuildMixin, developer_crash_records
 from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
 from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
                                       default_gpu_host_lease_path, detect_gpu_inventory,
-                                      schedulable_cuda_tokens)
+                                      eval_time_admission_blocked, schedulable_cuda_tokens)
 from looplab.engine.speculation import SpeculationMixin
 from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.asha_monitor import AshaMonitorMixin
@@ -81,6 +84,7 @@ from looplab.engine.novelty import NoveltyGateMixin
 from looplab.engine.strategy import StrategyCadenceMixin
 from looplab.engine.concept_cadence import ConceptCadenceMixin
 from looplab.engine.verifier_tiebreak import VerifierTiebreakMixin
+from looplab.engine.value_estimate import ValueEstimateMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
 from looplab.engine.finalize import (
     ensure_finish_report,
@@ -112,7 +116,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS,  # noqa: F401
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
-    Idea, Node, NodeStatus, RunState, durable_idea_payload, effective_card_footprint,
+    Event, Idea, Node, NodeStatus, RunState, durable_idea_payload, effective_card_footprint,
     is_developer_error, is_developer_stuck)
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
@@ -120,8 +124,9 @@ from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
 from looplab.core.llm_budget import RunBudget
 from looplab.core.phase_events import phase_sink_scope
-from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
-                                     in_llm_lane, llm_broker_scope, llm_lane_scope)
+from looplab.core.llm_broker import (LLMConcurrencyBroker, ProviderCallMeter,
+                                     default_llm_lane_limits, in_llm_lane, llm_broker_scope,
+                                     llm_lane_scope, provider_call_meter)
 from looplab.search.card_selection import (
     META_CARD_ID, SpeculativeSelectionContext, card_budget_used, card_next_actions,
     refunded_node_reservations, speculative_card_actions, speculative_raw_actions,
@@ -147,7 +152,7 @@ from looplab.agents.roles import (Developer, Researcher, is_researcher_fallback,
                                   researcher_budget_exhausted, researcher_fallback_cause)
 from looplab.runtime.sandbox import Sandbox
 from looplab.core.tracing import (
-    TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS, AsyncJsonlSpanExporter, Tracer)
+    TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS, AsyncJsonlSpanExporter, Tracer, current_ids)
 
 # Re-export (back-compat): the engine sentinel lives in engine/options.py since the F3 knob
 # collapse (the signature takes **knobs now, so the orchestrator itself no longer needs it);
@@ -223,21 +228,20 @@ class _DeferredBudgetStop:
     Only `start_soon` is intercepted.  Everything else -- `cancel_scope` above all, which
     `_dispatch_evals`'s `finally` uses to stop the repeating research loop -- is the real group's.
 
-    OPEN[eval-raised-ceiling-still-cancels-sibling-terminals] this facade covers RESEARCH only; a
-    `BudgetExceeded` raised from inside an EVALUATION (the repair path re-raises it; stage checks
-    and triage are paid calls) still cancels its sibling evals' terminals on both dispatch paths.
-    proof:absent:accountant_over_ceiling@looplab/engine/orchestrator.py
+    *Closed 2026-09-08 (`eval-raised-ceiling-still-cancels-sibling-terminals`): the drain hook no
+    longer keys only on the escaping exception's leaf -- `accountant_over_ceiling` asks the LEDGERS
+    whether the run is already past its ceiling, which is the fact a cancelled sibling cannot carry
+    -- and `evaluate.py::_land_terminal_before_ceiling` lands a measured node's terminal before a
+    ceiling raised by its own post-score bookkeeping propagates. The two lesser hardenings below
+    landed with it: `start_soon` forwards anyio's `name=`, and `start()` is REFUSED rather than
+    passed through uncaptured.*
+
     REVIEW 2026-08-30 (money): under Card mode that raise comes from an `eval_tg` CHILD -- the
     group cancels `_run_with_llm_broker`, the outer handler catches the Cancelled (whose
     `budget_stop_leaf` is None), the drain no-ops, and siblings mid-score lose their terminals:
     the five-runs-measured loss, one seam over. Clause (c) above is true and is also the
     mechanism -- a repeat-research capture leaves the run pinned over ceiling for hours of eval,
-    so the NEXT paid call inside any eval raises. Teach the drain hook to fire when evals are in
-    flight and the accountant is over ceiling (a fact it already holds out of band), instead of
-    keying only on the escaping exception's leaf; and let `_evaluate` land its terminal before
-    propagating a ceiling raised by its own post-score bookkeeping. Two lesser hardenings: this
-    `start_soon` drops anyio's `name=` kwarg, and `tg.start()` passes through uncaptured, so a
-    future `_spawn_research` using it silently reintroduces the defect.
+    so the NEXT paid call inside any eval raises.
     """
 
     __slots__ = ("_tg", "_sink")
@@ -246,7 +250,11 @@ class _DeferredBudgetStop:
         self._tg = tg
         self._sink = sink
 
-    def start_soon(self, func, *args) -> None:
+    def start_soon(self, func, *args, name=None) -> None:
+        # `name=` is FORWARDED and not dropped: anyio puts it on the task object and every stall
+        # report, `anyio` traceback and task dump reads it, so a facade that silently swallowed it
+        # renamed the one deferred task in the group to `None` exactly when the run is ending and
+        # somebody is reading the dump to find out why.
         sink = self._sink
 
         async def _capture() -> None:
@@ -255,7 +263,19 @@ class _DeferredBudgetStop:
             except BudgetExceeded as exc:
                 sink.append(exc)         # re-raised by `_dispatch_evals` once the evals have joined
 
-        self._tg.start_soon(_capture)
+        self._tg.start_soon(_capture, name=name)
+
+    async def start(self, *args, **kwargs):
+        """REFUSED, loudly. `__getattr__` used to forward this to the real group, so a caller that
+        needed the started-value handshake got a task whose `BudgetExceeded` was NOT captured --
+        the whole defect this facade exists to close, re-introduced by a one-word change at a call
+        site and invisible at this one. Capturing it here is not the answer either: `start()`'s
+        contract is that the task calls `task_status.started()` before the await returns, and a
+        raise BEFORE that point has to reach the caller to unblock it, so a facade cannot both
+        defer the exception and honour the handshake. Say so instead of choosing one silently."""
+        raise TypeError(
+            "_DeferredBudgetStop cannot defer a `tg.start()` task (its started-value handshake and "
+            "a deferred BudgetExceeded are mutually exclusive) -- use start_soon")
 
     def __getattr__(self, name):
         return getattr(self._tg, name)
@@ -267,6 +287,193 @@ class _DeferredBudgetStop:
 # see the scan — when the pool has fully drained and the head STILL does not fit, which proves it
 # wants more than the box physically has and must not be allowed to wedge the batch.
 _HEAD_BYPASS_LIMIT = 3
+
+
+# ------------------------------------------------------------------ THE CADENCE OFFLOAD (F1i / EM-01)
+#
+# `_run_cadences` is the run's paid periodic block — the Strategist consult, the concept
+# re-tag/consolidation pass, the verifier tie-break, the report refresh, the deep-research step and
+# the lesson distillations. It was a plain `def` with no `await` in it, called as
+# `state = self._run_cadences(state)` from the async spine, so nothing in it could ever yield: DRIVEN
+# 2026-09-08, a tick-counter task reading from INSIDE a blocking stub at each site counted 177->177
+# (strategist), 38->38 (report), 36->36 (concept) and 34->34 (verifier) — zero ticks, all four. Since
+# `cadence.at_creation_boundary` those gates come due WHILE evaluations run, so the hold lands on top
+# of a live GPU: no eval watcher tick, no operator abort/reset detection, no train-monitor kill and no
+# control ACK for as long as the block spends.
+#
+# THE OFFLOAD IS THEREFORE A SINK, NOT A `to_thread`. All nine row types those cadences write are
+# FOLDED and none is in `DIAGNOSTIC_EVENTS`, and the load-bearing one is `verifier_group_scored`: it
+# MOVES the champion tie-break, so a worker-thread append landing inside a Card reservation's window
+# is exactly the `score_moved` conjunct `card_reservation.py::_proposal_receipt_fence` discards an
+# already-paid proposal on. Invariant #1 is the rule and this is its shape: the worker BUFFERS its
+# folded intents and the MAIN TASK publishes them after the await, at the same point in the loop the
+# cadence block always wrote at.
+#
+# WHY NOT `novelty.py::_offload_under_proposal_sink`. Its sink intercepts `_append_proposal_event`
+# only — one funnel, four call sites — while the cadence cluster writes through `self.store.append`
+# from eleven modules, and hoisting all of them onto a new funnel would be a rename across the
+# cluster whose one forgotten site is a silent breach. The interception therefore goes where the
+# writes already converge: `Engine.store` itself, which every cadence reads through, resolved per
+# CONTEXT so only the worker's copied context sees the buffer. It is the same ContextVar discipline
+# the proposal sink uses (set on the calling task immediately before a non-abandonable
+# `to_thread.run_sync` hop, which copies the context into the worker), and its safety rests on the
+# same two facts: the main task is suspended at that await, and every sibling task carries the
+# context it was spawned with, so none of them can see this buffer.
+_CADENCE_STORE_SINK: "ContextVar[Optional[_BufferedCadenceStore]]" = ContextVar(
+    "looplab_cadence_store_sink", default=None)
+
+# ONE thread, because there is one caller: `_run_cadences` has exactly one call site, on the loop
+# task, awaited. A shared pool would be wrong in the other direction — anyio's default 40 tokens are
+# held by every in-flight `_run_eval` for its whole multi-hour duration, so a cadence queued on it
+# could wait behind the evaluations it is supposed to run BESIDE. Process-wide and lazily built so
+# importing this module never touches the loop (`novelty.py::proposal_limiter`'s rule).
+_CADENCE_THREADS = 1
+_CADENCE_LIMITER = None
+
+
+def cadence_limiter():
+    """The dedicated pool the offloaded cadence block rides. One object per process."""
+    global _CADENCE_LIMITER
+    if _CADENCE_LIMITER is None:
+        _CADENCE_LIMITER = anyio.CapacityLimiter(_CADENCE_THREADS)
+    return _CADENCE_LIMITER
+
+
+class _BufferedCadenceStore:
+    """The store view a cadence worker sees: FOLDED rows are BUFFERED for the main task to publish,
+    the two already-registered thread-side seams pass straight through, and reads see both.
+
+    WHAT PASSES THROUGH AND WHY IT IS NOT A WIDENING. `DIAGNOSTIC_EVENTS` and
+    `BACKGROUND_APPENDABLE` are invariant #1's own registries for exactly this situation — the first
+    is fold-ignored AND excluded wholesale from every seq-equality fence, the second is the
+    concurrent-research task's allow-list with a splice-neutrality proof
+    (`tests/test_background_appendable.py`). Both are already appended from worker threads today, by
+    the research task and by `core/phase_events.py`'s sink. Buffering them would be a REGRESSION in
+    observability: `phase_progress` and the `agent_phase_*` moments are how the UI shows that a
+    multi-minute cadence is alive, and `llm_usage` is the durable spend ledger a ceiling is read off.
+    Everything else — every folded, authority-bearing row — is buffered.
+
+    THE ORDER THIS PRODUCES is buffered-after-passthrough on the real log, and that is precisely what
+    those two registries assert is safe: neither set's position is load-bearing. Nothing else moves,
+    because the main task publishes at the same loop point the block always wrote at.
+
+    A CAS APPEND IS REFUSED, not degraded. `expected_last_seq` is a promise about the tail of the
+    REAL log at the instant of the append, and a buffered row cannot keep it — the publish happens
+    later, against a tail that has moved by construction. No cadence uses one today; a future one
+    that does gets a loud `TypeError` here instead of a silently unfenced write. `require_durable`
+    goes the same way and for the same reason: it is a claim about bytes that are not written yet.
+    """
+
+    __slots__ = ("_store", "rows")
+
+    def __init__(self, store):
+        self._store = store
+        # `(Event, trace_id, span_id)` per buffered row: the Event is what the worker's own reads
+        # fold, the pair beside it is what the publish re-appends with. Kept together so a publish
+        # cannot drift from what the worker was shown.
+        self.rows: list = []
+
+    def __getattr__(self, name):
+        # Everything that is not an append or a read is the real store's — `path`, the locks, the
+        # repair helpers. A proxy that re-implemented any of them would be a second EventStore.
+        return getattr(self._store, name)
+
+    def _refuse(self, kwargs: dict) -> None:
+        for key in ("expected_last_seq", "require_durable"):
+            if kwargs.get(key) not in (None, False):
+                raise TypeError(
+                    f"a cadence worker cannot honour `{key}`: its folded rows are buffered and "
+                    "published by the main task after the await, so the tail it would fence "
+                    "against has already moved (see _BufferedCadenceStore)")
+
+    def append(self, type: str, data: dict, **kwargs):
+        if type in DIAGNOSTIC_EVENTS or type in BACKGROUND_APPENDABLE:
+            return self._store.append(type, data, **kwargs)
+        self._refuse(kwargs)
+        trace_id, span_id = current_ids()
+        # `deepcopy` for the same reason `novelty.py::_capture_proposal_events` deep-copies: the
+        # caller keeps its dict and may go on mutating it, and what is published must be what the
+        # cadence decided at the moment it decided it.
+        event = Event(seq=self._next_seq(), ts=time.time(), type=type,
+                      data=deepcopy(data), trace_id=trace_id, span_id=span_id)
+        self.rows.append((event, trace_id, span_id))
+        return event
+
+    def append_many(self, records, **kwargs):
+        # The atomic multi-row envelope degrades to per-row buffering, which is sound HERE and only
+        # here: the whole buffer is published by one main-task call, so the group still lands as a
+        # contiguous run of rows. `_refuse` above still rejects the tail fence that would make the
+        # atomicity load-bearing.
+        return [self.append(rtype, rdata, **kwargs) for rtype, rdata in records]
+
+    def _next_seq(self) -> int:
+        tail = self._store.read_all()
+        highest = tail[-1].seq if tail else -1
+        return max(highest, self.rows[-1][0].seq if self.rows else -1) + 1
+
+    def read_all(self):
+        """The real log with this worker's own buffered rows appended.
+
+        The worker MUST see its own writes: `_run_cadences` threads one `state` through eleven
+        consumers and several of them re-fold after writing (`_maybe_deep_research`,
+        `_sync_card_enrichments`). A view that hid the buffer would hand the next consumer a state
+        missing the row the previous one just decided — a stale chain, not a delayed one. The
+        synthesized seqs are view-only: the publish assigns the real ones.
+        """
+        rows = self._store.read_all()
+        if not self.rows:
+            return rows
+        return list(rows) + [event for event, _tid, _sid in self.rows]
+
+
+def accountant_over_ceiling(engine: object) -> bool:
+    """Is this run ALREADY at or past a spend ceiling — asked of the LEDGERS, not of an exception?
+
+    THE FACT A CANCELLED SIBLING CANNOT CARRY. `_drain_inflight_evaluation` used to key entirely on
+    `budget_stop_leaf(escaping)`, i.e. on the exception that reached `Engine.run`. That is exactly
+    right when the ceiling was raised by the overlapped RESEARCH task, and it is blind in the case
+    the marker above described: a `BudgetExceeded` raised INSIDE an evaluation (the repair path
+    re-raises it; stage checks, triage and the repair critic are all paid calls) comes out of an
+    `eval_tg` CHILD, so the group cancels `_run_with_llm_broker`, the outer handler catches a
+    Cancelled whose leaf is None, and the drain no-ops — while every SIBLING evaluation, mid-score,
+    loses the terminal for compute the run has already bought. Same five-runs-measured loss the
+    drain was built for, one seam over.
+
+    So ask the question the escaping exception cannot answer. The ceiling is a property of the RUN
+    and both halves of it are held out of band: the `CostAccountant` family (`spent` against
+    `limit`, the ceiling `core/llm.py::CostAccountant.add` raises on) and the reserve-commit
+    `RunBudget` the broker meters at `borrow()` (`committed_cost`/`committed_tokens` against
+    `cost_limit`/`llm_token_limit`). At-or-over on ANY of them is the same predicate those two
+    classes refuse on, so this can only be true where the next paid call would raise anyway — which
+    is also why it costs nothing: the drain it enables starts no new work and cannot spend.
+
+    TOTAL AND NEVER RAISING. It runs on the teardown path, one frame from the `raise` that ends the
+    run, and a run must not lose its budget receipt to an introspection error over a foreign role
+    graph. An unreadable ledger answers False, i.e. exactly today's behaviour.
+    """
+    try:
+        for accountant in find_cost_accountants(engine):
+            limit = getattr(accountant, "limit", None)
+            spent = getattr(accountant, "spent", None)
+            if (isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0
+                    and isinstance(spent, (int, float)) and not isinstance(spent, bool)
+                    and spent >= limit):
+                return True
+        budget = getattr(engine, "_llm_budget", None)
+        if budget is not None:
+            cost_limit = getattr(budget, "cost_limit", None)
+            committed = getattr(budget, "committed_cost", 0.0)
+            if (isinstance(cost_limit, (int, float)) and not isinstance(cost_limit, bool)
+                    and cost_limit > 0 and float(committed) >= float(cost_limit)):
+                return True
+            token_limit = getattr(budget, "token_limit", None)
+            committed_tokens = getattr(budget, "committed_tokens", 0)
+            if (isinstance(token_limit, (int, float)) and not isinstance(token_limit, bool)
+                    and token_limit > 0 and int(committed_tokens) >= int(token_limit)):
+                return True
+    except Exception as exc:  # noqa: BLE001 — a teardown probe may never replace the run's own stop
+        _LOG.debug("could not read this run's spend ledgers for the drain gate: %r", exc)
+    return False
 
 
 def budget_stop_recheck(budget_stop: list) -> bool:
@@ -360,6 +567,74 @@ def _eval_admission_current(state, node, generation, max_es) -> bool:
         and node.id not in state.aborted_nodes
         and not _run_terminal_gate(state)
         and not (max_es is not None and state.total_eval_seconds >= max_es)
+    )
+
+
+def _eval_time_admission_refused(engine, state, node, max_es) -> bool:
+    """Whether the run's eval-second allowance refuses ONE MORE evaluation lane right now.
+
+    The dispatcher's own half of `resources.py::eval_time_admission_blocked` (doc 27
+    `eval-lanes-admit-without-reserving-time`): it reads the three numbers the rule needs off the
+    live fold, off the in-flight reservation ledger and off the lane's own worst case, so every
+    admission site asks the SAME question rather than each re-spelling `total_eval_seconds >=
+    max_es` — which is how the three sites came to enforce a per-lane ceiling while the ledger they
+    all charge is per-RUN. `node` is the candidate when the site has already chosen one and None at
+    the sites that gate before the scan; the estimate is then the run-level per-eval budget.
+
+    THE LEDGER IS READ THROUGH A BOUND-METHOD LOOKUP, and the reason is the same one the two
+    `hasattr(self, "_…_reserve_node_resources")` guards below carry: `_dispatch_evals` is driven
+    in the suite by stub hosts that own none of `ResourceSchedulingMixin`, and on such a host there
+    is no ledger to read — `reserved` is 0.0 and the rule degrades to exactly the historical
+    completed-time gate. What keeps that fallback from silently becoming the PRODUCT behaviour (the
+    `getattr`-default drift `engine/attribute_sites.py` is a census of) is that the property is
+    driven over a real `Engine` rather than pinned in source:
+    `tests/test_eval_time_reservation.py` admits one lane and asserts the next is refused while it
+    is still running, which no stub can satisfy.
+    """
+    reserved_seconds = getattr(engine, "_reserved_eval_seconds", None)
+    estimate_seconds = getattr(engine, "_eval_seconds_estimate", None)
+    return eval_time_admission_blocked(
+        float(getattr(state, "total_eval_seconds", 0.0) or 0.0),
+        float(reserved_seconds()) if callable(reserved_seconds) else 0.0,
+        float(estimate_seconds(node)) if callable(estimate_seconds) else 0.0,
+        max_es,
+    )
+
+
+def _reserve_eval_time(engine, node_id, generation, node) -> None:
+    """Commit one lane's worst-case eval charge against the run's allowance (the ledger half of
+    `_eval_time_admission_refused`, reached the same way and for the same stub-host reason)."""
+    reserve = getattr(engine, "_reserve_eval_seconds", None)
+    estimate = getattr(engine, "_eval_seconds_estimate", None)
+    if callable(reserve) and callable(estimate):
+        reserve(node_id, generation, estimate(node))
+
+
+def _release_eval_time(engine, node_id, generation) -> None:
+    """Hand the unused portion of that commitment back. Always paired with `_reserve_eval_time` in
+    a `finally`, because a leaked reservation is a run that stops admitting lanes forever."""
+    release = getattr(engine, "_release_eval_seconds", None)
+    if callable(release):
+        release(node_id, generation)
+
+
+def parent_generations_current(state, parent_generations) -> bool:
+    """Is every parent this build was reserved against still the exact lifecycle it named?
+
+    The same four clauses were spelled at three creation sites (doc 25 ES-02) — twice as an
+    affirmative `all(...)` and once as a NEGATED `any(...)` — so the three copies could drift on
+    what "the parents are still there" means with every test staying green. Each clause is
+    load-bearing: the parent must still exist, still be on the generation the reservation named (a
+    reset while we built makes this build a child of a lifecycle that no longer exists), and be
+    neither tombstoned nor aborted. An empty mapping is vacuously current, which is what a seed
+    build wants.
+    """
+    return all(
+        pid in state.nodes
+        and state.nodes[pid].attempt == generation
+        and not state.nodes[pid].tombstoned
+        and pid not in state.aborted_nodes
+        for pid, generation in ((int(pid), gen) for pid, gen in parent_generations.items())
     )
 
 
@@ -590,7 +865,7 @@ def _task_declared_env(task) -> bool:
 
 
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
-             ConceptCadenceMixin, VerifierTiebreakMixin,
+             ConceptCadenceMixin, VerifierTiebreakMixin, ValueEstimateMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
              AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
              CardReservationMixin,
@@ -797,6 +1072,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         digest_char_cap = _opt("digest_char_cap")
         research_verify = _opt("research_verify")
         memo_verdict_cue = _opt("memo_verdict_cue")
+        lesson_operator_scope = _opt("lesson_operator_scope")
         workdir_audit = _opt("workdir_audit")
         trace_llm_io = _opt("trace_llm_io")
 
@@ -830,6 +1106,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # "drifts" forever, and without this the strategy path rebuilt the whole StrategyContext on
         # every loop pass to re-derive the same no-op. Nothing durable keys off it — see there.
         self._invalid_pin_verdict: Optional[tuple] = None
+        # In-process abstention memo for the value-estimate cadence (docs/BACKLOG.md §0.1 row 17):
+        # the `(node_id, attempt)` pairs whose estimate came back unusable. Declared HERE rather
+        # than minted on first use so it takes no row in `engine/attribute_sites.py`'s shrink-only
+        # backlog — a read of a name nothing assigns answers a default instead of raising, which is
+        # the whole reason that registry exists. Nothing durable keys off it: an abstention is
+        # live-only and a resumed process may retry each node once, which is bounded.
+        self._value_estimate_attempted: set[tuple[int, int]] = set()
         self.strategist_every = max(1, strategist_every)
         self.concept_retag_every = max(1, concept_retag_every)
         # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
@@ -1001,6 +1284,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # it) for the two propose paths, and an engine attribute for the three call sites that are
         # engine methods (`crash_repair._ask_triage`/`_ask_repair_critic`, `node_build._choose_action`).
         self._memo_verdict_cue = bool(memo_verdict_cue)
+        # Read at ONE place, `lessons_priors.py::operator_scoped_prior` — the engine attribute exists
+        # so a build worker can ask without reaching for Settings (doc 52 §4.3). Off = the Developer
+        # prior is the run-wide text, byte for byte.
+        self._lesson_operator_scope = bool(lesson_operator_scope)
         try:
             setattr(researcher, "_memo_verdict_cue", bool(memo_verdict_cue))
         except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
@@ -1217,6 +1504,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._gpu_condition = threading.Condition(self._gpu_lock)
         self._gpu_epoch = 0
         self._eval_gpu_reservations: dict[tuple[int, int], dict] = {}
+        # The eval-SECOND half of the same lifecycle reservation: what the lanes now running are
+        # still going to charge against `max_eval_seconds`, so an admission gate can subtract it
+        # instead of comparing only completed charges (`resources.py::eval_time_admission_blocked`).
+        self._eval_time_reservations: dict[tuple[int, object], float] = {}
         self.timeout = _opt("timeout")
         self.max_eval_timeout = _opt("max_eval_timeout")
         # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
@@ -1354,6 +1645,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             _ro_argv(self.sandbox_readonly_rootfs)
         self._spec_activated = False
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        # Declared HERE, not only by the `store` property's setter: `engine/attribute_sites.py`'s
+        # rule is that every attribute the family reads has one declaring site, and
+        # `__init__` is it.
+        self._event_store = None
         self.store = EventStore(self.run_dir / "events.jsonl")
         # Bind after EventStore exists and before any role can make an LLM call. Paid usage now
         # survives process restarts in the same append-only source of truth as the run itself.
@@ -1903,6 +2198,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         `EV_NODE_EVALUATED` append.  Nothing was saved by cancelling -- the compute was already
         spent -- and the one durable record of it was lost.
 
+        THE CASE THE ESCAPING EXCEPTION CANNOT NAME (closed 2026-09-08).  When the ceiling is raised
+        INSIDE an evaluation rather than by the overlapped research -- the repair path re-raises it,
+        and stage checks, triage and the repair critic are paid calls -- the raise comes out of an
+        `eval_tg` CHILD.  The group then cancels `_run_with_llm_broker`, this hook is entered with a
+        Cancelled whose `budget_stop_leaf` is None, and the drain no-opped while every SIBLING
+        evaluation lost its terminal: the same measured loss, one seam over.  So the gate asks
+        `accountant_over_ceiling` as well -- the run's own ledgers, which hold the ceiling out of
+        band and can therefore answer for an exception that carries nothing.  The in-flight test
+        moved ABOVE both, because "is there anything to drain" is the cheap half and neither
+        predicate is worth asking of a run with no evaluation running.
+
         THE FIX IS THE ORDERING, NOT THE STOP.  Draining here happens BEFORE `async with eval_tg`
         exits, which is the only instant at which the children are neither cancelled nor already
         gone.  `Engine.run`'s `raise` is unconditional and untouched, so the run still stops with
@@ -1921,10 +2227,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         cancellation already pending the first `anyio.sleep` re-raises it and we fall through to
         `raise` -- i.e. exactly today's behaviour, never worse.
         """
-        if budget_stop_leaf(escaping) is None:
-            return                            # an ordinary crash keeps today's teardown, untouched
         if not self._evals_inflight():
             return                            # nothing paid for is in flight -- no barrier to pay
+        if budget_stop_leaf(escaping) is None and not accountant_over_ceiling(self):
+            return                            # an ordinary crash keeps today's teardown, untouched
         await self._drain_adopted_evals()
 
     def _enter_run(self) -> bool:
@@ -2187,7 +2493,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # ``node_budget_frac``; the post-cadence refresh below is still required because a live
             # policy swap rebuilds ``policy.max_nodes`` from its unextended base.
             self._refresh_speculation_budget(state, events=decision_events)
-            state = self._run_cadences(state)
+            # OFF THE LOOP THREAD (the whole block, one worker hop): the cadences below spend,
+            # and `at_creation_boundary` makes them due while an evaluation is burning. Their
+            # folded rows are buffered by the sink and published by THIS task inside the
+            # helper, so the tail read on the next line already carries them.
+            state = await self._offload_cadence(functools.partial(self._run_cadences, state))
             post_cadence_events = self.store.read_all()
             post_cadence_seq = post_cadence_events[-1].seq if post_cadence_events else -1
             if post_cadence_seq != decision_seq:
@@ -2622,6 +2932,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         proposing against a fold that holds the siblings — a different (and, on the field's own
         account, stronger) way to get it, but not the same bytes.
         """
+        # THE NODE-OPEN FLOOR, before anything is proposed or reserved. Every other create path
+        # asks it — the Card lane at `_handle_create_actions`, the chunked path per chunk, the
+        # serial path per node — and this lane, added later, asked it nowhere: with
+        # `node_open_budget_floor_usd` set and `steady_state_build` on, the floor was simply inert
+        # and the run kept opening nodes until the CEILING raised `BudgetExceeded` from inside a
+        # worker, where `_create_node_guarded` turns it into one node's terminal. Asked ONCE here
+        # rather than per iteration because the loop below runs inside a task group, where a raise
+        # would tear down lanes that are already building; the same "a lane of N node(s)" shape the
+        # Card lane uses.
+        self._refuse_node_open_below_floor(f"a steady-state build lane of {len(creates)} node(s)")
         # A SEMAPHORE and not a `CapacityLimiter`: the limiter is BORROWER-scoped — the task
         # that acquires must be the one that releases — and the whole point here is that the
         # MAIN task takes the slot (so it blocks before proposing) while the LANE gives it
@@ -3920,6 +4240,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self.store.append(EV_DATA_PROFILED, {"columns": profile_dataset(cols())})
                     _ev("data_profiled")
                     _su_step("data profiled")
+                # Distribution shift (docs/BACKLOG.md §15): record how far the deployment sample is
+                # from the training one, from the SAME declared data the two rungs around it read.
+                # Advisory and appended BEFORE the gate below on purpose — a run the leakage gate
+                # aborts is exactly a run whose operator wants to see what the data looked like.
+                self._record_distribution_shift()
                 # Leakage-first grounding (I9): if the task exposes split/feature/target/time
                 # data and a leak is detected, refuse to run — don't produce results on leaky data.
                 leakage_blocked = self._leakage_blocks()
@@ -4240,6 +4565,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # reads. Measured on the live reproduction (`/tmp/ll-fixb/run`): seq 10 and 11, identical.
             return True
         self._create_paused = True     # stop the rest of any create batch, like developer_crash
+        # REDACTED, because this `reason` is provider text. It is built from the raw `LLMError`
+        # (`agents/roles.py::researcher_fallback_cause`), and a provider that quotes the request's
+        # own `Authorization` header back in its error body -- an ordinary shape -- then puts the
+        # operator's credential verbatim into `events.jsonl`, the file `export-bundle` copies and
+        # the UI renders. Driven 2026-09-08: `sk-...` landed in the pause row while the SAME text
+        # was masked to `bearer ******` two rows above, in `research_completed`. Three screens
+        # already mask it (`redact_secrets`, `redact_persisted_text`, `redact_output_tail`); this
+        # row simply reached none of them, because `_redact` had 7 call sites and no `EV_PAUSE`.
+        reason = self._redact(reason)
         if main_task:
             if not fold(self.store.read_all()).paused:
                 self.store.append(EV_PAUSE, {"reason": reason})
@@ -4768,24 +5102,53 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return True
         return False
 
-    # OPEN[paid-cadences-hold-the-engine-loop] every paid cadence below executes as one event-loop
-    # callback: the Strategist consult (unbounded turns under the shipped `agent_max_turns=0`), the
-    # concept re-tag/consolidation pass (`_RETAG_CAP` 20 + `_HYP_TAG_CAP` 60 sequential tag calls),
-    # the verifier tie-break and the report refresh. `at_creation_boundary` made these gates due WHILE evaluations run, so the hold
-    # now lands on top of a live GPU. They write FOLDED rows, so the fix is the offload-under-a-capture-
-    # sink discipline `novelty.py` already uses, not a bare `to_thread`.
-    # proof:absent:_offload_cadence@looplab/engine/orchestrator.py
+    # *Closed 2026-09-08 (`paid-cadences-hold-the-engine-loop`): the whole block runs off the loop
+    # thread through `_offload_cadence` — one worker hop under `_BufferedCadenceStore`, which buffers
+    # every FOLDED row for the main task to publish and lets only the two registered thread-side
+    # seams (`DIAGNOSTIC_EVENTS`, `BACKGROUND_APPENDABLE`) through live. The two constraints recorded
+    # below are what the implementation is shaped by, so they are kept rather than deleted with the
+    # marker.*
     #
-    # MEASURED 2026-09-04, and the answer RE-RANKS this DOWN rather than closing it. Every
-    # `operation` span on v11 (a full 24 h run, 9 evaluations), totalled by name:
+    # WHAT USED TO BE HERE: every paid cadence below executed as ONE event-loop callback — the
+    # Strategist consult (unbounded turns under the shipped `agent_max_turns=0`), the concept
+    # re-tag/consolidation pass (`_RETAG_CAP` 20 + `_HYP_TAG_CAP` 60 sequential tag calls), the
+    # verifier tie-break, the report refresh and `foresight_rank`. `at_creation_boundary` made these
+    # gates due WHILE evaluations run, so the hold landed on top of a live GPU.
+    #
+    # MEASURED 2026-09-04, and it is why this sat open for four days rather than being taken on a
+    # hunch. Every `operation` span on v11 (a full 24 h run, 9 evaluations), totalled by name:
     #     strategist_consult 3 calls 5.9 min | concept_coverage 2 calls 4.9 min
     #     foresight_rank     2 calls 2.7 min | report           3 calls 2.0 min
     #     -> every paid cadence together ~15.5 min, against `evaluate` at 5026.6 min.
-    # The cadences named above are 0.3% of the run. The offload they ask for is a concurrency change
-    # against invariant #1, and 0.3% does not buy that risk. The same sweep found where the hold
-    # actually is: `card_build`, 608.6 min over 13 calls — the serial-node-build item, not this one.
-    # LEFT OPEN because the description is accurate and a costlier Strategist could change the
-    # number; what is recorded is that nobody should spend the risk until it does.
+    # 0.3% of the run. The same sweep found where the hold actually is: `card_build`, 608.6 min over
+    # 13 calls — the serial-node-build item, which `_offload_build` closed. What the wall-clock share
+    # does NOT price, and what decided this in the end, is WHAT the loop owes during those minutes:
+    # the eval watcher tick, operator abort/reset detection, the train-monitor kill signal and the
+    # control ACK are all main-task work, so 15.5 minutes of hold is 15.5 minutes of a burning GPU
+    # that cannot be stopped, not 0.3% of a delay.
+    #
+    # DRIVEN 2026-09-08, so the hold was measured rather than asserted before it was removed: a
+    # tick-counter task read from INSIDE a blocking stub at each site, over a real `engine.run()`,
+    # counted 177->177 (strategist), 38->38 (report), 36->36 (concept), 34->34 (verifier). Zero
+    # ticks, all four. The mechanism was one line: `_run_cadences` is a plain `def` with no `await`
+    # in it, called as `state = self._run_cadences(state)` from the async spine, so nothing in it
+    # could ever yield. (The finalize report holds too but is not one of these — it runs on a run
+    # that is already ending.)
+    #
+    # TWO CONSTRAINTS THE OFFLOAD MEETS, both found by building one and neither obvious from this
+    # site, recorded so a future change to it does not re-derive them:
+    #   * all nine row types these cadences write are FOLDED and none is in `DIAGNOSTIC_EVENTS`, so
+    #     a bare `to_thread` is out. The load-bearing one is `verifier_group_scored`: it MOVES the
+    #     champion tie-break, so a worker-thread append landing inside a Card reservation's window
+    #     is exactly the `score_moved` conjunct `card_reservation.py::_proposal_receipt_fence`
+    #     discards an already-paid proposal on.
+    #   * `novelty.py::_offload_under_proposal_sink` cannot be reused as-is, and for ONE reason,
+    #     not two: its sink intercepts `_append_proposal_event` only. The second reason recorded
+    #     here on 2026-09-08 -- that it publishes under the receipt fence's ELECTION rule while a
+    #     cadence must publish unconditionally -- was FALSE, and driven false: the helper publishes
+    #     from a bare `finally`, on return AND on raise, which its own two neighbouring docstrings
+    #     already said. A wrong reason in this position is worse than no reason, because it steers
+    #     the next attempt away from the helper it should be extending.
     def _run_cadences(self, state: RunState) -> RunState:
         # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
         # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision
@@ -4809,6 +5172,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # fold's final selector breaks the tie by soundness. Lazy (only real ties), replay-safe (persists one
         # verifier_group_scored event), advisory (never overrides a strictly-better metric). No-op when off.
         state = self._maybe_verify_ties(state)
+
+        # docs/BACKLOG.md §0.1 row 17: the LLM VALUE ESTIMATE for the MCTS candidates — how much a
+        # model thinks each branch still has left — frozen into the log so the tree can tell an
+        # unexpanded branch from a spent one at the same metric. Placed BEFORE the Strategist for
+        # the reason `_maybe_verify_ties` is: the policy that reads the estimates may be rebuilt by
+        # `_apply_strategy`, and an estimate bought after that rebuild would be spent on a weight
+        # the turn no longer uses. Replay-safe (the recorded per-node estimate is what the fold
+        # reads, never a live call), and a no-op unless the live policy's `value_weight` is > 0 —
+        # which is also the gate on the paid call itself, so today it costs nothing.
+        state = self._maybe_estimate_node_values(state)
 
         # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
         # the policy proposes the next actions. No-op when strategist is off (== today).
@@ -4840,6 +5213,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # (at_node gates), no-op when the cadences are 0.
         state = self._maybe_distill_lessons(state)
         state = self._maybe_refresh_lessons(state)
+
+        # M4 auto-skills, same shape and the same `lessons_every` pace: promote the technique of a
+        # card whose evidence has SETTLED into the shared skill store now, instead of holding every
+        # promotion for the run-end reflection — which a killed run never reaches. Replay-safe (the
+        # `skills_promoted` at_node gate), no-op when the cadence is 0, and the run-end pass skips
+        # what this one already wrote so the classifier is still paid once per card.
+        state = self._maybe_promote_skills(state)
 
         # Reconciliation (memory ↔ corrected outcomes): when a node_reset re-eval FLIPS a node's
         # outcome (a false-failure re-scored to evaluated, a demoted champion), this run's DISTILLED
@@ -5035,13 +5415,24 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         functools.partial(self._maybe_merge_hypotheses, snap))
                 if cap > 0 and calls >= cap:
                     return                   # research LLM budget spent; the health monitor still runs
+                # WHAT `calls` COUNTS IS PROVIDER REQUESTS, not passes (doc 27 P1). This used to be a
+                # bare `calls += 1` per pass, and a pass is a multi-turn agentic think plus its forced
+                # emit and its memo verification — so a ceiling spelled `concurrent_research_max_calls`
+                # was counting between one and several dozen calls at a time and undercounted the spend
+                # it exists to bound by exactly that factor. `ProviderCallMeter` is debited inside
+                # `llm_request_permit`, the one seam every outbound request passes, so what lands here
+                # is what the pass actually asked the provider for.
+                #
                 # Counted as an ATTEMPT, before the call rather than after it returns. Incrementing
                 # only on success meant a provider that consistently RAISES (broken auth, endpoint
                 # down, or a failure after tokens were already charged) never touched
                 # `concurrent_research_max_calls` and was re-called every `base` seconds for the whole
                 # eval window — the one budget backstop, blind to exactly the failure mode that can
-                # spend money without producing anything.
-                calls += 1
+                # spend money without producing anything. The `max(1, …)` floor and the `finally` are
+                # that property, kept exactly: a pass that raises before it reaches the provider (a
+                # refused thread hop, a role that fails to build) still spends one, so nothing can
+                # re-tick this loop for free.
+                pass_meter = ProviderCallMeter()
                 # ONE hop for the whole paid pass: receipt -> provider -> record. Only the FIRST pass
                 # carries the initially-due cadence/strategist trigger and thus a durable gate worth
                 # receipting; `_record_research_attempt` no-ops for the `repeat` passes that follow
@@ -5088,11 +5479,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # cadence advances either way. An explicit retry status for that window would be a
                 # second gate answering a question the receipt already answers.
                 this_trig, trig = trig, "repeat"
-                sig, recorded = await anyio.to_thread.run_sync(
-                    functools.partial(self._research_attempt_step, snap, this_trig,
-                                      manual=False, last_sig=last_sig,
-                                      converged_skips=converged),
-                    abandon_on_cancel=False)
+                # The meter rides the CONTEXT into the worker thread (`anyio.to_thread.run_sync`
+                # copies it), so every request the pass makes below — the think, its tools' own
+                # calls, the verify — is debited to this window whatever lane it declares.
+                try:
+                    with provider_call_meter(pass_meter):
+                        sig, recorded = await anyio.to_thread.run_sync(
+                            functools.partial(self._research_attempt_step, snap, this_trig,
+                                              manual=False, last_sig=last_sig,
+                                              converged_skips=converged),
+                            abandon_on_cancel=False)
+                finally:
+                    calls += max(1, pass_meter.calls)
                 if sig is None:
                     next_sleep = base
                     continue
@@ -5119,6 +5517,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             except Exception:  # noqa: BLE001 — an advisory tick hiccup must not disturb the eval
                 next_sleep = base
                 continue
+
+    def _fold_if_tail_moved(self, cached: Optional[tuple]) -> tuple:
+        """`(tail_seq, RunState)` for the log as it is now, re-folding ONLY if the tail moved.
+
+        The LOOP-LOCAL half of doc 25 ES-12, and deliberately not the shared `fold_cached` the
+        finding asked for. A resource wait can last as long as another run holds the host GPU pool
+        (hours), and every bounded tick of it re-folded the WHOLE log — an O(total-events) busy-poll
+        the wait's own comment had been asking to gate since it was written. `EventStore.read_all`
+        is already incrementally cached, so an unchanged log costs a stat and the fold is what the
+        gate removes.
+
+        WHY THE TAIL IS A SOUND KEY here and a shared memo is not. Soundness: the wait's stated
+        reason for re-folding is a GPU->CPU Card re-pin, which does not bump the pool epoch — but it
+        does APPEND (`EV_CARD_RESOURCE_PINNED`), as does every operator gate the loop re-checks
+        (pause/stop/abort/reset) and the terminal `_skip_if_aborted` writes itself. Nothing this
+        loop reacts to can land without moving the tail, and seqs are strictly monotonic, so an
+        equal tail means the fold would be the same value. Isolation: the returned state is CACHED
+        BY ONE LOOP and handed to nobody who keeps it (`_evaluate` takes a node id and re-folds).
+        That is the whole difference from the rejected `fold_cached` on the store, which would have
+        handed ONE `RunState` to a build worker thread and to `evaluate.py`'s `node.rerun_stage =
+        None` at the same time. Pass `None` on the first tick; hand back what this returned.
+        """
+        events = self.store.read_all()
+        tail = events[-1].seq if events else -1
+        if cached is not None and cached[0] == tail:
+            return cached
+        return tail, fold(events)
 
     async def _dispatch_evals(self, evals: list, state: RunState,
                               max_es: Optional[float]) -> None:
@@ -5151,7 +5576,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             continue
                         # Re-check the eval-compute budget BEFORE each eval (not just per loop
                         # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
-                        if (max_es is not None and cur.total_eval_seconds >= max_es):
+                        # Through the reservation rule, like the parallel branch: on this branch the
+                        # ledger is empty at this point (the previous eval was awaited and its
+                        # `finally` released), so the answer is the historical completed-time one —
+                        # but the QUESTION is now asked in one place for both branches.
+                        if _eval_time_admission_refused(self, cur, None, max_es):
                             break
                         node = cur.nodes.get(a["node_id"])
                         reservation = None
@@ -5164,6 +5593,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # there skips the eval, and the loop-top test then ends the queue.
                         if node is not None and hasattr(self, "_wait_reserve_node_resources"):
                             generation = node.attempt
+                            # The wait's own tail-gated fold, loop-local and handed to nobody: with
+                            # the cross-run host lease this wait lasts as long as ANOTHER run holds
+                            # the pool (hours of training), and an unconditional re-fold per 0.5s
+                            # tick was an O(total-events) busy-poll — the cost confirm F26 documents.
+                            waited_fold = None
                             while True:
                                 if budget_stop_recheck(budget_stop):
                                     skip_eval = True
@@ -5172,15 +5606,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 # re-pin does not release a GPU (and therefore does not bump the pool
                                 # epoch), so re-fold after every bounded condition tick and fence the
                                 # exact lifecycle plus run-level operator gates before retrying.
-                                # with the cross-run host lease this wait is no longer
-                                # bounded by a sibling eval in this process — it lasts as long as
-                                # ANOTHER run holds the pool (hours of training), and every 0.5s tick
-                                # re-folds the WHOLE log (the parallel branch folds twice per tick):
-                                # an O(total-events) busy-poll, the same cost confirm F26 documents.
-                                # The stated reason (a re-pin doesn't bump the pool epoch) doesn't
-                                # need an unconditional fold — a re-pin always APPENDS, so gate the
-                                # re-fold on the tail seq having changed, or lengthen the idle tick.
-                                waiting = fold(self.store.read_all())
+                                # The tail gate keeps that promise exactly: a re-pin APPENDS
+                                # (`EV_CARD_RESOURCE_PINNED`), as does every operator gate this loop
+                                # re-checks, so nothing it reacts to can land without moving the tail
+                                # — see `_fold_if_tail_moved` for why the key is sound and why this
+                                # stays loop-local rather than a memo on the store (ES-12).
+                                waited_fold = self._fold_if_tail_moved(waited_fold)
+                                waiting = waited_fold[1]
                                 live = waiting.nodes.get(node.id)
                                 if self._skip_if_aborted(a, waiting):
                                     skip_eval = True
@@ -5235,9 +5667,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 break
                         if skip_eval:
                             continue
+                        # …and the TIME this lane will charge, committed against the run allowance
+                        # for exactly as long as the lane holds it. Reserved beside the devices and
+                        # released in the same `finally`, so no path can leak an allowance nobody is
+                        # spending (`resources.py::eval_time_admission_blocked`).
+                        _reserve_eval_time(self, a["node_id"], generation, node)
                         try:
                             await self._evaluate(a["node_id"], limiter, max_es)
                         finally:
+                            _release_eval_time(self, a["node_id"], generation)
                             if reservation is not None and generation is not None:
                                 self._clear_eval_resource_reservation(a["node_id"], generation)
                                 self._release_gpus(reservation.get("gpu_ids"))
@@ -5289,6 +5727,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # no-op; the outer semaphore is what bounds fan-out and drives the refill.
                             await self._evaluate(nid, anyio.CapacityLimiter(1), max_es)
                         finally:
+                            # The eval-second allowance this lane committed at admission goes back
+                            # BEFORE the slot does: the producer wakes on `slots.release()` and
+                            # immediately asks whether one more lane fits, and it must ask that with
+                            # this lane's worst case already handed back — its REAL cost is in the log
+                            # by now and `total_eval_seconds` charges it.
+                            _release_eval_time(self, nid, generation)
                             if reservation is not None and generation is not None:
                                 self._clear_eval_resource_reservation(nid, generation)
                                 self._release_gpus(reservation.get("gpu_ids"))
@@ -5308,19 +5752,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             cur = fold(self.store.read_all())
                             # Budget guard (parallel path): now that `cur` reflects mid-batch completions,
                             # this actually enforces the eval-second cap — admit no more once spent. The
-                            # overshoot is bounded to the ~max_parallel evals already in flight.
-                            # CODEX AGENT: a "hard cumulative" budget cannot count only completed
-                            # charges: every lane can enter under the same remaining balance and each
-                            # timeout may exceed it. Reserve the worst-case/time-bounded charge atomically
-                            # at admission, then release the unused portion when the evaluation settles.
-                            if (max_es is not None and cur.total_eval_seconds >= max_es):
+                            # overshoot is bounded to the ONE evaluation the ceiling has always allowed,
+                            # not to the ~max_parallel that could each enter under the same remaining
+                            # balance: the annotation this line used to carry — "a 'hard cumulative'
+                            # budget cannot count only completed charges: every lane can enter under the
+                            # same remaining balance and each timeout may exceed it. Reserve the
+                            # worst-case/time-bounded charge atomically at admission, then release the
+                            # unused portion when the evaluation settles." — is what
+                            # `resources.py::eval_time_admission_blocked` and the reservation below now
+                            # do. The first lane still enters on the completed-time rule alone (see that
+                            # function's second clause: an empty ledger may never refuse, or a ceiling
+                            # under one eval's timeout would admit nothing at all).
+                            if _eval_time_admission_refused(self, cur, None, max_es):
                                 break
                             await slots.acquire()     # blocks only when the pool is full -> the refill point
                             # the pre-check above may be minutes old after a genuine refill
                             # wait. Re-fold while owning the freed slot so a sibling that crossed the hard
                             # eval budget (or an operator abort) cannot be followed by one more admission.
                             cur = fold(self.store.read_all())
-                            if max_es is not None and cur.total_eval_seconds >= max_es:
+                            if _eval_time_admission_refused(self, cur, None, max_es):
                                 slots.release()
                                 break
                             # …and the SPEND ceiling, for the same reason.  THE ONLY gate this
@@ -5430,10 +5880,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             if chosen_reservation is not None and generation is not None:
                                 self._register_eval_resource_reservation(
                                     chosen["node_id"], generation, chosen_reservation)
+                            # THE TIME RESERVATION IS TAKEN HERE, before the lane starts and while
+                            # the producer still owns the decision — the whole point is that the NEXT
+                            # turn of this loop sees it. Its release is `_eval_in_slot`'s `finally`,
+                            # which the failed-spawn path below cannot rely on (nothing ran), so that
+                            # path releases it beside the devices.
+                            _reserve_eval_time(self, chosen["node_id"], generation, chosen_node)
                             try:
                                 tg.start_soon(_eval_in_slot, chosen["node_id"], generation,
                                               chosen_reservation)
                             except BaseException:
+                                _release_eval_time(self, chosen["node_id"], generation)
                                 if chosen_reservation is not None and generation is not None:
                                     self._clear_eval_resource_reservation(
                                         chosen["node_id"], generation)
@@ -5635,6 +6092,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # this span is stamped with it (current_ids) → the UI scopes the event's trace to the distill.
         with self._op_span("lessons_distill"):
             return self.lessons.maybe_distill_lessons(state)
+
+    @in_llm_lane("enrichment")
+    def _maybe_promote_skills(self, state: RunState) -> RunState:
+        # Own op-trace for the same reason as the distill above: the classifier calls this pass makes
+        # are real money, and a beacon-only phase writes them with `trace_id=null` (CLAUDE.md's span
+        # rule). Not in `FORWARDED_SUBOBJECT_MEMBERS` — like every other `_maybe_*` here it opens a
+        # span and so is not a one-line delegator.
+        with self._op_span("skills_promote"):
+            return self.lessons.maybe_promote_skills(state)
 
     def _lessons_store_stamp(self):
         return self.lessons.lessons_store_stamp()
@@ -5856,7 +6322,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         its `client`/`is_code_generating` forwarders come from `WrapsDeveloper`, so they describe the
         DEVELOPER stage only (`agents/unified_agent.py::_wrapped` -> `_active_developer`). On every
         task whose Developer is a fixed template but whose Researcher is an `LLMResearcher` —
-        classification, regression, timeseries — both probes therefore read the same client-less
+        classification, regression (timeseries too, until its LLM path started writing the
+        forecaster on 2026-09-08) — both probes therefore read the same client-less
         template and the whole product default answered "no LLM" while calling the provider once per
         node. Measured on `examples/classification_task.json` with stock Settings: `run_started`
         recorded no `speculation_depth` at all (AUTO had settled to 0) even though the run's own
@@ -6041,6 +6508,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._role_pool.append(pair)
         # workers are constructed lazily, after Engine.__init__ bound the primary role
         # graph. Attach every newly reachable accountant before the first concurrent paid request.
+        #
+        # SEED FIRST, THEN BIND, the order `Engine.__init__` uses and `seed_prior_spend`'s docstring
+        # requires: the tracker takes each accountant's baseline at bind time, so seeding after it
+        # would re-record the prior spend as new usage. `Engine.__init__` ran that pass ONCE, before
+        # this pool existed, so on a RESUME every accountant a pooled `role_factory()` mints here
+        # was reachable only afterwards and started at `spent = 0.0` — a second full
+        # `llm_budget_usd` on the widest-spending lanes, exactly the §213 overshoot the seeding
+        # exists to end. It was benign only where the factory happened to hand every pooled client
+        # the SAME accountant object; that is a property of a factory, not of this seam. Idempotent
+        # per accountant (`_PRIOR_SEEDED_ATTR`), so the repeat costs one log read.
+        seed_prior_spend(self)
         bind_cost_accountants(self)
         return [(self.researcher, self.developer)] + self._role_pool[: n - 1]
 
@@ -6358,7 +6836,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # method and none of them may attach (see `_plan_native_card`).
                     retry_attach=True)
         if reserved is None:
+            # A RECEIPT, because this branch spends money and used to leave nothing behind.
+            # `_reserve_node_build` returns None when a control/research/lifecycle row won its CAS,
+            # and returning to the selection boundary is the CORRECT answer there — minting a
+            # replacement for a just-dropped orphan would defeat an operator's stop intent. What was
+            # wrong is the silence: the proposal above is already PAID FOR, and this returned with no
+            # node, no card and no row, so the loss was invisible in the log and unmeasurable after
+            # the fact. `offloaded-serial-build-reserves-off-the-main-task` is the loss itself;
+            # this only makes it countable.
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            # `_progress` is a CONTEXT MANAGER: a bare call builds a generator and emits nothing.
+            # The first cut of this receipt was exactly that no-op, and it was caught by driving it
+            # rather than reading it — which is the same lesson this file's own guard rules state.
+            with self._progress(PROGRESS_STAGE_BUILD, "discarded",
+                                operator=str(action.get("kind") or ""),
+                                reason="reservation_lost_the_cas"):
+                pass
             return
         state = reserved.state
         node_id = reserved.node_id
@@ -6465,55 +6958,36 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         **({"memo_id": _memo_id}
                            if valid_advisory_ref(_memo_id, "memo") else {}),
                     }
-            latest = fold(self.store.read_all())
-            if any(pid not in latest.nodes
-                   or latest.nodes[pid].attempt != generation
-                   or latest.nodes[pid].tombstoned
-                   or pid in latest.aborted_nodes
-                   for pid, generation in ((int(pid), gen)
-                                           for pid, gen in parent_generations.items())):
-                # Clear both the transient node owner and its immutable, now-unbuildable Card.
-                self._fail_reserved_build(
-                    node_id=node_id, card_id=reserved.card_id, generation=0,
-                    error="parent lifecycle changed while building", reason="superseded")
-                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
-                return
+            # Read off the pre-build snapshot, exactly as before, and hoisted above the commit only
+            # because the emit inside it needs the answer: an abort already recorded when this slot
+            # was reserved. A pure read of `state`, so its new position cannot change it.
             materialize_abort = node_id in state.aborted_nodes
-            self._emit_node_created(
-                node_id=node_id,
-                parent_ids=parents,
-                operator=idea.operator,
-                idea=durable_idea_payload(idea),
-                code=code,
-                files=dict(built.last_files),                # the envelope's, never the instance's
-                deleted=list(built.last_deleted),
-                research_origin=research_origin,
-                # doc 52 row 19: the arm this build was routed to (omitted when none was)
-                model_arm=(action.get(META_MODEL) if isinstance(action.get(META_MODEL), str)
-                           else _OMIT_ARM),
-                # Variant-1: read the receipt THIS build stamped on its own researcher (set under
-                # `_advisory_lock` in `_set_complexity_hint`), so a concurrent sibling draft's advisory
-                # write to `self._cross_run_advisory_receipt` can't mis-stamp this node. Falls back to
-                # the shared attr only when a path never refreshed it (attr genuinely absent).
-                cross_run_receipt=(_rcpt if (_rcpt := getattr(researcher, "_cross_run_advisory_receipt", None))
-                                   is not None else getattr(self, "_cross_run_advisory_receipt", {})),
-                # Every engine-created lifecycle promises the same generation-scoped admission
-                # receipt. Besides crash-safe speculative accounting, this is what lets the public
-                # activity projection prove "waiting for a slot" versus "evaluating".
-                eval_start_boundary=True,
-                **({"parent_generations": parent_generations} if parent_generations else {}),
-                **({"footprint_finalized": True} if footprint_finalized else {}),
-                # A legacy generation-less abort may intentionally reserve a not-yet-created slot.
-                # Mark only an intent already present in the reservation snapshot. An abort that lands
-                # after node_building is a losing-worker race and deliberately gets no escape hatch.
-                **({"materialize_aborted_intent": True}
-                   if materialize_abort else {}),
-            )
-            if node_id not in fold(self.store.read_all()).nodes:
-                self._fail_reserved_build(
-                    node_id=node_id, card_id=reserved.card_id, generation=0,
-                    error="node creation was rejected during replay", reason="superseded")
-                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            if not self._commit_built_node(
+                    node_id=node_id, generation=0, card_id=reserved.card_id,
+                    parents=parents, parent_generations=parent_generations,
+                    idea=idea, code=code,
+                    files=dict(built.last_files),                # the envelope's, never the instance's
+                    deleted=list(built.last_deleted),
+                    footprint_finalized=footprint_finalized,
+                    stale_error="parent lifecycle changed while building",
+                    rejected_error="node creation was rejected during replay",
+                    researcher=researcher, developer=developer,
+                    research_origin=research_origin,
+                    # doc 52 row 19: the arm this build was routed to (omitted when none was)
+                    model_arm=(action.get(META_MODEL) if isinstance(action.get(META_MODEL), str)
+                               else _OMIT_ARM),
+                    # Variant-1: read the receipt THIS build stamped on its own researcher (set under
+                    # `_advisory_lock` in `_set_complexity_hint`), so a concurrent sibling draft's advisory
+                    # write to `self._cross_run_advisory_receipt` can't mis-stamp this node. Falls back to
+                    # the shared attr only when a path never refreshed it (attr genuinely absent).
+                    cross_run_receipt=(_rcpt if (_rcpt := getattr(researcher, "_cross_run_advisory_receipt", None))
+                                       is not None else getattr(self, "_cross_run_advisory_receipt", {})),
+                    # A legacy generation-less abort may intentionally reserve a not-yet-created slot.
+                    # Mark only an intent already present in the reservation snapshot. An abort that lands
+                    # after node_building is a losing-worker race and deliberately gets no escape hatch.
+                    **({"materialize_aborted_intent": True}
+                       if materialize_abort else {}),
+            ):
                 return
             if materialize_abort:
                 # Preserve the already-recorded operator intent as the first terminal for this newly
@@ -6585,10 +7059,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         "auto-paused: a Developer session crashed (LLM unreachable or a hard "
                         "error, unresolved within the node) — resume once it's fixed")
         self._consume_node_build_telemetry(
-            node_id, 0, researcher=researcher, developer=developer)
+            node_id, 0, researcher=researcher, developer=developer, report=built.last_report)
 
     def _consume_node_build_telemetry(self, node_id: int, generation: int,
-                                      *, researcher=None, developer=None) -> None:
+                                      *, researcher=None, developer=None,
+                                      report=AuditMixin._REPORT_OMITTED) -> None:
         """Attribute this build's role telemetry to the node it belongs to, then clear it.
 
         All three creation paths end with this triple, and it is the CONSUMING half of the pairing
@@ -6603,13 +7078,124 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         `researcher`/`developer` ARE `self.researcher`/`self.developer`, so omitting them is
         byte-identical to passing them.
         """
-        self._emit_agent_report(node_id, **({"developer": developer} if developer is not None else {}))
+        # `report=` is THIS build's envelope copy when the caller has one — see
+        # `_emit_agent_report` for the unlocked window the instance read still sits in.
+        self._emit_agent_report(node_id, report=report,
+                                **({"developer": developer} if developer is not None else {}))
         self._emit_hypothesis_ranked(
             node_id, generation, **({"researcher": researcher} if researcher is not None else {}))
         self._emit_foresight_selected(
             node_id, generation,
             **({"researcher": researcher} if researcher is not None else {}),
             **({"developer": developer} if developer is not None else {}))
+
+    def _commit_built_node(self, *, node_id: int, generation: int, card_id: Optional[str],
+                           parents: list, parent_generations: Mapping, idea, code: str,
+                           files: dict, deleted: list, footprint_finalized: bool,
+                           stale_error: str, rejected_error: str,
+                           check_node_lifecycle: bool = False, strict_landing: bool = False,
+                           stamp_generation: bool = False, drop_card: bool = True,
+                           append_failure_error: Optional[str] = None,
+                           researcher=None, developer=None, **emit_extra) -> bool:
+        """Commit ONE finished build as its `node_created`, or close the reservation (doc 25 ES-02).
+
+        The three creation paths — `_create_node_scoped`, `_rerun_node`, `_create_injected_node` —
+        each hand-coded the same three-stage epilogue: re-fold and refuse a build whose parents (and,
+        on a rerun, whose own lifecycle) moved while the Developer worked; emit the `node_created`;
+        re-fold and refuse a node the fold did not accept. That triplication is what forced the
+        false-success sentinel guard to be retrofitted into all three copies SEPARATELY, and it had
+        already let the copies drift mechanically. The sequence now exists once; the callers keep
+        only what genuinely differs — how they obtained the idea/code, and everything AFTER the node
+        has landed (materialize-abort, the two Developer sentinels, telemetry consumption).
+
+        Every keyword below is a MEASURED divergence between the three copies, not a knob:
+
+        * `stale_error` / `rejected_error` — the two refusal sentences. They differ per path, they
+          are durable operator-facing text, so they stay the callers' words.
+        * `check_node_lifecycle` — a rerun re-enters an EXISTING lifecycle and must also fence its
+          own node (reset again / tombstoned / aborted mid-rebuild), on the SAME fold as the parent
+          check. A first creation has no prior lifecycle to lose.
+        * `strict_landing` — a rerun must see THIS generation land carrying THIS build's code and no
+          pending `rerun_from`; for a first landing, existing IS landing.
+        * `stamp_generation` — only the rerun writes a `generation` key into the payload. The other
+          two omit it (never None-fill it), which is the historical shape `_emit_node_created`'s
+          docstring pins.
+        * `drop_card` — a rerun keeps the original work item unless it minted a replacement card;
+          `_fail_reserved_build` owns the ownership half of that rule.
+        * `append_failure_error` — only the injected path recovers from an append that RAISES (the
+          operator's request must not leave a bare `node_building` behind). `None` re-raises
+          untouched, which is exactly what the two agent paths did: the parallel one is caught by
+          `_create_node_guarded`, the serial one deliberately crashes so bugs surface in tests.
+        * `researcher` / `developer` — the pooled roles of THIS build, so a concurrent draft's
+          telemetry is not what gets discarded here. Omitted = the shared instance attrs.
+        * `**emit_extra` — the per-path `node_created` keys (research_origin / model_arm /
+          cross_run_receipt; source / origin / forked_from). A typo cannot silently enter a payload:
+          `_emit_node_created` has an explicit keyword signature and raises `TypeError`.
+
+        Returns True when the node is committed and the caller may run its post-landing epilogue;
+        False when the reservation has already been closed and this build's telemetry discarded —
+        the caller must return without consuming telemetry.
+
+        Lives in orchestrator.py rather than beside `_emit_node_created` in `node_build.py` for the
+        reason the module-global `fold` seam comment gives: both re-folds below belong to the three
+        creation paths that `monkeypatch.setattr(orch, "fold", ...)` is written to intercept, and
+        `fold` resolved as a module attribute at call time is what keeps them intercepted.
+        """
+        latest = fold(self.store.read_all())
+        stale = not parent_generations_current(latest, parent_generations)
+        if check_node_lifecycle and not stale:
+            current = latest.nodes.get(node_id)
+            stale = (current is None or current.attempt != generation
+                     or current.tombstoned or node_id in latest.aborted_nodes)
+        if stale:
+            # Clear both the transient node owner and its immutable, now-unbuildable Card.
+            self._fail_reserved_build(
+                node_id=node_id, card_id=card_id, generation=generation,
+                error=stale_error, reason="superseded", drop_card=drop_card)
+            self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            return False
+        try:
+            self._emit_node_created(
+                node_id=node_id,
+                parent_ids=parents,
+                operator=idea.operator,
+                idea=durable_idea_payload(idea),
+                code=code,
+                files=files,
+                deleted=deleted,
+                # Every engine-created lifecycle promises the same generation-scoped admission
+                # receipt. Besides crash-safe speculative accounting, this is what lets the public
+                # activity projection prove "waiting for a slot" versus "evaluating".
+                eval_start_boundary=True,
+                **({"generation": generation} if stamp_generation else {}),
+                **({"parent_generations": parent_generations} if parent_generations else {}),
+                **({"footprint_finalized": True} if footprint_finalized else {}),
+                **emit_extra,
+            )
+        except Exception:
+            if append_failure_error is None:
+                raise                       # the caller's historical behaviour — see the docstring
+            try:
+                landed = node_id in fold(self.store.read_all()).nodes
+            except Exception:  # noqa: BLE001 — a failed landing probe reads as not landed; the branch below decides
+                landed = False
+            if not landed:
+                self._fail_reserved_build(
+                    node_id=node_id, card_id=card_id, generation=generation,
+                    error=append_failure_error, reason="build_crash", drop_card=drop_card)
+            raise
+        landed = fold(self.store.read_all()).nodes.get(node_id)
+        rejected = landed is None
+        if strict_landing and not rejected:
+            rejected = (landed.attempt != generation or landed.rerun_from is not None
+                        or landed.code != code)
+        if rejected:
+            self._fail_reserved_build(
+                node_id=node_id, card_id=card_id, generation=generation,
+                error=rejected_error, reason="superseded", drop_card=drop_card)
+            self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            return False
+        return True
 
     def _create_node_guarded(self, action: dict, roles=None, reserved=None, preproposed=None,
                              pretelemetry=None) -> None:
@@ -6657,6 +7243,86 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         "unresolved within the build) — resume once it's fixed")
                 except Exception:  # noqa: BLE001 — best-effort terminal; never re-raise into the group
                     pass
+
+    # ------------------------------------------------------------------ the run's event store
+    # A PROPERTY, and the ONE reason is the cadence offload (`_offload_cadence`). Every cadence in
+    # `_run_cadences` writes through `self.store.append` from eleven modules, so that is where the
+    # worker's buffer has to intercept; hoisting all of those onto a new funnel would be a rename
+    # across the cluster whose one forgotten site is a silent breach of invariant #1. Resolving the
+    # attribute per CONTEXT instead means the offload installs its view once and every writer in the
+    # block is covered, while every other task — the evaluations above all — keeps the real store,
+    # because a ContextVar set on this task after they were spawned is invisible to them.
+    #
+    # The setter is what keeps the ~170 direct `Engine(...)` call sites and the tests that swap
+    # `engine.store = <fake>` working unchanged: assignment still lands on one plain attribute.
+    @property
+    def store(self):
+        buffered = _CADENCE_STORE_SINK.get()
+        return buffered if buffered is not None else self._event_store
+
+    @store.setter
+    def store(self, value) -> None:
+        self._event_store = value
+
+    async def _offload_cadence(self, fn):
+        """Run the paid cadence block OFF the loop thread, under the store sink, publishing on the
+        way out. Returns whatever `fn` returned.
+
+        THE HOLD THIS REMOVES, driven rather than asserted (2026-09-08): a tick-counter task reading
+        from inside a blocking stub at each cadence site, over a real `engine.run()`, counted
+        177->177 (strategist), 38->38 (report), 36->36 (concept) and 34->34 (verifier). Zero ticks,
+        all four — because `_run_cadences` is a plain `def` with no `await` in it, called from the
+        async spine, so nothing in it could ever yield. Since `cadence.at_creation_boundary` those
+        gates come due WHILE evaluations run, so for as long as the block spends there is no eval
+        watcher tick, no operator abort/reset detection, no train-monitor kill signal and no control
+        ACK.
+
+        THE CAPTURE->OFFLOAD->PUBLISH TRIPLE, the same shape `novelty.py::
+        _offload_under_proposal_sink` uses and for the same invariant. `captured` is bound BEFORE the
+        `try` so a raise while installing the sink still leaves the `finally` something to read, the
+        var is RESET before the publish so the publish itself reaches the real store, and the publish
+        is in a `finally` because a `BudgetExceeded` out of a cadence (the Strategist and the
+        deep-research step both spend) would otherwise discard rows that were durable at emit time
+        before the offload existed — including the receipts whose absence would buy the same paid
+        pass again on resume.
+
+        `abandon_on_cancel=False` (the default) is REQUIRED, not preferred: an abandoned worker keeps
+        the sink installed in its copied context and goes on buffering into the same list this task's
+        `finally` is publishing. It also matches what the block already committed to — a paid
+        provider call bounded by the endpoint timeout — and it is the property invariant #1 rests on
+        here, since a cancel delivered mid-block could otherwise leave a cadence's gate spent with
+        its receipt in a buffer nobody owns.
+        """
+        captured = _BufferedCadenceStore(self.store)
+        token = _CADENCE_STORE_SINK.set(captured)
+        try:
+            return await anyio.to_thread.run_sync(fn, limiter=cadence_limiter())
+        finally:
+            _CADENCE_STORE_SINK.reset(token)
+            # Contained: `store.append` raising HERE would REPLACE an exception already unwinding
+            # (`shared.py::_append_progress_row` documents that shape), turning a clean
+            # `BudgetExceeded` into a generic store error and losing the run its budget receipt.
+            # Losing buffered rows to a store that cannot append is the lesser harm, said out loud.
+            try:
+                self._publish_cadence_events(captured.rows)
+            except Exception:  # noqa: BLE001 - never mask the raise already in flight
+                _LOG.warning("buffered cadence rows could not be published on the way out",
+                             exc_info=True)
+
+    def _publish_cadence_events(self, rows) -> int:
+        """Append a buffered cadence prefix from the MAIN TASK. Returns how many landed.
+
+        The rows land at the same point in the outer loop the cadence block always wrote at — the
+        caller re-reads the tail immediately after and re-enters the turn when it moved — so no
+        reader's position assumption changes. The trace/span ids are the ones that were current
+        INSIDE the worker, so `looplab timings` and the trace view still attribute each row to the
+        cadence that decided it rather than to the loop turn that published it.
+        """
+        landed = 0
+        for event, trace_id, span_id in (rows or ()):
+            self.store.append(event.type, event.data, trace_id=trace_id, span_id=span_id)
+            landed += 1
+        return landed
 
     async def _offload_build(self, fn) -> None:
         """Run ONE paid build off the event-loop thread, on the proposal pool.
@@ -6835,38 +7501,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             code = built.code
             idea, footprint_finalized = self._finalize_developer_footprint(
                 idea, self.developer, code, footprint=built.last_footprint)
-            latest = fold(self.store.read_all())
-            current = latest.nodes.get(node.id)
-            parents_current = all(
-                pid in latest.nodes and latest.nodes[pid].attempt == parent_generation
-                and pid not in latest.aborted_nodes and not latest.nodes[pid].tombstoned
-                for pid, parent_generation in ((int(pid), gen)
-                                                for pid, gen in parent_generations.items()))
-            if (current is None or current.attempt != generation
-                    or current.tombstoned or node.id in latest.aborted_nodes or not parents_current):
-                self._fail_reserved_build(
-                    node_id=node.id, card_id=active_card_id, generation=generation,
-                    error="node lifecycle changed while rebuilding", reason="superseded",
-                    drop_card=replacement_card)
-                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
-                return
-            self._emit_node_created(
-                node_id=node.id, parent_ids=parents, operator=idea.operator,
-                idea=durable_idea_payload(idea), code=code,
-                files=dict(built.last_files),
-                deleted=list(built.last_deleted),
-                generation=generation,
-                eval_start_boundary=True,
-                **({"parent_generations": parent_generations} if parent_generations else {}),
-                **({"footprint_finalized": True} if footprint_finalized else {}))
-            landed = fold(self.store.read_all()).nodes.get(node.id)
-            if (landed is None or landed.attempt != generation or landed.rerun_from is not None
-                    or landed.code != code):
-                self._fail_reserved_build(
-                    node_id=node.id, card_id=active_card_id, generation=generation,
-                    error="rebuilt node creation was rejected during replay", reason="superseded",
-                    drop_card=replacement_card)
-                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
+            if not self._commit_built_node(
+                    node_id=node.id, generation=generation, card_id=active_card_id,
+                    parents=parents, parent_generations=parent_generations,
+                    idea=idea, code=code,
+                    files=dict(built.last_files),
+                    deleted=list(built.last_deleted),
+                    footprint_finalized=footprint_finalized,
+                    stale_error="node lifecycle changed while rebuilding",
+                    rejected_error="rebuilt node creation was rejected during replay",
+                    # A reset re-enters an EXISTING lifecycle, so the fence is wider than the two
+                    # first-creation paths': the node itself may have been reset again, tombstoned or
+                    # aborted while the Developer worked, and the landing must be THIS generation
+                    # carrying THIS build's code — a bare "the id exists" would accept the previous
+                    # attempt's node as proof that the rebuild landed.
+                    check_node_lifecycle=True, strict_landing=True, stamp_generation=True,
+                    # The original work item survives a rerun; only a re-proposal that MINTED a
+                    # replacement card may close the one it superseded (`replacement_card`).
+                    drop_card=replacement_card,
+            ):
                 return
             if is_developer_stuck(code):
                 # SAME DISTINCTION AS THE FRESH-BUILD PATH ABOVE. The model ran out of moves on this
@@ -6892,7 +7545,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self.store.append(*crash_terminal)
                 if self._developer_crash_pause_due(fold(self.store.read_all()), node.id):
                     self.store.append(*crash_pause)
-        self._consume_node_build_telemetry(node.id, generation)
+        self._consume_node_build_telemetry(node.id, generation, report=built.last_report)
 
     def _prepare_injected_node(
         self,
@@ -7057,35 +7710,23 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 idea, footprint_finalized = self._finalize_developer_footprint(
                     idea, self.developer, code,
                     footprint=(_inj.last_footprint if _inj is not None else None))
-            latest = fold(self.store.read_all())
-            if any(pid not in latest.nodes
-                   or latest.nodes[pid].attempt != generation
-                   or latest.nodes[pid].tombstoned
-                   or pid in latest.aborted_nodes
-                   for pid, generation in ((int(pid), gen)
-                                           for pid, gen in parent_generations.items())):
-                self._fail_reserved_build(
-                    node_id=node_id, card_id=reservation.card_id, generation=0,
-                    error="parent lifecycle changed while building", reason="superseded")
-                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
-                return
-            try:
-                self._emit_node_created(
-                    node_id=node_id,
-                    parent_ids=parents,
-                    operator=idea.operator,
-                    idea=durable_idea_payload(idea),
-                    code=code,
+            if not self._commit_built_node(
+                    node_id=node_id, generation=0, card_id=reservation.card_id,
+                    parents=parents, parent_generations=parent_generations,
+                    idea=idea, code=code,
                     # Honour explicit files/deleted on the request (a cross-run `import` ships the
                     # sibling's full multi-file solution); else use the Developer's last build, and
                     # only when the Developer actually implemented (no ready-made code was supplied).
                     files=(req.get("files")
                            or ({} if req.get("code") or _inj is None else dict(_inj.last_files))) or {},
                     deleted=req.get("deleted") or [],
+                    footprint_finalized=footprint_finalized,
+                    stale_error="parent lifecycle changed while building",
+                    rejected_error="injected node creation was rejected during replay",
+                    # The operator's request must not leave a bare `node_building` behind when the
+                    # append itself RAISES; the two agent paths have callers that already handle it.
+                    append_failure_error="injected node append failed",
                     source="manual",
-                    eval_start_boundary=True,
-                    **({"parent_generations": parent_generations} if parent_generations else {}),
-                    **({"footprint_finalized": True} if footprint_finalized else {}),
                     # Cross-run provenance: a DICT when this inject seeded from a sibling run's
                     # experiment (an `import` action), else None. Coerce defensively — a non-dict
                     # origin (a hand-authored/API inject that passed a label string) would make the
@@ -7101,22 +7742,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # leave the inject gate re-creating the SAME id forever.
                     **({"forked_from": req["forked_from"]}
                        if isinstance(req.get("forked_from"), dict) else {}),
-                )
-            except Exception:
-                try:
-                    landed = node_id in fold(self.store.read_all()).nodes
-                except Exception:  # noqa: BLE001 — a failed landing probe reads as not landed; the branch below decides
-                    landed = False
-                if not landed:
-                    self._fail_reserved_build(
-                        node_id=node_id, card_id=reservation.card_id, generation=0,
-                        error="injected node append failed", reason="build_crash")
-                raise
-            if node_id not in fold(self.store.read_all()).nodes:
-                self._fail_reserved_build(
-                    node_id=node_id, card_id=reservation.card_id, generation=0,
-                    error="injected node creation was rejected during replay", reason="superseded")
-                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
+            ):
                 return
             # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the
             # "(developer error: …)" sentinel as its code (an LLM 401/timeout/hard error). Without
@@ -7150,7 +7776,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 if self._developer_crash_pause_due(fold(self.store.read_all()), node_id):
                     self.store.append(*crash_pause)
         if developer_called:
-            self._consume_node_build_telemetry(node_id, 0)
+            # `_inj` is bound by the same `if developer_called` above; a build that never called the
+            # Developer does not reach this line at all.
+            self._consume_node_build_telemetry(node_id, 0, report=_inj.last_report)
 
     def _activate_spec(self, proposal: dict) -> None:
         """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec

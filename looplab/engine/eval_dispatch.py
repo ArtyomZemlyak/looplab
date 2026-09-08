@@ -23,7 +23,7 @@ from looplab.engine.speculation_gate import engine_authored_artifacts
 from looplab.events.replay import fold
 from looplab.events.types import (EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
                                   SETUP_THREAD_APPENDABLE)
-from looplab.runtime import applied_params, metric_inputs
+from looplab.runtime import applied_params, effective_batch, metric_inputs
 
 # THE engine sentinel (engine/options.py): `_evaluate` passes it into `_run_eval` positionally
 # (as `next_start`), so the identity check here MUST see the same object the orchestrator uses.
@@ -835,6 +835,25 @@ class EvalDispatchMixin:
                     pipeline_stages=[s.get("name") for s in (stages or ())])
             except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
                 res.applied_params = None
+            # THE EXECUTION SIDE of that same coordinate (`runtime/effective_batch.py`): what the
+            # trainer's OWN state file says it ran at, which is the one thing a reader of the
+            # committed or resolved configuration cannot see (`auto_find_batch_size` writes the
+            # reduced batch to `trainer_state.json` and leaves `args` declaring the original).
+            #
+            # HERE, at the metric read, for the two reasons its siblings are: the workdir is
+            # unambiguously alive at this line, and `run_command_eval` is the library boundary. The
+            # SAME freshness floor as the resolved tier, and for the same reason — a state file that
+            # predates this attempt belongs to the previous one — so it is re-derived from the same
+            # call rather than remembered across the `except` above, which could have swallowed it.
+            try:
+                res.effective_train_batch = effective_batch.bind_effective_train_batch(
+                    str(workdir),
+                    since=command_eval.attempt_freshness_floor(
+                        _attempt_started, stages,
+                        (node.rerun_stage if node is not None else None)
+                        if start_stage is _UNSET else start_stage))
+            except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
+                res.effective_train_batch = None
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;

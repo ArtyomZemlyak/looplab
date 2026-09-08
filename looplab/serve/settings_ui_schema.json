@@ -101,7 +101,7 @@
           "label": "Agent chooses the GPU footprint",
           "type": "bool",
           "default": true,
-          "help": "ON by default: tell the Researcher what a LARGER `footprint.gpus` actually does, instead of the shipped claim that it “does NOT get this experiment more hardware” and that the run then “serialises at the same per-experiment cost”. The scheduler contradicts both halves — a declared count beats AUTO, the reservation takes exactly that many devices all-or-nothing and the child is fenced to them — and the per-experiment cost is exactly what a second device changes. The sentence came from an old width defect that Proposals decide the width has since fixed, and it outlived its cause: no experiment on this box has ever declared anything but one GPU. With this on, the two prompts state the ordinary share as a DEFAULT rather than a wall, spell out the trade in both directions (same per-device batch: about the same experiments per hour, each finishing sooner, but a different — larger-batch — experiment; same global batch: the same experiment, fewer per hour, each sooner), name the per-device memory the scheduler reserves against, say plainly that this box's own speedup is unmeasured, and ask for a short fixed-step probe before hours are committed. It widens what the agent may ASK for and nothing else: the pool clamp, the width rule, the metric, the champion and selection are untouched, and an explicit GPU count in your task statement still wins. Turn it off to reproduce the historical prompts byte for byte. Operator-only: it governs what the deciding agent is TOLD about the machine, so an agent that could flip it could silence its own brief."
+          "help": "ON by default: tell the Researcher what a LARGER `footprint.gpus` actually does, instead of the shipped claim that it “does NOT get this experiment more hardware” and that the run then “serialises at the same per-experiment cost”. The scheduler contradicts both halves — a declared count beats AUTO, the reservation takes exactly that many devices all-or-nothing and the child is fenced to them — and the per-experiment cost is exactly what a second device changes. The sentence came from an old width defect that Proposals decide the width has since fixed, and it outlived its cause: no experiment on this box has ever declared anything but one GPU. With this on, the two prompts state the ordinary share as a DEFAULT rather than a wall, spell out the trade in both directions (same per-device batch: about the same experiments per hour, each finishing sooner, but a different — larger-batch — experiment; same global batch: the same experiment, fewer per hour, each sooner), name the per-device memory the scheduler reserves against, say plainly that this box's own speedup is unmeasured, and ask for a short fixed-step probe before hours are committed. It widens what the agent may ASK for and nothing else: the pool clamp, the width rule, the metric, the champion and selection are untouched, and an explicit GPU count in your task statement still wins. Turning it off does NOT restore the old paragraphs — they closed on a claim the scheduler contradicts, and no resumed run lands on this switch — it leaves the ordinary share and the rule that the command must target the count you declare, and says nothing about what a larger count buys. Operator-only: it governs what the deciding agent is TOLD about the machine, so an agent that could flip it could silence its own brief."
         },
         {
           "key": "ablate_every",
@@ -339,6 +339,13 @@
           "type": "float",
           "default": 0.0,
           "help": "Cost-constrained selection (mcts policy only): how much a subtree\u2019s measured expense counts against its UCB1 score, relative to this run\u2019s mean eval second. 0 = off; 0.5 = a subtree costing twice the average pays half a reward unit. An unmeasured subtree counts as average, never as free."
+        },
+        {
+          "key": "mcts_value_weight",
+          "label": "MCTS value estimate weight",
+          "type": "float",
+          "default": 0.0,
+          "help": "LLM value estimate (mcts policy only): how much a model\u2019s opinion of a branch\u2019s REMAINING headroom counts in the UCB1 value term, so an unexpanded branch stops scoring like a spent one at the same metric. 0 = off and buys no calls; 0.4 = a once-visited branch the model calls spent loses 0.2 reward and one it calls wide open gains 0.2, decaying as the subtree is really measured."
         },
         {
           "key": "digest_char_cap",
@@ -621,7 +628,7 @@
           "type": "float",
           "default": 0.0,
           "placeholder": "0 = no cap",
-          "help": "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit."
+          "help": "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit. It and llm_budget_usd are ONE ceiling since 2026-09-08: the tightest declared cap binds this reserve half AND the post-hoc accountant (with its node-open floor), and the refusal names the knob that was typed."
         },
         {
           "key": "llm_token_limit",
@@ -867,7 +874,7 @@
           "label": "LLM spend ceiling ($)",
           "type": "float",
           "default": 0.0,
-          "help": "Hard spend ceiling for this run's LLM calls, in US dollars, shared by every client the run builds (one accountant per Settings, not per client). 0 = no limit (the historical behaviour). On reaching it the next priced call raises BudgetExceeded, which every agent path treats as a hard stop that ENDS the run rather than degrading to a fallback. Priced calls only: a local model reports no cost and can never trip it. Not pinned into run_started, so a resume reads whatever is set now."
+          "help": "Hard spend ceiling for this run's LLM calls, in US dollars, shared by every client the run builds (one accountant per Settings, not per client). 0 = no limit (the historical behaviour). On reaching it the next priced call raises BudgetExceeded, which every agent path treats as a hard stop that ENDS the run rather than degrading to a fallback. Priced calls only: a local model reports no cost and can never trip it. Not pinned into run_started, which is NOT the same as re-read on resume: every resume adopts config.snapshot.json, so raise a stopped run's ceiling there (or in the per-run settings editor) rather than in the environment. Enforced in both halves of the run's budget — reserved at the broker's permit and committed post hoc — from one derivation shared with llm_cost_limit, whose tighter value binds if both are set."
         },
         {
           "key": "node_open_budget_floor_usd",
@@ -1368,6 +1375,14 @@
           "help": "B3, ON by default since 2026-08-15: adds the HIGH-ENTROPY pass to the persisted event, trace and UI stdout/stderr tail redactor. It is NOT the on/off switch for tail redaction — known credential shapes (sk-…, AKIA…, ghp_…, Authorization:, key=value, URL userinfo) and the values of your own secret-named environment variables are masked on every persisted tail whatever this says. What it adds is masking of a 24+ character high-entropy run that mixes upper case, lower case AND digits — the composition of a base64 credential, and deliberately not that of a path, a slug or a CamelCase class name (/ is treated as a separator for the same reason). That screen is why it now ships on: measured over every persisted tail under runs/, the pass changed 13 of 744 before the screen and all 13 were traceback file paths, and 0 of 1,652 after. Turn it OFF only if you would rather a high-entropy credential your eval prints reach the durable log than accept that residual risk; ordinary diagnostic output survives verbatim either way. Raw node-workdir setup.log, stage logs, eval.log, code and artifacts are outside this boundary and may contain secrets — protect the run root and avoid exposing secrets to candidate code."
         },
         {
+          "key": "mlflow_tracking_uri",
+          "label": "MLflow tracking URI",
+          "type": "text",
+          "default": "",
+          "placeholder": "off",
+          "help": "Mirror this run into MLflow WHILE IT RUNS (2026-09-08): a follower thread tails the run's event log and publishes each evaluated node as it lands — a child MLflow run per node with its params and metrics, plus node_metric / best_metric series on the parent run — instead of nothing reaching MLflow until someone runs `looplab export-mlflow` after the fact. Blank (the default) is OFF and nothing leaves the box: an external tracking server is an EGRESS boundary, so only a URI you type here starts it, and the champion's code is redacted on the way out exactly as the export redacts it. Needs the optional `mlflow` package — without it the setting degrades to today's behaviour with no error. The mirror only ever READS the log: it never appends, holds no lock, and a dead tracking server costs the mirror, never the search."
+        },
+        {
           "key": "reward_hack_detect",
           "label": "Reward-hack detector",
           "type": "bool",
@@ -1522,7 +1537,7 @@
           "type": "int",
           "default": 40,
           "placeholder": "40",
-          "help": "Per-eval-window cap on repeated-research LLM calls (0 = cadence-only). Past it the loop stops calling the LLM (the training-health monitor still runs)."
+          "help": "Per-eval-window cap on repeated-research LLM calls (0 = cadence-only), counted as PROVIDER CALLS: one research pass spends as many as it makes (at least one). Past it the loop stops calling the LLM (the training-health monitor still runs)."
         },
         {
           "key": "concurrent_consolidate",
@@ -1569,6 +1584,13 @@
           "default": 4,
           "placeholder": "4",
           "help": "M6 mid-run: every N created nodes, RE-READ the store so lessons distilled by CONCURRENT runs reach this run’s proposals (file re-read, no LLM call, skipped when unchanged). 0 = run-start read only."
+        },
+        {
+          "key": "lesson_operator_scope",
+          "label": "↳ scope lessons to the operator",
+          "type": "bool",
+          "default": false,
+          "help": "Cross-run lessons are retrieved by task fingerprint and role and by nothing about the action about to fire, so a merge, a repair and an improve all read the same five rows. ON ranks the Developer’s prior by the operator of the idea being built: that operator’s own lessons first, then untagged ones, then rows tagged only with other operators. It RANKS, it does not filter — nothing is withheld, only the order of the five slots changes. OFF by default because the only per-operator scoping ablation in the field came back null, and OFF reproduces the Developer prompt byte for byte. The evidence to decide it accrues either way: every distilled lesson records the operators of its own evidence, and a scoped render writes a prior_injected row naming the operator for the citation-rate instrument."
         },
         {
           "key": "embed_model",

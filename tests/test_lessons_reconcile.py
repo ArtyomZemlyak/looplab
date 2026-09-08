@@ -513,7 +513,7 @@ def test_reconcile_aborts_when_authoritative_locked_read_fails(tmp_path, monkeyp
     state = _state([_node(0, metric=9.0), _node(1, metric=6.0, parent_ids=[0])])
     monkeypatch.setattr(eng, "_reflect_client", lambda: FakeClient("P1 [BAD] regressed\n"))
     monkeypatch.setattr(
-        "looplab.engine.claims._load_claim_source_path",
+        "looplab.engine.claims.load_claim_source_path",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("locked read failed")),
     )
 

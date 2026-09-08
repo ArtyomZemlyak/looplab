@@ -91,10 +91,20 @@ SPECULATION_RUNTIME_POLICY_DESCRIPTOR: Mapping[str, Any] = MappingProxyType({
     "ablate_every": 0,
     "operator_bandit": False,
 })
+# 2026-09-08 (doc 25 AG-02): the two toy classes moved to `looplab/agents/toy_roles.py` and the
+# strings below FOLLOW them, which changes `speculation_runtime_scope_digest` and therefore revokes
+# every receipt issued against the old envelope. That is the deliberate answer rather than freezing
+# a path that no longer resolves: this descriptor's whole job is to NAME the concrete shipped
+# implementation, and a frozen name that resolves to nothing is the recorded-fact-away-from-its-
+# deciding-site shape `core/claimpin.py` exists to end. The revocation costs nothing that was not
+# already spent: `search/speculation_quality.py`'s header lists the FOUR identities that revoke a
+# receipt, and `speculation_implementation_digest` (a semantic edit to any shipped `.py`) had
+# already revoked every receipt this split touches. `roles.py` deliberately does NOT re-export the
+# pair, so there is exactly one path to name here.
 SPECULATION_RUNTIME_ROLES_DESCRIPTOR: Mapping[str, Any] = MappingProxyType({
-    "researcher": "looplab.agents.roles.ToyResearcher",
+    "researcher": "looplab.agents.toy_roles.ToyResearcher",
     "researcher_calibration_concepts": True,
-    "developer": "looplab.agents.roles.ToyObjectiveDeveloper",
+    "developer": "looplab.agents.toy_roles.ToyObjectiveDeveloper",
     "developer_calibration_gpu_probe": True,
     "isolated_role_factory": True,
 })

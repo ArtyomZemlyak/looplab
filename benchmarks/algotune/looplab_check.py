@@ -27,6 +27,7 @@ generator and reports validity only -- no speedup, no baseline, nothing that cou
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.util
 import io
 import json
@@ -185,6 +186,80 @@ def build_gate(solver_dir: Path, timeout: float = 120.0) -> dict:
             "note": f"failed rc={built.returncode}: {_build_error_digest(built.stderr)}"}
 
 
+def _binds_name(tree: ast.AST, name: str) -> bool:
+    """Does this parsed module bind `name` in ANY of Python's binding forms?
+
+    Deliberately NOT scoped to the module body. A `Solver` bound inside a function never becomes a
+    module attribute, so counting it ACQUITS a file the grader would refuse -- and that direction is
+    the safe one here (see `solver_binding_error`). What the loose walk buys is every form that
+    matters and that a scope analysis would cost real complexity to keep: a binding under
+    `if TYPE_CHECKING`, inside a `try: from fast import Solver / except ImportError:` pair (the
+    shape a compiled candidate with a pure-python fallback really has), or in a `with` block.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == name:
+                return True
+        elif isinstance(node, ast.Name):
+            # Every assignment target, `for` target, `with ... as`, walrus and comprehension
+            # variable reaches here in a `Store` context, so one test covers all of them.
+            if node.id == name and isinstance(node.ctx, ast.Store):
+                return True
+        elif isinstance(node, ast.alias):
+            # `import Solver`, `import pkg as Solver`, `from x import Solver`, `... as Solver`.
+            if (node.asname or node.name.split(".")[0]) == name:
+                return True
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                return True
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if name in node.names:
+                return True
+    return False
+
+
+def solver_binding_error(source: str, filename: str) -> str | None:
+    """The file-level refusal for a submission that cannot yield a `Solver`, or None.
+
+    THE GRADER RESOLVES A MODULE ATTRIBUTE, NOT A `class` STATEMENT. `_run_isolated`'s own
+    `getattr(solver_mod, "Solver", None)` one function up is the arena's rule too
+    (`evaluate_results.py` imports the file and reads the attribute), so `from impl import Solver`
+    and `Solver = make_solver()` are scored perfectly well. This gate used to be
+    `re.search(r"^\\s*class\\s+Solver\\b", ...)`, which convicts both of them and answers "defines no
+    `Solver` class" -- steering a rewrite the grader never required, on the one correctness command
+    the writing sessions are supposed to reach for constantly. `edit_surface` grants more than one
+    file precisely so a candidate CAN keep its class next door.
+
+    So the text is read with `ast`, which is the only reader that can tell a BINDING from a mention,
+    and every binding form acquits (`_binds_name`).
+
+    IT MAY ACQUIT ON EVIDENCE IT CANNOT SEE, AND MAY NEVER CONVICT ON IT. A module can still bind the
+    attribute in a way no reader of the text can settle -- `globals()["Solver"] = ...`, `exec`, a
+    decorator that registers -- so the conviction below is the weakest one that still answers the
+    typo this gate exists for: the name occurs NOWHERE in the file. Anything else falls through to
+    the instances, which import the module for real and report the loader's own sentence per row.
+    Two extra rows are cheap; telling a working candidate to rewrite itself is not.
+
+    A file that does not PARSE is its own answer, and a better one than the old message ever was:
+    the grader imports this file before it resolves anything in it, so the `SyntaxError` is what it
+    would hit first and what the model has to fix first.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return (f"{filename} does not parse: {exc.msg} (line {exc.lineno}). The grader imports this "
+                "file before it resolves anything in it, so fix this before anything else.")
+    if _binds_name(tree, "Solver"):
+        return None
+    if re.search(r"\bSolver\b", source):
+        # The name is in the file but in no form the text can prove binds it. Say nothing here:
+        # the instances below import the module for real and answer from the attribute itself.
+        return None
+    return (f"{filename} defines no `Solver` class, and binds that name nowhere else either. The "
+            "grader imports this file and reads the module attribute `Solver`, so a class "
+            "statement, `from <module> import Solver` or `Solver = <something>` all work.")
+
+
 def check(reference: Path, solver: Path, n: int, size: int, seed: int, timeout: float = 30.0) -> dict:
     """Validate `n` instances, EACH IN ITS OWN CHILD PROCESS.
 
@@ -198,17 +273,12 @@ def check(reference: Path, solver: Path, n: int, size: int, seed: int, timeout: 
     """
     # A MISSING `Solver` IS A FILE-LEVEL FACT, reported ONCE. Asked per-instance it would come back
     # as n identical rows, which reads like n failures. Checked in the parent, before any fork.
-    # OPEN[solver-check-requires-a-literal-class-statement] a valid solver that BINDS `Solver`
-    # (import or assignment) is refused by this regex while the arena's loader accepts it.
-    # proof:present:search(r"^\s*class@benchmarks/algotune/looplab_check.py
-    # REVIEW 2026-08-30 (correctness): the arena resolves the module ATTRIBUTE — as
-    # `_run_isolated`'s own `getattr(solver_mod, "Solver", None)` does one function up — so
-    # `from impl import Solver` or `Solver = make_solver()` scores fine and this checker tells the
-    # Developer its solver "defines no `Solver` class", steering a rewrite the grader never
-    # required. Resolve the attribute (import the module the way `_run_isolated` does, or fall
-    # back to the regex only as a fast pre-check that can acquit, never convict).
-    if not re.search(r"^\s*class\s+Solver\b", solver.read_text(encoding="utf-8", errors="replace"), re.M):
-        return {"ok": False, "error": f"{solver.name} defines no `Solver` class"}
+    # WHAT COUNTS AS "MISSING" IS `solver_binding_error`'s, which reads the file the way the GRADER
+    # resolves the attribute instead of demanding a literal `class Solver` statement (2026-09-08).
+    binding_error = solver_binding_error(solver.read_text(encoding="utf-8", errors="replace"),
+                                         solver.name)
+    if binding_error:
+        return {"ok": False, "error": binding_error}
     # BEFORE ANY INSTANCE, because a submission that cannot compile is graded 0 whatever the
     # instances say -- and because building it here is what makes the rows below describe the code
     # the evaluator will actually run. See `build_gate`.

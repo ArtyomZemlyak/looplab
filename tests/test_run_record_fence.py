@@ -108,10 +108,124 @@ def test_a_write_to_the_event_log_is_refused_and_the_row_never_lands(tmp_path):
     assert rows and log in rows[0] and rows[0].rstrip().endswith("open")
 
 
+def test_a_chdir_into_the_record_does_not_buy_a_bare_relative_write(tmp_path):
+    """THE SAME FORGERY, one `os.chdir` earlier — the spelling the fence let through until
+    2026-09-08.
+
+    `_resolve` gives a bare relative name a syscall-free bail (`p is None`) unless
+    `_CWD_REACHES_ROOT` says the cwd can reach a fenced root, and the open branch's RECORD check is
+    guarded on `p is not None`. The STARTUP derivation `_cwd_reaches_root` has always turned that
+    flag on for a cwd under the record and outside the writable prefixes, so a LAUNCHER standing in
+    the run directory was covered; the `os.chdir` hook re-derived it from `_prefixed` alone, which
+    answers about the EDITABLE roots and knows nothing about the record. So the absolute and
+    `../..` spellings were refused and `os.chdir("../.."); open("events.jsonl", "a")` was allowed,
+    with nothing in the violation log — driven, under policy `deny`, with no source root at all,
+    which is the shape every non-repo run gets.
+
+    Both halves are asserted because the fix is a flag: the forged row must be refused, AND a
+    write inside the node's own workdir must still be allowed after the same chdir back into it —
+    a flag that simply stays on would pass the first half and break every eval."""
+    run_dir, wd, _sib = _world(tmp_path)
+    fence = _install(run_dir)
+    before = (run_dir / "events.jsonl").read_bytes()
+    rc, out, err, _to = _run("""
+        row = json.dumps({"v": 1, "seq": 1, "ts": 2.0, "type": "node_evaluated",
+                          "data": {"node_id": 4, "metric": 999.0}}) + "\\n"
+        here = os.getcwd()
+        os.chdir("../..")                      # <run>/nodes/node_4 -> <run>
+        attempt("chdir-append", lambda: open("events.jsonl", "a").write(row))
+        attempt("chdir-plant", lambda: open("planted.json", "w").write("{}"))
+        attempt("chdir-sibling", lambda: open("nodes/node_3/predictions.json", "w").write("[2]"))
+        os.chdir(here)
+        attempt("own-workdir", lambda: open("mine.txt", "w").write("ok"))
+        """, wd, fence)
+    got = _verdicts(out)
+    for name in ("chdir-append", "chdir-plant", "chdir-sibling"):
+        assert got[name].startswith(f"REFUSED {name} LoopLabSourceReadRefused"), got[name]
+        assert "run's own RECORD" in got[name], got[name]
+    assert got["own-workdir"] == "ALLOWED own-workdir", got["own-workdir"]
+    assert (run_dir / "events.jsonl").read_bytes() == before, "a row landed"
+    assert not (run_dir / "planted.json").exists()
+    assert (run_dir / "nodes" / "node_3" / "predictions.json").read_text() == "[1]\n"
+    assert (wd / "mine.txt").read_text() == "ok"
+    # …and the refusal is IN THE LOG: a rung that refuses without recording leaves an operator
+    # reading the same events.jsonl with no account of what tried to write it.
+    assert any("events.jsonl" in line for line in read_fence.violations(run_dir))
+
+
+def test_the_fence_takes_no_exemption_a_candidate_can_set(tmp_path):
+    """The `_SELF` rung must not rest on a flag that lives in the candidate's own interpreter.
+
+    The fence is a generated `sitecustomize` the eval's interpreter IMPORTS, so every module-level
+    name in it is reachable as `sitecustomize.<name>`. The rung was first written with a
+    `not getattr(_busy, "on", False)` clause, because `_record` appended its diagnostic with
+    `open(_LOG, "a")` and that append had to be let through. Driven 2026-09-08:
+
+        import sitecustomize; sitecustomize._busy.on = True
+        open(<fence>/sitecustomize.py, "w").write("# gone")
+
+    went straight through and destroyed the fence for every later process of the run — the rung
+    disarmed by the one line of the attacker's own choosing.
+
+    The exemption is gone: `_record` writes through a descriptor opened in the module body, BEFORE
+    `sys.addaudithook` runs, and `os.write` raises no `open` event to exempt. Both halves are
+    asserted, because dropping the exemption WITHOUT the descriptor is the other failure — under
+    `deny` `_report` raises out of `_record`'s own `open`, its `except Exception` swallows it, and
+    the violation log goes silently empty (driven the same day: 0 rows).
+
+    THE SCOPE OF THIS TEST, stated so it is not read as more than it is: it says the rung takes no
+    exemption a candidate can SET. It does not say the fence survives a candidate that rewrites the
+    hook's inputs — `sitecustomize._ROOTS = ()` disarms the source fence and `_RECORD = ""` the
+    record fence, in one assignment each, because the hook reads module globals at call time. That
+    residual is `_hook`'s own open item `read-fence-inputs-are-writable-by-the-fenced-process`, and
+    it is what the Landlock and seccomp rungs sit beside this one for."""
+    run_dir, wd, _sib = _world(tmp_path)
+    fence = _install(run_dir)
+    generated = Path(fence) / "sitecustomize.py"
+    before = generated.read_text(encoding="utf-8")
+
+    rc, out, _err, _to = _run(f"""
+        import sitecustomize
+        # THE ATTACK, and the stronger claim beside it: the historical exemption is not merely
+        # unreachable, the attribute is GONE — a rung that consults a module-level name the
+        # candidate can assign has no floor, whatever that name happens to be today.
+        print("BUSY-ATTR", hasattr(sitecustomize, "_busy"))
+        try:
+            sitecustomize._busy.on = True                 # the historical exemption, if it is back
+        except AttributeError:
+            pass
+        attempt("overwrite-fence", lambda: open({str(generated)!r}, "w").write("# gone"))
+        attempt("forge-terminal", lambda: open({str(run_dir / 'events.jsonl')!r}, "a").write("{{}}"))
+        """, wd, fence)
+
+    assert "BUSY-ATTR False" in out, "the candidate-settable exemption is back on the module"
+
+    got = _verdicts(out)
+    for name in ("overwrite-fence", "forge-terminal"):
+        assert got[name].startswith(f"REFUSED {name} LoopLabSourceReadRefused"), got[name]
+    assert generated.read_text(encoding="utf-8") == before, "the fence was rewritten"
+
+    # …AND THE DIAGNOSTIC STILL LANDS, which is what the exemption was there for. A rung that
+    # refuses silently is `warn` with its product removed.
+    rows = read_fence.violations(run_dir)
+    assert any(str(generated) in line for line in rows), rows
+    assert any("events.jsonl" in line for line in rows), rows
+
+
 def test_the_record_stays_readable_and_the_workdir_and_the_fence_dir_writable(tmp_path):
     """The rule is about WRITES: a node may read the run it belongs to, write anything under its own
-    workdir (create, mkdir, remove, rename, chmod), append the fence's own diagnostic, and write
-    outside the run dir exactly as before — and a fenced process is SILENT when nothing is refused."""
+    workdir (create, mkdir, remove, rename, chmod), and write outside the run dir exactly as before
+    — and a fenced process is SILENT when nothing is refused.
+
+    THE FENCE'S OWN DIRECTORY IS NOT PART OF THAT SURFACE, though `install()` does pass it as a
+    `writable` prefix. It does so for ONE writer, `_record`'s append of the violation log, and until
+    2026-09-08 that prefix was granted to the candidate too: `open(<fence>/violations.tsv, "w")`
+    truncated the very audit trail the run is judged on, and `open(<fence>/sitecustomize.py, "w")`
+    disarmed the fence for every process the run started afterwards. Both raise the `open` event
+    with `O_TRUNC` rather than a mutation event, so the `_SELF` rung in `_mutation_fenced` — which
+    refuses the `chmod`, the `unlink` and the `rename` of the same file — never saw either. The open
+    branch consults `_SELF` too now; `_record`'s own append is exempted by the `_busy` re-entrancy
+    flag it already sets, not by a prefix the candidate shares."""
     run_dir, wd, _sib = _world(tmp_path)
     fence = _install(run_dir)
     outside = tmp_path / "scratch.txt"
@@ -127,14 +241,25 @@ def test_the_record_stays_readable_and_the_workdir_and_the_fence_dir_writable(tm
         attempt("own_remove", lambda: os.remove("sub/moved.txt"))
         attempt("own_rmdir", lambda: os.rmdir("sub"))
         attempt("fence_log", lambda: open({str(run_dir / read_fence.FENCE_DIRNAME / read_fence.VIOLATION_LOG)!r}, "a").write(""))
+        attempt("fence_source", lambda: open({str(run_dir / read_fence.FENCE_DIRNAME / "sitecustomize.py")!r}, "w").write(""))
+        attempt("read_fence_log", lambda: open({str(run_dir / read_fence.FENCE_DIRNAME / read_fence.VIOLATION_LOG)!r}).read())
         attempt("outside", lambda: open({str(outside)!r}, "w").write("x"))
         """, wd, fence)
     assert rc == 0, err
-    assert err == "", err
+    assert err == "", err          # a refusal travels in the return value and the log, not on stderr
     got = _verdicts(out)
-    assert all(v.startswith("ALLOWED") for v in got.values()), got
-    assert len(got) == 12
+    allowed = {k: v for k, v in got.items() if k not in ("fence_log", "fence_source")}
+    assert all(v.startswith("ALLOWED") for v in allowed.values()), allowed
+    assert len(got) == 14
+    # The fence's own two files: refused, and refused with the MUTATION sentence, because the fix
+    # for "you truncated the fence" is not "name your own copy" — there is no legitimate write.
+    for name in ("fence_log", "fence_source"):
+        assert got[name].startswith(f"REFUSED {name} LoopLabSourceReadRefused"), got[name]
+        assert "may not create, delete, rename, truncate" in got[name], got[name]
     assert (wd / "out.txt").read_text() == "x" and outside.read_text() == "x"
+    # …and the fence still works after the attempt: the source is the fence's, not the candidate's.
+    assert "LoopLab source-tree READ FENCE" in (
+        run_dir / read_fence.FENCE_DIRNAME / "sitecustomize.py").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("name, code", [
