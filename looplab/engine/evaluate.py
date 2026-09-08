@@ -118,14 +118,18 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
                                               reason_override_refused,
                                               engine_observed_facts, fence_refusal_note,
                                               evidence_citation_resolves,
+                                              reason_source_for,
                                               resolve_findings)
 # NOTE what is deliberately NOT imported here: `UNCLASSIFIED_REASON` and `REASON_SOURCE_UNDIAGNOSED`.
 # This file never spells either — `diagnosed_failure_reason` returns them as a PAIR, which is the
 # whole point of the rule living in one pure function. A site here that set one of them by hand
 # would be a second implementation of "the diagnostician could not answer", and the two would drift.
-# `REASON_SOURCE_ENGINE` is imported because the loop really does have to stamp it in three places
-# the rule never sees: the loop-local default, the per-attempt re-stamp, and the two engine-authored
-# reasons (`idea_rejected`, `developer_crash`) that are not classifications of the eval at all.
+# `REASON_SOURCE_ENGINE` is imported because the loop really does have to stamp it in the places the
+# rule never sees: the loop-local default, and the two engine-authored reasons (`idea_rejected`,
+# `developer_crash`) that are not classifications of the eval at all. The PER-ATTEMPT re-stamp is
+# not one of them any more — it goes through `reason_source_for`, because one engine-final answer
+# (`rules_violation`) is a fact the eval STATED rather than one the engine measured, and that
+# derivation belongs beside the split it comes from and not inline here.
 # The repair-verification rung: did this repair do what its rationale said? A LEAF (pure functions
 # over bytes the loop already holds — no engine state, no events, no model), imported here rather
 # than re-derived, because the same verdict has to be written to the durable row, read back off the
@@ -1024,8 +1028,10 @@ DIAGNOSIS_SLOTS = ("_evidence", "_evidence_resolved", "_summary", "_findings", "
                    # merge rather than after the next stale row.
                    "_override_refused")
 # The slots a failure row also carries but which are REBOUND rather than cleared: a failure always
-# has an author, so the reset for `_reason_source` is `REASON_SOURCE_ENGINE` and not None. Named
-# here so the exception is written down rather than widening the rule above.
+# has an author, so the reset for `_reason_source` is a non-diagnostician source and not None — the
+# loop-local default is `REASON_SOURCE_ENGINE` and the per-attempt re-stamp asks `reason_source_for`,
+# which answers `declared` for the one engine-final reason the eval STATES. Named here so the
+# exception is written down rather than widening the rule above.
 DIAGNOSIS_DEFAULTED = ("_reason_source",)
 
 
@@ -2853,7 +2859,17 @@ class EvaluateMixin:
         # Re-stamped per ATTEMPT, beside the classification it describes: a chain whose
         # third attempt is judged and whose fourth is not must not carry the third's
         # attribution into the fourth's row.
-        a._engine_reason, a._reason_source = a.reason, REASON_SOURCE_ENGINE
+        #
+        # THROUGH `reason_source_for` AND NOT THE BARE CONSTANT, because one engine-final
+        # answer is a fact the engine was TOLD rather than one it measured: a
+        # `rules_violation` is read out of the eval's own stdout, which the candidate's code
+        # shares (`triage.DECLARABLE_REASONS`). Stamping `engine` here wrote a STATED reason
+        # onto the durable row as an engine-authenticated one, and this branch is the only
+        # place that classification is made — `rules_violation` is in
+        # `NON_REPAIRABLE_REASONS`, so `_eval_decide_repair` settles the node before the
+        # triage call, and `diagnosed_failure_reason` (which applies the same rule) is never
+        # reached for it.
+        a._engine_reason, a._reason_source = a.reason, reason_source_for(a.reason)
         # …and the diagnostician's citation with them, for the identical reason: a chain
         # whose third attempt was diagnosed and whose fourth was not must not carry the
         # third's evidence into the fourth's durable row. The SUMMARY and the findings are

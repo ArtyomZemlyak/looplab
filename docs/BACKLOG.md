@@ -4788,15 +4788,23 @@ holds the line meanwhile is the same conjunct as everywhere else — through `--
 own false-stop rate is 1 decision / 1 of 49 productive attempts in BOTH arms, because all four
 `implementation` verdicts on productive runs are below the 0.8 bar.
 
-OPEN[monitor-fault-has-no-outcome-label] `TrainingVerdict.fault` routes a stop to REPAIR instead of
-a terminal, and nothing measures it. `recorded.fault` is `None` in 450 of 450 rows because the field
-postdates every preserved run — the extractor already reads it, so the corpus repairs itself the
-moment a run records one. What does NOT arrive with those rows is the LABEL: the outcome that says
-whether `implementation` was right is what the REPAIR then did, which is the same shape the triage
-bench needs (`node_repaired` + the next attempt's terminal) and is not the `wasted`/`productive`
-rule this dataset has. A run must also actually reach the branch — `train_monitor_kill` on, a
-`broken` at ≥ 0.8 confirmed twice, and `fault="implementation"` — which no preserved run did.
-proof:absent:LABEL_REPAIRED@looplab/judgebench/judge_corpus.py
+*Closed 2026-09-08 — the LABEL landed. `judge_corpus.py` now carries a SECOND, independent
+vocabulary beside `wasted`/`productive` (`FAULT_LABELS`: `repaired` / `unrepaired` / `unknown`),
+derived by `_fault_label` from facts the judge did not author — the `node_repaired` rows written
+AFTER the decision joined to the node's own terminal, which is the shape this entry asked for — and
+recomputable offline by `rederive_fault_label`, so a hand-edited label goes red with no `runs/`
+present. Four undecidable cases carry their own basis rather than one shared `unknown`
+(`no_fault_recorded`, `fault_not_routed:<fault>` for the `hypothesis`/`environment` attributions
+that are recorded and never repaired, `no_repair_after_decision`, `no_node_terminal`). One
+correction the work produced: this entry's "`None` in 450 of 450 rows" was wrong — 449 carry no
+fault and ONE does, `e5small-dr-unified-v3` n2, `broken` at confidence 0.95 over an uncaught
+`torch.OutOfMemoryError`, saying `environment`. It does not route, so the label still grades nothing.
+What is left is not a tree state a marker can hold: a run must actually REACH the branch
+(`train_monitor_kill` on, a `broken` at ≥ 0.8 confirmed twice, `fault="implementation"`). The
+tripwire for that is a test rather than a marker —
+`tests/test_judge_bench.py::test_every_fault_label_rederives_and_the_corpus_grades_none_of_them`
+pins the whole corpus at `unknown` with its exact basis counts, so the first run that records an
+`implementation` fault turns it red and the number becomes readable.*
 
 ### §0.20 A goal sentence nobody could check killed three nodes, and the prompt telling five roles to use every GPU outlived the correction (2026-08-20)
 

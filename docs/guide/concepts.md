@@ -855,7 +855,10 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   gone) and `check_false_positive` — the stage check is ANOTHER MODEL's reading of stdout, so "that
   reading was wrong" is a claim only a second reader can make. Neither admits a metric: both are
   absent from `NEVER_SALVAGED_REASONS`, so they can neither suppress one nor grant one. The engine's own structural answer stays on the row beside it
-  (`engine_reason`) and `reason_source` says who chose the word.
+  (`engine_reason`) and `reason_source` says who chose the word: `engine` (it measured it), `triage`
+  (the diagnostician answered), `undiagnosed` (one was asked and could not) or, since 2026-09-08,
+  `declared` — the eval itself STATED the reason on the stdout channel its candidate shares
+  (`rules_violation`), which is engine-final but is not a fact the engine observed.
 
   `diverged` is the one word BOTH may say, and only in one direction: the engine names it when its
   own watchdog killed the stage, and the diagnostician may name it ONLY where the engine's own
