@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 148 resolved, 38 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 149 resolved, 37 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -4391,9 +4391,7 @@ time in this campaign (CT-10's grep guard was the first). Two occurrences is a p
 the reflex when writing a tree-wide guard is to reach for `rglob`, and the shared helper exists
 because at least one tracked file carries a UTF-8 BOM that a fresh walk decodes differently.
 
-#### SC-12 · LOW · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-08)**
-
-> **OPEN[claim-escape-hatch-scaffold-duplicated]** the liveness probe pair is unified; `resolve_active_claims` and `resolve_spawn_claim` still repeat the confirmation-phrase / `minimum_age` / revalidate-then-unlink / structured-409 scaffold verbatim. proof:absent:guarded_claim_resolution@looplab/serve/run_commands.py
+#### SC-12 · LOW · duplication · effort: small — **RESOLVED (2026-09-08)**
 
 **Duplicated liveness/identity probe pairs and operator escape-hatch scaffolding inside run_commands**
 
@@ -4403,7 +4401,7 @@ because at least one tracked file carries a UTF-8 BOM that a fresh walk decodes 
 
 *Recommendation:* One owner_liveness(row_or_path) pair taking a parsed claim dict (file loading as a thin adapter), and one guarded_claim_resolution(claims, phrase, revalidate) helper for both escape hatches.
 
-*Resolution (2026-08-03) — the probe pair. The escape-hatch scaffold is NOT yet done.*
+*Resolution (2026-08-03) — the probe pair.*
 
 `_owner_definitely_gone(row)` and `_owner_exactly_alive(row, *, own_process_counts=False)` are the
 one decision; the four old names are now thin carriers, with file loading (including the legacy
@@ -4425,9 +4423,32 @@ One behaviour TIGHTENED, in the fail-closed direction: the claim-dict path had n
 handed `row.get("pid")` straight to `process_alive`. It now refuses a non-int/bool/non-positive pid
 before probing, so a malformed claim can never read as "definitely gone".
 
-Still open: the second half — `resolve_active_claims` / `resolve_spawn_claim` repeat the same
-escape-hatch scaffold (confirmation phrase, `minimum_age` window, revalidate-then-unlink, structured
-409s). That is a separate extraction and has not been done.
+*Resolution (2026-09-08) — the escape-hatch scaffold.* `RunCommandService.guarded_claim_resolution`
+is the one protocol both hatches run, over a frozen `ClaimEscapeHatch` record (`ACTIVE_CLAIM_HATCH`,
+`SPAWN_CLAIM_HATCH`) that carries the only things that differ: the 400 text, the two 409 codes and
+messages, the confirmation phrase, and which timestamps date the subject. `_canonical_claim_run`
+shares the head. Both callers keep exactly what is theirs — which claims to gather, which liveness
+question to re-ask, and what to unlink or quarantine.
+
+The ORDER is why this was worth extracting, not the line count. The gates are safety window ->
+confirmation phrase -> revalidate -> destroy, and each one is load-bearing under a race: revalidating
+above the phrase check takes its liveness reading while the operator is still typing, and unlinking
+on that reading is exactly the live-owner override both hatches exist to refuse. A convention cannot
+hold an ordering that only matters under a race across two copies, so the ordering is now STRUCTURAL:
+the destructive step is a callable reached only through this helper, after the gates.
+
+One latent drift the extraction removed: the spawn hatch dates its window from `quarantined_at` and
+only then from `created_at` — the window is about the DECISION to call a claim unknown, not the
+file's age — and that preference was a bare `or` chain inside one copy. It is now a declared field of
+the hatch, and `test_a_freshly_quarantined_spawn_claim_is_dated_from_the_quarantine_not_its_creation`
+drives it end to end through the route.
+
+Covered by `tests/test_run_command_service.py`
+(`test_both_escape_hatches_are_one_scaffold_that_cannot_unlink_before_it_revalidates`, which drives
+the gate order with accountants over BOTH hatches rather than pinning the source). Teeth-verified
+against four mutations, each applied and reverted in an isolated worktree — revalidate hoisted above
+the confirmation gate, retire hoisted above revalidate, the spawn hatch's `quarantined_at` preference
+dropped, and the window gate disabled — all four red.
 
 #### SC-13 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
