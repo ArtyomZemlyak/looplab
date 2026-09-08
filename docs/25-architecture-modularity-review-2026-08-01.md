@@ -2320,7 +2320,7 @@ guard (4 failures) and by narrowing the storage-fault translation to `TimeoutErr
 
 #### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[structured-claim-identity-not-default]** the DEFAULT is structured and the fuzzy path is deleted; what remains is the deprecated lean read path (`structured=False`) and the `_scoped_key`/`_global_key` shadow namespaces it is the last reader of, so a governance fix is still reasoned about twice. proof:present:_scoped_key@looplab/engine/claims.py
+> **OPEN[structured-claim-identity-not-default]** the lean read path and `_scoped_key` are DELETED and there is ONE claim identity, resolved once; what remains is the RETIRED `structured=` keyword itself — accepted and inert on five projection signatures, yet still passed `False` by a resumed pre-field run through `Settings.cross_run_structured_claims` and `EngineOptions.cross_run_structured_claims` (`engine/strategy.py`, `engine/proposal_cues.py`), so a live knob names a projection that no longer exists. proof:present:cross_run_structured_claims@looplab/engine/options.py
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**
 
@@ -2389,19 +2389,61 @@ collapses the same paraphrase pair — the structured key — and one that pins 
 reader SET per name instead of one module list, rather than an unused import kept alive to satisfy a
 test.
 
-**What is still open, exactly:** the lean read path itself (`structured=False`) and the
-`_scoped_key`/`_global_key` shadow namespaces. The recommendation asks for lean to stay a documented
-legacy read path until consumers migrate, and it is the only thing that can read a projection built
-under it — deleting it in the same change that flips the default would leave a store's existing lean
-review with no reader at all. Note also that `_global_key` cannot leave with it: `_decision_for` reads
-it as the structured path's explicitly-UNSCOPED fallback, so its deletion is a separate question about
-the fallback chain, not about the lean mode. The mode table at `claim_assessments` now lists TWO modes
-and `tests/test_claim_key.py` counts them.
+*Closure (2026-09-08), the third mode: THE LEAN READ PATH AND `_scoped_key` ARE DELETED. There is
+one claim identity, and the `_global_key` fallback that survives now says so at every row it
+resolves.*
+
+The previous pass kept lean for one stated reason — "deleting it in the same change that flips the
+default would leave a store's existing lean review with no reader at all". That is the migration
+question, and answering it took a look at the ledger READER rather than at the projections:
+`claims.py::_validate_claim_decision_row` calls a missing / empty / oversized / sanitizes-to-empty
+`statement` `invalid_record`, and `governance_health.py::read_governance_rows` RAISES on that instead
+of projecting the readable subset. So **every row `load_claim_decisions` can see carries a statement,
+hence a structured `claim_uid`, hence an index at it.** `_scoped_key` was only ever a SECOND index on
+a scoped row that already had its UID — never any row's only key — so deleting it costs no durable
+decision its reachability. A store's existing lean REVIEW loses only the cross-task merge, which is
+the finding's own complaint, and which was undecidable anyway: a lean row carried no `claim_uid` and
+no `evidence_digest`, and the write path validates against the structured projection.
+
+`_global_key` stays, and the code now says why rather than leaving it filed under "shadow namespace".
+It is the STRUCTURED projection's explicitly-UNSCOPED fallback, its one reader is `_decision_for`,
+and it is live for a caller-MERGED overlay: the durable loader never writes a scoped decision at the
+plain legacy key, but a caller that does would otherwise erase the portfolio-wide verdict for every
+other scope. Its retirement is a question about that fallback chain.
+
+The fallback also stopped being silent. `_decision_for` returns `(decision, resolved_via)` and every
+overlaid decision now carries that receipt — `claim_uid` when a structured candidate matched,
+`legacy_statement_key` / `unscoped_global_key` when the row was only reachable through the
+pre-structured statement namespace. Before this an operator could not tell a scope-precise verdict
+from a statement spelling that happens to normalize the same; that is the "reasoned about twice"
+residue arriving as data instead of as a comment. It is whitelisted through
+`_bounded_claim_projection`, so the bounded read-model an operator and the UI see carries it too, and
+it is deliberately not digest material (`claim_evidence_digest` excludes governance metadata, so no
+issued receipt goes stale for it).
+
+`--lean` is gone from `looplab claims`: an operator who scripted the undecidable projection gets a
+usage refusal rather than a receipt whose meaning changed underneath them. Four tests DRIVE the
+migration on a durable ledger written by the shipped writer — a scoped decision that governs its own
+task and not a same-worded claim in another, an unscoped one that still reaches every scope through
+its legacy keys, and both `resolved_via` routes — rather than pinning the source. The projection
+digest moved by exactly one key: the harness run against both trees is byte-identical once
+`resolved_via` is stripped, and the two halves of the retired flag are now equal.
 
 The digest tripwire moved and the answer is recorded where it asks for one: the `fuzzy` dimension left
 the CORPUS, not the projections. The harness passed every flag explicitly and the deleted branch was
 `rows = out` when `fuzzy=False`, so each surviving key's value is byte-identical and the whole payload
 change is eight vanished `:f=True` entries plus eight renamed keys.
+
+**What is still open, exactly:** the `structured=` keyword itself. Unlike `fuzzy=`, it cannot simply
+be removed here: `EngineOptions.cross_run_structured_claims` reaches `claim_context_pack` through
+`engine/proposal_cues.py` and `engine/strategy.py`, `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins that field
+`False`, and refusing the value the way `fuzzy=True` is refused would abort a resumed pre-field run
+over a read-model preference. Accepting it is safe only because both values now name the same
+projection — which `tests/test_claim_key.py` drives, byte for byte, rather than asserting. Removing
+it is a Settings-field retirement (config, options, the settings catalogue and its counts,
+`serve/routers/cross_run.py`, `tools/cross_run_tools.py`, `docs/guide/configuration.md`), not a
+claims change, which is why it did not travel with this one. The identity table at
+`claim_assessments` now lists ONE identity and `tests/test_claim_key.py` counts it.
 
 #### EM-07 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
@@ -4733,7 +4775,7 @@ that speaks it, so it stays a named item rather than being smuggled into an extr
 
 #### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[unconverted-stat-signature-ledger]** the THREE tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 5 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 5@tests/test_file_identity_tiers.py`
+> **OPEN[unconverted-stat-signature-ledger]** the THREE tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 2 unconverted sites, both now CONFIRMED refusals stating their reason at the site, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 2@tests/test_file_identity_tiers.py`
 
 **Event-log rewrite/race detection implemented six different ways across serve/**
 
@@ -4812,17 +4854,61 @@ regressions rather than source assertions: a same-length replacement with the mt
 assertion that the two fields the old tuple carried are provably identical — so the old code was
 equal by construction and the fixture cannot rot into a vacuous pass.
 
-Five sites remain, and each is a judgement rather than a backlog item: `events/eventstore.py`'s
-trusted-growth tuple (compared against an `fstat` where the Windows attribute may not agree with the
-`stat` it is compared to — converting it would make the growth fence spuriously fail on Windows, in
-the direction that ABORTS appends); `serve/scope_report_store.py::_stat_identity` and
-`serve/scope_generate.py`'s `observed`/`directory_identity`, which are PERSISTED in scope-report
-sidecars behind an explicit `len(log_sig) != 7` shape check, so a tuple of a different width is a
-compatibility break, not a strengthening; `events/traceview.py`'s trace revision, which mixes a
-descriptor-bound ChangeTime token into the tuple; and `events/span_index.py::_index_from_handle`,
-which is not a signature at all — it is parallel assignment of three named locals beside a real
-`trace_file_identity` call, and rewriting it as three statements to satisfy the sweep would be the
-comment-shaped pass CLAUDE.md's guard-test rule forbids.
+Five sites remained after that pass, each recorded as a judgement rather than a backlog item.
+
+*Follow-up (2026-09-08, third pass) — the ledger falls from 5 to 2, and it fell because the five
+judgements were RE-DERIVED rather than inherited. Three of the five did not survive contact with the
+code they described.*
+
+* `events/eventstore.py`'s trusted-growth tuple is now `file_identity`. The inherited reason —
+  "converting would make the growth fence spuriously fail on Windows, in the direction that ABORTS
+  appends" — is false at the only site that reads the value. `_trusted_growth_stat` is consulted in
+  exactly one expression in `read_all`, and a mismatch there sets `trusted_growth = False`, which
+  routes the read into the prefix-verification arm that re-proves the cached bytes. It cannot refuse
+  an append; the worst an fstat/stat disagreement can cost is the SHORTCUT, i.e. it buys back the
+  proof the shortcut was skipping. Meanwhile the tuple was `file_identity` minus
+  `st_file_attributes` — the very omission this finding exists to close. Note also that the tuple
+  already compared `st_ctime_ns` across the same fstat/stat pair, so the attribute field introduced
+  no new class of cross-source hazard.
+* `serve/scope_generate.py`'s `directory_identity` is now `same_file_kind`. The persisted-width
+  objection was real for `observed` and inherited wholesale by its neighbour: `directory_identity`
+  was `(st_dev, st_ino, st_mode, st_file_attributes)` — field-for-field AND order-for-order the
+  middle tier — so naming the tier leaves the stored probe digest byte-identical and invalidates no
+  report. Driven, not pinned: a child artifact must not invalidate a report (the tier ignores the
+  container's timestamps) while a `chmod` on the run directory must.
+* `events/span_index.py::_index_from_handle` was never a signature, so the SWEEP was corrected
+  rather than the site. `size, mtime_ns, ctime_ns = stt.st_size, stt.st_mtime_ns, stt.st_ctime_ns`
+  is multiple assignment: Python spells it with tuple syntax and materializes no tuple, the three
+  locals are threaded SEPARATELY into a persisted per-field header and the exporter's
+  `before_*`/`after_*` receipt chain, and the identity question beside them is already
+  `trace_file_identity`. The detector now skips a Tuple that is an `Assign.value` with a Tuple/List
+  target — narrowly, so `sig = (st.st_dev, st.st_ino)` is still caught. A known false positive in a
+  ledger is worse than noise: it pre-pays for a real signature added to that file later.
+
+**The two that remain are CONFIRMED refusals, and each now states its reason at the SITE** — the
+point being that a reason living only here is a reason the next reader of the code will not find:
+
+* `events/traceview.py::trace_file_revision`. The dev/ino half now calls `trace_file_identity`
+  (= `same_file_entry` under the trace sidecar's name), so the hand-spelling is halved; the rest
+  deliberately stays below `file_identity` because the two fields that tier would add are already
+  SUBSUMED by `change_token`. On POSIX the token IS `st_ctime_ns`, so adding it writes the same
+  number into the digest twice. On Windows `st_ctime_ns` is CREATION time and this module's own
+  contract says it is not mutation proof, while `FILE_BASIC_INFO.ChangeTime` moves on any metadata
+  change — an attribute flip included, which is the one thing `st_file_attributes` would have caught
+  — and `open_private_trace_file` has already refused a reparse point outright. The token is
+  strictly stronger than the upgrade, so the upgrade would only churn a client-held CAS token.
+* `serve/scope_report_store.py::_stat_identity`. Two independent reasons, both now in its docstring.
+  Every comparison it feeds is CROSS-SOURCE — `lstat(path)` against `fstat(descriptor)` in the lease
+  open and the bounded report read — which is precisely the pairing `serve/scope_sources.py` is a
+  declared variant for, because Windows diverges on `st_ctime` between the two calls; and it is
+  PERSISTED, spliced by `scope_generate`'s `observed` into the 7-field digest stored on every scope
+  report. A reader that accepts both widths beside a writer that emits the new one is the standard
+  migration and it was weighed and refused here: the digest's ONLY use is equality against a freshly
+  derived one, so widening it buys no strength that `_stat_identity` does not already have, while
+  reading two widths costs every stored report a staleness flip and adds a second shape to a
+  security-relevant fence. It stays counted in the ledger rather than being moved into
+  `DOCUMENTED_VARIANTS`: that dict is FILE-granular, so declaring the file would also pre-authorize
+  the next hand-rolled signature written into it.
 
 `tests/test_file_identity_tiers.py` therefore pins the tiers as BEHAVIOUR (growth keeps
 `same_file_entry`; a same-size in-place rewrite defeats it but not `file_identity`), pins all three

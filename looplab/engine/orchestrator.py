@@ -2933,7 +2933,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
           `card_added` / `node_building` receipts of the lanes still running, so it cannot re-propose
           an idea another lane is building at this moment;
         * the pause circuit breaker still stops before starting new work, and the group still joins
-          before the turn ends, so no build outlives the turn that started it.
+          before the turn ends, so no build outlives the turn that started it;
+        * NO LANE HOLDS THE PRIMARY ROLE PAIR while this method keeps proposing on it. This fourth
+          one was MISSING from the list, and from the lane, between 2026-09-07 and 2026-09-08:
+          `_build_role_pairs` returns `[(self.researcher, self.developer)] + pool`, so pair 0 is
+          the primary pair, and the barrier made leasing it safe only because propose-all /
+          build-all / join meant no proposal ran while a build held it. Removing the join is
+          precisely what makes it unsafe. Driven: a build's `last_foresight` read back as None
+          because a concurrent proposal's `finally` had nulled it — `foresight_selected` silently
+          never written — and, in the mirror order, one node's ranking stamped onto the next, which
+          is the mis-attribution the per-build pooled roles exist to prevent. The caller now hands
+          this method non-primary pairs only, minting one extra POOLED pair so the operator's width
+          survives (`speculation.py::_producer_role_pair` states the same rule where it was already
+          obeyed).
 
         WHAT DOES MOVE, and is why this ships behind a flag: the researcher is asked for ONE idea per
         lane instead of `_fan` ideas per chunk. That is more provider calls of a smaller shape, and
@@ -3252,11 +3264,46 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                          and all(a.get("kind") == "draft" for a in creates)
                          and not any(META_CARD_ID in a for a in creates)) else None)
         if _pb_pairs and len(_pb_pairs) > 1 and self._steady_state_build:
-            # The barrier's replacement (doc 52 row 33), opt-in: propose and dispatch as each lane
-            # frees instead of chunk-join-chunk. Same reservations, same worker, same join before
-            # the turn ends — see `_steady_state_build_lane` for what moves and what does not.
-            state, _built = await self._steady_state_build_lane(creates, state, _pb_pairs)
-            return "continue", state, _no_mint_turns
+            # NEVER THE PRIMARY PAIR, and this is the fourth invariant the barrier was protecting.
+            # `_build_role_pairs` returns `[(self.researcher, self.developer)] + pool`, so pair 0 IS
+            # the primary pair — and under the barrier that was safe, because propose-all then
+            # build-all then join means no proposal ever ran while a build held those objects. The
+            # steady lane's whole purpose is to remove that join, so from the moment pair 0 is
+            # leased the main task's next `_await_batch_proposal` calls `self.researcher.propose()`
+            # on the same object a lane is building with (and under the shipped `unified_agent` the
+            # same object is the developer too).
+            #
+            # Driven: with `parallel_build=2` and this flag on, two of eight proposals overlapped a
+            # build holding the shared pair, and the build's own `last_foresight` was read back as
+            # None because the proposal's `finally` had nulled it — `foresight_selected` silently
+            # never written for that node. The mirror direction cross-wires one node's ranking onto
+            # the next, which is the mis-attribution the per-build pooled roles exist to prevent.
+            #
+            # `speculation.py::_producer_role_pair` already states this rule where it is obeyed
+            # ("`_build_role_pairs(1)` is intentionally not used: it returns the primary roles whose
+            # per-build output slots are shared with repairs and ordinary builds") and refuses a
+            # pair equal to the primary. This lane, added later, did not.
+            #
+            # ONE MORE PAIR, not one fewer lane. Simply dropping pair 0 would leave a single lane at
+            # the common `parallel_build=2` and silently turn the flag into the barrier it replaces
+            # — a fix that removes the feature is not a fix. `_build_role_pairs(n + 1)` mints one
+            # extra POOLED pair (the pool is built lazily from `role_factory`, so the cost is one
+            # more role construction, once), and `[1:]` is then exactly `n` pairs none of which is
+            # the primary. Falling back to the BARRIER below when the factory cannot supply two is
+            # the honest alternative to proposing onto a role a lane is holding.
+            _steady_pairs = list(self._build_role_pairs(
+                min(self._llm_parallel, len(creates)) + 1)[1:])
+            _steady_pairs = [_p for _p in _steady_pairs
+                             if (isinstance(_p, tuple) and len(_p) == 2
+                                 and _p[0] is not getattr(self, "researcher", None)
+                                 and _p[1] is not getattr(self, "developer", None))]
+            if len(_steady_pairs) > 1:
+                # The barrier's replacement (doc 52 row 33), opt-in: propose and dispatch as each
+                # lane frees instead of chunk-join-chunk. Same reservations, same worker, same join
+                # before the turn ends — see `_steady_state_build_lane` for what moves and what does
+                # not.
+                state, _built = await self._steady_state_build_lane(creates, state, _steady_pairs)
+                return "continue", state, _no_mint_turns
         if _pb_pairs and len(_pb_pairs) > 1:
             _fan = len(_pb_pairs)
             for _i in range(0, len(creates), _fan):
@@ -6222,7 +6269,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # No `node_id`: a batch proposes `width` ideas at once and none of them has an id yet.
         # Emitting a prospective one would name a node that most of these ideas will not become.
         # `count` is the honest shape, and a beacon without a node_id is the run-level phase it is.
-        with self._progress(PROGRESS_STAGE_BUILD, "propose", count=int(width)):
+        # `_paid_progress`, NOT `_progress`: a batch proposal is `width` paid Researcher calls, and
+        # `_progress` opens no span — `core/tracing.py::generation` then yields the NULL handle and
+        # every one of those calls is written with `trace_id=null`, attributable to nothing and
+        # invisible to `looplab timings`, the trace view and every per-phase cost question. This
+        # comment's own note above already called this "the single longest wholly invisible stretch
+        # in the loop", and on the shipped default width it is the path a run actually takes: the
+        # SERIAL propose one method over is inside `_create_node`'s `create_node` span, so the
+        # asymmetry hid — the lane that pays most was the one with no span.
+        with self._paid_progress(PROGRESS_STAGE_BUILD, "propose", count=int(width)):
             ideas = self._propose_batch(state, width)
         telemetry = list(getattr(self, "_pending_batch_telemetry", None) or [])
         if len(telemetry) < len(ideas):

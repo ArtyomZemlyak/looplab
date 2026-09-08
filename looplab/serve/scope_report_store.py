@@ -292,6 +292,22 @@ def _legacy_scope_report_path(reports_dir: Path, scope_type: str, scope_id: str)
 
 
 def _stat_identity(entry: os.stat_result) -> tuple[int, ...]:
+    """A deliberate VARIANT of `core/atomicio.file_identity` (doc 25 SC-11), refused for two reasons.
+
+    First, every comparison this feeds is CROSS-SOURCE: `lstat(path)` against `fstat(descriptor)` in
+    `_open_scope_action_lease` and in the bounded report read, which is the same pairing
+    `serve/scope_sources.py` declares its own variant for — Windows reports a divergent `st_ctime`
+    through the two calls, so carrying `st_ctime_ns` would make an ordinary open fail as a conflict.
+    `st_mode` is added for the opposite reason: these are lease/authority fences, so a regular file
+    that became something else must not compare equal.
+
+    Second, it is PERSISTED. `serve/scope_generate.py::ScopeSourceProbes.probe_key` splices this
+    tuple into a 7-field per-file observation whose sha-256 is stored on every scope report and
+    re-derived to answer `stale`. Re-shaping it (`file_identity` reorders and drops `st_mode`) would
+    change every stored digest at once — every existing report would read stale until regenerated —
+    and a two-width reader/writer migration buys nothing here, because the digest's ONLY use is
+    equality against a freshly derived one. So the width stays and this docstring is the reason.
+    """
     return (
         int(entry.st_mode), int(entry.st_dev), int(entry.st_ino),
         int(entry.st_mtime_ns), int(entry.st_size),

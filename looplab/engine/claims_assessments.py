@@ -61,10 +61,12 @@ def _register_incarnation(group: dict, row: dict) -> None:
 def _ingest_evidence(lessons, research_claims, resolve, *, weigh=None) -> None:
     """Fold lesson + research rows into their claim groups (doc 25 EM-07).
 
-    The structured (scope+polarity) and lean (normalized-statement) projections differ ONLY in how a
+    The structured (scope+polarity) and lean (normalized-statement) projections differed ONLY in how a
     row finds its group — `resolve(row)` — and in the structured path's evidence weighting, passed as
-    `weigh(group, row, refs)`. Everything else was duplicated verbatim, and it is the part where a
-    quiet mistake is unrecoverable:
+    `weigh(group, row, refs)`. Everything else was duplicated verbatim. The lean projection is deleted
+    (doc 25 EM-06, 2026-09-08) and the structured one is the last caller, but the parametrized seam
+    stays: this is the part where a quiet mistake is unrecoverable, and it is drivable on its own
+    (`tests/test_evidence_ingestion.py`) precisely because the walk is not inlined into a projection:
 
     * **Run/scope registration happens even for a NEUTRAL lesson.** A "noted" lesson takes no stance
       but still proves the claim was seen in that run and scope. Skipping it because the stance is
@@ -180,8 +182,19 @@ def _structured_assessments(lessons, research_claims, decisions, *,
     _dec = {"ratified": "operator-ratified", "rejected": "operator-rejected", "pinned": "operator-pinned"}
 
     def _decision_for(g: dict, rep: str):
+        """The decision governing this group AND how it was found: `(decision, resolved_via)`.
+
+        `resolved_via` is the read-time migration receipt (doc 25 EM-06, 2026-09-08). `claim_uid`
+        means a structured candidate matched — the identity the write path validates against.
+        `legacy_statement_key` / `unscoped_global_key` mean the decision was only reachable through
+        the PRE-STRUCTURED normalized-statement namespace, i.e. an old row whose spelling happens to
+        normalize onto this group. That was invisible before: an operator saw the same maturity
+        overlay either way and could not tell a scope-precise verdict from a statement collision,
+        which is precisely the ambiguity the deleted lean projection institutionalized. REPORTED,
+        never acted on — the fallback chain itself is unchanged.
+        """
         # DEFERRED: `claims.py` imports THIS module to re-export it, so importing the ledger
-        # half back at module scope would cycle. These two spell the legacy overlay keys the
+        # half back at module scope would cycle. This spells the legacy overlay key the
         # governance loader writes (doc 25 EM-01).
         from looplab.engine.claims import _global_key
         overlay = decisions
@@ -194,27 +207,30 @@ def _structured_assessments(lessons, research_claims, decisions, *,
         seen = set()
         for uid in candidates:
             if uid and uid not in seen and isinstance(overlay.get(uid), dict):
-                return overlay[uid]
+                return overlay[uid], "claim_uid"
             seen.add(uid)
         legacy_key = normalize_statement(rep)
         legacy = overlay.get(legacy_key)
         if (isinstance(legacy, dict) and not str(legacy.get("scope") or "")
                 and not str(legacy.get("metric") or "")):
-            return legacy
+            return legacy, "legacy_statement_key"
         global_legacy = overlay.get(_global_key(legacy_key))
         if (isinstance(global_legacy, dict) and not str(global_legacy.get("scope") or "")
                 and not str(global_legacy.get("metric") or "")):
-            return global_legacy
-        return None
+            return global_legacy, "unscoped_global_key"
+        return None, ""
 
     prepared = []
     for g in groups.values():
         rep = max(g["_ev"], key=lambda s: (g["_ev"][s], s)) if g["_ev"] else ""
         sup, opp, unverified = sorted(g["support"]), sorted(g["oppose"]), sorted(g["unverified"])
-        decision = _decision_for(g, rep)
+        decision, resolved_via = _decision_for(g, rep)
         if decision is not None:
             decision = sanitize_cross_run_projection(
                 decision, max_chars=16_000, max_items=64, max_total_items=256)
+            # Stamped AFTER sanitizing: this is the PROJECTION's receipt about its own lookup, not
+            # persisted operator text, so it must not be redacted or bounded away as if it were.
+            decision = {**decision, "resolved_via": resolved_via}
         prepared.append({"group": g, "statement": rep, "support": sup, "oppose": opp,
                          "unverified": unverified, "decision": decision,
                          "maturity": _dec.get((decision or {}).get("decision"), "machine-proposed")})
@@ -285,123 +301,51 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     (`operator-ratified`/`operator-rejected`/`operator-pinned`, else `machine-proposed`) — the §22.4
     governance overlay. Sorted most-evidenced first. Pure.
 
-    `structured` (THE DEFAULT since 2026-09-08, doc 25 EM-06) is the SCOPE+POLARITY-safe structured
-    claim key (`claim_key.claim_signature`): claims from different tasks never merge, opposite polarity
-    ("X helps" vs "X never helps") is a CONTRADICTION not a merge, and paraphrase/inflection variants
-    collapse by exact structured key (O(n), no transitive over-merge). `structured=False` is the LEGACY
-    lean read path — normalized-statement grouping, kept for callers reading a projection built under
-    it, deprecated and slated for deletion with the shadow overlay keys it is the only reader of."""
-    # THE TWO MODES, and which overlay key each one's governance decisions arrive under — the table
-    # doc 25 EM-06 asks for, because "operator decisions must overlay correctly across every mode" is
-    # the whole cost of keeping more than one, and nothing else states which guards which:
+    `structured` is a RETIRED keyword (doc 25 EM-06, 2026-09-08). There is ONE claim identity — the
+    SCOPE+POLARITY-safe structured claim key (`claim_key.claim_signature`): claims from different tasks
+    never merge, opposite polarity ("X helps" vs "X never helps") is a CONTRADICTION not a merge, and
+    paraphrase/inflection variants collapse by exact structured key (O(n), no transitive over-merge).
+    Both values of the keyword project it."""
+    # THE ONE IDENTITY, and the overlay key its governance decisions arrive under — the table doc 25
+    # EM-06 asked for, now that there is no longer anything to select between:
     #
-    #   flag                  identity                                overlay key
-    #   ------------------    ------------------------------------    -----------------------------
-    #   structured=True       claim_key.claim_signature (scope +      structured `claim_uid`
-    #     (THE DEFAULT)       polarity safe)                          (legacy keys as a FALLBACK)
-    #   structured=False      normalize_statement grouping (LEAN,     `_scoped_key` / `_global_key`
-    #     (LEGACY)            deprecated)
+    #   identity                                overlay key
+    #   ------------------------------------    -------------------------------------------------
+    #   claim_key.claim_signature (scope +      structured `claim_uid`, then the pre-structured
+    #   polarity safe)                          normalized-statement keys as an explicitly UNSCOPED
+    #                                           fallback that REPORTS itself (`_decision_for`)
     #
-    # The legacy path reads the shadow overlay spelling; the structured path deliberately does NOT
-    # key on it — its key is scope-precise, so a decision recorded against a lean key must not
-    # silently apply to a structured claim from a different task; it consults the legacy keys only
-    # as an explicitly UNSCOPED fallback (`_decision_for`). That asymmetry is why the last mode
-    # cannot be collapsed by deleting a branch alone: a caller still projecting lean would silently
-    # change which claims merge, i.e. what its governance overlay applies to.
+    # THE LEAN READ PATH (`structured=False`) IS DELETED, and `_scoped_key` — the only namespace it
+    # was the last reader of — with it. No durable decision became unreachable, and that is a
+    # property of the ledger READER rather than a hope: `claims.py::_validate_claim_decision_row`
+    # calls a missing/empty/oversized/sanitizes-to-empty `statement` `invalid_record`, and
+    # `read_governance_rows` RAISES on that instead of projecting the readable subset — so every row
+    # `load_claim_decisions` can see carries a statement, hence a structured `claim_uid`, hence an
+    # index at it. `_scoped_key` was always a SECOND index on a row that already had its UID; it was
+    # never any row's only key. What a caller still projecting lean loses is the CROSS-TASK MERGE,
+    # which is the finding's own complaint arriving as a behaviour change — and an operator reviewing
+    # under it could never be decided on anyway: a lean row carried no `claim_uid` and no
+    # `evidence_digest`, and `record_claim_decision` validates against the structured projection.
     #
-    # WHY THE DEFAULT FLIPPED. The durable side was already structured on both ends: every operator
-    # decision is written through `record_claim_decision`, which validates against
-    # `claim_assessments(..., structured=True)`, and `load_claim_decisions` indexes a scoped row by
-    # its structured UID ONLY. A lean projection therefore handed an operator an `evidence_digest`
-    # the write path could never match, and merged across the task boundary the write path enforces.
-    # The migration is safe in the one direction that matters for an existing store: no durable
-    # decision becomes unreachable, because an unscoped/unqualified row stays indexed at its legacy
-    # keys and `_decision_for` still consults them.
-    # DEFERRED for the same reason as `_decision_for` above: `claims.py` imports this module to
-    # re-export it, so the ledger half's legacy overlay-key spellings come in per call (EM-01).
-    from looplab.engine.claims import _global_key, _scoped_key
+    # WHY THE KEYWORD SURVIVES THE PATH IT SELECTED. `fuzzy=` was deleted outright, because a
+    # silently-accepted `fuzzy=True` would have read as "paraphrases still merge". `structured=`
+    # cannot follow it yet: `EngineOptions.cross_run_structured_claims` reaches
+    # `claim_context_pack` through `engine/proposal_cues.py` and `engine/strategy.py`, and
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins that field False — so a RESUMED pre-field run still
+    # passes `structured=False`, and refusing it would abort that run over a read-model preference.
+    # Accepting it is safe only because both values now name the SAME projection. Removing the
+    # keyword is what is left of EM-06, and it is a Settings-field retirement (config, options, the
+    # settings catalogue, `serve/routers/cross_run.py`, `tools/cross_run_tools.py`), not a claims
+    # change.
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
     research_source = _research_source_summary(research_claims)
     claim_source = _claim_source_summary(
         lessons, research_claims, research_source=research_source)
     decisions = decisions if isinstance(decisions, dict) else {}
-    if structured:
-        rows = _structured_assessments(
-            lessons, research_claims, decisions,
-            research_source=research_source, claim_source=claim_source)
-        projected = [_bounded_claim_projection(row) for row in rows] if bounded else rows
-        return _ClaimAssessmentRows(
-            projected, claim_source=claim_source, research_source=research_source)
-    groups: dict[str, dict] = {}
-
-    def _group(stmt: str) -> Optional[dict]:
-        s = _claim_text(stmt)
-        if not s:
-            return None
-        # NOTE: identity here is the normalized STATEMENT (the shipped lesson `normalize_statement`
-        # key) — it can merge same-worded claims across incompatible scopes and the 160-char cap can
-        # collide. A structured semantic claim key (subject/intervention/comparator/scope) is the CR1b TODO
-        # (§21.20.13); this lean projection keeps scope/runs as metadata on the claim.
-        return groups.setdefault(normalize_statement(s), {
-            "statement": s, "support": set(), "oppose": set(),
-            "unverified": set(), "runs": set(), "run_refs": set(), "scopes": set(),
-            "sources": set(), "verification": set()})
-
-    _ingest_evidence(lessons, research_claims, lambda row: _group(row.get("statement")))
-
-    _dec = {"ratified": "operator-ratified", "rejected": "operator-rejected", "pinned": "operator-pinned"}
-    out = []
-    for key, g in groups.items():
-        sup, opp, unverified = sorted(g["support"]), sorted(g["oppose"]), sorted(g["unverified"])
-        overlay = decisions
-        real_scopes = {str(scope) for scope in g["scopes"] if str(scope)}
-        # A statement row spanning multiple tasks cannot safely receive any one task's policy.  For a
-        # task-bound row, however, the exact scope-only decision outranks the portfolio-wide fallback.
-        d = None
-        if len(real_scopes) == 1:
-            from looplab.engine.claim_key import claim_uid
-            scope = next(iter(real_scopes))
-            d = overlay.get(claim_uid(g["statement"], scope=scope, metric=""))
-            # Compatibility for a custom lean overlay keyed by normalized statement+scope.
-            if d is None:
-                d = overlay.get(_scoped_key(key, scope))
-        if d is None:
-            d = overlay.get(key)
-        # The lean projection groups by statement across tasks. A caller-supplied scoped decision may
-        # therefore govern this row only when all contributing task scopes are that exact scope; unscoped
-        # decisions remain the portfolio-wide fallback. The durable loader normally indexes scoped records
-        # by structured UID only, but this guard also keeps custom/preloaded overlays fail-closed.
-        if not isinstance(d, dict):
-            d = None
-        if d is not None:
-            _dscope = str(d.get("scope") or "")
-            if _dscope:
-                if not real_scopes or not real_scopes <= {_dscope}:
-                    d = None
-        if d is None:
-            d = overlay.get(_global_key(key))
-        if not isinstance(d, dict):
-            d = None
-        if d is not None:
-            d = sanitize_cross_run_projection(
-                d, max_chars=16_000, max_items=64, max_total_items=256)
-        out.append({
-            "statement": g["statement"],
-            "epistemic": _source_guarded_epistemic(sup, opp, claim_source),
-            "maturity": _dec.get((d or {}).get("decision"), "machine-proposed"),
-            "support": sup, "oppose": opp,
-            "n_support": len(sup), "n_oppose": len(opp),
-            "unverified": unverified, "n_unverified": len(unverified),
-            "runs": sorted(g["runs"]), "run_refs": sorted(g.get("run_refs", ())),
-            "scopes": sorted(g["scopes"]),
-            "sources": sorted(g["sources"]), "verification": sorted(g["verification"]),
-            "decision": d,
-            "research_source": research_source,
-            "claim_source": claim_source,
-        })
-    # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
-    out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
-    projected = [_bounded_claim_projection(row) for row in out] if bounded else out
+    rows = _structured_assessments(
+        lessons, research_claims, decisions,
+        research_source=research_source, claim_source=claim_source)
+    projected = [_bounded_claim_projection(row) for row in rows] if bounded else rows
     return _ClaimAssessmentRows(
         projected, claim_source=claim_source, research_source=research_source)

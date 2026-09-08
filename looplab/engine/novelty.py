@@ -889,7 +889,20 @@ class NoveltyGateMixin:
         THOSE ATTRIBUTE SETS ARE DISJOINT TODAY and that is the whole of the safety: this lane owns
         `_novelty_feedback` and the `_pending_batch_*` trio; the eval-task consumers own the repair
         and triage paths and touch neither. It is not enforced anywhere, so a new attribute shared
-        between the two is a real race and this paragraph is the only place that says so."""
+        between the two is a real race and this paragraph is the only place that says so.
+
+        THE ENUMERATION ABOVE WAS INCOMPLETE FROM 2026-09-07 TO 2026-09-08, and the correction is
+        the reason it is worth reading twice. `orchestrator.py::_steady_state_build_lane` removed
+        the barrier's join, and it leased pair 0 of `_build_role_pairs` — which IS
+        `(self.researcher, self.developer)` — to a BUILD lane. So a third concurrent driver of the
+        same object appeared, and unlike the eval task its attribute set is NOT disjoint from this
+        one: a build writes `last_hyp_priority`/`last_foresight` on its researcher and this
+        function nulls exactly those in its `finally`. Driven: a build's own `last_foresight` read
+        back as None, so `foresight_selected` was never written for that node. The lane now takes
+        only NON-PRIMARY pairs (it mints one extra pooled pair rather than running one lane
+        narrower), which restores the premise this paragraph rests on. A future lane that leases
+        the primary pair re-opens it, and `tests/test_steady_state_build.py::
+        test_no_lane_ever_holds_the_PRIMARY_role_pair` is what says so."""
         n = max(1, int(n))
         self._pending_batch_dropped = []
         # Keep the exact returned objects as a one-shot capability for the rare unreserved

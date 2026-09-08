@@ -235,17 +235,66 @@ left is a widening that costs the rung its clearest catch, closes one row of thr
 sized because the corpus is gone. `unmet` stops nothing, so leaving them costs three noisy lines in
 a judge's history; the rule costs the accusation the rung was built to make.
 
-OPEN[repair-unmet-five-unpatched-shapes] three of the 14 surviving `unmet` shapes are left
-deliberately unpatched — the three crash-citation rows, all of which need a reading of the sentence
-rather than of its tokens — and `verified` is a FLOOR (at least one claimed token in the diff), not
-a guarantee. proof:present:changed_region@looplab/engine/repair_verify.py
+AND ON 2026-09-08 THAT REFUSAL WAS MEASURED INSTEAD OF REASONED, which moved it off DIRECTION and
+onto REACH — a bigger fact, and one the file exemption does not contain. The corpus that argued
+every other rule here is gone, but `bench-out/cand.durable.jsonl` (the triage bench's durable arm
+over these same runs) still holds both halves such a rule needs: 95 verbatim triage rationales — the
+repair rationale IS the triage rationale, which is what `engine/evaluate.py` hands `verify_repair` —
+and, on 78 of them, the slice of the FAILURE OUTPUT the triage quoted back at it
+(`evidence.source == "error"`, a transcription of the very stderr the engine had handed it). 71 of
+the 95 name something concrete at all and 64 rows carry BOTH halves, which is the denominator below.
+Replaying `claimed_tokens` over that pair: four candidate rules, four ways of failing.
+
+  * "A TOKEN THE FAILURE OUTPUT CONTAINS MAY NOT CONVICT" reaches 38 of those 64 rows, and 35 of the
+    38 through a token that is NOT a file — so the exemption the true positive forces saves three
+    rows in thirty-eight and leaves the reach essentially where it was. And one quoted LINE is the
+    floor of that measurement rather than the measure: the window the engine actually holds is
+    64,000 bytes (`judgebench/triage_corpus.py::LOG_TAIL_BYTES`).
+  * WHAT IT EXCUSES IS THE PROMISE, which no direction argument had said out loud.
+    `e5small-dr-unified-v2` node 0 promises "rename the offending flags to the `adapter.training`
+    namespace" — and the flags it names are the ones argparse printed as it died (`train.py: error:
+    unrecognized arguments: --train.training.gradient_accumulation_steps=2 …`).
+    `rubertlite-dense-retrieval` node 0 promises to import `UniqueSparseContainer`; the
+    `AttributeError` names that class. A crash message quotes the offending flag, the failing line's
+    own variables, the file that was missing — and a repair worth the name promises to change
+    exactly that thing. "In the failure output" is therefore a proxy for THE SUBJECT OF THE REPAIR
+    and not for "the crash's own vocabulary": on this evidence the two are the same bytes.
+  * A CRASH-CLAUSE WHITELIST ("the crash is in X"), the variant that needs no new input at all,
+    excuses EVERY concrete token in 4 of the 71 rationales that name anything and some token in 9 —
+    and on the one such row this tree carries verbatim it withdraws `rubertlite-dense-retrieval`
+    node 11, where the repair edited a different file and saying so is the rung working. It does not
+    even reach the true positive, whose promise sits in the sentence AFTER the crash clause, so the
+    trade is the genuine accusations for none of the three; widen the phrasing list the way such a
+    list always gets widened (bare `failed`, `exited`, `OOM`) and it is 8 rows and 20.
+  * AND THE SHAPE CHANNEL IS SPENT. n32's two tokens survive in that row's own quoted crash line
+    (`dd_mask = (s_dd_local <= pos_scores_broadcast + thr_val) …`) and both come out of `_IDENT_RE`'s
+    underscore branch, exactly like `rdrop_alpha` and `gradient_accumulation_steps`. No predicate
+    over the TOKEN separates the crash's variable from the promise's parameter, which is why
+    `_EXCEPTION_CLASS_RE` could close the fourth shape and nothing of that kind closes these three.
+
+All four are DRIVEN in `tests/test_repair_verification.py` as throwaway candidate rules over the
+verbatim rows, not argued here, because a refusal nobody can re-run is the thing this module keeps
+having to correct.
+
+DECLINED[repair-unmet-five-unpatched-shapes] measured: 38 of the 64 durable-arm rows whose triage
+quoted the failure output name a claimed token inside that ONE quoted line, 35 of them a non-file
+token, so the file exemption the live true positive forces saves 3 of the 38 — docs/BACKLOG.md §0.2
+The three crash-citation rows keep their `unmet`. What separates "the crash is in X" from "I will
+fix X" is the sentence's verb over the same token about the same crash — a READING, and
+`REPAIR_VERDICTS` is disjoint from `TRIAGE_ACTIONS` precisely so that no model may emit one of
+these. Leaving them costs three noisy lines in a judge's history and `unmet` stops nothing; the rule
+costs the accusation the rung was built to make. The other half the old marker carried — that
+`verified` is a FLOOR (at least one claimed token in the diff) and not a guarantee — is NOT closed
+by this and was never an item to close: it is the section below, pinned by the `verified`-floor row
+in `tests/test_repair_verification.py`.
 
 WHAT IS STILL OPEN, having been measured rather than assumed. The 14 surviving `unmet` verdicts split
 7 / 4 / 3: SEVEN are genuine discrepancies, i.e. the rung working; FOUR are withdrawn by the rules
 above (v8 node 3 attempts 2 and 4, `sim-nosignal` node 5 since 2026-09-08, and — since the
 clause-scanner correction of that same day — `rubertlite-dr-unified-v6` node 1 attempt 1, which had
-until then kept its verdict with a shortened list); and THREE are shapes left deliberately
-unpatched, all three of them the crash-citation rows named above.
+until then kept its verdict with a shortened list); and THREE are the crash-citation rows named
+above, DECLINED on the measurement above rather than pending — they stay `unmet` and are noise the
+judge is asked to read past.
 
 HOW OFTEN THE `%params%` COLLISION UNDER THE v6 ROW ACTUALLY FIRES — the substitution that made its
 promise unreadable, whoever reads it — measured 2026-08-29 so the next reader does not

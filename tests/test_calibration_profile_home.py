@@ -745,11 +745,31 @@ def test_the_profile_ignores_the_launcher_environment(monkeypatch):
             f"the profile read {field} from the environment instead of the schema default")
 
 
-def test_the_derivation_refuses_a_required_settings_field():
+def test_the_derivation_refuses_a_required_settings_field(monkeypatch):
     """A required field has no declared default to read, so the profile cannot be inferred at all.
-    Failing loudly at import beats emitting a digest that silently omits it."""
-    source = inspect.getsource(speculation_calibration._declared_settings_json_defaults)
-    assert "is_required()" in source and "raise RuntimeError" in source
+    Failing loudly beats emitting a digest that silently omits it.
+
+    DRIVEN, because the pin this replaces (`assert "is_required()" in source and "raise
+    RuntimeError" in source`) is the shape CLAUDE.md names: one comment away from vacuous. Replacing
+    the guard with `# if field.is_required(): raise RuntimeError(...)` kept both literals in the
+    source and the whole file green, and nothing else in the tree covers this function — so the
+    property the test is NAMED for was not being checked at all. With the raise gone,
+    `field.get_default()` answers `PydanticUndefined` for a required field, and that flows into
+    `SPECULATION_CALIBRATION_PROFILE_SETTINGS` and into the digest every issued receipt is keyed
+    on: the silent omission, exactly.
+    """
+    from pydantic.fields import FieldInfo
+
+    fields = dict(Settings.model_fields)
+    fields["_probe_required"] = FieldInfo(annotation=int)      # no default -> `is_required()`
+    monkeypatch.setattr(Settings, "model_fields", fields, raising=False)
+    with pytest.raises(RuntimeError, match="required Settings field"):
+        speculation_calibration._declared_settings_json_defaults()
+
+    # …and the fixture is not vacuous either: without the probe field the derivation succeeds, so a
+    # green `pytest.raises` above can only come from the guard and never from an unrelated error.
+    monkeypatch.undo()
+    assert speculation_calibration._declared_settings_json_defaults()["max_nodes"] is not None
 
 
 @pytest.mark.parametrize("name", ["_declared_settings_json_defaults",

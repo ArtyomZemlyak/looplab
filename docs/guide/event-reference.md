@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-153 event types — 110 folded into `RunState`, 43 diagnostic; 881 declared payload keys; 26 types whose whole payload is stored by the fold.
+153 event types — 110 folded into `RunState`, 43 diagnostic; 910 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -37,8 +37,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `applied_params_backfilled` | folded | What the configuration that actually RAN assigned to the declared params, read back off the workdir. | `applied_params`, `generation`, `node_id`, `read_at`, `unrecoverable`, `workdir_digest` | — |
 | `approval_granted` | folded | The operator ratified the node the run paused on (HITL). | `generation`, `node_id` | `attempt` |
 | `approval_requested` | folded | The run paused for a human decision about one node, at a named log position. | `after_seq`, `generation`, `metric`, `node_id` | `attempt` |
-| `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | — |
-| `asha_verdict` | diagnostic | The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence. | `comparable_population`, `confidence`, `direction`, `generation`, `intermediate`, `kill`, `node_id`, `quantile`, `reason`, `status`, `stop_decided`, `under_streak` | `confidence_valid`, `kill_superseded_by`, `train_monitor_status` |
+| `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | `resource`, `resource_key` |
+| `asha_verdict` | diagnostic | The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence. | `comparable_population`, `confidence`, `direction`, `generation`, `intermediate`, `kill`, `node_id`, `quantile`, `reason`, `status`, `stop_decided`, `under_streak` | `confidence_valid`, `kill_superseded_by`, `resource`, `resource_key`, `train_monitor_status` |
 | `belief_admission` | diagnostic | How many researcher-proposed beliefs one proposal turn offered and how many the board admitted. | `admitted`, `blank`, `board_read`, `capped`, `proposed`, `repeated`, `restated`, `shape` | — |
 | `best_confirmed` | folded | The champion the run confirmed by re-evaluation, and whether that confirmation was significant. | `generations`, `node_id`, `search_epoch`, `significant` | `attempt`, `generation` |
 | `budget` | diagnostic | The finalization budget receipt: wall clock, in-process seconds, evaluation seconds and node count. | — | `elapsed_s`, `eval_s`, `finalize_scope`, `finish_seq`, `nodes`, `process_s`, `speculation` |
@@ -46,7 +46,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_added` | folded · whole | A research Card minted into durable inventory: its id, statement and the action it owns. | — | `action`, `at_node`, `concepts`, `footprint`, `generation`, `id`, `idea`, `node_id`, `ownership_receipt`, `parent_card_id`, `parent_generations`, `parent_id`, `parent_ids`, `rationale`, `scored_against`, `scored_against_empty`, `scored_against_generation`, `source`, `statement`, `steering_context` |
 | `card_auto_dropped` | folded | The engine dropped a Card as a lifecycle effect, with the reason (`dropped_by=engine`). | `dropped_by`, `id`, `reason` | `by` |
 | `card_build_attempted` | folded | One dispatch attempt for a Card's build, indexed so a repeat is visible instead of silently re-issued. | `card_id`, `generation`, `index` | — |
-| `card_build_done` | folded | A Card's build finished: the node it produced, or the reason it was skipped. | `error`, `eval_seconds`, `generation`, `node_id`, `reason` | `card_id`, `skipped`, `speculative` |
+| `card_build_done` | folded | A Card's build finished: the node it produced, or the reason it was skipped. | `card_id`, `generation` | `node_id`, `skipped`, `skipped_reason`, `speculative` |
 | `card_build_requested` | folded | The durable selection-and-compute gate for one Card's build. | `card_id`, `generation` | — |
 | `card_dropped` | folded | The operator stopped a Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_edited` | folded | The operator rewrote a Card's statement. | `id` | `source`, `statement` |
@@ -110,7 +110,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `lessons_store_unavailable` | diagnostic | The lesson store could not be read this cadence; the next one retries the same unread store. | `error`, `mode` | `count`, `phase` |
 | `literature_retrieved` | folded | The papers one deep-research pass READ, beside the memo it produced. | `at_node`, `items` | `memo_id` |
 | `llm_cost` | folded · whole | The finalization roll-up of the run's provider spend. | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens` | `finalize_scope`, `finish_seq` |
-| `llm_usage` | folded · whole | One sanitized provider-call delta, folded cumulatively into the run's durable ledger. | — | `priced_calls`, `usage_id` |
+| `llm_usage` | folded · whole | One sanitized provider-call delta, folded cumulatively into the run's durable ledger. | — | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens`, `usage_id` |
 | `log_repaired` | diagnostic | The `looplab repair-log` receipt for a rewritten torn log: what was dropped, and where the backup is. | `backup`, `corrupt_line`, `dropped_lines`, `good_records`, `ts` | — |
 | `memory_read` | diagnostic | One memory / cross-run / skill tool call: the rows it showed and the digest of the exact bytes the role saw. | `args`, `invocation_id`, `result_chars`, `result_sha256`, `rows`, `tool` | `source` |
 | `node_abort` | folded | The operator aborted one node. | `node_id` | `attempt`, `generation`, `reason` |
@@ -131,7 +131,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |
 | `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `generation`, `node_id`, `reason` |
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
-| `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `endgame_start`, `phases`, `reason`, `reserve` |
+| `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `endgame_start`, `max_nodes`, `phases`, `reason`, `reserve`, `reserve_frac`, `source` |
 | `policy_decision` | folded | The search policy's pick among the legal actions, with the scores behind it. | `chosen`, `reason`, `scores` | — |
 | `prior_injected` | diagnostic | A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads. | — | `at_node`, `case`, `notes`, `operator`, `operator_scoped`, `phase`, `quarantined_useless`, `role`, `rows`, `source` |
 | `promote` | folded · whole | The operator promoted one node to an alias (`champion` by default). | `node_id` | `alias`, `attempt`, `generation` |
@@ -173,8 +173,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `stage_finished` | folded | One stage of a multi-stage eval pipeline finished: name, status, exit code, seconds. | — | `attempt`, `exit_code`, `generation`, `name`, `node_id`, `seconds`, `status` |
 | `stage_rollback` | diagnostic | A failed stage's rollback to a checkpoint — accepted, or refused with a reason. | `accepted`, `attempt`, `failed_stage`, `generation`, `node_id`, `refusal`, `stage` | — |
 | `strategy_decision` | folded | The Strategist's consult: the strategy it returned and the context it was given. | `at_node`, `ctx`, `strategy` | `developer_application`, `width_unfilled` |
-| `trace_export_health` | diagnostic | The span exporter is unhealthy — one row per distinct state, never on a healthy run. | — | `accepted_spans`, `buffered_bytes`, `buffered_spans`, `dropped_spans`, `export_failures`, `exported_spans`, `loss_receipt_failures`, `queued_spans`, `shutdown`, `worker_alive`, `worker_stop_reason` |
-| `train_monitor_alert` | diagnostic | The live training-log judge's verdict about one running stage, and the log role it judged. | `confidence`, `generation`, `log_role`, `node_id`, `reason`, `status` | `citation_resolved`, `confidence_valid`, `evidence_locator`, `evidence_source`, `fault`, `kill`, `kill_role_withheld`, `kill_superseded_by`, `repair_decided`, `stage`, `stop_decided`, `trajectory`, `trajectory_veto` |
+| `trace_export_health` | diagnostic | The span exporter is unhealthy — one row per distinct state, never on a healthy run. | — | `accepted_spans`, `buffered_bytes`, `dropped_queue_bytes`, `dropped_queue_full`, `dropped_serialization_error`, `dropped_shutdown`, `dropped_shutdown_timeout`, `dropped_spans`, `dropped_worker_start`, `export_failures`, `exported_spans`, `last_export_error`, `loss_receipt_failures`, `loss_receipts`, `queued_spans`, `shutdown`, `stopped_abandoned`, `stopped_crashed`, `stopped_idle`, `stopped_receipt_failed`, `stopped_retired`, `stopped_shutdown`, `worker_alive`, `worker_stop_detail`, `worker_stop_reason` |
+| `train_monitor_alert` | diagnostic | The live training-log judge's verdict about one running stage, and the log role it judged. | `confidence`, `generation`, `log_role`, `node_id`, `reason`, `status` | `citation_resolved`, `confidence_valid`, `evidence_locator`, `evidence_source`, `fault`, `kill`, `kill_role_withheld`, `kill_superseded_by`, `overrun_alert_floor_s`, `overrun_beyond_noise_s`, `projected_overrun_s`, `repair_decided`, `stage`, `stage_grace_s`, `stage_wall_s`, `stop_decided`, `trajectory`, `trajectory_veto` |
 | `trust_gate_changed` | folded | The run's trust gate was changed, by a named source (last write wins). | `source`, `trust_gate` | — |
 | `trust_scan` | diagnostic | Which trust detectors ran over one node's code, how many findings they made, over what digest. | — | `code_digest`, `detectors`, `evidence_version`, `findings`, `generation`, `node_id` |
 | `verifier_group_scored` | folded | One verifier round over a GROUP of nodes, keyed on the contract and evidence digests. | `contract`, `members`, `requested_samples`, `v` | — |

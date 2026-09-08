@@ -20,8 +20,8 @@ from typing import Any, Iterator, Optional, Sequence
 
 import orjson
 
-from looplab.core.atomicio import (best_effort_fsync, same_file_entry, strict_fsync,
-                                   strict_fsync_parent)
+from looplab.core.atomicio import (best_effort_fsync, file_identity, same_file_entry,
+                                   strict_fsync, strict_fsync_parent)
 from looplab.core.models import Event
 from looplab.core.run_deletion import assert_run_deletion_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
@@ -966,9 +966,16 @@ class EventStore:
                 self._publish_dir_entry(existed)
             self._seq = last_logical_seq
             if written_stat is not None:
-                self._trusted_growth_stat = (
-                    written_stat.st_dev, written_stat.st_ino, written_stat.st_size,
-                    written_stat.st_mtime_ns, written_stat.st_ctime_ns)
+                # The FULL tier by name (doc 25 SC-11). What `read_all` asks of this value is "same
+                # file AND unchanged since MY OWN append", which IS `file_identity` — the tuple
+                # spelled here by hand was that minus `st_file_attributes`, the same silent omission
+                # that let a log which gained a reparse point compare EQUAL in three other caches.
+                # Adding the field is fail-closed in the only direction that matters: a mismatch
+                # costs `read_all` its trusted-growth SHORTCUT and sends it to the prefix
+                # verification arm, which re-proves the cached bytes. Nothing else reads this value,
+                # so a disagreement between this `fstat` and the later `stat` can never refuse an
+                # append — it can only buy back the check the shortcut was skipping.
+                self._trusted_growth_stat = file_identity(written_stat)
             # Keep cache bytes + file identity synchronized with our own successful write. Without
             # this top-up, a store that appended but had not yet read the new record could retain
             # `_cache_identity=None`; replacing its one-record log with an empty file would then look
@@ -1128,13 +1135,15 @@ class EventStore:
                 # The REPLACEMENT tier by name (doc 25 SC-11). Growth is the normal path for this
                 # log and must keep the cached prefix; a new inode under the same name must not.
                 identity = same_file_entry(st) if st is not None else None
+                # ...and the FULL tier beside it, for the trusted-growth fence only: that one asks
+                # "unchanged since my own append", so it wants every field, not just the inode.
+                current_stat = file_identity(st) if st is not None else None
             except OSError:
                 size = 0
                 mtime_ns = None
                 ctime_ns = None
                 identity = None
-            current_stat = (
-                identity[0], identity[1], size, mtime_ns, ctime_ns) if identity is not None else None
+                current_stat = None
             replaced = (self._cache_identity is not None and identity != self._cache_identity)
             same_size_rewrite = (size == self._cache_bytes and self._cache_mtime_ns is not None
                                  and (mtime_ns != self._cache_mtime_ns

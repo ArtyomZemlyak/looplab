@@ -21,6 +21,7 @@ looplab stage-dups      Duplicated stage work, and what a cross-node reuse key w
 looplab edit-types      What KIND of edit each experiment made, which kinds paid, and how much was already tried once (doc 52 row 31)
 looplab proxy-accuracy  Was the proxy that KILLED candidates any good? Pairwise ranking accuracy against the metrics that came back (doc 52 row 31)
 looplab seed-distance   How far each experiment moved from the SEED program it descends from, and how much of that movement is tuning (doc 52 row 31)
+looplab workspace-bytes What this run's node workspaces actually WEIGH on disk, beside the seed claim its log made about them — bounded, and it says so (doc 37 §8 R1)
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
@@ -749,7 +750,7 @@ reconciliation vs 27.9 min wall clock:
   untraced     18.0 min  (65%)  no span open — not attributable from spans.jsonl
 ```
 
-**Three sections, and why.**
+**The sections, and why.**
 
 * **Per node** — unchanged: each node's `create_node` / `evaluate` / `repair` work. An operation
   span's recorded duration includes every nested span, so each row is charged its **self** time
@@ -766,6 +767,22 @@ reconciliation vs 27.9 min wall clock:
   remainder — work with no span at all, engine bookkeeping, provider waits, and the idle gap while a
   stopped run waits for someone to finalize it. It is reported rather than hidden: a residual you
   can see is a residual you can go and instrument.
+* **Run opening** — the head of the run: its first event to its first `node_eval_started`, which
+  is by construction the window in which no evaluation of this run was running. Split at the
+  boundaries the run already writes — `setup_started -> setup_finished`, the run-opening think
+  (`research_attempted -> research_completed`, `trigger=run_start`), the first `propose` span,
+  `-> node_created`, `-> node_eval_started` — with the rest of the window named as `unattributed`
+  and the two headline numbers stated: *run start -> the run-opening think complete* and *run start
+  -> the first propose complete*. This is the phase that is systemically the longest in a run
+  (`docs/BACKLOG.md`: the run's own maximum in four of seven measured runs) and the only one that
+  cannot overlap an evaluation, so what it costs and how it divides is now a number a run produces
+  rather than one someone reconstructs. Everything but the propose row comes from the durable log,
+  so a run whose trace was cleared still gets the rest. The propose row is the earliest `propose`
+  span that FITS the window, never simply the earliest in the file — the seed path that mints node 0
+  opens none, so on such a run the first traced propose belongs to a later node and is already
+  running beside an evaluation. Every absence is printed as a NOTE and never as a zero, and the two
+  are kept apart: "no `propose` span at all" (turn tracing on) reads differently from "spans, but
+  none inside the opening window" (this run cannot answer).
 * **Contained failures** — printed only when a span carries one. `core/containment.py::contain`
   stamps the span it ran under with a `contained` count and a `contained` event (the reason and the
   exception type), so a run whose watchdog ticks or agentic calls degraded to their fallbacks says
@@ -1210,6 +1227,77 @@ whose file set is missing from the record is NOT measured and is counted separat
 unreadable record is not a node that never moved. And this is the distance from the seed **program**;
 the semantic distance from a seed **corpus** (§11/§17's Scoop-Check, an embedder over a versioned
 external corpus) is a different, unbuilt artifact.
+
+---
+
+## `workspace-bytes`
+
+Read-only, no model. What this run's node workspaces actually **weigh**, beside the only sentence
+its own log ever made about them.
+
+```bash
+looplab workspace-bytes RUN_DIR [--max-entries 200000] [--node 4] [--top 3]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (walks its `nodes/*` workspaces; reads its own `workspace_seeded` rows for the claim column) |
+| `--max-entries` | `200000` | The BOUND, in directory entries stat'ed across the whole run. Spent = the walk stops and every total becomes a floor |
+| `--node` | *(all)* | Spend the whole budget on ONE node (its id, or its directory name) |
+| `--top` | `3` | How many of a node's largest subtrees to name |
+
+**Why it exists.** `workspace_seeded` is the only workspace fact in the event log, and it says
+`.[auto]:75 tracked` — an accurate statement about 0.9 MB, and the sole thing a reader could see
+about a directory that measured **944,779,776 B**, 937,847,296 of it three intermediate checkpoints
+plus a final because that node's own trainer said `save_total_limit=3`. So the one visible number
+named the copy, the copy got blamed for 727 GB it never wrote, and a whole migration proposal was
+written against a mechanism responsible for 0.096 % of the bytes
+(doc 37 §6 — the measurement that DECLINED it — and §8's R1, which asked for
+exactly this receipt). The claim and the measurement now print on the same rows.
+
+```
+workspace bytes for runs/demo — apparent size (sum of file sizes, what doc 37 quotes), symlinks NOT followed
+entry budget: 1,204 of 200,000 directory entries spent; the walk COMPLETED
+
+where                                  bytes     files
+(the record)                       1,204,913         5
+nodes/                           944,779,776       168
+confirm/                                   0         0
+run total                        945,984,689       173
+  run total = 945,984,689 B (902.2 MiB). `(the record)` is the run directory's own top-level files: the event log, the snapshots, the lock.
+
+node workspaces, largest first (top 3 subtree(s) each):
+  node_4: 944,779,776 B (901.0 MiB) in 168 file(s)
+      checkpoint-1200/            312,615,765 B (298.1 MiB)  in 6 file(s)
+      checkpoint-800/             312,615,765 B (298.1 MiB)  in 6 file(s)
+      final/                      312,615,766 B (298.1 MiB)  in 6 file(s)
+      seeded (the log's only workspace fact): .[auto]:75 tracked, data:train->link
+```
+
+**The bound is stated, and crossing it is a floor rather than a smaller number.** A byte total over
+a tree is unbounded work — doc 37 §9 records that as R1's own open problem — so the walk spends one
+shared budget of directory entries. When it runs out the walk **stops**: every total prints with
+`>=`, the nodes and subtrees it never reached are named `NOT WALKED` (which is not the same claim as
+`0 B`), and the report ends with the call that continues past it, at a budget the caller has not
+already spent.
+
+```
+BUDGET SPENT after 200,000 entries: every number above is a FLOOR (>=), not a measurement.
+  continue:  looplab workspace-bytes runs/demo --max-entries 400000
+  or spend the whole budget on one node:  looplab workspace-bytes runs/demo --node <id>
+```
+
+**What the number is.** The **apparent** size — the sum of file sizes — not allocated blocks, so it
+is directly comparable with doc 37's figures and reads differently from `du` (which counts blocks:
+larger for many small files, smaller for a sparse one). **Symlinks are never followed**: a `data:`
+mount is a link into a dataset the node did not write (189 GiB on the v1 testbed), so it is counted
+as the link it is and its target is not walked — which is also what keeps the walk inside the run
+directory it claims to be measuring.
+
+**What it will not do.** It decides nothing and deletes nothing. Doc 37 §8's next two rungs — a
+workspace disk budget stated to the Developer (R2), and reclaiming non-champion checkpoints at run
+end (R3) — both need something this command deliberately is not: R3 deletes evidence
+`engine/metric_salvage.py` reads, and needs a written retention policy first.
 
 ---
 
@@ -1869,12 +1957,12 @@ the evidence mixed. Legacy rows without the verifier payload remain
 explicit `claim_stance` separating literal proposition support from action guidance, so a confirmed negative
 fact is no longer inverted; legacy rows without the field keep the historical outcome mapping. This is still not
 an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is the
-scope+polarity-safe structured claim key unless the deprecated `--lean` projection is selected. `--scope` narrows every joined store (lessons, D8 research claims and, with
+scope+polarity-safe structured claim key — the only claim identity since 2026-09-08 (doc 25 EM-06). `--scope` narrows every joined store (lessons, D8 research claims and, with
 `--pack`, concept capsules) to one task — the CLI spelling of the HTTP `/api/cross-run/claims?scope_task=`
 read. Pure read; no LLM/endpoint.
 
 ```bash
-looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--structured|--lean] [--scope TASK_ID]
+looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--structured] [--scope TASK_ID]
                [--json] [--governance-receipt]
 ```
 
@@ -1884,10 +1972,10 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--structured|--lean
 | `--top N` | `20` | How many most-evidenced claims to list — **and, with `--pack`, the pack's `max_claims` cap** (`engine/claims_retrieval.py::build_context_pack`), so it bounds both listings and the rendered context pack |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly. Concept tendencies are derived from the full retained pre-cap aggregate while the rendered labels remain bounded |
-| `--structured` / `--lean` | `--structured` | Claim identity. `--structured` (the default) groups by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`): claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge); governance overlays by scope-precise `claim_uid`. `--lean` is the deprecated normalized-statement projection kept for reading a review built under it — its rows carry no `claim_uid`/`evidence_digest`, so its `--governance-receipt` can never satisfy `claim-decide` |
+| `--structured` | on (inert) | Claim identity, and there is only one: the scope+polarity-safe **structured claim key** (`engine/claim_key.py`): claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge); governance overlays by scope-precise `claim_uid`. The flag is accepted and changes nothing. `--lean` — the deprecated normalized-statement projection, whose rows carried no `claim_uid`/`evidence_digest` and whose `--governance-receipt` could therefore never satisfy `claim-decide` — was DELETED on 2026-09-08 (doc 25 EM-06) and now refuses as an unknown option |
 | `--scope TASK_ID` | `""` (portfolio-wide) | Project only this task's evidence, filtering **every** joined store through the same access boundary the Atlas and HTTP reads use. **Required to obtain a usable `--governance-receipt` for a task-scoped claim** — see the projection rule below. Empty keeps the portfolio-wide read |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
-| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide` (the structured projection is the default; `--lean` cannot produce them). `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
+| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide` (the structured projection is the only one; the deleted `--lean` read path could not produce them). `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
 
 ### The projection rule: review at the scope you decide at
 

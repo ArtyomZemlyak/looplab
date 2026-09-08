@@ -21,7 +21,7 @@ from looplab.core.redact import is_secret_key_name, redact_persisted_text
 from looplab.core.trace_files import (
     TRACE_JSONL_ROW_MAX_BYTES,
     iter_bounded_trace_jsonl_lines as _iter_bounded_trace_jsonl_lines,
-    open_private_trace_file, trace_file_change_token)
+    open_private_trace_file, trace_file_change_token, trace_file_identity)
 
 
 _MAX_SPAN_ID_CHARS = 256
@@ -240,8 +240,21 @@ def trace_file_revision(path: str | os.PathLike) -> Optional[str]:
         # destructive clear approval.  The caller must reject the operation and ask for a new,
         # provable snapshot rather than accept Windows creation time as a mutation fence.
         return None
+    # `trace_file_identity` IS `core/atomicio.same_file_entry` under the trace sidecar's own name
+    # (doc 25 SC-11) — the REPLACEMENT half of this token, now named rather than re-spelled.
+    #
+    # The rest deliberately stays below `file_identity`, and this is a judgement, not an omission:
+    # the two fields that tier would add are already SUBSUMED by `change_token`. On POSIX the token
+    # IS `st_ctime_ns` (`core/trace_files.py::trace_file_change_token`), so adding `st_ctime_ns`
+    # writes the same number into the digest twice; on Windows `st_ctime_ns` is CREATION time and
+    # this module's own contract says it is not mutation proof, while `FILE_BASIC_INFO.ChangeTime`
+    # moves on ANY metadata change — an attribute flip included, which is the one thing
+    # `st_file_attributes` would have caught here. `open_private_trace_file` has already refused a
+    # reparse point outright by then. So the descriptor token is strictly stronger than the upgrade,
+    # and the upgrade would only make a client-held CAS token churn on fields that cannot move
+    # without the token moving first.
     identity = (
-        int(source_stat.st_dev), int(source_stat.st_ino), change_token,
+        *trace_file_identity(source_stat), change_token,
         int(source_stat.st_size), int(source_stat.st_mtime_ns),
     )
     return hashlib.sha256(
