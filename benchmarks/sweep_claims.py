@@ -939,6 +939,9 @@ TEST_TRAIN_BANDS = {
 }
 
 MIN_PROBES_FOR_A_BAND = 2
+# HOW MUCH EVIDENCE A BAND IS PINNED ON HERE -- computed from the table above rather than typed, so
+# it cannot drift from what the file actually does. Today: 118, 11 and 10 probes, so the bar is 10.
+MIN_PROBES_TO_PIN = min(n for _lo, _hi, n in TEST_TRAIN_BANDS.values())
 
 
 def check_test_tracks_train(bench: str):
@@ -991,12 +994,19 @@ def check_test_tracks_train(bench: str):
     # HOLDS on its own tautology -- the shape this file exists to catch, written into this file.
     # The bands below are the measurement of 2026-09-08; a future probe outside one is the thing
     # worth reading, and a band that has visibly moved is worth re-pinning WITH a line saying why.
-    loud, unpinned, thin = [], [], set()
+    loud, unpinned, thin, narrow = [], [], set(), []
     for probe, task, best, test in pairs:
         band = TEST_TRAIN_BANDS.get(task)
         if band is None:
             if len(by_task[task]) < MIN_PROBES_FOR_A_BAND:
                 thin.add(task)          # one probe is a point, not a band
+            elif len(by_task[task]) < MIN_PROBES_TO_PIN:
+                # COMPUTABLE, NOT YET PINNABLE (§364). At two probes the band IS its two points:
+                # pinning it makes a rule those two can never fail, which is §330 at its smallest
+                # scale -- and the pagerank comment above `TEST_TRAIN_BANDS` is the record of that
+                # happening at one probe. The bar is not invented: it is the THINNEST band already
+                # pinned in this file, so the advice waits for as much evidence as its neighbours.
+                narrow.append(task)
             else:
                 unpinned.append(task)
             continue
@@ -1009,6 +1019,11 @@ def check_test_tracks_train(bench: str):
     if unpinned:
         detail += ("; UNPINNED task(s): " + ", ".join(sorted(set(unpinned)))
                    + " -- add the measured band to TEST_TRAIN_BANDS with the date")
+    if narrow:
+        detail += ("; band computable but TOO THIN TO PIN: "
+                   + ", ".join(f"{t} (n={len(by_task[t])}, the thinnest pinned band rests on "
+                               f"{MIN_PROBES_TO_PIN})" for t in sorted(set(narrow)))
+                   + " -- pinning it now would be a rule its own probes cannot fail")
     if thin:
         detail += ("; too few probes for a band: " + ", ".join(sorted(thin))
                    + f" (under {MIN_PROBES_FOR_A_BAND}); not judged")
