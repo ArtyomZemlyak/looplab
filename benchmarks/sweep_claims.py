@@ -28,6 +28,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -199,6 +200,87 @@ def _first_trace_of(bench: str, regime: str) -> str:
     return min(seen) if seen else "9999"
 
 
+# When `ruler_selfcheck` began recording the denominator of the regime it actually ran in (§353).
+# Before this, `cached_ms` was the wide median whatever the run did, so it cannot refute a label.
+DENOMINATOR_FOLLOWS_THE_REGIME = "2026-09-08T18:30:00"
+
+
+def _cache_medians(bench: str) -> dict:
+    """`{(task, regime): median ms}` for every baseline entry, so a row can be checked against the
+    denominator it claims to have divided by."""
+    out = {}
+    for row in ruler_check.entries(f"{bench}/looplab/benchmarks/algotune/.baseline_times"):
+        if row.get("subset") == "test" and row.get("median"):
+            out[(row.get("task"), row.get("regime"))] = float(row["median"])
+    return out
+
+
+def _label_contradicted_by_its_own_denominator(row, medians) -> str | None:
+    """§352. Does this reading's `cached_ms` belong to the OTHER regime's cache?
+
+    The strong form on purpose. "Does not match its own cache" would fire on every row written
+    before a cache was re-minted, which is a legitimate history; "matches the other regime's cache
+    to within 2 %" is a positive identification, and on this box the two differ by 1.9x on
+    pde_heat1d and 20x on discrete_log, so there is no ambiguity to split.
+
+    It found four rows §350's fix could not: 2026-09-07T01:58-02:02, all four sweep tasks, stamped
+    `lane22r3` while their denominators are the wide cache. They had been sitting in the SERIAL
+    pool, and removing them moved the serial-versus-wide gap by 1 to 1.8 points a task.
+    """
+    task, said, cached = row.get("task"), row.get("regime"), row.get("cached_ms")
+    if not said or not isinstance(cached, (int, float)) or cached <= 0:
+        return None
+    # ONLY ROWS WHOSE DENOMINATOR COULD HAVE BEEN REGIME-AWARE (§353). Until 2026-09-08T18:30
+    # `_cached_median_ms` defaulted to the WIDE key for every caller, so a correct SERIAL reading
+    # recorded a wide `cached_ms` and this check would convict it of a mislabel it does not have.
+    # That is what happened on the first §352 accusation: four rows of 2026-09-07 were called
+    # mislabelled on a field that was wide by construction. They are unattributable for §350's
+    # reason -- the label came from the newest cache FILE -- and not for this one.
+    if str(row.get("stamp") or "")[:19] < DENOMINATOR_FOLLOWS_THE_REGIME:
+        return None
+    other = (ruler_check.SERIAL_REGIME if said == ruler_check.CAMPAIGN_REGIME
+             else ruler_check.CAMPAIGN_REGIME)
+    mine, theirs = medians.get((task, said)), medians.get((task, other))
+    if not theirs:
+        return None
+    if mine and abs(cached - mine) / mine <= 0.02:
+        return None                          # its own cache accounts for the number
+    if abs(cached - theirs) / theirs <= 0.02:
+        return other
+    return None
+
+
+def _caveats(task, refs, inferred, contradicted, withdrawn, unattributed, serial_first) -> str:
+    """Everything that had to be said about HOW this task's readings were selected.
+
+    Lifted out of the pooled branch (§352): a task whose only mishandled rows are serial falls to
+    the single-reading path, and every one of these notes silently vanished with it -- the
+    "2 readings refuted by their own denominator" line printed nowhere for exactly the case that
+    produced it. A caveat that appears only on one of two paths is worse than none, because its
+    absence reads as "nothing to report".
+    """
+    how = ""
+    seen_refs = refs.get((task, ruler_check.CAMPAIGN_REGIME)) or set()
+    named = {r for r in seen_refs if r}
+    if len(named) > 1:
+        how += (f" [{len(named)} DIFFERENT reference module(s) across these readings: "
+                + ", ".join(sorted(named)) + " -- not one series]")
+    elif seen_refs and not named:
+        how += " [no reading names the reference it used]"
+    if inferred.get(task):
+        how += f" ({inferred[task]} of them INFERRED, taken before {serial_first[:16]})"
+    if contradicted.get(task):
+        how += (f" [{contradicted[task]} reading(s) whose own cached_ms belongs to the "
+                "OTHER regime's cache -- label refuted by the reading]")
+    if withdrawn.get(task):
+        how += (f" [{withdrawn[task]} reading(s) WITHDRAWN by the record: taken under an "
+                "interpreter it marks wrong]")
+    if unattributed.get(task):
+        how += (f" [{unattributed[task]} later reading(s) DROPPED: no regime recorded and "
+                "both regimes existed by then]")
+    return how
+
+
 def check_ruler_constants(bench: str):
     """"Эталон против себя ~1.0: pagerank 1.0024, pde_heat1d 0.9958, edge_expansion 0.9847,
     discrete_log 1.0162"
@@ -216,6 +298,10 @@ def check_ruler_constants(bench: str):
     pool: dict = {}
     inferred: dict = {}
     unattributed: dict = {}
+    refs: dict = {}
+    withdrawn: dict = {}
+    contradicted: dict = {}
+    medians = _cache_medians(bench)
     # THE EARLIEST EVIDENCE THAT THE SERIAL REGIME EXISTED HERE, from two independent places: a
     # cache file's mtime and the log's own first regime-tagged row. The earlier of the two is the
     # cutoff, so a copied file or a late-added field can only make the rule STRICTER, never let an
@@ -233,6 +319,29 @@ def check_ruler_constants(bench: str):
                 continue
             task, med, stamp = row.get("task"), row.get("median"), str(row.get("stamp") or "")
             if not isinstance(med, (int, float)) or task not in SWEEP_CONSTANTS:
+                continue
+            # A READING THE RECORD MARKS WRONG IS NOT EVIDENCE (§349). §299 withdrew §296-§298
+            # after finding they were all measured under conda instead of the bench venv, and
+            # marked the nine readings `interpreter: conda (WRONG -- see §299)` rather than deleting
+            # them. Nothing here looked at that field: those nine miss today's verdict only because
+            # they predate `busy_cpus_outside_lane`, so the exclusion is an accident of field order.
+            # One conda row written a day later, with the busy count on it, would have gone straight
+            # into a mean -- carrying the exact error §299 exists to record.
+            # THE ROW'S OWN DENOMINATOR OUTRANKS ITS LABEL (§352). `cached_ms` is the cached
+            # per-instance median this reading divided by, and the two regimes' caches are nothing
+            # alike -- 146.5 ms against 78.2 on pde_heat1d, 2.18 against 1.47 on discrete_log. A
+            # label that disagrees with it is refuted by the reading itself, which is the second
+            # instrument §350's fix did not have.
+            mislabelled = _label_contradicted_by_its_own_denominator(row, medians)
+            if mislabelled:
+                contradicted[task] = contradicted.get(task, 0) + _n_values(row)
+                continue
+            said_interp = str(row.get("interpreter") or "")
+            if "WRONG" in said_interp:
+                # IN READINGS, NOT ROWS -- the unit the sentence beside it uses (§340). One sitting
+                # carries four reps, and counting sittings printed "1 reading(s) WITHDRAWN" beside
+                # "2 quiet wide read(s)". The same mismatch, one field over, caught by its own test.
+                withdrawn[task] = withdrawn.get(task, 0) + _n_values(row)
                 continue
             busy = row.get("busy_cpus_outside_lane")
             # ATTRIBUTED FIRST, THEN USED -- for every route, not only the pool. §340's first cut
@@ -282,6 +391,12 @@ def check_ruler_constants(bench: str):
                 pool.setdefault((task, reg), []).extend(
                     float(v) for v in (row.get("values") or [med])
                     if isinstance(v, (int, float)))
+                # AND WHICH REFERENCE EACH READING WAS TAKEN AGAINST (§346). "The reference against
+                # itself" is one series only while the reference is one file. Readings that used
+                # different ones are two series pooled into a mean measured nowhere -- the §317
+                # mistake with a different key. Rows written before the field exists carry None and
+                # are counted separately, because "not recorded" is not "the same as the others".
+                refs.setdefault((task, reg), set()).add(row.get("reference_sha"))
     except OSError as exc:
         return False, f"cannot read the drift log: {type(exc).__name__}"
 
@@ -331,6 +446,7 @@ def check_ruler_constants(bench: str):
         # AND outside the tolerance: the first test is what stops a +-4 % instrument reporting a
         # 3 % drift every other sitting, the second is what stops a very tight instrument reporting
         # a difference too small to act on.
+        how = _caveats(task, refs, inferred, contradicted, withdrawn, unattributed, serial_first)
         vals = pool.get((task, ruler_check.CAMPAIGN_REGIME)) or []
         n = len(vals)
         if n >= 2:
@@ -350,12 +466,6 @@ def check_ruler_constants(bench: str):
             # HOW MANY OF THEM ARE INFERRED, said out loud. Four of four on two of these tasks:
             # a reader who sees `4 quiet wide read(s)` and a tight error bar has no way to tell
             # that number came from rows that never named a regime.
-            how = ""
-            if inferred.get(task):
-                how = f" ({inferred[task]} of them INFERRED, taken before {serial_first[:16]})"
-            if unattributed.get(task):
-                how += (f" [{unattributed[task]} later reading(s) DROPPED: no regime recorded and "
-                        "both regimes existed by then]")
             said.append(f"{task}: list {quoted:.4f}, {n} quiet wide read(s) mean {mean:.4f} "
                         f"+-{sem:.4f} ({100 * delta:+.1f} %){how}{beside}"
                         f"{'  <-- ' if moved else ''}")
@@ -365,7 +475,7 @@ def check_ruler_constants(bench: str):
         if abs(delta) > DRIFT_TOLERANCE:
             off += 1
         said.append(f"{task}: list {quoted:.4f}, ONE reading {got:.4f} on {stamp[:10]}{under} "
-                    f"({100 * delta:+.1f} %){mark}")
+                    f"({100 * delta:+.1f} %){how}{mark}")
     return off == 0, "; ".join(said)
 
 
@@ -869,6 +979,75 @@ def check_test_tracks_train(bench: str):
     return not loud and not unpinned, detail
 
 
+# The bridge stamps every evaluation with which half of the dataset it actually ran on, and why it
+# believes that. `patch_eval_subset.py` writes a marker into the harness and `looplab_eval.py` reads
+# it back, so `verified` is a check against the patched file rather than a repeat of what was asked.
+_SUBSET_EVIDENCE = re.compile(r'"subset_evidence"\s*:\s*(\{[^{}]*\})')
+
+
+def check_every_node_was_graded_on_train(bench: str):
+    """Every LoopLab node is evaluated on TRAIN; TEST is the graded split and the run must not see it.
+
+    NOTHING ON THIS BOX CHECKED IT. The rule is the reason `compare_arms` refuses to put a run's own
+    champion metric in the same column as arm A's test result (`_arm_b_final`: "every LoopLab node is
+    evaluated on TRAIN, mirroring AlgoTuner's agent loop"), and the whole arm-B column is worthless
+    if a single node was scored on the half it is graded against. A silent violation would not look
+    like a failure -- it would look like a good score.
+
+    Driven 2026-09-08 over every `node_evaluated` in the corpus: **392 nodes, 392 asked `train`, 392
+    verified, 0 without evidence**, every one by `patch_marker_present`. The check exists so that
+    stays a measurement instead of a thing everyone knows.
+
+    A node whose record carries NO evidence is reported, not passed over: unverifiable is not the
+    same as verified, and it is the state a future harness change would produce.
+    """
+    nodes = missing = 0
+    wrong: list = []
+    reasons: dict = {}
+    for path in glob.glob(f"{bench}/model-probes/*/runs/*/*/events.jsonl"):
+        probe = path.split("/model-probes/", 1)[1].split("/")[0]
+        if probe == "_ruler":
+            continue
+        try:
+            fh = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"node_evaluated"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("type") != "node_evaluated":
+                    continue
+                nodes += 1
+                got = _SUBSET_EVIDENCE.search(str((row.get("data") or {}).get("stdout_tail") or ""))
+                try:
+                    evidence = json.loads(got.group(1)) if got else None
+                except ValueError:
+                    evidence = None
+                if not isinstance(evidence, dict):
+                    missing += 1
+                    continue
+                reasons[evidence.get("reason")] = reasons.get(evidence.get("reason"), 0) + 1
+                if evidence.get("asked") != "train" or evidence.get("verified") is not True:
+                    wrong.append(f"{probe}/node {(row.get('data') or {}).get('node_id')}: "
+                                 f"asked={evidence.get('asked')!r} "
+                                 f"verified={evidence.get('verified')!r}")
+    if not nodes:
+        return False, "no evaluated node on this box, so the split cannot be checked"
+    detail = (f"{nodes} evaluated node(s): {nodes - missing - len(wrong)} asked train and verified"
+              + (f", by {', '.join(f'{k} x{v}' for k, v in sorted(reasons.items()))}" if reasons else ""))
+    if missing:
+        detail += (f"; {missing} carry NO subset evidence -- unverifiable, which is not the same "
+                   "as verified")
+    if wrong:
+        detail += "; GRADED ON THE WRONG HALF: " + "; ".join(wrong[:6])
+    return not (missing or wrong), detail
+
+
 def check_waste_before_the_first_node(bench: str):
     """§72: "трата ПОСЛЕ последнего узла" читается только рядом с тратой ДО первого -- и проверялась
     половина пары.
@@ -939,6 +1118,8 @@ CLAIMS = [
      check_money_cue_reaches_the_choosers),
     ("point 9: 3.6 % of spend lands after the last evaluated node, 16 of 69 runs",
      check_waste_after_the_last_node),
+    ("point 9: every node was graded on TRAIN, never on the graded half",
+     check_every_node_was_graded_on_train),
     ("point 9: the other half of the pair -- spend BEFORE the first node",
      check_waste_before_the_first_node),
     ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),

@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import glob
+import hashlib
 import json
 import os
 import re
@@ -145,7 +146,15 @@ def in_process_ms(task: str, n: int, root: str = f"{BENCH}/AlgoTune", repeats: i
 
 
 def _cached_median_ms(task: str, subset: str, key: str = "w22x1r3"):
-    """The median of the cached per-instance timings this reading is divided by."""
+    """The median of the cached per-instance timings this reading is divided by.
+
+    §353. `key` defaulted to `w22x1r3` and every caller took the default, so a SERIAL reading
+    recorded the WIDE median as its denominator -- 45.48 ms on `edge_expansion` where the serial
+    cache says 28.21. The field is called `cached_ms` and named itself "what this reading divided
+    by", which it was not. Caught by §352's cross-check firing on a reading taken forty minutes
+    after that check was written, with the regime label correct: the label was right and the
+    DENOMINATOR was the one lying. See the correction to §352 in docs/56.
+    """
     path = f"{baseline_dir()}/{task}__{subset}__{key}.json"
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -155,19 +164,36 @@ def _cached_median_ms(task: str, subset: str, key: str = "w22x1r3"):
     return times[len(times) // 2] if times else None
 
 
+def reference_module(task: str, probe_root: str = f"{BENCH}/model-probes") -> tuple[str, str]:
+    """`(path, sha256[:12])` of the delivered reference this self-check will inline.
+
+    §346. Every OTHER input to a reading is now on the row -- the lane (§266), the cpus busy outside
+    it (§295), the regime (§329), both halves of the denominator (§319) -- and the one input that is
+    the thing being measured was not. The self-check calls itself "the reference against itself",
+    and the reference it uses is whatever `sorted(glob)[0]` returns out of a probe's workspace: a
+    candidate that rewrites its staged copy would move the constant with nothing on the row to say
+    so. Measured 2026-09-08, so the record starts from a known state: 11 staged copies for
+    pde_heat1d, 13 for discrete_log, 119 for edge_expansion, 1 for pagerank -- and ONE distinct
+    version of each. Today it changes nothing; that is what makes it worth recording now.
+    """
+    found = sorted(glob.glob(f"{probe_root}/*/ws/{task}/reference_{task}.py"))
+    if not found:
+        raise FileNotFoundError(f"no delivered reference module for {task} under {probe_root}")
+    sha = hashlib.sha256(Path(found[0]).read_bytes()).hexdigest()[:12]
+    return found[0], sha
+
+
 def build_solver(task: str, out_dir: str, probe_root: str = f"{BENCH}/model-probes") -> str:
     """Write a SELF-CONTAINED `solver.py` whose `solve()` is the reference's own.
 
     Inlined rather than imported: `--solver-file-only` copies one file, and an import of the
     reference module comes back `solver_unloadable` with `eval_seconds` 1.7.
     """
-    found = sorted(glob.glob(f"{probe_root}/*/ws/{task}/reference_{task}.py"))
-    if not found:
-        raise FileNotFoundError(f"no delivered reference module for {task} under {probe_root}")
-    body = Path(found[0]).read_text(encoding="utf-8")
+    found, _sha = reference_module(task, probe_root)
+    body = Path(found).read_text(encoding="utf-8")
     got = re.search(r"^class (\w+)\(Task\)", body, re.M)
     if not got:
-        raise ValueError(f"{found[0]} has no `class X(Task)` to delegate to")
+        raise ValueError(f"{found} has no `class X(Task)` to delegate to")
     cls = got.group(1)
     path = os.path.join(out_dir, "solver.py")
     Path(path).write_text(
@@ -218,25 +244,33 @@ def baseline_dir() -> str:
     return os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR") or str(HERE / "algotune" / ".baseline_times")
 
 
-def observed_regime(task: str, subset: str) -> str | None:
-    """The regime key the run ACTUALLY divided by, read off the cache after the fact.
+def observed_regime(task: str, subset: str, evals=None) -> str | None:
+    """The regime key the run ACTUALLY divided by, taken from the evaluation's own report.
 
     Not the requested one. §305 asked for `ALGOTUNE_EVAL_WORKERS=1`, got twenty-two, wrote
     `__w22x1r3` and reported a number that read like a one-worker measurement; the override that
     caused it is gone (§306), but recording the intent would reintroduce the same class of lie for
-    free. What is on disk after the evaluation is what the reading was divided by.
+    free. What the arena resolved is what the reading was divided by.
 
     §314 is why this belongs in the row at all: max_clique_cpsat reads 1.5291 at twenty-two workers
     and 0.9922 at one, on the same quiet box against baselines built in each regime. Two rows
     carrying the same task name and no regime are not a series -- they are two different questions.
     """
-    hits = sorted(Path(baseline_dir()).glob(f"{task}__{subset}__*.json"),
-                  key=lambda q: q.stat().st_mtime, reverse=True)
-    for hit in hits:
-        if hit.name.endswith(".provenance.json"):
-            continue
-        tail = hit.stem.split("__")[-1]
-        return tail or None
+    # THE RUN'S OWN ANSWER FIRST (§350). Globbing the cache by mtime does NOT say what this run
+    # divided by: an evaluation that READS a cached entry leaves its mtime untouched, so the newest
+    # file is simply whichever regime was minted last. Both regimes exist for all four sweep tasks,
+    # and the serial entries were written on 09-06 while the wide ones date from 08-31 -- so every
+    # WIDE reading taken since has been stamped `lane22r3`. Four of them, taken on a quiet box on
+    # 2026-09-08, went into the SERIAL pool: the exact mixing §314 forbids, produced by the field
+    # that exists to prevent it. `looplab_eval.py` stamps `eval_regime()` on its own output
+    # (`out.setdefault("eval_regime", ...)`), which is what the arena actually resolved.
+    for row in evals or []:
+        key = ((row or {}).get("eval_regime") or {}).get("key")
+        if key:
+            return str(key).lstrip("_") or None
+    # NO FALLBACK TO THE CACHE LISTING. Returning a guess here is what put four wide readings in the
+    # serial pool; a row that cannot name its regime is handled by `sweep_claims` (§340), and that
+    # path is honest. None means "this run did not say".
     return None
 
 
@@ -319,7 +353,8 @@ def busy_cpus_outside_lane() -> int | None:
 def append_reading(path, task: str, subset: str, values, median: float, stamp=None,
                    lane: str | None = None, busy: int | None = None,
                    regime: str | None = None, solver_ms: float | None = None,
-                   cached_ms: float | None = None) -> dict:
+                   cached_ms: float | None = None, reference_sha: str | None = None,
+                   reference_from: str | None = None, interpreter: str | None = None) -> dict:
     """Append one dated reading, so the drift becomes a SERIES rather than a single number.
 
     §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
@@ -358,6 +393,19 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
            # to quoting the number from a comment.
            "cached_ms": (round(float(cached_ms), 4) if isinstance(cached_ms, (int, float)) else None),
            "solver_ms": (round(float(solver_ms), 4) if isinstance(solver_ms, (int, float)) else None),
+           # AND WHICH REFERENCE IT WAS MEASURED AGAINST (§346) -- the last unrecorded input, and
+           # the one the reading is named after. `reference_from` is the probe whose workspace the
+           # module came out of, so a reading can be traced without re-globbing a tree that may be
+           # gone by then.
+           "reference_sha": reference_sha, "reference_from": reference_from,
+           # AND THE INTERPRETER (§349). §299 is the section about a wrong one surviving three
+           # sweeps, four reported findings and six refuted hypotheses -- "a wrong instrument
+           # reproduces its own error perfectly" -- and its fix stamped the interpreter on the
+           # BASELINE's sidecar. The reading is the other half and never got it: the nine conda-era
+           # rows carry `interpreter: conda (WRONG -- see §299)` only because they were marked BY
+           # HAND afterwards. They are excluded from today's verdict solely because they predate
+           # `busy_cpus_outside_lane`, which is an accident, not a rule.
+           "interpreter": interpreter,
            "values": [round(float(v), 6) for v in values],
            "median": round(float(median), 6)}
     path = Path(path)
@@ -494,6 +542,7 @@ def main(argv=None) -> int:
         # starts and ends inside a single rep is missed, and that is not the kind that moves a
         # median by 9 %.
         busy_seen = []
+        seen_evals = []
         for _ in range(max(1, args.reps)):
             busy_seen.append(busy_cpus_outside_lane())
             row = one_eval(args.task, solver, args.lane, args.subset)
@@ -502,6 +551,7 @@ def main(argv=None) -> int:
             if why:
                 bad.append(why)
                 continue
+            seen_evals.append(row)
             vals.append(float(row["speedup"]))
             if isinstance(row.get("eval_seconds"), (int, float)):
                 secs.append(float(row["eval_seconds"]))
@@ -522,7 +572,11 @@ def main(argv=None) -> int:
     if os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR"):
         print(f"  (dividing by the cache you named: {baseline_dir()})")
     target = dataset_target_ms(args.task)
-    cached = _cached_median_ms(args.task, args.subset)
+    # THE REGIME THE RUN ACTUALLY RESOLVED, same source as §350's fix. Passing nothing here is
+    # what made every serial reading claim a wide denominator.
+    ran_regime = observed_regime(args.task, args.subset, seen_evals)
+    cached = (_cached_median_ms(args.task, args.subset, ran_regime) if ran_regime
+              else _cached_median_ms(args.task, args.subset))
     if target and cached:
         print(f"  (the dataset name says the reference took {target:.0f} ms per instance on the "
               f"machine that BUILT it; our cached baseline says {cached:.1f} ms, "
@@ -549,9 +603,20 @@ def main(argv=None) -> int:
               f"`eval_seconds` cannot see this drift at all)")
     if args.record:
         seen = [b for b in busy_seen if b is not None]
+        # THE REFERENCE IS LOOKED UP AGAIN, not carried down from `build_solver` -- the run may
+        # have taken minutes and a probe can restage its workspace in that time. Re-reading here
+        # records what is on disk NOW; a mismatch with what was inlined would mean the reading is
+        # already unattributable, and a stale carried value would hide that.
+        try:
+            ref_from, ref_sha = reference_module(args.task)
+            ref_from = ref_from.split("/model-probes/", 1)[-1].split("/")[0]
+        except (FileNotFoundError, OSError):
+            ref_from = ref_sha = None
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
                        args.lane, max(seen) if seen else None,
-                       observed_regime(args.task, args.subset), direct, cached)
+                       ran_regime, direct, cached,
+                       reference_sha=ref_sha, reference_from=ref_from,
+                       interpreter=bench_python())
         print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "

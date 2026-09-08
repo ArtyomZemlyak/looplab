@@ -14,24 +14,24 @@ principals must still protect the owner UI/control plane as described in the dep
 """
 from __future__ import annotations
 
-import base64
 from contextlib import contextmanager
-import hashlib
 import hmac
 import json
 import math
-import re
 import secrets
 import threading
 import time
-import uuid
 from pathlib import Path
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.serve.capability_store import (
     capability_store_lock,
+    exact_request_id,
+    exact_token_secret,
     publish_reserved,
+    recovery_bearer,
+    recovery_digest,
     reservation_state,
     reserve_exact_id,
     reserve_unique_id,
@@ -44,7 +44,6 @@ DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 MIN_TTL_SECONDS = 5 * 60
 MAX_TTL_SECONDS = 30 * 24 * 60 * 60
 REVIEW_HEADER = "X-LoopLab-Review"
-_RECOVERY_SECRET = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _CREATE_CONTRACT = 1
 _CURRENT_GENERATION_UNSET = object()
 
@@ -58,67 +57,37 @@ class ReviewError(ValueError):
         self.metadata = metadata
 
 
-def _canonical_bytes(value: dict) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-
-def exact_review_request_id(value: object) -> str | None:
-    """Return only a canonical lowercase RFC 4122 UUIDv4 create identity."""
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = uuid.UUID(value)
-    except (ValueError, AttributeError):
-        return None
-    return value if (parsed.variant == uuid.RFC_4122 and parsed.version == 4
-                     and str(parsed) == value) else None
-
-
-def exact_review_token_secret(value: object) -> bytes | None:
-    """Decode only a canonical unpadded base64url 256-bit create-recovery secret."""
-    if not isinstance(value, str) or _RECOVERY_SECRET.fullmatch(value) is None:
-        return None
-    try:
-        decoded = base64.urlsafe_b64decode(value + "=")
-    except (ValueError, TypeError):
-        return None
-    if len(decoded) != 32:
-        return None
-    canonical = base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=")
-    return decoded if hmac.compare_digest(canonical, value) else None
+# The create-recovery FIELD validators and the derivation below are `capability_store`'s since
+# 2026-09-08: `ShareStore` needed the SAME protocol, and a second copy of these bytes would hand a
+# retrying client a token that authenticates nothing (doc 25 SC-10).  The review spellings stay
+# exported here because the review router imports them by these names.
+exact_review_request_id = exact_request_id
+exact_review_token_secret = exact_token_secret
 
 
 def _recovery_identity(run_id: str, request_id: str) -> tuple[str, str]:
-    identity = _canonical_bytes({
+    identity_hash = recovery_digest("looplab-review-create-id-v1", {
         "request_id": request_id,
         "run_id": run_id,
         "v": _CREATE_CONTRACT,
     })
-    identity_hash = hashlib.sha256(
-        b"looplab-review-create-id-v1\0" + identity).hexdigest()
     return "rvl_" + identity_hash[:32], identity_hash
 
 
 def _recovery_token(link_id: str, token_secret: bytes) -> str:
     suffix = link_id[4:]
-    material = hmac.new(
-        token_secret, b"looplab-review-bearer-v1\0" + link_id.encode("ascii"),
-        hashlib.sha256).digest()
-    bearer = base64.urlsafe_b64encode(material).decode("ascii").rstrip("=")
-    return f"rv_{suffix}_{bearer}"
+    return f"rv_{suffix}_{recovery_bearer('looplab-review-bearer-v1', token_secret, link_id)}"
 
 
 def _recovery_intent(run_id: str, generation: str, ttl_seconds: int,
                      include_evidence: bool) -> str:
-    intent = _canonical_bytes({
+    return recovery_digest("looplab-review-create-intent-v1", {
         "expected_generation": generation,
         "include_evidence": include_evidence,
         "run_id": run_id,
         "ttl_seconds": ttl_seconds,
         "v": _CREATE_CONTRACT,
     })
-    return hashlib.sha256(b"looplab-review-create-intent-v1\0" + intent).hexdigest()
 
 
 def _finite_number(value, fallback: float | None = None) -> float | None:

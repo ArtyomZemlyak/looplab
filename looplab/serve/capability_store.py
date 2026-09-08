@@ -31,6 +31,16 @@ whose copies could only ever agree by hand:
 * `publish_reserved` — publish one OWNED reservation, preserving any non-empty uncertain result and
   healing only the empty footprint this caller created.
 * `token_digest` — the one hashing of a bearer value.
+* The CREATE-RECOVERY derivation — `exact_request_id`, `exact_token_secret`, `canonical_bytes`,
+  `recovery_digest`, `recovery_bearer`. A lost response to a create leaves the client holding no
+  token while a live capability exists, and a plain retry then mints a SECOND one: an un-revoked
+  bearer nobody holds. The fix is that the CLIENT, not the server, owns the identity — a random
+  request id and a 256-bit secret it keeps — so the id is derived from (subject, request id) and
+  the bearer is an HMAC of that secret over the id. A retry lands on the same record and
+  reconstructs the same token, which the store still never persists. Both sides of that derivation
+  are pure functions of the client's envelope, and a server that computed one byte differently from
+  its sibling would hand back a token that authenticates nothing: they could only ever agree by
+  hand, which is precisely what belongs here.
 
 **What deliberately stays local to each store, because sharing it would LOOSEN it:**
 
@@ -49,13 +59,17 @@ whose copies could only ever agree by hand:
 """
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 import hashlib
+import hmac
 import json
 import os
+import re
 import stat
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -77,6 +91,72 @@ _EMPTY_RESERVATION_POLLS = 21
 def token_digest(token: str) -> str:
     """The stored form of a bearer value. The token itself is never persisted by either store."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# --- the create-recovery derivation, shared by both stores (doc 25 SC-10) -------------------------
+
+_TOKEN_SECRET = re.compile(r"[A-Za-z0-9_-]{43}\Z")
+
+
+def canonical_bytes(value: dict) -> bytes:
+    """The one serialization a hash is taken over. Sorted, compact and ASCII-escaped, so the digest
+    depends on the FACTS in the envelope and never on a dict order or a JSON writer's spacing."""
+    return json.dumps(
+        value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def exact_request_id(value: object) -> str | None:
+    """Return only a canonical lowercase RFC 4122 UUIDv4 create identity."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return None
+    return value if (parsed.variant == uuid.RFC_4122 and parsed.version == 4
+                     and str(parsed) == value) else None
+
+
+def exact_token_secret(value: object) -> bytes | None:
+    """Decode only a canonical unpadded base64url 256-bit create-recovery secret.
+
+    Canonical, not merely decodable: two spellings of one secret would derive two bearers for one
+    record, so the round trip has to come back byte-identical before the value is accepted.
+    """
+    if not isinstance(value, str) or _TOKEN_SECRET.fullmatch(value) is None:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(value + "=")
+    except (ValueError, TypeError):
+        return None
+    if len(decoded) != 32:
+        return None
+    canonical = base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=")
+    return decoded if hmac.compare_digest(canonical, value) else None
+
+
+def recovery_digest(label: str, payload: dict) -> str:
+    """A domain-separated SHA-256 over one create-recovery envelope.
+
+    `label` is what keeps an identity hash, an intent hash and a sibling store's hashes from ever
+    being the same number over the same facts, so a digest lifted from one can never be replayed as
+    another. The NUL is the separator: a label is ASCII and a canonical JSON body starts with `{`,
+    so no label/body pair can be read two ways.
+    """
+    return hashlib.sha256(
+        label.encode("ascii") + b"\0" + canonical_bytes(payload)).hexdigest()
+
+
+def recovery_bearer(label: str, secret: bytes, link_id: str) -> str:
+    """The bearer secret a client can reconstruct: HMAC(client secret, label \0 link id), base64url.
+
+    The store persists only `token_digest` of the assembled token, exactly as it does for a random
+    one. What changes is who can derive it a second time: the holder of the 256-bit secret, and
+    nobody else — the record itself carries nothing that would let a reader recompute this.
+    """
+    material = hmac.new(
+        secret, label.encode("ascii") + b"\0" + link_id.encode("ascii"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(material).decode("ascii").rstrip("=")
 
 
 def store_process_lock(directory) -> threading.Lock:

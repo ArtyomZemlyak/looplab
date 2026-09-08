@@ -26,6 +26,10 @@ import {
 import { assistantDirectDecision, assistantDirectPresentation } from './assistantDirectPolicy.js'
 import { shareActionBlock, shareActionFailure, shareSnapshotAudience } from './assistantShareModel.js'
 import {
+  beginShareCreateIntent, clearShareCreateIntent, shareCreateBody, shareRecoverySpent,
+  validateShareCreateReceipt,
+} from './assistantShareRecovery.js'
+import {
   sessionDeleteBlock, sessionDeleteFailure, sessionReadSuperseded,
 } from './assistantSessionModel.js'
 import { contextChipTitle, contextUsage, foldControl, newChatGate } from './assistantChromeModel.js'
@@ -258,15 +262,11 @@ const assistantLiveShareRecoveryFailure = {
   notice: 'Saved Assistant turn paused · live public-link status changed',
   blocked: false,
 }
-const assistantShareReceipt = (value, expectedSession) => {
-  const shareId = value?.share_id
-  const match = typeof value?.url === 'string' ? ASSISTANT_SHARE_URL_RE.exec(value.url) : null
-  const expiresAt = value?.expires_at
-  if (value?.ok !== true || String(value?.session || '') !== String(expectedSession || '')
-      || value?.live !== false || !validAssistantShareId(shareId) || match?.[1] !== shareId
-      || !Number.isFinite(expiresAt) || expiresAt <= 0) return null
-  return { shareId, relativeUrl: value.url, expiresAt }
-}
+// A saved create identity belongs to ONE deployment served from ONE path: two LoopLabs open in the
+// same tab must not read each other's envelopes, and a chat id is only unique within a deployment.
+// (`assistantShareReceipt` used to live here; the receipt is now checked against what this browser
+// DERIVES rather than against the shape of the answer — `assistantShareRecovery.js`.)
+const shareRecoveryScope = () => `${location.origin}${location.pathname}`
 const validAssistantShareFallback = value => {
   if (!value || !validAssistantShareId(value.shareId) || !Number.isFinite(value.expiresAt)
       || value.expiresAt <= 0 || typeof value.url !== 'string') return false
@@ -3348,11 +3348,30 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       turnIncomplete: runningRef.current || turnCaptureRef.current || busy || commandBusy
         || pending.length > 0 || msgs[msgs.length - 1]?.role === 'user',
     })) return
+    // The create identity is minted and durably saved BEFORE the request goes out (doc 25 SC-10).
+    // That is the whole contract: a response lost in flight leaves this browser able to ask for the
+    // SAME capability again, where before it could only publish a second live link nobody held.
+    let intent = null
     try {
-      const r = await boundedRequest(signal => assistantShare(shareSid, false, { signal }))
+      intent = beginShareCreateIntent({
+        scope: shareRecoveryScope(), sessionId: shareSid, live: false,
+      }).intent
+    } catch {
+      // Our own vocabulary, never the exception's (this component never renders a raw message): the
+      // identity could not be minted or durably saved, so nothing was sent and nothing was created.
+      settleShareAction(shareSid)
+      flash('Public-link recovery is unavailable · nothing was shared')
+      return
+    }
+    try {
+      const r = await boundedRequest(signal => assistantShare(
+        shareSid, shareCreateBody(intent), { signal }))
+      // Validated against what THIS tab derives, not against what the server says about itself: the
+      // URL must carry the exact token our own saved secret rebuilds, over our own derived id.
+      const receipt = await validateShareCreateReceipt(r, intent)
+      // The identity is spent the moment its capability is in hand; a later click starts a new one.
+      clearShareCreateIntent(intent)
       if (!mountedRef.current) return
-      const receipt = assistantShareReceipt(r, shareSid)
-      if (!receipt) throw new Error('Invalid Assistant share receipt')
       const url = location.origin + location.pathname + receipt.relativeUrl
       setShareUnknown(shareSid, false)
       mutateSessionsLocally(current => current.map(session => session.id === shareSid
@@ -3375,8 +3394,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const audience = shareSnapshotAudience(mountedRef.current, sidRef.current, shareSid)
       if (audience === 'gone') return
       flash(audience === 'departed' ? 'Snapshot link copied for the previous chat'
-        : `Snapshot link copied · expires ${fmtDate(receipt.expiresAt)}.`)
+        : receipt.replayed
+          ? `The same snapshot link was recovered and copied · expires ${fmtDate(receipt.expiresAt)}.`
+          : `Snapshot link copied · expires ${fmtDate(receipt.expiresAt)}.`)
     } catch (error) {
+      // A 4xx about the ENVELOPE is authoritative about this identity and only this identity, so it
+      // is spent and the next click starts a fresh one. Everything else — a timeout, a 5xx, a
+      // dropped connection — is precisely what the saved identity is FOR, so it stays put.
+      if (shareRecoverySpent(error)) clearShareCreateIntent(intent)
       if (!mountedRef.current) return
       reportShareFailure('snapshot', shareSid, error)
     } finally {

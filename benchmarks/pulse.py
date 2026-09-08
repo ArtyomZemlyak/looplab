@@ -87,6 +87,7 @@ def pulse(events_path: str) -> dict:
     spend = 0.0
     nodes = zeros = errors = 0
     bad = []
+    spend_at_last_node = None
     for event in events_read.iter_events(events_path):
         kind = event.get("type")
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -96,6 +97,11 @@ def pulse(events_path: str) -> dict:
             except (TypeError, ValueError):
                 pass
         elif kind == "node_evaluated":
+            # EVERY evaluated node, scored or zero. §347's question is "when did this probe last
+            # get an ANSWER back from the arena", and a zero is an answer: the money spent after it
+            # bought no further reading either way. Counting only scored nodes would call a probe
+            # that keeps earning zeros "productive" while it spends.
+            spend_at_last_node = spend
             scored = data.get("metric")
             if isinstance(scored, (int, float)) and scored > 0:
                 nodes += 1
@@ -117,7 +123,8 @@ def pulse(events_path: str) -> dict:
                             (isinstance(secs, (int, float)) and secs < REFUSAL_SECONDS)})
         elif kind in ("error", "developer_crash", "build_interrupted"):
             errors += 1
-    return {"spend": spend, "nodes": nodes, "zeros": zeros, "errors": errors, "bad": bad}
+    return {"spend": spend, "nodes": nodes, "zeros": zeros, "errors": errors, "bad": bad,
+            "spend_at_last_node": spend_at_last_node}
 
 
 def zero_sentence(z: dict) -> str:
@@ -145,6 +152,58 @@ def zero_sentence(z: dict) -> str:
     # all there is. It stays the fallback and says so.
     return ("RULER REFUSAL -- the harness declined, the solver was never the question"
             if z.get("refusal") else "the evaluation ran and came back invalid")
+
+
+# NOT A LIVE SIGNAL, AND THE TOOL NEXT DOOR SAYS WHY (§347). The share of a probe's spend that has
+# landed since its last evaluated node is a real number for a FINISHED probe -- point 9's waste --
+# and it is not one for a running one. `probe_summary` records the reason in as many words: "for a
+# RUNNING one it is just 'time since the last node', which grows until the next one lands and then
+# collapses", which is why it marks the live figure with a `+`.
+#
+# Driven here, against myself. On 2026-09-08 remDL13 held 55.5 % with one node while the worst
+# FINISHED probe on this box had ever held 47.4 %, and a line was added saying it was "still paying
+# and no longer learning". Forty minutes later the probe evaluated its second node, scored 5.3676,
+# and the same figure read 0.44 %. The alarm was the shape of the metric, not the state of the run.
+#
+# `spend_at_last_node` stays on the reading because it costs nothing and a finished probe's tail is
+# computed from it. Nothing here judges a running probe by it.
+def tail_after_the_last_node(got: dict) -> float | None:
+    """Share of spend since the last evaluated node -- meaningful only once a probe has ENDED."""
+    at = got.get("spend_at_last_node")
+    spend = got.get("spend") or 0.0
+    if at is None or spend <= 0:
+        return None
+    return 100.0 * (spend - at) / spend
+
+
+def unscored_result(root: str, name: str, got: dict) -> str | None:
+    """A probe that ENDED holding evaluated nodes and no `final.json` -- money spent, nothing scored.
+
+    §351. `run_probe.sh` runs two steps after the engine: `extract_champion.py`, then a TEST
+    evaluation into `final.json`. `resume_paused` (§338) restarts the ENGINE and nothing else, and
+    the driver has long exited by then -- so a probe that pauses, is resumed and then finishes has
+    no one left to run either step. remDL13 is the case: its driver wrote "чемпион: НЕТ" at
+    06:21 and exited; two resumes carried it to $0.978 and a node scoring 5.3676 on TRAIN; and for
+    eleven hours nothing said the result was never scored. The champion was still extractable for
+    free -- node 1 with its Cython siblings -- and came back 5.1345 on TEST.
+
+    Detection, not repair: the two commands are printed rather than run, because scoring occupies a
+    22-cpu lane and that is the operator's call, not a monitor's.
+    """
+    if not got.get("nodes"):
+        return None
+    if glob.glob(f"{root}/{name}/final.json"):
+        return None
+    runs = sorted(glob.glob(f"{root}/{name}/runs/*/run"))
+    if not runs:
+        return None
+    return (f'{got["nodes"]} evaluated node(s) and NO final.json -- the run ended but nobody '
+            "extracted or scored its champion (a resume restarts the engine, not the driver). "
+            "Recoverable without new spend:\n"
+            f'        extract_champion.py --run-dir {runs[-1]} --all-files '
+            f'--out {root}/{name}/champion_solver.py\n'
+            f'        ALGOTUNE_EVAL_WORKERS=auto taskset -c <lane> looplab_eval.py --subset test '
+            "  # the corpus is __w22x1r3; unset means 1 worker and a number nothing compares to")
 
 
 def wchan(pid) -> str:
@@ -576,6 +635,9 @@ def main(argv=None) -> int:
         spend = pulse(found[0])["spend"] if found else 0.0
         if got["finished"]:
             print(f'{name:10s} {"(off the lanes)":12s} {spend:8.4f}      ended')
+            unscored = unscored_result(root, name, pulse(found[0]) if found else {})
+            if unscored:
+                print(f"      {unscored}")
         elif got["paused"]:
             print(f'{name:10s} {"(off the lanes)":12s} {spend:8.4f}      PAUSED and owed work -- '
                   "resume it or the batch is short a probe")

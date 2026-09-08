@@ -31,19 +31,26 @@ def _log(tmp, rows):
 
 
 def test_the_regime_recorded_is_the_one_on_disk_not_the_one_asked_for(monkeypatch):
+    """§329's invariant, re-pointed by §350 at a better source.
+
+    The run ASKED for one worker and the arena resolved twenty-two; recording the REQUEST would
+    have called that run serial, which is §305 exactly. What changed in §350 is where the answer
+    comes from: reading it off the cache listing returned the newest FILE's regime, and an
+    evaluation that merely READS a cached entry leaves no mtime behind -- so every wide reading
+    taken after the serial entries were minted was stamped serial. The arena's own report
+    (`looplab_eval.py` stamps `eval_regime()` on its output) is neither the request nor a guess.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         cache = Path(tmp) / "cache"
         cache.mkdir()
-        # The run ASKED for one worker; what the harness wrote is the twenty-two-wide key. §305 is
-        # exactly this, and recording the request would have called that run serial.
-        (cache / "max_clique_cpsat__test__w22x1r3.json").write_text("{}", encoding="utf-8")
-        (cache / "max_clique_cpsat__test__w22x1r3.json.provenance.json").write_text(
-            "{}", encoding="utf-8")
+        # The DISK says serial and is NEWER -- the trap §350 fell into.
+        (cache / "max_clique_cpsat__test__lane22r3.json").write_text("{}", encoding="utf-8")
         monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", str(cache))
-        # THE INTENT IS SET AND IT DISAGREES WITH THE DISK. Without this line the fixture passes on
-        # a version that reports the requested regime, because request and reality coincide.
+        # THE INTENT IS SET AND IT DISAGREES WITH WHAT THE ARENA DID.
         monkeypatch.setenv("ALGOTUNE_EVAL_WORKERS", "1")
-        assert ruler_selfcheck.observed_regime("max_clique_cpsat", "test") == "w22x1r3"
+        got = ruler_selfcheck.observed_regime(
+            "max_clique_cpsat", "test", [{"eval_regime": {"key": "__w22x1r3"}}])
+        assert got == "w22x1r3", got
 
 
 def test_the_row_carries_the_regime():

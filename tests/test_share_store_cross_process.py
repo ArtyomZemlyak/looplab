@@ -12,9 +12,11 @@ other's write — leaving live a link the owner was told was dead. And a check-t
 lost between the look and the write, replacing an existing token digest with a new one.
 
 Since 2026-09-08 the shared half is ONE implementation (`serve/capability_store.py`) that both stores
-parameterize, so a fix to the protocol reaches both. This file drives the properties rather than
-reading source wherever it can: a store whose OS lock cannot be had, an id that collides, a publish
-that fails, and a reservation left behind by a worker that died mid-create.
+parameterize, so a fix to the protocol reaches both — the locking, reservation and publish core
+first, then the CREATE-RECOVERY contract (the last section here). This file drives the properties
+rather than reading source wherever it can: a store whose OS lock cannot be had, an id that
+collides, a publish that fails, a reservation left behind by a worker that died mid-create, and the
+retry that follows a response the client never received.
 
 The mutation/read split is deliberate and matches the sibling: MUTATIONS take the store lock, reads do
 not. Locking reads would serialize the HTTP read path across workers and turn contention into 503s on
@@ -23,6 +25,7 @@ a path that cannot corrupt anything.
 from __future__ import annotations
 
 import ast
+import base64
 import inspect
 import json
 import os
@@ -30,14 +33,15 @@ import secrets
 import textwrap
 import threading
 import time
+import uuid
 
 import pytest
 
 from looplab.serve import assistant, capability_store, reviews
 from looplab.serve.assistant import ShareError, ShareStore
 
-MUTATORS = ("create", "revoke_token", "revoke_session")
-READERS = ("resolve", "active_for_session", "active_summary_by_session")
+MUTATORS = ("create", "create_or_replay", "revoke_token", "revoke_session")
+READERS = ("resolve", "replay", "active_for_session", "active_summary_by_session")
 
 _SECRET = "x" * 43                                   # the shape `resolve` requires of a token secret
 
@@ -322,3 +326,185 @@ def test_the_reservation_state_rule_is_the_one_both_stores_read(tmp_path):
     listed.write_text(json.dumps(["not", "a", "record"]), encoding="utf-8")
     assert capability_store.reservation_state(listed, wait=False) == ("corrupt", None), (
         "a non-object JSON body is not free space — it is state nobody may overwrite")
+
+
+# --- the create-RECOVERY contract: what a lost response leaves behind ----------------------------
+#
+# The last divergence doc 25 SC-10 named. `create` cannot be idempotent — the client has nothing to
+# name its request with — so a response lost in flight leaves the owner holding NO token while a
+# live capability sits in the store, and their retry publishes a SECOND one: an un-revoked bearer
+# nobody holds. `ReviewStore.create_or_replay` already reconstructed the exact original bearer from
+# a client-held envelope; since 2026-09-08 `ShareStore.create_or_replay` is that same protocol over
+# the same shared derivation, and these tests DRIVE the retry rather than reading either source.
+
+def _envelope() -> dict:
+    """What a client keeps so it can ask for the same capability twice: a request identity and a
+    256-bit secret. Neither is ever persisted by the store."""
+    return {"request_id": str(uuid.uuid4()),
+            "token_secret": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")}
+
+
+def test_a_lost_response_retry_recovers_the_bearer_and_mints_nothing(tmp_path):
+    """THE property. The first create lands; its answer never reaches the client (here: it is simply
+    never read, which is exactly what the server saw). The retry must hand back the SAME token and
+    leave exactly ONE capability in the store — a second live record is the security defect, because
+    nobody holds its bearer and the owner cannot see it to revoke it."""
+    store = ShareStore(tmp_path)
+    sid = "a1b2c3d4e5f60718"
+    envelope = _envelope()
+
+    lost_token, _lost_record, replayed = store.create_or_replay(
+        sid, message_count=4, title="t", **envelope)
+    assert replayed is False
+
+    token, record, replayed = store.create_or_replay(sid, message_count=6, title="t2", **envelope)
+    assert replayed is True
+    assert token == lost_token, "the retry could not reconstruct the original bearer"
+    assert len(list(store.dir.glob("*.json"))) == 1, "the retry minted a second live capability"
+    assert store.resolve(token) is not None
+    # The replay is the ORIGINAL capability, not a re-mint under the same id: it keeps the snapshot
+    # the first attempt froze, even though the transcript has grown since.
+    assert record["upto"] == 4 and store.resolve(token)["title"] == "t"
+
+
+def test_the_same_retry_without_the_envelope_is_the_defect_it_replaces(tmp_path):
+    """The contrast that makes the test above non-vacuous: the legacy path really does publish a
+    second live capability for the identical second call."""
+    store = ShareStore(tmp_path)
+    sid = "a1b2c3d4e5f60718"
+    first, _ = store.create(sid, message_count=4, title="t")
+    second, _ = store.create(sid, message_count=4, title="t")
+    assert first != second and len(list(store.dir.glob("*.json"))) == 2
+    assert store.resolve(first) is not None and store.resolve(second) is not None
+
+
+def test_the_bearer_is_derived_from_the_client_secret_and_never_stored(tmp_path):
+    """The store keeps a digest, exactly as it does for a random token. What changed is WHO can
+    derive the value a second time: only the holder of the 256-bit secret."""
+    store = ShareStore(tmp_path)
+    envelope = _envelope()
+    token, record, _ = store.create_or_replay("a1b2c3d4e5f60718", message_count=2, **envelope)
+    persisted = json.loads((store.dir / f"{record['id']}.json").read_text())
+    assert token not in json.dumps(persisted)
+    assert persisted["token_hash"] == capability_store.token_digest(token)
+    # A different secret under the same request id derives a different token, so it can never be
+    # accepted as this record's replay.
+    with pytest.raises(ShareError) as excinfo:
+        store.create_or_replay("a1b2c3d4e5f60718", message_count=2,
+                               request_id=envelope["request_id"],
+                               token_secret=_envelope()["token_secret"])
+    assert excinfo.value.status_code == 409
+
+
+def test_different_terms_under_one_request_id_conflict_rather_than_replace(tmp_path):
+    """`live` and the TTL are hashed into the create intent. A retry that changes either is a
+    DIFFERENT capability, and answering it with the stored one — or overwriting the stored one —
+    would both be lies about what the owner published."""
+    store = ShareStore(tmp_path)
+    envelope = _envelope()
+    token, _record, _ = store.create_or_replay("a1b2c3d4e5f60718", message_count=2, **envelope)
+    for changed in ({"live": True}, {"ttl_seconds": 3600}):
+        with pytest.raises(ShareError) as excinfo:
+            store.create_or_replay("a1b2c3d4e5f60718", message_count=2, **envelope, **changed)
+        assert excinfo.value.code == "assistant_share_recovery_conflict"
+    assert len(list(store.dir.glob("*.json"))) == 1
+    assert store.resolve(token) is not None, "a conflicting retry overwrote a live capability"
+
+
+def test_the_recovery_identity_is_per_session(tmp_path):
+    """One saved envelope may not be replayed onto another chat: the session is inside the derived
+    id, so the same request id under a second session is a separate capability."""
+    store = ShareStore(tmp_path)
+    envelope = _envelope()
+    first, record_one, _ = store.create_or_replay("a1b2c3d4e5f60718", message_count=2, **envelope)
+    second, record_two, _ = store.create_or_replay("b1b2c3d4e5f60718", message_count=2, **envelope)
+    assert record_one["id"] != record_two["id"] and first != second
+    assert store.resolve(first)["session"] == "a1b2c3d4e5f60718"
+    assert store.resolve(second)["session"] == "b1b2c3d4e5f60718"
+
+
+def test_a_create_that_died_mid_publish_is_finished_by_its_own_retry(tmp_path):
+    """The crash the reservation protocol is built for, now reachable at a DERIVED id: a worker that
+    died between `O_EXCL` and the atomic publish leaves an empty file. Empty authorizes nothing, and
+    only this one envelope can ever derive that id, so the retry heals it and finishes the create
+    instead of failing forever on somebody's abandoned footprint."""
+    store = ShareStore(tmp_path)
+    envelope = _envelope()
+    sid = "a1b2c3d4e5f60718"
+    link_id = assistant._share_recovery_identity(sid, envelope["request_id"])[0]
+    store.dir.mkdir(parents=True, exist_ok=True)
+    path = store.dir / f"{link_id}.json"
+    os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    stamp = time.time() - 5.0
+    os.utime(path, (stamp, stamp))
+
+    assert store.replay(sid, **envelope) is None, "an empty reservation is not a capability"
+    token, record, replayed = store.create_or_replay(sid, message_count=2, **envelope)
+    assert replayed is False and record["id"] == link_id
+    assert store.resolve(token) is not None
+
+
+def test_an_in_flight_reservation_at_a_derived_id_refuses_instead_of_minting(tmp_path):
+    """The other half: a FRESH empty file is this same envelope landing twice at once. A bounded,
+    retryable refusal — never a second mint, and never a healing that would hand one caller's id to
+    the other."""
+    store = ShareStore(tmp_path)
+    envelope = _envelope()
+    sid = "a1b2c3d4e5f60718"
+    link_id = assistant._share_recovery_identity(sid, envelope["request_id"])[0]
+    store.dir.mkdir(parents=True, exist_ok=True)
+    os.close(os.open(store.dir / f"{link_id}.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    with pytest.raises(ShareError) as excinfo:
+        store.create_or_replay(sid, message_count=2, **envelope)
+    assert excinfo.value.status_code == 503
+
+
+def test_revocation_keeps_the_create_identity_so_a_retry_is_told_the_truth(tmp_path):
+    """`_validated_record` is an exact projection and revocation writes it back, so the create-
+    recovery hashes have to be carried across. Without that the owner retrying their own saved
+    envelope reads as somebody else's request — a conflict — instead of a replay of a dead link."""
+    store = ShareStore(tmp_path)
+    sid = "a1b2c3d4e5f60718"
+    envelope = _envelope()
+    token, _record, _ = store.create_or_replay(sid, message_count=2, **envelope)
+    assert store.revoke_session(sid) == 1
+
+    replayed_token, replayed_record = store.replay(sid, **envelope)
+    assert replayed_token == token and replayed_record["revoked_at"] is not None
+    assert store.resolve(token) is None, "a revoked capability came back to life"
+    assert len(list(store.dir.glob("*.json"))) == 1
+
+
+def test_a_recovery_envelope_that_is_not_canonical_is_refused(tmp_path):
+    """Fail-closed on every spelling but one. Two spellings of a secret would derive two bearers for
+    one record, and a coerced TTL would derive a different link id than the client's own."""
+    store = ShareStore(tmp_path)
+    good = _envelope()
+    raw = base64.urlsafe_b64decode(good["token_secret"] + "=")
+    for bad in ({"request_id": "not-a-uuid"},
+                {"request_id": good["request_id"].upper()},
+                {"token_secret": good["token_secret"] + "="},
+                {"token_secret": base64.urlsafe_b64encode(raw[:16]).decode().rstrip("=")},
+                {"token_secret": None}):
+        with pytest.raises(ShareError) as excinfo:
+            store.create_or_replay("a1b2c3d4e5f60718", message_count=2, **{**good, **bad})
+        assert excinfo.value.code == "assistant_share_recovery_invalid"
+    assert not list(store.dir.glob("*.json"))
+
+
+def test_both_capability_stores_derive_recovery_from_the_one_implementation():
+    """The extraction this closes: the review and share create-recovery contracts are one protocol
+    with two labels, not two implementations that happen to agree. A store that computed one byte
+    differently from its sibling would hand a retrying client a token authenticating nothing."""
+    assert reviews.exact_review_request_id is capability_store.exact_request_id
+    assert reviews.exact_review_token_secret is capability_store.exact_token_secret
+    assert assistant.exact_share_request_id is capability_store.exact_request_id
+    assert assistant.exact_share_token_secret is capability_store.exact_token_secret
+
+    # The labels are what keep one store's hash from ever being replayable as the other's.
+    facts = {"request_id": "r", "session": "s", "v": 1}
+    assert (capability_store.recovery_digest("looplab-share-create-id-v1", facts)
+            != capability_store.recovery_digest("looplab-review-create-id-v1", facts))
+    secret = secrets.token_bytes(32)
+    assert (capability_store.recovery_bearer("looplab-share-bearer-v1", secret, "abc")
+            != capability_store.recovery_bearer("looplab-review-bearer-v1", secret, "abc"))

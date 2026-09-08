@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 171 resolved, 15 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 172 resolved, 14 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -4642,9 +4642,15 @@ fifth (dropping `len(raw) <= _MAX_ITEMS` from a list verifier) turned out to be 
 already slices to the bound, so `_refs(raw) == list(raw)` fails on a long list anyway and the guard
 is redundant in the original expression, which is preserved verbatim.
 
-#### SC-10 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-09-08)**
+#### SC-10 · MEDIUM · inconsistency · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[capability-store-core-not-shared]** the locking, reservation and publish core is now ONE implementation both stores parameterize, and the last divergence in guarantees is the CREATE-RECOVERY contract: a lost response to the share-create leaves the client with no token and a retry mints a SECOND live capability, where `ReviewStore.create_or_replay` reconstructs the exact original bearer from a client-held envelope. proof:absent:create_or_replay@looplab/serve/assistant.py
+*Closed 2026-09-08: the create-RECOVERY contract landed too, so both capability stores now
+parameterize ONE implementation of every rule they share. `ShareStore.create_or_replay` /
+`ShareStore.replay` reconstruct the exact original bearer from a client-held envelope, over the same
+`capability_store` derivation `ReviewStore` uses, and `POST /api/assistant/sessions/{sid}/share`
+carries that envelope; the browser half is `ui/src/capabilityRecovery.js` (shared with the review
+links) beside `ui/src/assistantShareRecovery.js`. Driven, not pinned: the lost-response retry
+recovers the same token and leaves exactly one capability, at the store and over the route.*
 
 **ShareStore duplicates ReviewStore's capability-link concept with weaker, inconsistent hardening**
 
@@ -4765,13 +4771,60 @@ dropping `O_EXCL` (3 — including a pre-existing `ReviewStore` collision test, 
 sharing the code), dropping the publish healing (1), yielding from the lock's exception handler (1),
 and re-keying the lock table per call (2).
 
-**Still open, and it is one thing:** the create-RECOVERY contract. `ReviewStore.create_or_replay`
-reconstructs the exact original bearer from a client-held envelope (a canonical request id plus a
-256-bit token secret, bound by durable identity/intent/token hashes), so a lost HTTP response is
-recoverable. `POST /api/assistant/sessions/{sid}/share` carries no such envelope: a lost response
-leaves the client with no token and a retry mints a SECOND live capability. That is not a property
-of the store — it is the create PROTOCOL, and porting it means changing an HTTP contract and the UI
-that speaks it, so it stays a named item rather than being smuggled into an extraction.
+*The create-RECOVERY contract, ported (2026-09-08).* The last divergence was not a property of the
+store but of the create PROTOCOL: `ReviewStore.create_or_replay` reconstructs the exact original
+bearer from a client-held envelope, so a lost HTTP response is recoverable, while
+`POST /api/assistant/sessions/{sid}/share` carried no such envelope — a lost response left the owner
+with no token and their retry published a SECOND live capability. That second link is the security
+defect the item was really about: an un-revoked bearer nobody holds, absent from the copy surface and
+removable only by revoking the whole chat, while the UI told the operator "Share uncertain · revoke
+before retrying".
+
+What is now ONE implementation is the DERIVATION, in `serve/capability_store.py`: `exact_request_id`
+/ `exact_token_secret` (the two client fields, canonical-or-refused), `canonical_bytes`,
+`recovery_digest(label, payload)` and `recovery_bearer(label, secret, link_id)`. That is exactly the
+part whose copies could only ever agree by hand — a server computing one byte differently from its
+sibling hands a retrying client a token that authenticates nothing — and both stores now spell their
+own labels and shapes over it (`_share_recovery_identity` / `_share_recovery_token` /
+`_share_recovery_intent` beside the review trio). The lock-and-publish SEQUENCE stays per store for
+the same reason `resolve` and the record validators do: the two answer with different error types
+and fence different terms.
+
+Three decisions worth naming, each measured against a way the port could have been wrong:
+
+* **The replay is resolved BEFORE the transcript is read.** `ShareStore.replay` is a read-only
+  lookup the route calls first, ahead of the turn-active check, the transcript read and the frozen
+  snapshot's size fence. A recovery fenced on the CURRENT chat would answer 409 (a reply is running)
+  or 413 (the chat grew) forever while the capability the owner already paid for sat unrecoverable.
+  A replay therefore returns the ORIGINAL frozen `upto` and title, never a re-mint under the same id.
+* **Revocation carries the create identity across.** `_validated_record` is an exact projection and
+  revocation writes it back, so the `create_*` hashes had to be preserved explicitly
+  (`_tombstoned`). Without that the owner retrying their own saved envelope reads as somebody else's
+  request — a 409 conflict — instead of the truth, which is 410 `assistant_share_replay_terminal`.
+  This was a live defect in the first cut of the port, caught by driving the revoke-then-retry path.
+* **Presence, not value, selects the contract.** `request_id` + `token_secret` are sent together or
+  not at all; two explicit JSON nulls are a 400 rather than a silent downgrade into the legacy create
+  that mints the second capability. The legacy 200 body is unchanged for every caller without an
+  envelope; with one, the route answers 201 for a create and 200 with `replayed: true` for a
+  recovery.
+
+The UI speaks it: `ui/src/capabilityRecovery.js` is the browser twin of the shared derivation (the
+review link's own module now computes through it too), `ui/src/assistantShareRecovery.js` is the
+share store's pure model beside `AssistantBar.jsx`, and the mint saves its identity to
+`sessionStorage` BEFORE the request — a storage that cannot hold it refuses rather than sending a
+request whose retry could never be reproduced. The receipt is validated against what the browser
+DERIVES, not against the shape of the answer, so a server returning any other capability fails
+locally instead of being copied to a clipboard. `shareActionFailure`'s uncertain notice changed with
+the contract to "Share uncertain · try again to recover it".
+
+Driven at three levels, and the drive is what makes each non-vacuous:
+`tests/test_share_store_cross_process.py` (20 → 32) replays a lost response and asserts exactly one
+record — beside the CONTRAST that the envelope-less path really does publish two — plus the
+conflicting-terms refusal, the per-session identity, the abandoned reservation at a derived id that
+the retry heals, the in-flight one it refuses, and the revoke-then-replay truth.
+`tests/test_assistant_endpoint.py` drives the same lost-response retry over the real route and reads
+the owner's own link list to count capabilities. `ui/test/assistantShareRecovery.test.js` pins BOTH
+surfaces' derivations against vectors computed by the Python implementation, in both directions.
 
 #### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-09-08)**
 

@@ -131,13 +131,15 @@ def test_every_portfolio_mount_in_serve_asks_the_PARTY():
     portfolio provider must sit in a function that also calls `portfolio_access`.
     """
     import ast
-    from pathlib import Path
 
-    serve = Path(__file__).resolve().parents[1] / "looplab" / "serve"
+    # THROUGH `_source_scan`, not a walk of my own: `test_source_scan_helper.py` refuses a guard
+    # test that re-derives the walk, so the decoding (utf-8-sig, errors="replace") stays uniform
+    # across every source-reading assertion in the suite.
+    from tests._source_scan import PKG, iter_trees
+
     providers = {"CrossRunTools", "ConceptGovernanceTools"}
     offenders = []
-    for path in sorted(serve.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path, tree in iter_trees(PKG / "serve"):
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
