@@ -95,3 +95,18 @@ def test_the_sentence_says_which_kind_of_earned_zero_it_is():
     with tempfile.TemporaryDirectory() as tmp:
         got2, why2 = compare_arms._arm_b_final(_final(tmp, EARNED))
         assert got2 == 0.0 and "every instance failed is_solution" in why2, why2
+
+
+def test_a_build_failure_is_named_whatever_reason_it_arrives_under():
+    """Фикстура, расходящаяся с дефектом: тот же провал сборки приходит под `no_valid_speedups`, а не
+    под `evaluator_error`. Слово в ПРИЧИНЕ ничего не решает — решает свидетельство: имя причины это
+    сводка моста, а `is_solution_errors` рядом с ней — то, что произошло."""
+    import tempfile
+    block = {"subset": "test", "speedup": 0.0,
+             "no_speedup": {"reason": "no_valid_speedups",
+                            "is_solution_errors": [
+                                {"message": "LoopLab-1: Failed in nopython mode pipeline", "count": 3}]}}
+    with tempfile.TemporaryDirectory() as tmp:
+        got, why = compare_arms._arm_b_final(_final(tmp, block))
+        assert got == 0.0, (got, why)
+        assert "the candidate's own code would not build or import" in why, why
