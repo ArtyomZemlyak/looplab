@@ -864,6 +864,12 @@ def _task_declared_env(task) -> bool:
     return bool(getattr(eval_spec, "env", None))
 
 
+
+# Set INSIDE an `_offload_build` worker, read by `_reserve_on_main_task`. A thread-local rather than
+# a ContextVar: the worker needs to know it is a worker, and a ContextVar copied into the thread
+# would say the same thing on the main task.
+_OFFLOADED_BUILD = threading.local()
+
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ConceptCadenceMixin, VerifierTiebreakMixin, ValueEstimateMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
@@ -6834,7 +6840,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return
             with self._progress(PROGRESS_STAGE_BUILD, "reserve", node_id=prospective_node_id,
                                 prospective=True, operator=action.get("kind")):
-                reserved = self._reserve_node_build(
+                reserved = self._reserve_on_main_task(
                     action, idea, scored_against=_proposal_anchor_id,
                     scored_against_attempt=_proposal_anchor_attempt,
                     source=source, steering_context=steering_context,
@@ -7373,7 +7379,49 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         #
         # The helper buffers those intents and publishes them from the MAIN task on the way out; the
         # node's own four appends are untouched and stay exactly as licensed.
-        await self._offload_under_proposal_sink(fn, limiter=proposal_limiter())
+        # MARKED, so `_reserve_node_build` inside this worker knows to marshal its CAS back onto
+        # the loop — see `_reserve_on_main_task`.
+        def _marked_build():
+            _OFFLOADED_BUILD.value = True
+            try:
+                return fn()
+            finally:
+                _OFFLOADED_BUILD.value = False
+
+        await self._offload_under_proposal_sink(_marked_build, limiter=proposal_limiter())
+
+    def _reserve_on_main_task(self, *args, **kwargs):
+        """`_reserve_node_build`, always on the MAIN task, whichever thread asks.
+
+        THE RESERVATION IS NOT THE WORKER'S TO MAKE. It appends `card_added` and `node_building` —
+        both FOLDED, both in none of the five writer registries, and `events/types.py` says of the
+        Card ledger in so many words: "Main-task-written; NONE are BACKGROUND_APPENDABLE (a
+        monotonic card_id cannot be background-minted)". When `_offload_build` moved the whole of
+        `_create_node` into a worker (2026-09-06) it took the reservation with it, and both those
+        appends started coming off the main task against that statement.
+
+        The money half is worse and was driven: `_proposal_authority_seq` fences the CAS retries on
+        seq EQUALITY, and its docstring justifies that by the window being "microseconds long"
+        with "nothing paid at risk in it" — true while `_create_node` froze the loop, false once it
+        ran in a worker with the loop still turning. Isolated 2x2, 40 trials a cell, real Engine and
+        real store, the racer appending the BACKGROUND_APPENDABLE `research_completed`:
+
+            racer=off offload=off  0/40 | racer=off offload=on  0/40
+            racer=on  offload=off  0/40 | racer=on  offload=on  38/40 PAID PROPOSALS LOST
+
+        and 8 % of nodes in a real wide CLI run — silently: no node, no card, no row.
+
+        Marshalling back is the fix that restores BOTH halves at once, and it is why widening the
+        fence's exclusion list was refused: that would have bought the money half and left
+        `card_added` still minted in a worker. It also restores the fence's own premise rather than
+        working around it — on the main task the window really is microseconds again.
+
+        The paid work stays off the loop. Only the CAS comes back, which is what the loop was free
+        for."""
+        call = functools.partial(self._reserve_node_build, *args, **kwargs)
+        if getattr(_OFFLOADED_BUILD, "value", False):
+            return anyio.from_thread.run_sync(call)
+        return call()
 
     async def _offload_node_build(self, action: dict, **kwargs) -> None:
         """`_create_node`, off the loop — see `_offload_build`."""
