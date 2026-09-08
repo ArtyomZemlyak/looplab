@@ -813,6 +813,26 @@ MEASURE = (
     "train instances SPECIFICALLY -- a lookup table, a hard-coded answer, a threshold tuned to one "
     "of them -- scores zero where it counts. Make it fast for instances of THIS SHAPE, not for "
     "these hundred. "
+    # WHICH NODE IS SUBMITTED, AND IT IS NOT THE LAST ONE. The other rule experience cannot teach:
+    # a run sees its own nodes in order and has every reason to assume the newest is the answer.
+    #
+    # §84, measured over all 17 multi-node probes in the corpus: ELEVEN ended on a node that was not
+    # their best, none on a node better, paired sign test p = 1/2048. Median submitted TRAIN score
+    # 130.81 with the rule against 18.38 without it. `remEE6` scored 234.89 and then finished by
+    # scoring 0.0 -- the rule is the only reason that run has a number at all. And `remPde` spent
+    # 74 % of its dollar before any node existed, which is the same rule from the other end: a node
+    # that is never EVALUATED cannot be kept, however promising its summary.
+    #
+    # Shipped 2026-09-06, after the twelve-batch arm read out (§284) -- not before, because the card
+    # is read by both sides of that comparison and changing it mid-arm would have measured two
+    # things at once.
+    "AND THE NODE THAT IS SUBMITTED IS YOUR BEST **EVALUATED** ONE, NOT YOUR LAST. A node that was "
+    "never evaluated cannot be submitted however promising it looks, and a later node that scores "
+    "worse does not replace an earlier one that scored better. Two things follow. A risky rewrite "
+    "late in the run cannot cost you what you have already banked -- so take it, if you have "
+    "something to test. And an idea you never spend an evaluation on is worth exactly nothing, so "
+    "get code evaluated early and often rather than perfecting one submission you may not have the "
+    "budget to grade."
 )
 
 

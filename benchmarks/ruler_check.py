@@ -35,6 +35,13 @@ def entries(directory) -> list[dict]:
     """One record per cache file: task, subset, regime, instance count, spread, mtime."""
     out = []
     for path in sorted(Path(directory).glob("*.json")):
+        # A SIDECAR IS NOT AN ENTRY. §297 gave every baseline write a `.provenance.json` recording
+        # the conditions it was taken under, and this loop immediately reported both of them as
+        # malformed cache files -- a false alarm I created myself, in the tool whose whole job is
+        # telling a real problem from a memorised number. Skipped here and READ below, which is
+        # what it was written for.
+        if path.name.endswith(".provenance.json"):
+            continue
         got = NAME.match(path.name)
         row = {"file": path.name, "path": path, "ok_name": bool(got),
                "task": got.group("task") if got else "", "subset": got.group("subset") if got else "",
@@ -43,6 +50,7 @@ def entries(directory) -> list[dict]:
             data = json.loads(path.read_text(encoding="utf-8"))
             times = [float(v) for v in data.values() if isinstance(v, (int, float))]
             row["n"] = len(times)
+            row["times"] = times
             row["median"] = statistics.median(times) if times else 0.0
         except (OSError, ValueError):
             pass
@@ -50,8 +58,205 @@ def entries(directory) -> list[dict]:
             row["mtime"] = os.path.getmtime(path)
         except OSError:
             pass
+        # AND THE CONDITIONS IT WAS TAKEN UNDER, when the write left them. `pagerank`'s 46 % error
+        # was undiagnosable for three sweeps precisely because no entry carried this.
+        row["provenance"] = {}
+        try:
+            row["provenance"] = json.loads(
+                Path(str(path) + ".provenance.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
         out.append(row)
     return out
+
+
+DRIFT_LOG = Path(__file__).resolve().parent / "algotune" / "ruler_selfcheck_log.jsonl"
+DRIFT_TOLERANCE = 0.15      # of the cached value; see below for why it is not tighter
+
+
+CAMPAIGN_REGIME = "w22x1r3"   # what a campaign's candidates run under; see task_inventory
+
+
+def latest_readings(path=DRIFT_LOG, regime: str | None = None,
+                    accept_unstamped: bool = False) -> dict:
+    """The most recent reference-against-itself reading per task, from the recorded series.
+
+    `regime` filters to rows taken in one evaluation regime -- `w22x1r3` for the twenty-two-wide
+    one a campaign uses, `lane22r3` for serial. §314: max_clique_cpsat reads 1.5291 at twenty-two
+    workers and 0.9922 at one, on the same idle box against baselines built in each regime, so a
+    "latest reading" that mixes the two answers neither question. Rows written before the regime
+    was recorded carry no key and are returned only when no filter is asked for.
+    """
+    out: dict = {}
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            task, med, stamp = row.get("task"), row.get("median"), str(row.get("stamp") or "")
+            if not isinstance(med, (int, float)) or not task:
+                continue
+            if regime is not None:
+                got = row.get("regime")
+                # `accept_unstamped` is for the campaign regime only: every row written before the
+                # key existed was taken twenty-two wide, so dropping them would report a box that
+                # has read twenty tasks as having read four. It must NEVER be used to fill the
+                # serial slot -- that is how an unstamped twenty-two-wide row would come to prove
+                # one-worker rulability.
+                # AND THE FLAG IS HONOURED FOR ONE REGIME ONLY. The first cut left that to the
+                # caller and said so in a comment; a comment is not a guard, and the one thing it
+                # was guarding is the claim this whole field exists to support -- that a task rules
+                # at ONE worker. An unstamped row was taken twenty-two wide, so it can stand in for
+                # a twenty-two-wide reading and for nothing else.
+                if got != regime and not (accept_unstamped and got is None
+                                          and regime == CAMPAIGN_REGIME):
+                    continue
+            if task not in out or stamp > out[task][1]:
+                out[task] = (float(med), stamp)
+    return out
+
+
+CPSAT_ROOT = "/var/tmp/looplab-bench/AlgoTune/AlgoTuneTasks"
+
+
+def uses_cpsat(task: str, root: str | None = None) -> bool:
+    """Does this task's reference solve with CP-SAT?
+
+    IT DECIDES WHETHER A RULER IS POSSIBLE AT ALL. Measured 2026-09-06 across all 19 tasks whose
+    self-check returned a number, three repeats each: the nine CP-SAT tasks read **1.1375 to 1.8545**
+    and the ten others **0.9021 to 1.0670** -- no overlap. CP-SAT is multi-threaded and its search is
+    nondeterministic, so the same solver timed twice does not give the same time: within one task the
+    repeats swing 1.72/2.09/1.85 and 1.32/1.48/1.19, against 0.96/0.98/0.98 for `edge_expansion`.
+
+    The reference-as-candidate reading exists to say "the cache and the box still agree". On these
+    tasks it cannot: there is no stable time for the cache to hold. That is a property of the task,
+    not a defect in the cache, and it must be said differently -- a 46 % "drift" on `pagerank` was
+    worth a week (§292-§299); the same number here means only that CP-SAT was asked twice.
+    """
+    import os
+    # READ AT CALL TIME, NOT BOUND AT DEF TIME. `root: str = CPSAT_ROOT` evaluates once at import,
+    # so a test setting `ruler_check.CPSAT_ROOT` changed nothing and every call read the real
+    # checkout: two tests passed for the wrong reason and a mutation dropping the tolerance guard
+    # survived. (It survived twice, the second time because I restored the file from a backup taken
+    # BEFORE this very fix -- a stale backup quietly undoing it.)
+    path = f"{root if root is not None else CPSAT_ROOT}/{task}/{task}.py"
+    try:
+        src = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return False
+    return "cp_model" in src or "ortools" in src
+
+
+TAIL_RATIO_LIMIT = 30.0     # p90/p10 of the cached per-instance times; see below
+
+
+def tail_ratio(row):
+    """p90 / p10 of a cache entry's own per-instance times.
+
+    THE SECOND HALF OF THE CP-SAT STORY. A speedup here is a SUM -- the reference's total time over
+    the candidate's -- so the heaviest instances carry the number, and nondeterminism only fails to
+    cancel where it lands on those. Measured 2026-09-06, one worker, three repeats:
+
+        task                        CP-SAT   p90/p10   reading
+        min_dominating_set            yes      51.9     1.145   MISSES
+        max_independent_set_cpsat     yes      32.2     1.236   MISSES
+        max_common_subgraph           yes      15.0     1.014   comes home
+        max_clique_cpsat              yes      13.1     0.997   comes home
+        queens_with_obstacles         yes       3.4     1.014   comes home
+        discrete_log                   no     276.4     0.997   comes home
+
+    `discrete_log` has the heaviest tail on this box by a factor of five and is perfectly stable,
+    because it is deterministic and the tail cancels exactly. Neither condition alone predicts
+    anything; the pair does, and the ordering inside the CP-SAT group is exact.
+    """
+    times = row.get("times") or []
+    if len(times) < 20:
+        return None
+    v = sorted(times)
+    lo = v[len(v) // 10]
+    return (v[9 * len(v) // 10] / lo) if lo > 0 else None
+
+
+def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[str]:
+    """Cache entries whose own recorded self-check says they no longer time this box.
+
+    A reading of 1.0 means the cached baseline and a fresh timing agree. Measured 2026-09-06 by
+    timing all four references into a scratch cache and dividing:
+
+        task             cached/fresh   self-check reading
+        edge_expansion       0.868          0.9007
+        pde_heat1d           1.016          1.0676
+        discrete_log         1.052          1.0830
+        pagerank             1.463          1.4317
+
+    The two columns are independent -- one re-times the reference, the other runs it as a candidate
+    against the cache -- and they agree to within 0.04 on every task. So the reading IS a measure of
+    how wrong the cache is, and `pagerank`'s cache is high by **46 %** while the other three sit
+    within 13 %. Being "re-measured HERE", which is what the standing sweep says of every entry, is
+    not the same as being still true.
+
+    The tolerance is 15 % and not tighter on purpose: three of the four tasks disagree by 2-13 %
+    and none of them is a problem worth an alarm every sweep. It is set to catch the one that is.
+    """
+    said = []
+    for task, (median, stamp) in sorted(readings.items()):
+        if not any(r["task"] == task for r in rows if r["ok_name"]):
+            continue
+        off = abs(median - 1.0)
+        tail = next((tail_ratio(r) for r in rows
+                     if r["task"] == task and r.get("subset") == "test"), None)
+        if off > tolerance and uses_cpsat(task):
+            said.append(f"{task}: self-check reads {median:.4f} ({stamp[:10]}) -- but this task "
+                        "solves with CP-SAT, whose runtime depends on how many cores it is given: "
+                        "x2.2 between one core and a 22-cpu lane on the same instance (§304). The "
+                        "reference asks for no `num_search_workers` and no seed, so it takes "
+                        "whatever the process is allowed. NOT a drifting cache, and not mere noise "
+                        "-- per-instance repeat spread is only x1.3 and averages away over a "
+                        "hundred instances. THE FIX IS THE WORKER COUNT (§307): the same task read at "
+                        "ALGOTUNE_EVAL_WORKERS=1 comes home -- max_common_subgraph 1.4820 -> "
+                        "1.0141, queens_with_obstacles 1.2667 -> 1.0142, max_clique_cpsat 1.6028 "
+                        "-> 0.9974 -- because twenty-two pinned single-core workers all running "
+                        "CP-SAT contend differently in the two passes. A one-worker ruler is 22x "
+                        "slower to build and keys __lane22r3, so it is a different cache"
+                        + (f". BUT this task's per-instance times are heavy-tailed "
+                           f"(p90/p10 = {tail:.0f}) and the speedup is a SUM, so the tail carries "
+                           "the number and is exactly where CP-SAT's nondeterminism does not "
+                           "cancel: both tasks above p90/p10 = 30 miss unity even at one worker, "
+                           "while every CP-SAT task below 15 comes home (§308)"
+                           if tail and tail > TAIL_RATIO_LIMIT else ""))
+            continue
+        if off > tolerance:
+            said.append(f"{task}: its own self-check reads {median:.4f} ({stamp[:10]}), so the "
+                        f"cached baseline is {'high' if median > 1 else 'low'} by "
+                        f"{100 * off:.0f} % -- every score on this task divides by it")
+    return said
+
+
+SERIAL_REGIME = "lane22r3"    # ALGOTUNE_EVAL_WORKERS=1; the only regime CP-SAT rules in
+
+
+def scoring_regime(task: str, root=None) -> str:
+    """The regime a task is SCORED in, which is not the same for every task any more.
+
+    §314 measured the reference against itself for six CP-SAT tasks: 1.14-1.60 with twenty-two
+    evaluation workers and 1.01-1.10 with one, on an idle box, against baselines built in each
+    regime. The excess is an asymmetry between the baseline pass and the candidate pass that only
+    exists at twenty-two, so a CP-SAT task is priced serially or not priced.
+
+    §149's rule -- timings from two regimes are not comparable -- is about ONE task's numerator and
+    denominator, and it still holds exactly. What stops holding is the shortcut that the whole cache
+    is therefore one regime: a serial ruler for `max_clique_cpsat` beside a wide one for `pagerank`
+    scores each task in its own regime and compares nothing across them.
+    """
+    return SERIAL_REGIME if uses_cpsat(task, root=root) else CAMPAIGN_REGIME
 
 
 def problems(rows, expect_regime: str | None = None, min_instances: int = 100) -> list[str]:
@@ -69,10 +274,33 @@ def problems(rows, expect_regime: str | None = None, min_instances: int = 100) -
         if row["n"] < min_instances:
             said.append(f"{row['file']}: {row['n']} per-instance timings, fewer than {min_instances}")
     if expect_regime:
-        for reg, n in regimes.items():
-            if reg != expect_regime:
-                said.append(f"{n} entr{'y' if n == 1 else 'ies'} in regime {reg}, not {expect_regime}"
-                            f" -- timings from two regimes are not comparable (§149)")
+        stray = collections.Counter()
+        for row in rows:
+            if not row["ok_name"] or row["regime"] == expect_regime:
+                continue
+            # A SECOND REGIME PER TASK IS EVIDENCE, NOT A MISTAKE -- the rule written here
+            # yesterday said otherwise and was refuted the same night by the measurement the sweep
+            # asks for. §318 needed serial rulers for four tasks that are scored WIDE, to measure
+            # what the regime is worth: pde_heat1d -4.5 %, discrete_log -2.5 %, edge_expansion and
+            # pagerank +0.3 %. Taking those readings meant minting exactly the entries this branch
+            # was calling the §149 mistake.
+            #
+            # What §149 actually forbids is one SCORE whose numerator and denominator come from
+            # different regimes, and the regime key makes that impossible by construction: a run
+            # looks up its own key or refuses (`baseline_regime_mismatch`). So the cache may hold,
+            # per task, the regime the campaign scores it in AND the regime that task rules in --
+            # and nothing else. A `w4x1r3` entry on a box whose lanes are 22 wide is still a stray.
+            # THE TWO REGIMES THIS BOX MEASURES IN, for any task: the one a campaign scores in and
+            # the serial one that CP-SAT needs and that §318 used to price the gap. Which of them a
+            # given task is JUDGED in is `scoring_regime`'s business, not this branch's -- keying
+            # the allowance on it was the second version of this rule and it still flagged the four
+            # serial rulers §318 had just measured with.
+            if row["regime"] in (CAMPAIGN_REGIME, SERIAL_REGIME):
+                continue
+            stray[row["regime"]] += 1
+        for reg, n in stray.items():
+            said.append(f"{n} entr{'y' if n == 1 else 'ies'} in regime {reg}, not {expect_regime}"
+                        f" -- timings from two regimes are not comparable (§149)")
     elif len(regimes) > 1:
         said.append("entries span more than one regime: "
                     + ", ".join(f"{r}x{n}" for r, n in regimes.most_common())
@@ -97,9 +325,16 @@ def main(argv=None) -> int:
     for row in rows:
         when = (datetime.datetime.fromtimestamp(row["mtime"]).strftime("%m-%d %H:%M")
                 if row["mtime"] else "?")
+        prov = row.get("provenance") or {}
+        note = ("" if not prov else
+                f'   [{prov.get("eval_workers", "?")} workers, load '
+                f'{(prov.get("loadavg") or ["?"])[0]:.1f}]'
+                if isinstance((prov.get("loadavg") or [None])[0], (int, float))
+                else f'   [{prov.get("eval_workers", "?")} workers]')
         print(f'{row["task"]:22s} {row["subset"]:>6s} {row["regime"]:>10s} {row["n"]:4d} '
-              f'{row["median"]:10.2f}  {when}')
+              f'{row["median"]:10.2f}  {when}{note}')
     bad = problems(rows, args.expect_regime, args.min_instances)
+    bad += stale_entries(rows, latest_readings())
     for line in bad:
         print(f"  PROBLEM: {line}")
     if not bad:

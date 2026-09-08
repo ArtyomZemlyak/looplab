@@ -32,9 +32,14 @@ def _probe(root: Path, name: str, executed: int, refused: int, spans: int = 1, m
                                                     "output": "(run_probe refused: this run ...)"}})
     (run / "spans.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     # a score sitting right beside it, which the tool must ignore
+    # A `run_finished` beside the score, because since 2026-09-04 the contrast is computed over
+    # FINISHED probes only (§209/§212) and these fixtures are complete probes. The score stays
+    # exactly where it was -- the point of this file is that the tool walks past it.
     (run / "events.jsonl").write_text(
         json.dumps({"v": 1, "seq": 1, "ts": 1.0, "type": "node_evaluated",
-                    "data": {"node_id": 0, "metric": metric}}) + "\n", encoding="utf-8")
+                    "data": {"node_id": 0, "metric": metric}}) + "\n"
+        + json.dumps({"v": 1, "seq": 2, "ts": 2.0, "type": "run_finished",
+                      "data": {"reason": "budget_exhausted"}}) + "\n", encoding="utf-8")
     (root / name / "final.json").write_text(json.dumps({"speedup": metric}), encoding="utf-8")
 
 
@@ -42,7 +47,13 @@ def test_it_counts_executed_and_refused_separately(tmp_path):
     _probe(tmp_path, "cap", executed=12, refused=2, spans=3)
     _probe(tmp_path, "free", executed=15, refused=0, spans=6)
     got = arm_fidelity.report(str(tmp_path), ["cap"], ["free"])
-    assert got["rows"]["cap"] == {"executed": 12, "refused": 2, "spans": 4}, got["rows"]["cap"]
+    # `finished`/`paused` joined the row on 2026-09-04 (§212): a paused run writes a `final.json`
+    # too, so the state has to come from the run's own lifecycle events. The counts are still the
+    # claim, so they are asserted exactly and the state keys are asserted for shape, not value.
+    row = got["rows"]["cap"]
+    assert {k: row[k] for k in ("executed", "refused", "spans")} == {
+        "executed": 12, "refused": 2, "spans": 4}, row
+    assert isinstance(row["finished"], bool) and isinstance(row["paused"], bool), row
     assert got["rows"]["free"]["executed"] == 15 and got["rows"]["free"]["refused"] == 0
     assert got["contrast"] == 3
 
@@ -52,7 +63,12 @@ def test_no_contrast_is_reported_as_no_contrast(tmp_path, capsys):
     _probe(tmp_path, "free", executed=9, refused=0)
     arm_fidelity.main(["--root", str(tmp_path), "--treat", "cap", "--control", "free"])
     out = capsys.readouterr().out
-    assert "NO CONTRAST YET" in out, out
+    # Reworded 2026-09-04 (§209): mid-flight the tool refuses to state a contrast at all rather
+    # than printing a negative one, because a treated probe stopped at its cap against a control
+    # still climbing measures the clock. Either sentence is the same claim -- nothing separates the
+    # arms yet -- so accept whichever the tool is entitled to print.
+    assert ("NO CONTRAST YET" in out or "no contrast to report yet" in out
+            or "NO CONTRAST:" in out), out
 
 
 def test_the_tool_never_prints_a_score(tmp_path, capsys):

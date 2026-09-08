@@ -1,0 +1,287 @@
+{
+  "alpha": 0.05,
+  "batches": 12,
+  "design": [
+    [
+      [
+        "capA2",
+        "capB2"
+      ],
+      [
+        "freeA2",
+        "freeB2"
+      ]
+    ],
+    [
+      [
+        "capA3",
+        "capB3"
+      ],
+      [
+        "freeA3",
+        "freeB4"
+      ]
+    ],
+    [
+      [
+        "capA4",
+        "capB4"
+      ],
+      [
+        "freeA4",
+        "freeB5"
+      ]
+    ],
+    [
+      [
+        "capA5",
+        "capB5"
+      ],
+      [
+        "freeA5",
+        "freeB6"
+      ]
+    ],
+    [
+      [
+        "capA6",
+        "capB6"
+      ],
+      [
+        "freeA6",
+        "freeB7"
+      ]
+    ],
+    [
+      [
+        "capA7",
+        "capB7"
+      ],
+      [
+        "freeA7",
+        "freeB8"
+      ]
+    ],
+    [
+      [
+        "capA8",
+        "capB8"
+      ],
+      [
+        "freeA8",
+        "freeB9"
+      ]
+    ],
+    [
+      [
+        "capA9",
+        "capB9"
+      ],
+      [
+        "freeA9",
+        "freeB10"
+      ]
+    ],
+    [
+      [
+        "capA10",
+        "capB10"
+      ],
+      [
+        "freeA10",
+        "freeB11"
+      ]
+    ],
+    [
+      [
+        "capA11",
+        "capB11"
+      ],
+      [
+        "freeA11",
+        "freeB12"
+      ]
+    ],
+    [
+      [
+        "capA12",
+        "capB12"
+      ],
+      [
+        "freeA12",
+        "freeB13"
+      ]
+    ],
+    [
+      [
+        "capA13",
+        "capB13"
+      ],
+      [
+        "freeA13",
+        "freeB14"
+      ]
+    ]
+  ],
+  "excluded": {
+    "freeB3": "\u00a7213: the meter already showed it at $1.0308 when I resumed it, and the per-process accountant let it run on to $1.1056. Excluded at a criterion written down before any contrast had been read."
+  },
+  "interaction_p": 0.25095,
+  "lane_split": {
+    "A": {
+      "contrast": -3.0517562499999915,
+      "n": 8
+    },
+    "B": {
+      "contrast": 66.79549999999999,
+      "n": 3
+    },
+    "mixed": {
+      "contrast": -70.01205000000002,
+      "n": 1
+    }
+  },
+  "max_spend": 1.05,
+  "p_draws": 200000,
+  "p_exact": false,
+  "p_se": 0.0010718046625056896,
+  "p_space": 2176782336,
+  "scores": [
+    {
+      "batch": 1,
+      "control": [
+        224.3657,
+        256.5339
+      ],
+      "treat": [
+        203.1158,
+        137.7597
+      ]
+    },
+    {
+      "batch": 2,
+      "control": [
+        220.4893,
+        258.2564
+      ],
+      "treat": [
+        210.9271,
+        104.0622
+      ]
+    },
+    {
+      "batch": 3,
+      "control": [
+        227.0792,
+        28.0177
+      ],
+      "treat": [
+        243.1132,
+        215.3809
+      ]
+    },
+    {
+      "batch": 4,
+      "control": [
+        27.1858,
+        254.1441
+      ],
+      "treat": [
+        104.3631,
+        227.3754
+      ]
+    },
+    {
+      "batch": 5,
+      "control": [
+        184.943,
+        219.1636
+      ],
+      "treat": [
+        21.0752,
+        234.5464
+      ]
+    },
+    {
+      "batch": 6,
+      "control": [
+        138.2527,
+        28.3029
+      ],
+      "treat": [
+        178.6226,
+        227.0494
+      ]
+    },
+    {
+      "batch": 7,
+      "control": [
+        146.0447,
+        216.9133
+      ],
+      "treat": [
+        26.5212,
+        187.1454
+      ]
+    },
+    {
+      "batch": 8,
+      "control": [
+        222.3331,
+        267.0371
+      ],
+      "treat": [
+        145.4195,
+        268.9493
+      ]
+    },
+    {
+      "batch": 9,
+      "control": [
+        180.0193,
+        276.38
+      ],
+      "treat": [
+        251.3384,
+        199.8448
+      ]
+    },
+    {
+      "batch": 10,
+      "control": [
+        132.2525,
+        255.1379
+      ],
+      "treat": [
+        270.2029,
+        226.266
+      ]
+    },
+    {
+      "batch": 11,
+      "control": [
+        247.2043,
+        25.8386
+      ],
+      "treat": [
+        223.3564,
+        133.1197
+      ]
+    },
+    {
+      "batch": 12,
+      "control": [
+        225.5946,
+        26.8302
+      ],
+      "treat": [
+        229.754,
+        230.9321
+      ]
+    }
+  ],
+  "stratified_one_sided_p": 0.3577082114589427,
+  "sum_of_within_batch_mean_differences": 105.96040000000004,
+  "taken": "by arm_readout.py --record",
+  "verdict": "do not reject"
+}

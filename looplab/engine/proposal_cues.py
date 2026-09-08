@@ -135,6 +135,13 @@ class ProposalCuesMixin:
 
         The bill: $3.6067 of $100.2691 corpus spend (3.6 %) lands AFTER the last evaluated node, in
         a draw that never completes. 16 of 69 runs end holding one, 11 of them with no files at all.
+
+        RE-DRIVEN 2026-09-08 (§328), because this pair had been quoted from here ever since:
+        **5.8 % of $142.5275 over 141 probes with a node, median 1.5 %, and 72 of them end holding
+        an unfinished draw.** The corpus grew and the share grew with it. It says nothing about
+        whether the cue helped: `cue_reach` reports the money cue reaching `propose` in 141 of 141
+        probes on this box, so there is no control group left to compare against.
+        `sweep_claims.check_waste_after_the_last_node` recomputes both numbers every sweep.
         dsDL2 is the clean case -- $0.3058 of its $1.0041, 30 % of the run, bought a node with an
         empty `files` map, on a task where the difference between its 2.8369 and dsDL's 14.5186 is
         that dsDL got a SECOND draw and dsDL2 did not.

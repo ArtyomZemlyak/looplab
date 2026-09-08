@@ -32,6 +32,8 @@ cannot reintroduce the hang.
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 import pathlib
 import subprocess
 
@@ -243,3 +245,20 @@ def _stop_watch_schedulers_at_teardown(_isolation_patch):
             service.stop()
         except Exception:  # noqa: BLE001 - teardown must never mask the test's own outcome
             pass
+
+
+# --------------------------------------------------------------------------------------------
+# WHY THERE IS NO FIXTURE HERE REDIRECTING `ALGOTUNE_BASELINE_CACHE_DIR`.
+#
+# 2026-09-07: eight `<task>__<subset>__lane2r3.json` entries appeared in the box's live
+# `.baseline_times` -- 100 real timings each, a regime this box scores in neither way. The first
+# answer was a session fixture pointing every test at a scratch copy. It cost two tests twice:
+# `test_the_card_says_when_it_lost_its_timings` reads that directory ON PURPOSE, and its pair
+# distinguishes "card with timings" from "card without" by building from two repo roots -- an
+# environment variable that overrides the path makes those two cards identical either way.
+#
+# And it was not the fix. `/proc` named the writer: three ORPHANED `campaign.sh` processes running
+# `premint_serial_rulers`, hours after the runs that started them were killed. That is closed at the
+# source -- the pre-flight now mints only under `ALGOTUNE_PREMINT=1` -- and
+# `test_the_live_cache_is_clean_and_in_one_regime` is what catches a recurrence. A second
+# instrument that changes what the first measures is not a guard; it is the next defect.

@@ -9093,3 +9093,4751 @@ It is still not a change to make mid-arm, and by §185's conversion even $24 rec
 points a run — well inside the noise. But it is the first audit remedy whose direction is not in
 doubt, and the first worth doing for the wall clock rather than for the score: **47 % of tool turns
 is 47 % of the loop's turns**, and a turn is a minute.
+
+## §201 — the duplicate turns cost budget, not wall clock, and the difference is the whole remedy
+
+§200 measured what the re-fetching costs: **11,853 of 25,381 tool-calling turns (46.7 %) requested
+only content already retrieved that run, $25.04**. The obvious next question was how much TIME that
+is, and the answer looked large. Over the 97-run corpus, tool-calling turns account for **201.8 h**
+of wall clock, and the turns that were fully duplicate account for **68.5 h of it — 34 %, a median
+of 40 min in a run that lasts about 150**.
+
+That number is true and it is not the finding. **95 of 96 runs that spent more than $0.20 ended at
+$0.97 or more of the $1.00 cap, and 80 of them say `budget_exhausted` in so many words.** Wall clock
+is not what stops a run; money is. Handing a run back 40 minutes it had no use for buys nothing, so
+the 68.5 h is a *shadow* of the waste, not a second prize on top of it. I had the sentence "40
+minutes a run recoverable" half-written before checking which constraint actually binds — the same
+shape as every other entry here: a measurement that is correct about the thing it measured and wrong
+about the thing it was going to be used for.
+
+In the units that do bind: median spend per evaluated node is **$0.3373** over 95 completed runs
+(median 3 nodes). $25.04 over 97 runs is **$0.2581 a run = 0.77 of an extra node**. At §185's ~8
+points per extra node that is **~6 points a run**, which is the number the "already established"
+seed block should be judged against — not against the clock.
+
+## §202 — a refused probe is not a probe, and the dilution landed on the treated arm
+
+`capA2` finished at TEST 203.1158 and `probe_summary` reported *"reference over 19 run_probe calls:
+15.8 % import"*. `arm_fidelity` said the same probe executed **12** and was **refused 7**. Both were
+counting `run_probe` tool spans; only one of them was subtracting the refusals, which is what
+`developer_probe_max_calls` (§190) generates once a run hits its cap.
+
+A refusal ran nothing. It cannot import the reference, so putting it in the denominator dilutes the
+rate by turns in which the question was not asked. And because refusals only exist under the cap,
+**the whole bias sits on the treatment side of the live arm**, against a §69.1 band (4.9–8.3 %)
+measured on runs where `refused` was zero. Two rates over two different denominators, printed as one
+— the exact mistake the comment three lines above the code was written to prevent.
+
+Fixed in `benchmarks/probe_summary.py`: `run_probe` now counts executed calls, `run_probe_refused`
+is carried beside it, and the line prints `over 12 executed run_probe calls (+7 refused at the cap)`.
+`capA2` reads **16.7 %**, not 15.8 % — the numerator moved by one too, because one refused span
+carried an import that never ran.
+
+`tests/test_refused_probes_are_not_a_denominator.py` pins three things, and all three redden under
+mutation: refusals back in the denominator (M1), refusals counted but the denominator left whole
+(M2), the refusal matched on `input` instead of `output` (M3), and an all-refused run reporting
+0.0 % instead of `None` (M4). The last one matters on its own: **zero executed probes is no evidence
+about reference use, and 0 % is evidence** — it would put such a run below the §69.1 floor on no
+data at all.
+
+## §203 — batch 1 of the probe-cap arm, described but not read
+
+Per §190 no contrast is computed before twelve batches. Describing finished probes is allowed, and
+three of four have landed:
+
+| probe | arm | TEST | nodes (train) | executed / refused | reference use |
+|---|---|---|---|---|---|
+| `freeA2` | control | 224.3657 | 222.81, 199.54, 24.26 | 31 / 0 | 6.5 % |
+| `freeB2` | control | 256.5339 | 21.11, 208.95, 16.41, 256.61 | 21 / 0 | 9.5 % |
+| `capA2` | treat | 203.1158 | 205.15, 149.34 | 12 / 7 | 16.7 % |
+| `capB2` | treat | — running | 139.91, 21.96 | 12 / 5 | — |
+
+Fidelity is intact: treat median 12 executed, control 26, **contrast +14**, which is the separation
+§196's 91 %-bite estimate predicted.
+
+`freeA2` is the champion rule earning its keep in public (§84): its best node was 222.81 and its
+LAST was 24.26, and the run submitted the best — **9.18×** what ending on the last node would have
+scored. It is also the run's own worst node that was graded on code written after its last `check`
+(§104). Nothing in it needed fixing: blind spend 7.2 %, no read loop over threshold, reference use
+inside the §69.1 band.
+
+## §204 — the sweep's own point 1 was counting greps as probes
+
+Two sweeps in a row, the liveness scan printed a `looplab.cli run` process on no lane — unpinned
+across all 96 cpus, no probe name, gone before its `/proc` entry could be read a second time. The
+scan is a walk of `/proc` for command lines containing `looplab.cli` and `run`.
+
+Reproduced: `grep -rn "python -m looplab.cli run --out" /var/tmp/looplab-bench/model-probes`,
+sampled the instant it spawns, is `argv[0]=grep`, affinity 96 cpus, **and the naive matcher calls it
+a probe.** A search for a string contains that string. Nothing was wrong with the stand; the
+instrument was reporting itself.
+
+`run_probe.sh` already knows this. On 2026-09-01, sampling its lane guard through a full pytest suite
+turned up `python -m looplab.cli ui --help`, `python -m looplab.cli resume /tmp/pytest-of-jovyan/…/run`
+and a `ugrep` for the probe line, and the guard was tightened to: **a python interpreter running the
+module with `run` or `resume`, whose run directory is under the bench root.** That rule sits inside a
+heredoc where nothing but the launcher can call it — so the bench has had a fixed copy and a naive
+one at the same time, and the sweep has been reading the naive one.
+
+`benchmarks/lanes.py` is the callable copy: `is_bench_probe(argv, root)`, `probes()`, `lane_busy()`,
+affinity injectable so the scan is testable against a fake `/proc`. It reads lanes with
+`sched_getaffinity`, not from the command line, which is the only reading of a lane that is not a
+guess. On the live stand it prints the four batch-2 probes and nothing else.
+
+**Three of six mutations survived the first version of the test, and all three were the clauses that
+matter.** The fixtures could not discriminate:
+
+* dropping the `argv[0]` interpreter check stayed green, because a real grep carries its whole
+  pattern as ONE argv element and so has no bare `-m` to match. It needed
+  `grep -rn -m 1 -e looplab.cli -e run <root>` — an ordinary invocation whose argv spells every
+  clause but the interpreter.
+* accepting ANY subcommand stayed green, because `ui --help` has no bench root in it. It needed
+  `looplab.cli inspect <root>/…/runs/edge_expansion/run`: reading a run directory does not occupy
+  its lane.
+* deleting the `-c` exclusion stayed green for the same reason. It needed a `-c` script given the
+  probe's words as `sys.argv` — which is how the sweep's own scanners are written.
+
+`test_a_probe_is_not_a_grep_for_one.py` also pins `lanes.py` against the heredoc in `run_probe.sh`
+clause by clause, so the two cannot drift back apart. `run_probe.sh` itself is NOT edited this
+sweep: four probes are reading it by file offset, and the hazard at the top of that file is exactly
+what editing it under load does.
+
+## §205 — batch 1 complete, batch 2 launched
+
+`capB2` finished at TEST 137.7597 — best node 139.9092 (node 0), last node 12.815, so the champion
+rule earned its keep in three of the four probes of batch 1. Blind spend 11.7 %, no read loop over
+threshold, 12 executed probes and 7 refused, reference use 16.7 % import / 8.3 % `is_solution`.
+
+Batch 1 as described (no contrast computed, per §190): controls `freeA2` 224.3657 and `freeB2`
+256.5339; treated `capA2` 203.1158 and `capB2` 137.7597. Batch 2 is on all four lanes —
+`capA3`/`capB3` with `-s developer_probe_max_calls=12`, `freeA3`/`freeB3` with the shipped defaults,
+`LOOPLAB_LLM_STREAM=1`, all four INSTRUMENT.txt verified and all four pinned to their own lane by
+`lanes.py`. Ten batches remain.
+
+## §206 — the snapshot interval was a gap, and four live probes stretched it to an hour
+
+Point 8's three unverified claims about snapshotting are all **refuted by the files and by running
+them**, and one of them led somewhere real.
+
+* *"a snapshot whose destination has vanished reports success"* — no. Measured against an
+  unwritable store: `rc=1`, zero bytes written, `FATAL: … is not writable; refusing to snapshot`.
+* *"nothing separates two simultaneous snapshots"* — no. Two started in the same second land in
+  `20260904-101017` and `20260904-101017-2`; there is a `flock -w 60`, and a run that cannot take
+  the lock exits **3**, which the timer treats as "do not record the fingerprint, retry".
+* *"`.env` does not reach the snapshot and is not named"* — half. It deliberately does not reach it,
+  and it IS named: every snapshot writes `ENVIRONMENT.txt`, `32 lines (redacted; .env itself
+  deliberately NOT copied)`.
+
+The dig came from the incidental part. Snapshot durations, measured as `.complete` mtime minus the
+stamp in the directory name: 129, 118, 104, 127, 117, 200, 126 — and then **1765 s**. Everything but
+the runs archive finished in **7 s**; `cp -ru` spent the remaining 1758 s copying `freeA3` (09:58),
+`freeB3` (10:03), `capA3` (10:07) and `capB3` (10:12) — the four probes I had launched at 09:53,
+**live and growing under the copy**. The archive step scales with how many probes are RUNNING, not
+with how much finished work is new.
+
+And the loop ended `sleep "$INTERVAL"` *after* the snapshot, so the effective period was interval
+PLUS duration. At 127 s that is 1927 s instead of 1800 and nobody notices. At 1765 s it is **3565 s:
+the recovery window doubles**, and the only number the sweep reads — snapshot age, 1147 s against
+2400 — stays comfortably green throughout. The measured gaps say so directly: 1929, 1918, 1904,
+1927, 1917, 2000, 1926 s for a nominal 1800.
+
+Fixed in `benchmarks/snapshot_timer.sh`: time the iteration, sleep `INTERVAL - elapsed`, and when a
+tick already outran the interval **say so** and start the next immediately rather than quietly
+running back to back. Edited by ATOMIC REPLACE, per the doctrine at the top of `run_probe.sh` — the
+old `_loop` was running from this file by offset — then stopped by pid and restarted onto the new
+inode (`3459835`).
+
+`tests/test_the_snapshot_interval_is_a_period_not_a_gap.py` drives the real `_loop` against a stub
+snapshot that sleeps: a 3 s snapshot under a 4 s interval must tick every ~4 s, an overrunning tick
+must name itself, and a 0.2 s snapshot under a 3 s interval must still wait — that last one is there
+because a "fix" that always ran back to back would pass the first test and burn the box. All four
+mutations redden: sleeping the whole interval, never sleeping, running over silently, and measuring
+`elapsed` from a fixed zero.
+
+The stand itself had a hole worth recording: the first version wrote its per-tick marker where
+nothing watched, `fingerprint` returned the same value every time, the loop reported "nothing new"
+and the test timed **one** tick. The stub now moves `meter/`, which is a tree the fingerprint
+actually reads.
+
+## §207 — chasing the archive seconds, and finding the stopwatch
+
+§206 fixed the consequence — the period — and left the cause open: why does the runs-archive step
+take 121 s with no probes live, 193, 601 and once 1758 s with four? Four candidates, measured:
+
+* **Metadata latency on the persistent store.** Refuted: 0.06 ms to stat an existing file, 0.39 ms
+  to create and write one. All 5,151 files stat in 0.3 s, create in 2 s.
+* **Byte throughput.** Refuted: `dd conv=fsync` writes at 121 MB/s and reading every archived byte —
+  what `cmp -n` does for the prefix check — is **1.12 GiB in 7.9 s, 144 MiB/s**.
+* **Process creation.** `archive_tree` forks `stat` twice per file in its supersede loop, `cmp` once,
+  and twice more in its repair loop: roughly 25,000 processes per snapshot over this tree. Timed in
+  my own shell that is **~600 ms per `exec`**, which would make the archive step four hours, not ten
+  minutes — so the number was wrong, and the wrong thing was the stopwatch.
+* **Concurrency starving the copy.** Refuted below, by the ruler.
+
+**The stopwatch.** Spawning `/usr/bin/true` costs **603 ms** in the shell this sweep runs in (50
+execs in 30,158 ms; repeated, 35,089 ms). The same binary from a bash launched by Python costs
+**1.05 ms** (100 execs in 105 ms), and `subprocess.run` costs **1.0 ms**, as does a bare
+`fork`+`_exit`. The box is not slow at starting processes; my shell is, by a factor of ~600. Every
+`for f in …; do <binary>; done` timing I have taken this session was measuring the harness. It also
+explains three "hangs" earlier today — the `/proc` walks with an `awk` per pid that hit the two-
+minute cap — which I put down to "scanning a thousand pids".
+
+So the archive seconds remain **unexplained**, with three of four candidates refuted and the fourth
+measured on a broken instrument. That is where it stands; it is not a cause, and writing one down
+would be the parody of this document.
+
+**The ruler is not the casualty.** The worry that four probes on 88 pinned cpus distort the graded
+number is answerable from the corpus itself. `edge_expansion` `eval_seconds`, grouped by how many
+probes were live at that instant:
+
+| probes live | n | median | p10 | p90 |
+|---|---|---|---|---|
+| 1 | 7 | 40.5 | 39.4 | 47.4 |
+| 2 | 27 | 41.0 | 39.7 | 47.4 |
+| 3 | 48 | 41.2 | 39.6 | 47.1 |
+| 4 | 142 | 41.1 | 39.6 | 45.1 |
+
+Flat to within 0.7 s across a fourfold load change. The lane discipline does what it is for, and
+`eval_seconds` is not a proxy for whatever the archive is spending.
+
+**Evidence integrity, since §206 raised it.** Point 8's open item is `cp -ru` overwriting a first
+attempt with a shorter second one. Over 126 archived probe trees against their live sources: three
+live probes hold 3 short files each (growing under the copy, repaired next cycle), seven hold one
+orphan each — all of them `memory/memora_cache.json.superseded-1`, a file the run itself retired
+after the archive took it — and **not one archived file is longer than its source**, which is the
+signature the mixing hazard would leave. The supersede loop that guards it compares by PREFIX, not
+by size, precisely because nothing makes attempt 2 shorter than attempt 1.
+
+**Not shipped, and why.** Card items (а) the 10× per-instance ceiling and (б) that the best
+EVALUATED node is what gets submitted are still the two rules experience cannot teach — `freeA2`
+scored 224.37 off a node it had already walked away from, 9.18× its last one. Both stay unshipped
+while the probe-cap arm runs: the card is read by treatment and control alike, so changing it
+mid-arm moves both arms at a batch boundary and confounds the thing $48 is being spent to measure.
+Same for (в), the money hint. They go in when the arm closes, and that is a decision to defer, not
+an omission.
+
+## §208 — the archive step now says which part it was, and two manual runs are healthy
+
+§207 left the runs-archive seconds unexplained with three candidates refuted. Rather than write a
+fourth theory, `archive_tree` now times its three parts and prints them beside the record count:
+
+```
+runs -> archive       model-probes 1.2G (105 run records, 3 re-copied SHORT of its source)
+                      67s prefix-check + 3s cp -ru + 23s repair
+```
+
+Two runs against the live tree, four probes alive throughout:
+
+| run | prefix-check | `cp -ru` | repair | total |
+|---|---|---|---|---|
+| pinned to the service lanes 44-47,92-95 | 67 s | 3 s | 23 s | **93 s** |
+| unpinned, as the timer runs it | 82 s | 38 s | 36 s | **156 s** |
+
+So pinning is worth about 60 s and is not the difference between 93 s and the timer's 601 s, let
+alone 1765 s — the pinned/unpinned gap is the wrong order of magnitude, and `cp -ru` differs mostly
+because the pinned run had copied everything minutes earlier. The prefix check is the dominant part
+in both, which is expected: it is a `cmp` per file over 5,151 files.
+
+What this does NOT do is explain 601 s. Both of my manual runs are healthy; the slow ones were the
+timer's. The instrument is now in place, so the next timer-run snapshot answers it by itself, and
+the answer will be a measurement rather than the fourth theory in a row. Test:
+`test_the_archive_step_says_where_its_seconds_went.py`, whose second case puts a sleeping `cmp` on
+PATH so that only the prefix check is slow and the breakdown has to blame the right part — it
+reddens on a clock that is not reset between parts, on all three parts reporting one total, and on
+no breakdown at all.
+
+§206's own fix is confirmed in production, incidentally: the timer's ticks now land at 10:24:35 and
+10:54:35, exactly 1800 s apart, where before the period was the interval plus the snapshot.
+
+And the timer is not systematically slow, which narrows it further. Its eight kept snapshots today:
+117, 200, 126, **1765**, **608**, 110, and my two manual ones at 101 and 162. The tick immediately
+after the two slow ones — same four live probes, same 1.2 G archive — took **110 s**. So whatever it
+was is episodic, not a property of running under the timer, and the breakdown will name the part
+when it next happens.
+
+## §209 — the fidelity check was reading the clock and calling it the intervention
+
+Three sweeps running, `arm_fidelity` has ended with a sentence that is false in the way that matters:
+
+```
+median executed: treat 12.0, control 10.5, contrast -1.5
+  NO CONTRAST YET: the control has not out-probed the treatment, so nothing separates the arms
+```
+
+At that moment the intervention was working exactly as designed. The treated probes had hit
+`developer_probe_max_calls=12` and stopped; the controls were mid-flight at nine and eleven, on their
+way past twenty. A running probe's probe-count is a LOWER BOUND and a finished one's is the answer,
+and the tool was comparing one against the other. Batch 1, all four finished, gives treat 12.0 vs
+control 26.0, contrast **+14** — from the same code, once the probes have ended.
+
+The sentence is the defect, not the arithmetic: a reader of "nothing separates the arms" concludes
+something about capping probes, when the number is about which probes had finished at the moment it
+was printed. It is §198's own warning arriving from the direction the file did not guard: that tool
+was built so a fidelity check could never become an interim read of the OUTCOME, and it turned into
+an interim read of the CLOCK instead.
+
+Fixed: the contrast is computed over finished probes only, running ones are counted and named but
+not compared, and when nothing has finished the tool says so in those words instead of printing a
+negative number. `finished` is the EXISTENCE of `final.json` and never its contents — parsing it
+would put a score on this screen, which is the one thing §190 forbids.
+
+Five mutations, and one of them survived the first version: deleting the "a probe with no spans has
+not started" filter left every assertion green, because an unstarted probe is unfinished either way
+and the difference only shows in the RUNNING list. It is closed by asserting that a probe which
+never began is not reported as still running — an operator reading that list is waiting for work
+that would never arrive.
+
+## §210 — the archive breakdown, first reading from the timer
+
+`20260904-112435`, taken by the timer with four probes live: **188 s = 137 s prefix-check + 14 s
+`cp -ru` + 29 s repair**. The prefix check dominates, as it did in both manual runs (67 s pinned,
+82 s unpinned), and 188 s is a tenth of the interval. Five consecutive healthy snapshots now —
+110, 101, 162, 188 — with the two slow ones (608 s, 1765 s) still unexplained and now instrumented.
+
+## §211 — a transient stall bought 23 minutes behind the 300 s window, and there was no way back
+
+`check_money` reported the share of unstreamed calls rising from 1.2 % to 1.6 % and a new death at
+the nginx ceiling: `7 of them cut at the 300 s nginx ceiling (oldCK9 x6, capB3 x1)`. Every probe's
+INSTRUMENT.txt says `LOOPLAB_LLM_STREAM=1`, so the streaming that the standing brief is emphatic
+about was on. It was turned off by the engine, at run time.
+
+Per live probe, unstreamed share over its whole life: `freeB3` **51 of 271 (18.8 %)**, `capB3`
+15/274 (5.5 %), `capA3` 3/376 (0.8 %), `freeA3` 2/369 (0.5 %). The ledger says exactly when:
+
+```
+11:39:38 stream=True  st=200 lat=  60.3s att=2 pt=0 ct=0
+11:40:36 stream=True  st=200 lat=  60.2s att=2 pt=0 ct=0
+11:40:36 stream=False st=200 lat=   0.9s att=1 pt=20308 ct=69
+11:42:40 stream=False st=200 lat=  67.1s att=1 pt=21356 ct=5627
+… 51 unstreamed calls, to 12:03:55 and still going
+```
+
+Two empty streamed 200s — sixty seconds, `att=2`, zero tokens both ways — and `_stream_stalls`
+reached `STREAM_STALL_DEGRADE_AFTER = 2`. The comment in `core/llm.py` says what happens next, and
+it is not a bug in the sense of a mistake: *"after STREAM_STALL_DEGRADE_AFTER stalls streaming is
+disabled for this client's lifetime"*, deliberate, with a measured rationale — glm-5.1 answered the
+same request in 2 s without SSE while its stream wedged.
+
+**That rationale is inverted on this bench.** Here non-streaming is the dangerous mode: the gateway
+sits behind an nginx with `proxy_read_timeout 300`, which without SSE measures the entire
+generation, and the brief's own measurement is 28 % of `discrete_log` calls dying at five minutes
+each with streaming off against 0 of 28 with it on. `freeB3` spent 23 minutes and 51 calls there,
+its prompt growing past 34 k tokens and single unstreamed answers reaching 106.9 s, while `capB3`
+lost one at exactly 300 s. Unstreamed p90 in that window was 85.6 s against 60.3 s streamed.
+
+Fixed: the degrade now expires. `STREAM_STALL_RETRY_AFTER = 20` good unstreamed calls and the next
+attempt probes SSE once; it works → the ratchet resets to zero and the client streams again; it
+stalls → the degrade re-arms for another twenty. The protection the ratchet exists for is untouched
+— two stalls still stop the streaming, and a stalled probe does not immediately probe again.
+
+Six mutations, all red: making the degrade permanent again, probing on every call, a successful
+probe that does not reset the ratchet, good unstreamed calls never counted, a failed probe that
+re-probes at once, and the degrade threshold removed. The 190 tests of the five existing LLM suites
+pass unchanged.
+
+This lands mid-arm on purpose. §190's test is stratified BY BATCH and compares within a batch, so a
+change that reaches all four probes of every later batch equally is absorbed by the stratification —
+which is what batch-stratification is for. Leaving a known 300 s exposure in place for ten more
+batches is not.
+
+## §212 — the fidelity fix was wrong in the direction that matters, and a probe was quietly lost
+
+§209 taught `arm_fidelity` to compare only FINISHED probes, and defined finished as *`final.json`
+exists*. Today it reported `freeB3` as a finished control with 34 executed probes and computed a
+contrast of +10.5 from it.
+
+`freeB3` had not finished. Its `run.log`:
+
+```
+run=run task=algotune_edge_expansion finished=False
+stop: PAUSED (node 2) — resumable, NOT finished, so the absent `run_finished` is correct rather
+than missing. It is OWED more work: `looplab resume`.
+  pause reason: auto-paused: a Developer session crashed (LLM unreachable or a hard error,
+  unresolved within the node) — resume once it's fixed
+nodes=3 evaluated=2
+BEST node 1: metric=265.025 params={}
+```
+
+A paused run writes a `final.json` all the same — 602 bytes, `speedup 260.9543` — so the file is a
+by-product and not the claim. The claim is an EVENT: every genuinely finished probe of batches 1 and
+2 carries `run_finished` with `reason=budget_exhausted`; the paused one carries a `pause` and no
+`run_finished` at all. `finished` now reads that event type, `paused` is surfaced as its own state,
+and the tool says **"PAUSED, not finished, and OWED work"** with the probe named. It still reads no
+scores: event TYPES only, never a metric and never the contents of `final.json`.
+
+Four mutations, all red: `final.json` existence again, a pause counting as finished, paused probes
+not named, and paused folded into finished. The instrument I built one sweep ago to stop a fidelity
+check becoming an interim read had a second way to be wrong, and it took a real paused probe to
+find it.
+
+**Why it paused is §211.** `freeB3` is the probe whose client degraded off SSE at 11:40 and never
+came back: by now **82 of its 313 calls went unstreamed (26 %)**, `capB3` 56/316 (18 %), and the
+ceiling deaths have gone from one to `oldCK9 x6, capB3 x4, freeB3 x1`. Without SSE the 300 s nginx
+window measures the whole generation; enough of those in one node and the Developer session is
+declared unreachable and the run auto-pauses. The permanent degrade did not merely cost latency —
+it cost a probe.
+
+**Resumed**, on its own lane 33-43,81-91 with the same meter path, model and `LOOPLAB_LLM_STREAM=1`,
+at 12:36. It picks up §211's expiring degrade because a resume loads the engine fresh. Dropping it
+instead would have censored the arm on exactly the arm-relevant variable — the control that made the
+most probe calls — which is what §190's registered design exists to prevent.
+
+Money is inside tolerance and says the same thing from the other side: `RESIDUE $+0.070113` against
+an allowance of `$0.080932`, `check_money` exiting 0, with the named parts including
+`$0.076945 PAID RETRIES` on `oldCK9` and 290 calls from five abandoned first-batch probes.
+
+## §213 — the spend ceiling is per PROCESS, and a resume hands the run a second budget
+
+Resuming `freeB3` was the right call and it exposed a bigger defect than the one it fixed.
+
+The meter, not the events, is the arm's cash register, and it had already recorded **$1.0308** for
+`freeB3` at the moment it paused — the events log lagged at $0.86 because a paused run has not
+flushed everything. So the probe was resumed **already over its $1.00 ceiling**, and the engine did
+not refuse. It ran 27 more minutes and 45 more calls for another $0.0929 with no refusal of any
+kind. Stopped by pid at **$1.1056**, 10.6 % over a cap its batch-mates respected to within a cent:
+`capA3 $1.0082`, `freeA3 $1.0098`, `capB3 $1.0102`.
+
+`run_cost_accountant` already went to some trouble to make `llm_budget_usd` one ceiling per RUN
+rather than one per client — its own docstring records the measurement where two clients from one
+`Settings` gave an effective ceiling of 2.0. It is still one per PROCESS: a `CostAccountant` is
+constructed with `spent = 0.0`, and `looplab resume` is a new process. The run's own append-only
+event log holds every `llm_usage` it ever paid, so the spend is recoverable exactly where the
+ceiling is set.
+
+`seed_prior_spend(engine)` sums those events and charges the run accountant before any role can
+make a call — called BEFORE `bind_cost_accountants`, so the tracker's baseline already contains the
+prior and cannot re-record it as new usage. Only accountants carrying a `limit` are seeded, junk and
+negative rows cannot buy budget back, an unreadable log cannot stop a run from starting, and a
+second call is a no-op.
+
+Seven tests, and mutation found the hole: **replacing `spent` instead of adding to it survived**,
+because every fixture started at zero. `run_cost_accountant` caches one accountant on the `Settings`
+object, so a process that starts a second engine from the same settings hands over an accountant
+that already holds spend, and overwriting it would erase paid calls. Closed with a pre-charged
+accountant; 632 tests of the cost/budget/resume suites pass.
+
+**The other half of the same reading was my own tool.** `arm_fidelity` called `freeB3` PAUSED while
+it was running: §212 defined paused as "a pause event exists", and events are append-only, so a
+resumed run stays paused for ever. The lifecycle in order is `pause 12:32:26`, `resume 12:36:06`,
+then llm_usage to 13:03:16. The state has to come from the LAST lifecycle event, not from any — the
+same correction `probe_summary::_why_no_test` needed, arriving in a tool I wrote one sweep ago.
+
+**And §211 is visibly working.** Every one of the resumed run's 45 calls went out streamed —
+`stream=True`, latencies to 83.8 s, not one 300 s death — where the same probe had spent 23 minutes
+unable to leave non-streaming before the fix.
+
+### §213.1 — freeB3 is excluded from batch 2, and the criterion is written before the contrast
+
+`freeB3` ended at **$1.1056** against the $1.00 every other probe held to within a cent. That is my
+doing: I resumed it, and §213 is why the engine let it keep spending. A control that received 10 %
+more budget than its batch-mates is not comparable to them, so it is **excluded from batch 2** and a
+replacement control is run.
+
+The criterion is stated here, before any contrast has been computed: **a probe whose metered spend
+exceeds $1.05 is not a $1 probe and does not enter the arm.** It is recorded now precisely so it
+cannot be chosen later to suit a number. `arm_fidelity` has never printed a score and the batch-2
+contrast has not been read.
+
+## §214 — point 5's four numbers were never checked, and three of them have moved
+
+`ruler_check.py` verifies the SHAPE of the baseline cache: one regime, a hundred per-instance
+timings, written here. It says nothing about the four numbers point 5 also carries —
+`pagerank 1.0024, pde_heat1d 0.9958, edge_expansion 0.9847, discrete_log 1.0162` — which are the
+ruler's READING: submit the reference implementation itself, and `speedup = baseline_ms /
+optimized_ms` must come back ~1.0 because both sides are then the same code. I have been reporting
+"линейка чистая" every sweep on the strength of the shape check and the memorised numbers.
+
+Measured, four repeats each on their own lanes:
+
+| task | repeats | median | sweep says | delta |
+|---|---|---|---|---|
+| edge_expansion | 0.8849 0.8872 0.8994 0.8747 | **0.8861** | 0.9847 | **−10.0 %** |
+| pde_heat1d | 1.0346 1.0468 1.1045 1.0419 | **1.0444** | 0.9958 | +4.9 % |
+| discrete_log | 1.0696 1.0767 1.0804 1.0711 | **1.0739** | 1.0162 | +5.7 % |
+
+The repeats are tight — `discrete_log` spans 1 %, `edge_expansion` 2.8 % — so these are not noise.
+Nor are they load: three more `edge_expansion` runs with the other lanes idle gave **0.8898, 0.8810,
+0.8865**, median 0.8865 against 0.8861 under full concurrency. The shipped tool re-run later put
+`discrete_log` at 1.0900 (+7.3 %).
+
+**What it means.** `baseline_ms` comes out of a cache written once — `edge_expansion` on 08-31 at
+02:15, `discrete_log` on 08-31 at 12:43 — and `optimized_ms` is timed today. The self-speedup is
+therefore the ratio of how fast this box was when the cache was written to how fast it is now.
+`edge_expansion` code runs ~13 % slower today than when its baseline was taken; `discrete_log` ~7 %
+faster. The two directions rule out a single systematic bias and point at per-task cache age.
+
+**What it does and does not affect.** Within one task the drift cancels exactly: all 76
+`edge_expansion` probes are divided by the same cached baseline, so probe-vs-probe and the whole
+probe-cap arm are untouched. What it does bite is comparison ACROSS TIME on one task — which is
+precisely what §181's re-timed arm A constants are: 0.9648 for `edge_expansion` measured in one
+window against arm B's corpus measured across several. A 10 % ruler move is the same size as some of
+the gaps being argued over there.
+
+**Not re-measured, deliberately.** Re-timing the cache would rescore every future run against a
+different ruler than the 102 already in the corpus, and it would move the ruler underneath a
+registered arm (§190). The drift is a number to carry, not a thing to erase.
+
+`benchmarks/ruler_selfcheck.py` makes it a measurement anyone can repeat, and it encodes point 2's
+own rule about how this check lies: **a zero that arrives in a second is the harness declining, not
+a slow solver.** Both refusals were hit while building it, both at `eval_seconds` ~1.7 against a real
+~28 s — first `solver_unloadable`, because `--solver-file-only` copies one file and the reference has
+to be INLINED rather than imported, then `Task data directory not found` until `DATA_DIR` pointed at
+the HF dataset directory. Five mutations red, including "any zero is a refusal", which would have
+erased arm A's real `pagerank` 0.0 (66 verification failures over a full 41 s evaluation).
+
+## §215 — the check that would have overturned §214, and why it could not
+
+§214 said the reference against itself has drifted (`edge_expansion` 0.8861 against the sweep's
+0.9847) and read it as the box being ~13 % slower than when the cache was written. The obvious way
+to confirm that is `eval_seconds`, so I measured it across the whole corpus:
+
+| day | n | median `eval_seconds` |
+|---|---|---|
+| 08-31 | 8 | 41.10 |
+| 09-01 | 71 | 41.20 |
+| 09-02 | 36 | 41.40 |
+| 09-03 | 91 | 41.10 |
+| 09-04 | 25 | 40.90 |
+
+Flat: **−0.5 % over the corpus window.** For about a minute that looked like §214 refuted by the
+same snapshot's own files — the failure this document keeps recording. It is not, for two reasons,
+and the weaker one came first.
+
+**Dilution.** A hundred `edge_expansion` instances at a cached 45.43 ms are **4.5 s of a 41 s
+evaluation, 10.9 %**; the rest is fixed harness overhead. A 13 % move in the compared part is 1.4 %
+of `eval_seconds`, inside its own p10–p90. The share is not uniform either — `discrete_log` 22.5 %,
+`pde_heat1d` 63 % — so an eyeballed "it's mostly overhead" is not available; it is now
+`ruler_selfcheck.instance_share`, arithmetic instead of memory.
+
+**And the reason that actually settles it: `eval_seconds` times a different solver every node.** It
+is the cost of evaluating whatever the model just wrote, not fixed work. Its day-to-day movement is
+the corpus's candidates changing, and the movement is far larger than any drift: `discrete_log`
+reads 30.6 s, 57.0 s, 46.7 s on three consecutive days, `pde_heat1d` 54.0 → 60.7 s. A quantity with
+no reason to be stable cannot be evidence that the hardware was. **§207's use of it stands but only
+as far as it goes** — flat across one to four concurrent probes says the harness does not collapse
+under load, which is what it was cited for; hardware constancy it never supported.
+
+Two other candidate causes of the 0.886, both closed by measurement rather than argument. The
+delivered reference is **byte-identical** to AlgoTune's own task file for all three tasks
+(9881 / 6109 / 4504 bytes, comments stripped), so the self-check really is the reference against
+itself. And load is out: three solo `edge_expansion` runs gave 0.8865 against 0.8861 under full
+concurrency (§214).
+
+So the drift stands as measured, its cause remains "the cached baseline and today's box disagree",
+and the only instrument here that compares like with like is the self-check itself — because both
+sides of it are the reference.
+
+## §216 — the instrument earned its keep, and the answer was in the lane discipline
+
+§208 installed a per-part breakdown on the runs-archive step and said the next slow snapshot would
+name its own cause instead of getting a fourth theory. It happened today, and it did:
+
+```
+[13:54:35] change detected, snapshotting
+  runs -> archive       model-probes 1.2G (106 run records, 3 re-copied SHORT of its source)
+                        391s prefix-check + 300s cp -ru + 285s repair
+```
+
+**976 s against 118 s (79 + 7 + 32) for the tick half an hour later**, on the same 1.2 G archive.
+All three parts inflated together — 5×, 43×, 9× — which is contention on a shared resource, not any
+one step. And the window is exactly when AlgoTune evaluations were saturating lanes 0-32 for §214's
+ruler self-check. The two earlier outliers fit the same shape: 1765 s over the morning's pytest and
+mutation runs, 608 s over the next batch of them.
+
+The cause is in point 5's own list. Lanes 44-47 and 92-95 are reserved so service work has cpus of
+its own while probes hold 0-43 and 48-91 — and `snapshot_timer.sh` ran `snapshot.sh` **unpinned**,
+the one service process on this box not using them. Invisible while the bench is merely waiting on
+an LLM; not invisible when it is computing. Fixed: `taskset -c "$SERVICE_LANE"` with
+`SNAPSHOT_SERVICE_LANE` overridable and defaulting to the reserved lanes. Atomic replace, timer
+restarted onto the new inode.
+
+`test_the_snapshot_runs_on_the_service_lanes.py` does not settle for the word `taskset` being in the
+file: it runs the real loop against a stub snapshot that records `sched_getaffinity(0)` and asserts
+the cpus. Three mutations red — unpinned again, a probe lane as the default, and the override
+ignored.
+
+**The verification did not happen and I am not claiming it did.** I loaded lanes 0-32 with
+evaluations and started a pinned snapshot to time it against the 976 s; it came back
+`another snapshot holds the lock (waited 60s); NOTHING WRITTEN by this run` — the restarted timer
+had taken its own snapshot first. The fix rests on the measurement above and on the lane discipline,
+not on a controlled before/after.
+
+## §217 — a test was snapshotting the live corpus
+
+Chasing that, `find /var/tmp/looplab-bench/model-probes` turned up in `/proc` during a suite run —
+a test walking the **live** 1.2 G bench tree. `test_snapshot_refuses_a_store_that_is_not_there.py`
+defaults `BENCH_ROOT` to the real `/var/tmp/looplab-bench`, and its concurrency case starts **two
+real snapshots of it at once**: `find` over 5,151 files with a `cmp` each and 1.2 G of `cp -ru`,
+twice, which is why it carried a 900 s timeout. The subject of that test is the LOCK and the unique
+stamp; §206 reproduced exactly that behaviour on a toy tree in under a second.
+
+Given a `BENCH_ROOT` with one run tree, `test_b_two_snapshots_at_once_do_not_share_one_directory`
+runs in **0.15 s** instead of ~30, and still proves what it is for. Its siblings still on the live
+root cost **27–33 s each** by `--durations`, and converting them is left for a sweep with room: they
+assert on redaction and on recorded settings, and swapping their root risks trading a slow test for
+a weakened one.
+
+**Three regressions of my own, from §209 and §212, fixed in the same pass.** `test_arm_fidelity_
+reads_no_scores.py` pins that the tool never reaches for the outcome, and it forbids the tokens
+anywhere below the module docstring — so §212's explanation, written into a function docstring,
+tripped the guard it was describing. The prose moved up into the module docstring, where the guard
+allows it and the record survives; the guard stays exactly as strict. The other two were a row that
+gained `finished`/`paused` keys and a sentence that changed wording.
+
+## §218 — the snapshot tests now build their own corpus instead of borrowing the live one
+
+§217 measured the cost and deferred the fix with a stated reason: those tests assert on redaction and
+on recorded settings, and swapping their root risked trading a slow test for a weakened one. The
+reason turned out to be answerable rather than blocking.
+
+Why they used the live root at all: **every case asserts `returncode == 0`, and only a COMPLETE
+`BENCH_ROOT` gives that** — a toy tree exits 1 with `INCOMPLETE SNAPSHOT: sources missing`. What they
+actually assert on is `ENVIRONMENT.txt`, which is built from the environment, and the exit code.
+So the fix is not a smaller root, it is a complete small one — and one already exists, in
+`test_snapshot_carries_the_repo_and_the_runs.py::_bench_root`, with the reasoning for each part
+written into it (two git checkouts with a second branch, an uncommitted edit, `meter`, `logs`,
+`reports`, `.baseline_times`, a campaign directory, a probe mid-flight). It is **imported, not
+copied**: two copies of a fixture drift exactly like two copies of a rule (§204).
+
+Measured by `--durations`, same sixteen tests:
+
+| | before | after |
+|---|---|---|
+| `test_c_records_the_settings_but_never_the_key` | 27.7 s | 0.14 s |
+| `test_a_credential_whose_NAME_looks_innocent_is_still_redacted` | 32.6 s | 0.16 s |
+| `test_a_adopts_a_genuinely_empty_store_and_leaves_the_sentinel` | 28.0 s | 0.14 s |
+| …a dozen more | 27–33 s each | 0.14–0.21 s |
+| `test_a_busy_lock_exits_non_zero_so_the_timer_retries` | 62.0 s | 62.0 s |
+
+About **six minutes off every run of this file**, and the tests no longer read and copy 1.2 G of the
+tree live probes are writing into. The busy-lock case is unchanged on purpose: its 60 s is
+`flock -w 60` being waited out, which is the behaviour under test.
+
+Two attempts were needed and the second is the interesting one. Building the toy root under the
+destination broke exactly the two cases whose subject is the destination — one wants a store root
+that is **genuinely empty**, the other a destination that **cannot be written** — and a fixture that
+plants a tree there answers both questions on their behalf. It is now built once, in a directory of
+its own.
+
+The guard is `test_these_tests_do_not_snapshot_the_live_bench_root`, and it **parses rather than
+greps**: the live path is named all through the comments and docstrings of that file and should be,
+because that is the record. What must not exist is a string CONSTANT carrying it — code pointing a
+test at the corpus. Both mutations redden: restoring the live default, and a toy root without the
+git checkouts that make `returncode == 0` mean anything.
+
+## §219 — one reading cannot say when the ruler moved, so the series starts
+
+§214 measured the reference against itself and found `edge_expansion` at 0.8861 where the sweep says
+0.9847. §215 then closed off the obvious way to date that: `eval_seconds` times a **different solver
+every node**, so its day-to-day movement is the corpus's candidates changing and not the box. Which
+leaves a fixed-work reading taken repeatedly as the only instrument that can answer *when* the
+cached baseline and the box parted — and a series has to start somewhere.
+
+`ruler_selfcheck.py --record` appends a dated row; `read_series` reads them back in time order.
+First readings, all `subset=test`:
+
+| task | 2026-09-04 ~13:40 | 2026-09-04 15:35 | sweep says |
+|---|---|---|---|
+| edge_expansion | 0.8861 (0.8747–0.8994) | **0.8908** (0.8833–0.8912) | 0.9847 |
+| pde_heat1d | 1.0444 (1.0346–1.1045) | **1.1013** (1.0625–1.1399) | 0.9958 |
+
+Two hours apart, and the two tasks say different things. `edge_expansion` moved **+0.5 %** — its
+repeats span under 1 % and it has now read ~0.886–0.891 four times across two sittings, which is a
+stable disagreement with 0.9847 and the strongest form this evidence has taken. `pde_heat1d` moved
+**+5.5 %** between sittings and its own repeats span 7 %; **no drift claim can be made for it**, and
+§214's `+4.9 %` for that task should be read as one draw from a noisy quantity rather than a
+measurement of anything. The series earned its keep on its second row.
+
+Two properties the recorder needed, and one was only found by mutation:
+
+* **A torn tail is healed before appending.** A row half-written by a killed process leaves the file
+  without its closing newline, and the next append lands *on that line* — one crash would cost two
+  readings instead of one, in a series whose whole point is that readings are rare.
+* **The reader sorts by stamp**, because the file's order is the order rows were WRITTEN: a sweep
+  records several tasks in whatever order their lanes finish, and a back-filled reading is older
+  than the row before it. The first test appended in time order and could not tell a sorted reader
+  from an unsorted one; mutation said so, and the fixture now writes one row out of order.
+
+`discrete_log`'s third row landed after this was written: **1.0896** (1.0831–1.1003) at 15:39
+against 1.0739 at ~13:45, **+1.5 %** with repeats spanning 1.6 %. So it behaves like
+`edge_expansion` rather than like `pde_heat1d` — a tight reading that has now disagreed with the
+sweep's 1.0162 by ~7 % twice. Of the three tasks, two carry a stable disagreement and one is too
+noisy to say anything, which is a sharper statement than §214 could make with one sitting.
+
+The stamp is passed in rather than read inside, so a test or a replay owns its own clock.
+
+## §220 — the champion rule picks on train, and on this task train is an excellent proxy
+
+§84 records the champion rule's protective value — the best EVALUATED node is submitted, and three of
+batch 1's four probes needed it — but not whether the CRITERION is right. The rule ranks nodes by
+their TRAIN metric and the score that counts is TEST, so the open question is how much that choice
+costs. It is answerable from the corpus and costs nothing to ask.
+
+Over the 78 `edge_expansion` runs that have both a train champion and a TEST score, the ratio
+**TEST / best-train** is:
+
+| task | n | median | sd | TEST below train | sign test |
+|---|---|---|---|---|---|
+| edge_expansion | 78 | **0.9951** | 0.0140 | 52/78 | **p = 0.0043** |
+| pde_heat1d | 10 | 1.0218 | 0.0179 | 2/10 | p = 0.11 |
+| discrete_log | 11 | 1.0015 | 0.0855 | 5/11 | p = 1.00 |
+
+Two things follow, and they point in opposite directions on the same task.
+
+**The criterion is sound.** With an sd of 1.4 %, a train ranking is a very sharp instrument: only
+**2 of 78** multi-node runs have a runner-up within one sd of their best (`expEEh` 156.87/155.36,
+`remEEctl1` 35.02/34.81). For every other run the train ordering of the top two is not in doubt, so
+picking by train costs essentially nothing. That is worth stating plainly because the alternative —
+evaluating candidates on TEST to choose between them — is the thing the benchmark forbids.
+
+**And there is a small, real train-optimism.** The median is 0.9951, not 1.0000, and 52 of 78 runs
+land below: **p = 0.0043** by sign test alone. Half a percent, consistent, on the task with enough
+runs to see it. `freeB4`, finished this sweep, is one of the 26 that went the other way — TEST
+258.2564 against a best train node of 250.6965. The other two tasks cannot say anything yet (10 and
+11 runs, p = 0.11 and p = 1.00), and `discrete_log`'s sd of **8.6 %** is six times
+`edge_expansion`'s, which is the same "thinnest carrying number" the sweep's own header warns about.
+
+Nothing to fix here; the measurement's value is that it removes a doubt about the rule rather than
+adding one. Where it does bite is comparisons of the form "arm A scored 0.9648": a half-percent
+train-optimism and a 1.4 % spread are the resolution of any single-run claim on this task.
+
+## §221 — batch 2 closed, batch 3 away
+
+`freeB4` finished at **TEST 258.2564** — the best control of the batch — from train nodes
+[250.6965, 218.7641], $1.0156, 24 `eval_train`, 41 % of spend before the first node and 12 % after
+the last, reference use 6.5 % over 31 executed probes, champion a 69-line kernel. Its `repropose`
+share, flagged as elevated last sweep at the 82nd percentile, ended at 19.5 % — inside the corpus's
+p90 of 17.4 % only just, and it produced the second node, so the reproposing was not idle.
+
+Batch 2 as described, no contrast read beyond fidelity: treated `capA3` 210.9271 and `capB3`
+104.0622; control `freeA3` 220.4893 and `freeB4` 258.2564. Fidelity **treat 12.0, control 21.0,
+contrast +9** over four finished probes.
+
+Batch 3 is on all four lanes — `capA4`/`capB4` with `-s developer_probe_max_calls=12`,
+`freeA4`/`freeB5` with the shipped defaults, `LOOPLAB_LLM_STREAM=1`, every INSTRUMENT.txt verified
+and every process pinned to its own lane. Nine batches remain.
+
+## §222 — the last open item on the standing list, driven end to end
+
+The sweep's point 8 has carried one item marked OPEN and "названо агентом честно" since 2026-08-30:
+`campaign.sh` does `rm -rf` of the task root at the head of every attempt, after which `cp -ru`
+overwrites the first attempt's evidence with the second's shorter log, *"закрывается только
+версионированием архива по попыткам"*. It is closed, and the remedy it asks for is already there
+under another name.
+
+Driven against the real `snapshot.sh` on a toy bench root, reproducing `campaign.sh`'s own line —
+delete the task root, write a fresh log at the same path, snapshot:
+
+| attempt | rows | outcome |
+|---|---|---|
+| 1 | 400 | archived, then kept as `events.jsonl.superseded-1` |
+| 2 | 50 — **shorter** | kept as `.superseded-2` |
+| 3 | 50 — **equal length, different content** | kept as `.superseded-3` |
+| 4 | 900 — **longer than anything archived** | live at `events.jsonl` |
+
+Every attempt survives. `.superseded-N` **is** versioning by attempt; the mechanism cannot see
+attempts, so it names what it can see, and the numbering is one per replacement. The equal-length
+and longer cases matter most, because as the supersede loop's own comment says, *nothing makes
+attempt 2 SHORTER than attempt 1* — which is why it tests whether the archive is a PREFIX of the
+source rather than comparing sizes.
+
+**And the summary line was lying about it.** For all three replacements it printed *"a shorter
+source replaced a longer archive"* — including the 900-row one. The per-file line beside it printed
+the true sizes (`kept … (400 bytes) -- the source is now 900`), so the summary and the detail told an
+operator two different stories, and only the wrong one is a sentence. It now states the actual rule:
+the source is not a continuation of what was archived, these being append-only logs where only
+growth is benign, and the new log may be shorter, equal **or** longer.
+
+`test_the_supersede_summary_says_the_real_rule.py` drives the whole sequence through the real script.
+Two mutations red: restoring the old sentence, and replacing the prefix test with a size test — the
+latter loses attempts 2 and 3 outright, which is the 2026-09-01 measurement the loop was written
+from, reproduced.
+
+Three fixture corrections were needed before it ran, each the same shape: `_bench_root` writes its
+sentinel INTO the directory it is given, so that directory has to exist; and the DESTINATION's store
+root needs a sentinel of its own, because `snapshot.sh` refuses a non-empty unmarked store — an
+unmounted volume looks exactly like one.
+
+## §223 — the cap has a channel, and it is counted now
+
+The probe cap is meant to work by pushing the developer towards the graded measurement: the refusal
+text says in so many words that `run_dev_command("eval_train")` is what measuring the solver is for.
+A cap that reduced probes and changed nothing else would be an intervention with no channel, and
+finding that out at batch twelve is how $48 becomes nothing — §198's argument for measuring fidelity
+continuously, applied to the mechanism instead of the dose.
+
+Over the eight finished probes of batches 1 and 2:
+
+| probe | arm | probes | refused | `eval_train` |
+|---|---|---|---|---|
+| capA2 | treat | 12 | 7 | 30 |
+| capB2 | treat | 12 | 7 | 36 |
+| capA3 | treat | 12 | 4 | 35 |
+| capB3 | treat | 12 | 6 | 31 |
+| freeA2 | control | 31 | 0 | 23 |
+| freeB2 | control | 21 | 0 | 30 |
+| freeA3 | control | 11 | 0 | 25 |
+| freeB4 | control | 31 | 0 | 24 |
+
+Medians: probes **12.0 vs 26.0**, `eval_train` **33.0 vs 24.5**. The capped runs turn about fourteen
+ungraded probes into about eight and a half graded evaluations. The channel is live, and it is now a
+column in `arm_fidelity` rather than a one-off query — still reading no scores, because a count of
+`run_dev_command` calls is not an outcome.
+
+Node counts are 3.0 against 3.5 on four probes a side, which at that n says nothing either way and
+is not offered as if it did.
+
+Two details the counter needed. `eval_train` arrives as an **argument** to `run_dev_command`, not as
+a tool name, so a counter keyed on the tool name sees none of them and one keyed on the raw line
+counts a `plan` generation that merely says *"next I will run eval_train twice"*; the claim is the
+parsed span's attributes. And the channel is measured over FINISHED probes only, for the same reason
+the dose is — a running probe's evaluations are a lower bound. That last one survived the first four
+mutations because every fixture was finished; it is closed with a running treated probe carrying 90
+evaluations that must not enter the median.
+
+## §224 — §189 replicates on 78 runs, and it argues against the channel being the mechanism
+
+§189 measured eleven process variables against the score and found only `run_probe` separating the
+top and bottom deciles. The corpus has grown since; re-run on the 78 `edge_expansion` runs that now
+carry a TEST score, deciles of seven:
+
+| variable | bottom decile (25.4–104.1) | top decile (265.0–276.7) | Mann–Whitney |
+|---|---|---|---|
+| `run_probe` | 31.0 | **24.0** | **p = 0.048** |
+| `eval_train` | 27.0 | 28.0 | p = 1.00 |
+| nodes | 3.0 | 3.0 | p = 0.25 |
+
+It replicates: fewer ungraded probes still go with better runs, and nothing else does.
+
+**And it cuts against yesterday's framing.** §223 called `eval_train` "the channel" because the
+refusal text points at it and because the capped arm does more of it — 33.0 against 24.5. That is a
+DOSE: it says the push landed. Whether anything flows through it is a different claim, and the
+corpus says the variable it moves has **no association with the score at all** (p = 1.00, medians 27
+and 28). Either the benefit, if there is one, does not travel by that route, or the observational
+comparison is confounded in the obvious direction — a run that is struggling evaluates more, which
+would mask a real effect.
+
+The arm tests the INTERVENTION and can answer whether capping helps. It cannot answer why, and no
+mechanism claim should be built out of "eval_train went up". `arm_fidelity`'s docstring now carries
+that paragraph beside the number it would otherwise be read into, which is the only place it is
+sure to be read.
+
+Worth keeping in view: this same corpus association is where §190's arm came from, and it is
+observational. `run_probe` at p = 0.048 on 14 runs against 78 is a decile split, not a randomised
+comparison — which is precisely why the arm exists.
+
+## §225 — the first node is bimodal, and a weak one is mostly recoverable
+
+Three of batch 3's four probes opened with a node 0 near 20–28 while the fourth opened at 224, which
+is the shape the corpus has all along. Over the 78 `edge_expansion` runs with a first node and a TEST
+score, node 0 is **bimodal, not spread**: 44 runs below 60, **7** between 60 and 150, 27 at or above
+150. There is almost nothing in the middle.
+
+What that opening is worth:
+
+| | n | final TEST median | p10 | p90 | nodes |
+|---|---|---|---|---|---|
+| node 0 **weak** (< 60) | 44 | 195.73 | 102.17 | 256.53 | 3 |
+| node 0 **strong** (≥ 150) | 27 | **224.37** | 158.63 | 268.25 | 3 |
+
+Difference in medians **+28.63**, one-sided permutation p = **0.0238** over 20 000 shuffles. So a
+strong opening is worth about 29 points — the same order as §186's +23.5 for a kernel on node 0,
+measured a different way and on a bigger corpus.
+
+**And the loop recovers most of it.** Of the 44 weak starts, **35 (80 %) still finish at 150 or
+above**; of the 27 strong starts, exactly **one** ends below 150. So the two facts to carry are
+asymmetric: a weak first node is a soft signal that costs about 29 points in expectation and is
+recovered four times in five, while a strong first node is very nearly a guarantee.
+
+The operational reading matters because the tempting rule is the wrong one. A restart-on-weak-node-0
+policy would abandon four runs in five that were going to get there anyway, at the price of a whole
+$1 probe each; the number that would justify it — weak starts that end badly — is 9 of 44. Nothing
+to ship here. What it does support is the reverse: `capA4` and `freeB5` are sitting at 21.1 and 28.1
+this sweep with $0.60 and $0.71 spent, and by this measurement that is an ordinary place to be, not
+a probe worth intervening in.
+
+## §226 — what `eval_seconds` actually measures, per task, and a correction to §215
+
+Two of batch 3's six nodes evaluated in 47.6 s and 47.0 s against the usual 39–42, so I checked
+whether that is a slow box or a slow solver. It is neither, and the answer corrects §215.
+
+Over the 232 evaluated `edge_expansion` nodes carrying both a metric and an `eval_seconds`:
+
+| node | n | median | p10 | p90 |
+|---|---|---|---|---|
+| weak (< 60) | 105 | 40.0 | 39.4 | **47.9** |
+| middle | 22 | 41.2 | 40.8 | 42.4 |
+| strong (≥ 150) | 105 | 41.3 | 40.8 | 42.3 |
+
+So a 47 s evaluation is **inside the weak-node p90**, which is where both of batch 3's belong
+(28.09 and 28.13). Not an anomaly. And the medians barely move — 40.0 against 41.3, with Spearman
++0.375 (p = 1.2e-08): the correlation is real, weak, and **positive**, the opposite of the intuition
+that a slow solver is slow to evaluate. What the weak nodes have is a long right tail, not a higher
+centre.
+
+**The correction.** §215 gave two reasons `eval_seconds` cannot see the ruler drift and called the
+second one the settling one: it "times a different solver every node". On `edge_expansion` that
+effect is about **1.3 s of 41, three per cent** — far too small to be what settles anything, and the
+real reason there is the first one, dilution. But the claim is not wrong, it is task-dependent, and
+`instance_share` predicts which way:
+
+| task | instances' share of wall clock | slow-half vs fast-half `eval_seconds` |
+|---|---|---|
+| edge_expansion | 10.9 % | 40.0 vs 41.3 (**3 %**) |
+| discrete_log | 22.5 % | 46.7 vs 38.8 (**20 %**) |
+| pde_heat1d | 63.0 % | 73.3 vs 58.6 (**25 %**) |
+
+The same arithmetic that says `eval_seconds` is mostly overhead on `edge_expansion` says the
+candidate should dominate it on `pde_heat1d`, and it does. §215's illustration — `discrete_log`
+reading 30.6, 57.0 and 46.7 s on three consecutive days — was drawn from the one task where that
+argument holds, and read as though it held everywhere.
+
+§215's conclusion stands unchanged: `eval_seconds` cannot detect the ruler drift, and the
+self-check is the only instrument here comparing like with like. What changes is which reason does
+the work on which task, and that `instance_share` turns out to be predictive rather than merely
+arithmetic — it was written to explain a number and it forecasts one.
+
+## §227 — every zero in the corpus is a real one, and batch 3's three finishers
+
+`freeB5`'s node 1 scored **0.0 with `eval_seconds` 39.8**, which is point 2's exact question: a zero
+that arrives in a tenth of a second is a ruler refusal, a zero after a full evaluation is the solver.
+Thirty-nine seconds is a full evaluation, and the verdict names itself — `no_valid_speedups`, with a
+recognisable signature:
+
+> `Proposed edge_expansion is negative (-0.3227848101265823).`
+> `Solution verification failed: Edge expansion mismatch. Proposed=0.19224283305227655,
+> Reference=13.96627318718381 (rtol=1e-05, atol=1e-08)`
+
+Proposed values about a hundredth of the reference, and two instances negative outright: a
+normalisation gone wrong in the candidate, not anything in the bench.
+
+So I classified every zero the corpus has. **Ten zero-metric evaluated nodes in the whole corpus**
+(eight `edge_expansion`, two `pde_heat1d`), and **none of them is a harness refusal** — every one is
+a genuine solver failure: four value mismatches, one negative value, two evaluator execution errors,
+one compilation failure, two tolerance failures. The trap point 2 warns about is real — I walked into
+it myself twice while building `ruler_selfcheck` (§214), at `eval_seconds` 1.7 against a real 28 —
+but no probe has ever hit it. Zeros are rare (ten of ~270 evaluated nodes) and always earned.
+
+Batch 3's three finishers, described:
+
+| probe | arm | TEST | train nodes | probes | `eval_train` | reference | after last node |
+|---|---|---|---|---|---|---|---|
+| `capA4` | treat | **243.1132** | 21.14, 28.09, 239.94 | 12 (+5 refused) | 24 | 0.0 % | 7 % |
+| `capB4` | treat | **215.3809** | 216.60, 146.31, 212.97 | **11 (+0 refused)** | 33 | 0.0 % | 10 % |
+| `freeB5` | control | **28.0177** | 28.13, **0.0** | 56 | 28 | 5.4 % | 0 % |
+
+Two things to say plainly rather than let them pass. **`capB4` never reached its cap** — eleven
+probes, no refusals — so that probe carries the treatment label and none of the treatment, which is
+the dilution §198's docstring warns about arriving from the treated side. And `capA4` and `capB4`
+both used the reference **0.0 %** of the time, below the §69.1 band of 4.9–8.3 %, while `freeB5` sat
+inside it at 5.4 % and spent **62.8 % of its budget in `plan_step`** across 56 probe calls to reach
+a champion of 28.
+
+`freeB5` is also §225 in action from the unlucky side: a weak node 0 recovers four times in five,
+and this is the fifth. Nothing about it needs fixing.
+
+## §228 — the spend ceiling was being recorded as a provider crash, in 15 % of runs
+
+`freeA4` finished its money and then **paused** — `$1.0031` spent, a scored champion of 227.0792 in
+its `final.json`, and this in the log:
+
+> `auto-paused: a Developer session crashed (LLM unreachable or a hard error, unresolved within the
+> node) — resume once it's fixed`
+
+The LLM was not unreachable. Measured over every probe in the corpus whose last lifecycle event is a
+pause — sixteen of them:
+
+| | |
+|---|---|
+| paused runs | 16 |
+| at or past their $1.00 ceiling | **16 of 16**, median spend **$1.0041** |
+| seconds between the last LLM call and the pause | **0.1–0.2 in every case** |
+| runs that reached full budget and ended cleanly | 88, `run_finished / budget_exhausted` |
+
+Nothing goes unreachable 0.1 s after answering. That is the NEXT call being refused, and the refusal
+is `BudgetExceeded` — which is an `Exception`, and the developer session's blanket
+`except Exception as e: return f"{DEVELOPER_ERROR_PREFIX} {e})"` turns it into the developer-crash
+sentinel. The orchestrator answers that sentinel by pausing the run, correctly, for a cause that did
+not happen.
+
+**What it cost.** A normal ending recorded as a provider failure in **15 % of runs**; runs marked
+"OWED more work: `looplab resume`" when they were complete; and §213 is the bill — I read that
+message, resumed `freeB3`, and it spent **$0.1056 past its cap** before I stopped it by pid.
+
+Fixed in both places that build the sentinel: `repo_developer.py` re-raises `BudgetExceeded` ahead of
+its blanket handler, and `evaluate.py`'s repair path re-raises rather than wrapping. The engine
+already had one reviewed exit for the ceiling and 88 runs prove it works, so this is a re-raise and
+not a translation. The blanket handler is untouched — it exists so a developer hiccup cannot crash
+the engine, and narrowing it to nothing would trade one defect for a worse one.
+
+The test **parses rather than greps**, and mutation is why: the first version asserted
+`"raise" in <handler text>` and a mutation replacing the statement with `pass` stayed green, because
+the comment above it says *"Re-raised rather than translated"*. A word in prose is not a
+control-flow statement. It now walks the AST for a `Raise` inside the `BudgetExceeded` handler, and
+for the `isinstance(_repair_exc, BudgetExceeded)` guard's body in the repair path. Four mutations
+red, including one that moves the re-raise after the blanket catch, where it can never run.
+
+**And the corpus already recorded is not re-runnable**, so `arm_fidelity` decides the disposition on
+the spend rather than the word: a pause at ≥ 99 % of the budget is a finished run, a pause below it
+is genuinely owed work. `freeA4` now reads `finished`, which it is; `freeB3`, paused at $0.8645 in
+its events log, still reads paused, which it was. Four more mutations red — including "every pause
+counts as finished", which would erase the distinction, and a negative cost row pulling a finished
+run back below its ceiling.
+
+## §229 — the five refusals are not alike, and now the code says which
+
+§228 re-raised `BudgetExceeded` at two catch sites. The obvious next question is whether its
+siblings belong on the same side, and the answer is no — which is worth writing down, because both
+directions of over-reading it are damaging.
+
+`core/errors.py` has five `OperatorRefusal` subclasses. Four are **faults**: `LLMError` (an outage),
+`LLMCredentialError` (a bad key), `ConfigRefusal`, `EnvironmentRefusal`. For those the developer
+session's crash sentinel is exactly right — the orchestrator pauses, the circuit breaker engages,
+and *"resume once it's fixed"* is a true sentence. That breaker exists because a 403 blowout once
+spun **67 dead nodes**, so re-raising them would trade §228's defect for that one. `BudgetExceeded`
+is the one refusal that is the run **reaching its end** with a champion in hand.
+
+The distinction is now named — `errors.is_run_ending(exc)` — and both catch sites ask it instead of
+spelling out a type, so there is one copy of the rule rather than two drifting ones (§204). The test
+pins all five siblings plus an ordinary `ValueError`.
+
+Mutation earned its keep twice more. Making the predicate `isinstance(exc, OperatorRefusal)` — the
+over-generalisation — reddens; making it `False` reddens. But **turning the fault guard into
+`if False:` survived the first version**, because the assertions only checked that a `raise` and a
+`return` existed somewhere in the handler, and `if False:` leaves both in the AST. The test now
+asserts on the If's CONDITION — it must mention `is_run_ending`, not be a constant — which is the
+difference between "the branch is present" and "the branch can be taken".
+
+## §230 — batch 4 away, carrying the fix, with the prediction stated first
+
+All four lanes went idle, so batch 4 is running: `capA5`/`capB5` capped, `freeA5`/`freeB6` at the
+shipped defaults, `LOOPLAB_LLM_STREAM=1`, every INSTRUMENT.txt verified — and all four record
+`looplab: 4bc28700`, which is §228's commit. This is the first batch whose runs cannot mistake their
+own ending for a crash.
+
+**Stated before the data, so it can be wrong:** all four should end with `run_finished` and
+`reason=budget_exhausted`, and none should end paused. Sixteen of the previous 105 full-budget runs
+did end paused; if any of batch 4 does, either the fix does not reach the path these runs actually
+take or there is a second route to the sentinel, and I will look for the second route rather than
+call it noise.
+
+Batch 3 closed at fidelity **treat 11.5, control 41.5, contrast +30**, channel `eval_train` +6, with
+`freeA4` counted as finished on the spend rather than resumed — which is §228 applied to the very
+run that exposed it. Eight batches remain.
+
+## §231 — what a weak opening actually costs: 44 % of the budget, and it buys the next node
+
+§225 established that a weak node 0 is recovered four times in five and left the price open. Over
+the 82 full-budget `edge_expansion` runs, 46 of which open below 60:
+
+* the first node arrives at **28 % of budget** after a weak opening and **33 %** after a strong one
+  — a weak start does not delay the first node, it wastes it;
+* of the 46, **37 reach a node ≥ 150**, and that node arrives at a median of **72 % of budget**
+  (p10 56 %, p90 94 %);
+* it is the **second** node in 30 of those 37, the third in 6, the fourth in 1.
+
+So the price of opening weak is about **44 % of the run's money** — the gap between 28 % and 72 % —
+and what it buys is almost always simply the next node. Recovery is not a long search; it is one
+more attempt, paid for at full price.
+
+**And the nine that never recovered were not short of nodes.** Their node counts are two (4 runs) and
+three (5 runs) against the recoverers' three (24) and four (11), and every one of the nine spent
+88–100 % of its budget before its last node. Their best nodes are a median of **35.0** against the
+recoverers' 216.3 — `newCK1` at [20.8, 21.8, 24.8], `remEEctl1` at [35.0, 34.8], `freeB5` at
+[28.1, 0.0]. These are runs that kept producing the same weak thing, not runs that ran out of turns
+mid-improvement.
+
+That sharpens §201, which is the standing argument for recovering the $0.258/run of duplicate
+prompt: an extra 0.77 of a node is worth most to the 37 recoverers, who spend nearly three-quarters
+of their budget getting to the node that matters and would gain a real fourth attempt after it. It
+is worth least to these nine, and the shape of their node lists says why — more money buys another
+draw from the same distribution, not a different one.
+
+Nothing to ship. It does close the question §225 left open with a number rather than an intuition,
+and it says which of the two populations the money argument is actually about.
+
+## §232 — the reference-use band describes a fifth of the corpus, and predicts nothing
+
+The sweep's point 9 carries "База обращений к референсу — 4.9-8.3 % (§69.1), НЕ 3.0 %", and I have
+been reporting probes against it every sweep — `capB3` at 16.7 % "above the band", `capA4` and
+`capB4` at 0.0 % "below it", `freeB4` at 6.5 % "inside". Measured over the 82 `edge_expansion` runs
+with at least five executed probes and a TEST score:
+
+| | |
+|---|---|
+| median reference use | **8.9 %** |
+| p10 / p90 | 0.0 % / 15.8 % |
+| runs inside 4.9–8.3 % | **18 of 82** |
+| runs that never touch the reference | 13 |
+
+So the band names a fifth of the corpus, and the median run sits above it. Nor is it an artefact of
+one era — by start day the median runs 10.4, 7.0, 9.5, 9.8, 12.5 %, straddling or exceeding the band
+throughout. §69.1's figure was right about the data it had; it has been carried since as though it
+described the population, and I have been flagging perfectly ordinary probes as noteworthy on the
+strength of it. `capB3`'s 16.7 % is a p90 value, not an excursion.
+
+**And it does not predict the score.** Spearman(reference use, TEST) = **−0.099, p = 0.373**. Split
+three ways, the medians even lean the wrong way for the obvious story:
+
+| | n | TEST median |
+|---|---|---|
+| never used the reference | 13 | **223.22** |
+| used it, at or below 8.3 % | 26 | 217.44 |
+| used it above 8.3 % | 43 | 201.33 |
+
+The trend is not significant and I am not claiming a direction; what the numbers do establish is that
+consulting the reference more is not associated with scoring better, so the band cannot be read as a
+target either. Thirteen runs never opened it at all and are the highest-scoring group of the three.
+
+The honest use of the number from here: report the rate, compare it to the corpus median of 8.9 %
+with p10 0.0 and p90 15.8, and stop describing 4.9–8.3 % as a baseline that a probe is above or
+below. That is a reporting change in my own sweeps rather than a code change, so it is written here
+where the next sweep will read it.
+
+## §233 — where the standing marks sit, and what one run can settle
+
+§232 found one of the sweep's carried numbers describing a fifth of the corpus. The others are
+single runs used as comparison points, so the same question applies: where do they sit now?
+
+| task | corpus | mark | percentile |
+|---|---|---|---|
+| edge_expansion | n=82, median 213.15, p10 106.36, p90 262.04 | 224.4432 | **62nd** (31 of 82 at or above) |
+| pde_heat1d | n=10, median 119.25 | 124.63 / 121.85 / 99.00 | 60th / 60th / 30th |
+| discrete_log | n=11, median 8.10 | 14.5186 | **91st** (1 of 11 at or above) |
+| | | 2.8369 | **0th** (all 11 above it) |
+
+`accEE`'s 224.4432 is a good-but-ordinary run, not a ceiling — a third of the corpus beats it. The
+`pde_heat1d` marks are mid-corpus. And on `discrete_log`, the thinnest task, the two marks **bracket
+the entire corpus**: one is near the ceiling, the other below the floor. The brief's "разброс 5.1×"
+is the gap between an outlier-good and an outlier-bad run, not a typical range — which is worth
+knowing before it is used as a spread.
+
+**And what a single run can settle, on the task with the most data.** `edge_expansion` TEST has
+mean 196.4, **sd 61.3, cv 0.31**. Two runs drawn at random differ by a median of **50.8 points**
+(p90 148.5). So a one-run-against-one-mark comparison cannot see any of the effects this document
+argues about:
+
+| effect | source | runs needed PER ARM at α .05, power .8 | cost |
+|---|---|---|---|
+| +23.5 | §186, kernel on node 0 | ~107 | $214 |
+| +28.6 | §225, strong opening | ~73 | $146 |
+| +44.0 | §190's registered target | **~31** | $62 |
+
+This is not an argument against the numbers; it is the resolution they come with. It also puts
+§190's arm in context: twelve batches is 24 runs per arm against a ~31-run requirement for a
+44-point effect, which is the same ballpark and is why the design's own power estimate was 0.83
+rather than 0.99 — the stratified test recovers some of it by pairing within batch. What the table
+rules out is reading any single probe's TEST against a mark as evidence of anything, which is a
+temptation every sweep offers.
+
+## §234 — the batch pairing buys no variance, and its real job is me
+
+§190's design pairs within batch and tests by exact within-batch permutation. Pairing pays only if
+there is a between-batch component to remove, so I measured whether there is one. Grouping the 82
+`edge_expansion` runs by the day they started:
+
+| day | n | mean | sd |
+|---|---|---|---|
+| 08-31 | 4 | 175.09 | 45.17 |
+| 09-01 | 23 | 196.13 | 53.68 |
+| 09-02 | 14 | 224.23 | 36.43 |
+| 09-03 | 28 | 184.38 | 71.13 |
+| 09-04 | 13 | 199.24 | 66.17 |
+
+Between-day MS 4202 against within-day MS 3787 — **F = 1.11, intraclass correlation 0.007**. The
+overall sd is 61.3 and the within-day sd is 61.5: the grouping removes nothing at all. So the
+stratification is not buying the precision it is normally chosen for, and the arm is effectively 24
+unpaired runs a side. Re-running the power table on the corpus as it stands (86 champions, sd 63.7)
+gives **0.75 for a +44 effect over twelve batches** on 60 trials — the design said 0.83 on a smaller
+corpus, and the two are the same claim inside simulation noise.
+
+**But the design is right for a reason it was not chosen for.** What the batches genuinely protect
+against is not day-to-day drift; it is *me*. Between batch 2 and batch 4 I landed §211 (the stream
+degrade expires), §228 (the ceiling is an ending, not a crash) and §213 (the ceiling survives a
+resume) — engine changes reaching treatment and control alike, at batch boundaries. A within-batch
+comparison is immune to all three; an unpaired pooled comparison across batches is not. §214's ruler
+drift is the same shape from the other direction.
+
+So: keep the pairing, and stop crediting it with variance reduction it does not deliver. The honest
+sentence for the eventual write-up is that the arm has ~0.75 power against +44 points, not that
+stratification bought extra precision. And the number to carry into any future design on this task
+is **ICC ≈ 0** — batching this corpus is a safety measure, never a statistical one.
+
+## §235 — the prediction held, and the node-level record changed with it
+
+§230 registered a falsifiable claim before batch 4 ran: all four probes should end with
+`run_finished / budget_exhausted` and none should end paused, and if any paused I would look for a
+second route to the crash sentinel rather than call it noise. Three have finished:
+
+| probe | ending | TEST |
+|---|---|---|
+| `capA5` | `run_finished['budget_exhausted']` | 104.3631 |
+| `capB5` | `run_finished['budget_exhausted']` | 227.3754 |
+| `freeA5` | `run_finished['budget_exhausted']` | 27.1858 |
+
+No pauses. `freeB6` is still running at $0.9837 and will settle it either way.
+
+**And the fix reaches deeper than the run's ending.** `freeA5` carries a `node_failed` on node 3 —
+`build_interrupted`, *"node build was interrupted before it committed"*, `eval_seconds 0.0`. That is
+what it looks like when the money runs out mid-build. Across the whole corpus:
+
+| `node_failed` reason | count | how those runs ended |
+|---|---|---|
+| `developer_crash` | 17 | **paused (16), resumed (1)** |
+| `build_interrupted` | **1** | **finished** |
+
+Every `developer_crash` in the corpus belongs to a run that paused — the sixteen ceiling hits §228
+identified, plus `freeB3`'s resume. The single `build_interrupted` belongs to the first post-fix run
+to hit its ceiling with a build in flight. So the same event that used to be filed as a provider
+failure is now filed as what it is, at the node level as well as the run level. That correspondence
+is exact and it is the strongest evidence the fix landed.
+
+Point 9 for the three, and one thing worth naming: the two capped probes both used the reference at
+**16.7 %** and `freeA5` at 8.8 % — which under §232's corrected reading is p90-ish and mid-corpus
+respectively, not "above the band" and "inside" it. `capA5` spent 40.0 % of its budget in `plan_step`
+and 1 % after its last node with 38 `eval_train`; `capB5` 33.9 % in `plan_step`, 0 % after, 25
+`eval_train`; `freeA5` 27.1 % in `propose`, **15 % after its last node**, 19 `eval_train` over 34
+executed probes. `freeA5` is also §231's unlucky fifth again — [27.25, 21.90, 27.13], three weak
+nodes and no recovery.
+
+## §236 — batch 4 closed the prediction 4 of 4, and four batches of fidelity in one table
+
+`freeB6` finished at TEST 254.1441 with `run_finished / budget_exhausted`, so **all four probes of
+batch 4 ended cleanly and none paused** — §230's registered prediction, confirmed at 4 of 4 rather
+than the 3 of 4 the last sweep could report. The claim that would have falsified it (a pause, sending
+me looking for a second route to the crash sentinel) did not occur.
+
+With four batches in, the intervention's delivery can be read as a whole. This is fidelity, not
+outcome — probe counts and `eval_train` counts, no scores:
+
+| batch | treated probes (+refused) | control probes | contrast | `eval_train` t/c |
+|---|---|---|---|---|
+| 1 | 12(+7), 12(+7) | 31, 21 | +14 | 33.0 / 26.5 |
+| 2 | 12(+4), 12(+6) | 11, 31 | +9 | 33.0 / 24.5 |
+| 3 | 12(+5), **11(+0)** | 27, 56 | +30 | 31.0 / 25.0 |
+| 4 | 12(+8), 12(+2) | 34, 32 | +21 | 36.5 / 20.0 |
+
+**The cap bit in 7 of 8 treated probes**, against §196's estimate that it bites 91 % of
+`edge_expansion` runs — one miss in eight is what that rate predicts. The exception is `capB4`,
+which stopped at eleven probes on its own and so carries the label without the treatment (§227).
+
+Two things the table says that the batch-by-batch reports did not. The **contrast is never negative
+and never small in the same direction twice** — +14, +9, +30, +21 — so no batch is diluted to the
+point of contributing nothing, and the weakest (+9, batch 2) is the one where a CONTROL stopped at
+eleven probes rather than a treated one failing to be capped. And the **channel is present in every
+batch** (33/26.5, 33/24.5, 31/25, 36.5/20), which is what §223 claimed on eight probes and what §224
+was careful to call a dose rather than a mechanism.
+
+Batch 5 is away on all four lanes at `5230093d`, verified. Seven batches remain, and by §234's
+power table twelve of them buy 0.77 against a +44 effect.
+
+## §237 — a hypothesis about the slow snapshots, tested and refuted
+
+The 23:05 snapshot took **337 s** (249 prefix-check + 53 `cp -ru` + 35 repair) against a recent norm
+near 130. It landed two minutes after batch 5 was launched, and the obvious guess is that starting
+four probes at once — `make_task`, workspace copies, four engines booting — is what slows it. The
+guess is testable against the twenty-five breakdowns the timer log has recorded since §208 shipped
+the instrument, so I tested it rather than writing it down.
+
+| snapshots | n | median | p90 | max |
+|---|---|---|---|---|
+| a probe started during or in the 10 min before | 15 | **127 s** | 187 s | 337 s |
+| quiet | 10 | **144 s** | 976 s | **976 s** |
+
+**Refuted.** The medians are the same within noise and the single worst snapshot in the series —
+976 s at 13:54 — is in the QUIET group. Probe launches do not explain it; if anything the quiet
+snapshots are marginally slower, which is what n=10 against n=15 looks like when there is no effect.
+
+What the series does say is that the distribution is tight with rare outliers: twenty-three of
+twenty-five between **113 and 187 s**, and two at 337 and 976. Both outliers sit over periods when
+something CPU-heavy was running that was not a probe — 13:54 is §216's window of AlgoTune
+evaluations saturating lanes 0-32 for the ruler self-check, and 23:05 is a launch plus my own
+analysis queries. That is the same conclusion §216 reached and acted on, and the action bounded the
+damage rather than removing it: the worst case fell from 976 s to 337 s once the snapshot was pinned
+to the service lanes, and eight cpus running a `cmp` per file over 5,400 files is simply not free.
+
+None of it threatens the cadence any more, which is the part that mattered: §206 made the interval a
+period, so even a 976 s snapshot no longer stretches the next tick. p90 of 187 s against an 1800 s
+interval is a tenth of the budget.
+
+I am leaving it here rather than chasing the last outlier. Two events in twenty-five, both explained
+by "the box was busy", with the consequence already neutralised, is the point at which further
+digging costs more than the answer is worth — and saying so is a decision, not an omission.
+
+## §238 — a kernel before node 0 is necessary for a strong opening, and not sufficient
+
+§225 found the first node bimodal — weak below 60, strong at or above 150, almost nothing between —
+and §186 tied a kernel on node 0 to a +23.5 move in the final champion. The sharper question is
+whether the kernel explains the bimodality itself, and it is answerable from the spans: did any
+tool call before the first evaluation write `numba` / `njit` / `cython` / `cimport` code?
+
+Over 90 `edge_expansion` runs with a first node:
+
+| before node 0 | n | median node 0 | opened strong (≥ 150) |
+|---|---|---|---|
+| a kernel was written | 77 | 52.62 | **30 (39 %)** |
+| no kernel | 13 | 22.82 | **0 (0 %)** |
+
+Fisher exact two-sided **p = 0.0038**. So a kernel is **necessary** — not one of the thirteen
+kernel-free runs opened strong, and their median first node is 22.82, sitting in the middle of the
+weak mode — and it is **not sufficient**: 47 of the 77 that wrote one still opened weak. The
+bimodality is not "kernel or not"; the kernel is the gate, and something else decides what happens
+after it.
+
+That is worth having straight before the card items (а) and (б) are eventually shipped, because it
+constrains what they could be expected to do. A card that reliably moved every run to writing a
+kernel first would move at most the thirteen kernel-free runs — 14 % of the corpus — from a median
+of 22.82 into a population whose median is 52.62 and whose upside is 39 % strong. That is a real
+effect and a bounded one, and it is smaller than the +44 the arm is sized for.
+
+The 47 kernel-yet-weak runs are the larger and more interesting group, and nothing measured so far
+separates them from the 30 kernel-yet-strong ones. That is the next question this corpus can answer,
+and I am naming it rather than guessing at it: what distinguishes a kernel that opens at 250 from
+a kernel that opens at 25.
+
+## §239 — what separates a kernel that opens at 250 from one that opens at 25
+
+§238 ended by naming this question rather than guessing at it. Among the 77 `edge_expansion` runs
+that wrote kernel code before their first evaluation — 30 opened strong (≥ 150), 40 weak (< 60),
+7 in between — everything observable in the spans before node 0:
+
+| before node 0 | strong median | weak median | Mann–Whitney |
+|---|---|---|---|
+| file writes / patches | **6.0** | **3.0** | **p < 0.001** |
+| `eval_train` calls | **13.5** | **9.0** | **p = 0.001** |
+| executed `run_probe` calls | 11.0 | 8.0 | p = 0.105 |
+| probes whose output carried an error | 4.0 | 3.0 | p = 0.215 |
+| largest single write, characters | 1812.5 | 1774.0 | p = 0.245 |
+
+The answer is **not a bigger first attempt** — the largest write is the same size to within 2 %, and
+the runs do not differ in how many probes they run or how often those probes error. It is **more
+revisions of it, each graded**: twice the writes and half again the graded evaluations, before the
+first node is ever built.
+
+**This is observational and I am not calling it causal.** The obvious confound runs the other way
+round: a run that had a promising kernel early has something worth revising, and a run whose kernel
+was hopeless has less reason to keep touching it. Nothing here distinguishes "iterating more makes
+the opening strong" from "a strong opening invites more iteration".
+
+What it does do is sharpen the relationship between §223 and §224. The cap moves `eval_train` up
+(33.0 against 24.5 across batches 1–2), and `eval_train` is one of the two things that separates a
+strong opening from a weak one — but §224 measured that `eval_train` has **no** association with the
+FINAL score across the corpus (p = 1.00). Both can hold at once, and §231 says how: a strong opening
+is worth about 29 points, and four weak openings in five recover anyway, so an effect on the opening
+is largely washed out by the end of the run. That is a coherent account, and it predicts that the
+arm's effect — if there is one — should be smaller than the opening-level difference suggests.
+
+Written down now, before the arm reads out, so it cannot be assembled afterwards to fit whatever
+number arrives.
+
+## §240 — the snapshot does not get slower as the archive grows
+
+Three elevated snapshots in a row (345, 179, 285 s) raise a different question from §237's, which
+asked *what makes a particular snapshot slow*. This one asks whether the whole distribution is
+creeping upward as the corpus grows — because if it is, the cadence has a deadline.
+
+Twenty-eight snapshots with both a record count and a breakdown, spanning **105 to 118 run records**:
+
+| run records | n | median total |
+|---|---|---|
+| 105–106 | 10 | 131 s |
+| 110 | 8 | 126 s |
+| 114 | 6 | 136 s |
+| 118 | 4 | 225 s |
+
+Regression over all twenty-eight: **slope −1.76 s per run record, Pearson r = −0.05**. No trend.
+The 118-record group looks high on four points, but the largest snapshot in the whole series — 976 s
+— sits at 106 records, in the group with the *lowest* median. Archive size is not what moves it.
+
+So both hypotheses about the slow snapshots are now measured and refuted: probe launches (§237,
+median 127 s near a launch against 144 s quiet) and archive growth (here, r = −0.05). What remains
+is §216's account — the box being busy with something CPU-heavy — which is the one that was acted on,
+and the action bounded the worst case rather than removing it.
+
+The practical answer is that the cadence has no deadline from this direction. A typical snapshot is
+~130 s against an 1800 s interval whatever the corpus size, and §206's period fix means even the
+outliers do not stretch the next tick. I am not measuring this again unless a snapshot crosses
+600 s, which is the point where the outliers would start eating a third of the interval.
+
+## §241 — what each extra node is worth, re-measured on 90 runs
+
+§185 priced the marginal node on a smaller corpus and its number — about 8 expected points — has
+been carried into every argument about recovering money since, including §201's estimate that the
+duplicate-prompt waste is worth ~6 points a run. Ninety full-budget `edge_expansion` runs later:
+
+| the k-th extra node | runs that reach it | beats the best so far | median gain when it does | **expected gain** |
+|---|---|---|---|---|
+| 2nd node | 89 | **73 %** | 132.29 | **86.85** |
+| 3rd node | 69 | 19 % | 76.43 | **18.16** |
+| 4th node | 10 | 30 % | 47.66 | **12.03** |
+
+Nodes per full-budget run: one run with 1, twenty with 2, fifty-nine with 3, ten with 4.
+
+**The second node is the run.** It beats the opening in nearly three runs in four and is worth 86.85
+points in expectation — which is §225 and §231 seen from the value side, since 30 of the 37 weak-start
+recoveries happen exactly there. Everything after it is worth an order of magnitude less: 18.16 for
+the third, 12.03 for the fourth, the latter on only ten runs.
+
+**Repricing §201.** The duplicate-prompt recovery buys $0.258 a run ≈ 0.77 of a node, and the node it
+buys is the MARGINAL one — a fourth for the fifty-nine runs that reach three. At 12.03 expected
+points that is **~9 points a run**, against the ~6 I estimated from §185's flat ~8. The direction and
+order are unchanged; what the finer numbers add is that the estimate must use the marginal node's
+value, not the average node's, and that the average is dominated by a second node every run already
+gets.
+
+That also caps the whole money-recovery argument honestly: even recovering every duplicate turn buys
+about 9 points on a task whose runs have sd 61.3 (§233). It is real, it is cheap, and it is not what
+decides a comparison.
+
+## §242 — a fidelity count that exceeded its own cap, and the third way a probe span runs nothing
+
+Batch 5 closed with fidelity **treat 12.5, control 29.5** — and a median of 12.5 under a cap of 12
+is arithmetic that cannot be right. `capA6` read as **13 executed probes**. Its own refusals say
+what the engine counted: *"already made 12 probes"*, four times over. So the off-by-one was the
+counter's, not the cap's.
+
+Thirteen distinct inputs, no retries — but one span with a duration of **0.002 s** against 0.06–2.57
+for the rest, and this for an output:
+
+> `(unknown tool: run_probe; available here: arxiv_search, concept_card, concept_nodes,
+> cross_run_atlas, cross_run_claims (+36 more))`
+
+`run_probe` is not offered in every phase. The model called it in `propose`, where it is not
+available, and got that back in two milliseconds having run nothing. Both `arm_fidelity` and
+`probe_summary` counted it as a probe that ran — the same family as §202, which took cap refusals out
+of the reference-use denominator, and the same shape as §227's zeros: **a harness declining is not
+the thing it declined to do.**
+
+Corpus-wide there are **2,870 executed spans, 47 cap refusals and 4 unknown-tool spans** (`capA6`,
+`expEEa`, `freeB4`, `remEE2`), so the correction moves almost nothing — batch 5's contrast goes from
++17 to +17.5. It is worth doing anyway because a fidelity number that can exceed the cap it is
+measuring costs more in doubt than four spans cost in accuracy.
+
+Both counters now discriminate three states rather than two: executed, refused by the cap,
+unavailable in this phase. Four mutations red, and one of them matters more than the fix: **treating
+any error as a non-execution** would erase most of what probes are for — code that raises inside a
+probe used the environment and must count. The discriminator is the harness declining, never the
+probe's own outcome. A fifth mutation initially survived, because `probe_summary`'s copy of the rule
+had no test of its own; it does now.
+
+Batch 5's four probes all ended `run_finished / budget_exhausted` — §228 holding for a second
+consecutive batch — and batch 6 is away on all four lanes.
+
+## §243 — the one probe whose treatment no count could verify
+
+`arm_fidelity` verifies the intervention by its BEHAVIOUR — probes executed, refusals collected —
+which is the stronger evidence and the reason §198 exists. It has one blind spot, and the arm has
+already produced it. `capB4` stopped at eleven probes with **zero refusals** (§227): behaviourally
+indistinguishable from a control. No count can say whether it was capped at all.
+
+For those probes the only evidence is the run's own `config.snapshot.json`, which is independent of
+the launcher's claim — INSTRUMENT.txt records what the operator meant, the config records what the
+engine got. Checked across all 24 probes of batches 1–6:
+
+| arm | probes | `developer_probe_max_calls` recorded |
+|---|---|---|
+| treated | 12 | **12** in every one, `capB4` included |
+| control | 12 | **0** in every one |
+
+No mismatches. `capB4` was capped and simply never reached its cap, which is the 9 % §196 predicts.
+
+The check is now part of `arm_fidelity` rather than a one-off query, because the failure it guards
+against is silent by construction: a treated probe whose setting never reached the engine looks
+exactly like a control that stopped early, and no amount of staring at the counts would show it.
+§195 is four minutes of that mistake caught early; a whole batch of it is $4 and a diluted result.
+
+Four mutations red, and two of them are the interesting pair: **a missing config must not count as a
+mismatch** (a probe seconds old has not written one, and a false alarm every sweep is how a real
+alarm gets ignored), and **the control arm must be checked too** — a control that silently carried
+the cap would be the same defect wearing the other label, and only checking the treated side would
+miss it.
+
+Still no scores: this reads two settings out of a config file.
+
+## §244 — the middle band, and why the opening is a floor rather than a forecast
+
+`capB7` opened at **137.757** this sweep, which lands in the band §225 measured as nearly empty. The
+corpus now has seven such runs, so they can be looked at rather than skipped:
+
+| node 0 | n | final median | p10 | p90 | reach 150+ |
+|---|---|---|---|---|---|
+| weak (< 60) | 53 | 195.29 | 28.02 | 254.14 | 40/53 = 75 % |
+| **middle (60–150)** | **7** | **179.65** | **96.92** | 261.36 | 5/7 |
+| strong (≥ 150) | 30 | 223.80 | 174.64 | 268.25 | 29/30 = 97 % |
+
+Run by run the middle band goes 96.92, 151.08, 179.65, 218.85, 218.87, 261.36 and 137.76 — which is
+to say it goes everywhere. Its final median is *lower* than the weak band's despite starting higher,
+and with seven runs that is noise, not a finding. **The middle band cannot be distinguished from
+either neighbour and I am not going to pretend otherwise.**
+
+Its one clear property is a higher floor — p10 96.92 against the weak band's 28.02 — and that is
+mechanical rather than predictive. The champion rule submits the best EVALUATED node, so a run
+cannot finish below its own opening. Verified: of 90 runs, **four** finish below 98 % of their first
+node (`remEEctl4` 96.3 %, `oldCK9` 97.3 %, `newCK2` 97.6 %, `oldCK12` 97.8 %) and every one of those
+four is the train→test gap of §220, whose sd is 1.4 % — not a run that got worse.
+
+So the honest reading of all three bands together: **the opening sets a floor, not a forecast.** A
+strong opening is close to a guarantee because its floor is already above 150 (29 of 30). A weak one
+is a lottery with a floor near zero, which §231 priced at 44 % of the budget to escape. And the
+middle is a lottery with a floor in the middle, on seven runs.
+
+That also puts §225's "+28.63 points for a strong opening" in its place: a large part of that gap is
+the floor the champion rule enforces, not a difference in what the loop goes on to build.
+
+## §245 — a quarter of the money goes to eleven per cent of the calls, and half of it on discrete_log
+
+`capB7` is the slowest probe of batch 6, and the ledger says why: two consecutive generations of
+**21,329 completion tokens in 230 s** and **49,051 in 529 s** — twelve minutes and seventy thousand
+tokens in two calls, against a corpus median of **453 completion tokens**.
+
+Over all 36,182 priced calls in the ledger:
+
+| completion tokens | calls | share | cost | wall clock |
+|---|---|---|---|---|
+| median 453, p90 8,605, p99 30,119, max **241,943** | | | | |
+| ≥ 8,000 | 3,982 | **11.0 %** | **$29.00** | 178 h |
+| ≥ 16,000 | 1,442 | 4.0 % | $14.54 | 103 h |
+| ≥ 32,000 | 304 | 0.8 % | $4.50 | 36 h |
+
+**$29.00 of $117.95 — a quarter of everything spent — is in eleven per cent of the calls**, and the
+concentration is by task:
+
+| task | calls ≥ 8k | that task's spend in them |
+|---|---|---|
+| edge_expansion | 9.7 % | 22.1 % |
+| pde_heat1d | 13.3 % | 22.7 % |
+| **discrete_log** | **23.6 %** | **47.8 %** |
+
+Nearly half of `discrete_log`'s money goes to calls emitting eight thousand tokens or more — on the
+task the sweep's own header calls the thinnest carrying number in the corpus, where the whole
+corpus is eleven runs.
+
+**And there is a wall at 1820 s.** The two largest calls in the ledger — `remDL4` at 241,943 tokens
+and `expEEa` at 222,905 — both have a latency of **exactly 1820 s**. Two independent runaways
+stopping at the same second is a bound, not a coincidence. It is not `llm_timeout`, which is 180 s
+and is an inter-token idle limit rather than a total: a stream that keeps producing tokens is never
+idle, so nothing stops it until whatever this is.
+
+**What I am not doing about it yet, and why.** The obvious remedy is a completion cap, and
+`run_probe.sh`'s own notes record that LoopLab sets no `max_tokens` anywhere. But a cap truncates,
+and a truncated tool call is malformed JSON rather than a shorter answer — it would convert a slow
+call into a failed one, which is a worse trade at an unknown rate. It also lands mid-arm on both
+sides. The measurement is the deliverable here; the remedy needs a rate for "how often a long
+generation is doing real work", and I do not have it.
+
+## §246 — the missing rate: long generations think, they do not ramble
+
+§245 measured that 11 % of calls carry a quarter of the money and deferred the remedy for want of
+one number — how often a long generation is doing real work. It is in the spans. Over 36,058
+generation spans carrying a usage record:
+
+| | completion ≥ 8,000 | completion < 8,000 |
+|---|---|---|
+| n | 3,960 | 32,098 |
+| made at least one tool call | **93.3 %** | **93.3 %** |
+| median `thinking` characters | **43,662** | **364** |
+| median visible output characters | 235 | 51 |
+| median tool calls | 2 | 1 |
+| thinking chars per completion token | 3.34 | 1.69 |
+
+**The rates are identical to the decimal.** A long generation acts exactly as often as a short one —
+it is not terminal rambling, and 93.3 % of both kinds end in a tool call. What differs is where the
+tokens go: **43,662 characters of thinking against 364**, a factor of 120, to produce two tool calls
+instead of one and 235 characters of visible output instead of 51.
+
+So the answer to §245's question is "always, and barely more of it". These calls are not idle and
+they are not broken; they are reasoning at enormous length and then acting normally.
+
+**That changes the remedy rather than justifying the one I declined.** `max_tokens` would cut the
+stream mid-thought, and since 93.3 % of these calls do finish with a valid tool call, truncation
+converts a working call into a malformed one — the trade I refused in §245, now with a rate attached
+that makes it clearly wrong. The targeted knob is reasoning effort, not a completion cap, and
+`core/llm.py` already carries a `reasoning_effort` toggle it drops per-client when an endpoint
+rejects it (`_is_reasoning_reject`).
+
+I am not turning that knob mid-arm: it would reach both arms at a batch boundary, and unlike §211
+and §228 — which fixed things that were plainly wrong — this one trades a quarter of the spend
+against an unknown amount of solution quality. It belongs in its own registered comparison after the
+probe-cap arm reads out, and the corpus already says what that arm would need: `discrete_log`, where
+47.8 % of the money is in these calls, is the task where it would show first.
+
+## §247 — the long generations live in two phases, and neither is the biggest spender
+
+§246 established what the long calls are (reasoning, not rambling) and left the future experiment
+pointed at a whole model. It can be pointed much more precisely. Over every `edge_expansion`
+generation with a usage record — $95.89 in total, of which **$20.97 (21.9 %) is in calls of 8,000
+completion tokens or more**:
+
+| phase | calls | ≥8k | ≥8k rate | $ total | $ in ≥8k | share of that phase | median thinking |
+|---|---|---|---|---|---|---|---|
+| **propose** | 6,681 | 1,400 | 21.0 % | 25.31 | **10.64** | **42.0 %** | 366 |
+| **repropose** | 2,065 | 512 | 24.8 % | 8.38 | **4.17** | **49.8 %** | 464 |
+| deep_research | 5,542 | 631 | 11.4 % | 15.85 | 3.57 | 22.5 % | 5,102 |
+| plan_step | 10,258 | 157 | **1.5 %** | **33.31** | 1.08 | **3.2 %** | 246 |
+| plan | 2,428 | 127 | 5.2 % | 7.83 | 0.81 | 10.4 % | 312 |
+| foresight_rank | 814 | 105 | 12.9 % | 1.83 | 0.47 | 26.0 % | **10,901** |
+
+**`propose` and `repropose` carry 71 % of it** — $14.81 of $20.97 — and nearly half of `repropose`'s
+own money is in these calls. Meanwhile `plan_step`, the single largest phase at $33.31, has the
+LOWEST big-call rate in the table at 1.5 % and only 3.2 % of its money there. The biggest spender is
+not the problem; the two proposal phases are.
+
+Two distinct shapes are visible and they should not be confused. `propose` and `repropose` have low
+median thinking (366 and 464 characters) with a fat tail — most calls are ordinary and a fifth are
+enormous. `foresight_rank` is the opposite: **10,901 characters of thinking on the median call** and
+only $1.83 of spend in the whole corpus. One is a tail worth money, the other is a habit worth
+almost nothing.
+
+So §246's eventual reasoning-effort comparison has a target: the two proposal phases, where the
+money is, rather than the model as a whole — and `plan_step` should be left alone, because its
+$33.31 is spent on many ordinary calls and a reasoning knob would reach all of them to recover a
+dollar. That is also where §239's discriminator lives: strong openings differ from weak ones in
+writes and graded evaluations, both of which are proposal-phase work.
+
+## §248 — six batches in: the dose and the channel have never once gone the wrong way
+
+Half the registered arm is done. §236 tabulated four batches of delivery; here are six, and this is
+still fidelity — probe counts and `run_dev_command("eval_train")` counts, no scores:
+
+| batch | treated (+refused) | control | dose | `eval_train` t/c | channel |
+|---|---|---|---|---|---|
+| 1 | 12(+7), 12(+7) | 31, 21 | +14 | 33.0 / 26.5 | +6.5 |
+| 2 | 12(+4), 12(+6) | 11, 30 | +8.5 | 33.0 / 24.5 | +8.5 |
+| 3 | 12(+5), **11(+0)** | 27, 56 | +30 | 31.0 / 25.0 | +6 |
+| 4 | 12(+8), 12(+2) | 34, 32 | +21 | 36.5 / 20.0 | +16.5 |
+| 5 | 12(+4), 12(+4) | 26, 33 | +17.5 | 43.0 / 22.5 | +20.5 |
+| 6 | 12(+6), 12(+3) | 35, 24 | +17.5 | 31.0 / 28.0 | +3 |
+
+**Dose median +17.5, minimum +8.5. Channel median +7.5, minimum +3. Neither has been negative in any
+batch.** The cap bit in **11 of 12** treated probes — `capB4` remains the only one that stopped short
+on its own, and §243 confirmed from its own `config.snapshot.json` that it was capped all the same.
+
+The channel is the noisier of the two: +3 in batch 6 against +20.5 in batch 5, a sevenfold spread on
+two probes a side. That is what a two-per-arm comparison of a count with a long tail looks like, and
+it is the reason §223's number was reported as a median over eight probes rather than per batch. The
+dose is tighter because it is bounded above by the cap itself.
+
+Nothing here is an outcome and nothing here is surprising; the value is that after six batches and
+$24 the intervention has been delivered every time, in the same direction, through the same channel.
+When the arm reads out at twelve batches, "the two arms did the same thing" will not be an available
+explanation for whatever the number turns out to be — which is the whole reason §198 exists.
+
+Batch 7 is away on all four lanes. Five batches remain, and by §234's table twelve of them buy 0.77
+against a +44 effect.
+
+## §249 — the money spent after the last graded node is an unfinished attempt, not idling
+
+`probe_summary` reports "spend after the last evaluated node" for every probe and I have been
+quoting it every sweep — 0 %, 4 %, 12 %, 15 % — without ever asking what it is. Over the 94
+full-budget `edge_expansion` runs:
+
+| | |
+|---|---|
+| median | **2.7 %** |
+| p10 / p90 | 0.3 % / 13.3 % |
+| max | 41.9 % (`accEE`, $0.4208 after its last of two nodes) |
+| corpus total | **$5.17 of $95.01 = 5.4 %**, or $0.0550 a run |
+
+At §241's marginal-node price of $0.3373 that is **0.16 of a node per run** — a fifth of what §201's
+duplicate-prompt waste is worth, and small enough that it would not have been worth a section on its
+own.
+
+**What makes it worth one is that it is not waste at all.** Splitting the 94 runs by whether they
+started a node they never got to evaluate:
+
+| | n | median after-last-node |
+|---|---|---|
+| started a node it never evaluated | 14 | **13.0 %** |
+| did not | 80 | **1.2 %** |
+
+An order of magnitude apart. The runs with a large tail were **mid-build when the money ran out** —
+which is exactly what §235's `build_interrupted` records at the node level, and what `freeA5`,
+`freeB8` and `capA5` all carry. The eighty runs that finished what they started spend a median of
+1.2 % after their last node, which is the finalisation and the report.
+
+So this number is not recoverable by stopping earlier: a run that stops before starting node N+1
+saves the money and loses the attempt. It is the same coin as §201 from the other side — more
+budget buys the attempt that got cut off, and cutting the attempt off earlier does not buy anything.
+
+Worth correcting my own reporting: quoting "15 % after the last node" as if it were slack, which I
+have done for `freeA5` and others, reads as an accusation. On the 14 runs where it is large it is
+the price of an attempt the budget did not cover, and on the other 80 it is 1.2 % of finalisation.
+
+## §250 — the cap changes what happens inside the phases, not where the money goes
+
+The intervention removes about fourteen probe calls and adds about seven graded evaluations per run
+(§248). A natural question with no outcome in it: does that move the money between phases? Over the
+24 finished probes of batches 1–6, median share of each run's own spend:
+
+| phase | treated | control | delta | two-sided permutation p |
+|---|---|---|---|---|
+| plan_step | 35.2 % | 34.6 % | +0.6 | 0.699 |
+| propose | 26.3 % | 25.8 % | +0.5 | 0.797 |
+| deep_research | 17.0 % | 16.1 % | +0.9 | 0.707 |
+| repropose | 10.5 % | 7.2 % | **+3.3** | 0.444 |
+| plan | 7.1 % | 9.6 % | **−2.4** | 0.126 |
+| foresight_rank | 2.1 % | 1.8 % | +0.3 | — |
+
+**Nothing here is significant.** The two largest deltas — `repropose` +3.3 and `plan` −2.4 — come
+back at p = 0.44 and p = 0.13 over 20,000 relabellings of twelve probes a side. Everything else is
+within a point.
+
+So the money profile of a run is remarkably stable under an intervention that plainly changes its
+behaviour: fourteen fewer probes, seven more graded evaluations, and the same third of the budget in
+`plan_step` either way. The cap operates **inside** the phases rather than across them.
+
+That is worth knowing for two reasons. It is a mild check on the arm — an intervention that had
+silently rearranged the whole run would be a different experiment from the one registered — and it
+narrows where any eventual effect could come from: not from spending more on proposing or less on
+planning, because it does neither.
+
+It also sets the floor for reading the eventual result. The two arms differ in what they *do* with
+a nearly identical budget profile, which is the cleanest form this comparison could take, and it
+means the outcome cannot be explained away as "the treated runs simply spent their money somewhere
+else".
+
+## §251 — there is no point in a run after which another node stops paying
+
+§249 found that the money spent after the last graded node is an interrupted build rather than
+idling. The neighbouring question is about nodes that *do* finish late: is there a point in the
+budget after which another attempt has never been worth making? That would be a stopping rule, and
+it is the kind of rule that sounds obviously right.
+
+Every evaluated node after the first, across the corpus, placed by the share of its run's budget
+spent when it was evaluated, and scored on whether it beat the best node so far:
+
+| budget decile | nodes | improved the champion | rate | median gain when it did |
+|---|---|---|---|---|
+| 50–60 % | 12 | 12 | **100 %** | 166.4 |
+| 60–70 % | 23 | 17 | 74 % | 107.3 |
+| 70–80 % | 38 | 27 | 71 % | 84.5 |
+| 80–90 % | 35 | 15 | 43 % | 76.4 |
+| 90–100 % | 67 | 15 | **22 %** | 65.2 |
+
+The rate decays monotonically and the gain shrinks with it — but **it never reaches zero**. In the
+final tenth of the budget, 15 of 67 nodes still improved the champion, by a median of 65 points.
+Over the last fifth, **30 of 102**.
+
+So a stopping rule has nothing to stop. At 22 % × 65.2 points, a node evaluated in the last decile is
+worth about **14 points in expectation**, which is the same order as §241's 12.03 for a fourth node —
+the two measurements agree, arrived at from opposite directions. Cutting a run at 80 % of budget
+would have forgone thirty improvements in this corpus to save nothing that could be spent elsewhere.
+
+That is the third tempting rule this corpus has refused. §225: do not restart a run because its first
+node was weak — four in five recover. §249: do not read the tail as slack — it is a build the money
+cut off. And now: do not stop early — the last node is worth about as much as the fourth.
+
+The pattern in all three is the same. The obvious economy is measured against what it saves and not
+against what it forgoes, and every time the number that matters is the one on the other side.
+
+## §252 — a node does not get more expensive as the run goes on; it gets cheaper after the second
+
+I expected the cost of a node to grow through a run — the conversation is re-sent every turn (§152),
+so later nodes should be dearer. Measured over the 95 full-budget `edge_expansion` runs, the money
+spent between one evaluated node and the next:
+
+| node | runs reaching it | median $ to reach it | p10 | p90 |
+|---|---|---|---|---|
+| 0 | 95 | 0.3140 | 0.2366 | 0.4116 |
+| 1 | 94 | **0.4166** | 0.3127 | 0.5407 |
+| 2 | 73 | 0.2261 | 0.1695 | 0.3259 |
+| 3 | 10 | **0.2049** | 0.1412 | 0.2543 |
+| tail after the last | 95 | 0.0424 | 0.0029 | 0.1857 |
+
+**It peaks at the second node and then halves.** The hypothesis is refuted: growth in the re-sent
+prompt does not dominate. Node 1 is the most expensive thing a run does — and §241 measured it as
+also the most valuable, worth 86.85 points in expectation, which is §231's recovery seen a third
+time. After it the loop is working on an established solver and each further node costs about half.
+
+The budget adds up exactly: 0.314 + 0.417 + 0.226 = **$0.957**, plus a $0.042 tail, which is the
+typical three-node run spending its dollar.
+
+**And it corrects my own arithmetic, for the second time.** §201 priced the duplicate-prompt recovery
+at ~6 points using §185's flat ~8 per node; §241 refined that to ~9 using 12.03 for a fourth node at
+an *average* node cost of $0.3373. But the average is inflated by nodes 0 and 1. The **marginal**
+node — a fourth, for the 73 runs that reach three — costs **$0.2049**, so the recoverable $0.258 a
+run buys **1.26 of them**, and at 12.03 points each that is **≈ 15 points a run**, not 9.
+
+The caveat is that the fourth node's cost rests on the ten runs that reached one, and its p10–p90 is
+0.141–0.254. Taking the p90 instead gives 1.02 nodes and ~12 points; the estimate is somewhere in
+12–18 and the direction has never moved. What has moved, twice, is my habit of pricing a marginal
+thing at an average rate — and both times the corpus was there to catch it.
+
+## §253 — the validity cliff is real and nothing in this corpus has fallen off it narrowly
+
+`capB8`'s node 2 scored **0.0 after a full 47.2 s evaluation** — point 2's rule says that is the
+solver, and the verdict names itself: `invalid_results`, *"Speedup N/A due to invalid results:
+52/100 valid (52.0 %)"*. AlgoTune requires **all hundred instances**, so 52 valid is worth exactly
+what 0 valid is worth.
+
+That is a second zero signature beside §227's. `freeB5`'s failure was uniform — every proposed value
+about a hundredth of the reference, some negative, a normalisation gone wrong. `capB8`'s is not:
+1.248 against 15.325, 6.699 against 9.500, 5.481 against 10.362 — ratios of 0.08, 0.71, 0.53. Half
+the instances are right and the wrong ones are wrong by no fixed factor, which is a partially
+correct algorithm rather than a scaling bug.
+
+The all-or-nothing gate invites an obvious worry: how many runs lose everything to a near miss? So I
+looked at every evaluated node whose verdict carries a validity count.
+
+| | |
+|---|---|
+| nodes reporting a count | **2** |
+| their validity | 52/100 (`capB8`) and 51/100 (`remPde10`) |
+| near misses at 95–99 % valid | **0** |
+
+**None.** In this corpus a node either passes all hundred instances or fails about half of them;
+nothing has come close and lost. §193's `spectral_clustering` at 98/100 — the case that made the
+cliff memorable — belongs to arm A's shipped solver, not to anything this loop produced.
+
+So the cliff is real and it has never been the thing that cost a run. That retires a worry I have
+been carrying since §193, and it bounds card item (а): a card sentence about the per-instance ceiling
+would be telling the loop about a hazard it has not once been near. Whatever the case for (а) is, it
+is not this.
+
+Eleven zeros now exist in the corpus and two of them are validity failures; the other nine are
+§227's mismatches, execution errors and one compilation failure. All eleven are the solver, none is
+the harness.
+
+## §254 — my own "never negative" claim, refuted one batch later
+
+§248 said of the intervention's channel: *"Dose median +17.5, minimum +8.5. Channel median +7.5,
+minimum +3. Neither has been negative in any batch."* Batch 7 closed this sweep with a channel of
+**−3** — treated 25.0, control 28.0 — so the sentence is false, one batch after I wrote it. That is
+the sweep's own standing warning about lines reading "confirmed" arriving from the direction I was
+not watching, and it is worth naming before anything else.
+
+What produced it is visible per probe:
+
+| batch | dose | channel | treated `eval_train` | control `eval_train` |
+|---|---|---|---|---|
+| 1 | +14 | +6.5 | 30, 36 | 23, 30 |
+| 2 | +8.5 | +8.5 | 35, 31 | 25, 24 |
+| 3 | +30 | +6 | 29, 33 | 22, 28 |
+| 4 | +21 | +16.5 | 46, 27 | 19, 21 |
+| 5 | +17.5 | +20.5 | 46, 40 | 20, 25 |
+| 6 | +17.5 | +3 | 34, 28 | 30, 26 |
+| 7 | **+16** | **−3** | 27, 23 | 19, **37** |
+
+One control probe, `freeB9` at **37** — the highest control value in the arm — against its partner's
+19. The treated pair is 27 and 23, entirely ordinary. **A median of two swings on one probe**, which
+is what a two-per-arm batch statistic does and what I should have said in §248 instead of counting
+signs.
+
+The right summary is the pooled one, and it is not close. Over all 14 treated and 14 control probes:
+
+| | treated | control |
+|---|---|---|
+| `eval_train` median | **32.0** | 24.5 |
+| mean | 33.2 | 24.9 |
+
+Stratified one-sided permutation over within-batch relabellings — the same test the arm's own outcome
+will use — gives **p = 0.0018**. The channel is real; only the per-batch sign was ever fragile.
+
+The dose is unaffected: still positive in all seven batches, median +17.5, because it is bounded
+above by the cap and cannot be swung by one probe the way an unbounded count can.
+
+**And the correction generalises.** Every per-batch number in §236 and §248 is a median of two, and I
+presented their monotony as evidence. It was evidence of small samples behaving; the pooled test is
+the claim, and from here that is what I will report.
+
+## §255 — the readout, written as code before the numbers exist
+
+§254 ended by saying the pooled test is the claim and the per-batch tables were small samples
+behaving. That correction is easy to make about fidelity, which has no stake in the answer. The
+outcome does, and every rule for what counts as a probe in this arm was decided one incident at a
+time *after* §190 registered the design:
+
+* `freeB3` excluded at $1.1056, by a criterion written before any contrast was read (§213.1);
+* `capB4` in, though its cap never bit, because its own `config.snapshot.json` records it (§243);
+* a pause at ≥ 99 % of budget counted as an ending, because sixteen corpus runs record a normal
+  ending as a Developer crash and the §228 fix cannot reach probes already on disk;
+* the statistic pooled rather than per batch (§254).
+
+Each was decided for a reason at the time. Each is also a degree of freedom that could be
+re-decided afterwards to suit whatever number arrives, and no amount of intending not to prevents
+that. So they are now `benchmarks/arm_readout.py`, run against an arm that is **seven of twelve
+batches complete** — which is the only moment at which writing them down proves anything.
+
+The tool **refuses to read a partial arm**: fewer than twelve complete batches and it prints what is
+missing and exits 2. That refusal is the point. An interim look at the outcome is the one thing
+§190 forbids, and a tool that would do it on request is a tool that will be asked.
+
+```
+7 complete batches of the 12 the design registered
+  batch 8 incomplete: capA9: has not ended ($0.3721); …
+REFUSING TO READ THE ARM at 7 of 12 batches.
+```
+
+Five mutations, all red, and they are the five ways this could quietly go wrong: reading a partial
+arm, ignoring the spend ceiling, dropping the config check, counting a mid-run pause as an ending,
+and — the subtlest — **removing the observed arrangement from its own null**, which turns `>=` into
+`>` and lets a one-sided p reach zero. The test pins p = 1/36 on a clean two-batch separation and
+p = 1.0 on flat data.
+
+One instrument note, since it happened while checking this: `arm_readout.py | tail` reported
+`EXIT=0` because that is `tail`'s status. The script exits 2. The sweep's own header says to measure
+the return code without a pipe, and it is right.
+
+## §256 — a run outside the corpus in one variable, caught in flight
+
+`capA9` is at **62 % of its budget with no evaluated node**. Across the 98 full-budget
+`edge_expansion` runs the first node arrives at a median of **31 %**, p90 41 %, and a maximum of
+**53 %** (`remEEctl1`). **No run has ever gone past 53 %.** So this is outside the observed range,
+not at its edge, and it is worth the dig while it is still running.
+
+It is not a read loop. Its reads of `reference_edge_expansion.py` total 29 across four phases —
+11 in `plan_step`, 9 in `propose`, 6 in `deep_research`, 3 in `plan` — against the 25–38 per run that
+`read_loops`'s own threshold was set to treat as background. The detector is silent and correctly so.
+
+What it is shows up in one line of the phase table:
+
+| | capA9 | corpus (n=100) |
+|---|---|---|
+| `deep_research` share of spend | **52.2 %** | median 16.3 %, p90 21.6 % |
+
+**$0.3335 of its $0.6392, in 61 calls** — and capA9 is the corpus maximum and the *only* run above
+40 %. Its tool trace shows the shape: `propose` reads the reference, hands back to `deep_research`,
+which reads the same two line-ranges again, consults the memo, and reads them once more. Not a loop
+by the count, but a phase that keeps being re-entered instead of a node being built.
+
+Nothing is broken: no errors, no zeros, no refusals beyond one at the cap, ordinary per-call spend.
+This is the loop making an unusual choice, not the bench failing.
+
+**A prediction, before the next sweep can see it.** By §252 the marginal node costs $0.2049 and by
+§244 the opening sets a floor. With ~38 % of budget left, `capA9` should finish with **one or two
+evaluated nodes**, and if its first node is weak it lands in §231's unrecovered fifth — because
+recovery normally arrives as the *second* node at 72 % of budget, and there is not room for two more.
+If it finishes with three, my model of how the money converts into nodes is wrong and I will say so.
+
+## §257 — the outlier check, and three defects it found in itself
+
+Three sweeps running, the same question arrived and was answered with an ad-hoc query: is a 47 s
+evaluation unusual (§226 — no), is 52 % of spend in `deep_research` unusual (§256 — yes, the corpus
+maximum), is a first node at 62 % of budget unusual (§256 — yes, past a maximum of 53 %). Two of the
+three were ordinary and one was not, and the difference was never guessable without the distribution.
+So `benchmarks/outlier_check.py` brings the distribution to the sweep: for every running probe it
+reports the percentile of a few PROCESS variables inside the finished corpus, and names only what
+falls outside p5–p95. It reads no score — node **count** and money are process; a metric is the
+outcome, and §190 forbids reading the arm's outcome in flight.
+
+**Its first run flagged three healthy probes**, and the reason is a mistake this document has made
+before. It compared a running probe's `first_node_at / spend-so-far` against a corpus of FINAL
+shares — but the denominator is still growing, so the same node reads **54 % at $0.59 and 32 % at its
+eventual $1.01**. That is §209's error in different clothes: a partial quantity held against a
+complete one. Fixed by measuring the first node in **dollars**, which is the same number whenever it
+is read, and by not comparing `spend` and `nodes` at all for a running probe — a probe that has spent
+less and built fewer nodes than every finished run would be flagged every sweep, and an alarm that
+always fires teaches its reader to skip the ones that matter.
+
+Two more defects came out of writing the tests, both about ties:
+
+* the percentile counted values `<= v`, so a probe sitting **exactly on** a much-repeated corpus
+  value read as the **100th** percentile and was flagged for being typical. Midrank — ties count half
+  — puts it at 50. Mutation caught this one twice: the first fixture had a constant corpus, where the
+  bug is invisible, and the test only bites with a sample that varies **and** has ties;
+* a corpus variable with no spread was skipped outright, which silently swallowed the most notable
+  thing such a corpus can produce — a value far outside a constant. Now it is skipped only when the
+  probe matches the constant.
+
+On the live batch it now says what the hand queries said, in one command: `capA9` outside on
+`first_node_usd` ($0.6392 against a corpus median of $0.3161) and on `share_deep_research` (45.2 %
+against 16.3 %), `capB9` and `freeA9` clean, `freeB10` low on `share_plan`. Four mutations red.
+
+## §258 — the outlier check is hygiene, not an early warning
+
+§257 shipped a tool that places a running probe inside the corpus and names what falls outside
+p5–p95. The temptation it creates is obvious: `capA9` lit up on two variables, and the next step is
+to start reading a flag as a prediction. So I checked whether it is one, on the 98 finished runs.
+
+| process variables outside p5–p95 | n | final TEST median |
+|---|---|---|
+| 0 | 61 | 201.33 |
+| 1 | 28 | 218.22 |
+| 2 | 8 | 210.87 |
+| **any (≥ 1)** | **37** | **215.38** |
+
+Mann–Whitney between "no flags" and "at least one" gives **p = 0.898**. Being unusual in how a run
+spends its money says **nothing** about how it will score — and what direction there is runs the
+wrong way for the worried reading, with flagged runs a shade higher.
+
+The flag rate itself is unremarkable too: 37 of 98 runs carry at least one, and six variables tested
+at p5/p95 independently would produce about 47 % by construction. Nothing here needs explaining.
+
+So the tool answers "is this normal?" and nothing else. That is worth having — three sweeps in a row
+the question arrived and twice the answer was "yes, ordinary", which stopped a dig that would have
+cost an hour. What it must not become is a reason to intervene in a probe, and after this measurement
+it cannot honestly be used that way.
+
+`capA9` is the case in point. It flagged on two variables, took its first node at $0.6392 where the
+corpus median is $0.3161, and that node came in at 135.47 — an ordinary middle-band opening (§244).
+Unusual and fine, which is precisely what p = 0.898 predicts.
+
+## §259 — the 600 s trigger fired, and the busy box was me
+
+§240 closed the slow-snapshot question with a registered condition: *"I will not measure this again
+unless a snapshot crosses 600 s."* The 09:35 snapshot took **1789 s** and the timer said so:
+
+```
+[10:05:41] that tick took 1802s, at or over the 1800s interval;
+     starting the next one immediately -- the period is now the snapshot's own length
+1017s prefix-check + 396s cp -ru + 376s repair
+```
+
+That line is §206's fix doing its job — naming an overrun instead of silently running back to back —
+and it is the first time it has printed in this campaign. So the trigger is honoured.
+
+All three parts inflated together, about eightfold, which is §216's contention signature and not any
+one step. Three things coincided in that half hour: batch 8's four probes all finished, so the
+archive had four fresh trees to copy (**1.5 G, 130 run records, 9 re-copied short**); the archive is
+at its largest; and **I was running §258's corpus analysis, which reads ~100 `events.jsonl` and ~100
+`spans.jsonl` files off the same tree.**
+
+The third one is mine and it is the one I can fix. Checking my own commands: the sweep's status
+queries run under `taskset -c 44-47,92-95`, but the heredoc analyses of the last several sweeps —
+§252's node costs, §256's distributions, §258's percentiles — went out **unpinned**. The bench
+reserves lanes 44-47 and 92-95 for service work precisely so heavy reads do not compete with probes
+and with the archiver, and §216 pinned the snapshot for that reason. My analysis was the one service
+process still ignoring it.
+
+So the rule I applied to the snapshot applies to me: **every analysis command over the corpus gets
+`taskset -c 44-47,92-95`**, not just the short status queries. That is a habit rather than a code
+change and it is written here because a habit with no record is a habit that lapses.
+
+Two things this does not claim. It does not prove causation — the archive also had four new trees
+that half hour, and §240 measured no trend with archive size but not with size *and* four fresh trees
+at once. And it does not reopen §237's or §240's refutations, which stand: launches and growth alone
+still explain nothing. What is new is a named third participant, and it is the one holding the
+keyboard.
+
+Next threshold, registered as before: measure again if a snapshot crosses 600 s while no analysis of
+mine is running. That is the observation that would move the cause off me.
+
+## §260 — the weak/strong thresholds turn out not to matter, which is §225 confirmed sideways
+
+Four sections lean on two numbers I picked by eye from a histogram: weak is below **60**, strong is
+at or above **150** (§225, §231, §238, §244). Cutoffs chosen after seeing the data are exactly the
+kind of degree of freedom §255 was written about, so I varied them over the 102 runs the corpus now
+has:
+
+| weak < | strong ≥ | n weak | n strong | weak starts reaching 150+ | median gap | p |
+|---|---|---|---|---|---|---|
+| 40 | 120 | 58 | 39 | 74 % | +30.01 | 0.0120 |
+| 40 | 150 | 58 | 32 | 74 % | +32.37 | 0.0044 |
+| 40 | 180 | 58 | 19 | 74 % | +52.67 | 0.0002 |
+| 60 | 150 | 60 | 32 | 73 % | +32.37 | 0.0036 |
+| 80 | 120 | 60 | 39 | 73 % | +30.01 | 0.0126 |
+| 80 | 180 | 60 | 19 | 73 % | +52.67 | 0.0001 |
+
+**Every combination gives the same answer.** The recovery rate sits at 73–74 % across cutoffs from 40
+to 80, and the strong-opening gap is significant everywhere, growing from +30 to +53 as the strong
+bar rises — which is what a real difference does.
+
+The reason the cutoffs do not matter is the finding itself: moving the weak bar from 40 all the way
+to 80 moves the group by **two runs** (58 → 60). There is almost nothing in between to move. §225
+claimed that bimodality from a histogram; this is the same claim arriving from a sensitivity
+analysis that was not looking for it.
+
+**One number needs correcting.** §231 reported that 35 of 44 weak starts — **80 %** — still reach
+150+. On 102 runs it is **73–74 %**, from 58–60 weak starts. The direction and the argument stand
+(a restart-on-weak-opening rule would still abandon roughly three runs in four that were going to get
+there), but the figure to carry is 73 %, not 80 %, and the earlier one was a smaller sample being
+kind.
+
+This is the check I should have run when I first drew the lines, and it is cheap enough that there
+was no excuse. What it buys is that none of §225, §231, §238 or §244 rests on where the lines went.
+
+## §261 — the other headline numbers audited, and they have not moved
+
+§260 caught one figure drifting as the corpus grew — §231's recovery rate, 80 % on 44 weak starts
+becoming 73 % on 58. That raises the obvious worry about every other number I have been quoting from
+a smaller corpus, so I re-measured the headline ones on the 102 full-budget runs there are now.
+
+| | measured at | now (n=102) |
+|---|---|---|
+| §241 2nd node improves | 73 %, +86.85 (n=90) | **75 %, +85.93** (n=101) |
+| §241 3rd node improves | 19 %, +18.16 | **19 %, +18.37** (n=77) |
+| §241 4th node improves | 30 %, +12.03 | 30 %, +12.03 (n=10, the same ten runs) |
+| §252 cost to node 0 | $0.3140 (n=95) | **$0.3161** |
+| §252 cost to node 1 | $0.4166 | **$0.4164** |
+| §252 cost to node 2 | $0.2261 | **$0.2253** |
+| §252 cost to node 3 | $0.2049 | $0.2049 |
+| §220 TEST / best-train median | 0.9951 (n=78) | **0.9957** |
+| §220 its sd | 0.0140 | **0.0136** |
+| §220 share below 1 | 52/78 = 67 % | 66/102 = **65 %** |
+
+**Nothing moved.** The largest change is the second node's improvement rate, 73 % to 75 %, and every
+money figure agrees to within a fifth of a cent.
+
+So §231's drift was the exception, and its reason is visible in the table: it was a **proportion on
+the smallest subgroup** of any headline number — 44 runs, against 78–95 for the rest. Proportions on
+small subgroups are what move; medians over the whole corpus are what do not. That is the rule to
+carry rather than a general suspicion of everything measured earlier.
+
+The audit itself cost one query and it is the kind of thing that should have been standing practice
+from the point the corpus started growing under the analysis. It is now: any figure quoted from a
+subgroup smaller than about fifty gets re-checked before it is used again.
+
+## §262 — two correct rules collided, and the ruler said so precisely
+
+Taking a fourth reading for §219's drift series, I applied §259's new habit — pin every analysis to
+the service lanes — and got four refusals in a row:
+
+```
+  REFUSED: baseline_regime_mismatch
+  REFUSED: baseline_regime_mismatch
+  REFUSED: baseline_regime_mismatch
+  REFUSED: baseline_regime_mismatch
+```
+
+The bench was right and I was wrong. **The regime key encodes the lane WIDTH.** Lanes 44-47,92-95
+are eight cpus, so the evaluation keys `__w8x1r3`, finds no cached baseline under that name, and
+§149's guard refuses rather than re-timing the reference in the same pass and dividing by a
+different denominator. Its own words, which I had to go and fetch:
+
+> `this invocation would key its baseline '__w8x1r3', which is not on disk, while
+> edge_expansion__test__w22x1r3.json already is -- so it would re-time the reference in this pass
+> and divide by a different denominator than whoever wrote those entries.`
+
+So §259's rule needs its exception written next to it: **every analysis runs pinned to the service
+lanes, EXCEPT a measurement that must happen inside the bench's own regime, which needs a 22-cpu
+bench lane.** Two correct rules, and obeying the newer one broke the older.
+
+**And the tool threw the explanation away.** `ruler_selfcheck.refused()` returned only the `reason`
+label, so four identical useless lines is all I saw; the sentence that names both keys was sitting in
+the `detail` field unread. That is exactly the shape `probe_summary` was built to stop — the
+diagnosis exists, in a field nothing reads. Fixed: the refusal now carries the evaluator's own
+explanation, and the `--lane` default is a bench lane rather than the service lanes, so the next
+person does not walk into this. Three mutations red, including one that keeps the detail but drops
+the label — a refusal has to remain greppable by its reason.
+
+**The reading itself is deferred, on purpose.** All four bench lanes are running batch 9, and taking
+a 22-cpu measurement now would steal CPU from an arm probe. §214 measured that concurrency does not
+move this reading (0.8865 solo against 0.8861 loaded), so it is safe for the *number* — but it is not
+safe for the *probe*, and the arm outranks the series. The fourth reading goes in the gap between
+batch 9 and batch 10.
+
+## §263 — §209's mistake a third time, on the variable that had not been fixed
+
+`outlier_check` flagged three of four running probes, each on a different phase share:
+
+```
+  capA10   OUTSIDE: share_plan=16.96 at the 97th pct (corpus median 7.751)
+  capB10   OUTSIDE: share_deep_research=25.26 at the 98th pct (corpus median 16.25)
+  freeB11  OUTSIDE: share_propose=36.6 at the 98th pct (corpus median 25.28)
+```
+
+Three of four is not a finding, it is a ruler. **A share of generation spend is partial for a running
+probe and complete for a corpus run**, and the phases are not spread evenly over a run. §257 fixed
+exactly this for `first_node_at/spend` and left the shares alone. Replaying each finished run only as
+far as the probe had actually got:
+
+| probe | variable | vs FULL runs | vs the same-$ PREFIX | corpus median full → prefix |
+|---|---|---|---|---|
+| capA10 | share_plan | 97.1th | **99.0th** | 7.75 → 6.02 |
+| capB10 | share_deep_research | 98.1th | 91.3th | 16.25 → 18.19 |
+| freeB11 | share_propose | 98.1th | 78.6th | 25.28 → 31.13 |
+
+`deep_research` and `propose` are front-loaded — their corpus medians RISE when a run is read young —
+so a young probe reads high on them for no reason but its age, and two of the three flags dissolved.
+`plan` is not front-loaded, its median falls, and capA10's flag survived and got stronger. The
+alarming ruler was hiding the one real reading underneath two artifacts.
+
+Fixed: shares are now placed against the corpus **read at the probe's own age**. Truncation is a
+reading, not a filter — a run is in the corpus because it finished, which is a fact about the whole
+run — and a mutation making the cap drop short runs is red. Four mutations, one of which (cap as a
+filter) first SURVIVED because every fixture run had more generation spend than the cap; the fixture
+now carries a finished run whose generation spend is below it.
+
+**capA10's surviving flag is not a treatment effect and needs no action.** Capped probes run a
+*lower* median `share_plan` than free ones (7.15 % against 9.37 %), and the free arm's maximum is
+19.41 %, above capA10's 16.11 %. So this is a high reading inside the observed range, and §258
+already measured that process outliers predict nothing about score. Both subgroups are under 50, so
+by §261 those two medians are not reusable as headline numbers — the refutation stands anyway,
+because it rests on a maximum that exceeds the value, not on the gap between the medians.
+
+## §264 — the provenance file was recording the snapshotter's cage as the size of the box
+
+Checking the three snapshot items the sweep list still carries as "НЕ ПРОВЕРЕНО мной", I found all
+three already shipped and verified them rather than taking that on trust: a vanished destination now
+exits 1 with `NOTHING WAS WRITTEN` instead of claiming success; two concurrent snapshots are
+separated by a `flock` with `exit 3` for busy and a uniquified stamp; `.env` is named in
+`ENVIRONMENT.txt` as `(redacted; .env itself deliberately NOT copied)`.
+
+Reading that output turned up a different one. `PROVENANCE.txt` ends with a machine line, and it
+said:
+
+```
+    nproc 8 | cpu.max 9000000 100000 | free 723G
+```
+
+on a box with **96** cpus. `nproc` reports the CALLER'S AFFINITY. §259 pinned the snapshot to the
+eight service lanes so it would stop stealing CPU from the arm, and from that tick on every snapshot
+has misreported the machine. In the timer log: **112 snapshots saying `nproc 8` against 115 earlier
+ones saying `nproc 96`**, and the changeover is exactly my own fix. Reproduced directly —
+`nproc` 96, `nproc --all` 96, `taskset -c 44-47,92-95 nproc` 8, `/proc/cpuinfo` 96.
+
+It matters because of §262: the baseline cache is keyed by **lane width**, and that key is the whole
+reason two timings are comparable. A restorer reading "8 cpus" off an archive whose rulers are keyed
+`w22x1r3` has a contradiction and nothing in the snapshot to resolve it — in the one file whose
+stated job is answering "is this mine?".
+
+Both numbers are now recorded, each carrying its own words:
+`cpus 96 on the box | this snapshot pinned to 8`. Dropping the affinity would be the opposite error,
+since §262 makes the width a load-bearing fact, so a mutation that keeps only the box size is red;
+so are swapping the two labels and printing the numbers bare.
+
+This is the session's named shape once more, and again with me as the cause: not a breakage, a quiet
+mismatch between what a line says and what it measures, introduced by a correct fix to something
+else.
+
+## §265 — the deferred fourth reading, taken; the drift over the arm's window is not readable
+
+Lane 22-32,70-80 came free when `freeA10` finished, so the reading deferred in §262 was taken there —
+a 22-cpu bench lane, per that section's exception to §259's pinning rule. It went through: no
+`baseline_regime_mismatch`, because the width now matches the key.
+
+```
+edge_expansion: [0.8986, 0.9168, 0.9188, 0.8904] -> median 0.9077; the sweep says 0.9847 (-7.8 %)
+```
+
+First: §219's "three readings" were **three tasks on one day**, not three days — the log holds four
+rows and only now two of them are `edge_expansion`. I had been carrying that as a time series it
+never was. Corrected by reading the file.
+
+The two `edge_expansion` points, a day apart:
+
+| when | repeats | median | range |
+|---|---|---|---|
+| 2026-09-04 15:34 | 3 | 0.8908 | 0.8833 – 0.8912 |
+| 2026-09-05 12:39 | 4 | 0.9077 | 0.8904 – 0.9188 |
+
+The gap is +0.0169, **1.90 % of the value, and it is not readable**: the within-recording spread on
+09-05 is 0.0284, larger than the day-to-day gap itself, and an exact one-sided rank test on 3 against
+4 repeats gives **p = 4/35 = 0.114**. So the honest statement is not "the ruler drifted 1.9 % over
+the arm's window" — it is that two days apart, this box's reference-against-itself reading is the
+same as far as seven repeats can tell, and the largest movement visible is *within* a single sitting.
+
+What is solid is the standing −7.8 % against the sweep list's 0.9847, present on both days. That
+offset is common to every probe on the task, which divides by the same cached baseline file
+(untouched since 08-31 02:15), and batches run their four probes concurrently, so it is common to
+treatment and control inside each pair — which is what §190's within-batch pairing is for, and what
+§234's ICC of 0.007 already implied. **The arm is unaffected.** Where it does bite is exactly where
+§219 said: arm A's re-timed constants, compared across time on one task.
+
+## §266 — the arm's labels were nearly nailed to the lanes, and a p=0.016 died on replication
+
+Batch 9 ended while the sweep was running — all four `run_finished/budget_exhausted`, spends
+$1.0078–$1.0162, no pauses, so §228's fix has now held across six consecutive batches. (En route I
+printed `final.json no` for all four and nearly filed it: wrong path. It lives in the PROBE ROOT,
+128 of them, written by the scoring step. My ruler, not the bench's.)
+
+With the lanes idle I checked something the design had never measured. **Which lane carried which
+label, over all 37 arm probes:**
+
+| label | 0-10 | 11-21 | 22-32 | 33-43 |
+|---|---|---|---|---|
+| TREAT | 9 | 8 | 1 | — |
+| control | — | 1 | 8 | 10 |
+
+17 of 18 treated probes ran on the first two lanes and 18 of 19 controls on the last two. §190's test
+permutes LABELS within a batch; that is valid only if the four probes in a batch are exchangeable,
+and nothing had ever shown the lanes were. Topologically they are symmetric — one NUMA node, 11
+physical cores each, HT pairs (n, n+48) — but structure is not measurement.
+
+So I measured, with the reference-against-itself ruler, all four lanes at once (the batch's own
+condition), three repeats each:
+
+```
+A 0.9585   B 0.9402   C 0.8820   D 0.9344      treated-lane minus control-lane = +0.0411, p = 0.0162
+```
+
+**A +4.5 % bias in the treated arm's favour, at p = 0.016, in the instrument itself.** I ran it
+again before writing a word of it, and the ordering scrambled: C went from worst to best, D from
+second to worst. Six sittings in total, 72 readings:
+
+| sitting | A | B | C | D | order |
+|---|---|---|---|---|---|
+| 1 | 0.9585 | 0.9402 | 0.8820 | 0.9344 | A>B>D>C |
+| 2 | 0.9593 | 0.9661 | 0.9689 | 0.8883 | C>B>A>D |
+| 3 | 0.9228 | 0.9475 | 0.8978 | 0.9871 | D>B>A>C |
+| 4 | 0.9038 | 0.9340 | 0.9039 | 0.9682 | D>B>C>A |
+| 5 | 0.9341 | 0.9472 | 0.9120 | 0.9485 | D>B>A>C |
+| 6 | 0.9355 | 0.9338 | 0.9116 | 0.9311 | A>B>D>C |
+
+The contrast per sitting: **+0.0411, +0.0341, −0.0073, −0.0171, +0.0104, +0.0133** — mean +0.0124,
+positive in 4 of 6, **sign test p = 0.34**. The blocked permutation over readings still says 0.0745,
+and that number is pseudo-replication: the dominant term is a whole-sitting swing that takes one
+lane down to 0.87 while its neighbours sit near 0.97, so the independent unit is the SITTING, not the
+reading, and the effective n is 6. The first sitting's p = 0.016 was one draw of "which lane got hit"
+landing on a control lane — a coin flip I had already interpreted.
+
+**What survives:** lane 22-32,70-80 is the lowest of the four over six sittings (0.9127 against
+0.9448 on 11-21,59-69, about 3 %), and a lane-level bias of that size cannot be excluded. **What does
+not:** any claim that the arm is measurably contaminated.
+
+Two things follow, neither of which waits on resolving it.
+
+**One, for the arm — decided now, before any outcome is read, and costing nothing: batches 10, 11
+and 12 swap the mapping.** Treatment goes to 22-32,70-80 and 33-43,81-91, control to 0-10,48-58 and
+11-21,59-69. Three crossed batches turn an unmeasurable confound into an estimable one, and if the
+lanes really are exchangeable, nothing is lost.
+
+**Two, a defect fixed:** `--record` wrote a drift row with no lane in it. §265 compared two
+`edge_expansion` readings whose lanes the log had never stored — and both, it turns out, came off
+lane C, the lowest of the four. A series that cannot tell a change in the box from a change of lane
+is not a series. The lane is now in every row; two mutations red, including one that keeps it in the
+signature and drops it at the call site, which is where the defect actually lived.
+
+## §267 — the check that would have caught §266 at batch two, and a closed item verified rather than re-fixed
+
+**First, the item the sweep list still carries as ОСТАЁТСЯ ОТКРЫТЫМ.** It is closed, and I drove the
+real `archive_tree` to prove it rather than reading the comments and believing them: archived a
+400-row `events.jsonl`, then did exactly what `campaign.sh` does — `rm -rf` the task root and write
+an **equal-length** second attempt at the same path — and ran the archive step again.
+
+```
+  kept demo/run/events.jsonl as .superseded-1 (6692 bytes) -- the source is now 6692
+  ...
+  attempt1 row 1        <- .superseded-1, 400 rows, intact
+  attempt2 row 1        <- events.jsonl
+```
+
+The rule is not "is it shorter" but "is the source a CONTINUATION of the archive" — a prefix check —
+which is why an equal-length attempt 2 is caught where a size test would pass it. `.superseded-N` is
+the per-attempt versioning the list asks for, keyed on what the function can actually see. And it is
+not accumulating: across the whole 6933-file, 1.49 GiB runs-archive there are **7** superseded
+copies, 0.0 MiB, deepest stack 1.
+
+**Second, the improvement.** §266's confound was found at batch 9 of 12 by hand. Nothing in the
+bench had ever looked at which lane carried which label, so `benchmarks/lane_balance.py` now does,
+on the real arm:
+
+```
+lane            treat  control
+0-10,48-58          9        1
+11-21,59-69         8        2
+22-32,70-80         2        8
+33-43,81-91         1        9
+  CONFOUNDED: lane 0-10,48-58: 9 of 10 probes are treat (90 %)
+  CONFOUNDED: lane 33-43,81-91: 9 of 10 probes are control (90 %)
+```
+
+Membership is **parsed out of `arm_readout.py`, not imported** — that module's job is reading the
+outcome, and an AST walk cannot reach the rest of it by accident; the fixture's `score()` raises if
+anything runs it. The lane comes from the probe's own `INSTRUMENT.txt`. Both are facts about the
+ASSIGNMENT, fixed before a probe's first call, so this is readable under §190's embargo. A lane
+carrying fewer than four probes cannot raise an alarm — one crossover on a fresh lane is 100 % of
+that lane and evidence of nothing — and the test proves the guard is what silences it by flagging
+the same data with the guard lowered.
+
+Six mutations red, including removing the thin-lane guard, reversing the share comparison, counting
+only one label, and reading the wrong field out of `INSTRUMENT.txt`. The crossed-assignment fixture
+reads clean, so the fix §266 registered turns this check off rather than leaving a permanent alarm
+whose reader learns to skip it.
+
+The numbers above already show batch 10's swap landing: lane 0-10 has gained its first control and
+22-32 its second treated probe.
+
+## §268 — two refinements proposed to the outlier check, both refused by measurement
+
+Batch 10's early flags: `capB11` at `share_propose` 61.71 % (corpus median 13.8 at that age) and
+`share_deep_research` 38.29 (median 78.0), `freeB12` at `share_propose` 63.43 (median 39.97). Two
+guesses, both tested before writing any code, both wrong:
+
+**"At $0.07 a share is quantized — a couple of calls can only make 0, 50 or 100 %."** No. The corpus
+at that prefix holds a **median of 24 generation spans** (finest share step 4.2 %, minimum 19 spans),
+and `capB11` had 27. The share is resolvable; the reading is not an artifact of coarseness.
+
+**"Match the corpus on span COUNT rather than dollars — equal money is not equal progress when calls
+differ in size."** Marginally true and immaterial. Matching on spans tightens the corpus spread
+slightly (sd 17.64 against 18.01; 12.20 against 13.95) and moves no percentile that matters:
+99.1 → 99.1, 100.0 → 100.0. The one that moved, `share_deep_research` 3.7 → 0.9, is more extreme
+either way. Not worth the code.
+
+So the flags stand as real: those two probes spent their opening money on `propose` where the corpus
+spends it on `deep_research`. One is treated and one is control, so it is not a treatment signature,
+and §258 measured that process outliers predict nothing about the score. **No action** — which is
+the finding, recorded so the next sweep does not re-propose either refinement.
+
+## §269 — the question three sweeps asked by hand, and why a node count could not answer it
+
+Batch 10 sat at $0.28–$0.36 with three of four probes showing no node, and for the third sweep
+running I answered "is that unusual?" with an ad-hoc query. It is not:
+
+```
+108 finished edge_expansion runs; 1 never got a node at all
+  p10 $0.2381   p25 $0.2705   p50 $0.3168   p75 $0.3552   p90 $0.4154
+  at $0.28 spent, 66 % of corpus runs still had NO node
+  at $0.31 spent, 53 %      at $0.34 spent, 33 %      at $0.36 spent, 21 %
+```
+
+§257 had deliberately made `outlier_check` skip `nodes` for a running probe, and correctly — a
+count is partial for a live probe and complete for a corpus run, which is §209's mistake. But that
+left a real question unanswerable, and a probe that never gets a node at all reading as **clean**
+right up to the moment it ends.
+
+The distinction §257 missed: **"has the first node arrived by $S?" is not a count, it is a
+threshold.** It has the same answer whenever it is asked. A probe at $0.30 with nothing is behind
+exactly those corpus runs whose first node came before $0.30, and no later reading changes that. So
+the check now carries a survival reading for nodeless probes, and it stays silent for the merely
+young — on the live batch, capA11 at $0.279 and capB11 at $0.326 are behind 34 % and 50 % of the
+corpus, which is nothing.
+
+A finished run that **never** produced a node stays in the denominator as a first node that never
+came — it is the most extreme value the corpus has, and there is exactly one of them in 108. A
+mutation dropping it is red, as are reversing the threshold, never firing, and firing for probes
+that already have a node.
+
+## §270 — the sweep's own point 2 was an interim read, every half hour, for nine batches
+
+`arm_fidelity` exists so the fidelity question can be asked continuously without looking at the
+outcome, and `test_arm_fidelity_reads_no_scores.py` holds it to that. Meanwhile point 2 of the sweep
+— "new nodes, zeros and errors" — has been answered every half hour by a heredoc I write fresh each
+time, and that heredoc prints the node METRICS. §190 forbids reading the arm's outcome before twelve
+batches. **The tool obeyed; the operator did not.** Same shape as everything else this month: not a
+breakage, a quiet mismatch between what I thought I was doing and what I was doing.
+
+Point 2 never needed the value. It needs whether nodes arrived, whether any were zero, and whether a
+zero is the harness declining or an evaluation that ran and failed. So `benchmarks/pulse.py` answers
+points 1, 2 and 4 and never prints a score.
+
+Two things had to be measured rather than assumed while building it. **First**, whether
+`no_speedup` could stand in for the metric, letting the tool avoid the field entirely: no — across
+354 `node_evaluated` events in the corpus, `no_speedup` is present on **zero** of them, including
+all 12 zeros. So the classification must read the field it must never print, and the guard is
+therefore behavioural rather than a token scan: a probe whose node scores 123456.789 must not have
+that number appear in the output, and the node COUNT must still appear.
+
+**Second**, what a zero actually carries. All 12 corpus zeros come with `violations` and
+`eval_seconds` of **41–47 s** — every one of them is an evaluation that ran and came back invalid,
+not a single ruler refusal. The sweep list's discriminator (a zero at ~0.1 s is the harness
+declining) is right and has simply never fired here; the tool now states which kind it is in words,
+because "zero" alone sends the next hour after the wrong half of the bench.
+
+Five mutations red: printing the score beside the count, raising the refusal threshold past a real
+evaluation, dropping it to zero, letting a stall print without setting an exit code, and counting
+scored nodes as zeros.
+
+(En route, the instrument list earned its keep twice more. `pulse.py | tail` reported `EXIT=0` over
+a traceback — `PIPESTATUS`, as the list says. And a throwaway script counting `eval_train` returned
+zero for all 107 corpus runs, because `eval_train` arrives as an ARGUMENT to `run_dev_command` and
+not as a tool name — which `arm_fidelity` already knew and documents. The answer was implausible, so
+it got checked; that is the only reason it did not become a finding.)
+
+## §271 — the standing list is an instrument too, and one of its readings is backwards
+
+Five sweeps running I have re-derived the same corrections to the sweep list by hand and reported
+them again. §219's lesson applies to the list itself: an instrument carrying false readings teaches
+its reader to discount the true ones. So `benchmarks/sweep_claims.py` checks the list's checkable
+claims against the bench, delegating each to the tool that owns the question:
+
+```
+        STALE  point 5: seven entries in .baseline_times
+               9 entries, regime w22x1r3 -- the COUNT is not the invariant
+        STALE  point 3: add the abandoned remDL $0.1292 when reconciling
+               remDL has a tree on disk, carrying $0.1292 of generation spans -- already inside
+               the span sum, so adding it by hand MANUFACTURES the discrepancy the note warns about
+        STALE  state: remEE, remDL2 and remPde are running
+               not running: remDL2, remEE, remPde; on the lanes now: capA11, capB11, freeA11, freeB12
+```
+
+**The money one is not merely stale, it is backwards.** Measured: `remDL` has a tree with 27
+generation spans totalling **$0.1292 exactly**, so its money is already in the sum the reconciliation
+uses. Following the instruction produces the very false discrepancy it exists to prevent — and
+`check_money` reconciles to `RESIDUE $-0.000005` without it.
+
+**A mutation survived, and the fix was a better criterion, not a better fixture.** I first keyed the
+money check on "does a tree exist", and a mutation to "is the cost zero" passed every test. The two
+looked equivalent and are not: **the reconciliation compares the meter against the sum of
+generation-span costs**, so what matters is whether remDL's dollars are IN that sum, not whether a
+folder with its name exists. A tree that exists but carries no billed span — a probe that died before
+its first paid call — really is money the sum lacks, and there the note would be right. The criterion
+is now the money, and the fixture that tells the two apart is in the file.
+
+The tool states the date of the wording it was written against, because if the list is edited this
+file goes stale in its turn. And a check that raises is printed `UNCHECKABLE` rather than counted
+either way — a mutation that scores it as stale is red, since a false reading in the checker is the
+exact thing it exists to stop.
+
+## §272 — a probe that leaves the lanes looked exactly like one that finished
+
+`freeB12` was gone from `pulse` this sweep. It had ended cleanly — `run_finished/budget_exhausted`
+at $1.0129, `final.json` written, no crash and no pause, so §228's fix holds across a seventh batch —
+but **nothing told me that**. `pulse` lists what is RUNNING, so a probe killed by a stray signal, an
+OOM or my own hand simply stops appearing, and that reads identically to completion.
+
+This is not hypothetical and it is not rare. `check_money` names **five** probes as money in the
+meter with no tree on disk — `capA1 $0.2791, capB1 $0.2477, freeA1 $0.2266, freeB1 $0.1453,
+svcCacheCheck $0.0011` — and §213 is the record of `freeB3` stopped by pid mid-run. Every one of
+those was caught by the MONEY tool. The liveness tool should not need the money tool to notice a
+missing probe.
+
+So `pulse --expect capA11 capB11 freeA11 freeB12` now reports, for each name not on a lane, whether
+it **ENDED** or **VANISHED**:
+
+```
+freeB12    (off the lanes)   1.0129      ended
+```
+
+The disposition comes from `arm_fidelity.probe_calls`, which already owns it and is score-free by
+its own test — so a run at its ceiling that says `pause` reads as ended (§228's 16 corpus runs), and
+only a pause BELOW the ceiling is owed work (§213's $0.1056 lesson). Four mutations red: counting
+every absentee as ended, letting a vanished probe print without setting the exit code, reading a
+genuine pause as ended, and computing the absentee set against nothing.
+
+**Point 3's alarm this sweep was the tool being right.** `RESIDUE $+0.006663` — a thousand times the
+usual — with the next line reading `(allowing $0.010130: 1 unnamed call(s) on arms that are still
+calling, at the p99 price -- spans the engine has not written yet)`. The residue is inside its own
+stated allowance: a call in flight whose span is not written yet. Earlier sweeps had no in-flight
+unnamed call, so the allowance was zero and the residue was six decimal places of rounding.
+
+## §273 — "spans the engine has not written yet" is only an excuse while the engine is writing
+
+Batch 10 finished during this sweep — all four `ended` at $1.0092–$1.0130, which §272's new
+`--expect` said in words instead of leaving me to infer it from an empty table. Batch 11 launched on
+the swapped mapping, and `lane_balance` now **exits clean**: 9/2, 8/3, 3/8, 2/9, no lane at 90 %.
+
+Point 3 read `RESIDUE $+0.006663` — a thousand times the usual. Chased it: inside the flat
+`--max-residue` of $0.01, and separately inside the in-flight allowance. No leak. But the chase found
+a hole worth closing.
+
+The allowance exists because the engine may not have written a span for a metered call yet. **That is
+true only while the run is still going**, and §175 already caught one version of the mistake: the
+allowance forgiving `oldCK9` **$0.076944** an hour and a half after that probe finished, because the
+expiry watched the LEDGER rather than the arm. The fix made the grace per-arm and time-based — which
+leaves the identical hole exactly **300 seconds** wide. For five minutes after a probe writes
+`run_finished`, a real leak on it is still excused as unwritten spans, when the engine has
+demonstrably finished writing. Batches end every ninety minutes, so that window opens on schedule,
+at precisely the moment a probe's final accounting matters most.
+
+The decisive fact was on disk the whole time. Both call sites now go through one predicate —
+`_still_calling` = its last ledger row is recent **and** its run has not ended — delegated to
+`arm_fidelity`, which already owns the distinction, is score-free by its own test, and knows that a
+pause at the ceiling is an ending (§228) while a pause below it is not (§213, and the $0.1056 that
+cost).
+
+**A mutation survived, and again the fixture was the problem.** Making "unreadable tree" count as
+ended passed everything, because a MISSING tree does not raise — `probe_calls` globs nothing and
+reports `finished: False` — so no fixture ever reached the handler. The test now raises for real.
+The direction matters: reading "I could not tell" as "it ended" withdraws the allowance from an arm
+that may genuinely have a call in flight, turning a read error into a false leak.
+
+Six mutations red in total: dropping the ending condition (back to §175), dropping the time
+condition, treating a ceiling pause as not-ended, treating a genuine pause as ended, and the handler
+one above.
+
+## §274 — the number that decides $48 had been tested only at both extremes
+
+One batch from readout, I went looking at the thing that will produce the verdict. `stratified_p`
+had exactly two tests: maximal separation (p = 1/36) and no variation at all (p = 1.0). **Both
+extremes, nothing in the middle** — and a statistic can be wrong across its whole interior while
+getting both endpoints right. It is the number that decides $48, and it had never been checked
+where it will actually land.
+
+So it is now checked **by a different method**. The exact enumeration is compared against the same
+p obtained by *sampling* 200 000 relabellings: enumeration and sampling can each be wrong, but an
+off-by-one in `combinations` bookkeeping does not reproduce itself in a shuffle. On a fixture
+deliberately placed mid-range (the test asserts it is not at an extreme, or it could not
+discriminate) the two agree to within 0.01.
+
+Three more properties, each a way the readout could quietly hand the arm a win:
+
+- **The observed arrangement is always in its own null.** Over 40 random three-batch datasets,
+  `p >= 1/6³`. A one-sided p that can reach 0 has dropped the observed relabelling from the null it
+  is compared against — and 0 < α for every α, so the arm would "win" on any data whatsoever.
+- **Ties sit at the boundary, not outside it.** A strict `>` returns 0 on data that says nothing.
+- **The direction is a real test, not `1 - p`.** With ties in the null the two do not sum to one.
+
+**I got one of these wrong and the code was right.** I asserted that `[5, 7]` against `[5, 7]` gives
+p = 1 "because every relabelling gives the same statistic". It does not: the six relabellings give
++2, 0, 0, 0, 0, −2, so p = 5/6. The tie sits ON the boundary and only the arrangements strictly
+below it are excluded. Corrected in the test, with the reasoning written down, because the wrong
+version of that sentence is exactly the sort of thing that reads as obviously true.
+
+Four mutations red: a strict inequality, ignoring the alternative's direction, pooling the batches
+instead of stratifying them (`zip` for `product`), and fixing the split size at one rather than the
+batch's own treated count.
+
+## §275 — the design the readout will compute over is hand-maintained, and nothing checked it
+
+`BATCHES` is a list I have appended to five times by hand. Measured it before building anything:
+**44 names, all unique, every batch 2+2, every name with a tree on disk.** Sound. And the one
+arm-shaped tree in no batch is `freeB3` — §213's probe, resumed past a ceiling the meter had already
+shown and let run on to $1.1056, excluded at a criterion written down before any contrast was read.
+
+So nothing was broken. What was missing is that **none of that was checked**, and every one of its
+failure modes changes the number silently:
+
+- a name in two batches counts one probe twice;
+- a batch that is not 2+2 is not the permutation set the test conditions on;
+- a name with no tree reads as "batch N incomplete" and gets blamed on the bench.
+
+None of it is visible in the readout's own output. `design_problems()` now runs first, and `main`
+returns 2 without calling `admit` at all if the design is malformed — a mutation that lets it carry
+on is red, and so is one that skips the check entirely. Five mutations red: not detecting duplicates,
+inverting the shape test, ignoring missing trees, ignoring `EXCLUDED`, and not stopping the readout.
+
+`freeB3`'s exclusion now lives **in the code**, with its reason, rather than only in a doc — an
+arm-shaped tree in no batch and not in `EXCLUDED` is itself reported, so the next reader either puts
+a probe in the design or writes down why it is out. That is the same discipline §266 needed and did
+not have: the thing that was true only in my head is now the thing the tool checks.
+
+Also verified in production this sweep: §264's provenance fix is live — four snapshots now record
+`cpus 96 on the box | this snapshot pinned to 8`, and the log still holds exactly one overrun, the
+already-diagnosed 1802 s tick.
+
+## §276 — the tool that answers checklist item 9 would have printed the arm's scores
+
+One batch from readout, I went to validate `probe_summary` against a probe whose answer I already
+knew, and typed `probe_summary.py accEE`. It printed:
+
+```
+no bench roots on this box
+```
+
+A message about the BOX, for a mistake on my command line. `_roots` filters argv with
+`if Path(a).is_dir()` and a probe NAME — which is what the checklist talks in — silently vanishes.
+With two arguments it is worse: a mistyped root is dropped beside a good one, the report looks like
+it worked, and it quietly covers a different scope than the one asked for. Now an argument that is
+not a root is named, and the CLI says what it does take.
+
+**The bigger thing was one command further on.** `probe_summary` prints a `TEST` column for every
+probe it finds, and the arm's probes live in the same tree as everything else — so pointing it at
+`BENCH_ROOT`, its documented default, puts the arm's outcome on screen. `arm_fidelity`, `pulse`,
+`outlier_check` and `lane_balance` were each built specifically to avoid that, and this one, which
+exists to read scores, had nothing stopping it. The only thing that ever had was me remembering.
+Same shape as §270, and I was one keystroke from it while doing something careful.
+
+So §190 is enforced in the code now: probes in the registered design print `EMBARGO` instead of a
+score, the table says how many it masked and why, `--include-embargoed` is an explicit override, and
+the embargo lifts on a **marker file** rather than an inference — lifting it should be a deliberate
+act somebody can find in the history. A `--probe NAME` filter makes item 9 usable one probe at a
+time, which is what I wanted in the first place. Six mutations red, including masking nobody, masking
+everybody, ignoring the marker, and dropping a bad argument silently again.
+
+**And the check that started it found a fifth stale claim.** `accEE`'s own `final.json` records
+**224.8846**, not the **224.4432** the list carries as the comparison figure for `edge_expansion`.
+Not a new discovery — §73.4 settled it on 2026-09-01 — but a number I have been carrying in the
+standing list for a week, and one that makes every future probe on that task look 0.20 % better than
+it is. It is now the fourth claim `sweep_claims.py` checks, read from the probe's own record rather
+than from memory.
+
+## §277 — the last unguarded step from disk to verdict
+
+Batch 11 ended clean (all four at $1.0080–$1.0106) and **batch 12, the last, is launched** on the
+swapped mapping. `lane_balance` keeps improving: 9/3, 8/4, 4/8, 3/9. So this was the final sweep
+before the readout, and I spent it on the one step in the path from disk to verdict that nothing
+checked.
+
+`score()` read `speedup` and nothing else. Two fields sit beside it in the same file and both change
+what that number means:
+
+- **`subset`.** Every node in a run is evaluated on TRAIN and the champion is scored once on TEST
+  (§84). A train figure in that field is a different measurement on a different split — and it is a
+  float, so it would go straight into the statistic without a word.
+- **`superseded`.** §55 recorded two `final.json` carrying it, both from a scoring pass that took
+  `solver.py` from the wrong path: a score for a solver that is not the champion.
+
+Measured before writing anything: **all 44 finished arm probes, and all 136 `final.json` on this
+box, record `subset: test` with no `superseded`.** So this guards a hole rather than closing a leak
+— which is the right time to do it, since the hole is invisible by construction and the readout is
+one batch away. `admit` now passes the reason through instead of flattening everything to "no usable
+score", because a generic reason sends the reader to the wrong half of the bench.
+
+**Three existing tests went red, and they were right to.** Their fixtures wrote
+`{"speedup": ...}` with no `subset`, which is not the shape the real file has. A fixture that does
+not match the artefact it stands for tests something that does not exist — the same lesson as §263's
+cap-as-filter and §271's directory-versus-money, arriving from the other direction: not a fixture too
+weak to fail, a fixture too loose to be true. Fixed to carry `subset: test`, as every real file does.
+
+Five mutations red: not checking `subset`, treating a missing `subset` as `test`, ignoring
+`superseded`, swallowing the reason in `admit`, and admitting a non-positive speedup.
+
+## §278 — one of the three unshipped card items was already shipped
+
+Batch 12 is running and the readout is one batch away, so I went to check the three card findings
+I have been deferring — the ones I would act on the moment the embargo lifts. Read out of the
+**generated card**, not out of my notes:
+
+- **(а) is SHIPPED.** The `goal` field carries the whole rule: *"AND THERE IS A CEILING ON HOW SLOW
+  YOUR SOLVER MAY BE, PER INSTANCE. The harness gives each instance's subprocess
+  `(1 + 5) * reference_time * 10` seconds -- 5 warm-up runs plus one timed run, each allowed 10x the
+  reference -- floored at 10 s. Cross it and the instance is KILLED, and a killed instance is not a
+  slow score, it is an INVALID one."* Had I not checked, I would have spent the post-readout window
+  re-shipping something already there.
+- **(б) still holds.** The card's only `champion` sentence is about the held-out SPLIT — *"the
+  champion is finally scored on held-out instances from the same generator"* — and says nothing
+  about WHICH node is submitted. §84's rule, the one the corpus shows biting in eleven of seventeen
+  multi-node probes with none the other way, is still absent.
+- **(в) still holds, and more completely than the note says.** `RESEARCHER_PROMPT_CUES` carries
+  `_gpu_budget_hint` and `_time_budget_hint` and no money cue at all; the only `budget` in the card
+  is *"46 ms of budget per instance"*, a time budget. There is nothing for plan / `foresight_rank` /
+  `hyp_prioritize` to fail to receive — the hint does not exist.
+
+Both card items are now claims `sweep_claims.py` checks, so this is measured every sweep instead of
+remembered. That makes six of its checks, five of them stale.
+
+**And the first version of the (а) message overclaimed.** It said the card states the rule
+*"including the worked form `(1 + 5) * reference_time * 10`"* when only one of two markers had
+actually matched — a sentence claiming more than its measurement, inside the file whose entire
+purpose is catching exactly that. Now it names what matched. Five mutations red, including one that
+puts the unmatched marker back into the sentence.
+
+## §279 — the analysis §266 made possible, registered before the data exists
+
+§266 swapped the lane-to-label mapping for batches 10-12 so that a lane effect could be told apart
+from a treatment effect. Nothing computed that separation, and batch 12 is the last one — so this is
+the final moment at which the check can be written **before** the numbers it will run on exist.
+
+`lane_split` reports the treatment contrast separately under each mapping, and `interaction_p` asks
+how often relabelling within each batch produces a gap between the two mappings this large. The
+logic: a lane effect **adds** to the contrast under one mapping and **subtracts** under the other,
+so the difference between the two contrasts is twice the lane effect. Three batches makes this weak,
+not meaningless; it is printed with its own n, as a check on the headline number rather than a
+replacement for it.
+
+Reading the mapping off each probe's own `INSTRUMENT.txt` turned up something I had not known:
+**batch 1 is mixed, not mapping A.** `capA2` ran on 0-10 and `capB2` on 22-32, `freeA2` on 11-21 and
+`freeB2` on 33-43 — one lane from each pair on each side. That batch is internally balanced against
+the lane pairs and carries no confound at all, and the first version of this code called it `?`,
+which reads as a failure to measure something that was in fact measured and came out even. The
+design is `mixed 1, A 8, B 3`.
+
+**A mutation survived, and the fix was a fixture at the boundary rather than a bigger effect.**
+Replacing the two-sided `abs(...)` with a signed comparison passed every test: on a symmetric null
+the two differ by a factor of two in p and never by direction, so no amount of "make the effect
+bigger" separates them. What separates them is α. The fixture now used reads **0.0571 two-sided —
+do not reject — against 0.0283 one-sided, which would call a lane effect real.** A lane effect can
+go either way, so the registered check is two-sided, and it is registered now so the side cannot be
+chosen after looking.
+
+Five other mutations red: reporting `mixed` as unreadable, reading every batch as mapping A,
+ignoring the mapping in the split, and running the interaction on a single mapping.
+
+## §280 — point 4 asks for two clocks and the tool was showing one
+
+Checklist item 4 says to look at the age of `events.jsonl` **and** at the age of the last CALL in
+the ledger. `pulse` showed the first and `check_money` showed the second globally; per probe, the
+pair was something I read by eye or not at all. The pair is the whole diagnosis, because the two
+come apart in two opposite ways:
+
+- **fresh ledger, stale log** — the probe is calling and producing nothing. §175's retry storm, and
+  the case where three consecutive 504s at exactly 300 s are the nginx ceiling rather than a hang.
+- **stale ledger, fresh log** — the probe is building or evaluating without calling the model, which
+  is ordinary.
+
+Neither is visible from the log alone, and an idle probe looks like both.
+
+`pulse` now prints `call age` beside `log age`, names a last call that did not come back 200, and
+flags only the first shape. The live batch showed why the second must NOT be flagged: `capB13`'s
+last call was **316 s** old while its log had grown **20 s** ago — a healthy probe mid-evaluation,
+and a rule that fired on it would fire on every probe every time an `eval_train` runs. The threshold
+is a stale log (past a quarter of `STALL_TIMEOUT`) with calls at least four times fresher.
+
+Five mutations red: not reading the second clock, never firing, firing on any stale ledger, ignoring
+a non-200 status, and comparing the two ages the wrong way round.
+
+## §281 — four constants the list quotes as current, and nothing said otherwise
+
+Point 5 of the standing list quotes the reference-against-itself figures as
+`pagerank 1.0024, pde_heat1d 0.9958, edge_expansion 0.9847, discrete_log 1.0162`. I checked the
+docs before claiming anything new, and §219 and its neighbours had already recorded the
+disagreements. What was missing is anything that says so **every sweep**, while the list keeps
+presenting the four numbers as the current state of the ruler:
+
+```
+  discrete_log:    list 1.0162, measured 1.0896 on 2026-09-04  (+7.2 %)
+  edge_expansion:  list 0.9847, measured 0.9077 on 2026-09-05  (-7.8 %)
+  pde_heat1d:      list 0.9958, measured 1.1013 on 2026-09-04  (+10.6 %)
+  pagerank:        UNMEASURED here (list says 1.0024)
+```
+
+**Three tasks, three disagreements, and not one direction.** This is not a box that got slower: it
+is task-specific, which is why a single "the box drifted" correction would be wrong for two of the
+three. `pagerank` has never been read here at all, and it is reported as UNMEASURED rather than
+passed over — silence about a constant nobody has checked is how it stays quoted.
+
+The check compares against the **latest reading this box recorded**, not a fresh measurement: taking
+one needs a 22-cpu bench lane (§262) and those are busy with the arm. The tolerance is 2 %, which
+against measured gaps of 5–11 % is not a hair-trigger.
+
+Five mutations red: letting an unmeasured task pass, taking the first reading instead of the latest,
+a tolerance that swallows everything, reporting the drift unsigned (the directions are the finding),
+and treating an unreadable log as a pass.
+
+That makes seven claims `sweep_claims.py` checks, six of them stale.
+
+## §282 — the verdict of $48 existed only as text on a terminal
+
+Three of batch 12's four probes ended during this sweep; `capB13` is the last one left, so the gate
+opens shortly. Which made the gap obvious: `arm_readout` **prints** its answer and keeps nothing.
+`/var/tmp` is ephemeral and has been wiped once already, taking 37 unpushed commits and about 69
+probe runs with it. The readout is the deliverable of forty-eight dollars and eleven days, and until
+now it would have survived exactly as long as a scrollback buffer.
+
+`--record` writes the whole thing into the repo, which is pushed: the design it used, the excluded
+probes and why, every admitted score by batch, the contrast, the exact p, §279's lane split and
+interaction p, and the verdict.
+
+**And the file is the same marker `probe_summary.EMBARGO_LIFTED` looks for**, which is the part
+worth stating plainly: §190 lifts exactly when the readout has been RECORDED, not when somebody
+decides it has been taken. One act, one artefact, and the artefact is the licence. A refusal writes
+nothing — a mutation that stamps the marker before the gate is red, because a partial readout
+leaving a marker behind would open the embargo over half an answer.
+
+The write is atomic (`os.replace`), since a torn marker would do the same thing more quietly. Five
+mutations red: marking before the gate, dropping the lane split, dropping the scores, dropping the
+design, and writing without the rename.
+
+Points 1–7 clean throughout: `RESIDUE $-0.000008` at $86.76, nine baseline entries all `w22x1r3`,
+`PermissionError` 0 on 2085 directories, zero zombies, and `pulse --expect` naming all three
+finished probes as `ended` rather than leaving them to be inferred from an empty table.
+
+## §283 — the twelfth batch landed and the readout did not return
+
+All four of batch 12 ended this sweep. The gate opened, `arm_readout` was invoked, and **it did not
+come back.** Diagnosed by pid: `stratified_p` enumerates `6**k` relabellings and the registered
+design is `k = 12`, which is **2 176 782 336**.
+
+§274 is what makes this worth writing down. That section checked the statistic "in the middle of its
+range" — and the range I checked was the range of its own VALUE, p near 0 to p near 1, on **four**
+batches: 1296 combinations. The size of the DESIGN was never a variable in any test. The number that
+decides $48 was verified against a Monte Carlo reference, against its own boundary behaviour, against
+ties and direction — and could not be computed on the design it was written for. Two sweeps of
+sharpening the blade, none of them checking it reached.
+
+With real-valued scores every relabelling gives a distinct sum, so no convolution shrinks the space.
+The honest move is to sample the SAME null rather than enumerate a different one: exact below a
+ceiling, sampled above it with a fixed seed and a reported standard error. Twelve batches now takes
+20 s.
+
+Three things the fix had to get right, each of them a way to lose something §274 had established:
+
+- **The ceiling is measured, not round.** The enumeration costs 0.3 s at `6**5`, 2.0 s at `6**6`,
+  14.3 s at `6**7` — about 20× per batch, so `6**8` is a hundred seconds. My first ceiling was
+  2 000 000, which puts `6**8` under it and would have made "exact when possible" mean "a hundred
+  seconds when possible". It is 50 000.
+- **The observed arrangement stays in its own null.** `(hits + 1) / (draws + 1)`, not `hits/draws`:
+  a sampled p that can return exactly 0 beats every α there is, which is precisely the property
+  §274 pinned for the exact version.
+- **The standard error is carried and used.** A p within two SE of α is printed as a reading that is
+  not yet a decision.
+
+**And my own test for this hung instead of failing.** The first version timed the call and asserted
+afterwards — which cannot fail when the call does not return. Under the mutation that puts the
+ceiling back up it hung, and a hanging test reads as "still running", not "broken". Split
+`relabel_space` out so the decision is checkable without paying for it. Six mutations red: the
+ceiling back up, dropping the plus-one, never taking the exact path, dropping the standard error,
+not counting the space, and silencing the near-α warning.
+
+## §284 — the arm read out, and the registered lane check had silently returned nothing
+
+**The twelve-batch arm is read.** Recorded to `benchmarks/algotune/.arm_readout_taken`, which is also
+the file that lifts §190 for `probe_summary` (§282):
+
+```
+12 complete batches of the 12 the design registered
+sum of within-batch mean differences: +105.96
+stratified one-sided permutation p = 0.3577 +/- 0.0011 (alpha 0.05)
+  -- SAMPLED over 200000 of 2176782336 relabellings
+do NOT reject: no effect of the registered size was detected at power 0.77 (§234).
+   That is not the same as 'capping does not help'.
+```
+
+Forty-eight dollars, twelve batches, forty-eight probes: **capping the developer at 12 probes did
+not move the score by an amount this design could see.** The fidelity was never in doubt — every
+treated probe stopped at exactly 12 executed calls and the controls ran to 13–33, with the channel
+visible in `eval_train` all the way through — so this is a real answer about the intervention, not a
+failed manipulation.
+
+**And the check §266 was designed for did not run.** The first output printed no interaction p at
+all. Cause: `interaction_p` required the group set to be EXACTLY `{"A", "B"}` — and §279 had
+established, in its own text, that batch 1 is `mixed`. I wrote the requirement two sweeps after
+documenting the fact that violates it, and the registered analysis silently returned `None` at the
+one moment it existed for. Fixed to need A and B *present* rather than *alone*, with `mixed`
+excluded on purpose and said out loud:
+
+```
+  mapping A: -3.05 over 8 batch(es)
+  mapping B: +66.80 over 3 batch(es)
+  mapping mixed: -70.01 over 1 batch (internally balanced)
+  two-sided sampled interaction p = 0.2510 on A vs B (excluding mixed)
+```
+
+So the lane-to-label mapping does not measurably change the contrast either (p = 0.25), which is
+what §266 hoped to be able to say and could not before the swap. The apparent gap between −3.05 and
++66.80 is three batches against eight and does not survive its own test.
+
+Two mutations red on the fix: silencing the check when a third group is present, and letting it run
+with only one mapping.
+
+## §285 — card item (б), shipped the day the embargo lifted
+
+The arm read out yesterday, so the card is no longer read by two sides of a live comparison and the
+deferred items can ship. Item (б) is in:
+
+> AND THE NODE THAT IS SUBMITTED IS YOUR BEST **EVALUATED** ONE, NOT YOUR LAST. A node that was
+> never evaluated cannot be submitted however promising it looks, and a later node that scores worse
+> does not replace an earlier one that scored better. Two things follow. A risky rewrite late in the
+> run cannot cost you what you have already banked — so take it, if you have something to test. And
+> an idea you never spend an evaluation on is worth exactly nothing, so get code evaluated early and
+> often rather than perfecting one submission you may not have the budget to grade.
+
+Both halves are there because the corpus punishes both. §84: of 17 multi-node probes, **eleven ended
+on a node that was not their best and none on a better one** (paired sign test p = 1/2048), median
+submitted TRAIN score 130.81 with the rule against 18.38 without it — `remEE6` scored 234.89 and
+then finished by scoring 0.0, so the rule is the only reason that run has a number. And `remPde`
+spent 74 % of its dollar before any node existed, which is the same rule from the other end.
+
+The two consequences point opposite ways on purpose — take the late risk, and get things graded
+early — because a card that gave only one would push the run off balance.
+
+Tested against the **generated card**, not the source, since the source is not what the model reads.
+Six mutations, one of which survived the first version: cutting *"get code evaluated early and often
+rather than perfecting one submission you may not have the budget to grade"* left "worth exactly
+nothing" intact, so the clause that tells the run WHAT TO DO was gone and the assertion still passed.
+The test now pins the instruction, not just its opening.
+
+`sweep_claims` flips accordingly: item (б) now reads STALE, because the card does say it.
+
+## §286 — the claim checker reported the card silent about a rule the card states
+
+Ten minutes after shipping §285, `sweep_claims` still read:
+
+```
+  HOLDS  point 8(b): the card does not say the best EVALUATED node is kept
+```
+
+It does say it. `CHAMPION_MARKS` had been **guessed** — `"best evaluated"`, `"the best EVALUATED
+node"` — while the clause that shipped says `BEST **EVALUATED** ONE, NOT YOUR LAST`. A false reading
+inside the file whose entire purpose is catching false readings, produced by the same habit that
+file was built against: writing down what I expect the artefact to say instead of what it says.
+
+The markers are now verbatim from the shipped text, and two tests tie them to it — the marker must
+be a string `make_task.py` actually contains, for the champion clause and for the ceiling clause
+alike. Without that the checker can drift from the card again the next time either is reworded, and
+drift in this direction is invisible: it reports the comfortable answer.
+
+The fixture in the older test had the same disease and went red the moment the real clause landed —
+it asserted on `"the best evaluated node is the one submitted"`, a sentence nobody wrote. Fixed to
+the shipped wording.
+
+`sweep_claims` now reads seven claims, six stale, with item (б) correctly among them.
+
+## §287 — point 9 on all 48 arm probes, and why `pagerank` was never measurable
+
+**The embargo is lifted, so item 9 finally runs on the arm.** All 48 registered probes have a TEST
+score; none is missing:
+
+| arm | n | TEST median | min | max | nodes | eval_train | before % | after % |
+|---|---|---|---|---|---|---|---|---|
+| treated | 24 | 213.15 | 21.08 | 270.20 | 3.0 | 31.0 | 32 | 0 |
+| control | 24 | 219.83 | 25.84 | 276.38 | 3.0 | 25.0 | 32 | 8 |
+
+Consistent with §284's p = 0.3577: the control median is slightly HIGHER, so what little sign there
+is points away from the cap. Node counts are identical at 3.0, the `eval_train` channel is visible
+(31 against 25), and the one place the arms differ noticeably is waste — treated probes spend a
+median **0 %** after their last evaluated node against the controls' **8 %**, which is what a cap
+that stops the probing would do. Against the list's comparison figure for the task (accEE, whose own
+`final.json` says 224.8846 — §276), the arm's best probes clear it: 276.38 and 270.20.
+
+**With the lanes idle, point 10's queued re-measurement ran** on a 22-cpu bench lane (§262), and the
+three measurable constants moved again in the same directions §281 found:
+
+```
+  pde_heat1d      1.0676   the sweep says 0.9958  (+7.2 %)
+  discrete_log    1.0830   the sweep says 1.0162  (+6.6 %)
+  edge_expansion  0.9007   the sweep says 0.9847  (-8.5 %)
+```
+
+**`pagerank` crashed, and the reason is the finding.** `no delivered reference module for pagerank
+under /var/tmp/looplab-bench/model-probes`. The self-check inlines the DELIVERED reference module —
+`build_solver` globs `*/ws/<task>/reference_<task>.py` — and that file exists only where a probe has
+staged one. The only tasks with probe trees on this box are `discrete_log`, `edge_expansion` and
+`pde_heat1d`. So `pagerank`'s 1.0024 is not merely unchecked, it is **uncheckable here** until a
+probe runs on that task, and every sweep that reported it as "UNMEASURED" was inviting a retry that
+would fail identically. `sweep_claims` now says which of the two it is, and what to do about it.
+
+That makes seven claims checked and **seven stale** — the list has no true reading left in it that
+this tool looks at.
+
+## §288 — §278 was wrong about item (в), and the measurement is sharper than the list
+
+§278 concluded, from reading `RESEARCHER_PROMPT_CUES`, that there is no money cue at all and
+therefore "nothing for plan / `foresight_rank` / `hyp_prioritize` to fail to receive". **That is
+wrong.** I inspected the cue machinery instead of measuring what reaches the model, which is the
+same mistake this document keeps recording, committed inside a section written to correct a stale
+claim.
+
+The line exists. `capA13`'s own prompts carry it 94 times:
+
+> `BUDGET: $0.0000 of $1.0000 spent, $1.0000 left (0 % gone). Research that leaves no money for
+> experiments buys nothing — size this memo to what is left.`
+
+Measured across eight capped probes, by phase, counting `generation` spans whose prompt carries it:
+
+| phase | share | | phase | share |
+|---|---|---|---|---|
+| deep_research | 395/475 — **83 %** | | propose | 0/538 — **0 %** |
+| plan_step | 279/897 — 31 % | | repropose | 0/158 — **0 %** |
+| plan | 44/216 — 20 % | | foresight_rank | 0/64 — **0 %** |
+| | | | hyp_prioritize | 0/60 — **0 %** |
+
+So item (в) is **right** about `foresight_rank` and `hyp_prioritize`, nearly right about `plan`
+(20 %, not 0), and **understates the case**: `propose` and `repropose` are also blind, and §245–§247
+measured those two as holding a quarter of a run's spend in 11 % of its calls. The two phases that
+decide what to spend money on are the two told nothing about it.
+
+The cause is visible once you look: the line is not a cue at all. It is **hand-built twice**, in
+`agents/deep_research.py` and `adapters/repo_developer.py`, with identical heads and different
+second sentences. That is why exactly the phases those two adapters drive have it and no others do.
+
+Shipped this sweep: `looplab/core/costs_text.py::budget_line`, one sentence in one place, carrying
+the measurement above in its docstring. Behaviour is unchanged — no phase gains the line yet —
+because a third copy is how the wordings would have started drifting for good, and the wording for
+`propose` deserves its own measurement rather than a paste. A run with no ceiling gets no line at
+all: "0 % gone" is a number a run cannot act on. Five mutations red, including reporting negative
+money on an overspend and inverting the share.
+
+## §289 — a parse of my own tool's prose invented an arm difference
+
+Doing item 9's last unmeasured column — does the model use the reference module — I grepped
+`probe_summary`'s output and got:
+
+```
+  treat    n= 1  import median  0.0 %
+  control  n=23  import median  9.1 %
+```
+
+A total difference between the arms, off 24 of 48 rows. **It is an artifact of the regex.** The
+reference line reads
+
+```
+  reference over 12 executed run_probe calls (+10 refused at the cap): 8.3% import / 8.3% is_solution
+  reference over 20 executed run_probe calls: 5.0% import / 5.0% is_solution
+```
+
+and a pattern expecting `calls:` drops every probe with a parenthesis — which is every CAPPED probe,
+and only capped probes. **The selection bug correlated perfectly with the treatment.** Twice before
+in this series a throwaway parse produced a plausible false number (§287's all-zero `eval_train`,
+§289's earlier 24-of-48); this one would have produced a headline.
+
+From the data, the arms are the same:
+
+| arm | run_probe (refused) | import | is_solution |
+|---|---|---|---|
+| treated | 12 (4) | 8.3 % | 8.3 % |
+| control | 28 (0) | 9.0 % | 8.7 % |
+
+So the fix is not a better regex. `probe_summary --json` now emits the record `summarise` already
+computes — `ref_pct`, `ref_call_pct`, `run_probe`, `run_probe_refused`, `eval_train` and the rest —
+so item 9 never has to recover a number from a sentence again. The embargo is honoured in JSON too:
+a machine-readable escape hatch around §190 would be worse than a prose one, not better. Three
+mutations red.
+
+**And the numbers themselves, now trustworthy.** Across all 48 arm probes the reference-import share
+has a median of **8.5 %**, just above §69.1's 4.9–8.3 % band; only **7 of 48** fall inside it, six
+probes never touched the reference at all, and the maximum is 25.0 %. The standing list is right to
+warn against the 3.0 % figure: it is below every probe in this arm.
+
+Also visible in the same output, and worth recording: **four arm probes ended on a node that scored
+ZERO** — `capA10` (best 249.3451, last 0.0000), `capB11` (237.3300 → 0.0000), `capB8`, `freeB5`.
+§84's rule is the only reason those four have a number, inside the arm that was measuring something
+else entirely.
+
+## §290 — a reassuring all-clear over zero probes examined
+
+`pgr1` is the first probe on `pagerank` — launched to make that task's ruler constant checkable at
+all (§287). Running `outlier_check` against it produced:
+
+```
+1 running probe(s) against 119 finished edge_expansion runs
+  no probe is outside the corpus on any process variable
+```
+
+**Nothing was examined.** The probe's path is built from `--task`, so `runs/edge_expansion/` matched
+nothing for a pagerank run and the loop `continue`d in silence — while the header counted the probe
+and the footer gave it a clean bill. The all-clear and the healthy case print the same sentence,
+which is how the sentence stops being read.
+
+Now:
+
+```
+  pgr1       runs pagerank, not edge_expansion -- NOT COMPARED; re-run with --task pagerank
+  NOTHING WAS COMPARED: no running probe is on edge_expansion
+```
+
+and the exit code is 2. The all-clear now carries its own denominator (`1 of 1 compared`) and can
+still fall silent when a probe really is on the right task — an alarm that cannot go quiet teaches
+its reader to skip it. Four mutations red: skipping in silence again, reading an empty examination
+as clean, never counting anything as examined, and never resolving the probe's own task.
+
+**And the anomaly that started the sweep was mine.** `pgr1` read `$0.0518` two sweeps running and I
+took it for a stall. It is not: 17 `llm_usage` events, `$0.0592`, `events.jsonl` one second old, all
+17 generations in `deep_research` — the slow opening phase, which §288 measured as the one phase that
+does get the budget line. Two samples close together in probe-time, not a stuck run. Checking cost
+one query; assuming would have cost a diagnosis.
+
+## §291 — point 9's comparison figures are history, and the corpus has moved
+
+§276 caught `accEE`'s 224.4432 against its own record of 224.8846. This sweep I checked the other
+five the list quotes, from the `--json` data §289 shipped. **Not one of the six is within 0.005 of
+any probe now on this box:**
+
+| task | quoted | what is actually here |
+|---|---|---|
+| pde_heat1d | 124.63, 99.00, 121.85 | 167.21, 133.51, 129.75, 125.92, 120.76 … 30.33, 0.00 |
+| discrete_log | 14.5186, 2.8369 | 16.78, 14.05, 12.40, 12.18 … 5.83, 4.03 |
+| edge_expansion | 224.4432 | `accEE` records 224.8846 (§276) |
+
+The figures are **real and documented** — §68 and the tables around it — and their probes are
+**gone**: the 2026-08-29 container crash took `/var/tmp` with about 69 runs in it, `dsDL` and `dsDL2`
+among them. So they are history, and point 9 reads as though they were the current corpus.
+
+One of them carries a claim that has quietly become false. The list calls `discrete_log`'s pair
+*"самое тонкое несущее число корпуса"* with a spread of **5.1×**. Over the eleven `discrete_log`
+probes that exist now the spread is **4.2×** (4.0326 to 16.7799), and **2.8369 is below every one of
+them.**
+
+`sweep_claims` now checks all six against the live corpus, requiring the `test` subset (§277's
+lesson: a train number wearing the right value is a different measurement) and the matching task.
+Four mutations red, including letting any probe satisfy any figure. That makes **eight claims
+checked and eight stale** — the standing list now has no figure this tool looks at that still holds.
+
+Two smaller things from the same sweep. `outlier_check --task pagerank` correctly refuses with *"no
+finished pagerank runs to compare against"* — the first probe on a task has no corpus, and saying so
+is the right answer. And `sweep_claims`' pagerank line has already changed since §287, from *"no
+probe has staged its reference module here"* to *"no reading recorded yet"*: `pgr1` staged the
+module, so the constant is now merely unmeasured rather than unmeasurable. The probe is paying for
+itself before it finishes.
+
+## §292 — pagerank's ruler is off by 43 %, and it is not the 09-04 re-timing
+
+`pgr1` staged the delivered reference module, so the constant §287 called **uncheckable** could
+finally be read. It reads:
+
+```
+pagerank: [1.4317, 1.4320, 1.4271] -> median 1.4317; the sweep says 1.0024 (+42.8 %)
+```
+
+Three repeats within 0.005 of each other, so not noise — and six times the disagreement of the other
+three tasks (−8.5 %, +6.6 %, +7.2 %). Four things checked before writing this down:
+
+- **Not the 09-04 re-timing.** `pagerank`'s TEST baseline was rewritten on 09-04 by §193's arm A
+  work while every other entry dates from 08-31, which made it the obvious suspect. Its TRAIN twin,
+  untouched since **08-31 00:36**, reads **1.4908** — *higher* still. Two baselines written four
+  days apart agree with each other and disagree with today by the same large factor.
+- **Not a loaded box when the baseline was written.** `pagerank`'s cached timings are as tight as
+  any: cv 0.13 test / 0.11 train, p10–p90 of 84–113 ms against a 109 ms median. `discrete_log`'s
+  cv is 2.33 and nobody suspects it.
+- **Not a changed reference.** `AlgoTuneTasks/pagerank/` has not been touched since `init`, and the
+  module `pgr1` staged is byte-identical to the repo's.
+- **Not the method.** `edge_expansion` TRAIN, run through the same tool on the same lane minutes
+  later, reads **0.9157** against its TEST **0.9007** — consistent, and consistent with §281.
+
+What is distinctive about `pagerank` is how much of an evaluation is real work:
+
+| task | per-instance work as a share of wall clock |
+|---|---|
+| edge_expansion | 16 % |
+| discrete_log | 24 % |
+| pagerank | **35–36 %** |
+| pde_heat1d | 67 % |
+
+**I am not re-timing the baseline yet, and the reason is `pgr1`.** It is running now and being
+scored against exactly this cached baseline; rewriting the cache mid-run changes its denominator
+half way through, which is §149's mistake with the operator holding the knife. The re-timing goes in
+the gap after `pgr1` finishes, and until then "stale cache or faster box" cannot be told apart —
+which is the honest state, not a conclusion.
+
+`sweep_claims` now carries the reading: `pagerank: list 1.0024, measured 1.4317 on 2026-09-06
+(+42.8 %)`. The constant is no longer unmeasured; it is measured and wrong by a wide margin.
+
+## §293 — pagerank's 43 %: three more suspects dead, and a prediction written down first
+
+§292 left the offset unexplained. Two more experiments this sweep, and one piece of context that
+makes it legible.
+
+**It is not the lane.** The same reading on three different bench lanes: 1.4131, 1.3581, 1.4099.
+
+**It is not memory-bandwidth contention.** That was the standing hypothesis — `pagerank` is
+graph-traversal and might suffer under load where `edge_expansion` does not (§214 measured 0.8865
+solo against 0.8861 loaded for that task). Run three-way concurrent on top of a live probe, pagerank
+gives 1.3581–1.4131 against a solo 1.4317: contention costs **1–7 %**, not 45 %. Real, larger than
+edge_expansion's zero, and nowhere near the offset.
+
+**And it is not the per-instance share**, which was the other candidate: `pde_heat1d` has the highest
+share of an evaluation spent on real work — **67 %** against pagerank's 35 % — and reads +7.2 %.
+
+The context that makes it legible is on the dataset file names. Every task's dataset here is
+`_T100ms_`: 100 ms per instance on the machine that BUILT it. Against our own cached baselines:
+
+| task | our baseline | vs the dataset's machine |
+|---|---|---|
+| discrete_log | 2.2 ms | 46× faster |
+| edge_expansion | 45.4 ms | 2.2× |
+| pde_heat1d | 146.4 ms | 0.7× |
+| **pagerank** | **109.1 ms** | **0.9×** |
+
+`pagerank` is the only task whose cached baseline barely beats the number the dataset's own machine
+hit. That is a hint the baseline is HIGH, not that this box is fast — but it is a hint, not a
+measurement, and `make_task.py` says in as many words that `T100ms` is a target rather than a
+reading of anything here.
+
+**The prediction, written before the measurement that will settle it.** When `pgr1` finishes and the
+baseline can be re-timed without moving a live probe's denominator: if the cache is high, a fresh
+baseline lands near **76 ms** (109.1 / 1.43); if this box is genuinely fast on pagerank, it
+reproduces near **109 ms**. Recording which outcome means what, before running it, is the only thing
+that stops the result from meaning whatever I need it to.
+
+Shipped alongside: `ruler_selfcheck` now prints the dataset target beside every reading, so the
+cross-task context that took this sweep to assemble is one line in the output. Four mutations red —
+including one that survived first: reading the target with a bare `(\d+)` passes every real file
+name, because there the target happens to be the first number. The fixture now puts something in
+front of it.
+
+## §294 — one reference band for four tasks, and the tasks differ
+
+`probe_summary` prints `(§69.1 baseline 4.9-8.3 %)` beside every probe's reference-use figure,
+whatever task it ran. Measured over the 140 probes with five or more executed `run_probe` calls:
+
+| task | n | median import share | inside 4.9–8.3 % |
+|---|---|---|---|
+| edge_expansion | 118 | 8.6 % | 22/118 — 19 % |
+| discrete_log | 11 | 4.8 % | 3/11 — 27 % |
+| pde_heat1d | 11 | 8.3 % | 5/11 — 45 % |
+
+Permutation p that the task means are the same: **0.0080**. The band fits none of the three, and it
+was never measured per task — it is a historical figure being read as a per-task expectation, which
+is §290's cross-task mistake in a gentler form. Worth noting the caveat rather than hiding it: 118
+against 11 and 11, so the test is dominated by one group; the practical point is the coverage
+column, which needs no test at all.
+
+So the band keeps its provenance and gains the task's own measured middle beside it — the same move
+§281 made for the ruler constants. And with `--probe`, where the corpus has been filtered away, it
+says *"this task's middle needs the unfiltered run"* rather than going quiet: two different absences
+want two different sentences, and silence makes a filtered run look like a thin task.
+
+**Three fixtures in a row agreed with the bug.** The mutation that lets low-call probes into the
+median survived twice. First fixture: four zero-call probes against five real ones — the median
+stays 10 % either way. Second: six zero-call probes — but a probe with no calls has `ref_pct` of
+`None` and never reaches the median under any version, so the fixture was testing nothing. The case
+the threshold actually excludes is **one to four** calls, where the share can only be 0, 25, 50, 75
+or 100 % — a number, admitted by any `isinstance` check, and pure quantization in a median. Six of
+those move the middle from 10.0 % to 0.0 %, and the mutation is red. Writing down what a threshold
+excludes turned out to be the only way to find out what it was for.
+
+## §295 — the prediction was right: pagerank's cached baseline is high by 46 %
+
+`pgr1` ended at $1.0123, so the cache could be re-timed without moving a live probe's denominator.
+§293 wrote down what each outcome would mean before the measurement: **~76 ms → the cache is high;
+~109 ms → this box is genuinely fast on pagerank.**
+
+```
+n=100  median 74.581 ms   p10 63.025   p90 78.772
+```
+
+Against the cached **109.133 ms** (p10 84.0, p90 113.4). Not a shifted median — the whole
+distribution has moved. The ratio 109.1/74.6 = **1.46** matches the self-check's independently
+measured **1.43**. Two methods, one answer: **the cached pagerank baseline is high, and this box is
+not unusually fast.**
+
+The evaluator refused to report a speedup for that run — `baseline_measured_in_pass: the
+per-instance reference timings for this task/subset were written during this evaluation, so the
+arena timed the reference and not the candidate`. Exactly right, and worth naming: the fresh number
+is trustworthy as a TIMING and would have been worthless as a RATIO. The one caveat I cannot remove
+with this measurement alone is that a baseline timed in the same pass may run warm; the agreement
+with the self-check's separate 1.43 is what makes "the cache is high" much the stronger reading.
+
+**I have not overwritten the cache.** Doing so reprices every pagerank score including `pgr1`'s,
+which was earned against the old one. That is a decision to take deliberately, not as the tail of a
+diagnosis.
+
+**And the re-timing could not be taken at all until a defect was fixed.** `ruler_selfcheck.one_eval`
+hard-coded `ALGOTUNE_BASELINE_CACHE_DIR` into the child's environment on top of whatever the caller
+had set, and passed `--baseline-times-dir` at the same fixed place. So the first attempt — the
+variable pointed at a scratch directory, exactly as §293 planned — produced an ordinary-looking
+reading against the REAL cache and an empty scratch directory, silently. The same shape as the
+sweep list's own `.env` warning, in the other direction: a value the operator set, overridden
+without a word. The cache is now resolved once, both channels get it, the reading names it when it
+is not the default, and `_cached_median_ms` follows the cache actually in use.
+
+**Two of my own tests were wrong and said so.** The `_T(\d+)ms_` fixture used
+`pagerank_v2_T100ms_…`, a filename the glob `{task}_T*ms_*` will never return — I had written a test
+for a case that cannot occur, to catch a mutation the glob was already catching. The glob now allows
+`{task}*_T*ms_*` so the regex is the thing that decides the shape, and one of them decides instead of
+both half-deciding. The median test still built its path from `BENCH`, which stopped being where the
+cache lives.
+
+**Point 9 on the first pagerank probe.** `pgr1`: TEST **34.2751**, $1.0123, three nodes, 25
+`eval_train`, 37 % of its dollar before the first node and **0 % after the last**, champion a 62-line
+Cython kernel, 53 minutes to first build. Its last node was also its best, so §84's rule cost it
+nothing — the first probe on the task, and the corpus for pagerank is now exactly one.
+
+## §296 — "re-measured HERE" is not the same as still true
+
+With the bench idle, all four references were timed fresh into scratch caches — one task per lane —
+and divided by what the cache holds. Beside the reference-against-itself readings, taken separately
+by a different method:
+
+| task | cached / fresh | self-check reading |
+|---|---|---|
+| edge_expansion | 0.868 | 0.9007 |
+| pde_heat1d | 1.016 | 1.0676 |
+| discrete_log | 1.052 | 1.0830 |
+| **pagerank** | **1.463** | **1.4317** |
+
+The two columns are independent — one re-times the reference, the other runs it as a *candidate*
+against the cache — and they agree to within **0.04 on every task**. So the self-check reading is a
+measure of how wrong the cache is, which was the assumption all along and is now a measurement.
+
+And the answer is not "everything drifted". Three caches sit within 13 %; `pagerank`'s is high by
+**46 %**, and `edge_expansion`'s is *low* by 13 % — a direction the other three do not share. The
+standing sweep says of every entry that it was **re-measured HERE**, which is true and turns out to
+be a different claim from being still right.
+
+`ruler_check` — point 5's own tool, where the operator already looks — now says so:
+
+```
+  PROBLEM: pagerank: its own self-check reads 1.4317 (2026-09-06), so the cached baseline is high
+           by 43 % -- every score on this task divides by it
+```
+
+The tolerance is **15 %** and deliberately not tighter: 0.9007, 1.0676 and 1.0830 are the real
+readings for the other three and none is worth an alarm every sweep — a threshold that fires on all
+four teaches its reader to skip it. The direction is stated because it is what an operator acts on:
+a low cache inflates every score on the task, a high one deflates it, and "off by 30 %" says
+neither. Five mutations red, including tightening the tolerance until the healthy three fire and
+dropping the direction.
+
+**The cache is still not overwritten**, for §295's reason: it would reprice `pgr1`'s TEST 34.2751 to
+about 23.4, and that is a decision to take on purpose rather than as the tail of a diagnosis. What
+has changed is that nobody can now read a pagerank score without the tool saying what it divides by.
+
+## §297 — six mechanisms tested, none reproduces it, and the ruler records nothing
+
+Chasing §296's 46 %, the first useful measurement was per-instance rather than aggregate. Cached
+divided by fresh, instance by instance:
+
+| task | ratio median | p10 | p90 | cv |
+|---|---|---|---|---|
+| pagerank | 1.446 | 1.362 | 1.551 | **0.103** |
+| edge_expansion | 0.887 | 0.786 | 0.983 | 0.136 |
+| discrete_log | 1.036 | 0.903 | 1.169 | 0.123 |
+| pde_heat1d | 1.019 | 0.905 | 1.169 | 0.231 |
+
+`pagerank`'s gap is the **most uniform of the four** — every instance is slower in the cache by
+about the same factor. That rules out a mixed or partly-corrupt file and points at a single global
+condition at the time of writing. So I went looking for the condition:
+
+- **threads** — `OMP/OPENBLAS/MKL/NUMEXPR=1` gives 75.3 ms, defaults give 75.1 ms. No.
+- **load** — three concurrent readings on the other lanes while timing: 76.1 ms against 74.6 idle.
+  A 1–2 % effect. No.
+- **lane** — 1.4131 / 1.3581 / 1.4099 on three bench lanes (§293). No.
+- **the reference** — `AlgoTuneTasks/pagerank/` untouched since `init`, byte-identical to the copy
+  `pgr1` staged. No.
+- **the re-timing date** — the TRAIN twin, untouched since 08-31, disagrees by *more* (1.4908). No.
+- **the cgroup quota** — `cpu.max 9000000 100000` in **all 257** recorded snapshots. No.
+
+Three independent fresh timings land at 74.581 / 75.055 / 75.338 ms. The cache says 109.133. I
+cannot reproduce it, and I am going to say that plainly rather than pick the least-refuted story.
+
+**What I can fix is why it is undiagnosable.** The cache stores the times and nothing else — while
+every other artefact here says where it came from: a probe's `INSTRUMENT.txt`, a snapshot's
+`PROVENANCE.txt`, the regime key in the cache's own filename. So a baseline write now leaves a
+sidecar recording exactly the six things I just spent a sweep testing: worker count, thread
+environment, CPU affinity, load average, cgroup quota, and when. It cannot fix the entries already
+on disk; it stops the next one being a mystery.
+
+Deploying it needed a detour worth recording. `patch_baseline_cache.py --algotune-root …` reported
+**"patched but STALE — missing: write provenance"** and refused to upgrade in place; `--revert` had
+no `.orig`; and a `git checkout` of `baseline_manager.py` came back with **eleven** LOOPLAB markers
+already in it, because this checkout has the patch committed. So the block was applied to the
+deployed file directly and verified fragment by fragment — all five present, the file parses, a
+write now produces its sidecar, and an ordinary reading is unchanged (`discrete_log` 1.0791 against
+the 1.0830 measured before the change).
+
+**A test of mine was trivially true and said nothing.** It asserted each provenance field appeared
+in `patch_baseline_cache.py` — but every required fragment also appears inside `_REQUIRED_FRAGMENTS`
+itself, so the search could never fail, and a mutation deleting `cpu_affinity` from the emitted
+patch passed. It now checks `WRITE_PATCH`, the string actually emitted. Five mutations red.
+
+## §298 — the pagerank ruler is replaced, and one score changed under it
+
+Decision taken by the operator: **re-time and accept.** Both `pagerank` baselines were archived to
+persistent storage, removed from the live cache, and re-measured:
+
+```
+pagerank test :  109.133 ms -> 74.891 ms   (x1.457)
+pagerank train:  110.466 ms -> 75.409 ms   (x1.465)
+```
+
+Both subsets moved by the same factor, which is what §297's uniform per-instance ratio predicted.
+The reference-against-itself reading is now **0.9886** against the standing list's 1.0024 — the
+constant that had been wrong by 43 % is back within 1.4 %, and `ruler_check`'s alarm has cleared.
+The new entries carry §297's provenance sidecar: `auto` workers, load 8.4, `cpu.max 9000000 100000`,
+written 2026-09-06T04:31.
+
+**One score changed, and it was re-measured rather than rescaled.** `pgr1` is the only probe ever
+run on this task. Its champion was re-evaluated against the corrected ruler:
+
+| | TEST |
+|---|---|
+| against the retired 109.1 ms ruler | 34.2751 |
+| against the corrected 74.9 ms ruler | **23.0394** |
+
+The ratio 1.488 is close to the baseline's 1.457 but not equal to it, which is exactly why this was
+re-run instead of divided: arithmetic on a stale number would have produced 23.5 and looked just as
+convincing. The old `final.json` is archived beside the old baselines.
+
+**And the fix broke the tool that checks it, immediately.** `ruler_check` reported both new
+`.provenance.json` sidecars as malformed cache entries — a false alarm I created myself, in the tool
+whose whole job is telling a real problem from a memorised number. A sidecar is now skipped as an
+entry and READ as what it is; the listing shows the conditions beside each baseline:
+
+```
+pagerank    test   w22x1r3  100    74.89  09-06 04:31   [auto workers, load 8.4]
+pagerank   train   w22x1r3  100    75.41  09-06 04:32   [auto workers, load 12.7]
+pde_heat1d  test   w22x1r3  100   146.36  08-31 02:12
+```
+
+Nine older entries have no sidecar and never will; the tool prints them unchanged rather than
+calling the cache broken.
+
+**A mutation run of mine measured nothing and looked like it had.** Three mutations all "failed" on
+`ModuleNotFoundError`: the new tests imported `ruler_check` from a path only a *neighbouring* test
+file had inserted, so they passed when run together and raised when run alone — and a red that comes
+from an import is not a red that comes from the behaviour. Both paths are now set in the file that
+needs them. A second mutation, `row["provenance"] = {} or json.loads(...)`, was a no-op — `{} or X`
+is `X` — so its survival meant nothing either; the real one is red.
+
+## §299 — RETRACTION: the drifting ruler was my own interpreter
+
+**Everything §219, §262, §265, §281, §292–§298 said about a drifting ruler is withdrawn. The
+constants in the standing sweep were right the whole time. The instrument was mine.**
+
+`run_probe.sh` scores every probe with `$ROOT/AlgoTune/.venv/bin/python`. `ruler_selfcheck.one_eval`
+used `sys.executable` — so a self-check launched with `/opt/conda/bin/python`, which is how I have
+launched every one of them, timed the reference under a **different numpy/scipy stack**. Measured
+today on `pagerank`, same task, same lane, same cache, minutes apart:
+
+```
+  venv  (what the bench scores with)   109.999 ms      cached baseline: 109.133 ms
+  conda (what I was measuring with)     74.6 / 75.1 / 75.3 ms
+```
+
+Under the interpreter the bench actually uses, all four constants hold:
+
+| task | the sweep says | measured under the venv | what I had reported |
+|---|---|---|---|
+| pagerank | 1.0024 | **0.9727 / 0.9663** | 1.4317 (+42.8 %) |
+| edge_expansion | 0.9847 | **1.0027 / 0.9997** | 0.9007 (−8.5 %) |
+| pde_heat1d | 0.9958 | **1.0136 / 0.9897** | 1.0676 (+7.2 %) |
+| discrete_log | 1.0162 | **1.0189 / 1.0097** | 1.0830 (+6.6 %) |
+
+Every one within 3.6 %, three of the four within 2 %.
+
+**How far it got.** This was not a stray number. It survived three sweeps; it was reported as a
+finding four times; it was chased through six hypotheses I refuted one by one — lane, thread
+environment, concurrent load, reference version, re-timing date, cgroup quota — and each refutation
+made the remaining mystery look *more* solid, because eliminating causes felt like progress. §293
+even wrote down a prediction before the measurement, which is the right discipline, and the
+measurement confirmed it: **a wrong instrument reproduces its own error perfectly.** Two independent
+methods agreed to within 0.04 (§296) — both of them running under conda. Agreement between two
+readings from the same broken stack is not corroboration.
+
+**And I acted on it.** §298 overwrote a correct `pagerank` baseline with one that was 1.46× too fast,
+and re-scored `pgr1` from 34.2751 to 23.0394 under it. Both are restored from the archive: the
+baselines are back at 109.133 / 110.466 ms, `pgr1`'s `final.json` is back at 34.2751, and the nine
+conda-era readings in the drift log are marked `interpreter: conda (WRONG -- see §299)` rather than
+deleted.
+
+**The fix.** The interpreter is named, not inherited: `bench_python()` returns
+`$BENCH/AlgoTune/.venv/bin/python`, the same one `run_probe.sh` scores with, and `main` refuses at
+the top if it is absent rather than falling back — falling back is exactly how this happened, and
+the fallback was silent. Four mutations red, including pinning to an interpreter the bench does not
+use, which would have been the same defect wearing a fix.
+
+**What this costs the record.** §296's "cached / fresh" table, §297's six-mechanism elimination,
+§298's replacement — all measured under the wrong stack, all withdrawn. What survives is real and
+uncomfortable: the tools that were supposed to catch a mismatched ruler (`ruler_check`'s drift
+alarm, `sweep_claims`' constants check, the provenance sidecar) were all built during this error and
+all faithfully reported it. **Every one of them was measuring my mistake and calling it the bench's.**
+The provenance sidecar §297 added would not have caught it either — it records workers, threads,
+affinity, load and quota, and **not the interpreter.** That field is the one thing it was missing,
+and it is added now.
+
+The shape is the document's own, at the largest size it has reached: not a breakage, a quiet
+mismatch between what I thought I was measuring and what I was measuring — sustained for three
+sweeps by the fact that everything I built to check it inherited the same mistake.
+
+## §300 — the bench is ready for a full campaign, and what it took
+
+The operator's decision was **first the ruler, then launch**. That turned out to mean four things,
+only one of which I had expected.
+
+**1. Fifteen of the twenty campaign tasks had no data on this box.** Measured, not assumed: only
+`discrete_log`, `edge_expansion`, `pagerank`, `spectral_clustering` and `pde_heat1d` had a dataset.
+The other fifteen were fetched from HuggingFace — 874 MiB, of which `convex_hull` alone is 815 MiB
+across 202 shards. `.hf_datasets` went from 129 MB to 1006 MB; 65 GB free on the overlay, so no
+pressure.
+
+**2. Eleven of the fifteen then failed to time at all**, with
+`Task 'multi_dim_knapsack' could not be imported`. Not a missing implementation — all 154 are
+present. The import failed because I was running the timing under `/opt/conda/bin/python`, which has
+no `ortools`. That was the first symptom of §299, and chasing it is what exposed the whole error.
+
+**3. The ten baselines I had already written under conda were retired**, archived beside the others,
+and every one of the fifteen tasks was re-timed under `$BENCH/AlgoTune/.venv/bin/python` — the
+interpreter `run_probe.sh` actually scores with.
+
+**4. The bench now holds 40 cache entries covering all 20 campaign tasks, test and train**, up from
+9 covering 5. Thirty carry §297's provenance sidecar, now including the interpreter field §299
+added; **none names conda**. `ruler_check` reports `all 39 in regime w22x1r3, 100+ instances each`
+with no problems, and the four constants the standing sweep quotes hold within 3.6 %.
+
+What is *not* done, and should be said plainly rather than left implied: nine of the forty entries
+predate the sidecar and will never have one, so their conditions remain unrecorded — the same gap
+that made §292–§298 possible, closed going forward and not backwards.
+
+The campaign can now run 20 tasks against a ruler measured under the interpreter that will score it.
+
+## §301 — the provenance sidecar's first real reading was a false alarm, and the fix is a better field
+
+`ruler_check` now prints the conditions beside each baseline, and the first thing it showed was
+`spectral_clustering train … [auto workers, load 80.6]`. Reading the rest: the thirty baselines
+built in §300 were written at **load 350 to 1817** on a 96-cpu box — the four-lane parallel build.
+That looked like thirty ruined rulers.
+
+**It is not what whole-box load means when the work is pinned.** `min_dominating_set`, written at
+load 1350, re-timed alone: **×0.996**. Load average counts every core; a lane-pinned job does not
+compete with pinned jobs on other cores, so a box at load 1800 can be perfectly quiet inside a lane.
+
+What does bite is other **lanes**, and only for some tasks:
+
+| task | in the cache (4-way build) | re-timed alone | ratio |
+|---|---|---|---|
+| min_dominating_set | 109.570 | 109.984 | 0.996 |
+| queens_with_obstacles | 105.157 | 86.292 / 86.010 | ≈1.22 |
+| max_common_subgraph | 131.797 | 112.833 / 105.041 | ≈1.21 |
+
+Controlled on `max_common_subgraph`, same lane and interpreter: **105–113 ms alone against 130 ms
+with three sibling lanes busy (×1.196)** — and the cache holds 131.797, matching the loaded
+condition. The measurement's own repeatability alone is ±7 %, so single comparisons at this size
+need the repeats they now have.
+
+So the sidecar records the number that actually predicts it: **CPUs busy outside our own lane** — 0
+alone, 44 with two 22-cpu lanes running. Counting distinct affinity *sets* instead read **46 on an
+idle box**, because the evaluator pins each worker to a single core and every core is its own set;
+that version shipped and was caught by its own output. An unpinned writer reports 0 rather than 96:
+a process with the run of the machine has no lane to be crowded out of, and 96 there would read as
+maximum contention while meaning the opposite.
+
+**The open question, stated rather than resolved.** A campaign runs four probes on four lanes at
+once, so a ruler timed with three siblings busy may be the *right* denominator and an idle one the
+wrong one. The current cache holds the loaded value for the fifteen new tasks and unknown conditions
+for the nine older ones. Which condition a ruler should be timed under is now a decision with a
+measured price tag — up to 22 % on some tasks, nothing on others — and it is not mine to take
+quietly. Two of three spot-checked tasks disagree with an idle re-timing by about a fifth; that is
+the number to weigh before the campaign is read, not after.
+
+## §302 — the fifteen new rulers are a mixed bag, and three of them are unusable
+
+§301 left the question open: is the loaded ruler or the idle one right? Before answering that, the
+prior question turns out to matter more — **are the new rulers self-consistent at all?** The
+reference-as-candidate reading should be ~1.0 by construction. Measured, five of the fifteen:
+
+| task | self-check reading | verdict |
+|---|---|---|
+| kcenters | 0.9880 | sound |
+| integer_factorization | 1.0568 | sound |
+| queens_with_obstacles | 1.2922 | **29 % high** |
+| max_common_subgraph | 1.7166 (repeats 1.66, 1.78, and 2.04 under load) | **72 % high** |
+| min_dominating_set | 1.8627 (repeats 2.24, 1.49, 1.71, 1.23) | **86 % high, and unstable** |
+
+`ruler_check` now says so on its own, because the readings are recorded and its §296 drift check
+compares any recorded task against 1.0 — it was written for `pagerank` and finds these without a
+line of new code.
+
+**Two of these numbers contradict something I measured last sweep.** `min_dominating_set`'s cached
+baseline matched an idle re-timing at **×0.996** (§301) — yet its self-check reads 1.86, and the
+repeats swing from 1.23 to 2.24. A cache that agrees with a direct re-timing but disagrees with the
+candidate path by 86 % means the two paths are not measuring the same thing on this task, and the
+instability says at least one of them is not measuring anything stable. I do not know which, and I
+am not going to pick.
+
+**What follows for the campaign, plainly.** Of the twenty tasks, five have long-standing rulers that
+read within 3.6 % (§299), and the fifteen new ones are unverified except for the five spot-checked
+here — of which two are sound and three are not. **Scoring a campaign against the unchecked ten
+would produce numbers with no error bar I can state.** The cheap fix is not a fix: raising a
+tolerance would hide it. What the bench needs before a twenty-task campaign is a self-check reading
+recorded for every task, and the ones that do not read ~1.0 either understood or dropped from the
+task list.
+
+That is a measurement of maybe an hour on idle lanes, and it is the honest next step rather than a
+launch. The five original tasks remain campaign-ready today.
+
+## §303 — nine of the twenty tasks cannot be ruled at all, and the split is exact
+
+§302 left three bad rulers and a question. The self-check was then recorded for **all twenty tasks,
+three repeats each**, and the answer is not "some rulers drifted". It is a clean partition:
+
+| | n | reading range |
+|---|---|---|
+| tasks whose reference solves with **CP-SAT** | 9 | **1.1375 – 1.8545** |
+| every other task | 10 | **0.9021 – 1.0670** |
+
+**No overlap.** `max_independent_set_cpsat` 1.8545, `max_weighted_independent_set` 1.8260,
+`max_clique_cpsat` 1.6028, `max_common_subgraph` 1.4820, `min_dominating_set` 1.3175,
+`queens_with_obstacles` 1.2667, `rectanglepacking` 1.2151, `multi_dim_knapsack` 1.1534,
+`set_cover_conflicts` 1.1375 — against `rbf_interpolation` 1.0670 downward to `kcenters` 0.9021.
+
+**A prediction was written down before the run finished** and is in the record: from the first three
+CP-SAT tasks and six non-CP-SAT ones, I predicted which of the remaining eleven would read high. The
+partition held for every task; the numeric threshold I guessed (>1.15) did not — `set_cover_conflicts`
+came in at 1.1375, just under it. The separation was the claim worth making; the cut-point was not.
+
+**The mechanism is not a drifting cache.** CP-SAT is multi-threaded and its search is
+nondeterministic, so the same solver timed twice does not give the same time: within one task the
+repeats swing **1.72 / 2.09 / 1.85** and **1.32 / 1.48 / 1.19**, against **0.96 / 0.98 / 0.98** for
+`edge_expansion`. A reference-as-candidate reading exists to say "the cache and the box still
+agree"; on these tasks there is no stable time for a cache to hold. That is a property of the task.
+
+So `ruler_check` now says the two things differently, and the distinction has to cut: an identical
+1.86 on a deterministic task is §296's `pagerank` finding and must not be filed under "solver is
+nondeterministic". Four mutations red, including calling everything CP-SAT and assuming it for a
+task whose source cannot be read.
+
+**Two of my tests passed for the wrong reason.** `uses_cpsat(task, root=CPSAT_ROOT)` binds its
+default **at import**, so tests setting `ruler_check.CPSAT_ROOT` changed nothing and every call read
+the real checkout — where the fixtures' pretended properties happen to be true. The guard is read at
+call time now. It took two attempts: the first fix was undone when the mutation script restored the
+file from a backup taken *before* it.
+
+**`spectral_clustering` returns no reading at all**: `invalid_results: 93/100 valid (93.0 %)`. The
+reference does not solve seven of its own hundred instances to the checker's satisfaction, so there
+is nothing to divide. It is neither ruled nor rulable and is the twentieth task.
+
+**Where that leaves a twenty-task campaign.** Ten tasks have a ruler that reads within 7 % of unity.
+Nine cannot be ruled by this method at all. One does not evaluate. A campaign over all twenty would
+produce a mix of numbers with error bars and numbers without, and the two would look identical in
+the results table. **Ten tasks are campaign-ready; the CP-SAT nine need a different scoring rule
+than "divide by a cached reference time", and that is a design decision, not a measurement.**
+
+## §304 — CP-SAT's problem is not noise, it is that its runtime depends on cores
+
+§303 called the nine CP-SAT tasks unrulable and attributed it to nondeterminism. That is half right,
+and the wrong half was doing the work. Timed directly — `min_dominating_set`'s own reference, three
+instances, seven repeats each:
+
+| | instance 0 | instance 1 | instance 2 |
+|---|---|---|---|
+| **22 cores** (a bench lane) | 14.43 ms | 12.01 ms | 16.17 ms |
+| **1 core** | 32.23 ms | 24.88 ms | 36.08 ms |
+| repeat spread, 22 cores | ×1.74 | ×1.19 | ×1.52 |
+| repeat spread, 1 core | ×1.31 | ×1.41 | ×1.28 |
+
+Two things, and the second is the one that matters.
+
+**Restricting to one core does not make it reproducible.** Spreads are ×1.28–1.41 at one core
+against ×1.19–1.74 at twenty-two. CP-SAT's search is randomized whatever it is given, so "pin it and
+the noise goes away" is refuted.
+
+**But the runtime depends on cores by a factor of two.** The same instance takes 14.4 ms with a lane
+and 32.2 ms with one core — **×2.2**. The reference asks for nothing: `cp_model.CpSolver()` with no
+`num_search_workers` and no seed, so CP-SAT takes whatever the process is allowed.
+
+That is enough to produce §303's readings on its own, and it is not noise: per-instance repeat
+spread averages away over a hundred instances, while a systematic core-count difference between the
+baseline pass and the candidate pass does not. A median ratio of 1.85 needs a systematic cause, and
+a 2.2× dependence on allocation is one.
+
+**So the nine are not condemned; they are misconfigured.** The fix is to make both passes give
+CP-SAT the same allocation — which means either fixing `num_search_workers` in the evaluation or
+guaranteeing identical affinity for the reference timing and the candidate timing. Both are changes
+to the scoring harness that alter every CP-SAT number this bench would ever produce, so it is a
+decision to take deliberately, and it is not mine to take quietly. What is now measured is the size
+of the prize: nine of twenty tasks, currently unusable, and one number (×2.2) that says why.
+
+## §305 — the remedy §304 proposed was already in place, and one instrument said otherwise
+
+§304 ended with a proposed fix: give CP-SAT the same allocation in the baseline pass and the
+candidate pass. Before recommending it further I went to check whether the passes actually differ.
+
+**First instrument, and it lied by omission.** `looplab_parallel` logs
+`evaluating N instances on W workers x C core(s)` when it pins. That line appears **zero** times in
+a self-check run and **zero** times in `pgr1`'s whole `run.log`. Read alone, that says the pinning
+path is never engaged.
+
+**Second instrument, and it disagrees.** Sampling `/proc` during a live evaluation, counting the
+affinity width of every python process touching the lane:
+
+```
+  {1: 20, 22: 6, 96: 14}
+```
+
+**Twenty processes pinned to a single core.** The path is engaged; the log line simply is not
+visible at the child's logging level. This is the sweep list's own rule — repeating one instrument
+is useless, a different one is needed — and it cost nothing to obey and would have cost a wrong
+recommendation to skip.
+
+So both passes already receive the same nominal allocation, 22 workers × 1 core, pinned, with a
+matching thread budget. **§304's remedy is not available because it is already done**, and the cause
+of the 1.14–1.85 readings is still open. The `ruler_check` message has been corrected to say so
+rather than send the next reader to do what is already in place; a test now asserts the old remedy
+is *absent* from it.
+
+What remains as the live hypothesis, unmeasured: twenty pinned single-core workers all running
+CP-SAT at once contend for shared cache and memory bandwidth, and the number of concurrently-active
+workers differs between the two passes as each drains its tail. That is testable — run the two
+passes with one worker instead of twenty and see whether the reading falls to 1.0 — and it is the
+next measurement, not a conclusion.
+
+**The pattern is worth naming, because it is now three for three.** §299 retracted a drifting ruler
+that was my interpreter. §304 proposed a fix that §305 refuted within the hour. Each time the error
+was not in the bench but in the instrument I reached for, and each time the correction came from
+picking up a *different* instrument rather than repeating the first one more carefully.
+
+## §306 — the registered test ran, after a third silent override in the same function
+
+§305 registered a test: run both passes with **one** worker instead of twenty and see whether the
+CP-SAT reading falls to 1.0. The first attempt appeared to run and read 1.28 — and wrote a baseline
+named `__w22x1r3`. **With `ALGOTUNE_EVAL_WORKERS=1` set, the run used twenty-two workers.**
+
+`ruler_selfcheck.one_eval` forced `ALGOTUNE_EVAL_WORKERS="auto"` into the child's environment over
+whatever the caller set. That is the **third** silent override in that one function: `sys.executable`
+was §299 and cost a retracted week; the baseline cache was §295 and blocked a re-timing; this one
+made a registered experiment measure the opposite of what it asked for and report a number.
+`looplab_eval.eval_regime` honours the variable perfectly — `1` keys `__lane22r3`, `4` keys
+`__w4x1r3`, `auto` keys `__w22x1r3` — so the fault was entirely local.
+
+With the override removed, the test finally ran:
+
+| task | 22 workers | **1 worker** |
+|---|---|---|
+| min_dominating_set (CP-SAT) | 1.3175 / 1.8627, repeats spread ×1.5 | **1.1450** (1.13, 1.15, 1.20), spread ×1.06 |
+| edge_expansion (control) | 0.9797 | **1.0051** (1.00, 1.01, 1.01) |
+
+**Worker contention is the dominant term.** Dropping from twenty-two workers to one takes the CP-SAT
+reading from 1.32–1.86 down to 1.145 and collapses the repeat spread from ×1.5 to ×1.06. The control
+task is unmoved, so this is not a general property of running with one worker.
+
+**A residual of ~14 % survives, and it is systematic** — all three repeats sit between 1.13 and 1.20,
+none near 1.0. So contention explains most of the gap and something else explains the rest; that
+remainder is the next question, not a conclusion.
+
+Three mutations red on the fix, including one that adds a *fourth* hard-coded value: the test now
+asserts every entry in that environment dict is either a fixed fact about the bench (the data
+directory) or a caller-overridable default, so the next override cannot be added quietly. Finding
+the first three one at a time, each after it had cost something, is what that test is for.
+
+## §307 — the nine CP-SAT tasks are rulable after all: it was the twenty-two workers
+
+§303 concluded the nine could not be ruled. §306 showed contention was the dominant term and left a
+"systematic ~14 % residual". Running the same pair of passes at **one worker** on three more CP-SAT
+tasks and one control settles it:
+
+| task | 22 workers | **1 worker** |
+|---|---|---|
+| max_common_subgraph | 1.4820 | **1.0141** (1.007, 1.028, 1.014) |
+| queens_with_obstacles | 1.2667 | **1.0142** (1.014, 1.023, 0.997) |
+| max_clique_cpsat | 1.6028 | **0.9974** (1.027, 0.980, 0.997) |
+| min_dominating_set | 1.3175 / 1.8627 | 1.1450 (1.13, 1.15, 1.20) |
+| discrete_log (control) | 1.0097 | **0.9965** |
+
+**Three of the four land on unity.** So §306's "residual" is not systematic — it is
+`min_dominating_set` alone, and every other CP-SAT task tested reads within 1.5 % of 1.0 once the
+twenty-two-worker contention is removed. **§303's conclusion is withdrawn: the nine tasks are not
+unrulable. The twenty-two-worker regime is what breaks them.**
+
+The mechanism now hangs together with §304's measurement: CP-SAT's runtime depends on the cores it
+can actually use (×2.2 between one core and a lane), and twenty-two pinned single-core workers
+running CP-SAT simultaneously contend for shared cache and bandwidth in a way that differs between
+the baseline pass and the candidate pass. Take the contention away and the ruler works.
+
+**What that costs to use.** A one-worker ruler is twenty-two times slower to build, and the regime
+key changes from `__w22x1r3` to `__lane22r3`, so it is a *different* cache — the existing forty
+entries are not it. Whether a campaign should score CP-SAT tasks against a one-worker ruler while
+the candidates themselves run twenty-two-wide is exactly the question §301 raised and did not
+answer: a ruler timed under conditions the scored runs will not see is its own kind of wrong. This
+is now a decision with both numbers on the table rather than a mystery.
+
+`min_dominating_set` remains the one task that does not come home at one worker (1.13–1.20 across
+three repeats, none near unity). One outlier out of four, named rather than averaged away.
+
+## §308 — the last outlier explained: a heavy tail is only fatal when the solver is not deterministic
+
+§307 left `min_dominating_set` as the one CP-SAT task that does not come home at one worker. Its
+cached per-instance times spread p10 12.3 ms to p90 81.3 ms — a factor of **6.6 across instances**,
+where the other CP-SAT tasks that came home are tight.
+
+**A speedup here is a SUM** — the reference's total time over the candidate's — so the heaviest
+instances carry the number. Two independent one-worker timings of the *same* reference:
+
+```
+  sum ratio     1.0951      <- what the scorer uses
+  median ratio  1.0249
+  p10 0.8850   p90 1.4063   max 4.6750
+  five heaviest instances (ms, run A -> run B): 93->87, 92->64, 89->22, 87->33, 87->71
+```
+
+Two of the five heaviest instances took a **quarter to a third** of the time on the second run.
+CP-SAT got lucky. And those are precisely the instances a sum weights most.
+
+**A prediction was recorded before the confirming run.** From the tail ratios across the whole
+cache: `discrete_log` has the heaviest tail on this box, **p90/p10 = 276**, and reads 0.9965 —
+because it is deterministic and the tail cancels exactly. So neither condition alone predicts
+anything. The pair does, and among CP-SAT tasks the ordering should follow the tail. I predicted
+`max_independent_set_cpsat` (32.2) would also miss unity at one worker, unlike `max_clique_cpsat`
+(13.1) and `queens_with_obstacles` (3.4), which came home. It reads **1.2361** (1.27, 1.24, 1.14).
+
+| task | CP-SAT | p90/p10 | one-worker reading |
+|---|---|---|---|
+| min_dominating_set | yes | 51.9 | 1.145 **misses** |
+| max_independent_set_cpsat | yes | 32.2 | 1.236 **misses** |
+| max_common_subgraph | yes | 15.0 | 1.014 |
+| max_clique_cpsat | yes | 13.1 | 0.997 |
+| queens_with_obstacles | yes | 3.4 | 1.014 |
+| discrete_log | no | 276.4 | 0.997 |
+
+Exact ordering inside the CP-SAT group, and the deterministic task with a tail five times heavier
+than any of them is perfectly stable. `ruler_check` now reports the tail ratio when it exceeds 30,
+and says why it matters. Five mutations red, including measuring the tail from the minimum instead
+of the p10 and letting a zero p10 divide.
+
+**So the twenty tasks now sort cleanly.** Ten non-CP-SAT tasks rule within 7 % as they are. Five
+CP-SAT tasks with light tails rule at one worker. Two CP-SAT tasks with tails above 30 do not rule
+under either regime — a sum-weighted score over a randomized solver's worst instances is not a
+measurement, and no amount of re-timing fixes that. The remaining two CP-SAT tasks are untested at
+one worker; their tails (`max_weighted_independent_set` 45.2, `rectanglepacking` 13.3) predict one
+of each.
+
+## §309 — both remaining predictions held, and the twenty tasks are now sorted
+
+§308's rule — a CP-SAT task rules at one worker if its per-instance tail is light, and does not if it
+is heavy — made two more predictions. Both were recorded before the runs and both held:
+
+| task | p90/p10 | predicted | measured at one worker |
+|---|---|---|---|
+| rectanglepacking | 13.3 | comes home | **0.9871** (1.000, 0.974, 0.987) |
+| max_weighted_independent_set | 45.2 | misses | **1.2468** (1.425, 1.247, 1.122) |
+
+The full CP-SAT picture, seven of nine tested:
+
+| task | p90/p10 | one-worker reading | |
+|---|---|---|---|
+| min_dominating_set | 51.9 | 1.145 | misses |
+| max_weighted_independent_set | 45.2 | 1.247 | misses |
+| max_independent_set_cpsat | 32.2 | 1.236 | misses |
+| max_common_subgraph | 15.0 | 1.014 | rules |
+| rectanglepacking | 13.3 | 0.987 | rules |
+| max_clique_cpsat | 13.1 | 0.997 | rules |
+| queens_with_obstacles | 3.4 | 1.014 | rules |
+
+**Every task above p90/p10 = 30 misses; every task below 15 rules.** Nothing lands in between, and
+the two untested tasks — `set_cover_conflicts` (12.3) and `multi_dim_knapsack` (4.2) — are both well
+below the line. The threshold `TAIL_RATIO_LIMIT = 30` now has seven points under it rather than the
+one it was guessed from.
+
+**The twenty tasks, sorted:**
+
+- **Ten** non-CP-SAT tasks rule as they are, at twenty-two workers, within 7 % of unity.
+- **Six** CP-SAT tasks (four measured, two predicted) rule at **one worker** — a ruler that is 22×
+  slower to build and lives in a different cache (`__lane22r3`).
+- **Three** CP-SAT tasks rule under neither regime, because a sum-weighted score over a randomized
+  solver's heaviest instances is not a measurement and no re-timing repairs it.
+- **One**, `spectral_clustering`, produces no reading at all: its own reference fails 7 of its 100
+  instances (§303).
+
+That is the honest inventory a campaign would be run against, and it took eight sections to get —
+five of which corrected an earlier one of mine. Every number above is reproducible with
+`ruler_selfcheck --task T --lane L --reps 3` under `ALGOTUNE_EVAL_WORKERS=1`, which is only true
+because §306 removed the override that made that flag a no-op.
+
+## §310 — the sorted inventory, computed instead of remembered
+
+§309's twenty-task sorting lived in a documentation table. A hand-typed table is the thing this
+bench keeps discovering it cannot trust — §291 found six comparison figures quoted from probes that
+no longer exist, §300 found fifteen tasks with no data at all, §303 found nine rulers that do not
+read unity — so `benchmarks/task_inventory.py` derives it from the cache, the recorded self-check
+readings and the task sources, every time it is asked. It reproduces §309 exactly:
+
+```
+  RULES AS IS  (10)                 rbf_interpolation 1.0670 … kcenters 0.9021
+  RULES AT ONE WORKER  (6)          max_clique_cpsat, max_common_subgraph, queens_with_obstacles,
+                                    rectanglepacking, multi_dim_knapsack, set_cover_conflicts
+  UNRULABLE  (3)                    max_independent_set_cpsat (tail 32), max_weighted_independent_set
+                                    (45), min_dominating_set (52)
+  UNREAD  (1)                       spectral_clustering
+  16 of 20 can be scored against a ruler that reads unity
+```
+
+The task list comes from `campaign.sh`'s own default rather than from a list in this file, so the
+inventory cannot drift from what the campaign would actually run.
+
+**The control that keeps the rule honest is in the tests.** `discrete_log` has the heaviest tail on
+the box — p90/p10 = **276**, five times any CP-SAT task — and rules as it is, because it is
+deterministic. A rule that sorted on the tail alone would condemn the most stable task here; a
+mutation doing exactly that is red. So is one that files a *deterministic* task reading 1.85 under
+"CP-SAT", which would have buried §296's `pagerank` finding.
+
+Five mutations red in total. And the end-to-end test asserts the three group sizes on the real
+bench, so a change to the cache or the readings that silently re-sorts the campaign is a failing
+test rather than a different table.
+
+## §311 — spectral_clustering's own reference trips its own reward-hack detector
+
+The one task §310 files as UNREAD refuses with `invalid_results: 93/100 valid`. Running the
+reference against the task's own `is_solution`, instance by instance:
+
+```
+  7 of 100 reference solutions rejected by the task's own checker
+     instances 1, 26, 55, 61, 62, 64, 84
+  ERROR:root:Detected argmax over a k-column subset (suspicious).
+```
+
+Exactly the seven the harness counts, from a second instrument. The rejection comes from an
+anti-reward-hacking heuristic inside `is_solution` (line 763) that looks for a solution which is an
+argmax over a k-column subset of the spectral embedding — and **the reference's own output looks
+like that** on seven instances, because that is more or less what spectral clustering *is*. So the
+task is unscorable here: 100 % validity is required and its reference cannot reach it. That is an
+upstream defect, not a bench one, and nothing on this box can repair it.
+
+**My probe was wrong three times before it was right, and each time plausibly.** First it read the
+raw JSON and reported `100 of 100` with `points=2` — the matrices are external `.npy` files behind
+`{"__type__": "ndarray_ref", "npy_path": …}` and only `stream_jsonl`'s decoder resolves them. This
+is the method note's own "манифест считает ВНЕШНИЙ архив" in another costume. Second, with decoding
+fixed, it still said `100 of 100` — `AttributeError: 'SpectralClustering' object has no attribute
+'is_solution'`, because `from …spectral_clustering import SpectralClustering` binds **sklearn's**
+class: the module imports it at line 13 and the task is `SpectralClusteringTask`. Third time it
+agreed with the harness.
+
+Each wrong version returned a clean, quotable number. The only thing that caught them was that
+`100 of 100` did not match the harness's `93/100` — an implausibility, not a test. That is the same
+guard that saved §287 and §289, and it is the last line of defence rather than a method.
+
+**While there: the downloaded datasets are complete.** Tasks needing external arrays have them —
+`spectral_clustering` 200 `.npy` files, `convex_hull` 200, `rbf_interpolation` 2 — and tasks that
+need none have no `_npy_data` directory. The §300 fetch pulled the payloads, not just the manifests.
+
+## §312 — the loudest open item on the list is checked now, by driving it
+
+The sweep list marks `campaign.sh`'s evidence overwrite **ОСТАЁТСЯ ОТКРЫТЫМ** — the only item it
+capitalises that way. §267 closed it by driving the real `archive_tree`, and since then I have been
+re-reporting that from memory each sweep. `sweep_claims` now re-drives it instead:
+
+```
+  STALE  point 8: campaign.sh's rm -rf still overwrites the first attempt's evidence
+         driven here: attempt 1 survives as .superseded-1 with 400 rows, first 'attempt1 row 0'
+         -- the per-attempt versioning the note asks for is in place (§267), keyed on a PREFIX
+         check so an equal-length second attempt is caught too
+```
+
+**Driven, not grepped**, and the difference is the point: a source-grep passes on a function whose
+behaviour has changed underneath its comment. The check archives 400 rows, does what `campaign.sh`
+does — `rm -rf` the task root, write an equal-length attempt 2 at the same path — and looks inside
+what survived.
+
+**A mutation survived and the fixture was the reason, for the fourth time in this series.** Accepting
+any `.superseded-1` regardless of contents passed every test, because the fixture that loses evidence
+writes *no* such file — so "exists" and "holds attempt 1" were never distinguished. The new fixture
+is an `archive_tree` that writes a superseded file containing attempt **two**: evidence-shaped and
+evidence-free. That is the failure that would actually fool a reader, and it is now red.
+
+Also pinned: "cannot be driven" must not read as "the note is stale". A bench without `snapshot.sh`
+reports the claim as unrefuted, and a mutation flipping that is red — reporting a claim as refuted
+because the tool was missing is precisely the false reading this file exists to stop.
+
+**And one thing that needed no new work.** Nineteen of the twenty tasks produced a self-check
+reading, and a reading requires 100 % valid instances — so every one of those references passes its
+own checker, and §311's `spectral_clustering` is provably the only self-rejecting reference on the
+box. That follows from the readings already taken rather than from twenty more runs.
+
+## §313 — the three unchecked snapshot claims, driven; and a contention field that measured nothing
+
+Three items on the standing list carried the words **НЕ ПРОВЕРЕНО мной**. They are now driven every
+sweep rather than read, by `sweep_claims.check_snapshot_refusals`, against the real `snapshot.sh`:
+
+* a destination that is not a mounted store → **exit 1**, `NOTHING WAS WRITTEN … this is not a skip;
+  it is a failed snapshot`, nothing on disk;
+* another snapshot holding the lock → **exit 3**, nothing on disk, so the timer retries instead of
+  recording a fingerprint;
+* `.env` is not copied — confirmed by looking: no file named `.env` anywhere in a real snapshot, and
+  the only mention of it lives in the timer log.
+
+The lock arm cost 80 s the first time because it had to hold the lock longer than the wait, so the
+wait became `SNAPSHOT_LOCK_WAIT_S` (default unchanged at 60) and the message stopped saying "60s"
+from a hardcoded string beside a hardcoded number. Two earlier attempts at the same drive failed on
+my instrument, not the script: a 60 s hold against a 60 s wait let the second run WIN the lock and
+copy 112 MB of bundles into a temp directory, and an 80 s timeout killed the refusal ten seconds
+before it printed.
+
+Read live at 12:07 on 2026-09-06, the newest snapshot directory had no `ENVIRONMENT.txt`. It had one
+at 12:09:24. That is the hazard the `.complete` marker exists for — written last, after the
+shortfall check — and `restore_from_snapshot.sh` walks newest-first and **skips any directory
+without it**. The marker is honoured by the thing that restores, not merely written.
+
+### The field that read 22 for both answers
+
+Chasing the constants, `check_ruler_constants` reported `discrete_log` at −7.7 % and `pagerank` at
+−5.2 % against the list. Re-run alone on one lane, `discrete_log` came back **1.0274** against the
+06:38 reading of **0.9380** — a 9.5 % swing with lane, interpreter, cached baseline and task all
+held fixed. The 06:38 rows were taken during the ruler rebuild, four lanes self-checking within
+seconds of each other. The prediction that it would come back ≥0.97 was recorded before the run.
+
+The reading rows carried the lane (§266) but not the load, so that pair reads as drift. They now
+carry `busy_cpus_outside_lane`, sampled **between the reps while the work runs** rather than after
+it, and `check_ruler_constants` takes the most recent QUIET reading as its verdict instead of the
+most recent one.
+
+Then the count itself was driven, and it did not survive:
+
+| box | §295's count (any pinned process) | running-only |
+|---|---|---|
+| idle | **22** | 0 |
+| a pinned neighbour burning eleven cores | **22** | 22 |
+
+The field written into every baseline sidecar since §295 could not tell an idle box from a loaded
+one. The cause was on the same box: **23 orphaned `multiprocessing` forkservers and resource
+trackers**, parent gone (ppid 1), four to six hours old, 648 MiB, still wearing the affinity mask of
+the lane they were born on. State **S**, so the hygiene step — which looks for state Z — reported
+zero zombies on a box carrying two thirds of a gigabyte of dead workers, and the contention field
+counted them as occupancy for hours after they stopped doing anything.
+
+Both ends are fixed: the count requires state `R` (in `ruler_selfcheck`, and delivered into the
+deployed `baseline_manager` through a new in-place upgrade anchor, since this box has no pristine
+copy to re-derive from), and `pulse` reports orphaned pinned bench workers with their age, cpu span
+and resident size — printed **before** the "no bench probe running" early return, because an idle
+box is exactly when nothing else would mention them. The 23 were reaped by PID.
+
+Four mutations are red: counting anything pinned regardless of state, dropping the count from the
+row, forgetting the ppid test in the orphan scan, and sampling the box once after the loop instead
+of during it. The fixtures are built to disagree with each bug — an **idle** pinned neighbour beside
+the busy one, and a **parented** worker with the same command line beside the orphan.
+
+The shape is the file's usual one. `busy_cpus_outside_lane` was added in §295 to explain a drift
+that turned out to be an interpreter (§299); it was never itself measured against a box whose load
+was known, and so it spent eleven days reporting a constant that looked like a measurement.
+
+### A gate that had been red for two days, found by running the whole suite
+
+`tests/test_calibration_profile_home.py` was failing before any edit in this section: `e224c5f3`
+(2026-09-04 04:19) added `Settings.developer_probe_max_calls` — the knob §190's registered arm sets
+— and did not re-pin the calibration profile digest. An AST diff of `Settings` between `e224c5f3^`
+and `e224c5f3` reports exactly that one field added and none removed, which is the test's own
+"field set changed too" branch: `_EXPECTED_FIELD_COUNT` 220 → 221 and both pins re-set, with the
+history line the file asks for. The default is `0`, meaning no cap, so no shipped run behaved
+differently; what moved is the envelope a speculation receipt is compared against, and receipts
+issued before it should stop verifying.
+
+Worth naming the method rather than the bug: it was found by running `tests/` whole after an edit
+that touched only `benchmarks/`, not by any reasoning about what the edit could have broken. The
+same sweep had run the suite before and the failure post-dates that run.
+
+### The reading series was one restart from gone
+
+`.gitignore`'s `*.jsonl` — written for run logs and ledgers — also covered
+`benchmarks/algotune/ruler_selfcheck_log.jsonl`. Forty dated readings, 7 KB, living on `/var/tmp`,
+in no snapshot: a bundle carries git, and a gitignored file is not in git. This box lost `/var/tmp`
+once already, on 2026-08-29. The series is the only artefact that can say WHEN a ruler and the box
+parted (§214) and it cannot be recomputed after the fact, so it is now un-ignored with a `!` rule
+and committed. Noticed only because `git status` did not list it after three readings were appended.
+
+## §314 — the CP-SAT excess is not contention, and "rules at one worker" was never read
+
+§301 asked whether a campaign may score CP-SAT tasks against a one-worker ruler while the
+candidates run twenty-two wide. Three measurements on an idle box, each with its prediction
+recorded first, answer it — and two of the three predictions were wrong.
+
+**Prediction 1 (refuted).** Every ruler on disk was timed 05:18–05:38 at loadavg 354–1817, and the
+readings that classified nine CP-SAT tasks were taken 06:27–06:57 with three or four lanes busy, so
+the excess above unity should be contention baked into the baseline. Re-timing on an idle box:
+
+| task | cached baseline | quiet baseline | sum ratio |
+|---|---|---|---|
+| max_clique_cpsat | 42 767 ms | 46 411 ms | 0.92 |
+| min_dominating_set | 53 009 ms | 49 961 ms | 1.06 |
+
+Two per cent and eleven, not the 1.6× and 1.3× the readings showed. The contention is not in the
+baseline.
+
+**Prediction 2 (refuted).** Then it is on the reading side, and reading the quiet baseline on a
+quiet box comes home. It does not: max_clique_cpsat reads **1.5291** (1.4618–1.8145) and
+min_dominating_set **1.2367** (1.0517–1.5806), on an idle box, against baselines built on that same
+idle box minutes earlier.
+
+**Prediction 3 (held).** With both passes at `ALGOTUNE_EVAL_WORKERS=1`, max_clique_cpsat reads
+**0.9922** (0.9775–1.0022) — unity, and the spread collapses from ±23 % to ±2.5 %.
+
+So the excess is an asymmetry between the baseline pass and the candidate pass that exists **only at
+twenty-two workers**, on an otherwise idle box. Baseline-against-baseline reproduces to 8 %;
+baseline-against-candidate is off by 50 %. §301's answer is therefore not "a ruler timed under
+conditions the scored runs will not see": at twenty-two wide the harness cannot reproduce unity for
+these tasks *at all*, so CP-SAT tasks must be scored serially or not scored.
+
+### What the inventory was asserting
+
+`classify` called six tasks **rules at one worker** from "CP-SAT and a light tail" — an inference,
+printed in the same column as measured numbers, with no one-worker reading anywhere in the readings
+log. (The numbers existed in `ruler_check.tail_ratio`'s docstring from an earlier sitting; a
+docstring is not a series.) The verdict now requires a serial-regime reading and otherwise says
+**unread at one worker**, which drops the box from "16 of 20 scorable" to **10 of 20** until those
+readings are taken. Its stated reason — "contention at 22 workers, not the solver" — was wrong and
+is replaced by what was measured.
+
+Readings now record the regime they were taken in, read **off the cache after the fact** rather than
+from `ALGOTUNE_EVAL_WORKERS`: §305 asked for one worker, got twenty-two, and reported a number that
+read like a serial measurement. `latest_readings(regime=…)` splits the series, because 1.5291 and
+0.9922 under one task name are two different questions.
+
+Two defects fell out of doing it. The regime guard in `looplab_eval.py` — right to refuse a silent
+regime switch — made minting a serial ruler beside a twenty-two-wide one impossible in the real
+cache; six tasks refused three times each. It now takes `ALGOTUNE_ALLOW_NEW_REGIME=1`, announced on
+stderr, because the guard is against silence and not against a second regime. And `classify`
+formatted `{tail:.0f}` on a `None` in a branch only CP-SAT tasks reach, which every entry on this
+box happens to avoid by having 100 per-instance times.
+
+Four mutations red: recording the requested regime instead of the observed one, dropping the regime
+from the row, ignoring the regime filter, and claiming one-worker rulability with no serial reading.
+
+### The six serial rulers, and the same trap one level up
+
+The six readings the inventory now demands were taken on the free lane, `ALGOTUNE_EVAL_WORKERS=1`,
+each against a serial baseline minted beside the twenty-two-wide one:
+
+| task | 22 wide | one worker |
+|---|---|---|
+| max_clique_cpsat | 1.6028 | 1.0967 |
+| max_common_subgraph | 1.4820 | 1.0113 |
+| queens_with_obstacles | 1.2667 | 1.0154 |
+| rectanglepacking | 1.2151 | 1.0329 |
+| multi_dim_knapsack | 1.1534 | 1.0401 |
+| set_cover_conflicts | 1.1375 | 1.0341 |
+
+Sixteen of twenty are scorable again — the same count as before, now with a measured number behind
+each of the six instead of an inference.
+
+Two of my own instruments broke on the second regime the moment it existed, both silently:
+
+* `latest_readings()` returns the newest row per task, so four tasks' `reading` column switched from
+  their twenty-two-wide number to their serial one within minutes of the section above being
+  written. Fixed by asking for a regime explicitly.
+* `classify` picked the cache entry by first match, and `lane22r3` sorts before `w22x1r3`, so
+  `max_common_subgraph`'s tail fell from 15.0 to 1.4 with nothing measured.
+
+And the legacy rule needed enforcing rather than documenting: rows written before the key existed
+were all taken twenty-two wide, so they may stand in for a wide reading and never for a serial one.
+The first cut left that to the caller and said so in a comment; the mutation that ignored the
+comment survived, and the test that killed it is the one that asks for an unstamped row in the
+serial slot.
+
+`max_clique_cpsat` also read **0.9922** in one serial sitting and **1.0967** in the next, both on an
+idle box, so a serial verdict is now checked against the same unity tolerance as everything else
+rather than accepted for existing.
+
+### Three tests that encoded the old rule
+
+Running the whole suite after the change turned up three reds, all mine and all the same shape:
+
+* `test_the_live_cache_is_clean_and_in_one_regime` asserted the cache holds ONE regime. §149's rule
+  is about one task's numerator and denominator and still holds exactly; the shortcut that the whole
+  cache is therefore one regime does not, now that a CP-SAT task is priced serially. `ruler_check`
+  gained `scoring_regime(task)` and forgives a serial entry only for the tasks it scores — a serial
+  entry for `pagerank` is still the §149 mistake, and only a fixture can tell the two rules apart,
+  because every real serial entry on this box belongs to a CP-SAT task.
+* `test_a_cpsat_task_with_a_light_tail_rules_at_one_worker` asserted the inference this section
+  refutes, down to the words "contention at 22 workers". It now supplies a serial reading and also
+  checks the blind case.
+* `test_the_real_bench_sorts_into_the_measured_groups` re-did `main`'s wiring with a plain
+  `latest_readings()`, so it read the six serial numbers in the twenty-two-wide column and called
+  them "rules as is" — 16 where the shipped tool said 10. The wiring moved into
+  `task_inventory.inventory()` and the test calls that. Duplicated wiring is how a test comes to
+  check a different program than the one that ships.
+
+## §315 — the concurrency hypothesis dies, and the bench refuses to print the biased number
+
+§314 left the mechanism open. The obvious hypothesis was that the two passes run at different
+concurrency, so a sampler counted the bench interpreter's processes and threads every half second
+through a baseline pass and a candidate pass of `max_clique_cpsat`:
+
+| pass | procs (median over busy samples) | threads |
+|---|---|---|
+| baseline | 80 | 2268 |
+| candidate | 51 | 1077 |
+
+Which looked like a confirmation and was an artefact of my own summary statistic: the windows
+contain different amounts of idle time. The time series says the opposite —
+
+```
+BASELINE   ..  91 procs / 2580 thr  ..  92/2770  ..  81/2196  ..  [5/8 serial gap]  ..  87/2666  ..
+CANDIDATE  ..  [5/50 startup]       ..  93/2484  ..  89/2857  ..  88/2860          ..  85/2661  ..
+```
+
+— both passes work at the same concurrency, ~22 workers and ~2 600 threads. **Prediction 4 refuted.**
+A median taken over a window that contains a serial phase is not the concurrency of the pass.
+
+So the mechanism is still open, and it is now bounded on four sides: it is not baseline staleness
+(re-timing quiet moves 2 %), not box contention (idle box, 1.5291), not worker count (identical
+profiles), and it scales with the task's own timing variance (§316 corrects the reading of that last
+clause: it is not zero on deterministic tasks, only small). What remains is inside how each pass
+turns ten timed runs into one number under oversubscription. Both use `min_time_ms`; both warm on a
+neighbouring problem; the run counts come from the same `EVAL_RUNS`. Named here so the next sitting
+starts from the four things it is not.
+
+### The number is refused rather than remembered
+
+The inventory knew CP-SAT tasks are only rulable serially, and nothing stopped a campaign from
+scoring one twenty-two wide and printing it. `looplab_eval` now refuses with its own reason,
+`regime_not_scorable_for_task`, registered in the vocabulary `compare_arms` reads: a task whose
+reference imports `cp_model` or `ortools` is not scored in a `__w<N>x<C>` regime.
+`ALGOTUNE_SCORE_ANYWAY=1` overrides it and says on stderr that the number carries the bias. The rule
+reads the reference rather than a list of task names, because a name list goes stale the first time
+upstream adds a solver — this box has been bitten by a name-keyed check before.
+
+Driving it end to end immediately caught what the unit test could not: `eval_regime()` returns
+`__lane22r3`, not `lane22r3`, so `startswith("lane")` was False and the guard refused the serial run
+too — telling the operator, in its own message, to make the run it had just refused. The test had
+typed the stripped key by hand, so fixture and bug came from the same wrong idea about the key's
+shape. Both keys now come from `eval_regime()` itself. Measured after the fix: serial scores
+(1.0733), wide refuses, override scores (1.8529 — a fourth sample of the biased number, beside
+1.6028, 1.5291 and 1.7702).
+
+## §316 — the asymmetry is not CP-SAT's, and pagerank's constant was never unmeasurable
+
+Two corrections to what this file said last sitting, both from measurement.
+
+**pagerank was not "UNCHECKABLE here".** `check_ruler_constants` carried a comment naming the three
+tasks with probe trees on the box and concluding that pagerank's constant could not be read until a
+probe ran on it. `pgr1/ws/pagerank/reference_pagerank.py` had been on disk the whole time, findable
+by the glob one line above the comment, along with sixteen more under `_ruler/ws/`. A remembered
+list contradicted by the file system, inside the file whose subject is remembered numbers. Read
+quietly on the free lane: **0.9994** against the quoted 1.0024 (−0.3 %), where the reading it had
+been carrying, 0.9507, came from the four-lane rebuild at 06:50. The reason is now globbed at call
+time and states how many trees the glob found; two mutations are red, including one that hardcodes
+the old three names.
+
+Three of point 5's four constants now hold on a quiet box: pagerank −0.3 %, discrete_log +0.5 %,
+edge_expansion +1.0 %.
+
+**And §315's "invisible on the ten deterministic tasks" is wrong.** `pde_heat1d` is deterministic
+(p90/p10 = 1.4) and reads **1.0198** and **1.0387** in two quiet sittings hours apart. (The words
+that followed here — "drifting away from unity rather than scattering around it" — were themselves
+a conclusion from a sample of two, and §317 refutes them with ten more readings. The task's mean
+really is above unity; the reasoning in this paragraph is not what establishes it.) Prediction 6 said a second sitting would land
+within 1.5 % of unity if that were sampling; it landed at +4.3 %, all four values between 1.025 and
+1.068. Prediction 7 then said the cached ruler must be stale — re-timed on the quiet box it came
+back **14 478 ms against the cached 14 482**, identical to 0.02 %.
+
+So the pass asymmetry is not a CP-SAT property. It is present on a deterministic task with a
+verified-fresh ruler, at 2–4 %, and CP-SAT amplifies it about fifteenfold. The four walls from §315
+still stand and a fifth is added: it is not the ruler's age either. What it costs is now stated
+rather than assumed — a probe scored on `pde_heat1d` carries roughly 3 % in the candidate's favour
+before the candidate does anything.
+
+## §317 — one reading is not a measurement, and §316's own conclusion was one
+
+§316 said `pde_heat1d` "drifts away from unity rather than scattering around it", from two quiet
+sittings at 1.0198 and 1.0387. A third quiet sitting, same box, same cache, same lane, read
+**0.9985**, and a fourth — three reps inside one sitting — read **1.0447, 0.9898, 1.0267**. So the
+scatter is not between sittings, it is between reps minutes apart, and my "drifting, not scattering"
+was a conclusion drawn from a sample of two.
+
+Prediction 9, that each rep leaves orphaned forkservers pinned to the lane and the readings climb
+with them, was refuted too: an orphan sampler ran through the whole sitting and read **zero, all 22
+samples**, while the readings still moved 5.5 % between consecutive reps.
+
+Twelve quiet values of a task whose p90/p10 is 1.4 and whose ruler was verified fresh to 0.02 %:
+
+```
+1.0129 1.0268 1.0094 1.0451 1.0335 1.0438 1.0250 1.0683 0.9985 1.0447 0.9898 1.0267
+```
+
+**One reading carries about ±4 %, and it was being judged against a 2 % tolerance.** That is a false
+alarm generator, and it generated this one: three predictions in two sittings, two of them refuted,
+chasing a "drift" that a single median cannot resolve.
+
+`check_ruler_constants` now pools every quiet per-rep value for a task and reports
+`mean ± standard error` with the count, calling a constant moved only when it lies outside
+**both** two standard errors and the tolerance — the first stops a ±4 % instrument reporting drift
+every other sitting, the second stops a very tight one reporting a quarter of a percent. Four
+mutations red, including one that pools only the medians and so throws the spread away, and one
+that keeps the scatter test but drops the tolerance clause.
+
+With the evidence pooled, the four constants read:
+
+| task | list | quiet reads | mean | |
+|---|---|---|---|---|
+| discrete_log | 1.0162 | 4 | 1.0192 ± 0.0034 | +0.3 % |
+| edge_expansion | 0.9847 | 4 | 0.9948 ± 0.0016 | +1.0 % |
+| pagerank | 1.0024 | 3 | 0.9968 ± 0.0029 | −0.6 % |
+| pde_heat1d | 0.9958 | 8 | **1.0331 ± 0.0068** | **+3.7 %** |
+
+So `pde_heat1d`'s constant really has moved — five standard errors, with a fresh ruler underneath it
+— and the other three hold. The conclusion §316 reached is the one that survives; the reasoning it
+used to get there did not, and the difference is eight readings.
+
+## §318 — the regime gap is a property of the task, and the pooling I shipped mixed the regimes
+
+§317 pooled every quiet reading of a task to judge its constant. The hour both regimes existed for
+the same four tasks, that pooling started mixing them: `pde_heat1d`'s eight quiet WIDE values (mean
+1.0331) and four SERIAL ones (0.9865) came out as twelve reads meaning **1.0177** — a number
+measured nowhere, and precisely the mixing §314 forbade, reintroduced by the fix for a different
+mistake in the file about that mistake. The pool is now keyed by `(task, regime)`, the verdict is
+taken in the regime the task is scored in, and the other regime is printed beside it. Three
+mutations red, including the one that pools them together and the one that lets an unstamped legacy
+row count as serial.
+
+The measurement that exposed it also answers the question §316 left. **Prediction 10** — that
+`pde_heat1d`'s excess is the same pass asymmetry CP-SAT shows, so a serial read lands near 1.03 —
+was refuted: serially it reads **0.9865**, and the spread collapses from ±4 % to ±0.4 %. So both
+the bias and the scatter belong to the twenty-two-wide regime. **Prediction 11** — that the other
+three constants therefore also read 2–5 % lower serially — was half refuted:
+
+| task | quiet wide | serial | gap |
+|---|---|---|---|
+| pde_heat1d | 1.0331 ± 0.0068 (8) | 0.9869 (4) | **−4.5 %** |
+| discrete_log | 1.0192 ± 0.0034 (4) | 0.9939 (4) | **−2.5 %** |
+| edge_expansion | 0.9948 ± 0.0016 (4) | 0.9976 (4) | +0.3 % |
+| pagerank | 0.9968 ± 0.0029 (3) | 1.0000 (4) | +0.3 % |
+
+Two tasks carry a real regime gap and two carry none, so it is **not** a uniform bench bias and
+"score everything serially" is not warranted by this evidence. What is warranted is what the check
+now does: state the number in the regime that will be used, and state the other one beside it, per
+task, from readings rather than from a rule.
+
+For the campaign that means three populations, not two: ten tasks that rule as is at twenty-two
+wide, six CP-SAT tasks that rule only serially (§314, refused outright at twenty-two since §315),
+and — new here — `pde_heat1d` and `discrete_log`, which rule at both but not to the same number, so
+whichever regime a probe on them was scored in has to be recorded with the score.
+
+### And the cache rule I wrote yesterday was refuted by the measurement it forbade
+
+`ruler_check.problems` forgave a serial entry only for CP-SAT tasks — written that way on
+2026-09-06 with a fixture asserting that a serial `pagerank` entry "is still the §149 mistake".
+Taking §318's measurement required minting exactly those entries for four tasks that are scored
+wide, and the live-cache test went red the same night on rulers that had just produced the numbers
+above.
+
+What §149 forbids is one SCORE whose numerator and denominator come from different regimes, and the
+regime key makes that impossible: a run finds its own key or is refused `baseline_regime_mismatch`.
+So the cache may hold either of the two regimes this box measures in, per task; a THIRD — `w4x1r3`
+from a four-worker run on a twenty-two-wide lane — is still a stray, and that is what the test now
+pins. Which regime a task is JUDGED in stays `scoring_regime`'s business, and the second attempt at
+this rule, which keyed the allowance on that, still flagged the four rulers §318 had just used.
+
+## §319 — not thread sensitivity either, and what the denominator is actually made of
+
+**Prediction 12, refuted.** The regime gap splits the four constant tasks in two (`pde_heat1d`
+−4.5 %, `discrete_log` −2.5 %, `edge_expansion` and `pagerank` +0.3 %), so the obvious candidate was
+thread sensitivity: a reference that spawns BLAS work behaves differently when twenty-two of it run
+at once. Timed alone, warm, three instances × five repeats, with and without
+`OMP/OPENBLAS/MKL_NUM_THREADS=1`:
+
+| task | unrestricted | one thread | |
+|---|---|---|---|
+| pde_heat1d (n=8) | 72.4 ms | 71.8 ms | +0.8 % |
+| edge_expansion (n=4408) | 30.4 ms | 30.9 ms | −1.5 % |
+| discrete_log (n=20) | 0.248 ms | 0.244 ms | +1.6 % |
+| pagerank (n=20) | 0.505 ms | 0.517 ms | −2.4 % |
+
+No separation, and the first two rows are at **the dataset's own instance sizes**, read off the file
+names (`_n8_`, `_n4408_`) rather than guessed — the first attempt used n=60 for `pde_heat1d`, which
+is a five-second solve against the dataset's 146 ms, and would have refuted the wrong thing. A sixth
+wall: it is not the solver's threads.
+
+### What the ruler's number is made of
+
+Timing the reference in a plain process at the dataset's own size, under the bench interpreter,
+against the cached per-instance median it divides by:
+
+| task | cached | in-process | overhead |
+|---|---|---|---|
+| pde_heat1d | 146.5 ms | 75.4 ms | **49 %** |
+| edge_expansion | 45.4 ms | 30.4 ms | **33 %** |
+
+Between a third and a half of what the ruler calls "the reference's time" is not the reference
+solving anything. That is not a defect — isolation, warmups and validation are what make the number
+reproducible — but it is the denominator every speedup on this box divides by, and it had never been
+separated into its parts. A reader comparing a candidate against "the reference's time" on
+`pde_heat1d` was comparing it against roughly twice that.
+
+`ruler_selfcheck` now prints the split beside every reading, timed under `bench_python()` for §299's
+reason, and only when the in-process number is the smaller of the two — a direct timing above the
+cached one means the comparison failed, not that the harness has negative overhead. Four mutations
+red, including one that takes the first integer in the file name (`_T100ms_` → 100 instead of
+`_n8_` → 8) and one that times it under whichever interpreter happens to be running.
+
+## §320 — the overhead does not order with the gap either, and it is proportional
+
+**Prediction 13, refuted.** With the denominator split measured on two tasks, the natural guess was
+that the regime gap lives in the harness half: `pde_heat1d` 49 % harness and a −4.5 % gap,
+`edge_expansion` 33 % and none. Measuring the other two at their own dataset sizes:
+
+| task | cached | in-process | harness share | regime gap |
+|---|---|---|---|---|
+| pde_heat1d | 146.5 ms | 76.5 ms | 48 % | −4.5 % |
+| pagerank | 109.2 ms | 60.6 ms | **44 %** | **+0.3 %** |
+| discrete_log | 2.2 ms | 1.3 ms | 42 % | −2.5 % |
+| edge_expansion | 45.5 ms | 29.7 ms | 35 % | +0.3 % |
+
+`pagerank` carries the second-largest overhead share and no gap at all, `discrete_log` a smaller
+share and a real gap. The two do not order together. Seventh wall.
+
+What the four measurements do establish is the **shape** of the overhead, and it is the thing that
+decides whether it matters. The share is 35–48 % across per-instance times spanning **2 ms to
+146 ms**. A fixed per-instance cost cannot do that — it would be almost all of a 2 ms number and a
+rounding error in a 146 ms one. And the bound is not an argument but a score already on the box:
+`remEE8` reads **276.7268** on `edge_expansion`, so its whole measured per-instance time is
+45.5/276.7 = 0.164 ms, and a fixed cost every instance pays cannot exceed that — at most **1.0 %**
+of the reference's 15.8 ms of overhead is fixed. Proportional overhead divides out of a ratio, so it
+does not compress the scores; that is now established rather than hoped.
+
+`check_denominator_composition` drives this every sweep from the recorded readings, which now carry
+both halves (`cached_ms`, `solver_ms`) so nothing has to be re-timed. Its boolean answers the list's
+own claim — that a speedup divides by the reference's time, which it does not, a third to a half
+being harness — and the second question, fixed or proportional, has its own mark in the detail,
+because reusing one boolean for two questions lets one answer hide the other. `discrete_log` carries
+that mark: its best score here is 16.8, which bounds the fixed part only at 14 %, so on that task
+the question stays open.
+
+Four mutations red: calling any overhead proportional, bounding the fixed part with the reference
+instead of the candidate, filling a missing solver half with zero — the fixture for that one has
+`cached_ms` present and `solver_ms` absent, which is the case that actually happens — and the
+earlier pair on the in-process timing.
+
+Also worth recording for point 9: the best `edge_expansion` TEST score on this box is **276.7268**
+(`remEE8`), not the 224.4432 the standing list carries, and not `accEE`'s own 224.8846.
+
+## §321 — the refusal I shipped would have cost a campaign six dollars
+
+§315 made `looplab_eval` refuse to score a CP-SAT reference in a wide regime, which is right: a
+candidate that changes nothing reads about 1.5 there. `campaign.sh` exports
+`ALGOTUNE_EVAL_WORKERS=auto` **once for the whole run**, at line 528, and never revisits it. So a
+twenty-task campaign started today would have spent six dollars on the six CP-SAT tasks and
+collected six `regime_not_scorable_for_task` nulls — a guard doing exactly its job, on a driver
+with no way to satisfy it.
+
+Found by asking what the campaign does with the refusal rather than by watching it happen, which is
+the only affordable order at a dollar a probe.
+
+`run_one` now asks per task, through the same `ruler_check.scoring_regime` the inventory and the
+guard already use, so the three cannot drift apart:
+
+```
+max_clique_cpsat -> 1        pagerank -> auto        no_such_task -> ?
+```
+
+The third column is the part that needed a second pass. `uses_cpsat` answers **False** for a task
+whose reference is missing — right for an inventory, wrong here, because it sends an unknown task to
+the wide regime silently, which is the null-score campaign arriving through the safety net. Driven
+before the fix, `scoring_workers no_such_task` printed `auto`; it now prints `?`, and the driver
+says out loud that it is leaving the campaign default in place.
+
+Three mutations red: always wide, an unreadable reference falling back to the default, and printing
+the answer without exporting it. The test extracts `scoring_workers` from the shipped
+`campaign.sh` and runs it — the §312 pattern — rather than re-implementing the rule beside it.
+
+## §322 — the serial rulers are minted before the money, and the rnd branch had nothing to pull
+
+§321 left half the problem standing. Telling `run_one` to score a CP-SAT task at
+`ALGOTUNE_EVAL_WORKERS=1` only helps on a box that already has that task's serial ruler. On one that
+does not, the same run cannot score, through either of two doors, both driven here:
+
+* without `ALGOTUNE_ALLOW_NEW_REGIME=1` → `baseline_regime_mismatch`, refused before measuring;
+* with it → the first evaluation BUILDS the ruler and returns `baseline_measured_in_pass`, which in
+  a campaign is a node of a paid probe consumed by the denominator.
+
+`declare_baseline_ruler` sets the regime and builds nothing, so the pre-flight now mints what the
+per-task regime will need — both subsets, on the free lane, before any arm starts, skipping what is
+already on disk so a resumed campaign pays nothing. Driven end to end against a wide-only scratch
+cache holding just `max_clique_cpsat__test__w22x1r3.json`: both `__test__lane22r3.json` and
+`__train__lane22r3.json` appeared.
+
+A mint that fails is not fatal and not silent — the task still reaches `looplab_eval`, which refuses
+rather than scoring it wrongly, and the operator is told which task will produce nulls *before* the
+arm runs. That is the entire reason this belongs in the pre-flight.
+
+Four mutations red: minting for every task, only the test subset, re-minting what exists, and
+swallowing the warning. The tests drive the shipped function with `python3` shimmed so the loop's
+decisions are checked in seconds instead of the twenty minutes four real timings cost — and the
+first shim swallowed `scoring_workers`' own `python3` call too, so every task came back `?` and
+nothing was minted: a fixture disagreeing with the test rather than with the bug.
+
+### The rnd branch
+
+Asked to pull it. Measured before merging: `origin/claude/agents-rnd-benchmarks-0cf964` is at
+**546a8e08**, and it holds **zero** commits this bench branch does not — the bench branch is 124
+ahead of it, and the local `rnd-merge` / `rnd-merged` are 367 and 429 behind. The merge ran and said
+`Already up to date`. What HAS moved is `origin/master`, by **99 commits** (`6262f3a1..bf860b72`);
+merging that is the operation the branch's own history calls "merge: origin/master into the rnd
+branch", it has resolved ten to fifteen conflicts each time it was done, and it changes the arm
+under measurement — so it is not something to do in passing.
+
+## §323 — the bridge says why, and the tool an operator watches was guessing from a stopwatch
+
+Two campaign links checked first, both already closed and both driven rather than read: `run_one` is
+backgrounded per task (`run_one "$T" ... &`), so §321's per-task `export ALGOTUNE_EVAL_WORKERS`
+cannot leak into the next task on the same lane; and `regime_not_scorable_for_task` is inside
+`compare_arms`' `NOT_SOLVERS_FAULT`, verified by deleting it — two tests go red, one of them the
+partition test that requires every reason in the bridge's vocabulary to be classified.
+
+The third link was open. `looplab_eval` names every refusal (`baseline_measured_in_pass`,
+`regime_not_scorable_for_task`, `evaluator_timeout`, twelve more) and the name travels into the run
+log inside the node's `stdout_tail` — measured: `data.metric_provenance.unbound_reason` is the only
+`reason`-shaped field the event carries, so nothing structured reaches a reader. `pulse` therefore
+decided "ruler refusal or solver failure" from `eval_seconds < 5`.
+
+That heuristic is right for the refusals which cost no time and **exactly wrong about the costliest
+one**: `evaluator_timeout` returns its zero after the full timeout, so a 900-second arena failure
+printed as "the evaluation ran and came back invalid" — the misclassification `compare_arms`'
+partition exists to prevent, arriving through the door the operator actually looks at.
+
+`pulse` now reads the bridge's own reason and names it; the stopwatch stays as the fallback for a
+node whose stdout the record did not keep, which is the case the heuristic was written for. Three
+mutations red: the stopwatch alone, a regex loose enough to match the word `no_speedup` in prose
+(these logs contain it — the model writes about it), and reading the reason without putting it in
+the row.
+
+## §324 — one word for two worlds: a zero the candidate earned was leaving as "not measured"
+
+Following §323's thread into the corpus: every zero-metric node on this box now carries a bridge
+reason, and the split is
+
+```
+no_valid_speedups 6   evaluator_error 4   invalid_results 2   compilation_failed 1
+```
+
+across 13 nodes in 13 probes, at 8.3–60.9 s. `pulse`'s own docstring said "all 12 zeros in the
+corpus are ... 41-47 s of real evaluation that came back invalid" — wrong on the count, the range
+and the kind: only **2** are `invalid_results`. Twelve of the thirteen probes finished with a real
+score anyway (169–262 on `edge_expansion`); the zeros are single nodes inside them.
+
+The thirteenth is the finding. **`remPde4` finished at 0.0**, and its `final.json` says why:
+
+```
+reason: no_valid_speedups
+is_solution_errors_distinct: 100,  is_solution_error_lines: 122
+"Solution verification failed: max abs err=0.131, max rel err=1.39e+06"
+```
+
+The candidate answered every instance and every answer was wrong. But `no_valid_speedups` sits in
+`compare_arms`' `NOT_SOLVERS_FAULT` — correctly, for the world it was named after, where nothing ran
+at all — so this row left as "not measured", and `arm_readout.score` dropped it too on
+`value <= 0`. Under the arena's own rule (100 % validity or nothing) that zero is real and belongs
+in the mean, exactly as the module's docstring already says of `spectral_clustering` at 95/100.
+Dropping earned failures biases an arm **upward**.
+
+One word covering two worlds is the shape; the evidence that separates them was sitting in the same
+JSON object. Both tools now read it: a non-positive speedup whose block carries `is_solution_errors`
+is a real zero, and one whose block is empty is still the arena's. Four mutations red — every
+`no_valid_speedups` to one side, then to the other, an empty error list counted as evidence, and the
+readout still dropping an earned zero.
+
+Measured rather than assumed, because this touches the registered arm: `remPde4` is the **only**
+`final.json` on the box with a non-positive speedup, and `arm_fidelity.assigned_cap` answers `None`
+for it — no probe in §190's design is affected and its readout does not move. The rule is fixed
+before a design needs it rather than after.
+
+## §325 — переход на master, и тест, который чеканил линейку этой коробки
+
+Ветка rnd действительно влита в master (`merge-base --is-ancestor` = да), так что «переходим на
+master» — это слияние, а не переключение: master не видел **67 файлов, +14 148 строк, 43 новых
+файла** этой ветки. Слито `origin/master f1d1fe30` в ветку стенда, четыре конфликта:
+
+* `looplab_eval.py` — обе стороны добавили РАЗНУЮ новую функцию в одно место (`regime_scores_this_task`
+  и `--print-ruler`/`ruler_identity`). Оставлены обе.
+* `evaluate.py` — объединение двух списков импорта.
+* `llm.py` — один и тот же измеренный дефект, решённый дважды: master вводит выключатель
+  `llm_stream_stall_fallback` (на стенде, где nginx рубит весь запрос, именно не-SSE попытка и
+  умирает) и пишет `stream_attempts` в спан; эта ветка делает деградацию ВОЗВРАТНОЙ (после N
+  хороших не-стримовых вызовов следующий пробует стрим). Слиты оба: восстановление живёт внутри
+  ветки выключателя.
+* `tests/test_calibration_profile_home.py` — взяты пины master (его история уже содержит и
+  `developer_probe_max_calls`, и правило пересчёта при слиянии); проверено, что 227 и его дайджест
+  сходятся с объединённым модулем.
+
+Слияние стоило трёх падений, все три — мои, и все три чинились не поднятием планки:
+
+1. `AttributeError: '_stream_stall_fallback'` — я вычислил состояние деградации ДО проверки
+   `self.stream`, а `tests/test_llm_broker.py` строит клиент через `__new__` с руками
+   проставленными полями. Объединённое выражение не имеет права читать больше состояния, чем
+   читала любая из сторон.
+2. `_post` вырос до 119 строк при храповике в 110. Правильный ответ — не поднять храповик, а
+   вынести решение в `_want_stream()`: это политика, а не транспорт, ровно как говорит тест.
+3. `test_the_live_cache_is_clean_and_in_one_regime` — и вот это оказалось не конфликтом слияния.
+
+### Тест чеканил линейку коробки
+
+В живом `.baseline_times` нашлись `<task>__<subset>__lane2r3.json`: по 100 настоящих замеров,
+`eval_workers=1`, `cpu_affinity [0, 48]`, интерпретатор стенда, написаны 06:02–06:21 и снова 07:04.
+Режим, в котором эта коробка не оценивает НИЧЕГО. В те минуты работал только прогон тестов.
+
+Незаметно это потому, что писатель в `baseline_manager` намеренно отказоустойчив («никогда не терять
+линейку») и глотает собственные исключения — тест, чеканящий в живой кэш, проходит независимо от
+того, легла запись или нет. Доказано прямым опытом: сделал каталог только для чтения и прогнал весь
+набор — **те же два падения, что и у чистого master, ни одного нового, и ни одной созданной
+записи**. Ни одному тесту этот каталог не нужен, а один в него писал.
+
+### Кто писал: не тест, а мой собственный вчерашний код
+
+Опыт «кэш только для чтения» показал, что ни одному тесту каталог не нужен, но при возвращённой
+записи сироты появились снова — значит писал не тест. Поймано **другим прибором**, `/proc`: три
+ОСИРОТЕВШИХ (`ppid 1`) процесса `campaign.sh` в тот момент выполняли `premint_serial_rulers` из
+§322, каждый со своим `ruler_selfcheck.py --lane 0,48 --subset train` и с ЖИВЫМ кэшем в окружении —
+через часы после того, как запустившие их прогоны были убиты. Всякий тест, который гоняет
+`campaign.sh` ради его преднастройки, гонял и настоящий трёхминутный замер на задачу, в тот самый
+каталог, на который делит весь стенд.
+
+Поэтому чеканка стала **опциональной**: преднастройка НАЗЫВАЕТ недостающие линейки и мнёт их только
+по `ALGOTUNE_PREMINT=1`. Причина §322 не изменилась — чеканить их посреди прогона стоит узла платной
+пробы, — но по умолчанию цена ошибки теперь ноль. Три мутации красные: чеканить без спроса, не
+чеканить по спросу, не назвать недостающую линейку. Осиротевшие процессы сняты по PID.
+
+Первым ответом была сессионная фикстура, уводящая всю сюиту на временный каталог. Она стоила двух
+тестов дважды: `test_the_card_says_when_it_lost_its_timings` читает этот каталог НАМЕРЕННО, а его
+пара отличает «карточку с замерами» от «карточки без» тем, что собирает их из двух корней репозитория
+— переменная окружения, перекрывающая путь, делает обе карточки одинаковыми в любом случае. И это
+был не тот ремонт: писал не тест. Фикстура снята, причина записана в `conftest.py` — второй прибор,
+меняющий то, что меряет первый, это не защита, а следующий дефект.
+
+Закрыто в источнике: преднастройка мнёт только под `ALGOTUNE_PREMINT=1`, а ловит рецидив
+`test_the_live_cache_is_clean_and_in_one_regime`. Двадцать две осиротевшие записи — в
+`baseline-retired/stray-lane2r3-2026-09-07/`, не удалены: это измерения.
+
+## §326 — пять таймеров там, где один
+
+Точка 1 обхода спросила, жив ли таймер снимков, и мой собственный ручной скан ответил: **пять**
+процессов `122868, 1174724, 1174739, 1174803, 1174812`. Через секунду четверо из них уже не
+существовали. Причина не в стенде: bash форкается на конвейер и на подстановку команд, а форк
+наследует командную строку родителя — значит таймер, идущий в цикле, выглядит пятью таймерами для
+любого сопоставителя, который читает только `/proc/<pid>/cmdline`. Ровно тот же самосовпадающий
+шаблон, о котором список предупреждает применительно к `pkill -f`.
+
+Дубликат таймера — вещь, которую ловить надо: два снимка сразу дерутся за один замок, и §313
+прогнал, чем это кончается (проигравший выходит с кодом 3, не написав ничего). Именно поэтому
+счётчик не имеет права кричать «пять» всякий раз, когда цикл случайно идёт в момент осмотра.
+
+Различитель — **родитель**: демон запущен через `nohup … &` и усыновлён init, а форк его цикла имеет
+демона родителем. Ни то, ни другое не зависит от момента взгляда, и оба лежат в одной таблице,
+которую скан читает один раз. Правило переехало из ручного скана в `pulse.timer_processes(table)`,
+берущее таблицу процессов, — потому что `/proc` нельзя попросить подержать два таймера, а
+фабрикованную таблицу можно. На живой коробке: **один демон, один форк цикла, дубликата нет**.
+
+Четыре мутации красные: считать таймером каждое совпадение, никогда не сообщать о дубликате,
+ловить заодно `snapshot.sh`, и уронить чтение на процессе, исчезнувшем между `listdir` и `open` —
+перепись, а не транзакция.
+
+## §327 — пункт 8(в) на две трети устарел, и это видно только измерением
+
+Список каждый обход повторяет: «денежная подсказка не доходит до `plan` / `foresight_rank` /
+`hyp_prioritize`». Прогнал `cue_reach` (он РАЗРЕШАЕТ цепочечные промпты; чтение `attributes.input`
+напрямую объявляет фазу слепой всякий раз, когда задан `input_from`, — эта ошибка делалась руками
+дважды: 31.7 % там, где правда 99.3 %) по трём свежайшим деревьям проб:
+
+| фаза | видит | доля трат |
+|---|---|---|
+| plan_step | 100 % | 33.6 % |
+| propose | 90 % | 26.3 % |
+| deep_research | 90 % | 17.6 % |
+| **plan** | **100 %** | 9.7 % |
+| repropose | 92 % | 9.4 % |
+| foresight_rank | **0 %** | 2.7 % |
+| hyp_prioritize | **0 %** | 1.4 % |
+
+`plan` закрыт 2026-08-31 через собственную заметку Разработчика (`repo_developer.py::_propose_plan`)
+и читает **100 %**; `propose`/`repropose`, которых тот же список когда-то звал слепыми, — около
+девяноста. Слепой осталась только панель предвидения, и это **записанное решение**, а не недосмотр
+(`engine/proposal_cues.py`): ранжировщик, выбирающий между кандидатами, которых сам не порождал, не
+имеет более дешёвой опции, на которую мог бы переключиться, — фраза стоила бы токенов на каждом
+вызове и ничего не меняла. У решения есть своя граница пересмотра — «пара процентов», — поэтому
+проверка печатает **долю трат**, а не только охват: 2.7 % и 1.4 %, обе под тремя.
+
+Отгружено не изменение промптов, а проверка: `sweep_claims.check_money_cue_reaches_the_choosers`
+гоняет `cue_reach` каждый обход и называет, какая из трёх фаз действительно слепа и сколько она
+стоит. `cue_reach` получил `--json` — по причине §289: регулярка по колонкам этого же вида однажды
+выбросила все capped-пробы и выдумала «0.0 % против 9.1 %». Четыре мутации красные, и две из них
+пережили первый заход: заглушка печатала JSON независимо от флага (фикстура соглашалась с дефектом),
+а сверка json↔таблица искала число «где-нибудь на странице» вместо пары «фаза → охват».
+
+## §328 — трата после последнего оценённого узла: 5.8 %, а не 3.6 %
+
+Число, ради уменьшения которого и вводилась денежная подсказка, с тех пор цитировалось из docstring
+`engine/proposal_cues.py`: «$3.6067 из $100.2691 (3.6 %) ложится ПОСЛЕ последнего оценённого узла,
+16 из 69 прогонов кончают, держа незавершённую тягу». Прогнал через `probe_summary --json` (он уже
+считает поглощаемую долю на пробу; §72: она читается только рядом с тратой ДО первого узла —
+`remPde` показывал 11 % по этой метрике, потратив 91 % до своего первого):
+
+**5.8 % от $142.5275 по 141 пробе с узлом, медиана по пробе 1.5 %, и 72 из них кончают, держа
+незавершённую тягу** — против 3.6 % и 16 из 69. Корпус вырос, и доля выросла вместе с ним.
+
+**И контрольной группы не осталось.** `cue_reach` говорит: денежная подсказка доходит до `propose`
+в **141 пробе из 141** на этой коробке. Значит это число не может сказать, помогла ли подсказка, —
+только что трата никуда не делась при ней везде. Разделение, которое делало бы вид, что может, было
+бы фикстурой, соглашающейся с надеждой.
+
+Мой первый ad-hoc скрипт дал 6.2 % и 82 пробы против 5.8 % и 72 у отгруженного инструмента —
+расхождение ~7 %, и оставляю его записанным, а не замазанным: считать надо тем прибором, которым
+пользуется пункт 9, а не тем, что написан по случаю (ровно та ошибка, ради которой `probe_summary`
+и существует — «трижды подряд я отвечал на эти вопросы одноразовым скриптом»).
+
+Пять мутаций красные, включая усреднение долей вместо взвешивания деньгами и деление на нулевой
+знаменатель — последнее не гипотетическое: угадав имя денежного поля (`spend`/`usd` вместо `spent`),
+проверка отрапортовала «0.0 % от $0.0000», не заметив, что у неё нет денег вообще. И фикстура:
+встроенный в исходник стаба JSON делает `true` питоновским идентификатором — заглушка падала с
+`NameError` и выглядела ровно как упавший настоящий инструмент; строки переехали в файл.
+
+## §329 — «пользуется ли модель референсом» имеет два ответа на одну пробу
+
+Последняя неперепроверенная величина пункта 9. Прогнал `probe_summary --json` по 142 пробам с
+`run_probe`-спанами:
+
+| величина | медиана | p25 | p75 | макс |
+|---|---|---|---|---|
+| `ref_pct` (доля run_probe-спанов с импортом референса) | **8.3 %** | 5.3 | 12.5 | 30.0 |
+| `ref_call_pct` (с вызовом `is_solution`/`generate_problem`) | 8.3 % | 5.4 | 12.1 | 38.9 |
+
+Список прав в том, что 3.0 % — не та цифра. Но полоса, которую он предлагает взамен, — полоса
+СТАРОГО корпуса: внутри 4.9–8.3 % лежат **30 проб из 142**, а сегодняшний разброс идёт от четверти
+ниже неё до полутора раз выше. Медиана при этом ровно 8.3 — то есть проверка, смотрящая только на
+середину, назвала бы полосу верной; поэтому вердикт считает долю корпуса ВНУТРИ полосы, а не медиану
+(мутация «судить по медиане» — красная).
+
+**И вопрос имеет два ответа на одну и ту же пробу.** `ref_imports`/`ref_calls` считают вхождения
+где угодно в тексте прогона — их больше нуля у всех 142 проб, — а `ref_pct` считает долю
+**собственных `run_probe`-спанов модели**. **20 проб** импортируют референс в написанном коде и ни
+разу не трогают его из пробы: «пользуется ли модель референсом» отвечает «да» или «нет» в
+зависимости от того, какое из двух полей читатель поднял. Обе величины теперь печатаются рядом.
+
+Три мутации красные, включая «проба без `run_probe`-спанов считается нулём» — это утянуло бы медиану
+вниз прогонами, которым вопрос вообще не задавали.
+
+## §330 — TEST против TRAIN: полоса на задачу, и проверка, которая сначала проверяла саму себя
+
+Последняя величина пункта 9, оставшаяся без прибора. По 141 пробе, у которой есть и TEST, и хотя бы
+один оценённый узел:
+
+| задача | проб | медиана | мин | макс |
+|---|---|---|---|---|
+| edge_expansion | 118 | 0.995 | 0.892 | 1.033 |
+| discrete_log | 11 | 1.001 | **0.890** | **1.260** |
+| pde_heat1d | 10 | 1.023 | 0.991 | 1.054 |
+| pagerank | 1 | 0.993 | — | — |
+
+TEST держится за лучший TRAIN с точностью около процента, **а ширина — это собственный хвост
+задачи**: у `discrete_log`, чьи кэшированные времена дают p90/p10 = 276, разброс от 0.890 до 1.260.
+Это и есть неопределённость, сидящая в числе, которое список зовёт самым тонким несущим числом
+корпуса (14.5186 против 2.8369).
+
+**Первый заход проверки был тавтологией.** Она считала полосу по тем же пробам, которые затем судила,
+— выпасть из такой полосы нельзя, и она рапортовала HOLDS о самой себе. Ровно та форма, ради ловли
+которой этот файл и ведётся, записанная в этот же файл. Полосы теперь **запиннены** с датой и числом
+проб; будущая проба вне полосы — это то, что стоит читать, а сдвинувшаяся полоса перепинивается
+строкой о том, почему.
+
+И сразу за этим — вторая ошибка того же рода: запиннив единственную пробу `pagerank` как полосу
+0.993–0.993, проверка на следующем же прогоне пометила **эту самую пробу** (0.99296 вне полосы по
+одному округлению). Одно измерение — точка, а не полоса; полосе нужны хотя бы двое, и сказать это
+дешевле, чем выдумать допуск, которого никто не мерил.
+
+Четыре мутации красные: считать полосу по судимым пробам, молча пропустить незапинненную задачу,
+судить одну пробу как полосу, не сообщить о выходе за полосу.

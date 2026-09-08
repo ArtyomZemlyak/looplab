@@ -1,0 +1,338 @@
+"""A running probe's probe-count is a lower bound; a finished one's is the answer.
+
+`arm_fidelity` counts `run_probe` calls to check that the capped arm really made fewer than the
+uncapped one. Mid-flight that comparison inverts by construction: the treated probes stop dead at
+their cap of 12 while the controls are still climbing through 9, 10, 11. Three sweeps in a row the
+tool printed "NO CONTRAST YET: the control has not out-probed the treatment" at exactly the moment
+the intervention was working perfectly — treat 12.0, control 10.5, contrast −1.5 — and the sentence
+reads as evidence about the intervention when it is evidence about the clock.
+
+So the contrast is computed over FINISHED probes only, and `finished` is the EXISTENCE of
+`final.json`, never its contents: §198's rule that this tool reads no scores still holds.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
+
+import arm_fidelity  # noqa: E402
+
+REFUSAL = "(run_probe refused: this run has already made 12 probes, the cap set for this run.)"
+
+
+def _probe(root: Path, name: str, executed: int, refused: int = 0, finished: bool = True,
+           paused: bool = False, resumed: bool = False):
+    d = root / name / "runs" / "edge_expansion" / "run"
+    d.mkdir(parents=True)
+    events = []
+    if finished:
+        events.append({"type": "run_finished", "data": {"reason": "budget_exhausted"}})
+    if paused:
+        events.append({"type": "pause", "data": {"reason": "a Developer session crashed"}})
+    if resumed:
+        events.append({"type": "resume", "data": {}})
+    (d / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events),
+                                    encoding="utf-8")
+    spans = []
+    for i in range(executed):
+        spans.append({"kind": "tool", "name": "tool", "attributes": {
+            "tool": "run_probe", "phase_span": f"s{i // 3}", "output": "ok"}})
+    for j in range(refused):
+        spans.append({"kind": "tool", "name": "tool", "attributes": {
+            "tool": "run_probe", "phase_span": "s9", "output": REFUSAL}})
+    (d / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans), encoding="utf-8")
+    # A final.json is written by a PAUSED run too -- that is what made the first version of this
+    # fix wrong -- so every probe here has one and it decides nothing.
+    (root / name / "final.json").write_text(json.dumps({"speedup": 999.0}), encoding="utf-8")
+
+
+def test_mid_flight_the_tool_refuses_to_state_a_contrast(tmp_path):
+    """The exact shape observed: treated at the cap, controls still climbing, nothing finished."""
+    _probe(tmp_path, "capA3", executed=12, refused=4, finished=False)
+    _probe(tmp_path, "capB3", executed=12, refused=2, finished=False)
+    _probe(tmp_path, "freeA3", executed=9, finished=False)
+    _probe(tmp_path, "freeB3", executed=14, finished=False)
+    got = arm_fidelity.report(str(tmp_path), ["capA3", "capB3"], ["freeA3", "freeB3"])
+    assert got["contrast"] is None, (
+        f'contrast {got["contrast"]} was stated from four running probes; a treated probe that has '
+        "stopped at its cap against a control still climbing measures the clock")
+    assert sorted(got["running"]) == ["capA3", "capB3", "freeA3", "freeB3"]
+
+
+def test_a_finished_batch_still_reports_its_contrast(tmp_path):
+    """Batch 1's real numbers: treat 12 and 12, control 31 and 21 -> +14."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _probe(tmp_path, "capB2", executed=12, refused=5)
+    _probe(tmp_path, "freeA2", executed=31)
+    _probe(tmp_path, "freeB2", executed=21)
+    got = arm_fidelity.report(str(tmp_path), ["capA2", "capB2"], ["freeA2", "freeB2"])
+    assert got["contrast"] == 14, got
+    assert got["treat_n"] == 2 and got["control_n"] == 2 and got["running"] == []
+
+
+def test_a_running_probe_is_counted_but_not_compared(tmp_path):
+    """One finished pair plus a running one: the contrast comes from the finished pair alone, and
+    the running probe is still NAMED -- an arm silently dropping a probe is its own failure."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _probe(tmp_path, "freeA2", executed=26)
+    _probe(tmp_path, "capB3", executed=12, refused=1, finished=False)
+    got = arm_fidelity.report(str(tmp_path), ["capA2", "capB3"], ["freeA2"])
+    assert got["contrast"] == 14 and got["treat_n"] == 1, got
+    assert got["running"] == ["capB3"]
+    assert got["rows"]["capB3"]["executed"] == 12, "a running probe must still be counted and shown"
+
+
+def test_a_paused_probe_is_not_a_finished_one(tmp_path):
+    """`freeB3`, 2026-09-04: auto-paused at node 2 -- "a Developer session crashed (LLM
+    unreachable)" -- with $0.86 of $1.00 spent, and it wrote a `final.json` all the same (602 bytes,
+    speedup 260.9543). The first version of this fix asked whether that file EXISTS and counted the
+    probe as a completed control. It is not finished; it is OWED work."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _probe(tmp_path, "freeA2", executed=26)
+    _probe(tmp_path, "freeB3", executed=34, finished=False, paused=True)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA2", "freeB3"])
+    assert got["control_n"] == 1 and got["contrast"] == 14, (
+        f'the paused probe was counted into the contrast: {got}')
+    assert got["paused"] == ["freeB3"], got
+    assert "freeB3" in got["running"], "a paused probe must still be named, not silently dropped"
+
+
+def test_finished_is_an_EVENT_and_not_a_file(tmp_path):
+    """§198: this tool reads no scores. The signal is the TYPE `run_finished`, never `final.json`'s
+    contents -- parsing that file would put a score on this screen."""
+    _probe(tmp_path, "capA2", executed=12)
+    _probe(tmp_path, "freeA2", executed=26)
+    for n in ("capA2", "freeA2"):
+        (tmp_path / n / "final.json").write_text("", encoding="utf-8")   # empty: decides nothing
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA2"])
+    assert got["contrast"] == 14 and got["running"] == [], got
+
+
+def test_a_probe_that_never_started_is_not_a_zero(tmp_path):
+    """No spans at all is a probe that has not begun, and averaging a 0 into the arm would report
+    an intervention effect made of a probe that never ran."""
+    _probe(tmp_path, "capA2", executed=12)
+    _probe(tmp_path, "freeA2", executed=26)
+    (tmp_path / "capB2").mkdir()
+    got = arm_fidelity.report(str(tmp_path), ["capA2", "capB2"], ["freeA2"])
+    assert got["treat_median"] == 12 and got["treat_n"] == 1, got
+    # NOR IS IT "STILL RUNNING". Mutation showed the first two assertions pass with the
+    # never-started filter deleted, because an unstarted probe is unfinished either way; the
+    # difference only shows here. A probe listed as running is one an operator will wait for.
+    assert got["running"] == [], (
+        f'{got["running"]} reported as still running, but capB2 has no spans at all -- it has not '
+        "started, and naming it makes the arm look like it is waiting on work that never began")
+
+
+def test_a_resumed_probe_is_running_again_and_not_still_paused(tmp_path):
+    """Events are append-only, so "is there a pause event" answers PAUSED for ever. `freeB3`'s
+    order is `pause 12:32:26`, `resume 12:36:06`, then paid calls to 13:03:16 -- it was running,
+    and the tool reported it paused and owed work while it spent money."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _probe(tmp_path, "freeA2", executed=26)
+    _probe(tmp_path, "freeB3", executed=34, finished=False, paused=True, resumed=True)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA2", "freeB3"])
+    assert got["paused"] == [], (
+        f'{got["paused"]} still reported paused after a resume event; the state is the LAST '
+        "lifecycle event, not any of them")
+    assert "freeB3" in got["running"], "a resumed probe is running and must still be named"
+    assert got["control_n"] == 1 and got["contrast"] == 14, got
+
+
+def _dev(root: Path, name: str, n: int):
+    """Append `n` `run_dev_command("eval_train")` spans to an existing probe."""
+    d = root / name / "runs" / "edge_expansion" / "run"
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        for _ in range(n):
+            fh.write(json.dumps({"kind": "tool", "name": "tool", "attributes": {
+                "tool": "run_dev_command", "phase_span": "s0",
+                "input": json.dumps({"command": "eval_train"}), "output": "speedup 12.3"}}) + "\n")
+
+
+def test_the_channel_is_counted_beside_the_dose(tmp_path):
+    """A cap that reduced probes and changed nothing else would be an intervention with no channel.
+    The refusal text points at `run_dev_command("eval_train")`, so that is the count that says
+    whether the push landed. Batch 1+2's real numbers: treat 33.0, control 24.5."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _dev(tmp_path, "capA2", 30)
+    _probe(tmp_path, "capB2", executed=12, refused=7)
+    _dev(tmp_path, "capB2", 36)
+    _probe(tmp_path, "freeA2", executed=31)
+    _dev(tmp_path, "freeA2", 23)
+    _probe(tmp_path, "freeB2", executed=21)
+    _dev(tmp_path, "freeB2", 26)
+    # A RUNNING treated probe with a large count, which must not enter the median: its evaluations
+    # are a lower bound exactly as its probe count is. Mutation showed that without this the
+    # finished-only filter on the channel was never exercised at all.
+    _probe(tmp_path, "capA4", executed=12, refused=2, finished=False)
+    _dev(tmp_path, "capA4", 90)
+    got = arm_fidelity.report(str(tmp_path), ["capA2", "capB2", "capA4"], ["freeA2", "freeB2"])
+    assert got["treat_evals"] == 33 and got["control_evals"] == 24.5, got
+    assert got["eval_contrast"] == 8.5, got
+    assert got["contrast"] == 14, "the probe contrast moved when eval_train counting was added"
+    assert got["rows"]["capA4"]["evals"] == 90, "a running probe must still be counted and shown"
+
+
+def test_eval_train_is_counted_from_the_ARGUMENT_not_a_tool_name(tmp_path):
+    """`eval_train` is an argument to `run_dev_command`; a counter keyed on the tool NAME sees none
+    of them, and one keyed on the raw line counts generations that merely mention it."""
+    _probe(tmp_path, "capA2", executed=12)
+    _dev(tmp_path, "capA2", 5)
+    d = tmp_path / "capA2" / "runs" / "edge_expansion" / "run"
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "generation", "name": "generation", "attributes": {
+            "phase": "plan", "output": "next I will run eval_train twice"}}) + "\n")
+    _probe(tmp_path, "freeA2", executed=20)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA2"])
+    assert got["treat_evals"] == 5, (
+        f'{got["treat_evals"]}: a generation that merely says "eval_train" is not an evaluation')
+    assert got["control_evals"] == 0
+
+
+def _cost(root: Path, name: str, dollars: float):
+    d = root / name / "runs" / "edge_expansion" / "run"
+    with open(d / "events.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "llm_usage", "data": {"cost": dollars}}) + "\n")
+
+
+def test_a_pause_at_the_spend_ceiling_is_a_finished_run(tmp_path):
+    """§228: a run that reaches `llm_budget_usd` inside a developer session was paused with
+    "a Developer session crashed (LLM unreachable or a hard error)" -- the ceiling refusal caught by
+    a blanket handler. 16 of the 105 corpus runs that reached full budget end that way, every one at
+    or past its ceiling. They are COMPLETE, and calling them OWED work is what sent freeB3 back for
+    another $0.1056."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _cost(tmp_path, "capA2", 1.0082)
+    _probe(tmp_path, "freeA4", executed=27, finished=False, paused=True)
+    _cost(tmp_path, "freeA4", 1.0031)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA4"])
+    assert got["paused"] == [], (
+        f'{got["paused"]}: a pause at $1.0031 of a $1.00 ceiling is the end of the money, not a '
+        "provider failure, and resuming it spends past the cap")
+    assert got["control_n"] == 1 and got["contrast"] == 15, got
+
+
+def test_a_pause_WELL_BELOW_the_ceiling_is_still_a_pause(tmp_path):
+    """The distinction has to cut both ways or it is just a way of ignoring pauses. freeB3 paused
+    at $0.86 of its $1.00 in the events log -- genuinely mid-run, genuinely owed work."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _cost(tmp_path, "capA2", 1.0082)
+    _probe(tmp_path, "freeB3", executed=34, finished=False, paused=True)
+    _cost(tmp_path, "freeB3", 0.8645)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeB3"])
+    assert got["paused"] == ["freeB3"], got
+    assert got["contrast"] is None, "an unfinished control was compared anyway"
+
+
+def test_a_negative_cost_row_cannot_buy_a_run_back_below_the_ceiling(tmp_path):
+    """A malformed or negative amount must not subtract from what a run has paid -- otherwise one
+    corrupt row turns a finished run back into one that looks OWED work, and §213 is what that
+    costs. `_safe_cost` degrades an unusable amount to 0.0 elsewhere for the same reason; mutation
+    showed no fixture here exercised it."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _cost(tmp_path, "capA2", 1.0082)
+    _probe(tmp_path, "freeA4", executed=27, finished=False, paused=True)
+    _cost(tmp_path, "freeA4", 1.0031)
+    _cost(tmp_path, "freeA4", -0.5)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA4"])
+    assert got["paused"] == [], (
+        f'{got["paused"]}: a -$0.50 row pulled a run that had spent $1.0031 back below its ceiling')
+
+
+UNKNOWN = ("(unknown tool: run_probe; available here: arxiv_search, concept_card, concept_nodes, "
+           "cross_run_atlas, cross_run_claims (+36 more))")
+
+
+def test_a_call_to_a_tool_the_phase_does_not_offer_is_not_an_execution(tmp_path):
+    """`run_probe` is not available in every phase. A model that calls it where it is not gets
+    `(unknown tool: run_probe; available here: …)` back in 2 ms having run nothing.
+
+    `capA6` did that once in `propose` and read as **13 executed under a cap of 12** — an
+    off-by-one that was the counter's, not the engine's: capA6's own refusals all say "already made
+    12 probes". A fidelity number that can exceed its own cap is worth none of the doubt it creates.
+    """
+    _probe(tmp_path, "capA6", executed=12, refused=4)
+    d = tmp_path / "capA6" / "runs" / "edge_expansion" / "run"
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "tool", "name": "tool", "attributes": {
+            "tool": "run_probe", "phase_span": "s9", "phase": "propose",
+            "input": json.dumps({"argument": "import time"}), "output": UNKNOWN}}) + "\n")
+    _probe(tmp_path, "freeA6", executed=26)
+    got = arm_fidelity.report(str(tmp_path), ["capA6"], ["freeA6"])
+    assert got["rows"]["capA6"]["executed"] == 12, (
+        f'{got["rows"]["capA6"]["executed"]} executed under a cap of 12; the unknown-tool span was '
+        "counted as a probe that ran")
+    assert got["rows"]["capA6"]["unavailable"] == 1
+    assert got["rows"]["capA6"]["refused"] == 4, "an unknown tool is not a cap refusal either"
+
+
+def test_a_probe_that_ran_and_failed_is_still_an_execution(tmp_path):
+    """The discriminator is the HARNESS declining, not the probe's own outcome. Code that raises
+    inside a probe used the environment and must count; treating every error as a non-execution
+    would erase most of what probes are for."""
+    _probe(tmp_path, "capA6", executed=5)
+    d = tmp_path / "capA6" / "runs" / "edge_expansion" / "run"
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "tool", "name": "tool", "attributes": {
+            "tool": "run_probe", "phase_span": "sX", "phase": "plan_step",
+            "input": json.dumps({"code": "1/0"}),
+            "output": "Traceback (most recent call last):\nZeroDivisionError: division by zero"}})
+            + "\n")
+    _probe(tmp_path, "freeA6", executed=20)
+    got = arm_fidelity.report(str(tmp_path), ["capA6"], ["freeA6"])
+    assert got["rows"]["capA6"]["executed"] == 6, got["rows"]["capA6"]
+    assert got["rows"]["capA6"]["unavailable"] == 0
+
+
+def _config(root: Path, name: str, cap):
+    d = root / name / "runs" / "edge_expansion" / "run"
+    (d / "config.snapshot.json").write_text(
+        json.dumps({"llm_budget_usd": 1.0, "developer_probe_max_calls": cap}), encoding="utf-8")
+
+
+def test_the_assignment_is_checked_against_the_runs_own_config(tmp_path):
+    """Counts verify the treatment by BEHAVIOUR, which is stronger — except for a probe that never
+    reaches its cap. `capB4` stopped at eleven probes with zero refusals, so its behaviour is a
+    control's; only its own `config.snapshot.json` can say it was capped. It records 12."""
+    _probe(tmp_path, "capB4", executed=11, refused=0)
+    _config(tmp_path, "capB4", 12)
+    _probe(tmp_path, "freeA4", executed=27)
+    _config(tmp_path, "freeA4", 0)
+    got = arm_fidelity.report(str(tmp_path), ["capB4"], ["freeA4"])
+    assert got["misassigned"] == [], got
+    assert got["rows"]["capB4"]["assigned"] == 12 and got["rows"]["freeA4"]["assigned"] == 0
+
+
+def test_a_treated_probe_that_was_never_capped_is_named(tmp_path):
+    """The failure this exists for: the launcher's INSTRUMENT.txt says one thing and the engine got
+    another, and no count can tell, because an uncapped probe that stops early looks like a control.
+    §195 is four minutes of that; a whole batch of it is $4."""
+    _probe(tmp_path, "capA9", executed=11, refused=0)
+    _config(tmp_path, "capA9", 0)                      # the setting never reached the engine
+    _probe(tmp_path, "freeA9", executed=27)
+    _config(tmp_path, "freeA9", 0)
+    got = arm_fidelity.report(str(tmp_path), ["capA9"], ["freeA9"])
+    assert got["misassigned"] == ["capA9"], got["misassigned"]
+
+
+def test_a_control_that_was_secretly_capped_is_named_too(tmp_path):
+    _probe(tmp_path, "capA9", executed=12, refused=3)
+    _config(tmp_path, "capA9", 12)
+    _probe(tmp_path, "freeA9", executed=11)
+    _config(tmp_path, "freeA9", 12)                    # a control carrying the treatment
+    got = arm_fidelity.report(str(tmp_path), ["capA9"], ["freeA9"])
+    assert got["misassigned"] == ["freeA9"], got["misassigned"]
+
+
+def test_a_missing_config_is_not_an_accusation(tmp_path):
+    """A probe whose config has not been written yet, or cannot be read, is unverified -- not
+    misassigned. Calling it a mismatch would put a false alarm in front of an operator every time a
+    probe is a few seconds old."""
+    _probe(tmp_path, "capA9", executed=12, refused=3)
+    _probe(tmp_path, "freeA9", executed=27)
+    got = arm_fidelity.report(str(tmp_path), ["capA9"], ["freeA9"])
+    assert got["misassigned"] == []
+    assert got["rows"]["capA9"]["assigned"] is None

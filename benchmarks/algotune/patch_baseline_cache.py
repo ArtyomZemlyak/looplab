@@ -190,6 +190,91 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                             with open(_ll_tmp, "w", encoding="utf-8") as _ll_fh2:
                                 _ll_json2.dump(baseline_times, _ll_fh2)
                             _ll_os2.replace(_ll_tmp, _ll_key)
+                            # A RULER WITH NO PROVENANCE CANNOT BE DIAGNOSED. On 2026-09-06 the
+                            # cached `pagerank` baseline was found to be 1.45x above three
+                            # independent fresh timings, uniformly across all 100 instances
+                            # (cv 0.10). Six mechanisms were tested and none reproduced it: lane,
+                            # BLAS/OMP thread count, concurrent load, reference version, the date of
+                            # the re-timing, and the cgroup quota (constant across 257 snapshots).
+                            # The reason it stayed undiagnosable is that this file writes the times
+                            # and nothing else -- while every other artefact on this bench records
+                            # where it came from (a probe's INSTRUMENT.txt, a snapshot's
+                            # PROVENANCE.txt, the regime key in this very filename). So each write
+                            # now leaves a sidecar saying under what it was taken. It cannot fix the
+                            # entries already on disk; it stops the next one being a mystery.
+                            try:
+                                import time as _ll_time2, socket as _ll_sock2, sys as _ll_sys2
+                                _ll_lanes = None
+                                try:
+                                    _ll_mine = _ll_os2.sched_getaffinity(0)
+                                    _ll_tot = _ll_os2.cpu_count() or 0
+                                    if _ll_mine and _ll_tot and len(_ll_mine) < _ll_tot:
+                                        _ll_seen = set()      # CPUs, not processes: see below
+                                        for _ll_p in _ll_os2.listdir("/proc"):
+                                            if not _ll_p.isdigit():
+                                                continue
+                                            try:
+                                                _ll_o = _ll_os2.sched_getaffinity(int(_ll_p))
+                                            except Exception:
+                                                continue
+                                            if not (_ll_o and len(_ll_o) < _ll_tot
+                                                    and not (_ll_o & _ll_mine)):
+                                                continue
+                                            # RUNNING, not merely present. Measured 2026-09-06:
+                                            # without this the field read 22 on an idle box and 22
+                                            # under a full neighbouring lane, because 23 orphaned
+                                            # forkservers from a six-hour-dead run were still
+                                            # pinned there. It counted workers that once existed.
+                                            try:
+                                                _ll_st = open("/proc/%s/stat" % _ll_p).read()
+                                                if _ll_st.split(") ")[-1].split()[0] != "R":
+                                                    continue
+                                            except Exception:
+                                                continue
+                                            _ll_seen |= _ll_o
+                                        _ll_lanes = len(_ll_seen)
+                                    else:
+                                        _ll_lanes = 0
+                                except Exception:
+                                    _ll_lanes = None
+                                _ll_prov = {
+                                    "written_at": _ll_time2.strftime("%Y-%m-%dT%H:%M:%S"),
+                                    "host": _ll_sock2.gethostname(),
+                                    "entries": len(baseline_times),
+                                    "eval_workers": _ll_os2.environ.get("ALGOTUNE_EVAL_WORKERS"),
+                                    "min_timeout_s": _ll_os2.environ.get("ALGOTUNE_MIN_TIMEOUT_S"),
+                                    "omp_num_threads": _ll_os2.environ.get("OMP_NUM_THREADS"),
+                                    "openblas_num_threads":
+                                        _ll_os2.environ.get("OPENBLAS_NUM_THREADS"),
+                                    # THE FIELD §297 MISSED, and the only one that mattered: the
+                                    # 46 % "drift" it was written to explain was an interpreter
+                                    # difference (§299), which none of workers/threads/affinity/
+                                    # load/quota can show.
+                                    "interpreter": _ll_sys2.executable,
+                                    # WHOLE-BOX LOAD IS A WEAK PROXY WHEN THE WORK IS PINNED,
+                                    # and it produced a false alarm on its first real use: 30
+                                    # baselines written at load 350-1817 looked ruined, and
+                                    # `min_dominating_set` re-timed alone came back x0.996. What
+                                    # DOES bite is other LANES: measured on `max_common_subgraph`,
+                                    # 105-113 ms alone against 130 ms with three sibling lanes busy
+                                    # (x1.196), and `queens_with_obstacles` x1.219, while
+                                    # `min_dominating_set` is flat. A ruler must be timed under the
+                                    # concurrency it will score under, so the count of busy sibling
+                                    # CPUs busy OUTSIDE our own lane is the number to keep -- counting distinct
+                                    # affinity SETS counted per-core workers instead and read 46.
+                                    "busy_cpus_outside_lane": _ll_lanes,
+                                    "cpu_affinity": sorted(_ll_os2.sched_getaffinity(0)),
+                                    "loadavg": _ll_os2.getloadavg(),
+                                    "cpu_max": (open("/sys/fs/cgroup/cpu.max").read().strip()
+                                                if _ll_os2.path.exists("/sys/fs/cgroup/cpu.max")
+                                                else None),
+                                }
+                                with open(_ll_key + ".provenance.json", "w",
+                                          encoding="utf-8") as _ll_pf:
+                                    _ll_json2.dump(_ll_prov, _ll_pf, indent=2, sort_keys=True)
+                            except Exception as _ll_pexc:   # noqa: BLE001 - never lose the ruler
+                                logging.warning("LOOPLAB baseline provenance not written (%s)",
+                                                _ll_pexc)
                             logging.info("LOOPLAB baseline cache WRITE %s (%d entries)",
                                          _ll_key, len(baseline_times))
                         except Exception as _ll_exc2:   # noqa: BLE001 - the measurement still stands
@@ -203,6 +288,12 @@ _REQUIRED_FRAGMENTS = [
     ("env-driven cache dir", "os.environ.get(\n            'ALGOTUNE_BASELINE_CACHE_DIR'"),
     ("lane regime key", 'f"__lane{_ll_lane}r3"'),
     ("worker regime key", 'f"__w{_ll_w}x{_ll_c}r3"'),
+    ("write provenance", '"cpu_affinity": sorted(_ll_os2.sched_getaffinity(0))'),
+    ("provenance names the interpreter", '"interpreter": _ll_sys2.executable'),
+    ("provenance counts busy cpus", '"busy_cpus_outside_lane": _ll_lanes'),
+    # A deployment carrying the field but not this line writes a number that cannot tell an idle
+    # box from a loaded one, which is worse than no field: it is a measurement-shaped constant.
+    ("provenance counts only RUNNING cpus", '.split()[0] != "R"'),
     ("write gate", "LOOPLAB baseline cache NOT WRITTEN"),
 ]
 
@@ -221,6 +312,24 @@ _GATE = """                    if _ll_key and not os.environ.get('ALGOTUNE_BASEL
                             import json as _ll_json2, os as _ll_os2"""
 
 
+# The running-state upgrade. The deployed file carries the ORIGINAL three-line condition verbatim,
+# because both came out of this generator; anchoring on it is what lets a box that already has the
+# field get the fix without a revert-and-re-derive cycle it has no pristine copy for.
+_RUNNING_ANCHOR = """                                            if (_ll_o and len(_ll_o) < _ll_tot
+                                                    and not (_ll_o & _ll_mine)):
+                                                _ll_seen |= _ll_o"""
+_RUNNING = """                                            if not (_ll_o and len(_ll_o) < _ll_tot
+                                                    and not (_ll_o & _ll_mine)):
+                                                continue
+                                            try:
+                                                _ll_st = open("/proc/%s/stat" % _ll_p).read()
+                                                if _ll_st.split(") ")[-1].split()[0] != "R":
+                                                    continue
+                                            except Exception:
+                                                continue
+                                            _ll_seen |= _ll_o"""
+
+
 def _upgrade_in_place(source: str):
     """Deliver missing fragments to an already-patched file. Returns (text, list-of-applied)."""
     applied = []
@@ -228,6 +337,9 @@ def _upgrade_in_place(source: str):
     if "LOOPLAB baseline cache NOT WRITTEN" not in out and _GATE_ANCHOR in out:
         out = out.replace(_GATE_ANCHOR, _GATE, 1)
         applied.append("write gate")
+    if '.split()[0] != "R"' not in out and _RUNNING_ANCHOR in out:
+        out = out.replace(_RUNNING_ANCHOR, _RUNNING, 1)
+        applied.append("provenance counts only RUNNING cpus")
     return out, applied
 
 

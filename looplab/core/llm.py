@@ -83,7 +83,18 @@ _LOG = logging.getLogger(__name__)
 
 # Named stream/timeout constants (previously inline magic numbers). Their retry/backoff siblings
 # (BACKOFF_CAP_S / RETRY_AFTER_CAP_S) live in `llm_transient` and are re-imported above.
-STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client goes non-streaming for good
+STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client stops streaming
+# ...AND HOW MANY GOOD NON-STREAMED CALLS BEFORE IT TRIES STREAMING AGAIN. The degrade used to be
+# "for this client's lifetime", and its rationale was measured on an endpoint where non-streaming is
+# the SAFE mode (glm-5.1: non-stream 2 s, stream wedges). On this bench it is the DANGEROUS one: the
+# gateway sits behind an nginx with `proxy_read_timeout 300`, which without SSE measures the whole
+# generation, and 28 % of `discrete_log` calls once died there at five minutes each.
+# Measured 2026-09-04 on `freeB3`: two empty streamed 200s at 11:39:38 and 11:40:36 (60 s, `att=2`,
+# zero tokens both ways) degraded the client, and the next **51 calls over 23 minutes went
+# unstreamed with no way back** while its prompt grew past 34 k tokens and single answers reached
+# 107 s. Its neighbour `capB3` lost a call to the 300 s ceiling at 12:01:40. A transient upstream
+# hiccup should not spend the rest of a $1 run exposed to that.
+STREAM_STALL_RETRY_AFTER = 20        # good unstreamed calls before one probe attempt re-tries SSE
 # Default first-byte (response-headers) window, seconds. The single source: config.py's
 # `Settings.llm_header_timeout` imports this constant as its field default.
 DEFAULT_HEADER_TIMEOUT_S = 45.0
@@ -1022,6 +1033,9 @@ class OpenAICompatibleClient:
         # for this client's lifetime. Bounded worst case: one idle-timeout, not retries ×
         # idle-timeout of silence.
         self._stream_stalls = 0
+        # Good non-streamed calls since the degrade. At STREAM_STALL_RETRY_AFTER the next call
+        # probes streaming once: if it works the ratchet resets, if it stalls the degrade re-arms.
+        self._unstreamed_since_degrade = 0
         # Whether the two degradations above are TAKEN at all (`Settings.llm_stream_stall_fallback`).
         # `True` is the historical client byte for byte. `False` keeps counting stalls but retries a
         # stalled stream AS A STREAM on the same backoff and never degrades: on a stand whose proxy
@@ -1700,6 +1714,38 @@ class OpenAICompatibleClient:
             self.accountant.add(normalized["cost"], usage=normalized)
             self._last_usage = normalized
 
+    def _want_stream(self, stalled_prev: bool) -> bool:
+        """Does THIS attempt go out streamed? The merge of two answers to the same measurement.
+
+        Master decides WHETHER the degrade is taken at all (`Settings.llm_stream_stall_fallback`):
+        `False` keeps counting stalls but never stops asking for SSE, because on a stand whose proxy
+        bounds the whole request (nginx `proxy_read_timeout 300`) the non-SSE attempt is exactly the
+        one that wall kills -- `oldCK9`, docs/56 §173-175: 58 of 301 calls sent unstreamed on this
+        fallback's initiative, 4 of them dead at 300.0 s.
+
+        This branch made the degrade RECOVERABLE: after STREAM_STALL_RETRY_AFTER good unstreamed
+        calls the next one probes streaming once, so a provider that recovers is not written off for
+        the client's lifetime. With the fallback off, neither the ratchet nor the previous attempt
+        may change what is asked for -- that is master's whole point -- so the recovery lives inside
+        the fallback branch.
+
+        A METHOD RATHER THAN FOUR LINES IN `_post`, because `_post` is under a 110-line ratchet
+        (`test_post_delegates_its_retry_policy_instead_of_re_growing_the_ladder`) and the merged
+        comment pushed it to 119. The ratchet is right: this is a policy, not transport.
+
+        Read lazily behind `self.stream` for `tests/test_llm_broker.py`, which builds a client with
+        `__new__` and hand-set attributes -- an eager read of `_stream_stall_fallback` raised
+        AttributeError on a fixture master's short-circuit never touched.
+        """
+        if not self.stream:
+            return False
+        if not self._stream_stall_fallback:
+            return True
+        if stalled_prev:
+            return False
+        return (self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
+                or self._unstreamed_since_degrade >= STREAM_STALL_RETRY_AFTER)
+
     def _post(self, payload: dict) -> dict:
         # T7 LLM response cache: serve an identical DETERMINISTIC (temp 0) request from cache instead
         # of re-hitting the model — cuts cost on retry/panel/verify flows. Sampling calls (temp>0)
@@ -1728,12 +1774,12 @@ class OpenAICompatibleClient:
             # often answers the SAME request fine without SSE while its stream wedges mid-generation.
             # Streaming is decided HERE, per attempt — never by the caller's payload (`_sdk_chat`
             # reads no `stream` key from it), so every call site gets the same degrade behaviour.
-            # With the fallback OFF (`stream_stall_fallback=False`) the decision is `self.stream`
-            # alone: the ratchets above still COUNT (a trace can say how often the endpoint
-            # stalled) but never change what is asked for.
-            use_stream = (self.stream and (
-                not self._stream_stall_fallback
-                or (self._stream_stalls < STREAM_STALL_DEGRADE_AFTER and not _stalled_prev)))
+            use_stream = self._want_stream(_stalled_prev)
+            if use_stream and self._stream_stalls >= STREAM_STALL_DEGRADE_AFTER:
+                # This attempt IS the probe. Zero the counter here rather than on its result, so a
+                # probe that stalls does not immediately probe again on the next call. It stays in
+                # `_post` because it is a side effect of SENDING, which `_want_stream` may not have.
+                self._unstreamed_since_degrade = 0
             # Say, per ATTEMPT, whether this call went out streamed. The generation span used to
             # carry no record of it at all, so an unstreamed call under a streaming flag could only
             # be found in the proxy's own ledger (docs/56 §173 counted 1,201 of them there).
@@ -1772,6 +1818,11 @@ class OpenAICompatibleClient:
                 # STREAM that produced an empty message (keepalive-only heartbeats, no content/tool_call).
                 empty_stream = self._keepalive_stall(parsed, use_stream)
                 if parsed is not None and not empty_stream:
+                    if self._stream_stalls >= STREAM_STALL_DEGRADE_AFTER:
+                        if use_stream:
+                            self._stream_stalls = 0      # the probe answered: streaming is back
+                        else:
+                            self._unstreamed_since_degrade += 1
                     body = parsed
                     break
                 if empty_stream:                # keepalive-only stream = the same stall family

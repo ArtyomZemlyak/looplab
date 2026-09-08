@@ -27,7 +27,7 @@ import math as _math
 
 from typing import Optional
 
-from looplab.core.llm import BudgetExceeded
+from looplab.core.errors import BudgetExceeded, OperatorRefusal, is_run_ending
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -2565,7 +2565,44 @@ class LLMRepoDeveloper:
                           terminal_salvage=True,
                           fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
-        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+        # EXPLICIT, BEFORE THE PARENT, because master's containment census reads the handlers
+        # rather than their reasoning: `test_containment_census` flags a blind `except` around a
+        # paid call unless `except BudgetExceeded: raise` stands in front of it. The clause below
+        # already re-raises every run-ending refusal, so this changes no behaviour -- it states the
+        # rule where an AST-level check can see it, which is the point of a census.
+        except BudgetExceeded:
+            raise
+        except OperatorRefusal as e:
+            if not is_run_ending(e):
+                # A FAULT, not an ending: an outage, a bad key, a misconfiguration. These keep the
+                # crash sentinel on purpose -- the orchestrator pauses, and "resume once it's fixed"
+                # is the right sentence for them. Only the ceiling is re-raised. See
+                # `errors.is_run_ending` for why the five siblings are not alike.
+                self.last_files = dict(write.files)
+                self.last_deleted = list(write.deleted)
+                from looplab.core.models import developer_artifact_footprint
+                self.last_footprint = developer_artifact_footprint(
+                    idea.footprint, "", self.last_files)
+                return f"{DEVELOPER_ERROR_PREFIX} {e})"
+            # THE CEILING IS NOT A CRASH, and dressing it as one cost more than a wrong word.
+            # `BudgetExceeded` is an `Exception`, so the blanket handler below turned "this run has
+            # spent its $1.00" into the developer-crash sentinel, which the orchestrator answers by
+            # PAUSING the run with "a Developer session crashed (LLM unreachable or a hard error) --
+            # resume once it's fixed".
+            #
+            # Measured over the probe corpus on 2026-09-04: **16 of the 105 runs that reached full
+            # budget end this way**, every one of them at or past its ceiling (median $1.0041) and
+            # every one paused **0.1-0.2 s after its last LLM call** -- the next call, refused. The
+            # other 88 end cleanly with `run_finished / budget_exhausted`. So a normal ending was
+            # being recorded as a provider failure in 15 % of runs, the run was left marked OWED
+            # WORK when it was complete, and §213 is what that costs: I read that message, resumed
+            # `freeB3`, and it spent $0.1056 past its cap before I stopped it by pid.
+            #
+            # Re-raised rather than translated here: the engine already has one reviewed exit for
+            # the ceiling and 88 runs prove it works -- and master's own rule, "a hard budget stop
+            # must propagate, never degrade" (`core/containment.py`), is the same rule stated for
+            # `BudgetExceeded` alone. `OperatorRefusal` is its parent, so this handler keeps that
+            # propagation and adds the four siblings that are faults rather than endings.
             raise
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)

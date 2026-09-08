@@ -587,6 +587,64 @@ declare_baseline_ruler() {
 }
 declare_baseline_ruler
 
+# THE SERIAL RULERS ARE MINTED BEFORE ANY MONEY IS SPENT, because the alternative is spending it.
+#
+# §321 taught `run_one` to score a CP-SAT task at `ALGOTUNE_EVAL_WORKERS=1`. On a box that has only
+# wide entries, that run cannot score: `looplab_eval` refuses `baseline_regime_mismatch` (the serial
+# key is absent while a wide one is there), and with `ALGOTUNE_ALLOW_NEW_REGIME=1` it instead spends
+# the first evaluation BUILDING the ruler and returns `baseline_measured_in_pass` -- a node of a
+# paid probe, consumed by the denominator. Both were driven on this box.
+#
+# So each task that will be scored serially gets its ruler here, on the free lane, before an arm
+# starts: two subsets, no LLM cost, about three minutes each. A task whose ruler already exists is
+# skipped, so a resumed campaign pays nothing.
+premint_serial_rulers() {
+  # OFF BY DEFAULT, AND THAT DEFAULT WAS BOUGHT THE HARD WAY. Measured 2026-09-07: three ORPHANED
+  # `campaign.sh` processes (ppid 1) were found minting rulers into the box's LIVE `.baseline_times`
+  # on lane `0,48`, hours after the runs that started them had been killed -- every campaign test
+  # that drives this script for its preflight was also driving a real three-minute timing per task,
+  # into the one directory the whole bench divides by. Eight `__lane2r3` entries reached it that
+  # way, in a regime this box scores in neither: `ruler_check.problems` flagged them and
+  # `test_the_live_cache_is_clean_and_in_one_regime` went red twice before the writer was caught in
+  # `/proc` with the cache directory in its environment.
+  #
+  # So the pre-flight SAYS what is missing and mints only when an operator asks with
+  # `ALGOTUNE_PREMINT=1`. A campaign that needs the serial rulers still gets them -- one flag, and
+  # §322's reason is unchanged: minting them mid-run costs a node of a paid probe.
+  _minted=0
+  _want=0
+  for _T in $TASKS; do
+    [ "$(scoring_workers "$_T")" = "1" ] || continue
+    for _S in test train; do
+      [ -n "$(ls "$ALGOTUNE_BASELINE_CACHE_DIR/${_T}__${_S}__lane"*.json 2>/dev/null)" ] && continue
+      _want=$((_want + 1))
+      if [ "${ALGOTUNE_PREMINT:-0}" != "1" ]; then
+        echo "  MISSING serial ruler for $_T/$_S (it is scored at one worker; §314). Mint it with" \
+             "ALGOTUNE_PREMINT=1, or that task will be REFUSED at scoring time."
+        continue
+      fi
+      echo "  minting the serial ruler for $_T/$_S (it is scored at one worker; §314)"
+      ALGOTUNE_EVAL_WORKERS=1 ALGOTUNE_ALLOW_NEW_REGIME=1 \
+        python3 "$REPO/benchmarks/ruler_selfcheck.py" --task "$_T" --subset "$_S" \
+        --lane "${PREMINT_LANE:-${LANE_CPUS[0]:-0-10}}" --reps 1 >/dev/null 2>&1 || true
+      if [ -n "$(ls "$ALGOTUNE_BASELINE_CACHE_DIR/${_T}__${_S}__lane"*.json 2>/dev/null)" ]; then
+        _minted=$((_minted + 1))
+      else
+        # NOT FATAL AND NOT SILENT. The task will reach `looplab_eval`, which refuses rather than
+        # scoring it wrongly -- the operator needs to know which task will produce nulls and why,
+        # before the arm runs, not after.
+        echo "  WARNING: could not mint $_T/$_S serially; that task will be REFUSED at scoring time"
+      fi
+    done
+  done
+  [ "$_minted" -gt 0 ] && echo "  minted $_minted serial ruler(s) before the arms started"
+  [ "$_want" -gt 0 ] && [ "${ALGOTUNE_PREMINT:-0}" != "1" ] \
+    && echo "  $_want serial ruler(s) missing; re-run with ALGOTUNE_PREMINT=1 to mint them first"
+  return 0
+}
+# (called below, after `scoring_workers` and the lane plan exist -- a call placed here
+# would run before either was defined.)
+
 # THE GOAL CARD IS PART OF THE ARM, not something an operator has to remember to export.
 #
 # `run_probe.sh` builds its card with `--deliver --one-card --enforce-rules`. This driver passed
@@ -1224,8 +1282,49 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
   return 0
 }
 
+# THE REGIME IS A PER-TASK DECISION NOW, and this driver was still making it once for all twenty.
+#
+# §314 measured the reference submitted as its own candidate on six CP-SAT tasks: 1.1375-1.6028
+# with `auto` (one worker per lane core) and 1.0113-1.0967 with `ALGOTUNE_EVAL_WORKERS=1`, on an
+# idle box against baselines built in each regime. §315 then made `looplab_eval` REFUSE to score a
+# CP-SAT reference in a wide regime -- `regime_not_scorable_for_task` -- because a candidate that
+# changes nothing scores about 1.5 there. This driver exports `auto` for every task, so without
+# this function a twenty-task campaign would spend six dollars producing six null scores.
+#
+# The rule is read from the task's own reference (`cp_model`/`ortools`), through the same
+# `ruler_check.scoring_regime` the inventory and the guard use, so the three cannot drift apart.
+# A helper that cannot answer leaves the campaign default in place and SAYS so: a silent fallback
+# to `auto` here is the null-score campaign again, arriving through the safety net.
+scoring_workers() {                # $1 = task -> "1" (serial) or "auto" (wide)
+  python3 - "$1" "$REPO/benchmarks" <<'PYEOF' 2>/dev/null || echo "?"
+import os
+import sys
+sys.path.insert(0, sys.argv[2])
+import ruler_check
+# AN UNREADABLE REFERENCE IS NOT "NOT CP-SAT". `uses_cpsat` answers False when the file is
+# missing, which is right for an inventory and wrong here: it would send an unknown task to the
+# wide regime silently, which is the null-score campaign arriving through the safety net. Driven
+# 2026-09-07 -- before this check, `scoring_workers no_such_task` printed `auto`.
+if not os.path.exists(f"{ruler_check.CPSAT_ROOT}/{sys.argv[1]}/{sys.argv[1]}.py"):
+    print("?")
+else:
+    print("1" if ruler_check.scoring_regime(sys.argv[1]).startswith("lane") else "auto")
+PYEOF
+}
+
 run_one() {                       # $1 = task, $2 = cpu list
   T=$1; CPUS=$2
+  # Per task, before anything is measured: the width this task is SCORED in.
+  WANT_WORKERS="$(scoring_workers "$T")"
+  if [ "$WANT_WORKERS" = "?" ]; then
+    echo "[$CPUS] $T: cannot read the task's reference to choose a regime; leaving" \
+         "ALGOTUNE_EVAL_WORKERS=$ALGOTUNE_EVAL_WORKERS -- a CP-SAT task will be REFUSED by" \
+         "looplab_eval rather than scored wrongly"
+  elif [ "$WANT_WORKERS" != "${ALGOTUNE_EVAL_WORKERS:-auto}" ]; then
+    echo "[$CPUS] $T: scored at ALGOTUNE_EVAL_WORKERS=$WANT_WORKERS (its reference solves with" \
+         "CP-SAT; §314 measured the reference itself at 1.14-1.60 wide and 1.01-1.10 serially)"
+    export ALGOTUNE_EVAL_WORKERS="$WANT_WORKERS"
+  fi
   MARKER="$OUT/$ARM-$T.done"
   # Per task-arm, so two lanes cannot read each other's breadcrumb. `run_bounded` clears it on
   # entry and writes it only when the stall guard itself does the killing.
@@ -1383,6 +1482,8 @@ reap_orphan_workers
 # sits idle -- which breaks the dedicated-core guarantee the timing argument rests on.
 declare -a LANE_PID
 for L in $(seq 0 $((LANE_COUNT - 1))); do LANE_PID[$L]=""; done
+
+premint_serial_rulers
 
 for T in $TASKS; do
   SLOT=""

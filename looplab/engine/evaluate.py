@@ -54,7 +54,7 @@ from looplab.agents.roles import DeveloperResult
 import orjson
 
 from looplab.core.llm import BudgetExceeded
-from looplab.core.errors import exception_leaves
+from looplab.core.errors import BudgetExceeded, exception_leaves, is_run_ending
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
                                  developer_artifact_footprint, developer_stuck_reason,
@@ -3504,6 +3504,13 @@ class EvaluateMixin:
                 # exit for "the repair call failed at the provider" rather than adding a
                 # second, differently-behaved one. `except Exception` deliberately does not
                 # catch `BaseException`, so cancellation and KeyboardInterrupt still travel.
+                if is_run_ending(_repair_exc):
+                    # RE-APPLIED ONTO MASTER'S REFACTOR of this block (§331). The same rule as
+                    # `repo_developer`'s handler: the spend ceiling is an ENDING, not a provider
+                    # failure, and routing it through the crash sentinel pauses a run that is simply
+                    # finished -- 16 of the 105 runs that reached full budget in the probe corpus,
+                    # every one within 0.2 s of its last call.
+                    raise
                 repaired = DeveloperResult.failed(f"{DEVELOPER_ERROR_PREFIX} {_repair_exc})")
         new_code = repaired.code
         # THE DEVELOPER'S PER-CALL OUTPUTS, OFF THE ENVELOPE. Until 2026-09-06 these five

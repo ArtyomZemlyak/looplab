@@ -88,9 +88,46 @@ def _meter_by_arm(path: str | None = None) -> dict:
     return out
 
 
+ARM_DESIGN = str(Path(__file__).resolve().parent / "arm_readout.py")
+EMBARGO_LIFTED = Path(__file__).resolve().parent / "algotune" / ".arm_readout_taken"
+
+
+def embargoed_probes(design: str = ARM_DESIGN) -> set:
+    """Names §190 forbids showing a score for until the arm has been read.
+
+    THIS TOOL PRINTS A `TEST` COLUMN FOR EVERY PROBE IT FINDS, and the arm's probes live in the same
+    tree as everything else. Pointing it at `BENCH_ROOT` -- the documented default -- puts the arm's
+    outcome on screen, which is the one thing §190 forbids and which `arm_fidelity`, `pulse`,
+    `outlier_check` and `lane_balance` were each built to avoid. I came within one command of it
+    while trying to check this very tool against a NON-arm probe. Same shape as §270: the tools
+    obeyed and the operator did not.
+
+    The embargo lifts when the readout is actually taken, marked by a file rather than inferred, so
+    that lifting it is a deliberate act somebody can find in the history.
+    """
+    if EMBARGO_LIFTED.exists():
+        return set()
+    try:
+        import lane_balance
+        return {n for treat, control in lane_balance.batches(design) for n in treat + control}
+    except Exception:                        # noqa: BLE001 - no design is not a licence to print
+        return set()
+
+
 def _roots(argv: list[str]) -> list[Path]:
     if argv:
-        return [Path(a) for a in argv if Path(a).is_dir()]
+        # AN ARGUMENT THAT IS NOT A ROOT IS AN ERROR, NOT A SILENT DROP. `probe_summary.py accEE`
+        # -- a probe NAME, which is what the checklist talks in -- filtered to an empty list and
+        # printed "no bench roots on this box": a message about the BOX for a mistake on the
+        # command line. Worse with two arguments, where a mistyped root is dropped beside a good
+        # one and the report silently covers a different scope than the one asked for.
+        bad = [a for a in argv if not Path(a).is_dir()]
+        if bad:
+            print(f"not a directory: {', '.join(bad)}", file=sys.stderr)
+            print("this tool takes bench ROOTS, not probe names; probes are filtered with --probe",
+                  file=sys.stderr)
+            return []
+        return [Path(a) for a in argv]
     cands = [os.environ.get("BENCH_ROOT") or "/var/tmp/looplab-bench",
              os.environ.get("SNAPSHOT_RUNS_ARCHIVE")
              or "/home/jovyan/data/looplab-bench/runs-archive"]
@@ -356,8 +393,30 @@ def summarise(run_dir: Path) -> dict | None:
     # of `run_probe` CALLS, not a raw count of regex hits. Reporting counts against a percentage
     # baseline is the same different-denominators mistake this file keeps catching elsewhere, and it
     # sat in this tool for three sweeps.
-    probes = [r for r in tools_all
-              if str((r.get("attributes") or {}).get("tool") or "") == "run_probe"]
+    #
+    # A REFUSED probe is not a probe. `developer_probe_max_calls` (§190) makes `run_probe` return
+    # "run_probe refused: ..." once the run hits its cap, and the span is still a `run_probe` tool
+    # span. Counting those in the denominator dilutes the rate by turns in which NOTHING RAN and so
+    # nothing could possibly have imported the reference. It bites only the capped arm -- `capA2`
+    # read 15.8 % over 19 spans and 25.0 % over the 12 that executed -- which means the bias lands
+    # entirely on the treatment side of the live experiment, and §69.1's 4.9-8.3 % band was measured
+    # on runs where `refused` was zero. Two rates over two different denominators, compared as if
+    # they were one: the same mistake this block's own comment was written to catch.
+    all_probe_spans = [r for r in tools_all
+                       if str((r.get("attributes") or {}).get("tool") or "") == "run_probe"]
+    def _ran(row) -> bool:
+        """A span that actually executed a probe.
+
+        Two ways it did not, and both used to count. The cap's refusal (§202), and a call to
+        `run_probe` in a phase that does not offer it -- the model gets
+        `(unknown tool: run_probe; available here: …)` back in 2 ms having run nothing. `capA6`
+        read as 13 executed under a cap of 12 on the strength of one of those.
+        """
+        out = str((row.get("attributes") or {}).get("output", ""))
+        return not out.startswith("(unknown tool") and "run_probe refused" not in out
+
+    probes = [r for r in all_probe_spans if _ran(r)]
+    refused = len(all_probe_spans) - len(probes)
     ref_pct = ref_call_pct = None
     if probes:
         hit_i = sum(1 for r in probes
@@ -403,6 +462,7 @@ def summarise(run_dir: Path) -> dict | None:
         "ref_imports": ref_imports,
         "ref_calls": ref_calls,
         "run_probe": len(probes),
+        "run_probe_refused": refused,
         "ref_pct": ref_pct,
         "ref_call_pct": ref_call_pct,
         "champion_lines": champ_lines,
@@ -433,11 +493,58 @@ def summarise(run_dir: Path) -> dict | None:
     }
 
 
+def _task_ref_note(task_ref: dict, task: str, filtered: bool = False) -> str:
+    """"; this task: N probes, median M %", or why there is no middle to print.
+
+    WITH `--probe` THERE IS NO CORPUS TO SPEAK OF. The filter skips summarising everything else, so
+    the middle would be computed over the one or two probes asked for -- and silently omitting it
+    then looks identical to a task that genuinely has too few probes. Two different absences want
+    two different sentences.
+    """
+    vals = sorted(task_ref.get(task) or [])
+    if filtered:
+        return "; this task's middle needs the unfiltered run"
+    if len(vals) < 5:
+        return f"; this task has only {len(vals)} probe(s) here, too few for a middle"
+    return f"; this task: {len(vals)} probes, median {statistics.median(vals):.1f} %"
+
+
 def main(argv: list[str]) -> int:
+    wanted = set()
+    while "--probe" in argv:
+        i = argv.index("--probe")
+        if i + 1 >= len(argv):
+            print("--probe needs a name", file=sys.stderr)
+            return 1
+        wanted.add(argv[i + 1])
+        del argv[i:i + 2]
+    show_embargoed = "--include-embargoed" in argv
+    argv = [a for a in argv if a != "--include-embargoed"]
+    # DATA, NOT PROSE, FOR ANYTHING DOWNSTREAM. Checklist item 9 keeps being answered by grepping
+    # this tool's own sentences, and on 2026-09-06 that produced a false arm difference: the
+    # reference line reads
+    #     reference over 12 executed run_probe calls (+10 refused at the cap): 8.3% import
+    # for a CAPPED probe and
+    #     reference over 20 executed run_probe calls: 5.0% import
+    # for an uncapped one, so a regex expecting `calls:` dropped every treated probe and reported
+    # "treat 0.0 %, control 9.1 %" off 24 of 48 rows. The parenthesis correlates perfectly with the
+    # arm, which is the worst possible thing for a selection bug to correlate with. The numbers
+    # exist in `summarise`; they should not have to be recovered from a sentence.
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
+
+    given = list(argv)
     roots = _roots(argv)
     if not roots:
-        print("no bench roots on this box", file=sys.stderr)
+        # NOT THE SAME FAILURE, so not the same sentence. `_roots` has already named the bad
+        # argument; repeating "no bench roots on this box" over it points the reader back at the
+        # box for a mistake on their command line.
+        if not given:
+            print("no bench roots on this box", file=sys.stderr)
         return 1
+    # ARM_DESIGN read HERE, not baked into the default at import time, so the path is one thing a
+    # caller (or a test) can point somewhere else.
+    hidden = embargoed_probes(ARM_DESIGN) if not show_embargoed else set()
     meter = _meter_by_arm()
     seen: dict[str, dict] = {}
     for root in roots:
@@ -445,16 +552,50 @@ def main(argv: list[str]) -> int:
             s = summarise(ev.parent)
             # The live tree and the archive hold the SAME run; keep whichever has more spend, which
             # is the fresher copy. Reporting one probe twice is how the zeros section went wrong.
-            if s and (s["probe"] not in seen or s["spent"] > seen[s["probe"]]["spent"]):
+            if not s or (wanted and s["probe"] not in wanted):
+                continue
+            if s["spent"] and (s["probe"] not in seen or s["spent"] > seen[s["probe"]]["spent"]) \
+                    or s["probe"] not in seen:
                 seen[s["probe"]] = s
     if not seen:
         print("no probes on this box")
         return 0
 
+    if as_json:
+        rows = []
+        for s_ in sorted(seen.values(), key=lambda x: (x["task"], -(x["test"] or -1))):
+            row = {k: v for k, v in s_.items() if not isinstance(v, (bytes, set))}
+            if s_["probe"] in hidden:
+                row["test"] = None
+                row["embargoed"] = True
+            rows.append(row)
+        print(json.dumps(rows, indent=2, sort_keys=True, default=str))
+        return 0
+    # THE §69.1 BAND IS ONE NUMBER FOR EVERY TASK, AND THE TASKS DIFFER. Measured 2026-09-06 over
+    # the 140 probes with at least five executed `run_probe` calls: median reference-import share
+    # 8.6 % on `edge_expansion`, 4.8 % on `discrete_log`, 8.3 % on `pde_heat1d`, permutation
+    # p = 0.008 that the task means are the same. The printed band 4.9-8.3 % covers 19 % of
+    # edge_expansion probes, 27 % of discrete_log and 45 % of pde_heat1d -- it fits none of them
+    # well, and it was never measured per task. So it keeps its provenance and gains the task's own
+    # observed middle beside it, the same move §281 made for the ruler constants: a memorised
+    # constant becomes a measured comparison. Below five probes a task has no middle worth printing.
+    task_ref: dict = {}
+    for s_ in seen.values():
+        if (s_.get("run_probe") or 0) >= 5 and isinstance(s_.get("ref_pct"), (int, float)):
+            task_ref.setdefault(s_["task"], []).append(float(s_["ref_pct"]))
+
+    if hidden & set(seen):
+        print(f"{len(hidden & set(seen))} probe(s) in the registered arm: TEST masked until the "
+              f"readout is taken (§190). Override with --include-embargoed, or mark the readout "
+              f"done by creating {EMBARGO_LIFTED.name}.")
     print(f"{'probe':10s}{'task':16s}{'$':>8}{'TEST':>10}{'nodes':>7}"
           f"{'before%':>9}{'after%':>8}{'eval_tr':>8}{'->build':>9}{'build':>7}  champion")
     for s in sorted(seen.values(), key=lambda x: (x["task"], -(x["test"] or -1))):
-        test = f"{s['test']:.4f}" if s["test"] is not None else "-"
+        # §190 IS ENFORCED HERE, NOT IN THE OPERATOR'S MEMORY. The arm's probes share this tree
+        # with everything else; the only thing that ever stopped this column showing them was me
+        # remembering not to run the tool.
+        test = ("EMBARGO" if s["probe"] in hidden else
+                f"{s['test']:.4f}" if s["test"] is not None else "-")
         champ = (f"{s['champion_lines']}L {'kernel' if s['kernel'] else 'plain python'}"
                  if s["champion_lines"] else "(none)")
         tb = f"{s['to_build_min']:.0f}m" if s["to_build_min"] is not None else "-"
@@ -755,12 +896,17 @@ def main(argv: list[str]) -> int:
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
         pct = ("—" if s["ref_pct"] is None
                else f"{s['ref_pct']:.1f}% import / {s['ref_call_pct']:.1f}% is_solution")
+        n_ref = s.get("run_probe_refused") or 0
+        refused_note = f" (+{n_ref} refused at the cap)" if n_ref else ""
         nov = f"; proposer repeated itself {s['novelty_rejected']}x" if s.get("novelty_rejected") else ""
         kern = ("" if s.get("first_kernel") is None
                 else "; node 0 kernel" if s["first_kernel"] else "; node 0 NO kernel")
         print(f"  {s['probe']} ({s['task']}) nodes(train)={s['nodes']}  "
-              f"reference over {s['run_probe']} run_probe calls: {pct}   "
-              f"(§69.1 baseline 4.9-8.3 %){kern}{nov}")
+              f"reference over {s['run_probe']} executed run_probe calls"
+              f"{refused_note}: {pct}   "
+              f"(§69.1 baseline 4.9-8.3 %"
+              f"{_task_ref_note(task_ref, s['task'], bool(wanted))})"
+              f"{kern}{nov}")
         for ph, cost in s["phases"]:
             share = 100 * cost / s["spent"] if s["spent"] else 0
             print(f"      {ph:16s}{s['calls'][ph]:>5} calls  ${cost:.4f}  {share:4.1f}%")

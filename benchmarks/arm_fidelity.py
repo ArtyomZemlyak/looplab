@@ -12,6 +12,21 @@ version that also printed the champion would turn every fidelity check into an i
 arm, which the design forbids and which no amount of discipline reliably prevents once the number
 is on the screen.
 
+THE CHANNEL, NOT ONLY THE DOSE. Capping probes is supposed to work by pushing the developer towards
+the graded measurement -- the refusal text says in so many words that `run_dev_command("eval_train")`
+is what measuring the solver is for -- so a cap that reduced probes and changed nothing else would be
+an intervention with no channel. That is a property of the intervention, like the probe count, and it
+is counted here for the same reason: finding out at batch twelve that the two arms did the same thing
+is how $48 becomes nothing. Measured over the eight finished probes of batches 1 and 2: probes
+treat 12.0 vs control 26.0, and `eval_train` **treat 33.0 vs control 24.5** -- the capped runs turn
+about fourteen ungraded probes into about eight and a half graded evaluations.
+
+AND THAT IS A DOSE, NOT A MECHANISM. The count says the push LANDED; it says nothing about whether
+anything flows through it. Measured over 78 corpus runs of this task (§224): the top and bottom
+deciles by score differ in `run_probe` (24 vs 31, p = 0.048) and do NOT differ in `eval_train`
+(28 vs 27, p = 1.00). So if the cap helps, this is not yet evidence of HOW -- and a column that
+moves is exactly the kind of number that gets read as a mechanism if nobody writes this paragraph.
+
 WHAT TO WATCH. §196 measured that a cap of 12 bites 91 % of `edge_expansion` runs, so most control
 probes should land ABOVE 12 and every treated probe at exactly 12. A batch where the control also
 sits at nine or ten is a batch with little contrast — it dilutes the effect the power table assumed,
@@ -19,21 +34,40 @@ and the honest response is to say so, not to reinterpret it afterwards.
 
 Usage:
     arm_fidelity.py --treat capA2 capB2 --control freeA2 freeB2 [--root DIR]
+
+WHAT "FINISHED" MEANS HERE, and it took two goes. A running probe's probe-count is a lower bound and
+a finished one's is the answer, so the contrast is computed over finished probes only. The first fix
+asked whether the run's result file EXISTS -- wrong in the direction that matters, because a PAUSED
+run writes one too: `freeB3` auto-paused at node 2 on 2026-09-04 ("a Developer session crashed, LLM
+unreachable") having spent $0.86 of its $1.00, and it was counted as a completed control. The claim
+is an EVENT: every genuinely finished probe of batches 1 and 2 carries `run_finished` with
+`reason=budget_exhausted`; the paused one carries a `pause` and no `run_finished`. And the state is
+the LAST lifecycle event, not any of them -- the log is append-only, so "a pause exists" answers
+PAUSED for ever, and `freeB3` read paused while it was running after a `resume`.
 """
 from __future__ import annotations
 
 import argparse
 import glob
+import os
 import json
 import statistics
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import events_read  # noqa: E402
 
 DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 
 
 def probe_calls(root: str, name: str) -> dict:
-    """`{executed, refused, spans}` for one probe tree. No scores are read."""
-    executed = refused = 0
+    """`{executed, refused, spans, finished}` for one probe tree. No scores are read.
+
+    See the module docstring for what `finished` means and why it is an event. No scores are read
+    here: event TYPES only.
+    """
+    executed = refused = evals = unavailable = 0
     spans: set = set()
     for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/spans.jsonl")):
         try:
@@ -42,31 +76,171 @@ def probe_calls(root: str, name: str) -> dict:
             continue
         with fh:
             for line in fh:
-                if '"run_probe"' not in line:
+                # `eval_train` arrives as an ARGUMENT to `run_dev_command`, not as a tool name, so
+                # the cheap prefilter is the word anywhere in the line and the claim is the parsed
+                # span. Counted before the `run_probe` gate below, which returns early.
+                if "eval_train" not in line and '"run_probe"' not in line:
                     continue
                 try:
                     span = json.loads(line)
                 except ValueError:
                     continue
                 attrs = span.get("attributes") or {}
-                if span.get("kind") != "tool" or attrs.get("tool") != "run_probe":
+                if span.get("kind") != "tool":
+                    continue
+                if "eval_train" in json.dumps(attrs):
+                    evals += 1
+                if attrs.get("tool") != "run_probe":
                     continue
                 spans.add(attrs.get("phase_span"))
-                if "run_probe refused" in str(attrs.get("output", "")):
+                out = str(attrs.get("output", ""))
+                if out.startswith("(unknown tool"):
+                    # NOT AN EXECUTION AND NOT A REFUSAL BY THE CAP. `run_probe` is not offered in
+                    # every phase, and a model that calls it where it is not available gets
+                    # `(unknown tool: run_probe; available here: …)` back in 2 ms having run nothing.
+                    # `capA6` did exactly that in `propose` and read as **13 executed under a cap of
+                    # 12** -- an off-by-one that was mine, not the engine's: its own refusals all
+                    # say "already made 12 probes". Four such spans exist in the corpus (capA6,
+                    # expEEa, freeB4, remEE2), so this moves little, and a fidelity count that can
+                    # exceed its own cap is worth none of the doubt it creates. Same family as §202.
+                    unavailable += 1
+                elif "run_probe refused" in out:
                     refused += 1
                 else:
                     executed += 1
-    return {"executed": executed, "refused": refused, "spans": len(spans)}
+    return {"executed": executed, "refused": refused, "unavailable": unavailable,
+            "evals": evals, "spans": len(spans),
+            "finished": _run_finished(root, name) or _at_ceiling(root, name),
+            "paused": _paused(root, name)}
+
+
+LIFECYCLE = ("run_finished", "pause", "resume")
+
+
+SETTING = "developer_probe_max_calls"
+
+
+def assigned_cap(root: str, name: str):
+    """What THIS RUN recorded as its own cap, from `config.snapshot.json`. None if unreadable.
+
+    The counts below verify the treatment by its BEHAVIOUR, which is stronger -- except for a probe
+    that never reaches the cap. `capB4` stopped at eleven probes with zero refusals (§227), so its
+    behaviour is identical to a control's and cannot tell whether it was capped at all. For those
+    the run's own recorded settings are the only evidence, and they are independent of the
+    launcher's INSTRUMENT.txt claim: one is what the operator meant, the other what the engine got.
+
+    Checked across all 24 probes of batches 1-6 on 2026-09-05: every treated probe records 12 and
+    every control records 0, `capB4` included. It was capped and simply never hit it.
+    """
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/config.snapshot.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh).get(SETTING)
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def _event_types(root: str, name: str) -> set:
+    """The set of event TYPES in this probe's run, crash-atomic packets unwrapped. No data read."""
+    kinds: set = set()
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl")):
+        for event in events_read.iter_events(path):
+            kind = event.get("type")
+            if isinstance(kind, str):
+                kinds.add(kind)
+    return kinds
+
+
+def _last_lifecycle(root: str, name: str) -> str:
+    """The LAST of `run_finished` / `pause` / `resume`, or "" if the run has had none.
+
+    The LAST, not any: see the module docstring. Same correction `probe_summary::_why_no_test`
+    needed -- take the last match.
+    """
+    last = ""
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl")):
+        for event in events_read.iter_events(path):
+            kind = event.get("type")
+            if isinstance(kind, str) and kind in LIFECYCLE:
+                last = kind
+    return last
+
+
+def _run_finished(root: str, name: str) -> bool:
+    return "run_finished" in _event_types(root, name)
+
+
+def _at_ceiling(root: str, name: str, budget: float = 1.0) -> bool:
+    """A pause that is really the end of the money -- see `_paused`."""
+    return (_last_lifecycle(root, name) == "pause"
+            and _spend(root, name) >= budget * CEILING_SHARE)
+
+
+CEILING_SHARE = 0.99      # of `llm_budget_usd`; below this a pause is a pause
+
+
+def _spend(root: str, name: str) -> float:
+    """What this run has paid, from its own `llm_usage` events. Budget, not outcome."""
+    total = 0.0
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl")):
+        for event in events_read.iter_events(path):
+            if event.get("type") != "llm_usage":
+                continue
+            data = event.get("data")
+            if isinstance(data, dict):
+                try:
+                    total += max(0.0, float(data.get("cost") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+    return total
+
+
+def _paused(root: str, name: str, budget: float = 1.0) -> bool:
+    """Paused AND not simply at the end of its money.
+
+    A run that reaches `llm_budget_usd` inside a developer session used to be paused with
+    "a Developer session crashed (LLM unreachable or a hard error)" -- the ceiling refusal caught by
+    a blanket `except Exception` and dressed as a provider failure (§228). Measured over the probe
+    corpus: 16 of the 105 runs that reached full budget end that way, every one at or past its
+    ceiling and every one 0.1-0.2 s after its last call. Those runs are COMPLETE, and calling them
+    "OWED work" is what sent `freeB3` back for another $0.1056 (§213).
+
+    The engine no longer does it, but every probe recorded before the fix still reads that way, so
+    the disposition is decided here on the spend rather than on the word.
+    """
+    if _last_lifecycle(root, name) != "pause":
+        return False
+    return _spend(root, name) < budget * CEILING_SHARE
 
 
 def report(root: str, treat, control) -> dict:
+    """Contrast over FINISHED probes only, with the running ones counted but not compared."""
     rows = {n: probe_calls(root, n) for n in list(treat) + list(control)}
-    t = [rows[n]["executed"] for n in treat if rows[n]["executed"] or rows[n]["refused"]]
-    c = [rows[n]["executed"] for n in control if rows[n]["executed"] or rows[n]["refused"]]
-    return {"rows": rows,
-            "treat_median": statistics.median(t) if t else 0,
-            "control_median": statistics.median(c) if c else 0,
-            "contrast": (statistics.median(c) if c else 0) - (statistics.median(t) if t else 0)}
+    for n in list(treat) + list(control):
+        rows[n]["assigned"] = assigned_cap(root, n)
+    misassigned = [n for n in treat if rows[n]["assigned"] not in (None, 12)] + \
+                  [n for n in control if rows[n]["assigned"] not in (None, 0)]
+
+    def started(names):
+        return [n for n in names if rows[n]["executed"] or rows[n]["refused"]]
+
+    t = [rows[n]["executed"] for n in started(treat) if rows[n]["finished"]]
+    c = [rows[n]["executed"] for n in started(control) if rows[n]["finished"]]
+    te = [rows[n]["evals"] for n in started(treat) if rows[n]["finished"]]
+    ce = [rows[n]["evals"] for n in started(control) if rows[n]["finished"]]
+    running = [n for n in started(list(treat) + list(control)) if not rows[n]["finished"]]
+    paused = [n for n in running if rows[n]["paused"]]
+    tm = statistics.median(t) if t else 0
+    cm = statistics.median(c) if c else 0
+    return {"rows": rows, "running": running, "paused": paused,
+            "misassigned": misassigned,
+            "treat_n": len(t), "control_n": len(c),
+            "treat_median": tm, "control_median": cm,
+            "treat_evals": statistics.median(te) if te else 0,
+            "control_evals": statistics.median(ce) if ce else 0,
+            "eval_contrast": (statistics.median(te) - statistics.median(ce)) if (te and ce) else None,
+            "contrast": (cm - tm) if (t and c) else None}
 
 
 def main(argv=None) -> int:
@@ -78,18 +252,46 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     got = report(args.root, args.treat, args.control)
-    print(f'{"probe":10s} {"arm":>9s} {"executed":>9s} {"refused":>8s} {"phases":>7s}')
-    for name in args.treat:
-        r = got["rows"][name]
-        print(f'{name:10s} {"treat":>9s} {r["executed"]:9d} {r["refused"]:8d} {r["spans"]:7d}')
-    for name in args.control:
-        r = got["rows"][name]
-        print(f'{name:10s} {"control":>9s} {r["executed"]:9d} {r["refused"]:8d} {r["spans"]:7d}')
-    print(f'\nmedian executed: treat {got["treat_median"]}, control {got["control_median"]}, '
+    print(f'{"probe":10s} {"arm":>9s} {"executed":>9s} {"refused":>8s} {"eval_train":>11s} '
+          f'{"phases":>7s}  state')
+    for arm, names in (("treat", args.treat), ("control", args.control)):
+        for name in names:
+            r = got["rows"][name]
+            state = ("finished" if r["finished"]
+                     else "PAUSED (owed work)" if r["paused"] else "running")
+            print(f'{name:10s} {arm:>9s} {r["executed"]:9d} {r["refused"]:8d} {r["evals"]:11d} '
+                  f'{r["spans"]:7d}  {state}')
+    if got["contrast"] is None:
+        print(f'\nno contrast to report yet: {got["treat_n"]} finished treated probe(s) and '
+              f'{got["control_n"]} finished control(s). A running probe\'s count is a LOWER BOUND, '
+              "and the treated ones stop at their cap while the controls are still climbing -- "
+              "comparing the two mid-flight measures the clock, not the intervention.")
+        if got["running"]:
+            print("  still running: " + ", ".join(got["running"]))
+        if got["paused"]:
+            print("  PAUSED and OWED work: " + ", ".join(got["paused"]))
+        return 0
+    print(f'\nmedian executed over FINISHED probes: treat {got["treat_median"]} '
+          f'(n={got["treat_n"]}), control {got["control_median"]} (n={got["control_n"]}), '
           f'contrast {got["contrast"]:+g}')
+    if got["misassigned"]:
+        print("  WRONGLY ASSIGNED: " + ", ".join(
+            f'{n} records {SETTING}={got["rows"][n]["assigned"]}' for n in got["misassigned"])
+            + " -- the label and the run's own config disagree, so that probe is not in the arm "
+              "it is filed under")
+    if got["eval_contrast"] is not None:
+        print(f'  the channel: median eval_train treat {got["treat_evals"]}, '
+              f'control {got["control_evals"]}, {got["eval_contrast"]:+g} -- a cap with no channel '
+              "would move probes and nothing else")
+    if got["running"]:
+        print("  still running (not counted): " + ", ".join(got["running"]))
+    if got["paused"]:
+        print("  PAUSED, not finished, and OWED work: " + ", ".join(got["paused"])
+              + " -- resume or the arm is short a probe, and a probe dropped in silence is the "
+                "censoring §190 was designed to avoid")
     if got["contrast"] <= 0:
-        print("  NO CONTRAST YET: the control has not out-probed the treatment, so nothing "
-              "separates the arms so far")
+        print("  NO CONTRAST: the control did not out-probe the treatment in the probes that "
+              "FINISHED, so nothing separates the arms so far")
     return 0
 
 
