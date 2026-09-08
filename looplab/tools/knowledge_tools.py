@@ -16,7 +16,7 @@ from looplab.core.atomicio import atomic_write_text
 from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.core.redact import redact_persisted_text
 from looplab.core import _pathsafe
-from looplab.tools._base import clip, fn_spec, jsonl_row_count
+from looplab.tools._base import RowCountTooLarge, clip, fn_spec, jsonl_row_count
 from looplab.tools.perm_modes import (
     DEFAULT_MODE, authorize, default_approver)
 from looplab.tools.retrieval import glob_files, grep, read_file
@@ -306,6 +306,14 @@ class KnowledgeTools:
         self._index = InMemoryVectorStore()
         self._index_revision = ""
         self._case_window_health = None
+        # An embedding is a pure function of (model, text), and a rebuild re-embeds every record —
+        # so the ones whose text did not move are paid for again on every write to the case store.
+        # See `_build_index` for why this memo needs no size, and `_embed_cached` for its key. The
+        # embedder it was filled by is remembered beside it: `self.embed` is fixed at construction,
+        # but a rebind (a test, a re-wired provider) changes the MODEL and every cached vector with
+        # it, and a memo that outlived that would mix two embedding spaces in one index.
+        self._vector_memo: dict[str, list] = {}
+        self._vector_memo_embedder = self.embed
         self._build_index()
 
     def bind_state(self, state, parent=None) -> None:
@@ -398,27 +406,50 @@ class KnowledgeTools:
                               "run_uid": c.get("run_uid"), "member_ids": [f"case:{i}"]}))
         return recs
 
+    def _embed_cached(self, text: str, previous: dict) -> list:
+        """One embedding, paid at most once per (embedder, text) across rebuilds.
+
+        Keyed by content digest, the same shape `memora.py::CachedAbstractor` uses one layer over
+        for the abstraction. Returns a COPY so a consumer that reassigns or mutates an `Item.vector`
+        (the consolidating build reassigns; nothing mutates today) can never reach back into the
+        memo and change what a later record is embedded as.
+        """
+        key = hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+        vec = self._vector_memo.get(key)
+        if vec is None:
+            # `previous` is the memo the LAST build earned. Reading it here rather than carrying it
+            # forward wholesale is what keeps this bounded: only a text THIS build asked for is
+            # promoted into the new memo, so a record that left the store stops being held.
+            vec = previous.get(key)
+            if vec is None:
+                vec = self.embed(text)
+            self._vector_memo[key] = list(vec)
+        return list(self._vector_memo[key])
+
     def _build_index(self) -> None:
-        # OPEN[knowledge-index-re-embeds-every-record] this re-embeds every KB doc and case from
-        # scratch on each rebuild, and a rebuild fires whenever `_source_revision` changes — i.e.
-        # every append to the case store — so an unchanged record is paid for again on every write.
-        # proof:absent:_vector_memo@looplab/tools/knowledge_tools.py
-        # The spend became VISIBLE on 2026-09-02 (`LLMEmbedder` now carries a `CostAccountant`, so
-        # these calls reach `llm_usage` and `looplab tokens`); what is still open is not paying it.
-        # `InMemoryVectorStore` has no persistence by design, but the embeddings are a pure function
-        # of (model, text) and could be memoized by content digest across rebuilds within a process
-        # — the same shape `make_abstractor`'s content-hash cache already uses one layer over.
-        # CLOSE IT WITH A NUMBER, not with the cache: nobody has measured records-per-rebuild or
-        # rebuilds-per-run on a real corpus (`runs/` is empty on the box this was written on), and a
-        # cache sized without that is the unmeasured policy this repo refuses elsewhere. The meter
-        # to read it off now exists.
+        # A REBUILD RE-EMBEDS ONLY WHAT MOVED. A rebuild fires whenever `_source_revision` changes
+        # — i.e. on every append to the case store — and on every scope rebind, so re-embedding
+        # from scratch charged an unchanged record again on every write. Since 2026-09-02 that
+        # spend is VISIBLE (`LLMEmbedder` carries a `CostAccountant`, so these calls reach
+        # `llm_usage` and `looplab tokens`); this stops paying it.
+        #
+        # AND IT IS NOT A SIZED CACHE, which is the reason it can land without the corpus number a
+        # bound would have needed. The memo is re-earned each build: it starts empty and keeps
+        # exactly the texts THIS build embedded, so it holds one vector per record the index was
+        # just built from and shrinks with the store instead of accumulating across a process's
+        # life. There is no capacity, no eviction policy and no ratio to tune — the only number it
+        # could be wrong about is one the index already pays. `kb_search`'s QUERY embedding is
+        # deliberately not memoized here: queries are unbounded in a way records are not.
+        previous = self._vector_memo if self._vector_memo_embedder is self.embed else {}
+        self._vector_memo, self._vector_memo_embedder = {}, self.embed
         self._index = InMemoryVectorStore()
         self._index_revision = self._source_revision()
         recs = self._records()
         if not recs:
             return
         if self.abstract is None:                        # legacy: embed raw text, no anchors/merge
-            self._index.upsert("kb", [Item(id=rid, vector=self.embed(src), payload=pl)
+            self._index.upsert("kb", [Item(id=rid, vector=self._embed_cached(src, previous),
+                                           payload=pl)
                                       for rid, src, pl in recs])
             return
         # Harmonic build: key each entry by its abstraction+anchors and CONSOLIDATE near-duplicates
@@ -427,7 +458,7 @@ class KnowledgeTools:
         kept: list[Item] = []
         for rid, src, pl in recs:
             ab = self.abstract(src)
-            vec = self.embed(ab.index_text())
+            vec = self._embed_cached(ab.index_text(), previous)
             merged = False
             for it in kept:
                 # Scope/authorization has already run.  Keep unlike source/semantic partitions
@@ -453,7 +484,7 @@ class KnowledgeTools:
                         if member not in members:
                             members.append(member)
                     it.payload["member_ids"] = members
-                    it.vector = self.embed(m.index_text())
+                    it.vector = self._embed_cached(m.index_text(), previous)
                     merged = True
                     break
             if not merged:
@@ -478,6 +509,17 @@ class KnowledgeTools:
             # index to count -- read the store's own rows, the same window `_build_index` reads.
             cases = (jsonl_row_count(self.cases_path)
                      if self.cases_path and self.cases_path.exists() else 0)
+        except RowCountTooLarge as exc:
+            # A case store that has outgrown the prompt-path counter is not an UNAVAILABLE one, and
+            # the difference is the whole reason this row is a string: "unavailable" reads as a
+            # broken knowledge base, while the truth is a corpus that has to be trimmed or read by
+            # the tool itself. Same UNKNOWN, different sentence -- see `_base.RowCountTooLarge`.
+            #
+            # And ONLY `kb_search` loses its count: the notes were already counted above and the
+            # other three tools read nothing else, so degrading them here would publish UNKNOWN
+            # about a source that was read successfully -- and `hide_empty_tools` reads these rows.
+            return {"list_notes": notes, "read_note": notes, "grep": notes,
+                    "kb_search": f"case store {exc}"}
         except Exception as exc:  # noqa: BLE001 - a prompt must never fail on an optional receipt
             reason = f"knowledge store unavailable: {type(exc).__name__}"
             return {name: reason for name in ("kb_search", "grep", "list_notes", "read_note")}

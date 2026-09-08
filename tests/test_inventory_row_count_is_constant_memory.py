@@ -34,10 +34,13 @@ def _peak(path):
 
 def test_the_cost_of_counting_does_not_grow_with_the_store(tmp_path):
     """The property is CONSTANT memory, so it is read off two sizes rather than one threshold."""
-    small, big = _store(tmp_path / "a", 100_000), _store(tmp_path / "b", 400_000)
+    # Both sizes stay under `_ROW_COUNT_CEILING` on purpose: above it the counter refuses instead
+    # of walking (see test_inventory_row_count_ceiling.py), and this property is about what the
+    # walk costs, so it has to be measured on stores the walk still happens for.
+    small, big = _store(tmp_path / "a", 50_000), _store(tmp_path / "b", 200_000)
     assert big.stat().st_size > 4 * (1 << 20), "premise: the store must exceed the read window"
     (n_small, peak_small), (n_big, peak_big) = _peak(small), _peak(big)
-    assert (n_small, n_big) == (100_000, 400_000)
+    assert (n_small, n_big) == (50_000, 200_000)
     assert peak_big <= peak_small * 1.25, (
         f"peak went {peak_small} -> {peak_big} for a 4x store: the counter is holding the file "
         "(and a list of its rows) in memory, on the synchronous prompt-assembly path")
