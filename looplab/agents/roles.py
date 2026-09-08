@@ -254,6 +254,19 @@ RESEARCHER_OUTPUT_ATTRS: tuple[str, ...] = (
     # A plain (non-facade) researcher writes only `last_budget_exhausted` and is not also a
     # developer, so both spellings are read through `researcher_budget_exhausted` below.
     "last_propose_budget_exhausted",
+    # THE FORESIGHT/RANKING TELEMETRY, registered 2026-09-08 after being CARVED OUT of this contract
+    # for a registry that does not exist. `tests/test_role_output_contract.py` excluded these three
+    # saying they "are read via `_emit_role_telemetry`'s registry, not here" —
+    # `engine/audit.py::_emit_role_telemetry` is a METHOD that takes the attribute name as a string
+    # argument, so there was no registry anywhere and the exclusion protected nothing. Measured: the
+    # three names live as bare literals at 32 sites across `search/`, `engine/audit.py` and
+    # `engine/novelty.py`, every consumer reading them with a FALSY `getattr` default — so a
+    # one-sided rename stops `hypothesis_ranked` / `foresight_selected` being emitted at all and
+    # leaves `Card.confidence` (copied straight from `last_hyp_priority["confidence"]`) unset, in
+    # silence. `search/surrogate.py`'s own docstring records that this already happened once.
+    "last_hyp_priority",
+    "last_foresight",
+    "last_foresight_pick",
 )
 
 

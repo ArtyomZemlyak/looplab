@@ -5965,6 +5965,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_graded_output_name": ("holdout", None),
         "_apply_host_grade": ("holdout", None),
         "_host_score_split": ("holdout", None),
+        # The one ASYNC delegator in the table, and it went undeclared from 2026 until
+        # 2026-09-08 because the guard filtered on `ast.FunctionDef`, which does not match
+        # `ast.AsyncFunctionDef` — so an async delegator was invisible to it in BOTH
+        # directions. Lane `None` is correct and checked rather than assumed:
+        # `HoldoutGrader.holdout_phase` makes no provider call and carries no `in_llm_lane`.
+        "_holdout_phase": ("holdout", None),
         "_build_holdout_idx": ("holdout", None),
         "_apply_search_split": ("holdout", None),
         "_holdout_topk": ("holdout", None),
