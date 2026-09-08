@@ -561,6 +561,37 @@ def runs_root_is_a_probe_tree(runs_root: Path) -> list[str]:
     return probes
 
 
+def retimed_disagreements(a: dict, retimed_path: Path) -> list[str]:
+    """Where a re-timed arm-A constant disagrees with the campaign figure about to be used.
+
+    §356. `_arm_a` reads `agent_summary.json`, which holds what arm A's OWN campaign reported --
+    measured on that campaign's box and ruler. §181/§193 re-timed those solvers through our bridge
+    on the ruler every arm-B number here divides by, and §355 turned the results into
+    `arm_a_retimed.json`. The two disagree by up to 13 % (`edge_expansion` 1.1087 against 0.9759),
+    and the comparison would have gone on quietly using the first.
+
+    This does not swap the numbers -- which of the two belongs in the table is the operator's call,
+    and §298 is the record of what silently substituting a "corrected" figure costs. It says the
+    file exists, what it says, and that the difference is larger than noise, on the page rather
+    than in someone's memory.
+    """
+    try:
+        data = json.loads(Path(retimed_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for task, row in sorted((data.get("tasks") or {}).items()):
+        got, was = row.get("speedup"), a.get(task)
+        if not isinstance(got, (int, float)) or not isinstance(was, (int, float)) or was == 0:
+            continue
+        drift = 100.0 * (got - was) / was
+        if abs(drift) > 2.0:
+            out.append(f"{task}: the table uses {was:.4f} from the campaign's own summary, and "
+                       f"{retimed_path.name} has {got:.4f} re-timed here on {row.get('regime')} "
+                       f"({drift:+.1f} %)")
+    return out
+
+
 def marker_state(final_dir: Path | None, arm: str, task: str, runs_root: Path | None = None) -> str:
     """What `campaign.sh` says about this task-arm: `"done"`, `"refused"` or `"unfinished"`.
 
@@ -770,6 +801,9 @@ def main() -> int:
 
     summary = args.algotune_root.resolve() / "reports" / "agent_summary.json"
     a = _arm_a(summary, args.model_fragment)
+    for line in retimed_disagreements(
+            a, Path(__file__).resolve().parent / "arm_a_retimed.json"):
+        print(f"NOTE: {line}")
     probes = runs_root_is_a_probe_tree(args.runs_root)
     if probes:
         print(f"REFUSING: {args.runs_root} holds {len(probes)} PROBE tree(s) "
