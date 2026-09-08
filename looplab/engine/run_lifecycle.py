@@ -3,7 +3,7 @@ flight — plus the config-write transaction every whole-run writer takes.
 
 Moved DOWN out of `serve/` on 2026-09-08 (doc 25 XP-03, the
 `run-lifecycle-primitives-cannot-move-down` item). These five primitives are what a run-MUTATING
-agent tool needs — `tools/machine_runs_tools.py::RunLifecycleFns` names them one by one — and while
+agent tool needs — `tools/run_control_tools.py::RunLifecycleFns` names them one by one — and while
 they lived in `serve/engine_proc.py` + `serve/run_files.py` the only way for `tools/` to reach its
 own defaults was a function-local import UPWARD into `serve/`: a package cycle held open by nothing
 but import timing. The injection seam (`RunLifecycleFns`) made the dependency explicit but did not
