@@ -402,6 +402,70 @@ def test_the_clear_is_inside_the_locked_window_and_not_at_the_call_site():
         engine, stale, stale.implement, {"i": 3}).last_footprint is None
 
 
+def test_the_state_BIND_is_inside_the_locked_window_too(tmp_path):
+    """The clear's unlocked sibling, missed when the clear moved in.
+
+    `_implement_result` and `_repair_result` each called `bind_state(state)` on the shared Developer
+    ABOVE `_run_developer`'s lock. `bind_state` is a plain write (`repo_developer` stores
+    `self._memory_state = state`), so with two offloaded calls on one instance worker A could bind
+    its fold, block on the lock, and then run its build against the fold worker B bound while A was
+    waiting — the Developer's memory and cross-run providers answering about a different lifecycle
+    than the node being built. Same class as the footprint clear, same window, one method apart.
+
+    Driven, not pinned: the bind is one `with` away from looking correct in either arrangement.
+    """
+    class _Dev:
+        """Records the state that was bound WHEN THE CALL RAN, which is the only one that matters."""
+        def __init__(self):
+            self.bound = None
+            self.saw: dict = {}
+            self.last_footprint, self.last_files = None, {}
+
+        def bind_state(self, state, parent=None):
+            self.bound = state
+
+        def implement(self, idea):
+            time.sleep(0.15)                       # the paid call's window
+            self.saw[idea["i"]] = self.bound       # what THIS call was working against
+            return "code"
+
+        def repair(self, idea, _code, _err):
+            self.saw[idea["i"]] = self.bound
+            return "repaired"
+
+    engine = NodeBuildMixin.__new__(type("_E", (NodeBuildMixin,), {}))
+    dev = _Dev()
+    state_a, state_b = {"fold": "A"}, {"fold": "B"}
+
+    def _build():
+        NodeBuildMixin._run_developer(engine, dev, dev.implement, {"i": 1}, bind_to=state_a)
+
+    def _sibling():
+        time.sleep(0.05)                           # lands inside the build's window
+        NodeBuildMixin._run_developer(engine, dev, dev.repair, {"i": 2}, "code", "err",
+                                      bind_to=state_b)
+
+    threads = [threading.Thread(target=_build), threading.Thread(target=_sibling)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert dev.saw[1] is state_a, (
+        "a concurrent call re-bound the Developer inside this build's window: the bind must happen "
+        "inside the same `developer_call_lock` window as the call and the capture")
+    assert dev.saw[2] is state_b
+
+    # …and a caller that asks for NO bind is distinguishable from one that binds None, which is
+    # what `_repair_result` does when it was given no state.
+    quiet = _Dev()
+    quiet.bound = state_a
+    NodeBuildMixin._run_developer(engine, quiet, quiet.implement, {"i": 3})
+    assert quiet.saw[3] is state_a, "an omitted bind must not overwrite what was already bound"
+    NodeBuildMixin._run_developer(engine, quiet, quiet.implement, {"i": 4}, bind_to=None)
+    assert quiet.saw[4] is None, "binding None is a bind, not an omission"
+
+
 def test_no_build_site_clears_the_footprint_on_its_own():
     """The walk has ONE caller, and it is the one holding the lock.
 
