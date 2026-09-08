@@ -634,9 +634,18 @@ _seen = set()
 # `O_APPEND` keeps concurrent launches' short lines atomic, exactly as the per-call
 # `open(..., "a")` relied on. A fence that cannot open its diagnostic still fences.
 _LOG_FD = -1
+_LOG_ID = None
+# OPENED UNDER THE PROBE SEAM TOO, and that is deliberate rather than an oversight. The seam
+# (`_PROBE_NAME`) yields the pure `_fenced()` predicate and installs no hook, but the two tests
+# that exercise `_record`'s BOUND in process — a read and a mutation of the same path, and the
+# stderr twin — exec this body with a real `log=` and then read the file, so gating the open on
+# `__name__` left them with no log at all. The cost is one descriptor per exec when a log path
+# is given; `tools/dev_probe.py` renders with `log=""`, so no engine path leaks one.
 if _LOG:
     try:
         _LOG_FD = os.open(_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        _st = os.fstat(_LOG_FD)
+        _LOG_ID = (_st.st_dev, _st.st_ino)
     except OSError:
         _LOG_FD = -1
 
@@ -1012,9 +1021,12 @@ def _dir_fd(args, index):
 
 
 def _record(path, rung, event):
-    """Append one line to the run's fence diagnostic. Re-entrancy-guarded: this opens a file, which
-    raises `open` again — the guard makes that provably terminate rather than relying on the fence
-    log being outside every root.
+    """Append one line to the run's fence diagnostic, through the descriptor opened at import.
+
+    NOT RE-ENTRANCY-GUARDED, and it no longer needs to be: this opens nothing, so it raises no
+    `open` event and cannot re-enter the hook. The paragraphs below record why the guard that used
+    to be here was thread-local and why it had to go — both are history now, kept because the second
+    is the reason this function writes through a descriptor at all.
 
     The guard is THREAD-LOCAL, not a module-level list. A process-global one made a concurrent
     thread's violation vanish: `_report` marks the path seen BEFORE calling here, so a thread that
@@ -1032,6 +1044,17 @@ def _record(path, rung, event):
     if _LOG_FD < 0:
         return
     try:
+        # THE DESCRIPTOR MUST STILL BE THE LOG. `_LOG_FD` is a module global in a module the fenced
+        # interpreter imports, so a candidate can `os.close` it and let its own next `open` take the
+        # number back — after which every line this writes lands in the candidate's file instead of
+        # the audit trail. One `fstat` per RECORDED violation (bounded by the 256-entry `_seen` cap,
+        # not per open) buys back the identity the descriptor cannot assert for itself. It does not
+        # make the fd unreachable — nothing at this layer can, see
+        # `_hook`'s open item `read-fence-inputs-are-writable-by-the-fenced-process` — it stops the fence
+        # from becoming a writer into a file of the candidate's choosing.
+        _now = os.fstat(_LOG_FD)
+        if _LOG_ID is not None and (_now.st_dev, _now.st_ino) != _LOG_ID:
+            return
         os.write(_LOG_FD, ("%%s\\t%%s\\t%%s\\t%%s\\t%%s\\n" %% (
             rung, os.getpid(), sys.argv[0], path, event)).encode("utf-8", "replace"))
     except Exception:

@@ -224,8 +224,8 @@ def test_the_record_stays_readable_and_the_workdir_and_the_fence_dir_writable(tm
     disarmed the fence for every process the run started afterwards. Both raise the `open` event
     with `O_TRUNC` rather than a mutation event, so the `_SELF` rung in `_mutation_fenced` — which
     refuses the `chmod`, the `unlink` and the `rename` of the same file — never saw either. The open
-    branch consults `_SELF` too now; `_record`'s own append is exempted by the `_busy` re-entrancy
-    flag it already sets, not by a prefix the candidate shares."""
+    branch consults `_SELF` too now, and `_record`'s own append takes no exemption at all: it
+    writes through a descriptor opened before the hook existed, so it raises no `open` event."""
     run_dir, wd, _sib = _world(tmp_path)
     fence = _install(run_dir)
     outside = tmp_path / "scratch.txt"

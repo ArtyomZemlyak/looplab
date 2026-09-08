@@ -201,7 +201,7 @@ class HoldoutGrader:
             return _holdout_indices(len(yt), float(fraction), epoch)
         return frozenset()
 
-    def apply_search_split(self) -> None:
+    def apply_search_split(self, *, refuse: bool = True) -> None:
         """Carve the pinned partition out of the PUBLIC assets for a real MLE-bench run: what every
         node is materialized from becomes the carved files, and the engine keeps the hidden slice's
         answers (`_search_answers`) and ids (`_search_hidden_ids`) in memory. Called wherever
@@ -235,7 +235,19 @@ class HoldoutGrader:
             # `n >= 2`, so with a fraction declared an empty partition means exactly "n < 2": the
             # rows could not be counted. Same refusal and the same two ways out as the carve below,
             # because it is the same question one step earlier.
-            if float(getattr(e, "_holdout_fraction", 0.0) or 0.0) > 0:
+            # `refuse=False` DEFERS the decision, and invariant #6 is why. `Engine.__init__` builds
+            # the split from the LIVE `holdout_fraction`, and `_reentry_repin` then overwrites it
+            # with the value `run_started` recorded — the log wins, so that pre-pin construction is
+            # not the moment to refuse a run. Driven: a competition whose train is not a readable
+            # CSV, launched once with the explicit legacy protocol (`run_started
+            # {holdout_fraction: 0.0}`) and resumed in an environment whose live setting is the
+            # 0.25 default, was refused at `__init__` before the pin could restore 0.0 — a
+            # permanently unresumable run, told to set the very value its own log already carries.
+            # `_reentry_repin` re-applies the split against the PINNED fraction and refuses there,
+            # which is correct for a resume AND for a fresh run (whose `run_started` is appended by
+            # `_setup_phase` a few lines earlier, so the re-pin sees the live value as the pinned
+            # one). The epoch rebuild keeps the default: by then the fraction is already pinned.
+            if refuse and float(getattr(e, "_holdout_fraction", 0.0) or 0.0) > 0:
                 raise ConfigRefusal(
                     f"MLE-bench competition {g.get('competition')!r}: `holdout_fraction=" 
                     f"{float(e._holdout_fraction):g}` was declared but the search split cannot be "
@@ -253,6 +265,15 @@ class HoldoutGrader:
         try:
             carved = mlebench_split.carve(public, e._holdout_idx)
         except mlebench_split.SplitUndecidable as exc:
+            if not refuse:
+                # Deferred for the same invariant-6 reason as the sibling refusal above: this may be
+                # the pre-pin construction, and the fraction the log recorded is what decides.
+                # Leaving the split UNCARVED here is safe — the re-pin re-enters and either carves
+                # or refuses against the pinned value, and nothing dispatches in between.
+                e._assets = dict(public)
+                e._search_answers = None
+                e._search_hidden_ids = frozenset()
+                return
             raise ConfigRefusal(
                 f"MLE-bench competition {g.get('competition')!r}: the search split cannot be carved "
                 f"from the public files ({exc}). The search may not be scored on the private answers "
