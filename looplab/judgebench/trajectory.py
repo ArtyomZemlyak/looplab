@@ -256,6 +256,16 @@ def _write_runs(root: Path, runs: dict) -> Path:
     Hand-writing JSONL here would have been shorter and would have measured a fold this repository
     does not perform. The scope boundary under test (`SiblingRunTools._scope_denial`) reads
     `RunState.task_id`, which only exists because `replay.fold` put it there.
+
+    And for the same reason the rows carry the FULL required payload of their type
+    (`events/types.py::EVENT_PAYLOAD_KEYS`), not the subset a sibling reader happens to look at.
+    A corpus world exists to be read by real providers over a real fold, so a fixture row that
+    omits `files`, `eval_seconds`, `extra_metrics`, `generation`, `trials` or `violations` is not
+    "smaller" — it is a shape the engine never writes, and every case built on it is measuring the
+    reader's tolerance for a malformed log rather than the containment boundary it names. The
+    stamped `generation` matters most: an UNSTAMPED terminal is the LEGACY generation-0 path in
+    `replay.py::_attempt_matches`, so a corpus that omitted it was exercising the compatibility
+    branch of the fold and not the one every modern emitter takes.
     """
     from looplab.events.eventstore import EventStore
 
@@ -270,15 +280,32 @@ def _write_runs(root: Path, runs: dict) -> Path:
                                      "direction": spec.get("direction", "min")})
         for node in spec.get("nodes", ()):
             node_id = int(node.get("id", 0))
+            # One lifecycle generation per fixture node, declarable so a case can write a node the
+            # fold must treat as a RE-RUN; the terminal below is stamped with the same number, which
+            # is what `_attempt_matches` compares. A case that leaves it out gets generation 0 on
+            # both rows — the same pair `_create_node` writes for an initial create.
+            generation = int(node.get("generation", 0))
             store.append("node_created", {
                 "node_id": node_id, "parent_ids": node.get("parent_ids", []),
                 "operator": node.get("operator", "draft"), "code": node.get("code", ""),
+                # A single-file node writes `{}` here, exactly as `_emit_node_created` does; a case
+                # that wants a multi-file experiment in a sibling run declares `files`.
+                "files": dict(node.get("files") or {}),
+                "generation": generation,
                 "idea": {"operator": node.get("operator", "draft"),
                          "params": node.get("params", {}), "theme": node.get("theme", "")}})
             if node.get("metric") is not None:
-                store.append("node_evaluated", {"node_id": node_id,
-                                                "metric": float(node["metric"]),
-                                                "stdout_tail": node.get("stdout_tail", "")})
+                # `violations` empty means FEASIBLE (`replay.py::_on_node_evaluated` folds
+                # `feasible = not violations`), which is the state a sibling reader's scope cases
+                # assume; a case that wants a flagged neighbour declares the list.
+                store.append("node_evaluated", {
+                    "node_id": node_id, "metric": float(node["metric"]),
+                    "eval_seconds": float(node.get("eval_seconds", 0.0)),
+                    "extra_metrics": dict(node.get("extra_metrics") or {}),
+                    "generation": generation,
+                    "stdout_tail": node.get("stdout_tail", ""),
+                    "trials": list(node.get("trials") or []),
+                    "violations": list(node.get("violations") or [])})
     return runs_root
 
 
