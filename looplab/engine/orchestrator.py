@@ -4557,6 +4557,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # reads. Measured on the live reproduction (`/tmp/ll-fixb/run`): seq 10 and 11, identical.
             return True
         self._create_paused = True     # stop the rest of any create batch, like developer_crash
+        # REDACTED, because this `reason` is provider text. It is built from the raw `LLMError`
+        # (`agents/roles.py::researcher_fallback_cause`), and a provider that quotes the request's
+        # own `Authorization` header back in its error body -- an ordinary shape -- then puts the
+        # operator's credential verbatim into `events.jsonl`, the file `export-bundle` copies and
+        # the UI renders. Driven 2026-09-08: `sk-...` landed in the pause row while the SAME text
+        # was masked to `bearer ******` two rows above, in `research_completed`. Three screens
+        # already mask it (`redact_secrets`, `redact_persisted_text`, `redact_output_tail`); this
+        # row simply reached none of them, because `_redact` had 7 call sites and no `EV_PAUSE`.
+        reason = self._redact(reason)
         if main_task:
             if not fold(self.store.read_all()).paused:
                 self.store.append(EV_PAUSE, {"reason": reason})
@@ -5125,9 +5134,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     #     champion tie-break, so a worker-thread append landing inside a Card reservation's window
     #     is exactly the `score_moved` conjunct `card_reservation.py::_proposal_receipt_fence`
     #     discards an already-paid proposal on.
-    #   * `novelty.py::_offload_under_proposal_sink` cannot be reused as-is: its sink intercepts
-    #     `_append_proposal_event` only, and it publishes its buffer under the receipt fence's
-    #     ELECTION rule. A cadence carries no receipt and must publish unconditionally.
+    #   * `novelty.py::_offload_under_proposal_sink` cannot be reused as-is, and for ONE reason,
+    #     not two: its sink intercepts `_append_proposal_event` only. The second reason recorded
+    #     here on 2026-09-08 -- that it publishes under the receipt fence's ELECTION rule while a
+    #     cadence must publish unconditionally -- was FALSE, and driven false: the helper publishes
+    #     from a bare `finally`, on return AND on raise, which its own two neighbouring docstrings
+    #     already said. A wrong reason in this position is worse than no reason, because it steers
+    #     the next attempt away from the helper it should be extending.
     def _run_cadences(self, state: RunState) -> RunState:
         # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
         # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision
@@ -6805,7 +6818,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # method and none of them may attach (see `_plan_native_card`).
                     retry_attach=True)
         if reserved is None:
+            # A RECEIPT, because this branch spends money and used to leave nothing behind.
+            # `_reserve_node_build` returns None when a control/research/lifecycle row won its CAS,
+            # and returning to the selection boundary is the CORRECT answer there — minting a
+            # replacement for a just-dropped orphan would defeat an operator's stop intent. What was
+            # wrong is the silence: the proposal above is already PAID FOR, and this returned with no
+            # node, no card and no row, so the loss was invisible in the log and unmeasurable after
+            # the fact. `offloaded-serial-build-reserves-off-the-main-task` is the loss itself;
+            # this only makes it countable.
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            # `_progress` is a CONTEXT MANAGER: a bare call builds a generator and emits nothing.
+            # The first cut of this receipt was exactly that no-op, and it was caught by driving it
+            # rather than reading it — which is the same lesson this file's own guard rules state.
+            with self._progress(PROGRESS_STAGE_BUILD, "discarded",
+                                operator=str(action.get("kind") or ""),
+                                reason="reservation_lost_the_cas"):
+                pass
             return
         state = reserved.state
         node_id = reserved.node_id

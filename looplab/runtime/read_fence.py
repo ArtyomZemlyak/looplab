@@ -1428,6 +1428,21 @@ def harden_guarantee(target) -> Optional[str]:
 _INSTALLED: dict = {}
 
 
+def _clear_fence_cache(fence_dir) -> None:
+    """Remove `<fence_dir>/__pycache__`, so no pyc can shadow the fence's own source. Best-effort:
+    a cache that cannot be removed must not take down the launch, and the source rung still runs."""
+    try:
+        cache = Path(fence_dir) / "__pycache__"
+        for entry in cache.iterdir():
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+        cache.rmdir()
+    except OSError:
+        pass
+
+
 def reassert(fence_dir) -> Optional[str]:
     """Repair a tampered fence before the next launch imports it. `None` when nothing was wrong.
 
@@ -1454,6 +1469,20 @@ def reassert(fence_dir) -> Optional[str]:
     read plus a `stat`): 0.025 ms best, 0.027 ms median, against an 18-19 ms fenced-process
     startup — 0.15 %. A launch already pays a `fork`+`execve`; this is not visible beside it.
     """
+    # THE SHADOWING CACHE, FIRST, because the source can be pristine and the fence still dead.
+    # `__pycache__` beside the fence is written by the interpreter that imports it, the fence dir is
+    # a WRITABLE record prefix, and `_SELF` guards the twelve MUTATION events -- not `open`. So a
+    # fenced node may write `<fence>/__pycache__/sitecustomize.<tag>.pyc` with a header whose mtime
+    # and size it copied from the untouched source, and CPython's timestamp validation then trusts
+    # it over the real file. Driven end to end: the source compared EQUAL, this function returned
+    # None, and every later launch of the run -- across an engine restart, because `install` does
+    # not rewrite an unchanged source either -- ran with no hook and read the operator's checkpoint.
+    # That is strictly worse than the tamper this function was written for: it is persistent and it
+    # leaves the one thing anybody checks looking correct. Removing the cache costs one recompile of
+    # a 33 KB file (2.4 ms measured, against an 18-19 ms fenced startup) and is unconditional on
+    # purpose -- a legitimate cache is worth exactly that much, and telling the two apart from the
+    # bytes is the game we just lost.
+    _clear_fence_cache(fence_dir)
     src = _INSTALLED.get(str(fence_dir or ""))
     if not src:
         # Not a fence THIS process installed: a resumed engine that has not reached `install` yet,

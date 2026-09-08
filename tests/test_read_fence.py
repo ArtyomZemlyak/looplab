@@ -1024,8 +1024,13 @@ def test_the_hook_rung_refuses_a_mutation_of_the_fences_own_file_at_any_uid(tmp_
     for label in ("chmod", "unlink", "unlink-dir-fd", "rename-away", "truncate", "symlink-over"):
         assert f"STAGE2 blocked {label} LoopLabSourceReadRefused" in out, out
 
-    # …and the file the hook was protecting is still the fence, byte-wise and mode-wise.
+    # …and the file the hook was protecting is still the fence, byte-wise and mode-wise. The MODE
+    # half was missing until 2026-09-08 while this comment already claimed it: a root process
+    # IGNORES a 0444 file, it does not stop the bits being set, so `_harden`'s mode is a
+    # uid-INDEPENDENT fact and belongs here rather than only in the sibling that skips under root —
+    # where, on this box, it was asserted nowhere at all.
     assert "LoopLab source-tree READ FENCE" in generated.read_text(encoding="utf-8")
+    assert not generated.stat().st_mode & 0o222, "`_harden` left the fence writable"
     assert any(str(generated) in line and "os.chmod" in line
                for line in read_fence.violations(run_dir))
 
@@ -1626,19 +1631,45 @@ def test_the_open_branch_uses_the_same_rule_as_every_other_event():
         # interpreter, irreversibly, and pytest's own tmp cleanup was then refused by it.
         ns: dict = {"__name__": read_fence._PROBE_NAME}
         exec(compile(src, "<fence>", "exec"), ns)
-        assert "bad = _fenced_resolved(p)" in src, (
-            "the open branch stopped using the shared rule; a second copy is how confinement was "
-            "lost the first time")
-        return ns["_fenced_resolved"]
+        # DRIVEN, not pinned. This assertion used to be `assert "bad = _fenced_resolved(p)" in src`
+        # — a positive substring pin, which is one comment away from vacuous, and it WAS vacuous:
+        # re-inlining the merge's own second copy of the rule while leaving the literal in a comment
+        # kept this file at 94 passed and the eight-file fence suite at 233, with the confined probe
+        # reading the whole filesystem again. Nothing in the tree drove `_hook("open", ...)` at all.
+        # So the branch is exercised here instead, through the same `_PROBE_NAME` namespace: under
+        # `deny` the hook RAISES for a refused read, and returns for an admitted one.
+        return ns["_fenced_resolved"], ns["_hook"]
 
-    confined = rule(True)
+    def open_branch(hook, path):
+        """What the `open` branch itself decides: True = refused, False = admitted."""
+        try:
+            hook("open", (path, None, 0))
+        except Exception as exc:                       # the fence's own refusal type, by name
+            assert type(exc).__name__ == "LoopLabSourceReadRefused", exc
+            return True
+        return False
+
+    confined, confined_hook = rule(True)
     assert confined("/usr/lib/python3.11/json/__init__.py") is not None, (
         "a confined fence must refuse a read outside its allow-list")
     assert confined("/tmp/work/solver.py") is None, "…and admit one inside it"
 
-    plain = rule(False)
+    plain, plain_hook = rule(False)
     assert plain("/src/repo/train.py") is not None, "an unconfined fence still refuses the source"
     assert plain("/usr/lib/python3.11/json/__init__.py") is None, "…and nothing else"
+
+    # AND THE BRANCH ITSELF, on the same four points: the `open` hook must agree with the rule at
+    # every one, which is the whole claim. A second copy of the policy inlined in the branch shows
+    # up here as a DISAGREEMENT — under `confine` it admitted everything the allow-list did not
+    # name, which is the escape this test exists for.
+    for label, hook, decide, path in (
+            ("confined/outside", confined_hook, confined, "/usr/lib/python3.11/json/__init__.py"),
+            ("confined/inside", confined_hook, confined, "/tmp/work/solver.py"),
+            ("plain/source", plain_hook, plain, "/src/repo/train.py"),
+            ("plain/elsewhere", plain_hook, plain, "/usr/lib/python3.11/json/__init__.py")):
+        assert open_branch(hook, path) is (decide(path) is not None), (
+            f"the open branch disagrees with the shared rule at {label} ({path}) — it is deciding "
+            "with a second copy of the policy again")
 
 
 def test_the_hook_refuses_a_mutation_of_the_fences_own_file_whatever_the_uid():

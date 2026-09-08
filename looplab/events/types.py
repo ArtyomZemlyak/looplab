@@ -695,6 +695,12 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
         # only inside `_evaluate`'s own loop, which is a different stage and would need its own
         # append site. Removed rather than left dangling, per the rule stated below: an entry no run
         # can reach renders a step the operator watches and never sees complete.
+        "discarded",   # the proposal was PAID FOR and no node came of it: `_reserve_node_build`
+                       # returned None because a control/research/lifecycle row won its CAS, and
+                       # returning to the selection boundary is correct there. Registered because
+                       # the branch used to return in SILENCE — no node, no card, no row — so a
+                       # loss that costs a whole proposal was invisible in the log and
+                       # unmeasurable afterwards. This beacon does not fix the loss; it counts it.
     ),
     # There is deliberately NO `commit` phase for the fold-verify-and-append tail after the Developer
     # returns. It is seconds, not minutes, and it already ENDS in `node_created` — a folded event the
