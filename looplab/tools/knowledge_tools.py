@@ -12,7 +12,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from looplab.core.atomicio import atomic_write_text
+from looplab.core.atomicio import atomic_write_text, file_identity
 from looplab.core.context_budget import bounded_page
 from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.core.redact import redact_persisted_text
@@ -356,16 +356,19 @@ class KnowledgeTools:
 
     def _source_revision(self) -> str:
         """Stable identity of the files feeding the in-memory index; unavailable files stay explicit."""
-        identities: list[tuple[str, int, int]] = []
+        identities: list[tuple] = []
         paths = [Path(p) for p in glob_files("*.md", str(self.dir))] if self.dir else []
         if self.cases_path:
             paths.append(self.cases_path)
         for path in sorted(set(paths), key=lambda item: str(item)):
             try:
+                # The canonical identity, not (size, mtime_ns): a note file REPLACED by an editor
+                # that writes-then-renames keeps size and mtime often enough to matter, and this
+                # revision is what decides whether the in-memory index is rebuilt (doc 25 SC-11).
                 stat = path.stat()
-                identities.append((str(path), int(stat.st_size), int(stat.st_mtime_ns)))
+                identities.append((str(path), *file_identity(stat)))
             except OSError:
-                identities.append((str(path), -1, -1))
+                identities.append((str(path), None))
         return hashlib.sha256(
             json.dumps(identities, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()

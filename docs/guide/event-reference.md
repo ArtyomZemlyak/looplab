@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-152 event types — 109 folded into `RunState`, 43 diagnostic; 873 declared payload keys; 26 types whose whole payload is stored by the fold.
+153 event types — 110 folded into `RunState`, 43 diagnostic; 880 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -125,6 +125,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_repaired` | folded | One repair round on a failing node: what it changed, on what evidence, and the verdict on the change. | `attempt`, `changed`, `deleted`, `error_in`, `files`, `generation`, `node_id`, `rationale`, `stages_passed`, `triage_action` | `attribution`, `budget_exhausted`, `code`, `edit_calls`, `engine_reason`, `error_evidence`, `eval_seconds`, `footprint_finalized`, `idea_footprint`, `param_overrides`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `salvaged_metric`, `unmet`, `unparseable_repairs`, `verified` |
 | `node_reset` | folded | The operator re-ran an existing node in place from a named stage. | `node_id` | `attempt`, `from_stage`, `generation` |
 | `node_tombstoned` | folded | Nodes struck from selection without deleting their history. | `node_ids` | — |
+| `node_value_estimated` | folded | How much a model thinks expanding one node's branch still has left, in [0, 1]. | `generation`, `node_id`, `value` | `attempt`, `rationale` |
 | `node_verified` | folded | The selection verifier's score for one node, over a named evidence digest. | — | `attempt`, `evidence_digest`, `generation`, `node_id`, `score` |
 | `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `literature`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
 | `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |
@@ -132,7 +133,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
 | `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `endgame_start`, `phases`, `reason`, `reserve` |
 | `policy_decision` | folded | The search policy's pick among the legal actions, with the scores behind it. | `chosen`, `reason`, `scores` | — |
-| `prior_injected` | diagnostic | A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads. | — | `at_node`, `case`, `notes`, `phase`, `quarantined_useless`, `role`, `rows`, `source` |
+| `prior_injected` | diagnostic | A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads. | — | `at_node`, `case`, `notes`, `operator`, `operator_scoped`, `phase`, `quarantined_useless`, `role`, `rows`, `source` |
 | `promote` | folded · whole | The operator promoted one node to an alias (`champion` by default). | `node_id` | `alias`, `attempt`, `generation` |
 | `proxy_scored` | folded | The pre-eval proxy's score for a candidate, or its abstention when the nearest neighbour is too far. | `abstained`, `generation`, `nearest`, `node_id`, `score`, `skipped` | `attempt` |
 | `readmodel_skipped` | diagnostic | The SQLite read-model sidecar could not be updated. | `error` | — |

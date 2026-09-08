@@ -56,7 +56,7 @@ from looplab.core.models import RunState
 _CURATION_CLAIM_DIR = ".curation_invocations"
 _CURATION_CLAIM_MAX_BYTES = 16 * 1024
 _FINALIZE_STEWARD_PARSER = "tool_call_once"
-# Soft cap on `.curation_invocations/`. `_interprocess_lock` opens (creates) a `<name>.lock` per paid
+# Soft cap on `.curation_invocations/`. `interprocess_lock` opens (creates) a `<name>.lock` per paid
 # decision and never unlinks it, and the concept/claim curation keys carry the EVOLVING portfolio digest,
 # so the scratch dir would otherwise accrete a lock file per finalize forever. Past this cap we best-effort
 # prune the oldest ORPHAN lock files (no matching `.json` recovery claim). Claim `.json` markers are durable
@@ -361,7 +361,7 @@ class CurationProtocolMixin:
     def _curation_decision_lock(self, log_name: str, final: RunState, curation_key: str):
         """Serialize every terminal decision for one semantic key, including no-call fast paths."""
         from looplab.core.atomicio import strict_fsync_parent
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
 
         claim_path = self._curation_claim_path(log_name, curation_key)
         legacy_path = self._legacy_curation_claim_path(log_name, final)
@@ -376,14 +376,14 @@ class CurationProtocolMixin:
             # (`_curation_attempt_already_resolved_locked`). Its interprocess lock therefore only matters
             # when a legacy claim actually exists on disk (a v1-era writer left one). Acquiring it
             # unconditionally would open (create) a `<run_id>.json.lock` — and since the legacy path is
-            # keyed by the unique run_id and `_interprocess_lock` never unlinks, that accreted one orphan
+            # keyed by the unique run_id and `interprocess_lock` never unlinks, that accreted one orphan
             # lock per run in `.curation_invocations/` forever. Serialize against it only when there is a
             # legacy claim to serialize against; the v2 claim lock below always fences the paid decision.
             legacy_guard = (
-                _interprocess_lock(Path(str(legacy_path) + ".lock"), required=True)
+                interprocess_lock(Path(str(legacy_path) + ".lock"), required=True)
                 if legacy_path is not None and legacy_path.exists() else nullcontext())
             with legacy_guard:
-                with _interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
+                with interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
                     yield
 
     def _prune_curation_scratch(self, scratch: Path) -> None:

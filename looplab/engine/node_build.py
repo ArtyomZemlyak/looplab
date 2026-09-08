@@ -21,6 +21,7 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (Idea, NodeStatus, RunState, normalize_researcher_footprint,
                                  is_developer_error, is_developer_stuck)
 from looplab.engine.costs import find_cost_accountants
+from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER
 from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED, EV_NODE_FAILED, EV_PAUSE
 from looplab.search.operators import merge_idea
 
@@ -461,12 +462,29 @@ class NodeBuildMixin:
         path (`_repair` routes through here), where "what fixed this crash class" is exactly relevant."""
         from looplab.agents.hints import render_hint_directives
         blocks = [b for b in (render_hint_directives(state.pending_hints),
-                              self._dev_prior_note_text.strip()) if b]
+                              self._developer_prior_text(idea).strip()) if b]
         if not blocks:
             return idea
         di = idea.model_copy(deep=True)
         di.rationale = ((di.rationale or "") + "\n" + "\n".join(blocks)).strip()
         return di
+
+    def _developer_prior_text(self, idea) -> str:
+        """The Developer's cross-run prior for THIS build — operator-scoped when the operator about
+        to fire is known and the operator scoping is on, otherwise the run-wide text verbatim.
+
+        This is the one place in the loop that holds both halves: the retrieved cross-run lessons and
+        the `Idea` whose `operator` the node will carry. Cross-run LESSONS were retrieved by task
+        fingerprint and role and by nothing about the action (doc 52 §4.3), so a merge, a repair and
+        an improve all read the same five rows.
+
+        `operator_scoped_prior` returns None with the flag off (the default), with no operator on the
+        idea, or before any prior has been loaded — and then this is the historical expression, byte
+        for byte. It never falls back to the unscoped text while claiming a scoped receipt: the
+        receipt is written by the scoped render itself or not at all."""
+        scoped = self.lessons.operator_scoped_prior(
+            LESSON_ROLE_DEVELOPER, str(getattr(idea, "operator", "") or ""), phase="build")
+        return self._dev_prior_note_text if scoped is None else scoped
 
     @in_llm_lane("build")
     def _repair(self, node, err: str, state: Optional[RunState] = None, *, developer=None) -> str:

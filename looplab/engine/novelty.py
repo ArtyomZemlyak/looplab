@@ -1377,7 +1377,7 @@ class NoveltyGateMixin:
                                                          load_concept_aliases, load_concept_splits)
             from looplab.engine.memory import (
                 ConceptCapsuleStore,
-                _capsule_completeness,
+                capsule_completeness,
                 _capsule_concept_evidence_completeness,
             )
             # NOTE (full-CR TODO, §21.20.13 CR2a): this reloads+scans the whole capsule JSONL per proposal;
@@ -1401,9 +1401,9 @@ class NoveltyGateMixin:
             for similarity, capsule in caps:
                 raw = [str(x) for x in (capsule.get("concepts") or []) if str(x)]
                 evidence_meta = _capsule_concept_evidence_completeness(capsule)
-                concept_meta = _capsule_completeness(capsule, "concepts", len(raw))
+                concept_meta = capsule_completeness(capsule, "concepts", len(raw))
                 raw_outcomes = capsule.get("concept_outcomes") or {}
-                outcome_meta = _capsule_completeness(
+                outcome_meta = capsule_completeness(
                     capsule, "concept_outcomes",
                     len(raw_outcomes) if isinstance(raw_outcomes, dict) else 0,
                 )

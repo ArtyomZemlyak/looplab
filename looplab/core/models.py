@@ -1645,6 +1645,14 @@ class Node(BaseModel):
     # doc 52 row 19: the model ARM the bandit routed this build to (`search/policy.py::META_MODEL`);
     # "" for a build that was not routed, which the yield fold reads as the default arm.
     model_arm: str = ""
+    # docs/BACKLOG.md §0.1 row 17: the LLM VALUE ESTIMATE for this branch, in [0, 1] — 0 "this
+    # lineage is spent", 1 "it still has a lot left" — computed live by `engine/value_estimate.py`
+    # and frozen here, because an LLM output cannot live in the deterministic fold (the same reason
+    # `verifier_score` above is frozen rather than recomputed). Read ONLY by `MCTSPolicy` and only
+    # as `search/policy.py::value_estimate`'s decaying adjustment to the UCB1 value term: it never
+    # touches the metric, never reaches champion selection, and None — nobody asked — is not 0.5.
+    # Additive and reader-defaulted, so an old log folds byte-identically.
+    value_prior: Optional[float] = None
     # Fold-internal receipt that the Developer finalized this lifecycle's quantitative footprint.
     # Excluded from model dumps so Layer 4 does not perturb snapshots/public DTOs; the append-only
     # node_created/node_repaired event remains the durable authority.

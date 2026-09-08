@@ -26,7 +26,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
 from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
-from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient
+from looplab.events.eventstore import interprocess_lock, read_jsonl_lenient
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED
 
 
@@ -280,7 +280,7 @@ class LessonDistillMixin:
             # The duplicate check and append are one transaction.  Concurrent finalizers can
             # otherwise both observe absence and append the same note, while a crash-torn last line
             # can swallow the next valid record for every line-oriented reader.
-            with _interprocess_lock(Path(str(npath) + ".lock")):
+            with interprocess_lock(Path(str(npath) + ".lock")):
                 run_uid = getattr(final, "run_uid", "")
                 _dup = _has_finish_seq and any(
                     o.get("finish_seq") == finish_seq and (
@@ -407,7 +407,7 @@ class LessonDistillMixin:
             _rows_out = utility_rows(_report, run_id=final.run_id, run_uid=final.run_uid)
             if _rows_out:
                 _upath = base / "lesson_utility.jsonl"
-                with _interprocess_lock(Path(str(_upath) + ".lock"), required=True):
+                with interprocess_lock(Path(str(_upath) + ".lock"), required=True):
                     append_jsonl_bytes_locked(
                         _upath, b"".join(orjson.dumps(row) + b"\n" for row in _rows_out))
             prior_citations = {
@@ -627,7 +627,9 @@ class LessonDistillMixin:
                      # cases worked and lessons did not). Same field, same meaning as lessons.py's case row.
                      "direction": final.direction,
                      "run_id": final.run_id, "evidence": [best.id], "role": LESSON_ROLE_RESEARCHER,
-                     "evidence_sig": self._evidence_sig_map(final, [best.id])}
+                     "evidence_sig": self._evidence_sig_map(final, [best.id]),
+                     # The winner's own operator, so an opt-in operator-scoped read can find it.
+                     "operators": self._evidence_operators(final, [best.id])}
             if getattr(final, "run_uid", ""):
                 lesson["run_uid"] = final.run_uid
             return [lesson]
@@ -662,6 +664,7 @@ class LessonDistillMixin:
         # RE-CHECK section), which is precisely the flip this signature exists to catch.
         ev_ids = [n.id for n in ok] + [n.id for n in bad] + [n.id for n, _ in observed]
         ev_sig = self._evidence_sig_map(final, ev_ids)
+        ev_operators = self._evidence_operators(final, ev_ids)
         # The full experimental record — every resolved Card work item with its outcome + Δ — so the LLM can
         # CONSOLIDATE many trials of the SAME theme (e.g. every temperature experiment) into ONE lesson,
         # instead of the old one-verbatim-hypothesis-per-lesson dump that filled the store with near-dupes.
@@ -744,6 +747,12 @@ class LessonDistillMixin:
                 "run_id": final.run_id,
                 **({"run_uid": final.run_uid} if getattr(final, "run_uid", "") else {}),
                 "evidence": list(ev_ids), "evidence_sig": ev_sig,
+                # WHICH OPERATORS this whole-run reflection is grounded in — the same `ev_ids` the
+                # signature above is taken over, so the two facts can never describe different nodes.
+                # Coarse for exactly the reason the signature is: a whole-run generalization cannot
+                # be attributed per node, so the row carries every operator that fed it and a reader
+                # scoping by one of them treats the row as its own (doc 52 §4.3).
+                "operators": ev_operators,
                 **role_tag}
                for _, stmt, outcome in parse_credit_lessons(out, 0, limit=8)]
         return res      # LLM gave nothing usable → [] (a real run never writes a templated lesson)

@@ -36,7 +36,7 @@ What this file drives, in the order the risk runs:
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -373,6 +373,16 @@ def test_the_graded_novelty_channel_cannot_see_an_in_flight_tag(tmp_path):
 
     host = SimpleNamespace(_graded_novelty=True, _reflect_client=None,
                            _cross_run_prior=lambda st: (set(), {}, {}, {}))
+    # The rubric's prior-art terminal (`novelty.py::_literature_rows`, doc 52 row 32) is evaluated
+    # as an ARGUMENT to `grade_novelty`, INSIDE the precheck's blind `except Exception` — so a host
+    # that does not answer it does not fail loudly, it takes the contained `return None` and the
+    # channel simply goes unreached. That is what this fixture did when the terminal landed, and the
+    # symptom was `NOT REACHED` on the CONTROL arm rather than any statement about the line under
+    # test. It is bound to the real method rather than stubbed to `[]` for the same reason the
+    # withholding is asserted through `Engine._graded_novelty_precheck` itself: `_novelty_literature`
+    # is absent here, so the production reader answers `[]` on its own and a future change to what
+    # the terminal needs surfaces here instead of being frozen into a stub.
+    host._literature_rows = MethodType(Engine._literature_rows, host)
     idea = Idea(operator="draft", theme="dcl-9", rationale="hard negatives")
 
     def _graph_for(state):

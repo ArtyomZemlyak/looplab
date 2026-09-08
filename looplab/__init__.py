@@ -50,6 +50,8 @@ _LAYOUT = {
     "toy_roles": "agents",      # the offline ToyResearcher/ToyObjectiveDeveloper backends
     "developer_backends": "agents",  # the three developer-backend wirings `make_roles` composes (RA-01)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
+    "task_schema": "adapters",  # the composable/legacy task-schema front-end `normalize_task`,
+                                # extracted from `tasks.py` on 2026-09-08 (doc 25 RA-01's cap)
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
@@ -83,6 +85,7 @@ _LAYOUT = {
     "audit": "engine",   # engine audit/trust-emitter mixin
     "concept_cadence": "engine",  # PART IV/V concept re-tag + snapshot mixin (doc 25 EC-09)
     "concept_capsules": "engine",  # durable per-run concept record + portfolio views (doc 25 EM-10)
+    "knowledge_views": "engine",  # the PUBLIC cross-run knowledge read model (doc 25 XP-01/TO-09 §6.6)
     "concept_shelf": "engine",   # the per-run concept surface the memory views sort by
     "concept_graph": "search",   # PART IV D5 concept vocabulary + axis-DAG + curated skeletons
     "concept_analytics": "search",  # ...its pure coverage/metrics/alarm read-models (doc 25 SE-09)
@@ -423,6 +426,7 @@ _LAYOUT = {
     "vectorstore": "tools",
     "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
     "verifier_tiebreak": "engine",  # R1-c calibrated-verifier metric tie-break mixin (doc 25 EC-09)
+    "value_estimate": "engine",  # the LLM value estimate cadence (docs/BACKLOG.md §0.1 row 17)
     # The D8 memo-claim verifier. It was `trust/verify.py` — two letters from `trust/verifier.py`,
     # which is a DIFFERENT verifier (doc 25 CT-09). Both legacy spellings live in `_RENAMED` below,
     # because this map's contract is canonical-stem -> package and `verify` is no longer a stem.

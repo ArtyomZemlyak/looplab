@@ -133,8 +133,31 @@ class BestOfNDeveloper(WrapsDeveloper):
     Deterministic given a deterministic inner (toy); with an LLM at temperature>0 the candidates
     vary, so best-of-N actually explores. `repair` delegates to inner (single attempt).
 
-    Forwarding (brief/client/prompts/is_code_generating/last_report) and one-candidate output sync
-    come from `WrapsDeveloper`; the N-candidate path restores the winning files/deletions/footprint."""
+    Forwarding (brief/client/prompts/is_code_generating) and one-candidate output sync come from
+    `WrapsDeveloper`; the N-candidate path restores the winning candidate's registered outputs —
+    `last_report` included, through the property below, because that one is a read-through on the
+    base class and a plain `setattr` cannot reach it."""
+
+    _NO_CHOSEN_REPORT = object()
+
+    @property
+    def last_report(self):
+        """The CHOSEN candidate's validation report, not whichever candidate ran LAST.
+
+        `WrapsDeveloper.last_report` reads through to the inner developer, which is correct for a
+        single-shot wrapper and wrong here: N candidates each overwrite the inner's report, so the
+        read-through describes candidate N while every other registered output describes the one
+        that was PICKED. `engine/audit.py::_emit_agent_report` writes that value to the durable
+        `agent_validated` row, and `_capture_developer_result` copies the same read-through into the
+        envelope — so a best-of-N node's ADR-7 audit trail described a candidate that did not ship,
+        beside files and a footprint that did.
+
+        Falls back to the read-through whenever no N-candidate pick is standing: `n == 1`, a repair
+        (single-shot, and `_sync_audit` clears the pick), or before the first build."""
+        chosen = getattr(self, "_chosen_report", self._NO_CHOSEN_REPORT)
+        if chosen is not self._NO_CHOSEN_REPORT:
+            return chosen
+        return getattr(self._wrapped, "last_report", None)
 
     def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call",
                  foresight: bool = True, direction: str = "min", goal: str = "",
@@ -195,6 +218,7 @@ class BestOfNDeveloper(WrapsDeveloper):
         if not callable(rf):
             return self.repair(idea, getattr(node, "code", ""), error)
         self.last_foresight_pick = None     # repair uses no predictive ranker: clear the prior pick
+        self._chosen_report = self._NO_CHOSEN_REPORT   # …nor a build's pick: this is single-shot
         out = rf(idea, node, error)
         self._sync_audit()                  # else last_files stale from a prior implement()
         return out
@@ -205,6 +229,7 @@ class BestOfNDeveloper(WrapsDeveloper):
         by `implement` and `implement_from` so both get identical best-of-N + parent-aware behavior."""
         if self.n == 1:
             code = gen_one()
+            self._chosen_report = self._NO_CHOSEN_REPORT   # single-shot: read through, as before
             self._sync_audit()
             self.last_n_scores = [_score(code)]
             return code
@@ -270,11 +295,15 @@ class BestOfNDeveloper(WrapsDeveloper):
             chosen = top[idx]
         # The chosen candidate's OWN side channels first, then the three this wrapper owns
         # explicitly (files/deleted/footprint are re-derived above so a copy is never shared).
+        # `last_report` is NOT among them: it is a read-through property on the base class, so a
+        # `setattr` here raised and was swallowed — which left the one member the durable
+        # `agent_validated` row is built from describing candidate N while the other ten described
+        # the pick. It goes through `_chosen_report` and the property above instead.
+        self._chosen_report = chosen[5].get("last_report")
         for _attr, _value in chosen[5].items():
-            try:
-                setattr(self, _attr, _value)
-            except Exception:  # noqa: BLE001 - an optional audit channel must never block a build
-                pass
+            if _attr == "last_report":
+                continue
+            setattr(self, _attr, _value)
         self.last_files, self.last_deleted, self.last_footprint = chosen[1], chosen[2], chosen[3]
         return chosen[0]
 
@@ -282,6 +311,7 @@ class BestOfNDeveloper(WrapsDeveloper):
         repair = getattr(self.inner, "repair", None)
         if callable(repair):
             self.last_foresight_pick = None   # repair uses no predictive ranker: clear the prior pick
+            self._chosen_report = self._NO_CHOSEN_REPORT   # …nor a build's: this is single-shot
             out = repair(idea, code, error)   # so this node's audit/`foresight_selected` isn't stale
             self._sync_audit()                # else last_files stale from prior implement()
             return out

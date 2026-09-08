@@ -624,6 +624,50 @@ def eval_cost_penalty(subtree_cost: float, run_cost: float, weight: float) -> fl
     return weight * relative
 
 
+def value_estimate(reward: float, prior: Optional[float], visits: int, weight: float) -> float:
+    """The LLM VALUE ESTIMATE (docs/BACKLOG.md §0.1 row 17): a subtree's UCB1 value term, adjusted
+    by what a model said the branch still has left, decayed by the evidence already standing under
+    the reward.
+
+    The tree valued a node by its metric alone, so a branch nobody has expanded and a branch that is
+    demonstrably exhausted scored identically whenever their metrics matched — and the only thing
+    separating them, the count-based exploration bonus, cannot read a line of what either one DID.
+    That is the whole item: `_mcts_reward` folds the number, and nothing in the tree ever formed an
+    opinion about the CODE. `prior` is that opinion, in [0, 1] (0 = this branch is spent, 1 = it has
+    a lot left), recorded per node by `engine/value_estimate.py` and frozen into the log, so the
+    fold stays deterministic and a replay picks exactly the same nodes.
+
+    Three decisions, each the same one `eval_cost_penalty` above made, and for the same reasons:
+
+    * ADDED to the value term, not multiplied into the score. `_mcts_reward` is bounded in (0, 2)
+      and `c ≈ 1.4` is calibrated against that scale; a multiplicative prior would rescale the
+      EXPLORATION term too, which counts visits and knows nothing about promise.
+    * ZERO-CENTRED at `prior = 0.5`, so an UNINFORMATIVE estimate is exactly inert. The obvious
+      spelling — blending `reward` toward `2 × prior` on the reward scale — is not: `2 × prior` is
+      an ABSOLUTE anchor (1.0 is the reward of a metric of exactly 0), so on a run whose accuracies
+      sit at 0.85 (reward ≈ 1.47) a model that answers a flat 0.5 for everything drags every
+      candidate down — and, because the blend weight decays with visits, drags the LEAST-VISITED
+      down hardest. That is the exploration bonus running backwards, bought with paid calls, and it
+      is invisible in any test where the priors differ.
+    * DECAYED as `1 / (1 + visits)`, the shape the exploration term beside it already has: the
+      estimate speaks loudest exactly where the evidence is thinnest and fades as the subtree is
+      actually measured. It never accumulates across a merge — ADR-5 §4 keeps value tree-like and
+      forbids back-propagating it across multi-parent credit — because the prior is read off the
+      CANDIDATE, standalone, and nothing propagates it anywhere.
+
+    The unit is therefore statable: at `weight = 0.4` a once-visited branch the model calls spent
+    loses 0.2 reward and one it calls wide open gains 0.2, against an exploration term worth
+    `1.4 × sqrt(ln 10 / 1) ≈ 2.1` at that visit count — the estimate nudges, it does not decide.
+    `weight = 0` (the default) returns `reward` itself, so the score expression is byte-identical to
+    the one every run before this shipped with, and an unestimated node is likewise untouched:
+    "nobody asked the model about this branch" is not "the model called it average".
+    """
+    if weight <= 0 or prior is None:
+        return reward
+    p = min(1.0, max(0.0, float(prior)))
+    return reward + weight * (2.0 * p - 1.0) / (1.0 + max(1, int(visits)))
+
+
 class MCTSPolicy:
     """Opt-in UCB1 tree search (I22, ADR-2). Selects which node to expand by
     UCB1 = reward + c·sqrt(ln N / visits), balancing exploiting good subtrees against
@@ -632,7 +676,7 @@ class MCTSPolicy:
     """
 
     def __init__(self, n_seeds: int = 3, max_nodes: int = 12, c: float = 1.4,
-                 debug_depth: int = 1, cost_weight: float = 0.0):
+                 debug_depth: int = 1, cost_weight: float = 0.0, value_weight: float = 0.0):
         self.n_seeds = n_seeds
         self.max_nodes = max_nodes
         self.c = max(0.0, float(c))   # >= 0: a negative c flips UCB exploration into a penalty
@@ -642,6 +686,14 @@ class MCTSPolicy:
         # unchanged. Clamped >= 0 for the same reason `c` is: a negative weight would turn the
         # expense into a BONUS and quietly make the policy prefer the slowest subtree.
         self.cost_weight = max(0.0, float(cost_weight or 0.0))
+        # The LLM value estimate (docs/BACKLOG.md §0.1 row 17), OFF at 0.0 on the same terms and for
+        # the same reason: `value_estimate` returns its `reward` argument and the UCB expression is
+        # byte-identical to the historical one. The clamp is the same clamp too — a negative weight
+        # would read every recorded estimate BACKWARDS, sending the search at the branches the model
+        # called spent, and would be recorded as a legitimate strategy while doing it. It is also
+        # the gate on the paid call: `engine/value_estimate.py` estimates nothing at 0, so a run
+        # that cannot use the number never buys it.
+        self.value_weight = max(0.0, float(value_weight or 0.0))
 
     def next_actions(self, state: RunState) -> list[dict]:
         pending = state.pending_nodes()
@@ -716,6 +768,15 @@ class MCTSPolicy:
                          and state.nodes[i].feasible and not state.nodes[i].tombstoned
                          and i not in state.aborted_nodes
                          and i not in state.breed_excluded) or 1
+            # THE LLM VALUE ESTIMATE (docs/BACKLOG.md §0.1 row 17): the value term, adjusted by what
+            # a model said this branch still has left and decayed by the visits already standing
+            # under it — so a branch nobody has expanded stops scoring identically to one that is
+            # demonstrably exhausted at the same metric. Read off the CANDIDATE (`Node.value_prior`,
+            # frozen into the log by `engine/value_estimate.py`, so the fold stays deterministic and
+            # nothing propagates a value across a merge — ADR-5 §4). Inert at `value_weight = 0`,
+            # which is the default and the historical behaviour, and inert for an unestimated node.
+            reward = value_estimate(reward, getattr(node, "value_prior", None),
+                                    visits, self.value_weight)
             ucb = reward + self.c * math.sqrt(math.log(n_total + 1) / visits)
             # COST-CONSTRAINED SELECTION (doc 52 row 31): the same UCB1, minus what this subtree
             # costs to expand, relative to what this run's experiments cost on average. Inert at
@@ -921,7 +982,8 @@ def _make_mcts(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,
     # subtrees — a silently degenerate hyper-greedy policy recorded as a legitimate strategy.
     c = max(0.0, float(params.get("c", 1.4)))
     return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c, debug_depth=depth,
-                      cost_weight=float(params.get("cost_weight", 0.0) or 0.0))
+                      cost_weight=float(params.get("cost_weight", 0.0) or 0.0),
+                      value_weight=float(params.get("value_weight", 0.0) or 0.0))
 
 
 def _make_asha(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,

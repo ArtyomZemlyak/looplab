@@ -1118,6 +1118,18 @@ class Settings(BaseSettings):
     # a subtree nobody has measured counts as average, never as free. Only the `mcts` policy reads
     # it (greedy/evolutionary/asha ignore it, as they ignore `c`).
     mcts_cost_weight: float = 0.0
+    # THE LLM VALUE ESTIMATE (docs/BACKLOG.md §0.1 row 17): how much a model's opinion of a branch's
+    # remaining HEADROOM counts in the `mcts` policy's UCB1 value term. `0.0` = off and is the
+    # historical behaviour exactly — `search/policy.py::value_estimate` returns its reward argument,
+    # the score expression is unchanged, and the paid call is never made, so a run that cannot use
+    # the number does not buy it. That is also why it needs no `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row:
+    # off IS the pre-field value, so a resumed snapshot that predates the field gains no paid call.
+    # The unit is REWARD, on `_mcts_reward`'s bounded (0, 2) scale and zero-centred at an
+    # uninformative estimate: at `0.4` a once-visited branch the model calls spent loses 0.2 and one
+    # it calls wide open gains 0.2, decayed by `1 / (1 + visits)` as the subtree is really measured.
+    # Only the `mcts` policy reads it (greedy/evolutionary/asha ignore it, as they ignore `c`), and
+    # it buys ONE bounded structured call per unestimated candidate per creation boundary.
+    mcts_value_weight: float = 0.0
     # THE MODEL ARMS of the operator x model router (doc 52 row 19): `{arm: "model-id[@cost]"}` —
     # the models the bandit branch may route a BUILD to beside the configured Developer model (the
     # implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because it is a
@@ -1156,6 +1168,30 @@ class Settings(BaseSettings):
     # run-start read only, the pre-M6 behavior.
     lessons_every: int = Field(default=4, ge=0)
     lessons_refresh_every: int = Field(default=4, ge=0)
+    # OPERATOR-SCOPED cross-run lessons (doc 52 §4.3). Cross-run lessons are retrieved by task
+    # FINGERPRINT (Jaccard >= 0.34, harmonic recall, top 5) and by ROLE, and by nothing about the
+    # action about to fire — so a merge, a repair and an improve on one task all read the same five
+    # rows, while the IN-RUN context has had parent-plus-sibling scoping since
+    # `events/digest.py::lineage_lessons`. ON threads the operator of the `Idea` being built into
+    # the Developer prior's ranking (`lesson_hygiene.py::lesson_operator_bucket`): this operator's
+    # own lessons first, then untagged ones, then rows tagged only with other operators.
+    #
+    # OFF BY DEFAULT, and the default is the finding rather than caution. The only per-operator
+    # scoping ablation in the field (AIRA-dojo) came back NULL, so there is no evidence to spend a
+    # prompt change on — and a prompt is a contract: `false` reproduces the Developer's prior BYTE
+    # FOR BYTE, because the flag decides only WHICH FIVE of the already-eligible rows fill the
+    # slots. It RANKS rather than filters for the same reason: dropping other-operator rows would
+    # bet a real loss (a Developer never shown the fix for a crash class) on an unmeasured effect.
+    #
+    # What the field buys while off is the EVIDENCE to decide it: every distilled lesson now records
+    # the operators of its own evidence nodes unconditionally (no prompt bytes, no call), and a
+    # scoped render writes a `prior_injected` row naming the operator, which
+    # `events/prior_citations.py` joins to what the proposals cited. NO
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: the live default IS the historical behaviour, so a
+    # pre-field snapshot resumes into exactly what it was doing (the map exists for the case where
+    # those two differ). Costs no store read and no provider call — the per-operator render re-ranks
+    # the scan the run-start/refresh load already paid for, with its embedder memo intact.
+    lesson_operator_scope: bool = False
     # B3 output redaction: the HIGH-ENTROPY half of the persisted-tail redactor.
     # **This flag no longer decides whether tails are redacted at all** (backlog C2, 2026-08-14).
     # Known credential SHAPES and the operator's own secret env VALUES are masked on every persisted

@@ -22,7 +22,8 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from looplab.core.atomicio import atomic_write_text, same_file_entry
+from looplab.core.atomicio import (atomic_write_text, file_identity, same_file_entry,
+                                   same_file_kind)
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_disagreement, run_start_pinned_settings,
     settings_from_snapshot)
@@ -38,7 +39,7 @@ from looplab.serve.http import (
     generation_conflict, if_none_match, json_object, request_body_contract, refusal)
 from looplab.events.eventstore import (
     EventStore, EventStoreLockError, JsonlRecordInvalid,
-    _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
+    interprocess_lock, decode_jsonl_line, iter_event_jsonl)
 from looplab.events.replay import FoldCursor, fold
 from looplab.events.trust_gate import (
     GATE_WRITE_APPENDED, GATE_WRITE_CONTENDED, apply_trust_gate,
@@ -327,14 +328,11 @@ def _concept_event_file_identity(path: Path) -> Optional[tuple]:
         status = path.stat()
     except OSError:
         return None
-    return (
-        str(path.absolute()),
-        status.st_dev,
-        status.st_ino,
-        status.st_ctime_ns,
-        status.st_mtime_ns,
-        status.st_size,
-    )
+    # The canonical tuple, not a hand-spelled subset of it: the version this cache key stands for
+    # is "same file AND unchanged", which is `file_identity`'s exact question, and the hand-rolled
+    # five fields omitted `st_file_attributes` — so a concept event file that gained a reparse point
+    # kept serving the core folded from the file that was validated (doc 25 SC-11/XP-02).
+    return (str(path.absolute()), *file_identity(status))
 
 
 def _concept_relation_registry_identity(lens_pack: list[dict]) -> tuple[str, ...]:
@@ -547,7 +545,9 @@ def _operator_stage_names(rd: Path) -> tuple:
         stt = snap_path.stat()
     except OSError:
         return ()   # engine still starting (snapshot not written yet) — don't memoize a transient miss
-    key = (str(rd), stt.st_mtime_ns, stt.st_size)
+    # `file_identity` rather than (mtime_ns, size): a snapshot REPLACED by a reset keeps the memo
+    # otherwise, and stage names decide how a node's pipeline is read (doc 25 SC-11).
+    key = (str(rd), *file_identity(stt))
     cached = _OP_STAGE_NAMES.get(key)
     if cached is not None:
         return cached
@@ -907,10 +907,7 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         try:
             initial_entry = rd.lstat()
-            initial_identity = (
-                initial_entry.st_dev, initial_entry.st_ino, initial_entry.st_mode,
-                int(getattr(initial_entry, "st_file_attributes", 0) or 0),
-            )
+            initial_identity = same_file_kind(initial_entry)
         except OSError as exc:
             raise HTTPException(404, "no such run") from exc
 
@@ -924,10 +921,7 @@ def build_router(srv) -> APIRouter:
                 # receives the authoritative 404/410 (or a temporary availability response) from
                 # the route boundary instead of accepting a fabricated empty state after quarantine.
                 return False
-            current_identity = (
-                entry.st_dev, entry.st_ino, entry.st_mode,
-                int(getattr(entry, "st_file_attributes", 0) or 0),
-            )
+            current_identity = same_file_kind(entry)
             return current == rd and current_identity == initial_identity
 
         async def gen():
@@ -2976,7 +2970,7 @@ def build_router(srv) -> APIRouter:
             # worker to the same handlers; only the thread the section runs on changes.
             def _write() -> dict:
                 with (_run_config_thread_lock(snap),
-                      _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
+                      interprocess_lock(Path(str(snap) + ".lock"), required=True)):
                     assert_run_reset_write_allowed(rd)
                     assert_run_deletion_write_allowed(rd)
                     return _put_run_config_locked(

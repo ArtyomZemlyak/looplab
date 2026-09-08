@@ -375,7 +375,7 @@ def test_the_bound_is_inclusive_and_non_negative(value, maximum, expected):
 # than silently leaving two of the four validators unguarded.
 _RECEIPT_VALIDATORS = {
     "claims_health.py": ("_safe_claim_read_segment",),
-    "concept_capsules.py": ("_capsule_concept_evidence_completeness", "_capsule_completeness"),
+    "concept_capsules.py": ("_capsule_concept_evidence_completeness", "capsule_completeness"),
     "concept_steward.py": ("_concept_source_receipt",),
 }
 
@@ -511,14 +511,14 @@ def test_each_bounded_collection_carries_its_declared_completeness_triple(stem):
     fields = concept_capsules.capsule_completeness_receipt(stem)
     assert set(fields) <= set(capsule)
     included = len(capsule[stem])
-    assert concept_capsules._capsule_completeness(capsule, stem, included) is not None
+    assert concept_capsules.capsule_completeness(capsule, stem, included) is not None
     for name in fields:                                  # a torn triple is corrupt, never partial truth
         broken = {key: value for key, value in capsule.items() if key != name}
-        assert concept_capsules._capsule_completeness(broken, stem, included) is None
+        assert concept_capsules.capsule_completeness(broken, stem, included) is None
 
 
 def test_the_source_receipt_declaration_is_the_same_object_at_both_ends():
-    """The widest gap of the three: the writer is `concept_capsules._capsule_source_summary` and the
+    """The widest gap of the three: the writer is `concept_capsules.capsule_source_summary` and the
     reader is `concept_steward._concept_source_receipt`, in another module. Identity, not equality —
     a second module-local copy that happened to be equal today is exactly the drift EM-12 named."""
     from looplab.engine import concept_capsules, concept_steward
@@ -529,10 +529,10 @@ def test_the_source_receipt_declaration_is_the_same_object_at_both_ends():
 def test_the_cross_module_source_receipt_round_trips():
     """Driven: the aggregate the writer really produces is read as KNOWN by the steward's validator,
     and every declared count survives the crossing."""
-    from looplab.engine.concept_capsules import CAPSULE_SOURCE_COUNTS, _capsule_source_summary
+    from looplab.engine.concept_capsules import CAPSULE_SOURCE_COUNTS, capsule_source_summary
     from looplab.engine.concept_steward import _concept_source_receipt
 
-    summary = _capsule_source_summary([_capsule()])
+    summary = capsule_source_summary([_capsule()])
     assert set(CAPSULE_SOURCE_COUNTS) <= set(summary)
 
     receipt = _concept_source_receipt(summary, [])

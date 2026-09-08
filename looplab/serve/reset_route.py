@@ -24,7 +24,7 @@ from looplab.core.run_reset import (
     RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RunResetFenceError,
     RunResetStorageError, load_run_reset_marker, publish_run_reset_marker)
 from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
-from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.events.span_index import (
     invalidate as invalidate_span_index, span_destructive_write_guard)
 from looplab.serve.engine_proc import (
@@ -652,7 +652,7 @@ def _restore_existing_fence(
         snap = rd / "config.snapshot.json"
         try:
             with (run_config_write_lock(snap, operation_id=operation_id),
-                  _interprocess_lock(
+                  interprocess_lock(
                       Path(str(rd / "events.jsonl") + ".lock"), required=True)):
                 marker = load_run_reset_marker(rd)
                 if marker is None:
@@ -1100,7 +1100,7 @@ def _reset_blocking(
                 snap = rd / "config.snapshot.json"
                 try:
                     with (run_config_write_lock(snap, operation_id=operation_id),
-                          _interprocess_lock(
+                          interprocess_lock(
                               Path(str(rd / "events.jsonl") + ".lock"), required=True),
                           span_destructive_write_guard(
                               rd / "spans.jsonl", required=True)):

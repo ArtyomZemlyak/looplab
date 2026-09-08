@@ -2147,7 +2147,7 @@ Where each concept lives in the code:
 | Trace span exporter | `core/tracing.py` |
 | Search policies | `search/policy.py` |
 | Static HTML lineage tree | `events/htmlview.py` |
-| Task adapters + loader | `adapters/tasks.py`, `adapters/synthetic.py` (the five demo adapters' shared `SyntheticTaskBase` + `PerturbResearcher`), `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
+| Task adapters + loader | `adapters/tasks.py`, `adapters/task_schema.py` (the composable/legacy schema front-end `normalize_task`), `adapters/synthetic.py` (the five demo adapters' shared `SyntheticTaskBase` + `PerturbResearcher`), `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
 | Strategist / Deep-Research / report | `agents/strategist.py`, `agents/deep_research.py`, `serve/report.py` |
 
 

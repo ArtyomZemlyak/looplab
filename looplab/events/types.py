@@ -227,6 +227,13 @@ EV_NODE_VERIFIED = "node_verified"
 # Versioned all-or-nothing verifier treatment for one complete selector tie component. Replay validates
 # every member/generation/evidence digest before publishing any score; legacy per-node events remain readable.
 EV_VERIFIER_GROUP_SCORED = "verifier_group_scored"
+# docs/BACKLOG.md §0.1 row 17: the LLM VALUE ESTIMATE for one node's branch, in [0, 1] — how much a
+# model thinks expanding that lineage still has left, computed live by `engine/value_estimate.py`
+# (an LLM output can't live in the deterministic fold) and frozen here so a replay picks the same
+# nodes. Generation-scoped exactly like `node_verified`; folds into `Node.value_prior` and is read
+# ONLY by `MCTSPolicy` as a decaying adjustment to the UCB1 value term — never by champion
+# selection. Emitted only when `mcts_value_weight` > 0. Additive, reader-defaulted.
+EV_NODE_VALUE_ESTIMATED = "node_value_estimated"
 EV_PROXY_SCORED = "proxy_scored"
 EV_BEST_CONFIRMED = "best_confirmed"
 EV_RUN_FINISHED = "run_finished"
@@ -1805,6 +1812,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("node_ids",),
         optional=(),
     ),
+    "node_value_estimated": PayloadContract(
+        "How much a model thinks expanding one node's branch still has left, in [0, 1].",
+        required=("generation", "node_id", "value"),
+        optional=("attempt", "rationale"),
+    ),
     "node_verified": PayloadContract(
         "The selection verifier's score for one node, over a named evidence digest.",
         required=(),
@@ -1855,8 +1867,13 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # The last five arrive as `**receipt` from `lessons_priors.py::_pick_role_prior`, a spread
         # the writer scan reads as opaque — so they are declared from the builder by hand and the
         # type is named in `tests/test_event_payload_contract.py::OPAQUE_PAYLOAD_WRITERS`.
+        # `operator` / `operator_scoped` ride the same spread and appear only on an OPERATOR-SCOPED
+        # render (`Settings.lesson_operator_scope`, off by default): which action the retrieval was
+        # scoped to. Both, not one — the outer key is what the row was scoped to and the receipt's own
+        # copy is what the RANKING actually used, so a render that fell back is visibly different.
         optional=(
-            "at_node", "case", "notes", "phase", "quarantined_useless", "role", "rows", "source"
+            "at_node", "case", "notes", "operator", "operator_scoped", "phase",
+            "quarantined_useless", "role", "rows", "source"
         ),
     ),
     "promote": PayloadContract(

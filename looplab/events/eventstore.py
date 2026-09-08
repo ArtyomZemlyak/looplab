@@ -252,7 +252,7 @@ class InterprocessLockContended(RuntimeError):
 
 
 @contextmanager
-def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: bool = True):
+def interprocess_lock(lock_path: Path, *, required: bool = False, blocking: bool = True):
     """Best-effort exclusive cross-process lock (msvcrt on Windows, fcntl on POSIX). The live UI
     server appends control events to the SAME events.jsonl the engine subprocess writes; without
     serialization their appends can interleave into a torn line (which `iter_jsonl` truncates at,
@@ -268,7 +268,17 @@ def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: boo
       wrapped in ``EventStoreLockError`` when ``required``, re-raised as the bare ``OSError``
       otherwise. It does not degrade. A mount where events.jsonl is appendable but its ``.lock``
       cannot be created therefore aborts the append rather than running it unlocked, which is the
-      long-standing engine-writer behaviour and is preserved on purpose."""
+      long-standing engine-writer behaviour and is preserved on purpose.
+
+    PUBLIC since 2026-09-08 (doc 25 XP-01/TO-09 §6.6). It spent its whole life as
+    `_interprocess_lock` while twenty-seven modules across `serve/`, `cli/`, `engine/` and `tools/`
+    imported it — the single most-depended-on underscore name in the tree — so the underscore was
+    claiming a freedom to rename that had already been spent four packages over. NO back-compat
+    alias was kept, deliberately: six test modules re-bind this name on the module object to prove a
+    fail-closed path (`monkeypatch.setattr(eventstore, ...)`), and an alias would leave every one of
+    them patching a name no caller reads — a guard that passes while proving nothing. A missing
+    attribute makes `monkeypatch.setattr` raise, so the removal is LOUD at the one place it matters.
+    """
     f = None
     locked = False
     try:
@@ -504,7 +514,7 @@ def repair_log(path: str | os.PathLike) -> dict:
     lock is the last-resort fence for anything that repairs a log another writer can still reach.)"""
     p = Path(path)
     from looplab.core.atomicio import atomic_write_bytes
-    with _interprocess_lock(Path(str(p) + ".lock"), required=True):
+    with interprocess_lock(Path(str(p) + ".lock"), required=True):
         assert_run_reset_write_allowed(p.parent)
         assert_run_deletion_write_allowed(p.parent)
         # Authoritative INSIDE the lock. A caller's earlier peek proves nothing: the log may have been
@@ -725,7 +735,7 @@ class EventStore:
         # a durable marker alone prevents crash replay, but it does not stop two live
         # processes that both observed the marker as absent.  Hold this required interprocess guard
         # across the complete paid-attempt window; EventStore.append uses its own distinct lock.
-        with _interprocess_lock(
+        with interprocess_lock(
             Path(str(self.path) + ".paid-effects.lock"),
             required=required,
         ):
@@ -903,7 +913,7 @@ class EventStore:
         callback here: `cur` is only knowable inside the critical section, and a payload serialized
         against a tail read outside it would carry a seq another writer already used.
         """
-        with self._append_lock, _interprocess_lock(
+        with self._append_lock, interprocess_lock(
                 Path(str(self.path) + ".lock"), required=require_lock):
             # Reset publishes its marker while owning this SAME append lock.  Checking inside the
             # critical section closes marker-check -> append races, and the replacement engine is

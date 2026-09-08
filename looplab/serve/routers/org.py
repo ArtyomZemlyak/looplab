@@ -33,7 +33,7 @@ def build_router(srv) -> APIRouter:
     def _project_call(fn):
         """Map CAS conflicts to 409, invalid mutations to 400, and lock failures to 503.
 
-        BLOCKING: `fn` reaches `ProjectStore._transaction` -> `_interprocess_lock(required=True)` ->
+        BLOCKING: `fn` reaches `ProjectStore._transaction` -> `interprocess_lock(required=True)` ->
         an unbounded `fcntl.flock(LOCK_EX)`, plus load/atomic-save disk I/O. A sync `def` route runs
         in FastAPI's threadpool and may call this directly; an `async def` route must NOT — on the
         ASGI event loop a lock another UI worker or process holds freezes every concurrent SSE tick

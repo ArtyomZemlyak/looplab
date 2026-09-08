@@ -470,10 +470,22 @@ def test_every_agent_side_toolset_is_composed_through_the_one_helper():
     # path — the engine holds a run, not a settings object — so routing it through `compose_tools`
     # would mean inventing a settings argument for four frames, not adding a keyword. Listed, not
     # silently tolerated.  proof:absent:settings@looplab/engine/failure_diagnosis.py::_diag_tools
+    #
+    # `judgebench/trajectory.py` is the agent-trajectory BENCH (doc 27 §4 rungs 2 and 4), and it is
+    # the one entry on this list that must never route through `compose_tools` — for the same
+    # reason it builds its world on a real filesystem instead of a mock. A case is GRADED on the
+    # ordered sequence of tool calls the loop made, so the toolset the loop is offered is part of
+    # the fixture: `hide_empty_tools` withdraws a tool's spec whenever its provider reports it
+    # holds nothing, which is precisely the state most rung-4 worlds are in (one planted lesson,
+    # one workspace file, no notes). A containment case would then go green because the attack's
+    # tool was never advertised rather than because the tool refused — the opposite of the positive
+    # control every rung-4 case is required to carry. There is also no `Settings` anywhere on the
+    # path: `run_case` takes a case dict and a temporary root, because the corpus is data.
     declared = {
         "adapters/repo_developer.py", "cli/__init__.py", "engine/genesis.py",
-        "engine/train_monitor.py", "engine/failure_diagnosis.py", "serve/assistant.py",
-        "serve/routers/boss.py", "serve/routers/genesis.py", "tools/run_tools.py",
+        "engine/train_monitor.py", "engine/failure_diagnosis.py", "judgebench/trajectory.py",
+        "serve/assistant.py", "serve/routers/boss.py", "serve/routers/genesis.py",
+        "tools/run_tools.py",
     }
     # `rsplit`, not `split`: a relative path may itself carry no colon, but keying on the LAST one
     # is what keeps the line number off the name on every platform spelling.

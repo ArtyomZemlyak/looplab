@@ -240,7 +240,7 @@ def test_claim_snapshot_lock_unavailable_is_stable_503_not_false_empty(
         raise EventStoreLockError(path, OSError("locking unsupported"))
         yield  # pragma: no cover - preserves the contextmanager shape
 
-    monkeypatch.setattr("looplab.events.eventstore._interprocess_lock", _unavailable)
+    monkeypatch.setattr("looplab.events.eventstore.interprocess_lock", _unavailable)
     response = TestClient(make_app(tmp_path)).get(endpoint)
 
     assert response.status_code == 503

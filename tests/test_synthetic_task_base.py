@@ -242,12 +242,24 @@ def test_the_base_does_not_declare_seed():
 # Captured from the hand-written models BEFORE the base landed. A changed digest here means a
 # resumed run refuses its own `task.snapshot.json` and every calibration receipt over a Toy run
 # stops validating (`search/speculation_quality.py::_validate_calibration_setup`).
+#
+# RE-PINNED 2026-09-08, `TimeSeriesTask` only: `9d30cbf5e7c3` -> `90fca841d551`. Not drift and not a
+# field-order accident — the payload's fields and their order are unchanged, and feeding this model
+# dump the OLD goal string still reproduces `9d30cbf5e7c3` exactly. What moved is the task's `goal`,
+# because the TASK changed (docs/BACKLOG.md §14): the candidate now WRITES the forecaster against a
+# shipped metric instead of tuning two floats of a template the adapter embedded, so the goal went
+# from "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE" to
+# "forecast a seasonal+trend series: write a forecaster that minimizes the rolling-origin backtest
+# MASE". A run started under `9d30cbf5e7c3` was solving a DIFFERENT problem — its search space was
+# two numbers, not a program — so its metrics are NOT comparable with a run started under
+# `90fca841d551`, and a pre-change run resumed against today's tree will (correctly) refuse its own
+# `task.snapshot.json` rather than silently continue on the new task.
 _CONFIG_HASHES = {
     "ToyTask": "83797d036689",
     "RegressionTask": "c636f0fe9aee",
     "CodeRegressionTask": "cd1fc83de08d",
     "ClassificationTask": "f1c63e88302f",
-    "TimeSeriesTask": "9d30cbf5e7c3",
+    "TimeSeriesTask": "90fca841d551",
     "MLEBenchTask": "bb1dc1ae1661",
 }
 
@@ -273,10 +285,19 @@ def test_the_two_regression_tasks_share_one_dataset_definition():
 def test_the_base_default_for_the_external_fallback_is_the_templated_one():
     """Three of the five said `return False  # the fallback fills a deterministic local template`.
 
-    That default lives on the base now; the two tasks whose fallback is a script-writing
-    `LLMDeveloper` (and `ToyTask`, whose reason is its own closed-form Developer) still say so
-    themselves, because the ANSWER is shared and the reasons are not.
+    That default lives on the base now; the tasks whose fallback is a script-writing `LLMDeveloper`
+    (and `ToyTask`, whose reason is its own closed-form Developer) still say so themselves, because
+    the ANSWER is shared and the reasons are not.
+
+    `TimeSeriesTask` moved to the `True` side on 2026-09-08 and the BASE default deliberately did
+    not move with it. The answer is a property of what a task's `llm_roles` hands back, not a house
+    style: that task's `llm_roles` now returns an `LLMDeveloper` writing a forecaster against the
+    shipped metric (docs/BACKLOG.md §14 — the same shape `CodeRegressionTask` has always had), so
+    validation really can reach a LoopLab-managed LLM Developer for it and
+    `agents/reachability.py::external_developer_fallback_uses_llm` has to be told, or startup
+    reports a false-green fallback target. Every task whose fallback still fills a deterministic
+    local template keeps the base's `False`, which is why the base is the one thing unchanged here.
     """
     assert SyntheticTaskBase.external_fallback_uses_llm(object()) is False
     assert [t().external_fallback_uses_llm() for t in _SYNTHETIC] == [
-        False, False, True, False, False, True]
+        False, False, True, False, True, True]

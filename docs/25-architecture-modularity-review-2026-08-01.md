@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 169 resolved, 17 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 171 resolved, 15 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -4731,9 +4731,9 @@ leaves the client with no token and a retry mints a SECOND live capability. That
 of the store — it is the create PROTOCOL, and porting it means changing an HTTP contract and the UI
 that speaks it, so it stays a named item rather than being smuggled into an extraction.
 
-#### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
+#### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[unconverted-stat-signature-ledger]** the two tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 17 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 17@tests/test_file_identity_tiers.py`
+> **OPEN[unconverted-stat-signature-ledger]** the THREE tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 5 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 5@tests/test_file_identity_tiers.py`
 
 **Event-log rewrite/race detection implemented six different ways across serve/**
 
@@ -4787,7 +4787,44 @@ hand-rolled signature (`eventstore`'s trusted-growth tuple, which is `file_ident
 stay-converted pin — a file-granular set that would otherwise go green while a sibling site in the
 same file was still hand-spelled.
 
-`tests/test_file_identity_tiers.py` therefore pins the two tiers as BEHAVIOUR (growth keeps
+*Follow-up (2026-09-08, second pass) — the ledger falls from 17 to 5, and the TIER the first pass
+kept almost-spelling now has a name.* `core/atomicio.py::same_file_kind` is the MIDDLE tier:
+`(st_dev, st_ino, st_mode, st_file_attributes)`, "the same directory entry, and still the same KIND
+of entry". It is the question every TOCTOU re-validation in the tree asks — an `lstat`, something
+slow, then a proof that the name is still the same entry AND still a directory (a regular file)
+rather than a symlink or a reparse point swapped in underneath. Content is deliberately outside it:
+a run directory gains children and a lock file gains bytes on the normal path, so `file_identity`
+would fail those fences on ordinary activity, and `same_file_entry` cannot see a type change at all.
+
+Four sites spelled it by hand and **two omitted `st_file_attributes`** — the same Windows
+reparse-point hole `file_identity` was written to close, here on the run-directory identity that
+`_engine_liveness` and the events STREAM re-check before authorizing a writer. They now call the
+tier: `serve/engine_proc.py`'s two `_run_dir_unchanged` / `_lock_entry_unchanged` comparisons and
+`serve/routers/runs.py`'s streaming pair.
+
+The other five conversions are the weak `(size, mtime_ns)` change detectors, each of which could not
+see a REPLACEMENT: `engine/lessons.py::lessons_store_stamp` (the cross-run refresh gate — the store
+is not only appended to, `compact_lessons` REPLACES it), `tools/knowledge_tools.py::_source_revision`
+(the in-memory knowledge index), `serve/engine_proc.py::_log_sig` (the spawn waiter),
+`serve/routers/runs.py`'s two cache keys (the concept-core cache, which also omitted the Windows
+attribute, and the operator-stage-names memo). The two that decide what an agent READS are driven
+regressions rather than source assertions: a same-length replacement with the mtime restored, and an
+assertion that the two fields the old tuple carried are provably identical — so the old code was
+equal by construction and the fixture cannot rot into a vacuous pass.
+
+Five sites remain, and each is a judgement rather than a backlog item: `events/eventstore.py`'s
+trusted-growth tuple (compared against an `fstat` where the Windows attribute may not agree with the
+`stat` it is compared to — converting it would make the growth fence spuriously fail on Windows, in
+the direction that ABORTS appends); `serve/scope_report_store.py::_stat_identity` and
+`serve/scope_generate.py`'s `observed`/`directory_identity`, which are PERSISTED in scope-report
+sidecars behind an explicit `len(log_sig) != 7` shape check, so a tuple of a different width is a
+compatibility break, not a strengthening; `events/traceview.py`'s trace revision, which mixes a
+descriptor-bound ChangeTime token into the tuple; and `events/span_index.py::_index_from_handle`,
+which is not a signature at all — it is parallel assignment of three named locals beside a real
+`trace_file_identity` call, and rewriting it as three statements to satisfy the sweep would be the
+comment-shaped pass CLAUDE.md's guard-test rule forbids.
+
+`tests/test_file_identity_tiers.py` therefore pins the tiers as BEHAVIOUR (growth keeps
 `same_file_entry`; a same-size in-place rewrite defeats it but not `file_identity`), pins all three
 fixed bugs, and turns the remainder into a LEDGER: the count of unconverted hand-rolled signatures
 cannot grow without the test going red, and lowering it is the work. That is a bounded, visible backlog
@@ -6407,9 +6444,9 @@ tests stayed green. Verified by three breaks on a scratch copy — removing the 
 into a replacement, and restoring `confidence_weight = 0.65` as the default — each failing only its
 own assertions.
 
-#### SE-12 · LOW · over-engineering · effort: medium — **DEFERRED (2026-08-08)**
+#### SE-12 · LOW · over-engineering · effort: medium — **DECLINED (2026-09-08)**
 
-> **OPEN[scorer-fidelity-selftests-ship-as-production-code]** the 15-case suite and its fixture factories are still production code re-executed on every gate and receipt revalidation (568 lines, `_extrema_case`/`_merge_cases`/`_ablate_cases`/`_bandit_cases`). Closing it is an explicit receipt-schema change with its own evaluation, not a modularity sweep. proof:present:_extrema_case@looplab/search/scorer_fidelity.py
+> **DECLINED[scorer-fidelity-selftests-ship-as-production-code]** measured: the move deletes 5 of the 8 policy verdicts the receipt carries parity evidence for, to save 0.13 % of one receipt validation and 2.2 % of the scorer byte bound — full evaluation in docs/25-architecture-modularity-review-2026-08-01.md, SE-12's 2026-09-08 resolution below. The five verdicts lost are every `merge`, every `ablate` and the whole operator-bandit path; both numbers are re-derived on every suite run by `tests/test_card_scorer_fidelity_gate.py` rather than trusted from this line.
 
 **scorer_fidelity.py ships a 15-case unit-test suite (with its own fixture factories) as production code, re-executed on every gate and receipt revalidation**
 
@@ -6440,6 +6477,94 @@ Deliberately not done here. The cost the finding names (a matrix recomputed per 
 performance concern with no measurement attached; the cost of getting it wrong is a fleet of
 unverifiable receipts. If revisited, do it as an explicit receipt-schema change with its own
 evaluation, not as part of a modularity sweep.
+
+*Resolution (2026-09-08) — DECLINED, carrying the evaluation the 2026-08-05 adjudication asked for.*
+
+The 2026-08-05 note deferred this "pending an explicit receipt-schema change with its own
+evaluation", and named the missing half itself: "the cost the finding names (a matrix recomputed per
+gate) is a performance concern with no measurement attached". Here is that measurement. It settles
+the item AGAINST the recommendation, so the schema bump, the one-time revocation and the digest
+guard that a move would have required were not written — there is nothing here worth revoking a
+receipt for.
+
+**The cost side, measured on this box (2026-09-08).** `scorer_fidelity_gate()` runs in **5.55 ms**
+and produces **5,858 bytes** of canonical JSON. A receipt validation executes it **twice** (once in
+`speculation_quality_gate`, once inside `validated_speculation_gate_receipt`'s full recompute), so
+the matrix costs **11.1 ms** per validation. The same validation cannot avoid one
+`speculation_implementation_digest()`, which reads and AST-parses every shipped `.py`: **4,162 ms**,
+beside a second identity derivation of comparable weight. The 15-case matrix is therefore **0.13 %**
+of one receipt validation. In the receipt body it is **2.2 %** of `_MAX_SCORER_BYTES` (262,144) and
+**0.56 %** of `_MAX_RECEIPT_BYTES` (1,048,576). The wall-clock halves are timed by calling
+`scorer_fidelity_gate()` and `speculation_implementation_digest()` in a loop; the byte half is
+re-derived on every suite run by
+`tests/test_card_scorer_fidelity_gate.py::test_the_matrix_the_receipt_carries_is_a_bounded_share_of_its_byte_budget`,
+so that number cannot go stale behind this paragraph.
+
+**The benefit side, measured — and this is what decides it.** The recommendation's second branch
+keeps "a handful of forced-gate cases" — `forced_pending`, `forced_seed`, `no_forced_debug`,
+`forced_budget` — and moves the other 11 to `tests/`. Those four make the legacy authority emit
+**3 of the 8** distinct `(kind, _reason)` verdicts the whole matrix reaches. The five they never
+reach are `merge top-2`, `ablate highest-impact param`, `bandit: merge top-2`,
+`bandit: ablate highest-impact param` and `bandit: exploit best` — the entire merge cadence, the
+entire ablate cadence and the whole operator-bandit path, which is exactly where the Card lane and
+`GreedyTree.next_actions` have the most room to disagree (the two protected cadences are the only
+places the Card lane must decline to own an action at all, and `ablate_every_at` /
+`bandit_untried_ablate` are the two rows that pin that). A receipt issued after the shrink would
+carry an assertion of parity it had not checked on any of them. Trading 5 of 8 verdicts of live
+evidence for 0.13 % of a validation is not a cleanup.
+
+The recommendation's first branch — "a digest of the offline test result" — is worse rather than
+cheaper. The matrix is the receipt's ONLY runtime evidence that the tree that issued it still has
+`card_next_actions` tracking `GreedyTree.next_actions`; a test-suite result is a property of a tree
+nobody is obliged to have tested before issuing a receipt. `scorer_fidelity.py`'s own docstring is
+built the other way on purpose ("the gate is deliberately pure and self-contained: it reads no
+configuration, files, clocks, or environment variables"), and swapping evidence for a reference to a
+test run that may never have happened is the substitution this gate exists to refuse.
+
+**The blocker the 2026-08-05 note named is mis-identified — which does not save the finding.** That
+note treats "every already-issued receipt stops verifying" as the distinctive cost of touching the
+scorer body. It is not distinctive: `speculation_implementation_digest` hashes the semantic AST of
+*every* shipped `.py` plus `serve/settings_ui_schema.json` and `pyproject.toml`, and
+`validated_speculation_gate_receipt` refuses outright when that digest moved — so **every semantic
+commit anywhere in `looplab/` already revokes every issued receipt**, exactly as
+`engine/speculation_gate.py`'s own comment records ("The next `pip install -U` (or any source edit)
+revoked the receipt"). The incremental revocation breadth of the move would have been zero, and the
+`self_digest` bump would have been redundant with a refusal that fires first. So the reason not to do
+it is the evidence loss above, not the receipt fleet.
+
+**A later review wants this matrix EXTENDED, not moved out.**
+`docs/50-architecture-review-2026-09-02.md` SE-01 (severity M, confidence C, driven on a 5-node
+board) records that the Card lane's width is unrestricted for `EvolutionaryPolicy` and `MCTSPolicy`
+while "the fidelity matrix is pinned 'greedy-only' as a fact", and proposes "add both policies to the
+fidelity matrix"; `tests/test_asha_expansion_parity.py` exists for the same gap and pins that
+`SCORER_FIDELITY_CASE_NAMES` is still GreedyTree-only. A LOW `over-engineering` finding that deletes
+the matrix from the receipt and an M finding with driven evidence that grows it cannot both be right.
+
+**Nothing moved, so nothing had to be ported — and the four self-raising assertions the finding
+cites already have test twins.** The `AssertionError`s at the module's canon check, `_bandit_cases`'
+`yield_counts` check, `_cases`' order/bound check and `scorer_fidelity_gate`'s per-case accounting
+stay in production because they are the gate's fail-closed guards, not its coverage; the same
+properties are driven from `tests/` by
+`test_bandit_yield_fixture_uses_unequal_nonzero_exploration_counts` (the unequal-count fixture
+property) and `test_scorer_fidelity_matrix_is_exact_bounded_and_json_ready` (the canonical 15-name
+order and the bounded JSON). What this decline added is two more of those:
+`test_the_matrix_the_receipt_carries_is_a_bounded_share_of_its_byte_budget` and
+`test_the_forced_cases_alone_would_drop_the_cadence_and_bandit_verdicts`, which re-derive both halves
+of the number above so the decline cannot quietly become false — the same rule CLAUDE.md states for
+machine constraints (measure it, do not write it down).
+
+**This resolution revokes no receipt.** It adds `#` comments only to shipped Python (above the
+fixture builders in `looplab/search/scorer_fidelity.py`), and `_semantic_source` hashes
+`ast.dump(...)` without attributes, so comments never reach the digest at all. Verified by
+re-deriving `_manifest_entry` for that file with and without the added comment: identical row,
+`sha256:8ac6a022…`. Everything else landed in `tests/` and `docs/`, neither of which the manifest
+covers.
+
+**What this decline does NOT close.** It refuses the removal, not the module. Growing the matrix
+(doc 50 SE-01's `EvolutionaryPolicy`/`MCTSPolicy` rows, or the ASHA lane
+`tests/test_asha_expansion_parity.py` names) is a separate, welcome change — and, unlike this one, it
+IS a receipt-schema change with the revocation the 2026-08-05 note describes, because it moves
+`SCORER_FIDELITY_CASE_NAMES` and therefore the scorer body every receipt carries.
 
 #### SE-13 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
@@ -7377,9 +7502,9 @@ still saw the shared call on the way past. A separate guard re-derives that ever
 is still `RESULT_CAP - <headroom>` rather than a free-standing constant, which is the other half of
 the finding. Teeth-tested against 18 breaks, all biting.
 
-#### TO-09 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### TO-09 · MEDIUM · layering · effort: medium — **RESOLVED (2026-09-08)**
 
-> This finding's facade arm is the same one XP-01 carries; it is indexed there once, under the slug `cross-run-read-model-still-private`.
+> This finding's facade arm is the same one XP-01 carries; it was indexed there once, under the slug `cross-run-read-model-still-private`, and closed on 2026-09-08 — `engine/knowledge_views.py` is the public read model and `interprocess_lock` is public. XP-01 carries the resolution narrative for both.
 
 **cross_run_tools/concept_tools depend on ~10 underscore-private engine helpers via lazy imports, so an engine rename fails silently at runtime**
 
@@ -7402,10 +7527,11 @@ Two entries are pinned by size to keep the promotion work prioritized by pressur
 whoever trips over it first: `serve/` leans on nine `events.traceview` privates, and `tools/` +
 `cli/` on seven `engine.memory` capsule read-model privates — XP-01's primary promotion candidate.
 
-The **facade arm remains open**: this makes the breakage loud, it does not make the boundary
-public. Promoting the capsule/claim read-model to public names is still the recommended fix, and
-`_interprocess_lock` — imported by four packages outside `events` — is still a private name doing
-a public job.
+*The facade arm landed 2026-09-08* (narrative on XP-01): `engine/knowledge_views.py` is the public
+cross-run read model the four consumer sites import, the thirteen views and the purge sentinel are
+public in the modules that own them, and `_interprocess_lock` — imported by four packages outside
+`events` — is the public `interprocess_lock`. Seventeen rows left the registry by being PAID; the
+`engine.memory` size pin inverted into a refusal of any new private import of that read model.
 
 #### TO-10 · LOW · dead-code · effort: small — **RESOLVED (2026-08-08)**
 
@@ -8495,9 +8621,9 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 - Low-level helpers are genuinely reused across packages rather than reimplemented: read_jsonl_lenient/iter_jsonl, core/atomicio, core/redact, events/digest's node_metric/top-k — cli/inspect_cmds even documents WHY it picks read_jsonl_lenient over iter_jsonl for corrupt-span tolerance.
 - Load-bearing why-comments at append sites, cache keys and lock acquisitions make the replay/idempotency invariants auditable in place — most files explain the failure mode a guard exists for, not just what the code does.
 
-#### XP-01 · HIGH · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### XP-01 · HIGH · layering · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[cross-run-read-model-still-private]** `tools/cross_run_tools.py` still reaches engine internals by their private names (`_capsule_rows`, `_claim_source_rows`, `_filter_claim_source_rows`, `_filter_capsule_rows`, `_dedup_valid_capsules` …) instead of a public cross-run read model, and `_interprocess_lock` is still a private name imported by four packages outside `events`. This is also TO-09's facade arm. proof:present:_capsule_rows@looplab/tools/cross_run_tools.py
+> *Closed 2026-09-08: the marker `cross-run-read-model-still-private` stood here.*
 >
 > **Contradiction, found 2026-08-19:** this finding has carried **PARTIALLY RESOLVED (2026-08-02)** since the 2026-08-08 reconciliation while containing NO resolution narrative at all — the doc's own §0.3 rule is that "the heading status plus its adjacent resolution narrative is the current authority", and here there is no adjacent narrative to be the authority. What landed under this heading is TO-03/XP-03's injection seam, recorded on those two findings; nothing has been done about the private-name surface itself.
 
@@ -8508,6 +8634,49 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 *Evidence:* cross_run_tools.py lazily imports _capsule_fingerprint_scope_complete, _capsule_rows, _dedup_valid_capsules, _claim_source_rows, _filter_claim_source_rows, _filter_claim_assessments, _capsule_source_summary, _filter_capsule_rows, _portfolio_concept_overview_data from engine.memory/engine.claims/engine.concept_registry — private names of a 1600-line (memory.py) and 2896-line (claims.py) module used from a lower-layer package. tools/ also imports engine at 26 sites total (knowledge_tools.py:270, concept_tools.py:209-365) while engine imports tools back (15 sites), a package cycle held together only by function-local imports. Unlike every other duck-typed seam in this codebase (BACKGROUND_APPENDABLE, DEVELOPER_OUTPUT_ATTRS, PROMPT_KEYS...), this private cross-package surface has no registry or source-scan guard, so an engine-internal rename that looks safe (underscore = private) silently breaks the cross-run tools. serve/run_files.py:13 similarly imports events.eventstore._interprocess_lock at module level.
 
 *Recommendation:* Promote the functions cross_run_tools actually needs into a public read-model API (drop the underscore, add to engine/memory's public surface or a dedicated cross-run read-model module) so the boundary is explicit; alternatively guard the private-import list with the same registry+source-scan discipline used for the other seams. Rename _interprocess_lock to a public name since four packages outside events (serve, cli, engine, tools) depend on it.
+
+*Resolution (2026-09-08) — the facade arm, in the shape §6.6 prescribes.* Two promotions, and
+neither is sufficient without the other.
+
+`looplab/engine/knowledge_views.py` is the PUBLIC cross-run knowledge read model and the ONE import
+site for the four consumers outside `engine/` (`tools/cross_run_tools.py`, `tools/concept_tools.py`,
+`cli/governance_cmds.py`, `serve/routers/cross_run.py`). The thirteen functions and the purge
+sentinel they used to reach for by underscore are now public IN THE MODULES THAT OWN THEM —
+`concept_capsules.py` (`capsule_rows`, `filter_capsule_rows`, `capsule_completeness`,
+`capsule_fingerprint_scope_complete`, `capsule_source_summary`, `dedup_valid_capsules`,
+`portfolio_concept_overview_data`), `claims_health.py` (`claim_source_rows`,
+`filter_claim_source_rows`, `filter_claim_assessments`, `load_claim_source_path`,
+`safe_claim_source_summary`, `safe_research_source_summary`) and `concept_registry.py`
+(`_TOMBSTONE` -> `CONCEPT_TOMBSTONE`). The facade re-exports the owning modules' OBJECTS, never
+wrappers: one implementation and one docstring per view, so the facade cannot drift from what it
+stands for. `memory.py` and `claims.py` keep re-exporting the same objects for their in-package
+callers, so no monkeypatch seam moved.
+
+Not merely cosmetic, which is the question a rename-only change has to answer. What the boundary
+buys is that an engine-internal reshuffle — `memory.py` splitting again, a view moving between
+`claims_health` and `claims` — is now ONE edit instead of an edit in four packages, and that the
+underscore is no longer claiming a freedom (rename at will) that four packages had already spent.
+`tests/test_knowledge_views.py` pins both directions: every view resolves and IS the owning module's
+object, and no consumer outside `engine/` may import a view from an engine internal — which WORKS
+(memory re-exports them), so it has to be a test rather than a convention. Its last case is DRIVEN:
+a real capsule store read back through the real `cross_run_prior_attempts`, because the failure this
+finding describes is a tool that answers "(cross-run tool unavailable)" — a string, not an
+exception, invisible to every source assertion.
+
+`events/eventstore.py::_interprocess_lock` is likewise now the public `interprocess_lock`, updated
+at all ~90 call sites across `serve/`, `cli/`, `engine/`, `tools/` and the tests. §6.6 suggested
+keeping a back-compat alias; it was deliberately NOT kept, and that is the one deviation. Six test
+modules re-bind this name ON THE MODULE OBJECT to prove a fail-closed path
+(`monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)`), and an alias no caller reads
+would leave every one of them patching nothing — a guard that passes while proving nothing, which is
+precisely the failure class CLAUDE.md's guard-test rule names. A missing attribute makes
+`monkeypatch.setattr` raise, so the removal is LOUD exactly where it matters.
+
+The registry those edges lived in (`tests/test_cross_package_private_seams.py`) loses twenty-four
+declared names (70 -> 46 edges) rather than re-pointing them — its own docstring says a new private cross-package import is "the
+moment to ask whether it should be public instead", and this is that question answered. The size pin
+that kept `engine.memory`'s seven privates visible INVERTS: the capsule/claim read model may not come
+BACK as a private cross-package surface.
 
 #### XP-02 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 

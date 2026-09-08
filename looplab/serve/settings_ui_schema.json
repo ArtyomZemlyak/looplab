@@ -341,6 +341,13 @@
           "help": "Cost-constrained selection (mcts policy only): how much a subtree\u2019s measured expense counts against its UCB1 score, relative to this run\u2019s mean eval second. 0 = off; 0.5 = a subtree costing twice the average pays half a reward unit. An unmeasured subtree counts as average, never as free."
         },
         {
+          "key": "mcts_value_weight",
+          "label": "MCTS value estimate weight",
+          "type": "float",
+          "default": 0.0,
+          "help": "LLM value estimate (mcts policy only): how much a model\u2019s opinion of a branch\u2019s REMAINING headroom counts in the UCB1 value term, so an unexpanded branch stops scoring like a spent one at the same metric. 0 = off and buys no calls; 0.4 = a once-visited branch the model calls spent loses 0.2 reward and one it calls wide open gains 0.2, decaying as the subtree is really measured."
+        },
+        {
           "key": "digest_char_cap",
           "label": "Digest budget (chars)",
           "type": "int",
@@ -1577,6 +1584,13 @@
           "default": 4,
           "placeholder": "4",
           "help": "M6 mid-run: every N created nodes, RE-READ the store so lessons distilled by CONCURRENT runs reach this run’s proposals (file re-read, no LLM call, skipped when unchanged). 0 = run-start read only."
+        },
+        {
+          "key": "lesson_operator_scope",
+          "label": "↳ scope lessons to the operator",
+          "type": "bool",
+          "default": false,
+          "help": "Cross-run lessons are retrieved by task fingerprint and role and by nothing about the action about to fire, so a merge, a repair and an improve all read the same five rows. ON ranks the Developer’s prior by the operator of the idea being built: that operator’s own lessons first, then untagged ones, then rows tagged only with other operators. It RANKS, it does not filter — nothing is withheld, only the order of the five slots changes. OFF by default because the only per-operator scoping ablation in the field came back null, and OFF reproduces the Developer prompt byte for byte. The evidence to decide it accrues either way: every distilled lesson records the operators of its own evidence, and a scoped render writes a prior_injected row naming the operator for the citation-rate instrument."
         },
         {
           "key": "embed_model",

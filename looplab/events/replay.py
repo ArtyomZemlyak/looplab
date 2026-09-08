@@ -91,7 +91,7 @@ from looplab.events.types import (
     EV_CROSS_RUN_PRIOR,
     EV_APPLIED_PARAMS_BACKFILLED,
     EV_SCORE_METRICS_BACKFILLED,
-    EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
+    EV_NODE_TOMBSTONED, EV_NODE_VALUE_ESTIMATED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_PLAN, EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_LITERATURE_RETRIEVED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
     EV_RESUME_SERVED,
@@ -3486,6 +3486,29 @@ def _on_node_verified(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.verifier_score = float(score)
 
 
+def _on_node_value_estimated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # docs/BACKLOG.md §0.1 row 17: freeze the LLM VALUE ESTIMATE for one node's branch (the model's
+    # answer cannot be recomputed in the deterministic fold, exactly as `node_verified` above cannot).
+    # Generation-scoped for the same reason and on the same terms: an estimate formed against a
+    # reset-abandoned attempt describes code this node no longer carries, and MCTS would keep
+    # steering by it. Advisory and search-side only — `MCTSPolicy` reads it as a decaying adjustment
+    # to the UCB1 value term (`search/policy.py::value_estimate`); nothing in champion selection
+    # reads it at all.
+    nid = _coerce_node_id(d)
+    n = st.nodes.get(nid) if nid is not None else None
+    if n is None or n.id in st.aborted_nodes or n.tombstoned:
+        return
+    # A brand-new event with one writer, which always stamps `generation` — so REQUIRE the stamp
+    # rather than accepting a missing one as current. No legacy log carries this type, so the
+    # additive-legacy tolerance the older per-node events must keep would buy nothing here and would
+    # let a hand-edited unscoped row steer the search.
+    if _event_generation(d) is _MISSING or not _generation_matches(n, d):
+        return
+    value = d.get("value")
+    if is_usable_metric(value) and 0.0 <= float(value) <= 1.0:
+        n.value_prior = float(value)
+
+
 def _on_verifier_group_scored(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """Publish a complete verifier tie treatment only after every member validates."""
     # This event is atomic and selection-affecting; reject the entire record unless
@@ -4381,6 +4404,7 @@ _HANDLERS = {
     EV_NOVELTY_GRADED: _on_novelty_graded,
     EV_CROSS_RUN_PRIOR: _on_cross_run_prior,
     EV_NODE_VERIFIED: _on_node_verified,
+    EV_NODE_VALUE_ESTIMATED: _on_node_value_estimated,
     EV_VERIFIER_GROUP_SCORED: _on_verifier_group_scored,
     EV_HYPOTHESIS_MERGED: _on_hypothesis_merged,
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,
