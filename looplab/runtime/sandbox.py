@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
 
+from looplab.core.containment import contain
 from looplab.core.errors import ConfigRefusal
 from looplab.runtime.read_fence import (FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath,
                                         reassert as _reassert_fence)
@@ -1019,6 +1020,11 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
         if docker_cidfile is not None:
             docker_cidfile.unlink(missing_ok=True)
         return -1, "", f"failed to launch: {e}", False
+    # THE ATOMIC TREE KILL on Windows (see `_WindowsJobObject`). Immediately after the spawn, because
+    # job membership is inherited at CreateProcess time: every descendant the child goes on to make
+    # is a member without anyone enumerating anything. A no-op on POSIX, where the
+    # `start_new_session=True` in `kwargs` above already gives the eval its own killable session.
+    _attach_windows_job(proc)
     # ALWAYS drain through the memory-bounded reader (log_path=None keeps no file but still caps the
     # in-memory tail): `communicate()` buffered the ENTIRE stdout/stderr before clamping, so an
     # adversarial/buggy fast printer on the untrusted solution.py path (which never sets log_path)
@@ -1045,6 +1051,11 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
             docker_cidfile.unlink(missing_ok=True)
         except OSError:
             pass
+    # Release the Windows job LAST, after the docker cleanup above: with KILL_ON_JOB_CLOSE this is
+    # the sweep that kills any descendant the child left behind, and `_remove_docker_container`
+    # spawns its own client which was never a member. A no-op on POSIX and on any launch that has
+    # no job. (The exception path out of the drain is covered by `_WindowsJobObject.__del__`.)
+    _close_windows_job(proc)
     return rc, _clamp_tail_bytes(out, max_output_bytes), _clamp_tail_bytes(err, max_output_bytes), timed_out
 
 
@@ -1621,6 +1632,204 @@ def _reap_process_group(proc: "subprocess.Popen") -> None:
         pass
 
 
+# --- THE WINDOWS JOB OBJECT (the atomic tree kill) ---------------------------------------------
+# Constants from winnt.h. Named rather than inlined because `SetInformationJobObject` takes an
+# OPAQUE buffer: a wrong flag value is not a type error here, it is a limit that silently does
+# nothing, and the only symptom would be the very leak this exists to stop.
+_WIN_JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_WIN_JOB_EXTENDED_LIMIT_INFORMATION = 9   # JOBOBJECTINFOCLASS::JobObjectExtendedLimitInformation
+
+
+def _windows_extended_limit_struct():
+    """Build `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` for this interpreter's ctypes.
+
+    Constructed inside a function, never at import: `ctypes.wintypes` raises on POSIX, and this
+    module is imported by every eval on every platform. The layout is by OFFSET — ctypes checks
+    nothing against the real header — so `Affinity` is `c_size_t` (ULONG_PTR, pointer-sized) rather
+    than `c_ulong`, which is 32-bit on Win64 and would shift every field after it.
+    """
+    import ctypes
+    import ctypes.wintypes as wintypes
+
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                    ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [("ReadOperationCount", ctypes.c_ulonglong),
+                    ("WriteOperationCount", ctypes.c_ulonglong),
+                    ("OtherOperationCount", ctypes.c_ulonglong),
+                    ("ReadTransferCount", ctypes.c_ulonglong),
+                    ("WriteTransferCount", ctypes.c_ulonglong),
+                    ("OtherTransferCount", ctypes.c_ulonglong)]
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", _BasicLimits),
+                    ("IoInfo", _IoCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    return _ExtendedLimits()
+
+
+class _WindowsJobObject:
+    """One eval tree's Job Object: membership is INHERITED, so the kill is one syscall, not a walk.
+
+    The Windows analogue of the POSIX session/group `start_new_session=True` gives the eval, closing
+    the same race for the same reason. `taskkill /F /T` and psutil's `children(recursive=True)` both
+    ENUMERATE a tree and then kill its members, so a process the doomed tree spawns between the
+    enumeration and the kill survives. A job has no such window: a child created by a member IS a
+    member at CreateProcess time, and `TerminateJobObject` ends every member at once, including one
+    created while that call is in flight.
+
+    `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is the second half, and it makes the HANDLE the tree's
+    lifetime: when the last handle to the job closes — `close()` below, or the engine process dying
+    — every member is killed. That is what also cleans up after an engine crash, and it is what
+    makes this class dangerous to get wrong: dropping the handle early kills a HEALTHY eval mid-run.
+    So the handle is owned here, closed at exactly one place (`run_argv`'s return), and `__del__` is
+    only a backstop for the path where the drain raised.
+
+    EVERY failure degrades to today's behaviour rather than to no kill: a job that cannot be
+    created, configured or assigned is closed immediately (an EMPTY job kills nothing when it
+    closes) and nothing is stamped on the Popen, which leaves `_kill_tree` on its existing
+    taskkill/psutil path. This is the trusted_local tier — see this module's header — so what the
+    job buys is a leaked-process robustness fix on the operator's own box, never a boundary.
+
+    UNVERIFIED: no box in this repo runs `os.name == "nt"` and the suite has never executed under
+    Windows, so every line below is unexecuted code. The tests that would exercise it are in
+    `tests/test_sandbox_windows_job_object.py`, skipped on every platform this project can run.
+    """
+
+    def __init__(self) -> None:
+        self._handle: Optional[int] = None
+        self._kernel32 = None
+
+    @property
+    def attached(self) -> bool:
+        return self._handle is not None
+
+    def attach(self, proc: "subprocess.Popen") -> bool:
+        """Create the job and put `proc` in it. False = nothing was attached and nothing leaked."""
+        import ctypes
+        import ctypes.wintypes as wintypes
+
+        # `Popen._handle` is the REAL process handle CreateProcess returned. Deliberately not
+        # `OpenProcess(pid)`: a pid can name a stranger after reuse, and "assign a stranger to a job
+        # that kills on close" is the one mistake here that could kill something we do not own.
+        handle = getattr(proc, "_handle", None)
+        if handle is None:
+            return False
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # argtypes on EVERY call. Without them ctypes passes a Python int as a C `int`, truncating a
+        # 64-bit HANDLE on Win64 — the silent corruption that turns "kill this tree" into a call on
+        # some other object.
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                    ctypes.c_void_p, wintypes.DWORD]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job = kernel32.CreateJobObjectW(None, None)   # unnamed, non-inheritable
+        if not job:
+            return False
+        # Set the limit BEFORE the assignment. A limit applied to an already-populated job still
+        # takes effect, but ordering it this way means the only job that ever holds a process is one
+        # that already carries KILL_ON_JOB_CLOSE — there is no window in which a failure here leaves
+        # a tree in a job nothing will ever reap.
+        info = _windows_extended_limit_struct()
+        info.BasicLimitInformation.LimitFlags = _WIN_JOB_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(job, _WIN_JOB_EXTENDED_LIMIT_INFORMATION,
+                                                ctypes.byref(info), ctypes.sizeof(info)):
+            kernel32.CloseHandle(job)   # an empty job: closing it kills nothing
+            return False
+        if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(int(handle))):
+            # Pre-Windows-8 a process already in a job cannot join a second one, and a job that
+            # forbids breakaway refuses too. Both mean "this box cannot have the atomic kill", not
+            # "this eval must not run": close the still-empty job and let the caller fall back.
+            kernel32.CloseHandle(job)
+            return False
+        self._handle = int(job)
+        self._kernel32 = kernel32
+        return True
+
+    def terminate(self) -> bool:
+        """Kill every member atomically. False = there was no job, so the caller must fall back."""
+        if self._handle is None or self._kernel32 is None:
+            return False
+        return bool(self._kernel32.TerminateJobObject(self._handle, 1))
+
+    def close(self) -> None:
+        """Release the handle — which, with KILL_ON_JOB_CLOSE, kills whatever is still a member."""
+        handle, kernel32 = self._handle, self._kernel32
+        self._handle, self._kernel32 = None, None
+        if handle is not None and kernel32 is not None:
+            kernel32.CloseHandle(handle)
+
+    def __del__(self) -> None:   # backstop for the path where the drain raised before `close()`
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 — a finalizer at interpreter shutdown must never raise
+            pass
+
+
+def _attach_windows_job(proc: "subprocess.Popen") -> None:
+    """Put a freshly spawned Windows child in its own Job Object; a no-op everywhere else.
+
+    Called immediately after `Popen` returns. There is a residual window — a grandchild the child
+    manages to spawn between CreateProcess and the assignment escapes — because closing it needs
+    `CREATE_SUSPENDED` plus a `ResumeThread`, and `subprocess` closes the primary thread handle
+    before it returns, so resuming would mean walking a thread snapshot to find it again. A failed
+    resume would wedge the eval FOREVER, which is a worse failure than the microseconds this window
+    costs, so the window is stated rather than closed. It is nothing like the enumerate->kill race:
+    that one is open for the whole life of the tree, this one closes before the child's interpreter
+    has finished starting.
+    """
+    if os.name != "nt":
+        return
+    job = _WindowsJobObject()
+    try:
+        attached = job.attach(proc)
+    except Exception as exc:  # noqa: BLE001 — the job is a robustness bonus; a launch must never fail on it
+        contain("windows_job_attach", exc)
+        attached = False
+    if attached:
+        # The Popen OWNS the job for exactly as long as `run_argv` holds it. Never hand this handle
+        # to anything with a different lifetime: with KILL_ON_JOB_CLOSE, an early drop is a kill.
+        proc._looplab_job = job   # type: ignore[attr-defined]
+
+
+def _close_windows_job(proc: "subprocess.Popen") -> None:
+    """Release the eval's job. With KILL_ON_JOB_CLOSE this is also the final sweep of survivors.
+
+    The Windows counterpart of `_reap_process_group`: a metric-producing parent can exit 0 while a
+    descendant it spawned keeps running and keeps holding the GPU the scheduler is about to hand to
+    the next node. On POSIX that sweep is `killpg` on the exited leader's group; here it is simply
+    letting go of the handle.
+    """
+    job = getattr(proc, "_looplab_job", None)
+    if job is None:
+        return
+    try:
+        job.close()
+    except Exception as exc:  # noqa: BLE001 — closing the job is best-effort after the drain returned
+        contain("windows_job_close", exc)
+
+
 def _kill_tree(proc: "subprocess.Popen") -> None:
     # POSIX: kill the whole SESSION/process group in ONE atomic syscall. The child was spawned with
     # start_new_session=True (see run_argv), so it is its own session/group leader — os.getpgid(pid) ==
@@ -1645,6 +1854,20 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # so killpg still reaches the survivors; `returncode` is set only when the CALLER already reaped
     # (`cli_agent.py`'s post-`communicate()` path), which is the one state where the pid may name a
     # stranger's group.
+    # WINDOWS, and BEFORE the reap fence below on purpose: a job holds its members by HANDLE, not by
+    # pid, so the pid-reuse hazard that fence exists for cannot reach it — and once the leader has
+    # been collected the job is the ONLY thing that still names the survivors. One
+    # `TerminateJobObject` ends every member at once, including a process spawned while the call is
+    # in flight, which is the enumerate->kill race neither path below can close. An absent job (an
+    # older Windows, a Popen the caller built itself, a refused assignment) or a refusing one simply
+    # falls through to them, so this branch only ever ADDS a kill. POSIX never enters it.
+    _job = getattr(proc, "_looplab_job", None)
+    if os.name == "nt" and _job is not None:
+        try:
+            if _job.terminate():
+                return
+        except Exception as exc:  # noqa: BLE001 — the job kill is the preferred path, never the only one
+            contain("windows_job_terminate", exc)
     if getattr(proc, "returncode", None) is not None:
         return
     # `start_new_session=True` did not take effect (or the caller built this Popen itself), so the
@@ -1715,13 +1938,17 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # its members, so a process the doomed tree spawns between the enumeration and the kill survives
     # — the exact race a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` does not have, because
     # membership is inherited at CreateProcess time and closing the handle kills everything at once.
-    # It is not adopted here because the fix does not live in this function: the job must be created
-    # and the child ASSIGNED to it at SPAWN (`run_argv`), with the breakaway cases handled, which is
-    # a Windows-only code path no box in this repo can execute (this one is Linux; the suite has
-    # never run under `os.name == "nt"`). Note the scope of what it would buy: this is the
+    # The job IS now created and the child ASSIGNED to it at SPAWN (`_attach_windows_job`, called
+    # from `run_argv`) and terminated at the top of this function, so these two paths are the
+    # FALLBACK for a box that cannot have one — an older Windows where a process already in a job
+    # cannot join a second, a Popen a caller built itself, a refused assignment. They stay exactly
+    # as they were, race and all, because a racy kill beats no kill. What has NOT changed is that
+    # none of it has ever executed: no box in this repo runs `os.name == "nt"` (this one is Linux;
+    # the suite has never run under it), so the job path above is unverified code and this comment
+    # is the honest statement of that. Note the scope of what it buys: this is the
     # trusted_local tier, which this module's own header states is NOT a security boundary — under
     # the Docker tiers a runaway is bounded by `--pids-limit`, the in-container coreutils `timeout`
-    # and `--rm`, none of which routes through here. So the missing Job Object is a leaked-process
+    # and `--rm`, none of which routes through here. So the Job Object is a leaked-process
     # robustness fix on the operator's own box, not a hole in the untrusted tier.
     try:
         if os.name == "nt":

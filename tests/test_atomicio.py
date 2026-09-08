@@ -346,3 +346,78 @@ def test_windows_strict_atomic_write_publishes_a_missing_parent_chain(tmp_path):
 
     assert target.read_bytes() == b"durable"
     assert _temp_files(target.parent) == []
+
+
+# --- Windows parent publication (the open item `atomicio-windows-parent-publication`) -----------
+# Both properties below are Windows-only by construction — the POSIX branch of
+# `_strict_publish_directory` returns before either can be reached — so on this repo's Linux CI they
+# are skipped, and the code they cover is UNEXECUTED. They deliberately drive the real publisher
+# rather than a recorded `_windows_move_write_through`: the questions here are "does MoveFileExW
+# really answer ERROR_ALREADY_EXISTS for this race" and "does the sweep really remove a crashed
+# publisher's leftovers", and a fake answers neither.
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows parent publication race (MoveFileExW)")
+def test_windows_racing_publishers_of_one_missing_parent_both_succeed(tmp_path):
+    """The race POSIX answers with mkdir(exist_ok=True) must not fail one writer on Windows."""
+    parent = tmp_path / "missing" / "nested"
+    start = threading.Barrier(2)
+    failures: list[BaseException] = []
+
+    def publish(name: str) -> None:
+        start.wait(timeout=10)
+        try:
+            atomicio.strict_atomic_write_bytes(parent / name, b"claim")
+        except BaseException as exc:      # noqa: BLE001 — the test's whole subject is what raised
+            failures.append(exc)
+
+    workers = [threading.Thread(target=publish, args=(f"claim-{i}.json",)) for i in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=30)
+
+    assert failures == []
+    assert (parent / "claim-0.json").read_bytes() == b"claim"
+    assert (parent / "claim-1.json").read_bytes() == b"claim"
+    assert _temp_files(parent) == []
+    assert _temp_files(parent.parent) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows staging-directory sweep")
+def test_windows_publish_sweeps_a_crashed_publishers_staging_directory(tmp_path):
+    """A process killed between mkdtemp and the move must not leave a permanent `.name.rand.tmp`."""
+    abandoned = tmp_path / ".target.deadbeef.tmp"
+    abandoned.mkdir()
+    stale = time.time() - (atomicio._WINDOWS_STAGING_DIR_ABANDONED_S + 60)
+    os.utime(abandoned, (stale, stale))
+
+    atomicio._strict_publish_directory(tmp_path / "target")
+
+    assert (tmp_path / "target").is_dir()
+    assert not abandoned.exists()
+    assert _temp_files(tmp_path) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows staging-directory sweep")
+def test_windows_publish_leaves_a_live_publishers_staging_directory_alone(tmp_path):
+    """The sweep must never reach a concurrent writer's in-flight staging directory."""
+    live = tmp_path / ".target.cafebabe.tmp"
+    live.mkdir()
+
+    atomicio._strict_publish_directory(tmp_path / "target")
+
+    assert (tmp_path / "target").is_dir()
+    assert live.is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows parent publication race (MoveFileExW)")
+def test_windows_publish_still_refuses_a_file_holding_the_parent_name(tmp_path):
+    """Tolerating a racing DIRECTORY is not tolerating a file: the caller mkstemps inside this name."""
+    (tmp_path / "target").write_bytes(b"not a directory")
+
+    with pytest.raises(OSError):
+        atomicio._strict_publish_directory(tmp_path / "target")
+
+    assert (tmp_path / "target").read_bytes() == b"not a directory"
+    assert _temp_files(tmp_path) == []
