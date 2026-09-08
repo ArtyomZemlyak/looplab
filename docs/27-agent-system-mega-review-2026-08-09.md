@@ -203,10 +203,26 @@ Research only.
 >   doc 52's `deep-research-plan-is-not-durable`. `tests/test_research_record.py` drives the sink,
 >   the fallback exit and the redaction. The marker `inner-agent-phases-not-event-sourced` stood
 >   here; deleted per the index rule.]**
-> - **OPEN[paid-eval-has-no-attempt-scoped-receipt]** the ENGINE half of the receipt item — the
->   serve/governance half shipped. `EV_NODE_EVAL_STARTED` carries only `node_id`+`generation`: no
->   attempt-scoped invocation id and no completed receipt.
->   proof:absent:eval_invocation_id@looplab/engine/evaluate.py
+> - **[closed 2026-09-08 — *the evaluator boundary has a receipt now, and it is DERIVED so a resume
+>   can name what it is repeating.* `eval_invocation_claimed` / `eval_invocation_settled`
+>   (`events/types.py`, both DIAGNOSTIC) bracket the one statement that invokes the evaluator:
+>   `engine/evaluate.py::eval_invocation_id` derives the key from (run ref, node, generation,
+>   attempt) — deliberately not a fresh uuid, because a random key can only prove that *some*
+>   invocation was left open while a derived one lets the resumed process say "the invocation I am
+>   about to make is THAT one", which is the reconciliable idempotency key the annotation at that
+>   line asked for. `unsettled_eval_invocations` reads the pair LAST-ROW-WINS (counting claims
+>   against settles can never return to closed, so a crash two resumes ago would stamp every later
+>   attempt), and `_eval_run_attempt` stamps the repeat `after_interrupted_attempt` rather than
+>   presenting it as a first attempt — the same at-least-once honesty
+>   `eval_dispatch.py::_ensure_run_setup` already practises, and the same refusal to claim that an
+>   arbitrary evaluator's external side effect was undone. DIAGNOSTIC is load-bearing rather than
+>   incidental: these are per-ATTEMPT rows from the eval child, and a folded pair would land inside
+>   the speculative election's compare-and-swap window (the 17/5 -> 12/0 cost
+>   `_record_eval_start_boundary` documents). The node still reaches exactly one terminal.
+>   `tests/test_eval_invocation_receipt.py` drives it over two real Engines on one run directory: a
+>   BaseException inside the evaluator, an open claim with no terminal, then a second process that
+>   reads that claim and stamps its repeat. The marker `paid-eval-has-no-attempt-scoped-receipt`
+>   stood here; deleted per the index rule.]**
 > - **[closed 2026-09-06 (doc 52 row 15) — `core/llm_budget.py::RunBudget` is ONE reserve-commit
 >   budget per run, attached to the broker: `LLMConcurrencyBroker.borrow()` reserves a call's
 >   estimate (the run's own mean per committed call) before queuing and refuses with
@@ -217,10 +233,24 @@ Research only.
 > - **OPEN[research-cap-counts-passes-not-provider-calls]** the cap is still incremented once per
 >   research PASS in the spine, not debited at the provider broker, so the named ceiling undercounts
 >   real spend. proof:absent:concurrent_research_max_calls@looplab/core/llm_broker.py
-> - **OPEN[eval-lanes-admit-without-reserving-time]** lanes still admit against
->   `cur.total_eval_seconds`, i.e. already-COMPLETED time, so several can enter under one remaining
->   allowance; the spine carries a live annotation prescribing the reservation.
->   proof:present:cur.total_eval_seconds@looplab/engine/orchestrator.py
+> - **[closed 2026-09-08 — *time is the second resource a lane reserves.*
+>   `resources.py::eval_time_admission_blocked` is the rule and `_reserve_eval_seconds` /
+>   `_release_eval_seconds` its ledger, keyed by the same `(node_id, generation)` lifecycle the
+>   DEVICE reservation is keyed by and released in the same `finally` — so the three admission sites
+>   in `_dispatch_evals` now ask one question (`_eval_time_admission_refused`) instead of each
+>   re-spelling `cur.total_eval_seconds >= max_es`, which is how they came to enforce a per-lane
+>   ceiling over a per-RUN ledger. What a lane reserves is the per-eval WALL-CLOCK ceiling the run is
+>   planned around (`shared.py::effective_eval_time_budget`, raised to a governed researcher
+>   override), NOT the sweep-stretched number and NOT the whole repair chain — that chain has its own
+>   between-attempts re-fold, and reserving for it here would starve lanes to guard something already
+>   guarded. The one clause that looks like a hole is the point of the design: an EMPTY ledger may
+>   never refuse, so the first lane still enters on completed time alone — otherwise a
+>   `max_eval_seconds` below one eval's timeout would admit nothing at all and a budget would read as
+>   a deadlock. The overshoot is back to the one evaluation the ceiling has always allowed.
+>   `tests/test_eval_time_reservation.py` drives the refusal over a real `Engine` (a stub host
+>   satisfies the ledger lookup with 0.0, so a source pin would have been vacuous) with the control
+>   case beside it. The marker `eval-lanes-admit-without-reserving-time` stood here; deleted per the
+>   index rule.]**
 > - **[closed 2026-09-06 (doc 52 row 12) — `agents/roles.py::DeveloperResult` is the frozen
 >   envelope of one Developer call (its field set IS `DEVELOPER_OUTPUT_ATTRS` plus `code`),
 >   captured by `engine/node_build.py::_run_developer` under the instance's own lock in the same

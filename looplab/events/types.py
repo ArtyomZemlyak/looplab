@@ -813,6 +813,33 @@ EV_STAGE_ROLLBACK = "stage_rollback"
 # the same loop). Position-immaterial for the same READER-side reason they are:
 # `speculation.py::_proposal_authority_seq` excludes DIAGNOSTIC_EVENTS wholesale.
 EV_REPAIR_CRITIC_VERDICT = "repair_critic_verdict"
+# THE ATTEMPT-SCOPED RECEIPT for one paid evaluation — the claim before the evaluator is invoked and
+# the settle after it returns (doc 27 `paid-eval-has-no-attempt-scoped-receipt`; the serve/governance
+# half of that item shipped as `serve/paid_ledger.py`'s claim->terminal ledger, this is the ENGINE
+# half). `node_eval_started` is the NODE-lifecycle boundary and answers "was this node ever
+# dispatched"; it is written once per lifecycle and carries no attempt, so it cannot answer the
+# question the evaluator boundary actually raises: an evaluation may finish paid/external side
+# effects — a training run, a submission, a remote job — and its terminal event is appended much
+# later, so a process death in that gap leaves a resume unable to tell "never ran" from "ran and the
+# record was lost", and the retry is indistinguishable from a first attempt.
+#
+# THE PAIR IS THE RECEIPT: a claim with no settle is an invocation whose outcome is unknown, and the
+# id is DETERMINISTIC over (run, node, generation, attempt) — `engine/evaluate.py::eval_invocation_id`
+# — so the resumed process re-derives the same key for the attempt it is repeating and can say so
+# rather than re-mint an unrelated one. That is the reconciliable idempotency key the boundary needs;
+# it is deliberately NOT a promise that the external side effect was undone, which LoopLab cannot make
+# for an arbitrary evaluator. The repeat is STAMPED instead (`after_interrupted_attempt` on the claim),
+# exactly as `eval_dispatch.py::_ensure_run_setup` stamps its own at-least-once repeat.
+#
+# DIAGNOSTIC, and that is load-bearing rather than incidental. These rows are appended PER ATTEMPT
+# from the eval child, so a FOLDED pair here would land inside the speculative election's
+# compare-and-swap window — the measured cost `_record_eval_start_boundary` documents (a depth-1
+# treatment run silently became serial: 17 builds / 5 discards became 12 / 0). `DIAGNOSTIC_EVENTS` is
+# excluded WHOLESALE from every seq-equality fence, so nothing keys on these rows' position, and the
+# fold ignores them: the receipt is evidence about a paid invocation, never a second authority for a
+# node's outcome (invariant #2 — the terminal is still exactly one `node_evaluated`/`node_failed`).
+EV_EVAL_INVOCATION_CLAIMED = "eval_invocation_claimed"
+EV_EVAL_INVOCATION_SETTLED = "eval_invocation_settled"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -1060,6 +1087,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
     EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
+    EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED,
 })
 
 # --------------------------------------------------------------- THE PAYLOAD CONTRACT (doc 52 row 30)
@@ -1441,6 +1469,18 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "env_changed": PayloadContract(
         "A resume observed that the Python/library environment differs from the one the run started in.",
         required=("now", "was"),
+        optional=(),
+    ),
+    "eval_invocation_claimed": PayloadContract(
+        "One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id.",
+        required=("attempt", "generation", "invocation_id", "node_id"),
+        # Written only when TRUE (an absent key is not the same fact as a false one): this attempt
+        # re-invokes an evaluator whose previous invocation of the SAME id never settled.
+        optional=("after_interrupted_attempt",),
+    ),
+    "eval_invocation_settled": PayloadContract(
+        "That evaluator invocation returned, with the outcome and the seconds it charged.",
+        required=("attempt", "eval_seconds", "generation", "invocation_id", "node_id", "outcome"),
         optional=(),
     ),
     "finalization_finished": PayloadContract(

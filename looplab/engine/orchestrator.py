@@ -72,7 +72,7 @@ from looplab.engine.node_build import NodeBuildMixin, developer_crash_records
 from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
 from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
                                       default_gpu_host_lease_path, detect_gpu_inventory,
-                                      schedulable_cuda_tokens)
+                                      eval_time_admission_blocked, schedulable_cuda_tokens)
 from looplab.engine.speculation import SpeculationMixin
 from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.asha_monitor import AshaMonitorMixin
@@ -361,6 +361,54 @@ def _eval_admission_current(state, node, generation, max_es) -> bool:
         and not _run_terminal_gate(state)
         and not (max_es is not None and state.total_eval_seconds >= max_es)
     )
+
+
+def _eval_time_admission_refused(engine, state, node, max_es) -> bool:
+    """Whether the run's eval-second allowance refuses ONE MORE evaluation lane right now.
+
+    The dispatcher's own half of `resources.py::eval_time_admission_blocked` (doc 27
+    `eval-lanes-admit-without-reserving-time`): it reads the three numbers the rule needs off the
+    live fold, off the in-flight reservation ledger and off the lane's own worst case, so every
+    admission site asks the SAME question rather than each re-spelling `total_eval_seconds >=
+    max_es` — which is how the three sites came to enforce a per-lane ceiling while the ledger they
+    all charge is per-RUN. `node` is the candidate when the site has already chosen one and None at
+    the sites that gate before the scan; the estimate is then the run-level per-eval budget.
+
+    THE LEDGER IS READ THROUGH A BOUND-METHOD LOOKUP, and the reason is the same one the two
+    `hasattr(self, "_…_reserve_node_resources")` guards below carry: `_dispatch_evals` is driven
+    in the suite by stub hosts that own none of `ResourceSchedulingMixin`, and on such a host there
+    is no ledger to read — `reserved` is 0.0 and the rule degrades to exactly the historical
+    completed-time gate. What keeps that fallback from silently becoming the PRODUCT behaviour (the
+    `getattr`-default drift `engine/attribute_sites.py` is a census of) is that the property is
+    driven over a real `Engine` rather than pinned in source:
+    `tests/test_eval_time_reservation.py` admits one lane and asserts the next is refused while it
+    is still running, which no stub can satisfy.
+    """
+    reserved_seconds = getattr(engine, "_reserved_eval_seconds", None)
+    estimate_seconds = getattr(engine, "_eval_seconds_estimate", None)
+    return eval_time_admission_blocked(
+        float(getattr(state, "total_eval_seconds", 0.0) or 0.0),
+        float(reserved_seconds()) if callable(reserved_seconds) else 0.0,
+        float(estimate_seconds(node)) if callable(estimate_seconds) else 0.0,
+        max_es,
+    )
+
+
+def _reserve_eval_time(engine, node_id, generation, node) -> None:
+    """Commit one lane's worst-case eval charge against the run's allowance (the ledger half of
+    `_eval_time_admission_refused`, reached the same way and for the same stub-host reason)."""
+    reserve = getattr(engine, "_reserve_eval_seconds", None)
+    estimate = getattr(engine, "_eval_seconds_estimate", None)
+    if callable(reserve) and callable(estimate):
+        reserve(node_id, generation, estimate(node))
+
+
+def _release_eval_time(engine, node_id, generation) -> None:
+    """Hand the unused portion of that commitment back. Always paired with `_reserve_eval_time` in
+    a `finally`, because a leaked reservation is a run that stops admitting lanes forever."""
+    release = getattr(engine, "_release_eval_seconds", None)
+    if callable(release):
+        release(node_id, generation)
 
 
 def parent_generations_current(state, parent_generations) -> bool:
@@ -1237,6 +1285,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._gpu_condition = threading.Condition(self._gpu_lock)
         self._gpu_epoch = 0
         self._eval_gpu_reservations: dict[tuple[int, int], dict] = {}
+        # The eval-SECOND half of the same lifecycle reservation: what the lanes now running are
+        # still going to charge against `max_eval_seconds`, so an admission gate can subtract it
+        # instead of comparing only completed charges (`resources.py::eval_time_admission_blocked`).
+        self._eval_time_reservations: dict[tuple[int, object], float] = {}
         self.timeout = _opt("timeout")
         self.max_eval_timeout = _opt("max_eval_timeout")
         # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
@@ -5227,7 +5279,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             continue
                         # Re-check the eval-compute budget BEFORE each eval (not just per loop
                         # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
-                        if (max_es is not None and cur.total_eval_seconds >= max_es):
+                        # Through the reservation rule, like the parallel branch: on this branch the
+                        # ledger is empty at this point (the previous eval was awaited and its
+                        # `finally` released), so the answer is the historical completed-time one —
+                        # but the QUESTION is now asked in one place for both branches.
+                        if _eval_time_admission_refused(self, cur, None, max_es):
                             break
                         node = cur.nodes.get(a["node_id"])
                         reservation = None
@@ -5314,9 +5370,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 break
                         if skip_eval:
                             continue
+                        # …and the TIME this lane will charge, committed against the run allowance
+                        # for exactly as long as the lane holds it. Reserved beside the devices and
+                        # released in the same `finally`, so no path can leak an allowance nobody is
+                        # spending (`resources.py::eval_time_admission_blocked`).
+                        _reserve_eval_time(self, a["node_id"], generation, node)
                         try:
                             await self._evaluate(a["node_id"], limiter, max_es)
                         finally:
+                            _release_eval_time(self, a["node_id"], generation)
                             if reservation is not None and generation is not None:
                                 self._clear_eval_resource_reservation(a["node_id"], generation)
                                 self._release_gpus(reservation.get("gpu_ids"))
@@ -5368,6 +5430,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # no-op; the outer semaphore is what bounds fan-out and drives the refill.
                             await self._evaluate(nid, anyio.CapacityLimiter(1), max_es)
                         finally:
+                            # The eval-second allowance this lane committed at admission goes back
+                            # BEFORE the slot does: the producer wakes on `slots.release()` and
+                            # immediately asks whether one more lane fits, and it must ask that with
+                            # this lane's worst case already handed back — its REAL cost is in the log
+                            # by now and `total_eval_seconds` charges it.
+                            _release_eval_time(self, nid, generation)
                             if reservation is not None and generation is not None:
                                 self._clear_eval_resource_reservation(nid, generation)
                                 self._release_gpus(reservation.get("gpu_ids"))
@@ -5387,19 +5455,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             cur = fold(self.store.read_all())
                             # Budget guard (parallel path): now that `cur` reflects mid-batch completions,
                             # this actually enforces the eval-second cap — admit no more once spent. The
-                            # overshoot is bounded to the ~max_parallel evals already in flight.
-                            # CODEX AGENT: a "hard cumulative" budget cannot count only completed
-                            # charges: every lane can enter under the same remaining balance and each
-                            # timeout may exceed it. Reserve the worst-case/time-bounded charge atomically
-                            # at admission, then release the unused portion when the evaluation settles.
-                            if (max_es is not None and cur.total_eval_seconds >= max_es):
+                            # overshoot is bounded to the ONE evaluation the ceiling has always allowed,
+                            # not to the ~max_parallel that could each enter under the same remaining
+                            # balance: the annotation this line used to carry — "a 'hard cumulative'
+                            # budget cannot count only completed charges: every lane can enter under the
+                            # same remaining balance and each timeout may exceed it. Reserve the
+                            # worst-case/time-bounded charge atomically at admission, then release the
+                            # unused portion when the evaluation settles." — is what
+                            # `resources.py::eval_time_admission_blocked` and the reservation below now
+                            # do. The first lane still enters on the completed-time rule alone (see that
+                            # function's second clause: an empty ledger may never refuse, or a ceiling
+                            # under one eval's timeout would admit nothing at all).
+                            if _eval_time_admission_refused(self, cur, None, max_es):
                                 break
                             await slots.acquire()     # blocks only when the pool is full -> the refill point
                             # the pre-check above may be minutes old after a genuine refill
                             # wait. Re-fold while owning the freed slot so a sibling that crossed the hard
                             # eval budget (or an operator abort) cannot be followed by one more admission.
                             cur = fold(self.store.read_all())
-                            if max_es is not None and cur.total_eval_seconds >= max_es:
+                            if _eval_time_admission_refused(self, cur, None, max_es):
                                 slots.release()
                                 break
                             # …and the SPEND ceiling, for the same reason.  THE ONLY gate this
@@ -5509,10 +5583,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             if chosen_reservation is not None and generation is not None:
                                 self._register_eval_resource_reservation(
                                     chosen["node_id"], generation, chosen_reservation)
+                            # THE TIME RESERVATION IS TAKEN HERE, before the lane starts and while
+                            # the producer still owns the decision — the whole point is that the NEXT
+                            # turn of this loop sees it. Its release is `_eval_in_slot`'s `finally`,
+                            # which the failed-spawn path below cannot rely on (nothing ran), so that
+                            # path releases it beside the devices.
+                            _reserve_eval_time(self, chosen["node_id"], generation, chosen_node)
                             try:
                                 tg.start_soon(_eval_in_slot, chosen["node_id"], generation,
                                               chosen_reservation)
                             except BaseException:
+                                _release_eval_time(self, chosen["node_id"], generation)
                                 if chosen_reservation is not None and generation is not None:
                                     self._clear_eval_resource_reservation(
                                         chosen["node_id"], generation)

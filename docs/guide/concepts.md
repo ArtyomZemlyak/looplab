@@ -222,7 +222,21 @@ bought the same think, the same build, or the same install a second time. With t
   moved to the serial path — instead of silently re-issued to a provider;
 - `run_setup` is exactly-once for a command that reported an outcome and at-least-once across a kill
   in between, and that repeat is stamped `after_interrupted_attempt` in the log. LoopLab cannot make
-  an arbitrary operator command transactional, so prefer an idempotent one.
+  an arbitrary operator command transactional, so prefer an idempotent one;
+- **one evaluation ATTEMPT is receipted the same way**, and it is a different fact from
+  `node_eval_started`. That row is the node LIFECYCLE's boundary — one per node, no attempt — and it
+  answers "was this node ever dispatched". The evaluator itself is invoked once per attempt and may
+  finish paid or external side effects (a training run, a submission, a remote job) minutes before
+  the node's terminal event is appended, so a kill in that gap left the node
+  byte-indistinguishable from one whose evaluator never ran. `eval_invocation_claimed` goes down
+  immediately before the invocation and `eval_invocation_settled` immediately after, carrying the
+  outcome (`ok` / `failed` / `superseded` / `aborted` / `gpu_unpinnable`) and the seconds it charged.
+  The id is DERIVED from (run, node, generation, attempt) rather than minted, which is what lets the
+  resumed process name the invocation it is repeating — hand it to an evaluator as an idempotency
+  key if that evaluator has one — and a claim whose last row is still a claim is an invocation
+  nobody recorded the result of. The repeat is stamped `after_interrupted_attempt`, exactly like
+  `run_setup` above and with the same honesty: nothing here claims the side effect was undone.
+  Both rows are diagnostic — the fold ignores them, and the node still reaches exactly one terminal.
 
 **The environment a run actually got is a fact on the log, not something to reconstruct afterwards.**
 A repo task appends `deps_declared` once at run start: what its source tree declares (the requirement

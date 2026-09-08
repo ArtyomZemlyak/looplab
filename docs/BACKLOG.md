@@ -4439,6 +4439,23 @@ OPEN[first-propose-runs-with-every-gpu-idle] the opening propose is the longest 
   propose both run before any node exists, serially, on the loop thread. Measure the split between
   them before choosing — the numbers above are the SUM.
 
+  **2026-09-08 — examined and deliberately left open, because the prescription's own precondition
+  cannot be met offline.** The split it asks for is a property of the run corpus (each run's
+  `propose` spans against its run-opening research rows), and no `spans.jsonl` from any of the seven
+  runs above exists on this box — there is nothing to measure, and the two candidate overlaps are
+  chosen differently depending on which half of those 138 minutes is which. Both were looked at:
+  (a) overlapping the run-opening think with the FIRST PROPOSE is not available at all — the
+  proposal consumes the memo, and proposing first is precisely the pre-2026-08-12 behaviour
+  `_ground_run_start` exists to reverse (measured then: no run of 22 had ever recorded research at
+  `at_node=0`); (b) overlapping it with the run's own SETUP (`_enter_run` -> `_setup_phase`, the
+  other phase that runs with every GPU idle) IS structurally available and would remove
+  `min(setup, think)` of dead time, but it moves a paid provider call — and the `research_attempted`
+  / `research_completed` rows with it — into the prologue whose own comment records that rows
+  appended there moved a PAID-work decision (finalize recovery minted a fresh paid scope where it
+  should have resumed one) and broke thirteen tests across four files. A change whose entire value
+  is a wall-clock saving nobody here can measure, made against the one block in the engine
+  documented as unsafe to append from, is not one to land blind.
+
 ### 2. Trust scans — the question is not "why not every node", it is "why only one run"
 
 I filed this as "trust scans ran 4 times for 10 nodes (unexplained)". That is wrong, and the real
