@@ -363,9 +363,14 @@ scores 0 either way.
 clock writes nothing, so a binding net does not shorten the campaign — it deletes rows from it.
 Measured 2026-08-24, a 4 h wall cut 13 of arm A's 19 task-arms and three of those had not spent the
 budget they were compared at, so the wall is now OFF by default (`HARD_TIMEOUT=0`) and a STALL bound
-replaces it: `STALL_TIMEOUT` (default 2400 s) kills a lane only when its own event log has not grown
-for that long. Either kill is recorded as its own marker state (`wall_cut` / `stall_cut`), shown and
-never averaged.
+replaces it: `STALL_TIMEOUT` (default 2400 s) kills a lane only when nothing under its own run
+directory has been written for that long. The watch was `events.jsonl` alone until 2026-09-08, and
+that is a different question: stage events land at stage END, so a lane inside a healthy evaluation
+(a valid slow solver runs ~50 min over 100 instances; the README measures one at 87 minutes) was
+indistinguishable from a wedged one and got killed. `campaign.sh::newest_activity` reads the newest
+mtime in the tree instead — arm A still hands it its own lane log, because `$CAMPAIGN_OUT` holds
+every lane's log and one busy lane must not mask another's silence. Either kill is recorded as its
+own marker state (`wall_cut` / `stall_cut`), shown and never averaged.
 
 ### The first eval of a task downloads its dataset
 
@@ -407,6 +412,15 @@ the field existed:
 | `stopped_after_start` | rc=2 (a typed `OperatorRefusal`, usually the spend ceiling) from a run whose event log proves it started | yes | — |
 | `wall_cut` / `stall_cut` | killed by `HARD_TIMEOUT` / the stall guard — a clock, not the budget | **no** | `RETRY_WALL_CUT=1` |
 | `operator_skip` | written by hand to stop a running campaign taking new work | **no** | delete the marker |
+
+A marker can also carry `champion_refused=<reason>` (arm B only, since 2026-09-08): the search ended
+terminally but the graded TEST pass was REFUSED, which is a different fact from "measured". The one
+reason listed there is `baseline_measured_in_pass` — the arena timed the REFERENCE in that pass, so
+the candidate was never timed — and it is the one a second pass clears, because that same pass
+cached the timings. `RETRY_REFUSED=1` re-runs the SCORING PASS alone (the champion is already on
+disk: no model call, no new search) and clears the field when it scores; it deliberately does not go
+through `already_measured`, whose flags re-run the whole task-arm and whose first act is deleting the
+task root the champion lives in.
 
 rc=0 with the meter proving NO successful call, a refusal to start (exit 2 with no event log) and
 an interruption (130/137/143) get NO marker and stay owed. Every marker also carries the REGIME

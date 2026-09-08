@@ -114,7 +114,42 @@ IMMEDIATE_EXIT_S="${IMMEDIATE_EXIT_S:-60}"
 # `timeout 0` means "no timeout" to GNU coreutils, so one spelling serves both settings and there is
 # no second code path to keep in step.
 #
-run_bounded() {   # run_bounded <events-file-or-empty> <cmd…>
+# WHAT "ALIVE" MEANS FOR A LANE, in one place because the stall guard is the only thing that may
+# kill healthy work. A lane is alive if it has written ANYTHING recently -- not if one named file
+# has grown, which is what this used to ask and which an evaluation cannot answer for tens of
+# minutes at a stretch (see the guard below for the measurement).
+#
+# A DIRECTORY IS SCANNED, A FILE IS STAT'ED, and the caller decides which it hands over. That is not
+# a convenience: arm A's watch is its own lane log, whose PARENT ($OUT) holds every other lane's log
+# too, so scanning that directory would let one busy lane mask another's silence. Arm B hands over
+# its own run directory, which is exactly this lane's tree.
+#
+# The walk is bounded by `-newermt "@$fallback"` -- only files touched since this run STARTED can
+# matter -- so it lists a handful of paths rather than the whole tree, and it stops at
+# STALL_WATCH_DEPTH so a candidate that unpacks a dataset under its workdir cannot turn a 60 s poll
+# into a disk sweep.
+#
+# A WATCH PATH THAT DOES NOT EXIST YET IS SILENCE, NOT LIFE: the fallback is the run's start, so the
+# silence that has actually elapsed is what gets measured. That rule was learned on the file form
+# (see the guard) and it is the same rule here.
+newest_activity() {   # $1 = watch path (file or directory), $2 = fallback epoch
+  local watch="$1" fallback="$2" newest=""
+  if [ -d "$watch" ]; then
+    newest="$(find "$watch" -maxdepth "${STALL_WATCH_DEPTH:-6}" -type f -newermt "@$fallback" \
+                -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -n | tail -1)"
+  else
+    newest="$(stat -c %Y "$watch" 2>/dev/null)"
+  fi
+  # `find` on a tree that is not there prints nothing, and `stat` on a missing file prints nothing:
+  # both are silence. Anything that is not a plain integer is treated the same way rather than
+  # arriving in the arithmetic below as a word.
+  case "$newest" in
+    ''|*[!0-9]*) echo "$fallback" ;;
+    *) echo "$newest" ;;
+  esac
+}
+
+run_bounded() {   # run_bounded <watch-path-or-empty> <cmd…>
   local watch="$1"; shift
   # STALL_FLAG is the breadcrumb that tells `record_done` WE killed this lane rather than a human.
   # A SIGTERM from the guard below arrives as rc=143, which is byte-identical to the operator's own
@@ -142,24 +177,24 @@ run_bounded() {   # run_bounded <events-file-or-empty> <cmd…>
       # in an import left the lane with NO bound at all once the wall went to 0, which is the exact
       # "endpoint down, lane hung for ever" case the stall guard was added for. Falling back to the
       # START of the run measures the silence that has actually elapsed. Arm A only escaped this by
-      # pre-creating its log with `: >`.
-      # OPEN[stall-guard-reads-one-files-mtime] the stall clock watches events.jsonl alone, and an
-      # arm-B lane inside a long, healthy `score` stage appends nothing there for the whole
-      # evaluation — so a legitimately slow candidate can be killed as a stall and the task-arm
-      # filed as a terminal, never-retried harness cut.
-      # proof:`present:last=$(stat -c %Y "$watch"@benchmarks/algotune/campaign.sh`
-      # REVIEW 2026-08-30 (correctness): stage events land at stage END; per-instance timeout is
+      # pre-creating its log with `: >`. (That rule now lives in `newest_activity`, which is where
+      # the fallback is applied, and it is unchanged: an absent watch path is still silence.)
+      #
+      # AND IT WATCHES THE TREE, NOT ONE FILE (2026-09-08). This read `stat -c %Y "$watch"` over
+      # `events.jsonl` alone, and an arm-B lane inside a long, healthy `score` stage appends nothing
+      # THERE for the whole evaluation: stage events land at stage END, the per-instance timeout is
       # max(10x baseline, floor) so a valid slow solver runs ~50 min over 100 instances against
-      # STALL_TIMEOUT=2400, and the README records an 87-minute evaluation. The champion pass was
-      # exempted for exactly this reason ("a scoring pass is legitimately silent for long
-      # stretches"); the in-run evaluations, which go through the same evaluator, were not. Watch
-      # something the eval actually grows (the node workdir's stage log, or the newest mtime under
-      # the run dir), or raise the bound for the eval window.
+      # STALL_TIMEOUT=2400, and the README records an 87-minute evaluation. So a legitimately slow
+      # candidate was killed as a stall and the task-arm filed as a terminal, never-retried harness
+      # cut -- the champion pass was exempted for exactly this reason ("a scoring pass is
+      # legitimately silent for long stretches") while the in-run evaluations, which go through the
+      # same evaluator, were not. `newest_activity` answers with the newest mtime ANYWHERE under the
+      # run directory, which the eval's own stage log and node workdir grow while it runs.
       local now last
       now=$(date +%s)
-      last=$(stat -c %Y "$watch" 2>/dev/null || echo "$t0")
+      last=$(newest_activity "$watch" "$t0")
       if [ $((now - last)) -gt "$STALL_TIMEOUT" ]; then
-        echo "STALL: $watch has not grown in $((now - last))s — killing this lane" >&2
+        echo "STALL: nothing under $watch has been written in $((now - last))s — killing this lane" >&2
         [ -n "${STALL_FLAG:-}" ] && : > "$STALL_FLAG"
         kill -TERM "$job" 2>/dev/null; sleep 5; kill -KILL "$job" 2>/dev/null
         return 0
@@ -1016,6 +1051,13 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
   # The ruler rides in REGIME so every marker line below carries it without a fifth edit per state.
   # `test` is the graded split for both arms: arm A's `final_speedup` and arm B's champion pass.
   REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE layout=$LANE_LAYOUT $(ruler_fields "$RD_TASK" test "$4")"
+  # AND SO DOES THE CHAMPION PASS'S VERDICT, for the same reason and by the same route: one edit
+  # instead of one per state. `run_one` sets it from `champion_refusal` after the graded pass; empty
+  # -- which is every arm-A marker and every arm-B one that got a number -- adds nothing to the
+  # line. `rescore_refused_champion` is the only reader, and `sed` removes the field again when a
+  # second pass finally scores. Placed inside REGIME so a marker written by a caller that never ran
+  # a champion pass (a test driving `record_done`) is byte-identical to what it always was.
+  REGIME="$REGIME${CHAMPION_REFUSED:+ champion_refused=$CHAMPION_REFUSED}"
   # A `.done` marker means "this task-arm reached a TERMINAL state and must not be re-run". It must
   # NOT be written for a run that was interrupted: an interrupted task has no verdict, and a marker
   # makes a later resume SKIP it silently. Measured 2026-08-20: stopping a campaign wrote six
@@ -1312,6 +1354,118 @@ else:
 PYEOF
 }
 
+# THE GRADED PASS, IN ONE PLACE, because it now has two callers: `run_one` after the search, and
+# the re-score below over a champion the first pass REFUSED. A second copy of this command is how
+# the two would come apart on the next `--protect` or `--subset` change, and a re-score that scores
+# something different from what the campaign scores is worse than no re-score at all.
+#
+# ITS OWN WALL, not $HARD_TIMEOUT. That default became 0 ("no timeout" to GNU coreutils) when the
+# wall was replaced by the stall guard, and this call was never migrated to `run_bounded` -- so the
+# graded TEST pass had no bound of any kind. A wedge outside `looplab_eval`'s own inner
+# `subprocess.run(timeout=…)` (the build_ext child holding a lock, a geesefs stat, an evaluator
+# child that ignores SIGTERM) held the lane for ever and the driver's final `wait` never returned.
+# It does NOT go through `run_bounded`: a scoring pass is legitimately silent for long stretches
+# (the README measures a single-candidate evaluation at 87 minutes), so a stall guard would kill
+# healthy work. A generous wall is the right instrument here.
+# `--protect` carries the TASK's own declaration rather than a second copy of it, and the champion
+# is scored out of its OWN directory so its sibling files are the submission (see
+# `extract_champion.py --all-files`). Scoring it from $TASK_ROOT made `src.parent` a directory whose
+# other entries are directories, so a multi-file champion submitted nothing, built nothing, and
+# failed to import -- recorded as the solver's own 0.0.
+score_champion() {   # $1 = task, $2 = cpu list, $3 = task root. Writes $OUT/B-<task>.final.json
+  local SC_T="$1" SC_CPUS="$2" SC_ROOT="$3" SC_PROTECT
+  SC_PROTECT="$(python3 - "$WS/algotune_$SC_T.json" <<'PROTEOF'
+import json, sys
+try:
+    spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
+except Exception:
+    raise SystemExit(0)
+print(",".join(str(x) for x in (spec.get("protect") or []) if x))
+PROTEOF
+)"
+  (cd "$SC_ROOT/champion" && timeout "$CHAMPION_TIMEOUT" taskset -c "$SC_CPUS" \
+      python "$REPO/benchmarks/algotune/looplab_eval.py" --algotune-root "$AT" --task "$SC_T" \
+      --model LoopLabFinal --solver solver.py --subset test \
+      ${SC_PROTECT:+--protect "$SC_PROTECT"}) \
+      > "$OUT/B-$SC_T.final.json" 2>>"$OUT/B-$SC_T.log"
+}
+
+# WHICH REFUSALS A SECOND PASS COULD CLEAR. One class, named, because the flag below reopens exactly
+# what this predicate matches: `baseline_measured_in_pass` is the bridge refusing a number because
+# the arena timed the REFERENCE in that same pass -- so the candidate was never timed, and the
+# refusal is correct. What makes it re-scorable is that the pass itself CACHED those timings: the
+# second run divides by a denominator that already exists, which is why the bridge's own remedy
+# line says "re-run this scoring now that the timings are cached".
+#
+# Every other reason is deliberately NOT here. `invalid_results`, `reported_zero` and
+# `compilation_failed` are facts about the CANDIDATE and re-running them buys the same answer;
+# `baseline_regime_mismatch` and `regime_not_scorable_for_task` are refusals BEFORE measuring that
+# a re-score under the same environment would repeat exactly.
+RESCORABLE_NO_SPEEDUP_REASONS="baseline_measured_in_pass"
+
+champion_refusal() {   # $1 = final.json. Echoes the re-scorable no_speedup reason, or nothing.
+  [ -s "$1" ] || return 0
+  RESCORABLE="$RESCORABLE_NO_SPEEDUP_REASONS" python3 - "$1" <<'PYEOF' 2>/dev/null
+import json, os, sys
+try:
+    row = json.loads(open(sys.argv[1], encoding="utf-8").read())
+except Exception:
+    raise SystemExit(0)
+block = row.get("no_speedup")
+reason = block.get("reason") if isinstance(block, dict) else None
+if reason in set(os.environ.get("RESCORABLE", "").split(",")):
+    print(reason)
+PYEOF
+}
+
+# A `.done` written over a REFUSED champion pass means "the search finished and the graded number
+# is missing", which is not the same terminal state as "this task-arm is measured".
+marker_says_champion_refused() {   # $1 = marker text
+  case "$1" in
+    *champion_refused=*) return 0 ;;
+  esac
+  return 1
+}
+
+# THE THIRD RETRY FLAG, and like the other two it reopens ONE state. It is not `RETRY_WALL_CUT`'s
+# business: a wall cut re-runs the whole task-arm and spends a fresh budget, while this reopens the
+# SCORING PASS ALONE -- the champion is already extracted on disk and the reference cache is warm,
+# so the repeat costs one evaluation and no model call. Re-running the search instead would be
+# strictly worse: `run_one` starts by deleting $TASK_ROOT, which is where that champion lives.
+#
+# Default off, like every other reopening: a resume must be safe to run blind, and a refused pass is
+# still a marker over a task-arm whose SEARCH really finished.
+RETRY_REFUSED="${RETRY_REFUSED:-0}"
+
+rescore_refused_champion() {   # $1 = task, $2 = cpu list, $3 = marker path. 0 = handled it.
+  local RR_T="$1" RR_CPUS="$2" RR_MARKER="$3" RR_ROOT="$RUNS_ROOT/$1" RR_WAS RR_NOW
+  [ -s "$RR_MARKER" ] || return 1
+  marker_says_champion_refused "$(cat "$RR_MARKER")" || return 1
+  [ "$RETRY_REFUSED" = "1" ] || return 1
+  if [ ! -s "$RR_ROOT/champion/solver.py" ]; then
+    # The champion is what makes this cheap. Without it the honest answer is "re-extract first",
+    # not "re-run the search": the scores are still in the run's event log.
+    echo "[$RR_CPUS] $RR_T: RETRY_REFUSED=1 but no champion at $RR_ROOT/champion/solver.py --" \
+         "re-extract it (extract_champion.py --run-dir $RR_ROOT/run --all-files) and try again"
+    return 0
+  fi
+  RR_WAS="$(champion_refusal "$OUT/B-$RR_T.final.json")"
+  echo "[$(date +%H:%M:%S)][$RR_CPUS] $RR_T: RE-SCORING the champion its last pass refused" \
+       "(${RR_WAS:-refused}); no model call, no new search"
+  score_champion "$RR_T" "$RR_CPUS" "$RR_ROOT"
+  RR_NOW="$(champion_refusal "$OUT/B-$RR_T.final.json")"
+  # THE MARKER IS REWRITTEN EITHER WAY, because it is the record of what the last pass said. A
+  # second refusal keeps the flag's meaning stable (this is still reopenable) instead of quietly
+  # promoting a task-arm that still has no number.
+  if [ -n "$RR_NOW" ]; then
+    echo "  [$(date +%H:%M:%S)][$RR_CPUS] $RR_T: refused again ($RR_NOW) -- the marker keeps saying so"
+  else
+    sed -i 's/ champion_refused=[^ ]*//' "$RR_MARKER"
+    echo "  [$(date +%H:%M:%S)][$RR_CPUS] $RR_T: scored on the second pass; marker cleared"
+  fi
+  return 0
+}
+
 run_one() {                       # $1 = task, $2 = cpu list
   T=$1; CPUS=$2
   # Per task, before anything is measured: the width this task is SCORED in.
@@ -1333,7 +1487,15 @@ run_one() {                       # $1 = task, $2 = cpu list
   # meter block -- so a skipped task-arm still ran the export. That was harmless while the path held
   # no per-attempt state; it is not harmless now, because `next_attempt` allocates an id and a
   # resume that skips 17 of 20 tasks would burn 17 attempt numbers on runs that never happened.
+  # BEFORE the resume check, and it does not go through it. `already_measured` decides whether to
+  # re-run the TASK-ARM; this decides whether to re-run the SCORING PASS over a champion that is
+  # already on disk, which is a different question and a hundredth of the cost. Arm A has no
+  # champion pass at all, so it never reaches here.
+  if [ "$ARM" != "A" ] && rescore_refused_champion "$T" "$CPUS" "$MARKER"; then return; fi
   if already_measured "$MARKER"; then echo "[$CPUS] $T arm $ARM already done"; return; fi
+  # Cleared per task-arm: `record_done` reads it into the marker, and a value left over from the
+  # previous task in this lane would file a refusal against a run that never had one.
+  CHAMPION_REFUSED=""
   # Allocated whether or not the meter is on: the attempt id is this driver's own name for this
   # run of this task-arm, it goes into the marker either way, and a marker whose `attempt=` means
   # something different depending on METER_BASE would be worse than one that has no attempt at all.
@@ -1378,8 +1540,12 @@ run_one() {                       # $1 = task, $2 = cpu list
     # Per-task memory and knowledge dirs: LoopLab can mine its own past runs and a shared store,
     # and AlgoTuner has no equivalent -- left shared, arm B would reach task 12 with eleven prior
     # runs to read, measuring a capability the other arm does not have rather than the loop.
+    # THE RUN DIRECTORY, not `events.jsonl` inside it: an evaluation appends nothing to the event
+    # log for its whole duration while it grows its stage log and node workdir under this tree.
+    # `newest_activity` is what reads it, and the file/directory distinction is the caller's -- see
+    # there for why arm A must keep handing over its own log file instead.
     LOOPLAB_MEMORY_DIR="$TASK_ROOT/memory" LOOPLAB_KNOWLEDGE_DIR="$TASK_ROOT/knowledge" \
-      run_bounded "$TASK_ROOT/run/events.jsonl" taskset -c "$CPUS" python -m looplab.cli run \
+      run_bounded "$TASK_ROOT/run" taskset -c "$CPUS" python -m looplab.cli run \
         "$WS/algotune_$T.json" --out "$TASK_ROOT/run" --backend llm --max-nodes 20 \
         > "$OUT/B-$T.log" 2>&1
     RC=$?   # captured HERE: the champion extraction and the test scoring below both clobber $?
@@ -1394,34 +1560,17 @@ run_one() {                       # $1 = task, $2 = cpu list
         > "$OUT/B-$T.final.json"
     elif python "$REPO/benchmarks/algotune/extract_champion.py" --run-dir "$TASK_ROOT/run" \
            --all-files --out "$TASK_ROOT/champion/solver.py" >> "$OUT/B-$T.log" 2>&1; then
-      # ITS OWN WALL, not $HARD_TIMEOUT. That default became 0 ("no timeout" to GNU
-      # coreutils) when the wall was replaced by the stall guard, and this call was never
-      # migrated to `run_bounded` -- so the graded TEST pass had no bound of any kind. A
-      # wedge outside `looplab_eval`'s own inner `subprocess.run(timeout=…)` (the build_ext
-      # child holding a lock, a geesefs stat, an evaluator child that ignores SIGTERM) held
-      # the lane for ever and the driver's final `wait` never returned. It does NOT go
-      # through `run_bounded`: a scoring pass is legitimately silent for long stretches
-      # (the README measures a single-candidate evaluation at 87 minutes), so a stall guard
-      # would kill healthy work. A generous wall is the right instrument here.
-      # `--protect` carries the TASK's own declaration rather than a second copy of it, and the
-      # champion is scored out of its OWN directory so its sibling files are the submission (see
-      # `extract_champion.py --all-files`). Scoring it from $TASK_ROOT made `src.parent` a directory
-      # whose other entries are directories, so a multi-file champion submitted nothing, built
-      # nothing, and failed to import -- recorded as the solver's own 0.0.
-      CHAMPION_PROTECT="$(python3 - "$WS/algotune_$T.json" <<'PROTEOF'
-import json, sys
-try:
-    spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
-except Exception:
-    raise SystemExit(0)
-print(",".join(str(x) for x in (spec.get("protect") or []) if x))
-PROTEOF
-)"
-      (cd "$TASK_ROOT/champion" && timeout "$CHAMPION_TIMEOUT" taskset -c "$CPUS" \
-          python "$REPO/benchmarks/algotune/looplab_eval.py" --algotune-root "$AT" --task "$T" \
-          --model LoopLabFinal --solver solver.py --subset test \
-          ${CHAMPION_PROTECT:+--protect "$CHAMPION_PROTECT"}) \
-          > "$OUT/B-$T.final.json" 2>>"$OUT/B-$T.log"
+      # The pass itself is `score_champion` (see there for its wall, its `--protect` and why it is
+      # not under `run_bounded`); it is a function because the re-score below runs THE SAME one.
+      score_champion "$T" "$CPUS" "$TASK_ROOT"
+      # A REFUSED PASS IS RECORDED IN THE MARKER, not just in the row. Without this the marker says
+      # `ran_to_completion` over a task-arm with no graded number, `already_measured` never re-runs
+      # it, and the one refusal that a second pass WOULD clear -- the reference was timed in this
+      # pass, so it is cached now -- is terminal by accident. `RETRY_REFUSED=1` reads this field.
+      CHAMPION_REFUSED="$(champion_refusal "$OUT/B-$T.final.json")"
+      [ -n "$CHAMPION_REFUSED" ] && echo "  [$(date +%H:%M:%S)][$CPUS] $T: the champion pass was" \
+          "REFUSED ($CHAMPION_REFUSED) -- recorded in the marker; RETRY_REFUSED=1 re-scores it" \
+          "without re-running the search"
     else
       # EXIT 1 AND EXIT 2 ARE DIFFERENT ANSWERS, and this used to be one `else`. The extractor was
       # rewritten to separate them and BOTH its callers threw the distinction away: `if cmd; then`
