@@ -52,8 +52,11 @@ why-comments) and do not reformat.
 Docs are built with `mkdocs build --strict` in CI — broken doc links fail the deploy.
 `looplab build-ui` builds the React UI (`npm ci && npm run build` in `ui/`); `looplab ui`
 auto-builds when the dist is missing. `looplab/cli/` is a PACKAGE (command groups in
-`run_cmds`/`export_cmds` (also `export-sft`: the run's answered turns as SFT rows, each carrying its node's outcome)/`inspect_cmds`/`concept_cmds`/`governance_cmds`/`memory_cmds`/`maintenance_cmds`/`audit_cmds`/`ui_cmds` —
+`run_cmds`/`export_cmds` (also `export-sft`: the run's answered turns as SFT rows, each carrying its node's outcome)/`inspect_cmds`/`concept_cmds`/`governance_cmds`/`memory_cmds`/`maintenance_cmds`/`audit_cmds`/`corpus_cmds`/`ui_cmds` —
 `inspect_cmds` is run diagnostics ONLY, the Part IV concept/novelty diagnostics are `concept_cmds`,
+`corpus_cmds` (2026-09-08) is the read side over a RUNS ROOT rather than one run — `belief-key-split` /
+`card-ladder` / `asha-rungs`, the three instruments that make a blocked decision measurable; no model,
+no write, no cross-run store,
 and everything that spends money on a steward or authors cross-run memory CONTENT is
 `governance_cmds`; `audit_cmds` (2026-09-06, doc 52 row 22) is the post-run INSTRUMENT group — a paid judge over ONE finished run that writes that run's sidecar and moves nothing (`mlebench-extras`; `bait-materialize` / `bait-audit`, the BAITBENCH-shaped hack-rate instrument over `judgebench/bait.py`, whose box measurement is still owed). `memory_cmds` is the other deliberate exception and it is a DOMAIN split, not a
 drift: `memory-orphans` writes the shared stores too, but only ever by REMOVING rows whose run no
