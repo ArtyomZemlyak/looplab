@@ -12,10 +12,12 @@ The states below are the ones HTTP cannot construct on demand: a claim whose wor
 the receipt and the terminal, a terminal that is visible while its lock is still held, and an
 abandon racing a live provider call.
 
-Also here: the monkeypatch-seam guard. Both extractions (SR-12's store, SR-02's action protocol)
-bind store names BY VALUE, so a seam now exists in three modules and a test that patches two of them
-passes while injecting nothing. `test_report.py::_STORE_PATCH_MODULE_PATHS` is the sweep;
-`test_the_store_patch_sweep_names_every_module_that_binds_a_seam` fails if a fourth reader appears.
+Also here: the monkeypatch-seam guard. All three extractions (SR-12's store, SR-02's action
+protocol, and SR-02's remaining generation arm in `scope_generate.py`) bind store names BY VALUE, so
+a seam now exists in four serve modules and a test that patches three of them passes while injecting
+nothing. `test_report.py::_STORE_PATCH_MODULE_PATHS` is the sweep;
+`test_the_store_patch_sweep_names_every_module_that_binds_a_store_name` fails when a reader appears
+that the sweep does not name.
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from looplab.serve import scope_actions, scope_report_store as store
+from looplab.serve import scope_actions, scope_generate, scope_report_store as store
 from looplab.serve.routers import reports as reports_router
 from tests._source_scan import PKG, iter_trees
 from tests.test_report import _STORE_PATCH_MODULE_PATHS
@@ -308,14 +310,22 @@ def test_the_store_patch_sweep_names_every_module_that_binds_a_store_name():
 
 def test_the_router_and_the_service_resolve_to_the_same_objects():
     """`routers/reports.py` imports the protocol by name and star-imports the store. Both bind by
-    value, so the only way to know a patch site is the real one is to assert identity."""
-    for name in ("action_response", "active_scope_action", "durable_abandon_scope_action",
-                 "get_scope_action", "indeterminate_receipt", "read_reconciled_action"):
+    value, so the only way to know a patch site is the real one is to assert identity.
+
+    SR-02's remaining arm (2026-09-08) split which module imports WHICH half: the router kept the two
+    action ROUTES, and `scope_generate` took the four the generation state machine calls. Asserting
+    identity per consumer is the point — a name asserted on a module that no longer imports it is a
+    guard that cannot fail, and a name imported by a module nobody checks is an unswept patch site."""
+    for name in ("durable_abandon_scope_action", "get_scope_action"):
         assert getattr(reports_router, name) is getattr(scope_actions, name), name
+    for name in ("action_response", "active_scope_action", "indeterminate_receipt",
+                 "read_reconciled_action"):
+        assert getattr(scope_generate, name) is getattr(scope_actions, name), name
     for name in ("_read_scope_action_lease_marker", "_write_scope_action_receipt",
                  "_read_scope_action_fence", "_scope_action_lease_is_live", "_scope_store_lock"):
         assert getattr(reports_router, name) is getattr(store, name), name
         assert getattr(scope_actions, name) is getattr(store, name), name
+        assert getattr(scope_generate, name) is getattr(store, name), name
 
 
 def test_the_two_action_routes_are_one_delegating_call_each():

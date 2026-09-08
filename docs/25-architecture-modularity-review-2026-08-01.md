@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 156 resolved, 30 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 158 resolved, 28 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -4975,9 +4975,15 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Recommendation:* Extract two shared services in looplab/serve/: an event-ledger paid-action protocol (claim event, terminal event, fsync-confirm, generation fence — parameterized by event types) covering report_refresh and concept-lens, and keep the file-ledger machinery of scope actions as its own module. Each new hand-rolled variant is a fresh set of crash-window bugs to re-find; the near-identical helper pairs prove the abstraction already exists implicitly.
 
-#### SR-02 · HIGH · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
+#### SR-02 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-09-08)**
 
-> **OPEN[generate-scope-report-endpoint-still-in-router]** `generate_scope_report_ep` (548 lines re-measured 2026-08-19, `reports.py:582-1129`) and the ~210-line source-probe staleness cache are still inside the router. proof:present:generate_scope_report_ep@looplab/serve/routers/reports.py
+> *Closed 2026-09-08: the last arm landed. `serve/scope_generate.py` now owns the eight scope
+> projections, the source-probe staleness cache (as `ScopeSourceProbes`, a class because the
+> closures captured three mutable `build_router` locals) and `durable_generate_scope_report`;
+> `routers/reports.py` goes 1 131 → 180 lines and is endpoint wiring plus the staleness GET, exactly
+> what this finding asked for. `tests/test_scope_generate.py` is the instrument — 14 tests that drive
+> the cache, the projections and the whole paid protocol against a stub `srv` and a real
+> `JobRegistry`, with no ASGI app. See "Still open" below, now answered.*
 
 **reports.py is a god-module: a distributed-storage subsystem inside a router file**
 
@@ -5037,7 +5043,8 @@ would have added ZERO new patch surface, which is a real argument. It loses on l
 docstring commits to "none of it is HTTP", and reconciliation is policy OVER the store (it decides
 when to write a tombstone and when a visible terminal must still read as running), not more store.
 
-**Not attempted:** `generate_scope_report_ep`. See "still open" below.
+**Not attempted in that change:** `generate_scope_report_ep`. It landed on 2026-09-08 —
+see the resolution below.
 
 *The seam this move creates, and the guard.* Importing a store name binds it BY VALUE exactly as the
 router's star import does, so `scope_actions.py` is a THIRD copy of every seam it names — and it is
@@ -5075,17 +5082,51 @@ comment-only mutation is the one a substring pin would have missed;
 threading is proven to have landed rather than asserted;
 (9) rebind the router's imported name to an alias → the identity test.
 
-**Still open:** `generate_scope_report_ep` — 550 lines with five nested closures
-(`_stamp_scope_action_usage`, `_compute`, `_inputs_unchanged`, `_persist_terminal`,
-`_compute_durable`) — stays in the router, as does the ~210-line source-probe staleness cache
-(`_source_probe_key` … `_omission_is_current`), which SR-02 explicitly wants the router to keep but
-whose caching machinery is not HTTP either and captures three mutable `build_router` locals, so
-extracting it needs a class rather than a move. `generate` is the harder half: it interleaves the
-action protocol with agent invocation, the `anyio` job hand-off, `_scope_run_ids`/`_scope_sig`/
-`_scope_context_digest`, and lease RETENTION (the quarantine path), and a verbatim move cannot
-establish that its crash windows are unchanged the way a 497-line differential can here. It wants
-the SR-03 treatment — a byte-level differential harness against a pre-extraction worktree — and is
-a separate change.
+*Resolution (2026-09-08, the generation arm).* `looplab/serve/scope_generate.py` (1 070 lines) now
+owns all three things this paragraph left open, and `routers/reports.py` goes 1 131 → **180** lines:
+3 117 → 180 across the three changes. What moved, in the order the endpoints use it:
+
+* the eight scope PROJECTIONS (`scope_label`, `scope_label_from_data`, `scope_run_ids`,
+  `scope_context_digest`, `run_brief`, `scope_drill`, `scope_sig`, `scope_source_sizes`), renamed to
+  public spellings because the staleness GET still calls four of them;
+* `ScopeSourceProbes` — the source-probe cache, as the CLASS this paragraph predicted. The eight
+  closures become methods and the three captured `build_router` locals (a lock and two
+  `OrderedDict`s) become instance state, built once per app in `build_router` because the cache's
+  lifetime is the app's: a per-request one would re-parse every event log on every GET, which is the
+  cost the cache exists to remove;
+* `durable_generate_scope_report` — the endpoint body with its five closures intact.
+
+The moved bodies are VERBATIM; the mechanical edits are the ones the two earlier extractions made
+and wrote down (`srv` threaded explicitly, `srv.reports_dir`/`srv.projects`/`srv.phase` in place of
+the three captures, the renames above). The route keeps its docstring, because that docstring is the
+OpenAPI description `docs/guide/api-reference.md` is generated from, and is one delegating `await`.
+
+**The differential this paragraph asked for was not the instrument that would have proved it.** A
+byte-level differential against a pre-extraction worktree establishes that the same HTTP requests
+produce the same HTTP responses — which is exactly what the existing 60-odd scope tests in
+`test_report.py` already do, and they were re-run unchanged. What no differential and no HTTP test
+can observe is the property the cache exists for: `stale:false` reads identically whether the server
+re-parsed a 30 MB event log or answered from memory. So the instrument is
+`tests/test_scope_generate.py` — 14 tests against a stub `srv` (six attributes) and a REAL
+`JobRegistry`, no app, no engine, no router. Three of them COUNT captures: an unchanged source is
+parsed once however many times it is checked; a rewritten one is re-read exactly once; and the two
+staleness rungs treat an unreadable source differently on purpose — the revision rung
+negative-caches it, the omission rung re-opens it every time, because accessibility is not part of
+the cheap stat key and a repaired source is new model-visible evidence. The rest drive the paid
+protocol end to end offline: one confirmed record with its fence cleared, a replayed UUID that reads
+its terminal instead of recomputing it, evidence that moves after the reservation refusing to
+publish anything, a second UUID refused while another action holds the scope, and the four pre-claim
+refusals leaving no durable state behind.
+
+*The seam this move creates.* `scope_generate.py` star-imports the store, so it is a FOURTH by-value
+patch site — and the only reader of `strict_atomic_write_text` and `capture_scope_source` outside
+the store, since the router now neither writes a report nor captures a source.
+`test_report.py::_STORE_PATCH_MODULE_PATHS` names it (the eleven write-failure tests and the four
+capture-failure tests read those two seams off `scope_generate` now, not off the router), and
+`test_scope_actions_service.py::test_the_store_patch_sweep_names_every_module_that_binds_a_store_name`
+is what would have caught leaving it out. The identity guard there was re-derived rather than
+extended: it now asserts each protocol name on the module that actually imports it, because a name
+asserted on a module that no longer imports it is a guard that cannot fail.
 
 #### SR-03 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-02)**
 
@@ -5122,9 +5163,13 @@ match. Each pins the same property — an unconfirmed or unreconstructable outco
 another deletion. Six independent breaks in the production module were each caught by exactly the
 test that guards the property they broke.
 
-#### SR-04 · MEDIUM · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### SR-04 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[concept-lens-subsystem-inside-runs-router]** the concept-lens subsystem still lives in `routers/runs.py` — 21 lens helpers plus the worker, ledger and three endpoints — though `serve/concept_frame.py` (731 lines, landed 2026-08-17) has since taken the pure projection half. proof:present:_run_concept_lens_worker@looplab/serve/routers/runs.py
+> *Closed 2026-09-08: `serve/concept_lens_service.py` now owns the whole paid subsystem — the
+> identities, both ledger folds, the bounded terminal projection, the provider worker and the four
+> command bodies — and `routers/runs.py` keeps four routes that are one delegating call each.
+> 4 054 → 3 080 lines. The instrument is `tests/test_concept_lens_service.py`; see the resolution
+> below, which answers the "Still open" note this marker pointed at.*
 
 **runs.py concept-lens subsystem (~1000 lines) with a triplicated generation-fence preamble**
 
@@ -5156,8 +5201,52 @@ today because `expected_generation` is regex-validated as 64 hex upstream, and t
 it teeth had to say so, pinning the fence's behaviour if that validation is ever relaxed rather than
 pretending the clause was already load-bearing.
 
-**Still open:** the ~1,000-line concept-lens subsystem still lives inside `routers/runs.py`; the
-`serve/concept_lens.py` service extraction is a separate change.
+*Resolution (2026-09-08, the subsystem).* `looplab/serve/concept_lens_service.py` (1 082 lines) is
+the service this finding asked for — named `_service` because `looplab/search/concept_lens.py`
+already exists and is what `derive_lens`/`default_lenses` come from; two modules called
+`concept_lens` in one import graph is a trap, not a tidy name. `routers/runs.py` goes 4 054 → 3 080
+lines and keeps four route decorators with the docstrings that ARE their OpenAPI descriptions, each
+one a single delegating call.
+
+What moved is everything the finding listed: the five identity/HMAC helpers, the bounded body
+reader, `assert_lens_generation`, the `PaidLedgerSpec` and BOTH folds (the legacy-compatible one and
+the strict recovery one), `validated_derived_lens` with its terminal matcher, the two bounded
+response projections, the two terminal writers, the provider worker, and the four command bodies.
+The moved bodies are verbatim; the mechanical edits are `srv` threaded explicitly where the closures
+captured it and `srv.run_dir(run_id)` in place of the captured `_run_dir`.
+
+**Two things were deliberately NOT moved, and each earns its place.** `_materialize_concept_core` —
+the bounded ConceptFrame fold plus its two process-wide caches — stays in the router, because the
+UNPAID `GET /concepts` is its other consumer: duplicating it would give the paid and unpaid paths
+two different bounded folds, and a cache whose lifetime is the app's does not belong to a command.
+Every command takes it as a keyword instead, exactly as `trace_clear.py` takes
+`known_engine_liveness`. And the three identity-shape constants (`_RUN_GENERATION_RE`, `_SHA256_RE`,
+`_MAX_SAFE_INTEGER`) are DEFINED in the service and imported by the router, which still reads them
+for its historical-detail and trace fences: one definition, and the direction is router to service
+rather than a second `re.compile` of the same shape beside the first.
+
+*The instrument.* `tests/test_concept_lens_service.py` — 17 tests against a stub `srv` with four
+members, seeding real `events.jsonl` ledgers through `EventStore`. It reaches the states HTTP cannot
+construct on demand, which is the entire point: a second claim on one identity, a terminal whose
+digest disagrees with the claim it answers, a previous generation's paid history that must not read
+as this generation's ambiguity, a derived receipt whose spec no longer validates (uncertain, never a
+lens, and it keeps the terminal's seq), an abandoned terminal that must say `billing_status:
+unknown` because after a crash the charge is genuinely unknowable, and an unrecognised `error_kind`
+coerced rather than echoed to the browser. Four of them drive the recovery COMMAND itself through
+orphaned / running / terminal / conflict off the same seeded run.
+
+Four structural tests hold the shape: no route decorator and no router object in the service, each
+of the four routes one delegating call with the materializer handed in (over the AST — a
+`pass  # return await durable_…` satisfies a positive source pin), the router defining none of the
+moved helpers and no second `PaidLedgerSpec`, and the materializer still living with the read model
+that shares it. The comment-only mutation was re-verified against a throwaway copy of the tree.
+
+*The seams the move creates.* Three tests imported lens helpers from the router and now import them
+from the service (`test_concept_lens_durability.py`, `test_lens_generation_fence.py`,
+`test_paid_ledger.py`), and `test_paid_ledger.py`'s `strict_fsync` guard was re-derived rather than
+re-pointed: `serve/routers/runs.py` KEEPS its row for the binding half — re-binding `strict_fsync`
+in the router would be exactly as damaging as before, and dropping the row would retire that guard
+silently — while the "calls the shared confirm" half moved to the module that now calls it.
 
 #### SR-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
