@@ -381,6 +381,8 @@ _LAYOUT = {
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)
     "stuck": "agents",
     "surrogate": "search",
+    "synthetic": "adapters",   # SyntheticTaskBase + PerturbResearcher, the five demo adapters'
+                               # shared skeleton (doc 25 RA-06)
     "tasks": "adapters",
     "text": "core",              # the shared unicode word tokenizer (doc 25 EM-15)
     "timeseries": "adapters",
