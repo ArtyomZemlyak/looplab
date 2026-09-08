@@ -202,6 +202,90 @@ def test_assistant_share_uses_strict_boolean_and_header_capability(tmp_path):
     assert "X-LoopLab-Share" in response.headers["vary"]
 
 
+def _share_envelope():
+    """What a share client keeps so a retry can ask for the SAME capability: a canonical UUIDv4 and
+    a canonical unpadded base64url 256-bit secret (`ui/src/assistantShareRecovery.js` mints these)."""
+    import base64
+    import secrets
+    return {"request_id": str(uuid.uuid4()),
+            "token_secret": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")}
+
+
+def test_share_create_recovery_survives_a_lost_response_over_the_route(tmp_path):
+    """The route half of the create-recovery contract (doc 25 SC-10), DRIVEN.
+
+    The first POST lands and its response is thrown away unread — which is precisely what the server
+    saw when a client's connection died mid-response. The retry must return the identical bearer with
+    `replayed: true`, and the owner's own link list must show exactly ONE capability: a second live
+    record is an un-revoked bearer nobody holds and the owner cannot see to revoke."""
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "share me"}).json()["id"]
+    envelope = _share_envelope()
+
+    lost = client.post(f"/api/assistant/sessions/{sid}/share", json={"live": False, **envelope})
+    assert lost.status_code == 201 and lost.json()["replayed"] is False
+
+    retry = client.post(f"/api/assistant/sessions/{sid}/share", json={"live": False, **envelope})
+    assert retry.status_code == 200 and retry.json()["replayed"] is True
+    assert retry.json()["url"] == lost.json()["url"]
+
+    shares = client.get(f"/api/assistant/sessions/{sid}/shares").json()["shares"]
+    assert len(shares) == 1, f"the retry published a second live capability: {shares}"
+    token = retry.json()["url"].rsplit("/", 1)[-1]
+    assert client.get("/api/assistant/shared",
+                      headers={"X-LoopLab-Share": token}).status_code == 200
+
+    # The contrast that makes the assertion above non-vacuous: without the envelope the same retry
+    # really does mint a second link, which is the defect the contract removes.
+    for _ in range(2):
+        assert client.post(f"/api/assistant/sessions/{sid}/share",
+                           json={"live": False}).status_code == 200
+    assert len(client.get(f"/api/assistant/sessions/{sid}/shares").json()["shares"]) == 3
+
+
+def test_share_create_recovery_refuses_a_partial_or_malformed_envelope(tmp_path):
+    """Presence, not value, selects the contract: half an envelope is refused rather than silently
+    downgraded into the legacy create that would mint a second capability. And a coerced field is
+    refused too — the TTL is hashed into the create identity, so `"604800"` would derive a different
+    link than the client's own saved one."""
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "share me"}).json()["id"]
+    envelope = _share_envelope()
+    for body in ({"request_id": envelope["request_id"]},
+                 {"token_secret": envelope["token_secret"]},
+                 {"request_id": None, "token_secret": None},
+                 {**envelope, "request_id": "not-a-uuid"},
+                 {**envelope, "token_secret": envelope["token_secret"] + "="},
+                 {**envelope, "ttl_seconds": "604800"},
+                 {**envelope, "ttl_seconds": 604800.0}):
+        response = client.post(f"/api/assistant/sessions/{sid}/share", json=body)
+        assert response.status_code == 400, body
+        assert response.json()["detail"]["code"] == "assistant_share_recovery_invalid"
+    assert client.get(f"/api/assistant/sessions/{sid}/shares").json()["shares"] == []
+
+
+def test_share_create_recovery_never_presents_a_revoked_link_as_success(tmp_path):
+    """The exact operation is immutable: revocation never mints or reveals a fresh bearer, so a
+    replay of a dead link is a typed 410 with the token dropped — not a success body carrying a URL
+    that resolves to nothing."""
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "share me"}).json()["id"]
+    envelope = _share_envelope()
+    created = client.post(f"/api/assistant/sessions/{sid}/share", json={"live": False, **envelope})
+    assert created.status_code == 201
+    assert client.delete(f"/api/assistant/sessions/{sid}/share").json()["revoked"] == 1
+
+    dead = client.post(f"/api/assistant/sessions/{sid}/share", json={"live": False, **envelope})
+    assert dead.status_code == 410
+    detail = dead.json()["detail"]
+    assert detail["code"] == "assistant_share_replay_terminal" and detail["kind"] == "revoked"
+    assert "url" not in detail and created.json()["url"] not in json.dumps(detail)
+    # A retry that changes the terms under one saved request id is a conflict, never a replacement.
+    conflict = client.post(f"/api/assistant/sessions/{sid}/share", json={"live": True, **envelope})
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "assistant_share_recovery_conflict"
+
+
 def test_run_turn_write_with_approval(tmp_path):
     target = tmp_path / "new.txt"
     client = _FakeChatClient([_call("write_file", {"path": str(target), "content": "hi"}), _final("done")])

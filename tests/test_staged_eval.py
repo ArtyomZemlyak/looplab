@@ -190,7 +190,7 @@ def test_stage_reuse_refuses_a_workdir_that_is_not_the_folded_manifest(tmp_path)
     import anyio
 
     from looplab.adapters.toytask import ToyTask
-    from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
     from looplab.engine.evaluate import _workdir_manifest_digest
     from looplab.engine.orchestrator import Engine
     from looplab.events.eventstore import EventStore

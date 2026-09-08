@@ -50,7 +50,7 @@ LADDER = {
     "run_lifecycle_lock_http": "lifecycle",
     "engine_write_lock_http": "engine_write",
     "run_config_write_lock": "config",
-    "_interprocess_lock": "events",
+    "interprocess_lock": "events",
     "span_destructive_write_guard": "spans",
 }
 

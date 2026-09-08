@@ -11,7 +11,8 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, SecretStr, StrictBool
 
 from looplab.core.node_evidence import node_attempt
-from looplab.serve.http import comment_cursor_error, comment_filter_invalid, refusal
+from looplab.serve.http import (
+    comment_cursor_error, comment_filter_invalid, generation_conflict, refusal)
 from looplab.serve.metrics_adapters import fenced_node_metrics
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, project_comments)
@@ -65,6 +66,15 @@ _SUMMARY_OMIT_KEYS = {
     # is omitted — `research_origin` is WITHIN-run provenance (which deep-research memo steered the
     # proposal) and deliberately survives.
     "origin",
+    # A property of the SERVER PROCESS, not of this run: which of the operator's `.py` modules
+    # moved under a running `looplab ui`, by relative path, plus the package's file counts. A
+    # review link is a capability over ONE RUN — it was granted the run, not the deployment — and
+    # "restart the UI server" is not a remedy its bearer has. It arrives on the envelope AND
+    # mirrored into `state`, and `_scrub_json`'s `omit_keys` is recursive, so one row removes both.
+    # This is the line `review_config` already refuses to cross by answering 404 rather than
+    # "disclose present-day deployment configuration to a legacy review link". The OWNER `/state`
+    # keeps it — that is who the receipt is for.
+    "server_code",
 }
 _BENIGN_SECRET_KEYS = {
     "tokenizer", "max_tokens", "num_tokens", "n_tokens", "total_tokens", "prompt_tokens",
@@ -541,11 +551,11 @@ def build_router(srv) -> APIRouter:
                     "remediation": "Use the generation returned by the review state response.",
                 })
             if request_generation is not None and request_generation != bound_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "message": "The requested evidence belongs to a different run generation.",
-                    "remediation": "Reload the review state before requesting solution evidence.",
-                })
+                # No fence fields: a review link never publishes the run's generation to its
+                # reader, so there is nothing here for the client to compare against.
+                raise generation_conflict(
+                    "The requested evidence belongs to a different run generation.",
+                    remediation="Reload the review state before requesting solution evidence.")
             if seq is not None:
                 if request_generation is None:
                     raise HTTPException(400, {

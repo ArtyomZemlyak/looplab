@@ -220,3 +220,85 @@ def test_no_producer_re_derives_either_seam():
     assert "[:2_048]" not in source, "a producer re-derives the bounded error text"
     assert source.count("anyio.BrokenResourceError") == 1, (
         "a producer re-derives the notification swallow")
+
+
+def test_the_raw_stage_source_is_derived_once_for_both_outcomes():
+    """A merge proposal that RAISED must be attributed to the same author as one that returned.
+
+    The two sites derived `"engine" if action.get("kind") == "merge" else "researcher"` separately,
+    so a change to the operator vocabulary on one side would have made the same proposal read as
+    engine-authored when it succeeded and researcher-authored when it failed — and nothing joins the
+    two rows to notice. Mutation: change either literal and this fails.
+    """
+    from looplab.engine.speculation import raw_stage_source
+
+    assert raw_stage_source({"kind": "merge"}) == "engine"
+    for action in ({"kind": "mutate"}, {"kind": ""}, {}, {"kind": "merge_ideas"}):
+        assert raw_stage_source(action) == "researcher", action
+
+
+def test_the_raw_stage_failure_constructor_carries_the_ceiling_and_the_bounded_text():
+    """`SpecRawStageResult.failure` is the ONE builder of the consumed, non-staged payload."""
+    from looplab.engine.speculation import SpecRawStageResult
+
+    state = RunState(run_id="r", task_id="t")
+    result = SpecRawStageResult.failure(
+        ValueError("x" * 10_000), generation=3, action={"kind": "merge"},
+        proposal_state=state, proposal_node_ceiling=7, source="engine")
+    assert result.success is False and result.error.startswith("ValueError: ")
+    assert len(result.error) == 2_048, "the durable payload's error text lost its bound"
+    assert result.at_node == 7 and result.proposal_node_ceiling == 7, (
+        "a failed proposal is AT the ceiling it was prepared against; a drift here mis-places the "
+        "consumed result against the node count the session reads")
+    assert result.audit_events == () and result.generation == 3
+    assert result.action == {"kind": "merge"} and result.proposal_state is state
+
+
+def test_a_raw_producer_fault_is_stored_as_a_consumed_result_and_releases_its_flag():
+    """DRIVEN end to end through the isolated-producer wrapper (doc 25 EC-12).
+
+    A raising proposal worker must leave a stored, consumed result — the session's exit gate reads
+    `_spec_raw_stage_inflight`, and a fault that stored nothing while clearing the flag would let the
+    main task conclude the epoch produced nothing at all. Mutations that fail it: drop the
+    `on_failure` result, clear the flag before storing, or stop discarding role telemetry.
+    """
+    import anyio
+
+    from looplab.engine.speculation import SpeculationMixin
+
+    class _Producer(SpeculationMixin):
+        def __init__(self):
+            self._spec_raw_stage_result = None
+            self._spec_raw_stage_inflight = True
+            self.discarded = []
+
+        def _discard_node_build_telemetry(self, *, researcher, developer):
+            self.discarded.append((researcher, developer))
+
+        def _prepare_raw_card_stage(self, *_args, **_kwargs):
+            raise RuntimeError("the provider hung up")
+
+    class _Notify:
+        def __init__(self):
+            self.keys = []
+
+        def send_nowait(self, key):
+            self.keys.append(key)
+
+    owner, notify = _Producer(), _Notify()
+    state = RunState(run_id="r", task_id="t")
+    state.search_epoch = 4
+    anyio.run(lambda: owner._produce_raw_card_stage(
+        {"kind": "merge"}, [], state, 9, ("researcher", "developer"), notify))
+
+    stored = owner._spec_raw_stage_result
+    assert stored is not None and stored.success is False, (
+        "a raw producer fault must still leave a CONSUMED result in the slot")
+    assert stored.error == "RuntimeError: the provider hung up"
+    assert stored.source == "engine" and stored.at_node == 9 and stored.generation == 4
+    assert stored.audit_events == (), (
+        "this guard fires when the worker never returned, so it has nothing buffered to carry")
+    assert owner._spec_raw_stage_inflight is False
+    assert notify.keys == [("raw_proposal", 4)]
+    assert owner.discarded == [("researcher", "developer")], (
+        "role telemetry from a failed proposal must not leak into the next build")
