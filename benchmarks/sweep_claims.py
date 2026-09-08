@@ -218,6 +218,7 @@ def check_ruler_constants(bench: str):
     inferred: dict = {}
     unattributed: dict = {}
     refs: dict = {}
+    withdrawn: dict = {}
     # THE EARLIEST EVIDENCE THAT THE SERIAL REGIME EXISTED HERE, from two independent places: a
     # cache file's mtime and the log's own first regime-tagged row. The earlier of the two is the
     # cutoff, so a copied file or a late-added field can only make the rule STRICTER, never let an
@@ -235,6 +236,20 @@ def check_ruler_constants(bench: str):
                 continue
             task, med, stamp = row.get("task"), row.get("median"), str(row.get("stamp") or "")
             if not isinstance(med, (int, float)) or task not in SWEEP_CONSTANTS:
+                continue
+            # A READING THE RECORD MARKS WRONG IS NOT EVIDENCE (§349). §299 withdrew §296-§298
+            # after finding they were all measured under conda instead of the bench venv, and
+            # marked the nine readings `interpreter: conda (WRONG -- see §299)` rather than deleting
+            # them. Nothing here looked at that field: those nine miss today's verdict only because
+            # they predate `busy_cpus_outside_lane`, so the exclusion is an accident of field order.
+            # One conda row written a day later, with the busy count on it, would have gone straight
+            # into a mean -- carrying the exact error §299 exists to record.
+            said_interp = str(row.get("interpreter") or "")
+            if "WRONG" in said_interp:
+                # IN READINGS, NOT ROWS -- the unit the sentence beside it uses (§340). One sitting
+                # carries four reps, and counting sittings printed "1 reading(s) WITHDRAWN" beside
+                # "2 quiet wide read(s)". The same mismatch, one field over, caught by its own test.
+                withdrawn[task] = withdrawn.get(task, 0) + _n_values(row)
                 continue
             busy = row.get("busy_cpus_outside_lane")
             # ATTRIBUTED FIRST, THEN USED -- for every route, not only the pool. §340's first cut
@@ -368,6 +383,9 @@ def check_ruler_constants(bench: str):
                 how += " [no reading names the reference it used]"
             if inferred.get(task):
                 how += f" ({inferred[task]} of them INFERRED, taken before {serial_first[:16]})"
+            if withdrawn.get(task):
+                how += (f" [{withdrawn[task]} reading(s) WITHDRAWN by the record: taken under an "
+                        "interpreter it marks wrong]")
             if unattributed.get(task):
                 how += (f" [{unattributed[task]} later reading(s) DROPPED: no regime recorded and "
                         "both regimes existed by then]")

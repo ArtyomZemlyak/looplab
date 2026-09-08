@@ -338,7 +338,7 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
                    lane: str | None = None, busy: int | None = None,
                    regime: str | None = None, solver_ms: float | None = None,
                    cached_ms: float | None = None, reference_sha: str | None = None,
-                   reference_from: str | None = None) -> dict:
+                   reference_from: str | None = None, interpreter: str | None = None) -> dict:
     """Append one dated reading, so the drift becomes a SERIES rather than a single number.
 
     §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
@@ -382,6 +382,14 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
            # module came out of, so a reading can be traced without re-globbing a tree that may be
            # gone by then.
            "reference_sha": reference_sha, "reference_from": reference_from,
+           # AND THE INTERPRETER (§349). §299 is the section about a wrong one surviving three
+           # sweeps, four reported findings and six refuted hypotheses -- "a wrong instrument
+           # reproduces its own error perfectly" -- and its fix stamped the interpreter on the
+           # BASELINE's sidecar. The reading is the other half and never got it: the nine conda-era
+           # rows carry `interpreter: conda (WRONG -- see §299)` only because they were marked BY
+           # HAND afterwards. They are excluded from today's verdict solely because they predate
+           # `busy_cpus_outside_lane`, which is an accident, not a rule.
+           "interpreter": interpreter,
            "values": [round(float(v), 6) for v in values],
            "median": round(float(median), 6)}
     path = Path(path)
@@ -585,7 +593,8 @@ def main(argv=None) -> int:
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
                        args.lane, max(seen) if seen else None,
                        observed_regime(args.task, args.subset), direct, cached,
-                       reference_sha=ref_sha, reference_from=ref_from)
+                       reference_sha=ref_sha, reference_from=ref_from,
+                       interpreter=bench_python())
         print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "
