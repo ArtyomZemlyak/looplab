@@ -468,8 +468,10 @@ def main(argv: list[str]) -> int:
     # In this order the counter can only have GAINED between the reads, so the gap is non-negative
     # by construction and the only thing left in it is what the named parts explain. Reading the
     # spans is the slow half (a glob over every probe tree), which is exactly why it must be first.
+    t_spans = time.time()
     s_cost, s_calls = spans_by_probe(a.bench_root, since)
     m_cost, m_calls, m_killed, m_empty = meter_by_probe(a.bench_root, since)
+    t_counter = time.time()
     live = _counter(a.port)
     health = endpoint_health(os.path.join(a.bench_root, "meter", "meter.jsonl"), since)
 
@@ -489,6 +491,15 @@ def main(argv: list[str]) -> int:
     preflight = sum(1 for p in probes if surplus.get(p, 0) >= 1)
     extra = {p: n - 1 for p, n in surplus.items() if n > 1}
 
+    # WHEN EACH HALF WAS READ (§362). The two are read seconds apart on purpose -- spans first,
+    # counter second, so the gap cannot go negative -- and the report never said so, which makes a
+    # number from this tool and a number from `pulse` look simultaneous when they are not. On
+    # 2026-09-08 I compared the meter total from one sweep's `check_money` against a probe's spend
+    # printed by the NEXT command in the same sweep and read the difference as a frozen probe; the
+    # tree and the meter agreed to $0.000002 when both were read at once. The window below is
+    # exactly the interval in which the two may legitimately differ.
+    print(f"read    spans at {time.strftime('%H:%M:%S', time.localtime(t_spans))}, "
+          f"counter {t_counter - t_spans:.1f}s later -- the counter can only have GAINED between")
     print(f"meter   ${live['cost_usd']:.6f}  over {live['calls']} calls")
     print(f"spans   ${spans_total:.6f}  over {sum(s_calls.values())} generations")
     print(f"gap     ${gap:+.6f}  over {live['calls'] - sum(s_calls.values())} calls")
