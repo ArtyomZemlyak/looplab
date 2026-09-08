@@ -1048,6 +1048,57 @@ def check_every_node_was_graded_on_train(bench: str):
     return not (missing or wrong), detail
 
 
+def check_arm_a_constants_are_a_file(bench: str):
+    """"перемер констант плеча A" -- point 10's last queue item, and the numbers lived in prose.
+
+    §355. §181 re-timed arm A on the verified ruler and §193 added two more, and the results existed
+    only as a markdown table in docs/56: `grep -rl 0.9648` over every json, py, txt and jsonl on the
+    box returned nothing but coincidental substrings inside probe spans. The figures the whole
+    A-versus-B comparison rests on were a sentence.
+
+    Re-measured 2026-09-08 from the surviving campaign logs -- the solver AlgoTuner actually shipped,
+    taken after `FILE IN CODE DIR solver.py:` and cut at the first log line -- and stored with every
+    field that decides whether a number may be averaged with an arm-B score. The model is read off
+    the campaign log (`Model: deepseek-v4-flash`), not assumed, and the campaign's own figures in the
+    file match §193's column exactly, which is what says the extraction took the right text.
+
+        task             own campaign   §181     now      regime
+        edge_expansion   1.1087         0.9648   0.9759   __w22x1r3
+        pde_heat1d       1.1010         1.0267   1.0259   __w22x1r3
+        discrete_log     1.5419         1.5133   1.4747   __w22x1r3
+        pagerank         None           0.0      0.0      no_valid_speedups
+
+    This check does not re-time anything -- that takes a 22-cpu lane. It asserts the file is there,
+    that every entry names the regime it was taken in, and that nothing in it drifted from §181 by
+    more than 5 %, which is the band a Python solver on twenty-two concurrent workers moves in.
+    """
+    path = Path(bench) / "looplab" / "benchmarks" / "algotune" / "arm_a_retimed.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, (f"arm A's re-timed constants are not a file on this box "
+                       f"({type(exc).__name__}) -- they are quoted from docs/56 and nothing can "
+                       "check them")
+    tasks = data.get("tasks") or {}
+    if not tasks:
+        return False, "arm_a_retimed.json holds no tasks"
+    said, bad = [], []
+    for task, row in sorted(tasks.items()):
+        got, was = row.get("speedup"), row.get("s181_said")
+        regime = row.get("regime")
+        if not regime:
+            bad.append(f"{task} does not name the regime it was taken in")
+        if not isinstance(got, (int, float)):
+            bad.append(f"{task} has no number")
+            continue
+        drift = (100 * (got - was) / was) if isinstance(was, (int, float)) and was else 0.0
+        if abs(drift) > 5.0:
+            bad.append(f"{task} moved {drift:+.1f} % from §181's {was}")
+        said.append(f"{task} {got:.4f} ({regime}, {drift:+.1f} % vs §181)")
+    detail = "; ".join(said) + ("; PROBLEM: " + "; ".join(bad) if bad else "")
+    return not bad, detail
+
+
 def check_waste_before_the_first_node(bench: str):
     """§72: "трата ПОСЛЕ последнего узла" читается только рядом с тратой ДО первого -- и проверялась
     половина пары.
@@ -1120,6 +1171,8 @@ CLAIMS = [
      check_waste_after_the_last_node),
     ("point 9: every node was graded on TRAIN, never on the graded half",
      check_every_node_was_graded_on_train),
+    ("point 10: arm A's re-timed constants are a file, not a sentence",
+     check_arm_a_constants_are_a_file),
     ("point 9: the other half of the pair -- spend BEFORE the first node",
      check_waste_before_the_first_node),
     ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),
