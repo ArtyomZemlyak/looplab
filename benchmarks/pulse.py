@@ -119,6 +119,35 @@ def wchan(pid) -> str:
 PAUSED_WINDOW_S = 86_400.0     # a pause older than a day is history, not news
 
 
+def readers_of_the_tree(bench: str, table=None) -> list:
+    """Live processes running FROM this checkout -- the ones a `git merge` would edit underneath.
+
+    §336. `run_probe.sh`'s own header records what this costs in bash: the file was edited while
+    four probes ran through it, and `remEEctl1` died on `line 291: -c: command not found`, because
+    bash reads a script by OFFSET as it executes. Python is not immune, only quieter: a run imports
+    most of `looplab` at startup, but every lazy import after that reads whatever is on disk now, so
+    a merge mid-run mixes two revisions inside one measurement and the events file says nothing.
+
+    The rule was written for bash and nowhere for the tree. This is it, as a function: before
+    editing the checkout, ask who is reading it.
+
+    Matched on the interpreter's argv, not on the cwd: a probe is launched with `taskset … python -m
+    looplab.cli`, its cwd is the bench root rather than the checkout, and the module path is what
+    binds it to these files.
+    """
+    table = process_table() if table is None else table
+    out = []
+    for row in table:
+        cmd = row.get("cmdline") or ""
+        if "looplab.cli" not in cmd and f"{bench}/looplab" not in cmd:
+            continue
+        if "pulse.py" in cmd or "pytest" in cmd:
+            continue                    # the sweep's own tools are not the measurement
+        if any(k in cmd for k in ("run", "resume")):
+            out.append(str(row.get("pid")))
+    return sorted(set(out))
+
+
 def call_in_flight(pid, port: int = 8801, root: str = "/proc") -> bool:
     """Is a request open RIGHT NOW from this process to the meter?
 
@@ -361,7 +390,20 @@ def main(argv=None) -> int:
     # should not need the money tool to notice a missing probe. Name the batch and it will say, for
     # each absentee, whether it ENDED or VANISHED.
     ap.add_argument("--expect", nargs="*", default=[])
+    # EXIT CODE, not prose: this is meant to stand in front of `git merge` in a shell line.
+    ap.add_argument("--refuse-edits", action="store_true",
+                    help="exit 3 if any run is reading this checkout (do not edit the tree)")
     args = ap.parse_args(argv)
+    if args.refuse_edits:
+        readers = readers_of_the_tree(args.bench)
+        if readers:
+            print(f"REFUSING: {len(readers)} run(s) are executing from this checkout "
+                  f"(pid {', '.join(readers)}). A merge would swap files under a live measurement; "
+                  "wait for them or use a separate worktree.")
+            return 3
+        print("no run is reading this checkout -- safe to edit")
+        return 0
+
     root = args.root or f"{args.bench}/model-probes"
     now = args.now if args.now is not None else time.time()
 
