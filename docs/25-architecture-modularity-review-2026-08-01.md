@@ -565,9 +565,9 @@ lines, a rebinding preamble, and an AST-located `self` → `engine` rename.
 `_require_pinned_speculation_receipt` stays in orchestrator.py: it is read by the run spine at three
 re-entry boundaries and by `cli/run_cmds.py`, so it is engine surface, not envelope.
 
-#### ES-02 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### ES-02 · HIGH · duplication · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[node-commit-epilogue-triplicated]** the parent-refetch guard, `_emit_node_created` and the landed-check are still hand-coded in all three creation paths; the shared commit helper does not exist. proof:absent:_commit_built_node@looplab/engine/orchestrator.py
+> *Closed 2026-09-08: the marker `node-commit-epilogue-triplicated` stood here. The remaining three stages landed as `orchestrator.py::Engine._commit_built_node` — see the second resolution note below. Deleted per the index rule.*
 
 **Three node-creation paths triplicate a ~70-line commit epilogue that has already forced the same fix to be applied three times**
 
@@ -579,15 +579,48 @@ emits with no shared name, so a path could quietly keep two and lose the third, 
 left behind is then attributed to the NEXT created node — which is exactly what
 `_emit_role_telemetry` exists to prevent.
 
-*Still open:* the parent-refetch guard, `_emit_node_created` and the landed-check. Those carry the
-real per-path divergence (`materialize_abort`'s first-terminal branch, generation payloads,
-`developer_called`) and the review's own §6 requires the extraction to read as parameterized
-unification with the two fold-monkeypatch test files re-verified — a change that wants its own
-pass rather than being appended to this one.
-
-`tests/test_developer_crash_transaction.py` guards the resolved half: every creation path consumes
+`tests/test_developer_crash_transaction.py` guards that half: every creation path consumes
 through the shared helper and none re-spells an individual emit, and the consume/discard pairing is
 pinned. Verified to have teeth by making the inject path keep two emits and drop the third.
+
+*Resolution (2026-09-08) — the other three stages, as parameterized unification.*
+
+`Engine._commit_built_node(...)` is the parent-refetch guard, the `node_created` emit and the
+landed-check, once. The three paths now say only how they obtained the idea/code and what happens
+AFTER the node lands (`materialize_abort`'s first-terminal branch, the two Developer sentinels, the
+telemetry consume) — the parts the finding itself records as genuinely per-path.
+
+**Every keyword is a measured divergence, not a knob**, which is the bar §6 sets: the two refusal
+sentences (durable operator-facing text), `check_node_lifecycle` (a rerun re-enters an EXISTING
+lifecycle and must fence its own node on the SAME fold as the parents), `strict_landing` (a rerun
+must see THIS generation land carrying THIS build's code; a first landing only has to exist),
+`stamp_generation` (only the rerun writes a `generation` key — the other two OMIT it, which is the
+historical payload shape `_emit_node_created`'s docstring pins), `drop_card`, and
+`append_failure_error` (only the operator's inject recovers from an append that RAISES; the two
+agent paths deliberately let it reach `_create_node_guarded` or the test suite). `**emit_extra`
+carries the per-path payload keys and cannot smuggle a typo in: the emitter's signature is explicit,
+so an unknown key is a `TypeError` before any append.
+
+The parent fence itself is now the statable `orchestrator.py::parent_generations_current` — it had
+been spelled twice as an affirmative `all(...)` and once as a NEGATED `any(...)`, i.e. three copies
+of one rule that could drift with every test green.
+
+**The `fold` seam decided the home.** The helper folds twice and stays in orchestrator.py rather
+than moving beside `_emit_node_created` in `node_build.py`, for the reason ES-01's Card-ledger note
+measured: `monkeypatch.setattr(orch, "fold", …)` is written to intercept these three creation paths,
+and a `from looplab.events.replay import fold` in another module would silently narrow every one of
+those interceptions. A guard pins that the helper contains no import and folds through the module
+attribute.
+
+`tests/test_node_commit_epilogue.py` (20) DRIVES the helper over a real engine and a real log: the
+parent truth table (missing / reset / tombstoned / aborted / one-of-two stale), a stale parent
+writing its terminal and NO node, the `generation` key present only when stamped, the typo'd emit
+key raising instead of landing in a payload, `strict_landing` refusing a landing on another
+lifecycle AND one carrying another build's code while the lax check accepts both, and the
+append-failure recovery being opt-in. Plus the single-sourcing itself: each of the three paths calls
+`_commit_built_node` and none of them still spells `_emit_node_created`. Teeth-tested against three
+breaks — ignoring `strict_landing`, dropping the tombstone clause from the parent fence, and
+re-inlining an emit into `_rerun_node` — each reddening the test written for it.
 
 *Locations:* `looplab/engine/orchestrator.py:5173-5260`, `looplab/engine/orchestrator.py:5418-5463`, `looplab/engine/orchestrator.py:5604-5675`
 
@@ -941,9 +974,9 @@ reverse direction too — a module that DROPS the import has stopped participati
 
 #### ES-12 · LOW · other · effort: medium — **DEFERRED (2026-08-08)**
 
-> **DECLINED[shared-fold-memo-races-the-build-worker]** a shared `fold_cached` on the EventStore/Engine is refused permanently, not postponed: folded state crosses a thread boundary and is mutated outside `replay.py`. measured: 3 facts verified on the code (`_BuildReservation.state` at orchestrator.py:237, `ToolProvider.bind_state`, `evaluate.py`'s `node.rerun_stage = None`) and 3 tests that model a pin change with no append — docs/25-architecture-modularity-review-2026-08-01.md
+> **DECLINED[shared-fold-memo-races-the-build-worker]** a shared `fold_cached` on the EventStore/Engine is refused permanently, not postponed: folded state crosses a thread boundary and is mutated outside `replay.py`. measured: 3 facts verified on the code (`_BuildReservation.state` at orchestrator.py:237, `ToolProvider.bind_state`, `evaluate.py`'s `node.rerun_stage = None`) — docs/25-architecture-modularity-review-2026-08-01.md
 >
-> **OPEN[loop-local-tail-gated-refold]** the narrow variant the serial resource-wait's own comment asks for — a loop-local re-fold gated on the tail seq having moved — is still not shipped, in that loop or in `engine/confirm_phase.py`'s sibling. proof:absent:_fold_if_tail_moved@looplab/engine/orchestrator.py
+> *Closed 2026-09-08: the marker `loop-local-tail-gated-refold` stood here. The narrow variant shipped as `orchestrator.py::Engine._fold_if_tail_moved` in both wait loops — see the second resolution note below. Deleted per the index rule; the `DECLINED` above is unchanged and still refuses the shared memo.*
 
 **Redundant full-log folds within a single stable decision iteration**
 
@@ -985,6 +1018,37 @@ for a LOW finding.
 If revisited: loop-local tail gate only, never a shared memo; re-point those three tests to append the
 re-pin event (the production invariant); and cover the sibling wait loop in `engine/confirm_phase.py`
 in the same change.
+
+*Resolution (2026-09-08) — revisited on exactly those terms.*
+
+`Engine._fold_if_tail_moved(cached) -> (tail_seq, RunState)` re-folds only when the log's tail
+moved, and both resource waits carry their own `waited_fold` — the serial dispatch wait and
+`confirm_phase.py`'s sibling. Nothing else uses it: it is a loop's private snapshot, not a memo on
+the store, so the three facts that refuse `fold_cached` (a `RunState` crossing into a build worker,
+`bind_state`, `evaluate.py`'s `node.rerun_stage = None`) are untouched — the state cached here is
+handed to nobody who keeps it, and `_evaluate` takes a node id and folds for itself.
+
+**Why the tail is a sound key for THIS loop.** The wait's stated reason for re-folding is a
+GPU->CPU Card re-pin, which does not bump the pool epoch — but it does APPEND
+(`EV_CARD_RESOURCE_PINNED`), and so does every other thing these loops react to: pause/stop,
+abort/reset/tombstone, and the terminal `_skip_if_aborted` writes itself. Seqs are strictly
+monotonic, so an equal tail means the fold is the same value. `EventStore.read_all` is already
+incrementally cached, so a quiet tick now costs a stat.
+
+**The three tests were re-pointed as the note asked, and the prediction was right about which ones.**
+They broke for a second reason too, which the 2026-08-05 pass could not have seen: the three
+`_dispatch_evals` hosts are stubs whose `store.read_all()` answered `[]` forever, so the tail could
+not move even in principle. They now keep a `_StubLog` of `(seq, type, data)` rows, take the
+Engine's own gate rather than re-implementing one, and every operator intervention in them APPENDS
+beside the projection mutation it used to make alone — which is what production does and is the
+whole premise of the gate.
+
+Two tests DRIVE the gate in `tests/test_gpu_resources.py`: one counts folds across six ticks of a
+real serial wait (four: the loop top, entering the wait, the tail moving under the re-pin, and
+admission) and asserts the re-pin was still seen — the last request asks for no GPU; the other runs
+the gate over a REAL store and asserts the same tuple comes back untouched while the log is quiet
+and a fresh one the moment it grows. Teeth-tested by deleting the gate's `cached[0] == tail` branch:
+both go red.
 
 #### ES-13 · LOW · excessive-logic · effort: medium — **RESOLVED (2026-08-08)**
 
