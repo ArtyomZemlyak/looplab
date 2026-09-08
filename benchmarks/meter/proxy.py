@@ -125,6 +125,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -297,6 +298,31 @@ def _request_sha(body: bytes) -> str:
     carries the prompt.
     """
     return hashlib.sha256(body or b"").hexdigest()[:16] if body else ""
+
+
+def _upstream_host(upstream: str) -> str:
+    """`host:port` of the endpoint a row was metered AGAINST, and never its credentials.
+
+    WHY IT IS ON EVERY ROW. `start_meter.sh` defaults every instance to one `meter.jsonl`, and this
+    box runs TWO meters -- the corporate gateway on 8801 and `openrouter.ai` on 8802, which is the
+    second instance `main()` had to stop force-disabling the egress proxy for. A meter started
+    without `METER_LOG` therefore interleaves its calls into the other one's ledger with nothing on
+    either row saying which endpoint served them, while the two are priced from different tables and
+    against different limits. Summing such a log per `(arm, task, attempt)` -- what this module's
+    own docstring tells a reader to do -- then adds two instruments together.
+
+    The PORT is kept because it is what tells two instances on one host apart. The userinfo is
+    dropped because a credential in a URL is still a credential in a file this proxy appends to on
+    every single call, and this row is written whether or not the call succeeded.
+    """
+    try:
+        parts = urllib.parse.urlsplit(upstream or "")
+        host, port = parts.hostname or "", parts.port
+    except ValueError:                  # a malformed netloc is not worth failing a metered call for
+        return ""
+    if not host:
+        return ""
+    return f"{host}:{port}" if port else host
 
 
 def _prompt_chars(body: bytes) -> int:
@@ -906,6 +932,9 @@ class Handler(BaseHTTPRequestHandler):
             "model": model, "status": status, "latency_ms": latency_ms, "stream": streaming,
             "attempts": attempts, "queued_s": round(queued_s, 2),
             "req_sha": _request_sha(req.data or b""),
+            # Which endpoint priced it: see `_upstream_host`. On BOTH routes, because two meters
+            # sharing one log interleave non-streamed calls exactly as readily as streamed ones.
+            "upstream_host": _upstream_host(self.server.upstream),
         }
 
         out = raw
@@ -1051,7 +1080,11 @@ class Handler(BaseHTTPRequestHandler):
         liveness signal in the run a property of this file.
         """
         row = {"ts": time.time(), "arm": arm, "task": task, "attempt": attempt, "path": tail,
-               "model": model, "stream": True, "req_sha": _request_sha(req.data or b"")}
+               "model": model, "stream": True, "req_sha": _request_sha(req.data or b""),
+               # In the literal, not appended at the end: the early returns above (an upstream
+               # HTTP error, a queue refusal) write this row too, and a row that names its
+               # endpoint only when the call got far enough is not an identity.
+               "upstream_host": _upstream_host(self.server.upstream)}
         # Counted from the request the proxy is HOLDING, before anything upstream can go wrong with
         # it. This is the only prompt-side evidence that survives a cut, so it is taken up front
         # rather than looked for later among objects the abort path may not have.
@@ -1127,6 +1160,10 @@ class Handler(BaseHTTPRequestHandler):
         # synthesis below overwrites `basis` and the reassembled body has to be able to tell "the
         # provider closed the books on this call" from "we closed them for it".
         usage_frame_seen = False
+        # What `pricing.rate` answered, whenever it was consulted -- the pinned model row or the
+        # `default` one, which says so in the string. Empty until something asks the table, so a
+        # row can never imply a rate was looked up for a call nobody priced.
+        rate_basis = ""
         # Content deltas SEEN, counted as they pass. They are the only evidence left when a stream
         # ends without its usage frame, and measured 2026-08-22 that is not a corner case: this
         # gateway CUTS a generation at ~1800 s (eight streams ended at 1817-1824 s, status 200, no
@@ -1173,20 +1210,21 @@ class Handler(BaseHTTPRequestHandler):
         # reached `[DONE]` ended, whatever else it did or did not carry.
         done_seen = False
         swallow_blank = False
-        # OPEN[meter-swallows-the-done-sentinel] the held-back `[DONE]` is re-emitted on exactly one
-        # of the three exit paths, so every COMPLETE stream loses its terminator.
-        # proof:`absent:if done_seen@benchmarks/meter/proxy.py`
-        # REVIEW 2026-08-30 (protocol): the swallow below says "re-emitted at the very end, after
-        # the estimate", and that is true only of the `elif not basis and deltas:` estimate branch
-        # (whose `wire` carries the sentinel). On the dominant path — usage frame seen, stream ended
-        # tidily (8,830 of 9,235 recorded rows) — and on the empty-stream path, the sentinel is
-        # consumed and the chunked body just ends. Driven live: 2 content frames -> finish -> usage
-        # -> `[DONE]` reaches the client with no `[DONE]`. Both current arms end on body EOF, so
-        # nothing breaks TODAY; but the module header promises "unchanged except usage.cost", and by
-        # this file's own reading (a stream that never reached its terminator was CUT) any strict
-        # SSE observer downstream must classify every clean answer as cut. The one fixture that
-        # sends `[DONE]` (`_frame_done` in tests/test_meter_delta_ceiling_is_not_retryable.py)
-        # never asserts the client saw it, which is how this shipped. Re-emit on the other exits.
+        # ...AND IT IS PUT BACK ON EVERY EXIT, which until 2026-09-08 it was not. The sentinel was
+        # re-emitted by exactly one of the three exits -- the `elif not basis and deltas:` estimate
+        # branch, whose `wire` ends on it. On the DOMINANT path (usage frame seen, stream ended
+        # tidily: 8,830 of 9,235 recorded rows) and on the empty-stream path it was consumed and
+        # the chunked body simply ended. Driven: 2 content frames -> finish -> usage -> `[DONE]`
+        # reached the client with no `[DONE]`. Both current arms end on body EOF, so nothing broke
+        # TODAY; but the module header promises "unchanged except usage.cost", and by this file's
+        # own reading -- a stream that never reached its terminator was CUT -- any strict SSE
+        # observer downstream had to classify every clean answer as cut. Swallowing a byte the
+        # upstream sent is a change to the response, and this file does not make those.
+        #
+        # `sentinel_sent` is what keeps the two doors from sending it TWICE: the estimate's ending
+        # already carries the sentinel (`abort_is_not_retryable` owns all three of its parts), so
+        # the re-emit below has to know whether that door was the one taken.
+        sentinel_sent = False
         try:
             for line in _upstream_lines(resp, died):
                 out = line
@@ -1208,6 +1246,23 @@ class Handler(BaseHTTPRequestHandler):
                     if isinstance(frame, dict) and collect_for_client:
                         collected.append(frame)
                     if isinstance(frame, dict):
+                        # WHO SAID IT. `_proxy` records the completion's `id` and the model the
+                        # GATEWAY reported, for the correlate-with-the-provider's-own-record need
+                        # `abort_is_not_retryable` states -- and the streamed rows, which include
+                        # every cut and therefore the rows that most need correlating, carried
+                        # neither, though every frame the gateway sends carries both.
+                        #
+                        # FIRST NON-EMPTY WINS, on both. The minted ending's `id` is
+                        # "meter-estimate" and its `model` is whatever the REQUEST asked for, and
+                        # neither may replace what the gateway said; taking the first also means a
+                        # frame arriving after a cut cannot renumber a row that is already about a
+                        # particular call. (The minted frames do not pass through here at all --
+                        # this is the forwarding path -- but the rule is the reader's, not the
+                        # writer's.)
+                        if frame.get("id") and not row.get("id"):
+                            row["id"] = str(frame["id"])
+                        if frame.get("model") and not row.get("model_reported"):
+                            row["model_reported"] = str(frame["model"])
                         for ch in (frame.get("choices") or []):
                             d = ch.get("delta") or {}
                             # `reasoning` too: `_reassemble` above reads BOTH spellings
@@ -1227,6 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
                         pout = int(usage.get("completion_tokens") or 0)
                         rate_in, rate_out, basis = self.server.pricing.rate(
                             model or frame.get("model", ""))
+                        rate_basis = basis      # before `upstream`/`upstream-header` overwrite it
                         reported_cost, body_cost = usage.get("cost"), _body_cost(usage)
                         if body_cost is not None:
                             # A ZERO is not an invoice here either: `_body_cost` refuses it as
@@ -1310,6 +1366,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the old comment described, so the number is not corrected here: the open item
                 # in this module's docstring holds the measurement and says why it is deferred.
                 rate_in, rate_out, est_basis = self.server.pricing.rate(model or "")
+                rate_basis = est_basis
                 # THE PROMPT SIDE IS NOT ZERO AND MUST NOT SAY IT IS. `prompt_tokens: 0` used to
                 # stand here. It is not the honest floor the completion side is -- it is a false
                 # measurement, and on this campaign it is the false one that matters: arm A's prompt
@@ -1332,6 +1389,11 @@ class Handler(BaseHTTPRequestHandler):
                     "meter_prompt_tokens_basis": prompt_basis,
                     "meter_prompt_chars": prompt_chars,
                     "meter_completion_tokens_basis": "counted_from_forwarded_deltas",
+                    # ...AND SO DOES THE RATE THEY WERE MULTIPLIED BY: `estimated_from_deltas` says
+                    # where the token counts came from and nothing said which table row priced
+                    # them, so a `default` fallback rate reached the client's accountant looking
+                    # exactly like the model's own pinned one.
+                    "meter_rate_basis": est_basis,
                     "meter_note": "upstream ended the stream without a usage frame; "
                                   "completion_tokens is a FLOOR counted from forwarded deltas and "
                                   f"prompt_tokens is {prompt_basis}",
@@ -1397,6 +1459,22 @@ class Handler(BaseHTTPRequestHandler):
                         emit(b"\n" if wire_tail.endswith(b"\n") else b"\n\n")
                     for payload in wire:
                         emit(payload)
+                    sentinel_sent = True        # `wire`'s third part IS the sentinel
+            if done_seen and not sentinel_sent:
+                # THE HELD SENTINEL GOES BACK ON THE WIRE. It is the upstream's own byte and the
+                # client's end-of-stream; holding it back is a metering convenience (an estimate
+                # emitted after `[DONE]` reaches a conformant client not at all), and a convenience
+                # may not eat a frame. `emit` is a no-op while collecting for the adapted client,
+                # which reads its ending off `collected` and never sees SSE at all.
+                #
+                # The open event is closed FIRST, by the same `wire_tail` rule the minted frames
+                # use: a stream that stopped between a `data:` line and its blank-line terminator
+                # would otherwise have the sentinel glued into it as a second `data:` line, and a
+                # conformant parser reads that as one event with the payload `{...}[DONE]`.
+                if wire_tail and not wire_tail.endswith(b"\n\n"):
+                    emit(b"\n" if wire_tail.endswith(b"\n") else b"\n\n")
+                emit(b"data: [DONE]\n\n")
+                sentinel_sent = True
             emit(b"")           # terminating zero-length chunk
             if collect_for_client:
                 # ONE body, built from the frames, with the usage frame this proxy already priced
@@ -1409,6 +1487,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except Exception as exc:  # noqa: BLE001 - a broken client must not take the server down
             row["error"] = f"{type(exc).__name__}: {exc}"
+            # AND THE CONNECTION GOES WITH IT. `emit(b"")` -- the terminating zero-length chunk --
+            # lives inside the `try` above, so this path used to return with the chunked body
+            # UNFINISHED on a connection `protocol_version = "HTTP/1.1"` keeps alive by default.
+            # httpx/litellm pool every connection to this proxy (this file says so where it explains
+            # its own `ConnectionReset` noise), so after an upstream death the arm sat on a
+            # half-finished body until its OWN stall timeout -- minutes of dead wall clock per
+            # failure, times the retry that follows it. urllib probes hid the whole thing: they send
+            # `Connection: close`, so the socket the test watched was going to close anyway.
+            #
+            # Closing turns that wait into an immediate EOF, which is what a cut chunked body IS,
+            # and everything already forwarded stays the client's to salvage. Deliberately NOT an
+            # `emit(b"")`: a terminator written after a chunk that may itself be half-written would
+            # frame a corrupt body as a clean end, which is the one outcome worse than a cut one.
+            self.close_connection = True
         finally:
             resp.close()
 
@@ -1438,36 +1530,22 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001 - the socket may already be gone; the row still lands
                 pass
 
-        # OPEN[meter-midstream-death-holds-the-keepalive-socket] a mid-stream failure returns with
-        # no terminating chunk and the connection left open, so pooled clients hang until their own
-        # read timeout.
-        # proof:absent:close_connection@benchmarks/meter/proxy.py
-        # REVIEW 2026-08-30 (robustness): the `emit(b"")` terminator lives inside the `try`; the
-        # exception path records the row and returns with the chunked body unfinished on a
-        # keep-alive connection. httpx/litellm pool every connection here (this file says so), so
-        # after an upstream death the arm sits on a half-finished body for its own stall timeout —
-        # minutes of dead wall clock per failure, times the retry that follows. urllib probes hide
-        # it (they send Connection: close). One line in the except path turns that into an
-        # immediate, salvageable EOF.
         latency_ms = round((time.time() - t0) * 1000, 1)
-        # OPEN[meter-stream-rows-are-anonymous] streaming rows carry neither the response `id` nor
-        # `model` the non-stream rows record, the estimate discards its own pricing-fallback basis,
-        # and nothing names the upstream when two meter instances share one default log path.
-        # proof:absent:upstream_host@benchmarks/meter/proxy.py
-        # REVIEW 2026-08-30 (auditability): `_proxy` records `model_reported` and `id` for exactly
-        # the correlate-with-the-gateway need `abort_is_not_retryable`'s comment states, and the cut
-        # streams — the rows that most need correlating — get neither, though every frame carries
-        # both. `est_basis` from `pricing.rate` is dropped, so an estimate priced off the `default`
-        # table is indistinguishable from one priced at the pinned model rate, precisely for the
-        # unknown-model rows where a wrong rate is likeliest. And `start_meter.sh` defaults every
-        # instance to one `meter.jsonl` with no per-row upstream identity, so a second instance
-        # started without METER_LOG interleaves unattributable spend. Three one-line row additions.
         row.update({"status": resp.status, "latency_ms": latency_ms, "prompt_tokens": pin,
                     "completion_tokens": pout, "cost": cost, "cost_basis": basis,
                     "metered": bool(basis)})
         row["deltas_seen"] = deltas
         if prompt_basis:
             row["prompt_tokens_basis"] = prompt_basis
+        # WHICH ROW OF THE PRICE TABLE PAID FOR THIS, kept apart from `cost_basis`. On this route
+        # `cost_basis` is the WAY the call was priced (`estimated_from_deltas`, `upstream`), so the
+        # answer `pricing.rate` gave -- the pinned model rate, or `default` with the fallback said
+        # out loud -- was dropped, and an estimate priced off a table nobody checked read exactly
+        # like one priced at the model's own rate. `_proxy` never lost it: on the non-streaming
+        # route the two are the same string. Precisely the unknown-model rows, where a wrong rate is
+        # likeliest, are the ones that needed it.
+        if rate_basis:
+            row["rate_basis"] = rate_basis
         if upstream_cost_refused is not None:
             row["upstream_cost_refused"] = upstream_cost_refused
         if basis == "estimated_from_deltas":
