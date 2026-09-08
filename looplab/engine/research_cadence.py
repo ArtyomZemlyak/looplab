@@ -57,6 +57,15 @@ _LOG = logging.getLogger(__name__)
 DEEP_RESEARCH_OPEN_BELIEF_CAP = BOARD_PROMPT_CARDS
 
 
+# WHAT THE RUN-OPENING THINK CALLS ITSELF on the two rows it writes (`research_attempted` /
+# `research_completed`). A constant because it is now READ from outside this module — the run-opening
+# split `looplab timings` prints (`cli/run_report.py::run_opening_split`) finds that think in the
+# durable log by this exact trigger, and a literal copied into the reader would drift the first time
+# the trigger was renamed, reporting "this run never thought" about a run that did. `_ground_run_start`
+# is the ONE site that decides it (CLAUDE.md: a recorded fact is pinned to the site that decides it).
+RUN_START_TRIGGER = "run_start"
+
+
 def normalized_belief_key(statement) -> str:
     """The append-site duplicate key: case-folded, whitespace-collapsed statement text.
 
@@ -786,7 +795,7 @@ class ResearchCadenceMixin:
             return state
         if deep_research_window(self.deep_research_every) <= 0:
             return state
-        return self._run_deep_research(state, trigger="run_start", manual=False)
+        return self._run_deep_research(state, trigger=RUN_START_TRIGGER, manual=False)
 
     @classmethod
     def _cadence_research_marks(cls, state: RunState) -> set[int]:

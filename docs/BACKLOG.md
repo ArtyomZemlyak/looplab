@@ -4588,7 +4588,7 @@ What makes it expensive is WHEN it happens: at `n == 0` no node exists, so every
 idle for the whole phase — this is not one long turn among many, it is dead time at the front of
 every run. v3 spent **2 hours 18 minutes** there and then died with three nodes and no metric.
 
-OPEN[first-propose-runs-with-every-gpu-idle] the opening propose is the longest phase of most runs and the only one that cannot overlap an evaluation. proof:`present:def _ground_run_start@looplab/engine/research_cadence.py`
+OPEN[first-propose-runs-with-every-gpu-idle] the run-opening think and the first propose still run serially with every GPU idle; `looplab timings` now PRICES that split per run, and no GPU-shaped bench run has produced one yet. proof:`present:def _ground_run_start@looplab/engine/research_cadence.py`
 
   NOT a cadence fix and not a prompt fix. The lever is overlap: `_ground_run_start` and the first
   propose both run before any node exists, serially, on the loop thread. Measure the split between
@@ -4610,6 +4610,43 @@ OPEN[first-propose-runs-with-every-gpu-idle] the opening propose is the longest 
   should have resumed one) and broke thirteen tests across four files. A change whose entire value
   is a wall-clock saving nobody here can measure, made against the one block in the engine
   documented as unsafe to append from, is not one to land blind.
+
+  **2026-09-08 (second pass) — the MEASUREMENT shipped, and (b) is refused on a sharper ground than
+  the prologue.** `looplab timings` now ends with a `run opening` block
+  (`cli/run_report.py::run_opening_split`): the run's first event to its first `node_eval_started` —
+  the window in which, by construction, no evaluation of this run is running — split at the
+  boundaries the engine already writes, `setup_started -> setup_finished`, `research_attempted ->
+  research_completed (trigger=run_start)`, the first `propose` span, `-> node_created`, `->
+  node_eval_started`, with a SIGNED residual and both of this item's headline numbers stated
+  outright: *run start -> the run-opening think complete* and *run start -> the first propose
+  complete*. Every boundary but the propose comes from the durable log for the reason
+  `events/eval_occupancy.py` records (a span sidecar can be cleared, torn or switched off, and a
+  question about the RUN must still have an answer); the propose is the one phase with no durable
+  pair of its own, because the node id is reserved only once the Idea is final
+  (`orchestrator.py::_prepare_node_idea`), so it is read from the same `propose` span population the
+  table above was built from and its ABSENCE is printed as a note rather than as a zero. The
+  trigger is one constant (`research_cadence.py::RUN_START_TRIGGER`) read by both the writer and the
+  reader, so a rename cannot leave the instrument reporting "this run never thought" about a run
+  that thought for two hours. So the precondition is no longer a corpus that has to have survived:
+  the next GPU-shaped run answers this item by finishing.
+
+  **And (b) is now refused on its INPUTS, not on its appends.** The offload lane
+  (`orchestrator.py::_offload_cadence`, 2026-09-08) does defuse the invariant-1 half of the old
+  objection — a paid cadence already runs off the loop thread under a buffering sink whose folded
+  rows the main task publishes — but it does not touch what makes the overlap wrong. The
+  run-opening think's own tools ARE setup's outputs: `agents/providers.py::_shared_providers` hands
+  it `tools/run_tools.py::DataTools`, whose `data_profile` answers from `state.data_profile` — the
+  `data_profiled` row `_setup_phase` appends — and whose `inventory()` under `hide_empty_tools`
+  WITHHOLDS all three data tools when that count reads 0. Overlapping the two therefore buys
+  `min(setup, think)` minutes by making the one think whose entire purpose is grounding the first
+  proposal run against an unprofiled, possibly unmounted dataset — the same trade (a) is refused
+  for, one phase earlier. Two costs ride with it: setup ends in a leakage HARD STOP that can refuse
+  the run (`_leakage_blocks`), so the overlap spends a Deep-Research pass on runs preflight would
+  have killed for free; and `research_attempted` is durable BEFORE the provider call precisely so a
+  kill in that window is not re-paid, while a buffered receipt has no main-task publish point until
+  setup finishes — v3 died in exactly this window after 2 h 18 min. A `Settings` field would not
+  make that safe, it would only make it optional, so none was added. What remains is the number:
+  run one GPU-shaped task and read the block.
 
 ### 2. Trust scans — the question is not "why not every node", it is "why only one run"
 
