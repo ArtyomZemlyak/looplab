@@ -139,6 +139,8 @@ _LAYOUT = {
     "comparison": "core",
     "concepts": "core",       # canonical concept identity + materialization integrity contracts
     "concept_frame": "serve",   # bounded versioned concept frames served to the UI
+    "concept_lens_service": "serve",   # the paid concept-lens subsystem `routers/runs.py`
+                                       # shed (doc 25 SR-04)
     "config": "core",
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
@@ -341,6 +343,9 @@ _LAYOUT = {
     "scorer_fidelity": "search",
     "schemas": "serve",
     "scope_actions": "serve",   # the paid ACTION protocol above that store (doc 25 SR-02)
+    "scope_generate": "serve",   # the paid GENERATION protocol, the scope projections
+                                 # and the source-probe cache `routers/reports.py`
+                                 # shed (doc 25 SR-02)
     "scope_report": "serve",
     "scope_report_store": "serve",   # the durable store `routers/reports.py` shed (doc 25 SR-12)
     "scope_sources": "serve",
