@@ -119,6 +119,48 @@ def wchan(pid) -> str:
 PAUSED_WINDOW_S = 86_400.0     # a pause older than a day is history, not news
 
 
+def call_in_flight(pid, port: int = 8801, root: str = "/proc") -> bool:
+    """Is a request open RIGHT NOW from this process to the meter?
+
+    §335. `remDL13` sat for seven and a half minutes with its log and its last completed call the
+    same age, no evaluation workers on its lane and nothing in state R -- which reads exactly like a
+    wedge and was a long streamed generation. The ledger records a call when it FINISHES, so
+    `call age` cannot see one in progress; an established socket can.
+
+    Read from `/proc/<pid>/fd` (socket inodes) against `/proc/net/tcp` (state 01 = ESTABLISHED), so
+    it costs two directory reads and no network. `ss` is not used on purpose: the sweep list records
+    that it lies about this box.
+    """
+    try:
+        fds = os.listdir(f"{root}/{pid}/fd")
+    except OSError:
+        return False
+    inodes = set()
+    for fd in fds:
+        try:
+            target = os.readlink(f"{root}/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith("socket:["):
+            inodes.add(target[8:-1])
+    if not inodes:
+        return False
+    try:
+        lines = open(f"{root}/net/tcp", encoding="utf-8").read().splitlines()[1:]
+    except OSError:
+        return False
+    for line in lines:
+        f = line.split()
+        if len(f) < 10 or f[9] not in inodes or f[3] != "01":
+            continue
+        try:
+            if int(f[2].split(":")[1], 16) == port:
+                return True
+        except (ValueError, IndexError):
+            continue
+    return False
+
+
 def paused_probes(bench: str, now: float | None = None) -> list:
     """Probes that are PAUSED AND OWED WORK -- not running, not finished, and not out of money.
 
@@ -391,6 +433,12 @@ def main(argv=None) -> int:
             else:
                 print(f'      last call came back {called[1]}, not 200 -- check the endpoint before '
                       "the probe")
+        # A LONG GENERATION IS NOT SILENCE. The ledger records a call when it finishes, so a probe
+        # waiting on one looks identical to a probe waiting on nothing -- §335 measured 7.5 minutes
+        # of it, with no worker on the lane and nothing in state R.
+        if call_age is not None and call_age > 240 and call_in_flight(row["pid"]):
+            print(f'      a call has been OPEN to the meter for at least {call_age:.0f}s -- a long '
+                  "generation in flight, not silence (the ledger records a call when it ends)")
         if call_age is not None and age > args.stall / 4 and call_age < age / 4:
             print(f'      CALLING BUT NOT PRODUCING: last call {call_age:.0f}s ago, log last grew '
                   f'{age:.0f}s ago. Three consecutive 504s at exactly 300 s are the nginx ceiling, '
