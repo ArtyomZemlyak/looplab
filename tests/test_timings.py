@@ -25,6 +25,7 @@ from looplab.cli import app
 from looplab.core.models import Event, Idea, RunState
 from looplab.engine.finalize import finalize_run
 from looplab.events.eventstore import EventStore
+from looplab.cli.run_report import run_opening_split
 from looplab.events.replay import event_timestamp, run_wall_clock_seconds
 
 from tests.factories import make_engine
@@ -490,3 +491,201 @@ def test_the_producer_span_survives_an_engine_built_without_a_tracer(tmp_path):
 
     assert result.success is True
     assert result.code == "print('built')"
+
+
+# ------------------------------------------------- the head of the run (`first-propose-…-gpu-idle`)
+# The opening propose is systemically the longest phase of a run and the one nothing can overlap: at
+# `n == 0` no node exists, so no evaluation is running and every GPU on the box is idle for the whole
+# of it. The 2026-08-25 corpus measured that stretch only as a SUM — run-opening think plus first
+# propose — and the split it asks for cannot be reconstructed after the fact, because it lives in
+# each run's `spans.jsonl`, a sidecar `fold` never rebuilds and which none of the seven measured runs
+# still has. These drive the instrument that makes a run PRODUCE the split instead.
+
+def _opening_log(run_dir: Path, rows: list[dict], *, t0: float | None = None) -> list[dict]:
+    """A run log written from `(offset_seconds, type, data)` triples, oldest first."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    base = (time.time() - 10_000.0) if t0 is None else t0
+    out = [{"v": 1, "seq": i, "ts": base + row["at"], "type": row["type"],
+            "data": row.get("data", {})} for i, row in enumerate(rows)]
+    (run_dir / "events.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in out), encoding="utf-8")
+    return out
+
+
+_OPENING_ROWS = [
+    {"at": 0.0, "type": "setup_started", "data": {"phase": "task+data", "repo": False, "goal": "g"}},
+    {"at": 180.0, "type": "setup_finished", "data": {"seconds": 180.0, "manifest": {}}},
+    {"at": 200.0, "type": "research_attempted",
+     "data": {"at_node": 0, "attempt_id": "a1", "manual": False, "trigger": "run_start"}},
+    {"at": 700.0, "type": "research_completed",
+     "data": {"at_node": 0, "memo": {}, "served_manual": 0, "trigger": "run_start"}},
+    {"at": 720.0, "type": "node_building", "data": {"node_id": 0}},
+    {"at": 1920.0, "type": "node_created", "data": {"node_id": 0, "operator": "draft",
+                                                    "parent_ids": []}},
+    {"at": 1980.0, "type": "node_eval_started", "data": {"node_id": 0, "generation": 0}},
+    {"at": 9000.0, "type": "node_evaluated", "data": {"node_id": 0}},
+]
+
+
+def _propose_span(events: list[dict], *, at: float, seconds: float) -> dict:
+    """The `propose` operation span, placed at an offset from the log's own first row."""
+    return _span("propose", "operation", events[0]["ts"] + at, seconds, span_id="p")
+
+
+def test_the_split_the_item_asks_for_is_a_number_the_run_produces(tmp_path):
+    """Run start -> the run-opening think complete, and -> the first propose complete.
+
+    These two are the whole question: the corpus recorded their SUM (a `propose` span of 19.9 min on
+    `e5small-dr-unified-v2`, 138.0 min on v3) and nothing that could say which half was the think.
+    """
+    events = _opening_log(tmp_path / "run", _OPENING_ROWS)
+    split = run_opening_split(events, [_propose_span(events, at=720.0, seconds=1194.0)])
+
+    assert split["to_think_seconds"] == pytest.approx(700.0)
+    assert split["to_propose_seconds"] == pytest.approx(1914.0)
+    assert split["think_to_propose_seconds"] == pytest.approx(1214.0)
+    # …and the window they sit in is the one in which nothing could be evaluating.
+    assert split["opening_seconds"] == pytest.approx(1980.0)
+    assert split["propose_outside_opening"] is False
+    assert split["notes"] == []
+
+
+def test_every_phase_of_the_opening_is_charged_to_a_boundary_the_run_wrote(tmp_path):
+    """Disjoint phases plus a SIGNED residual, the same reconciliation shape the command already
+    prints — a number that is not explained must be visible, not folded into a neighbour."""
+    events = _opening_log(tmp_path / "run", _OPENING_ROWS)
+    split = run_opening_split(events, [_propose_span(events, at=720.0, seconds=1194.0)])
+
+    assert {p["name"]: round(p["seconds"], 1) for p in split["phases"]} == {
+        "setup": 180.0, "run-start think": 500.0, "first propose": 1194.0,
+        "first build": 6.0, "dispatch": 60.0}
+    named = sum(p["seconds"] for p in split["phases"])
+    assert split["unattributed_seconds"] == pytest.approx(split["opening_seconds"] - named)
+    assert split["unattributed_seconds"] == pytest.approx(40.0)     # setup_finished -> the attempt
+
+
+def test_a_run_that_never_thought_says_so_instead_of_reporting_a_zero(tmp_path):
+    """An ABSENT run-opening think is not a think that took no time. Deep research off, no
+    researcher wired and a log written before `_ground_run_start` all land here, and reporting 0.0
+    would make the item's own question ("which half of those minutes is which") answer itself
+    wrongly on every such run."""
+    rows = [r for r in _OPENING_ROWS if not r["type"].startswith("research_")]
+    events = _opening_log(tmp_path / "run", rows)
+    split = run_opening_split(events, [_propose_span(events, at=720.0, seconds=1194.0)])
+
+    assert split["to_think_seconds"] is None
+    assert split["think_to_propose_seconds"] is None
+    assert "run-opening think" in " ".join(split["notes"])
+    assert [p["name"] for p in split["phases"]] == ["setup", "first propose", "first build",
+                                                    "dispatch"]
+
+
+def test_a_cleared_trace_costs_the_propose_row_and_says_which_row_it_lost(tmp_path):
+    """`spans.jsonl` is the ONE source here that a run can be missing (it is a sidecar replay never
+    rebuilds), so the propose is the one row that can go absent — and when it does, the build row
+    falls back to the durable reservation the log does carry rather than vanishing with it."""
+    events = _opening_log(tmp_path / "run", _OPENING_ROWS)
+    split = run_opening_split(events, [])
+
+    assert split["to_propose_seconds"] is None
+    assert split["to_think_seconds"] == pytest.approx(700.0)        # the durable half still answers
+    build = next(p for p in split["phases"] if p["name"] == "first build")
+    assert build["boundary"] == "node_building -> node_created"
+    assert build["seconds"] == pytest.approx(1200.0)
+    assert "propose` span" in " ".join(split["notes"])
+
+
+def test_the_reading_is_order_tolerant_like_every_other_read_of_the_log(tmp_path):
+    """Invariant #5's house rule reaches here too: earliest by TIMESTAMP, never by position, so a
+    background row spliced into the head of the log cannot move a published number."""
+    events = _opening_log(tmp_path / "run", _OPENING_ROWS)
+    spans = [_propose_span(events, at=720.0, seconds=1194.0)]
+    forward = run_opening_split(events, spans)
+    shuffled = run_opening_split(list(reversed(events)), spans)
+
+    assert shuffled["to_think_seconds"] == forward["to_think_seconds"]
+    assert shuffled["to_propose_seconds"] == forward["to_propose_seconds"]
+    assert shuffled["opening_seconds"] == forward["opening_seconds"]
+
+
+def test_a_run_that_never_evaluated_is_measured_to_its_last_row_and_says_so(tmp_path):
+    """`e5small-dr-unified-v3` spent 2 h 18 min in this window and then died. A run with no
+    `node_eval_started` must still report its opening — as a lower bound, named as one."""
+    rows = [r for r in _OPENING_ROWS if r["type"] not in ("node_eval_started", "node_evaluated")]
+    events = _opening_log(tmp_path / "run", rows)
+    split = run_opening_split(events, [_propose_span(events, at=720.0, seconds=1194.0)])
+
+    assert split["open"] is True
+    assert split["opening_seconds"] == pytest.approx(1920.0)        # to the last row it has
+    assert "lower bound" in " ".join(split["notes"])
+
+
+def test_a_later_nodes_propose_is_never_charged_to_the_opening(tmp_path):
+    """MEASURED on a real offline run, which is why this is a window and not a `min()`: the seed
+    path that mints node 0 opens no `propose` span, so the earliest span in the file belongs to a
+    LATER node and starts after the first evaluation is already burning. Charging it here would
+    publish a number for this phase that was measured somewhere else entirely — and the absence is a
+    DIFFERENT fact from "tracing was off", which is why it gets its own note."""
+    events = _opening_log(tmp_path / "run", _OPENING_ROWS)
+    later = _propose_span(events, at=4000.0, seconds=30.0)      # well past node 0's eval start
+
+    split = run_opening_split(events, [later])
+    assert split["to_propose_seconds"] is None
+    assert split["propose_outside_opening"] is True
+    assert "none of them inside the opening window" in " ".join(split["notes"])
+    assert "tracing was off" not in " ".join(split["notes"])
+
+
+@pytest.mark.parametrize("ts", [0.0, True, "1000.0", float("nan"), None])
+def test_a_damaged_timestamp_costs_its_own_row_not_the_split(tmp_path, ts):
+    """The same rule `run_wall_clock_seconds` is held to, reached through the same one spelling:
+    a row whose `ts` is unusable is skipped, and the phases either side of it still report."""
+    events = _opening_log(tmp_path / "run", _OPENING_ROWS)
+    events.append({"v": 1, "seq": 99, "ts": ts, "type": "note", "data": {}})
+    split = run_opening_split(events, [_propose_span(events, at=720.0, seconds=1194.0)])
+
+    assert split["to_think_seconds"] == pytest.approx(700.0)
+    assert split["to_propose_seconds"] == pytest.approx(1914.0)
+
+
+def test_a_junk_span_duration_costs_that_span_not_the_report(tmp_path):
+    """`spans.jsonl` is written by a tracer that promises never to raise into the operation it
+    observes, so a non-numeric `duration_s` reaches this reader intact and must not take it down."""
+    events = _opening_log(tmp_path / "run", _OPENING_ROWS)
+    junk = _propose_span(events, at=720.0, seconds=1194.0)
+    junk["duration_s"] = "1194.0"
+
+    split = run_opening_split(events, [junk])
+    assert split["to_propose_seconds"] == pytest.approx(720.0)      # placed, but zero-length
+
+
+def test_the_command_prints_the_opening_under_the_occupancy_block(tmp_path):
+    """End to end through the real Typer command: the section exists, names both headlines, and
+    lands below the `eval occupancy` bootstrap it explains."""
+    run_dir = tmp_path / "run"
+    events = _opening_log(run_dir, _OPENING_ROWS)
+    (run_dir / "spans.jsonl").write_text(
+        json.dumps(_propose_span(events, at=720.0, seconds=1194.0)) + "\n", encoding="utf-8")
+
+    result = _timings(run_dir)
+    assert result.exit_code == 0, result.output
+    assert "run opening" in result.output
+    assert "no evaluation was running for any of it" in result.output
+    assert "run start -> the run-opening think complete: 11.7 min" in result.output
+    assert "run start -> the first propose complete:     31.9 min" in result.output
+    assert result.output.index("eval occupancy") < result.output.index("run opening")
+
+
+def test_a_spans_only_directory_keeps_its_historical_report(tmp_path):
+    """No event log means no boundary at all, and the section prints NOTHING rather than a block of
+    absences — `timings` still answers for a spans-only directory, which is why it does not require
+    `events.jsonl` in the first place."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "spans.jsonl").write_text(
+        json.dumps(_span("propose", "operation", time.time(), 60.0, span_id="p")) + "\n",
+        encoding="utf-8")
+
+    result = _timings(run_dir)
+    assert "run opening" not in result.output
+    assert run_opening_split(None, [])["available"] is False

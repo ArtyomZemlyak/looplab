@@ -67,6 +67,14 @@ def upstream():
     srv.shutdown()
 
 
+# The fixture's prices. Distinct from each other and from the `default` row, so every cost
+# assertion below fails on a swapped rate, on a fallback that should not have happened, and on the
+# $0.00 this file used to price everything at.
+_RATE_IN = 2e-6
+_RATE_OUT = 5e-5
+_WRONG_RATE = 9e-4          # the `default` row: taking it for a model in the table is visible
+
+
 def _meter(upstream_url: str, tmp_path: Path):
     srv = proxy.Server(("127.0.0.1", 0), proxy.Handler)
     srv.upstream = upstream_url
@@ -74,16 +82,23 @@ def _meter(upstream_url: str, tmp_path: Path):
     srv.timeout = 30.0
     srv.max_retries = 0
     price = tmp_path / "pricing.json"
-    # OPEN[meter-adapter-test-prices-at-zero] this fixture's default entry uses key names the real
-    # pricing table does not have, so every price on the adapter path under test is $0 and a
-    # pricing regression there is invisible.
-    # proof:`present:{"in": 0.0, "out": 0.0}@tests/test_meter_stream_adapter.py`
-    # REVIEW 2026-08-30 (test-validity): `proxy.Pricing.rate` reads `input_per_token` /
-    # `output_per_token` (see `benchmarks/meter/pricing.json`); `.get(..., 0.0)` silently zeroes
-    # unknown keys, so even a fixture that later sets real values here would be ignored. Rename the
-    # keys and give them non-zero values so at least one adapter assertion can see a priced row.
+    # A REAL PRICE TABLE, in the key names `proxy.Pricing.rate` actually reads. This fixture used to
+    # write `{"in": 0.0, "out": 0.0}` under `default` with an EMPTY `models` map: `rate()` reads
+    # `input_per_token`/`output_per_token` with `.get(..., 0.0)`, so every rate on the adapter path
+    # was 0.0, every `cost` the adapter computed was $0.00, and a pricing regression anywhere on
+    # this path — the wrong rate, the two rates swapped, the fallback taken for a model that IS in
+    # the table — was arithmetically invisible.
+    #
+    # The two rates DIFFER FROM EACH OTHER (so a swapped in/out is a different number) and the
+    # `default` entry differs from both (so falling back for a model that is in the table prices it
+    # visibly wrong, and `rate()` also stamps `-default-fallback` on the basis). Every priced
+    # assertion below is exact arithmetic against these constants.
     price.write_text(json.dumps({"source": "test", "fetched_at": "now", "cost_basis": "imputed",
-                                 "default": {"in": 0.0, "out": 0.0}, "models": {}}), encoding="utf-8")
+                                 "default": {"input_per_token": _WRONG_RATE,
+                                             "output_per_token": _WRONG_RATE},
+                                 "models": {"m": {"input_per_token": _RATE_IN,
+                                                  "output_per_token": _RATE_OUT}}}),
+                    encoding="utf-8")
     srv.pricing = proxy.Pricing(str(price))
     srv.meter = proxy.Meter(tmp_path / "meter.jsonl")
     srv.limiter = proxy.RateLimiter(1000)
@@ -128,6 +143,15 @@ def test_on_the_client_gets_one_whole_answer_and_never_sees_a_frame(upstream, tm
     assert body["choices"][0]["finish_reason"] == "stop"
     assert body["usage"]["completion_tokens"] == 2
     assert body["id"] == "cmpl-1" and body["model"] == "m"
+    # …AND THE PRICE THE ADAPTER PUT ON IT. The usage frame the client never sees is the one this
+    # proxy prices in place, so the reassembled body is the only place an adapted client's own
+    # accountant can read a cost. Exact arithmetic against the fixture's rates: a swapped
+    # in/out pair, a `default` fallback, or the $0.00 this table used to yield all fail here.
+    usage = body["usage"]
+    assert usage["cost_basis"] == "imputed", (
+        "the model IS in the price table, so `-default-fallback` here means the lookup missed it")
+    assert usage["cost"] == pytest.approx(7 * _RATE_IN + 2 * _RATE_OUT)
+    assert usage["cost"] > 0.0
 
 
 def test_the_adapted_call_is_still_metered_and_says_it_was_adapted(upstream, tmp_path, monkeypatch):
@@ -142,6 +166,13 @@ def test_the_adapted_call_is_still_metered_and_says_it_was_adapted(upstream, tmp
     assert rows[0]["stream_adapted"] is True and rows[0]["arm"] == "A"
     # The ledger must not lose the call just because its shape changed on the way through.
     assert rows[0]["completion_tokens"] == 2 and rows[0]["metered"] is True
+    # …nor lose its PRICE. `metered: true` is a claim about the row, not about the money in it: a
+    # row that carries the token counts and $0.00 is exactly what this file recorded for as long as
+    # its price table used key names `Pricing.rate` does not read.
+    assert rows[0]["prompt_tokens"] == 7
+    assert rows[0]["cost_basis"] == "imputed"
+    assert rows[0]["cost"] == pytest.approx(7 * _RATE_IN + 2 * _RATE_OUT)
+    assert rows[0]["cost"] > 0.0
 
 class _AbortingUpstream(BaseHTTPRequestHandler):
     """What the real gateway does at ~1800 s: start a stream, send deltas, then CLOSE — no usage
@@ -197,6 +228,14 @@ def test_an_adapted_stream_the_gateway_cuts_still_carries_its_price(aborting_ups
     assert usage.get("completion_tokens", 0) > 0, "a cut that produced deltas must carry a token floor"
     assert usage.get("cost_basis") == "estimated_from_deltas"
     assert "FLOOR" in usage.get("meter_note", "")
+    # A FLOOR PRICED AT $0.00 IS NOT A FLOOR. The estimate exists so a cut stream still costs the
+    # arm's ceiling something; with the old zero-rate table it charged nothing at all, which is the
+    # same silence the estimator was written to end. Exact arithmetic on the rates the estimator
+    # looked up, so a `default` fallback (the unknown-model case this path is likeliest to hit)
+    # would not pass either.
+    assert usage["cost"] == pytest.approx(
+        usage["prompt_tokens"] * _RATE_IN + usage["completion_tokens"] * _RATE_OUT)
+    assert usage["cost"] > 0.0
 
     # 2. The answer does not claim to be complete, and says so in the SAME word the client's own
     #    salvage uses — the two disagreeing about one cut is half of the defect.
@@ -213,6 +252,8 @@ def test_an_adapted_stream_the_gateway_cuts_still_carries_its_price(aborting_ups
     rows = [json.loads(l) for l in (tmp_path / "meter.jsonl").read_text().splitlines() if l.strip()]
     assert rows[-1]["stream_adapted"] is True and rows[-1]["stream_aborted"] is True
     assert rows[-1]["completion_tokens"] == usage["completion_tokens"]
+    assert rows[-1]["cost"] == pytest.approx(usage["cost"]), (
+        "the ledger and the body the client was handed must agree on the price of one cut call")
 
 
 def test_the_two_transports_stamp_the_SAME_word_on_a_cut():

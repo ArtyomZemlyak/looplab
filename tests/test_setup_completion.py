@@ -10,6 +10,30 @@ from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.events.types import EV_DATA_LEAKAGE, EV_RUN_STARTED, EV_SETUP_FINISHED
 
+# EVERY git call that BUILDS a fixture in this file goes through here, and it ASSERTS. The four local
+# `_git` helpers this replaced (2026-09-08) passed no timeout and checked no `returncode`, so a call
+# that failed — or one that wedged on a loaded box — returned an EMPTY RESULT which the test then
+# read as PRODUCT behaviour: a fixture that had never become a repo, and a `_dirty_inputs` answering
+# `[]` blamed on the engine. Both of this file's observed failures were that shape, on two different
+# tests, and a harness whose own failure mimics the defect it guards cannot fail as itself.
+# The shape is `tests/test_merge_history_integrity.py::_git`'s — an explicit timeout and
+# `returncode == 0` with the stderr in the message — adopted rather than re-invented.
+#
+# Deliberately NOT applied to `_fixture_git_reports_dirty`: that one is a PROBE of the environment,
+# whose whole job is to answer False when git cannot report, and it is bounded by the product's
+# own `_DIRTY_STATUS_TIMEOUT_S` for the reason its docstring gives.
+_GIT_TIMEOUT_S = 120.0
+
+
+def _git(repo, *args) -> str:
+    """Run one git command in `repo`, fail loudly if it did not work, and return its stdout."""
+    import subprocess
+
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=_GIT_TIMEOUT_S)
+    assert result.returncode == 0, f"git {' '.join(args)} in {repo}: {result.stderr.strip()}"
+    return result.stdout.strip()
+
 
 def test_setup_done_folds_from_setup_finished(tmp_path):
     s = EventStore(tmp_path / "events.jsonl")
@@ -246,7 +270,6 @@ def test_the_environment_probe_tells_a_dirty_repo_from_a_non_repo(tmp_path):
     kills it: the probe must answer False where git has nothing to report, or the skip it licenses
     would fire on a real defect and hide it.
     """
-    import subprocess
 
     plain = tmp_path / "not-a-repo"
     plain.mkdir()
@@ -256,10 +279,10 @@ def test_the_environment_probe_tells_a_dirty_repo_from_a_non_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     for a in (("init", "-q"), ("config", "user.email", "t@t.t"), ("config", "user.name", "t")):
-        subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+        _git(repo, *a)
     (repo / "m.py").write_text("print(0)\n")
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, text=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "i"], capture_output=True, text=True)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "i")
     assert _fixture_git_reports_dirty(repo) is False        # committed and clean -> nothing to report
     (repo / "m.py").write_text("print(1)\n")
     assert _fixture_git_reports_dirty(repo) is True          # now genuinely dirty
@@ -268,20 +291,16 @@ def test_the_environment_probe_tells_a_dirty_repo_from_a_non_repo(tmp_path):
 def test_dirty_inputs_hashes_the_diff_of_a_dirty_repo(tmp_path):
     # P0-5: a git-repo source with uncommitted edits contributes both the porcelain file LIST and a
     # sha256 DIGEST of `git diff HEAD` — the fingerprint of the change without the leak-prone patch text.
-    import subprocess
 
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    def _git(*a):
-        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
-
-    _git("init", "-q")
-    _git("config", "user.email", "t@t.t")
-    _git("config", "user.name", "t")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t.t")
+    _git(repo, "config", "user.name", "t")
     (repo / "model.py").write_text("print(0)\n")
-    _git("add", "-A")
-    _git("commit", "-q", "-m", "init")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
 
     eng = _mk_engine(tmp_path / "run")
     assert eng._dirty_inputs({str(repo / "model.py"): {}}) == []   # committed & clean -> nothing
@@ -306,17 +325,15 @@ def test_dirty_inputs_hashes_the_diff_of_a_dirty_repo(tmp_path):
 def test_dirty_inputs_untracked_heavy_file_costs_only_its_name(tmp_path):
     # A heavy UNTRACKED artifact never reaches `git diff HEAD` (git diffs tracked paths only), so it
     # contributes just its porcelain name — no giant patch buffered, and no digest at all here.
-    import subprocess
 
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    def _git(*a):
-        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
-
-    _git("init", "-q"); _git("config", "user.email", "t@t.t"); _git("config", "user.name", "t")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t.t")
+    _git(repo, "config", "user.name", "t")
     (repo / "keep.py").write_text("print(0)\n")
-    _git("add", "-A"); _git("commit", "-q", "-m", "init")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
     (repo / "big.bin").write_bytes(b"A" * (2 * 1024 * 1024))        # untracked heavy artifact
 
     if not _fixture_git_reports_dirty(repo):
@@ -330,19 +347,17 @@ def test_dirty_inputs_untracked_heavy_file_costs_only_its_name(tmp_path):
 def test_dirty_inputs_caps_a_huge_tracked_diff(tmp_path, monkeypatch):
     # A heavy TRACKED+modified text file is hashed incrementally and capped: with a tiny cap the
     # digest is marked `~` (truncated) rather than buffering the whole patch.
-    import subprocess
 
     from looplab.engine import orchestrator
 
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    def _git(*a):
-        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
-
-    _git("init", "-q"); _git("config", "user.email", "t@t.t"); _git("config", "user.name", "t")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t.t")
+    _git(repo, "config", "user.name", "t")
     (repo / "data.txt").write_text("seed\n")
-    _git("add", "-A"); _git("commit", "-q", "-m", "init")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
     (repo / "data.txt").write_text("x\n" * 100000)                 # tracked -> a large real diff
 
     monkeypatch.setattr(orchestrator, "_DIFF_DIGEST_CAP", 4096)    # force truncation cheaply
@@ -354,17 +369,15 @@ def test_dirty_inputs_caps_a_huge_tracked_diff(tmp_path, monkeypatch):
 def test_dirty_inputs_shares_one_diff_across_sources_in_a_repo(tmp_path):
     # Two declared sources under the SAME repo each get an entry, but the diff is computed once —
     # both carry the identical (repo-level) digest.
-    import subprocess
 
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    def _git(*a):
-        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
-
-    _git("init", "-q"); _git("config", "user.email", "t@t.t"); _git("config", "user.name", "t")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t.t")
+    _git(repo, "config", "user.name", "t")
     (repo / "a.py").write_text("0\n"); (repo / "b.py").write_text("0\n")
-    _git("add", "-A"); _git("commit", "-q", "-m", "init")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
     (repo / "a.py").write_text("1\n")
 
     out = _mk_engine(tmp_path / "run")._dirty_inputs({str(repo / "a.py"): {}, str(repo / "b.py"): {}})

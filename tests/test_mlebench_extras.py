@@ -18,7 +18,7 @@ import pytest
 from looplab.adapters.mlebench_extras import (
     EXTRAS_SIDECAR, MLEBENCH_RULES, RULE_IDS, RuleFinding, RuleViolationVerdict, champion_record,
     extras_report, plagiarism_check, rule_violation_judge, rule_violation_messages)
-from looplab.core.evidence import EVIDENCE_LABEL
+from looplab.core.evidence import EVIDENCE_LABEL, is_fenced
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from tests.factories import make_engine
@@ -56,7 +56,14 @@ def test_the_judge_returns_a_plain_record_and_marks_an_unknown_rule():
     assert out["status"] == "ok" and out["verdict"] == "violation"
     assert [f["rule"] for f in out["findings"]] == ["test_label_access", "made_up_rule"]
     assert [f["known_rule"] for f in out["findings"]] == [True, False]
-    assert seen["msgs"][1]["content"].count(EVIDENCE_LABEL) == 1
+    # BOTH FENCES, not a bare opening label: the evidence is agent-authored code and an
+    # agent-authored transcript, so a prefix with no end lets the last line of the transcript
+    # continue as prompt text. `is_fenced` is a RE-DERIVATION, so it also proves an inner marker
+    # was neutralized rather than left live to close the block early.
+    body = seen["msgs"][1]["content"]
+    fenced = body[body.index(EVIDENCE_LABEL):]
+    assert is_fenced(fenced, EVIDENCE_LABEL), body
+    assert "=== code ===" in fenced and "=== transcript ===" in fenced
     assert rule_violation_judge(None, description="d", code="c", transcript="t",
                                 judge=lambda m: None)["status"] == "unanswered"
 

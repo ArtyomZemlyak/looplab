@@ -151,12 +151,18 @@ def test_web_and_tui_controls_use_the_authoritative_command_service():
     """
     root = Path(__file__).resolve().parents[1] / "ui" / "src"
     api = (root / "api.js").read_text(encoding="utf-8")
+    # The web's action vocabulary left api.js for `controlActions.js` (doc 25 UI-02, 2026-09-08).
+    # The pin follows it: read against api.js, the slice below is empty and every assertion on it
+    # passes over nothing.
+    actions = (root / "controlActions.js").read_text(encoding="utf-8")
     assistant = (root / "AssistantBar.jsx").read_text(encoding="utf-8")
     inspector = (root / "Inspector.jsx").read_text(encoding="utf-8")
     tui_source = Path(tui.__file__).read_text(encoding="utf-8")
-    control = api[api.index("export const CONTROL = {"):api.index("export async function appendAction")]
+    control = actions[actions.index("export const CONTROL = {")
+                      :actions.index("export async function appendAction")]
+    assert len(control) > 1000, "the action map must still be found where this pin now reads"
 
-    combined = "\n".join((api, assistant, inspector, tui_source))
+    combined = "\n".join((api, actions, assistant, inspector, tui_source))
     assert "NEEDS_RESUME" not in combined
     assert "actionNeedsEngine" not in combined
     assert "applyAction" not in combined
@@ -1773,32 +1779,101 @@ def test_reconcile_pending_survives_rich_markup_in_persisted_label():
 
 def test_render_chat_survives_rich_markup_in_persisted_content():
     """Persisted boss-chat content — a user line or an LLM recap that quotes a rich-markup fragment
-    like "[/dim]" — must NOT raise MarkupError. _render_chat re-prints the whole transcript on every
+    like "[/dim]" — must NOT raise MarkupError. render_chat re-prints the whole transcript on every
     chat view, so an unescaped line re-crashed the dashboard on each open (P2, same class as the
     command-label escape above; the round-2 escape pass had missed the user/summary render paths)."""
-    app = _command_tui(type("_Api", (), {})())
+    console = _render_console()
     history = [
         {"role": "user", "content": "try [/bold green] and [red]x"},
         {"role": "summary", "content": "recap [/dim] done"},
     ]
-    app._render_chat(history)                      # would raise rich.errors.MarkupError before the fix
-    out = app.console.file.getvalue()
+    tui.render_chat(console, history)              # would raise rich.errors.MarkupError before the fix
+    out = console.file.getvalue()
     assert "try" in out and "recap" in out         # both lines rendered (escaped), not crashed
 
 
 def test_status_panel_survives_rich_markup_in_goal_and_stop_reason():
     """The run status Panel interpolates the user goal and the (engine/operator) stop_reason, and rich
     parses Panel content as markup — so a goal like "strip [/b] tags" or an abort reason quoting
-    "[/dim]" raised MarkupError on EVERY _draw_run, i.e. re-crashed the run view on each reopen. The
-    round-2/round-4 escape passes had never covered _status_panel."""
-    app = _command_tui(type("_Api", (), {})())
-    panel = app._status_panel("demo", {
+    "[/dim]" raised MarkupError on EVERY draw_run, i.e. re-crashed the run view on each reopen. The
+    round-2/round-4 escape passes had never covered status_panel."""
+    console = _render_console()
+    panel = tui.status_panel("demo", {
         "phase": "finished", "finished": True, "nodes": {},
         "goal": "strip [/b] tags from [red]html", "stop_reason": "aborted [/dim] by op",
     })
-    app.console.print(panel)                       # would raise rich.errors.MarkupError before the fix
-    out = app.console.file.getvalue()
+    console.print(panel)                           # would raise rich.errors.MarkupError before the fix
+    out = console.file.getvalue()
     assert "strip" in out and "aborted" in out     # goal + stop_reason rendered (escaped), not crashed
+
+
+# ------------------------------------------------------- the screen renderers are not on the class
+# (doc 25 SC-15's remaining half.) These five used to be `Tui` methods reading `self.console`,
+# `self.api.base` and `self._interactive()`, so nothing could draw a screen without the whole REPL.
+# They are `tui_format` functions now, and the tests below DRAW with them: a Console over a StringIO
+# is the entire fixture, no Api and no run root. That is the property — a rendering that needs a
+# server to be exercised is one nobody exercises.
+
+def _render_console():
+    """A Console that writes into memory: the whole fixture a screen renderer now needs."""
+    import io
+    from rich.console import Console
+    return Console(file=io.StringIO(), force_terminal=False, color_system=None, width=100)
+
+
+def test_the_screen_renderers_are_module_functions_and_draw_without_a_repl():
+    """Every one of the five draws from a Console alone, and none of them is a `Tui` attribute any
+    more — a delegating method would keep the class as the only documented way in."""
+    from looplab.serve import tui_format
+
+    for name in ("draw_dashboard", "draw_run", "render_spec", "render_chat", "status_panel"):
+        assert callable(getattr(tui_format, name)), name
+        assert getattr(tui, name) is getattr(tui_format, name), f"{name} must re-export through tui"
+        assert not hasattr(tui.Tui, f"_{name}") and not hasattr(tui.Tui, name), \
+            f"{name} is back on the Tui class"
+
+    console = _render_console()
+    runs = [{"run_id": "demo", "phase": "search", "engine_running": True, "nodes": 3,
+             "best_metric": 0.5, "task_id": "toy", "mtime": 0}]
+    tui.draw_dashboard(console, runs, base="http://127.0.0.1:8765", live=True)
+    out = console.file.getvalue()
+    assert "demo" in out and "127.0.0.1:8765" in out and "live" in out
+    # …and the live marker is the CALLER's answer, not a terminal probe inside the renderer.
+    console = _render_console()
+    tui.draw_dashboard(console, [], base="http://x", live=False)
+    quiet = console.file.getvalue()
+    assert "live" not in quiet and "no runs yet" in quiet
+
+
+def test_draw_run_composes_the_status_panel_and_the_chat():
+    """The run screen is the panel + the transcript + the key bar, and a run whose state could not be
+    loaded says so instead of drawing a panel over nothing."""
+    console = _render_console()
+    tui.draw_run(console, "demo", {"phase": "search", "engine_running": True,
+                                   "nodes": {"1": {"status": "pending"}}, "best_node_id": None},
+                 [{"role": "user", "content": "make it faster"}], live=False)
+    out = console.file.getvalue()
+    assert "demo" in out and "in flight" in out and "make it faster" in out
+    assert "Chat with the boss" in out and "● live" not in out
+
+    console = _render_console()
+    tui.draw_run(console, "demo", None, [], live=True)
+    lost = console.file.getvalue()
+    assert "could not load" in lost and "no chat yet" in lost and "● live" in lost
+
+
+def test_render_spec_draws_the_verdict_it_is_handed_and_asks_no_server():
+    """`render_spec` takes the server's readiness verdict as a value: `None` is launchable, a string
+    is the reason it is not. It must not carry a rule of its own (doc 52 row 8) — which is now
+    structural, since the module holding it cannot reach the Api client at all."""
+    console = _render_console()
+    tui.render_spec(console, {"run_id": "r1", "task": {"kind": "toy"}}, None)
+    assert "launch" in console.file.getvalue()
+
+    console = _render_console()
+    tui.render_spec(console, {"run_id": "r1"}, "give exactly one nonempty task or task_file")
+    refused = console.file.getvalue()
+    assert "nonempty task" in refused and "type launch to start" not in refused
 
 
 def test_genesis_does_not_send_the_new_turn_twice():

@@ -320,3 +320,137 @@ def test_the_agent_run_screen_is_the_shared_redactor_and_not_a_second_spelling(t
     assert "abcdefABCDEF0123456789" not in run.stdout_tail
     assert "/var/data/emb_v3/index.faiss" in run.stdout_tail
     assert AgentRun().stdout_tail == "" and AgentRun().stderr_tail == ""
+
+
+# --------------------------------------------------------------------------------------------
+# doc 27 `external-cli-usage-is-unpriced`: the role that WRITES THE CODE reaches the run's ledger.
+
+def test_every_launched_invocation_reaches_the_ledger_as_one_unpriced_call(tmp_path):
+    """THE DEFECT: `CliAgentDeveloper` had no accountant at all, so an external coding agent's spend
+    reached neither `llm_usage` nor `looplab tokens` — a run whose Developer is a CLI agent reported
+    the cost of every role except the developer.
+
+    UNPRICED is the honest record, and it is not the same as recording nothing: `calls` above
+    `priced_calls` is the ledger's existing "we know a paid call happened and not what it cost".
+    """
+    from looplab.core.llm import CostAccountant
+
+    accountant = CostAccountant()
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=_stub(tmp_path), accountant=accountant)
+    dev.implement(Idea(operator="draft", params={}))
+    dev.repair(Idea(operator="debug", params={}), "raise RuntimeError()", "boom")
+
+    assert accountant.calls == 2                     # one per invocation, implement AND repair
+    assert accountant.priced_calls == 0              # ...explicitly unpriced, never a parsed guess
+    assert accountant.total_tokens == 0 and accountant.spent == 0.0
+    assert dev.last_run.duration_s > 0.0             # the invocation's own wall clock is recorded
+
+
+def test_a_launcher_that_never_started_spends_nothing(tmp_path):
+    """A missing binary is not an unpriced call, it is no call: nothing ran, nothing was billed."""
+    from looplab.core.llm import CostAccountant
+
+    accountant = CostAccountant()
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=[str(tmp_path / "nope.exe")], accountant=accountant)
+    dev.implement(Idea(operator="draft", params={}))
+    assert dev.last_run.launched is False and accountant.calls == 0
+
+
+def test_the_durable_ledger_walk_reaches_the_external_developer(tmp_path):
+    """The ledger binds by walking role objects for an `accountant` attribute, and an external agent
+    is reached through the ValidatingDeveloper's `inner`. Driven end to end through the walk and the
+    sink, because the whole item is "the spend arrives in the ledger", not "an attribute exists"."""
+    import types
+
+    from looplab.agents.roles import ValidatingDeveloper
+    from looplab.core.llm import CostAccountant
+    from looplab.engine.costs import find_cost_accountants, sanitize_usage_delta
+
+    accountant = CostAccountant()
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=_stub(tmp_path), accountant=accountant)
+    engine_like = types.SimpleNamespace(
+        developer=ValidatingDeveloper(dev, fallback=None, max_retries=0))
+    assert accountant in find_cost_accountants(engine_like)
+
+    deltas = []
+    accountant.set_sink(lambda d: deltas.append(sanitize_usage_delta(d)))
+    dev.implement(Idea(operator="draft", params={}))
+    assert deltas == [{"cost": 0.0, "calls": 1, "priced_calls": 0, "prompt_tokens": 0,
+                       "completion_tokens": 0, "total_tokens": 0}]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group liveness probe")
+def test_a_cancel_token_stops_the_agent_without_waiting_for_its_timeout(tmp_path):
+    """doc 27 `cancel-not-propagated-into-provider-request`, the external-CLI leg: the agent used to
+    be killed on its TIMEOUT alone, so a stopped run kept a multi-minute subprocess — and the
+    language server / training children it spawned — alive to the deadline.
+
+    DRIVEN: a 120 s agent under a 120 s timeout, cancelled a moment after it starts. If the token did
+    not reach the wait, this test would take two minutes and the record would say `timed_out`.
+    """
+    import time as _time
+
+    started = tmp_path / "started"
+    child = tmp_path / "slow_agent.py"
+    child.write_text("import pathlib, sys, time\n"
+                     "pathlib.Path(sys.argv[1]).write_text('go')\n"
+                     "print('working', flush=True)\n"
+                     "time.sleep(120)\n", encoding="utf-8")
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=[sys.executable, str(child), str(started)],
+                            timeout=120.0, cancel_check=started.exists)
+
+    began = _time.monotonic()
+    dev.implement(Idea(operator="draft", params={}))
+    elapsed = _time.monotonic() - began
+
+    assert elapsed < 30, f"the cancel did not reach the wait ({elapsed:.1f}s)"
+    assert dev.last_run.cancelled is True and dev.last_run.timed_out is False
+    assert "working" in (dev.last_run.stdout_tail or "")   # what it printed first is kept
+    assert "cancelled by the caller" in (dev.last_run.stderr_tail or "")
+
+
+def test_the_ambient_request_cancel_token_reaches_the_agent_too(tmp_path):
+    """No constructor argument needed: a caller that scopes `cancel_check_scope` around the build
+    reaches the external developer exactly as it reaches an in-process client."""
+    from looplab.core.llm import cancel_check_scope
+
+    child = tmp_path / "slow_agent.py"
+    child.write_text("import time\ntime.sleep(120)\n", encoding="utf-8")
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=[sys.executable, str(child)], timeout=120.0)
+    with cancel_check_scope(lambda: True):
+        dev.implement(Idea(operator="draft", params={}))
+    assert dev.last_run.cancelled is True
+
+
+def test_the_invocation_opens_a_generation_span_so_its_spend_is_attributable(tmp_path):
+    """CLAUDE.md: a phase that SPENDS must open a SPAN. Without one the external Developer's calls
+    are money attributable to nothing — invisible to `looplab timings`, `looplab tokens` and the
+    trace view — which is the same hole the unpriced ledger entry closes from the other side."""
+    import json
+
+    from looplab.core.llm import CostAccountant
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+
+    spans = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(str(spans)), run_id="r")
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=_stub(tmp_path), accountant=CostAccountant())
+    with tracer.span("implement", kind="operation"):
+        dev.implement(Idea(operator="draft", params={}))
+    tracer.force_flush()
+
+    rows = [json.loads(line) for line in spans.read_text().splitlines() if line.strip()]
+    generations = [r for r in rows if r.get("kind") == "generation"]
+    assert len(generations) == 1, "the external agent's invocation opened no generation span"
+    attrs = generations[0]["attributes"]
+    assert attrs["op"] == "cli_agent" and attrs["model"] == "ollama/x"
+    assert attrs["agent"] == "opencode" and attrs["unpriced"] is True
+    assert attrs["duration_s"] >= 0.0
+    # The commit stamps the span from below (`tracing.record_paid_call`), so the span agrees with
+    # the ledger about the call having happened — at zero, which is what unpriced means.
+    assert attrs["cost_billings"] == 1

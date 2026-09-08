@@ -1671,7 +1671,8 @@ def _asha_mask_is_unsound(
     bracket it cannot know yet.
 
     THIS IS A PROPERTY OF THE MASKED VIEW, NOT OF THE QUERY, and stating it that way is the whole of
-    backlog F1g's remaining defect. Both conditions below were `return [], []` at the TOP of
+    backlog F1g's remaining defect. Both conditions this predicate once carried (the second is now
+    a RESERVATION rather than a refusal — see below) were `return [], []` at the TOP of
     `_speculative_selection` until 2026-08-20, so an ASHA-family run answered NOTHING to any
     speculative query while one of its own in-flight Nodes was masked — including the occupancy-paced
     production query, whose entire purpose is to produce while an in-flight Node holds a slot. The
@@ -1700,46 +1701,148 @@ def _asha_mask_is_unsound(
     So the guard keeps its meaning and loses its reach: consulted where the masked view is built,
     not where the unmasked board answers. Nothing here widens what any lane may DECIDE — the forced
     seed prefix is the same authority `card_next_actions` uses on the serial path, asked the same
-    way — and the promotion clause is unchanged in force.
+    way — and the promotion clause was unchanged in force until 2026-09-08, when it stopped being a
+    clause of this predicate at all (below).
 
-    Two conditions, kept separate because they are different unsoundnesses:
+    ONE condition, and the second one is gone because it was answerable rather than refusable:
 
     1. AN UNRESOLVED RUNG-0 ROOT IS MASKED. It has no metric, so ASHA cannot know the survivor set,
        and the masked view reads its slot as free. `reopened_node_ids` exempts the freshness caller,
        which deliberately reopens its own subject into the population and is therefore not masking
        it. Promotion children have parents and may still fill other already-decided same-rung slots.
-    2. A MASKED PROMOTION HAS NO EXACT DURABLE ACTION. Masking an unresolved promotion whose Card
-       does not carry `("improve", its parents)` would make the parent look unexpanded and permit a
-       duplicate same-rung child.
 
-    OPEN[asha-promotion-mask-blocks-all-production] clause 2 still refuses the WHOLE discretionary
-    lane, so an ASHA run whose seeding is complete and whose in-flight promotion carries no exact
-    durable action produces nothing at all while a slot is free — measured at 2.08 starved hours
-    over 6 intervals on `runs/rubertlite-dr-unified-v8`, the entire residue after the clause-1 fix.
-    Whether an UNMASKED policy query plus a filter over the masked node's own action is sound here
-    is not measured, and refusing on an unmeasured alternative is the correct default; what is not
-    correct is leaving the number unrecorded.
-    proof:present:asha_mask_unsound@looplab/search/card_selection.py
+    WHAT USED TO BE CLAUSE 2, and why refusing was the wrong instrument (2026-09-08). "A MASKED
+    PROMOTION HAS NO EXACT DURABLE ACTION": masking an unresolved promotion whose Card does not
+    carry `("improve", its parents)` makes the parent look unexpanded and permits a duplicate
+    same-rung child. The hazard is real — `policy.py::asha_expansion` puts EVERY parent of a live
+    child in `has_live_child`, so deleting that child from the view frees every one of them — but
+    it is a hazard about ONE parent, and the clause refused the whole discretionary lane for it:
+    2.08 starved hours over 6 intervals on `runs/rubertlite-dr-unified-v8`, the entire residue after
+    the clause-1 fix, in which the run had a free slot, complete seeding, and other survivors it was
+    never asked about.
+
+    The duplicate is now made IMPOSSIBLE instead of the lane being made empty.
+    `_masked_promotion_expansions` reads a masked promotion's parents off the NODE — `parent_ids` on
+    the folded row, which is what ASHA itself expands over — and reserves `("improve", parent)` for
+    each of them, beside the action a masked node's CARD carries, which was already reserved. Both
+    consumers of the masked view then drop those keys: the Card lane filters its candidates, and the
+    raw lane filters the policy's own fallback (`speculative_raw_actions`), which is where an ASHA
+    promotion reaches production without a Card at all. Deriving the reservation from the node and
+    not from the Card is the whole of it — the Card's claim is exactly what clause 2 found
+    untrustworthy, and the node's parents are a fact of the fold.
+
+    A query whose ONLY producible action is the reserved one still yields nothing, which is the
+    residue that is genuinely unsound; what is gone is refusing the survivors it never named.
     """
     if _builtin_policy_name(policy) != "ASHAPolicy":
         return False
-    if not reopened_node_ids and any(
+    return not reopened_node_ids and any(
         (node := state.nodes.get(node_id)) is not None
         and node.status is NodeStatus.pending
         and not node.parent_ids
         for node_id in ignored_pending
-    ):
-        return True
+    )
+
+
+def _admissible_cards(
+    state: RunState,
+    policy: object,
+    excluded: frozenset[str],
+    resource_envelope: "CardResourceEnvelope | None",
+) -> list[Card]:
+    """The eligible Cards ONE speculative session may still act on, in stable id order.
+
+    THE RULE, STATED ONCE (doc 25 SE-04's second half). The forced lane and the discretionary lane
+    ask the same three questions of the same eligible Cards — the id is not an outstanding
+    exclusion, the Card's generation fences still describe the live board, the Card fits the
+    session's resource envelope — and they spelled all three out separately. The finding itself
+    records that the two never both execute, so this was never double WORK: it was two copies of one
+    predicate that had to be kept in step by hand, in a function where the discretionary copy also
+    carries a fourth clause (the ASHA reservation) the forced one must NOT have. A clause added to
+    one copy and not the other is a lane that admits what its sibling refuses, with nothing to say
+    so.
+
+    The ASHA reservation stays OUT of here for that reason: it is a property of the masked policy
+    view, not of the session, and applying it to the forced lane would refuse durable receipts the
+    forced prefix is the authority on.
+    """
+
+    return [
+        card for card in eligible_cards(state, policy)
+        if card.id not in excluded
+        and _card_generation_fences_current(state, card)
+        and card_fits_resource_envelope(card, resource_envelope)
+    ]
+
+
+def _masked_promotion_expansions(
+    state: RunState,
+    policy: object,
+    ignored_pending: frozenset[int],
+) -> set[tuple[str, tuple[int, ...]]]:
+    """The expansions an ASHA masked view would re-offer because the NODE doing them is hidden.
+
+    Read off `parent_ids` on the folded row and nothing else, which is what closed
+    `_asha_mask_is_unsound`'s clause 2 (2026-09-08): the masked node's CARD is exactly what that
+    clause found untrustworthy — it may say something else, carry no action, or not exist — while
+    the node's parents are a fact of the fold and are the identity ASHA expands over.
+    `policy.py::asha_expansion` credits a live child to EVERY parent it names, so hiding one child
+    frees all of them and each one is reserved.
+
+    Scoped to the nodes `_speculative_policy_state` actually deletes (pending, not tombstoned):
+    reserving over a node the view still SHOWS would refuse an expansion ASHA is entitled to offer.
+    Empty for every non-ASHA policy — no other family gets a node-deleted view, so nothing is hidden
+    from it and nothing needs reserving.
+
+    SEPARATE from the Card-derived half below because the two are admissible in different places.
+    This one is a statement about the BOARD and holds wherever the masked view answers, including
+    `speculative_raw_actions`, where an ASHA promotion reaches production with no Card at all. The
+    Card-derived half is a statement about outstanding CARDS and belongs only to the candidate
+    filter: applied to the raw lane it also reserves `("draft", ())` — one key every seed shares —
+    and silently refuses the forced seed prefix that bootstraps a run.
+    """
+
+    if _builtin_policy_name(policy) != "ASHAPolicy":
+        return set()
+    reserved: set[tuple[str, tuple[int, ...]]] = set()
     for node_id in ignored_pending:
         node = state.nodes.get(node_id)
-        if node is None or node.status is not NodeStatus.pending or not node.parent_ids:
+        if node is None or node.status is not NodeStatus.pending or node.tombstoned:
             continue
-        card_id = node.idea.card_id
-        card = state.cards.get(card_id) if isinstance(card_id, str) else None
-        key = _action_key(card_action(card) or {}) if card is not None else None
-        if key != ("improve", tuple(node.parent_ids)):
-            return True
-    return False
+        reserved.update(("improve", (parent_id,)) for parent_id in node.parent_ids)
+    return reserved
+
+
+def _masked_asha_reservations(
+    state: RunState,
+    policy: object,
+    excluded: frozenset[str],
+    ignored_pending: frozenset[int],
+) -> set[tuple[str, tuple[int, ...]]]:
+    """Every action the discretionary Card lane must not offer while the ASHA view is masked.
+
+    The Card-derived reservations plus `_masked_promotion_expansions`; see there for why only the
+    second half may travel to the raw lane.
+    """
+
+    if _builtin_policy_name(policy) != "ASHAPolicy":
+        return set()
+    reserved_card_ids = set(excluded)
+    # A session also masks its initial, non-speculative pending batch from ASHA's policy view.
+    # Reserve those exact actions here even when a caller did not redundantly list their Card ids
+    # in `excluded_card_ids`, otherwise a survivor appears unexpanded and can be built twice.
+    reserved_card_ids.update(
+        node.idea.card_id
+        for node_id in ignored_pending
+        if (node := state.nodes.get(node_id)) is not None
+        if isinstance(node.idea.card_id, str)
+    )
+    reserved = {
+        key for card_id in reserved_card_ids
+        if (card := state.cards.get(card_id)) is not None
+        if (key := _action_key(card_action(card) or {})) is not None
+    }
+    return reserved | _masked_promotion_expansions(state, policy, ignored_pending)
 
 
 def _speculative_selection(
@@ -1785,6 +1888,22 @@ def _speculative_selection(
     # `_asha_mask_is_unsound` for why it is not a return.
     asha_mask_unsound = _asha_mask_is_unsound(
         selection_state, policy, ignored_pending, reopened_node_ids)
+
+    # ONE derivation of the admissible Card set per selection pass (doc 25 SE-04's second half).
+    # Memoized rather than computed eagerly, because three of the forced lane's paths return without
+    # asking anything of it (a raw seed/debug lane, an empty lane, a malformed one) and
+    # `_admissible_cards` re-derives `breedable_nodes` + `rank_by_metric` over the whole board.
+    # Hoisting it into an unconditional call would buy the single derivation with a cost this
+    # finding never asked for, on the exact path that bootstraps a run.
+    admissible_cache: list[Card] | None = None
+
+    def admissible_cards() -> list[Card]:
+        nonlocal admissible_cache
+        if admissible_cache is None:
+            admissible_cache = _admissible_cards(
+                selection_state, policy, excluded, resource_envelope)
+        return admissible_cache
+
     # Outstanding requests and build markers reserve capacity before they become Node rows.  Committed
     # excluded Cards already have evidence and are therefore already included in card_budget_used.
     effective_limit = max(
@@ -1825,12 +1944,7 @@ def _speculative_selection(
         forced_ids = [card_id for card_id in forced_ids if card_id not in excluded]
         if not forced_ids:
             return [], forced
-        eligible_by_id = {
-            card.id: card for card in eligible_cards(selection_state, policy)
-            if card.id not in excluded
-            and _card_generation_fences_current(selection_state, card)
-            and card_fits_resource_envelope(card, resource_envelope)
-        }
+        eligible_by_id = {card.id: card for card in admissible_cards()}
         if any(card_id not in eligible_by_id for card_id in forced_ids):
             return [], []
         return [eligible_by_id[card_id] for card_id in forced_ids], forced
@@ -1841,30 +1955,12 @@ def _speculative_selection(
     if asha_mask_unsound:
         return [], []
 
-    reserved_asha_actions: set[tuple[str, tuple[int, ...]]] = set()
-    if _builtin_policy_name(policy) == "ASHAPolicy":
-        reserved_card_ids = set(excluded)
-        # A session also masks its initial, non-speculative pending batch from ASHA's policy view.
-        # Reserve those exact actions here even when a caller did not redundantly list their Card ids
-        # in `excluded_card_ids`, otherwise a survivor appears unexpanded and can be built twice.
-        reserved_card_ids.update(
-            node.idea.card_id
-            for node_id in ignored_pending
-            if (node := selection_state.nodes.get(node_id)) is not None
-            if isinstance(node.idea.card_id, str)
-        )
-        reserved_asha_actions = {
-            key for card_id in reserved_card_ids
-            if (card := selection_state.cards.get(card_id)) is not None
-            if (key := _action_key(card_action(card) or {})) is not None
-        }
+    reserved_asha_actions = _masked_asha_reservations(
+        selection_state, policy, excluded, ignored_pending)
     policy_state = _speculative_policy_state(selection_state, ignored_pending, policy)
     candidates = [
-        card for card in eligible_cards(selection_state, policy)
-        if card.id not in excluded
-        and _action_key(card_action(card) or {}) not in reserved_asha_actions
-        and _card_generation_fences_current(selection_state, card)
-        and card_fits_resource_envelope(card, resource_envelope)
+        card for card in admissible_cards()
+        if _action_key(card_action(card) or {}) not in reserved_asha_actions
     ]
     return _selection_after_forced_gates(
         selection_state,
@@ -1960,6 +2056,19 @@ def speculative_raw_actions(
         state, policy, max_nodes, context=context,
         include_owned_card_id=None, include_owned_node_id=None,
     )
+    # THE RAW LANE IS THE OTHER CONSUMER OF THE MASKED VIEW, and the only one that reaches
+    # production without a Card. ASHA's fallback is computed over a board its own in-flight
+    # promotions have been deleted from, so it can re-offer the exact expansion one of them is
+    # already doing — the duplicate `_asha_mask_is_unsound` used to refuse the whole query over.
+    # Drop those exact expansions here instead: what is unsound is the one action, not the query.
+    # The BOARD-derived half only (see `_masked_promotion_expansions`) — the Card-derived half
+    # reserves `("draft", ())`, which every seed shares, and would refuse the forced seed prefix
+    # this same lane carries.
+    expanded = _masked_promotion_expansions(
+        state, policy, _node_id_set(context.ignored_pending_node_ids))
+    if expanded:
+        fallback = [action for action in fallback
+                    if _action_key(action) not in expanded]
     if selected or not fallback:
         return []
     # Ablation is executed by the outer orchestrator before Card creation.  It has no concrete Card

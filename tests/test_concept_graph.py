@@ -1028,3 +1028,106 @@ def test_rendering_the_default_returns_the_shipped_text_byte_for_byte():
     assert "You consolidate a machine-learning experiment CONCEPT vocabulary" in shipped
     assert render(None, "concept_consolidate_system", shipped) == shipped, (
         "the default no longer survives Template substitution; a `$` entered the prompt text")
+
+
+# ----------------------------------------- the skeleton has to match a RUN (docs/BACKLOG.md §0.9)
+#
+# Measured on the bench box: every run answers `repo_task`, `e5small-dr-unified-v2` or
+# `toy_quadratic` for `state.task_id`, none of which contains a registered alias — so `seed` was
+# None on EVERY run and the curated 46-id taxonomy matched nothing that ever ran. The id is the
+# ADAPTER's name; the subject lives in the goal.
+
+_DR_GOAL = ("Improve recall@100 of the e5-small dense retrieval model on the ESCI dataset. The "
+            "unified repo implements in-batch InfoNCE and hard negative mining; keep the batch "
+            "size and learning rate of the baseline recipe.")
+
+
+def test_a_repo_run_whose_goal_is_the_domain_now_gets_the_curated_pack():
+    """THE DEFECT, in one assertion pair: the same task id, with and without the words the run was
+    actually launched with."""
+    from looplab.search.concept_graph import skeleton_for
+
+    assert skeleton_for("repo_task").concepts() == [], "the id alone still says nothing"
+    seeded = skeleton_for("repo_task", text=_DR_GOAL)
+    assert seeded.task_type == "dense-retrieval"
+    assert "negatives/hard-mining-inbatch" in seeded and "loss/contrastive" in seeded
+
+
+def test_a_run_id_that_names_no_pack_is_resolved_by_its_goal_too():
+    from looplab.search.concept_graph import skeleton_for
+
+    assert skeleton_for("e5small-dr-unified-v2").concepts() == []
+    assert skeleton_for("e5small-dr-unified-v2", text=_DR_GOAL).task_type == "dense-retrieval"
+
+
+def test_a_goal_from_another_domain_seeds_nothing():
+    """The bar is two DISTINCT domain concepts, and the generic axes are excluded from it on
+    purpose: `hyperparameter`, `regularization`, `training-schedule` and `eval` carry vocabulary
+    every ML task uses, so a goal that names a batch size, a learning rate and dropout would
+    otherwise import a 46-id retrieval taxonomy into an image-segmentation run."""
+    from looplab.search.concept_graph import skeleton_for
+
+    other = ("Train a convolutional net for image segmentation; tune the batch size, the learning "
+             "rate and the dropout, and report IoU on the validation split.")
+    assert skeleton_for("repo_task", text=other).concepts() == []
+    assert skeleton_for("toy_quadratic", text="minimise (x-3)^2 over x").concepts() == []
+
+
+def test_one_passing_mention_is_not_a_domain():
+    from looplab.search.concept_graph import (_SKELETON_TEXT_MIN_CONCEPTS, _signature_concepts,
+                                              skeleton_for)
+
+    mention = "Build an ETL job that does data retrieval from S3 and writes parquet files."
+    assert _signature_concepts("dense-retrieval", mention) < _SKELETON_TEXT_MIN_CONCEPTS
+    assert skeleton_for("repo_task", text=mention).concepts() == []
+
+
+def test_an_alias_may_never_select_a_pack_from_the_adapters_own_name(monkeypatch):
+    """A pack whose alias happens to be a substring of `repo_task` would select a domain for every
+    repo run in existence — the same failure as matching nothing, one direction over and much
+    quieter. The adapter defaults are excluded from the substring pass, so only the GOAL can speak
+    for them."""
+    from looplab.search import concept_graph
+
+    monkeypatch.setitem(concept_graph._SKELETON_ALIASES, "dense-retrieval", ("repo", "retrieval"))
+    assert concept_graph.skeleton_for("repo_task").concepts() == []
+    assert concept_graph.skeleton_for("dataset_task").concepts() == []
+    # …and a real id that carries the alias is still resolved by it, exactly as before.
+    assert concept_graph.skeleton_for("my-repo-search").task_type == "dense-retrieval"
+
+
+def test_matching_is_word_anchored_and_survives_a_plural():
+    """`ance` inside `balance` is the accident this refuses (the same one `asset_brief`'s lexicon
+    records paying for); `hard negatives` is the inflection it must not refuse."""
+    from looplab.search.concept_graph import _signature_concepts
+
+    assert _signature_concepts("dense-retrieval", "we balance the enhanced pipeline") == 0
+    assert _signature_concepts(
+        "dense-retrieval",
+        "mined negatives from an index, plus a teacher distillation head") == 2, (
+        "`mined negative` and `teacher distill` must survive the inflection the goal wrote them in")
+
+
+def test_the_live_gates_hand_the_resolver_the_runs_own_goal():
+    """The resolver is only half the fix: the three live seeds have to ASK. Driven through the real
+    precheck — a repo-task state whose goal is the domain now has a vocabulary to grade over, where
+    before it returned None for want of one."""
+    import pathlib
+    import tempfile
+
+    from looplab.core.models import Idea, Node, NodeStatus, RunState
+    from tests.factories import make_engine
+
+    state = RunState(run_id="r", task_id="repo_task", direction="max", goal=_DR_GOAL)
+    tried = Idea(operator="improve", params={"lr": 0.1},
+                 rationale="in-batch InfoNCE with hard negative mining")
+    state.nodes[0] = Node(id=0, operator="improve", idea=tried, status=NodeStatus.evaluated,
+                          metric=0.5, attempt=0)
+    engine = make_engine(pathlib.Path(tempfile.mkdtemp()) / "run", graded_novelty=True)
+    variant = Idea(operator="improve", params={"lr": 0.9},
+                   rationale="in-batch InfoNCE with hard negative mining, mined offline this time")
+    assert engine._graded_novelty_precheck(state, variant) is variant, (
+        "a curated seed resolved from the goal must reach the graded pre-gate")
+    state.goal = "minimise a quadratic over one variable"
+    assert engine._graded_novelty_precheck(state, variant) is None, (
+        "…and a goal outside every pack leaves the pre-gate exactly as it was: no vocabulary")

@@ -61,7 +61,8 @@ These are **not Python extras** — they're external tools you point LoopLab at:
   Developer role. See [LLM & coding agents](llm-and-agents.md).
 - **Docker** with the NVIDIA runtime, only for the `untrusted` sandbox tier or the Compose stack.
   See [Deployment](deployment.md).
-- **MLflow** (`pip install mlflow`) only for `looplab export-mlflow`.
+- **MLflow** (`pip install mlflow`) only for `looplab export-mlflow` and for the live mirror
+  (`mlflow_tracking_uri`); without it both degrade to doing nothing, never to an error.
 
 ## Verify the install
 

@@ -14,34 +14,37 @@ principals must still protect the owner UI/control plane as described in the dep
 """
 from __future__ import annotations
 
-import base64
 from contextlib import contextmanager
-import hashlib
 import hmac
 import json
 import math
-import os
-import re
 import secrets
-import stat
 import threading
 import time
-import uuid
 from pathlib import Path
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.jsonutil import valid_digest_ref
+from looplab.serve.capability_store import (
+    capability_store_lock,
+    exact_request_id,
+    exact_token_secret,
+    publish_reserved,
+    recovery_bearer,
+    recovery_digest,
+    reservation_state,
+    reserve_exact_id,
+    reserve_unique_id,
+    store_process_lock,
+    token_digest as _digest,
+)
 
 
 DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 MIN_TTL_SECONDS = 5 * 60
 MAX_TTL_SECONDS = 30 * 24 * 60 * 60
 REVIEW_HEADER = "X-LoopLab-Review"
-_RECOVERY_SECRET = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _CREATE_CONTRACT = 1
-_STORE_LOCK_TIMEOUT_SECONDS = 5.0
-_STORE_LOCKS_GUARD = threading.Lock()
-_STORE_LOCKS: dict[str, threading.Lock] = {}
 _CURRENT_GENERATION_UNSET = object()
 
 
@@ -54,71 +57,37 @@ class ReviewError(ValueError):
         self.metadata = metadata
 
 
-def _digest(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def _canonical_bytes(value: dict) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-
-def exact_review_request_id(value: object) -> str | None:
-    """Return only a canonical lowercase RFC 4122 UUIDv4 create identity."""
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = uuid.UUID(value)
-    except (ValueError, AttributeError):
-        return None
-    return value if (parsed.variant == uuid.RFC_4122 and parsed.version == 4
-                     and str(parsed) == value) else None
-
-
-def exact_review_token_secret(value: object) -> bytes | None:
-    """Decode only a canonical unpadded base64url 256-bit create-recovery secret."""
-    if not isinstance(value, str) or _RECOVERY_SECRET.fullmatch(value) is None:
-        return None
-    try:
-        decoded = base64.urlsafe_b64decode(value + "=")
-    except (ValueError, TypeError):
-        return None
-    if len(decoded) != 32:
-        return None
-    canonical = base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=")
-    return decoded if hmac.compare_digest(canonical, value) else None
+# The create-recovery FIELD validators and the derivation below are `capability_store`'s since
+# 2026-09-08: `ShareStore` needed the SAME protocol, and a second copy of these bytes would hand a
+# retrying client a token that authenticates nothing (doc 25 SC-10).  The review spellings stay
+# exported here because the review router imports them by these names.
+exact_review_request_id = exact_request_id
+exact_review_token_secret = exact_token_secret
 
 
 def _recovery_identity(run_id: str, request_id: str) -> tuple[str, str]:
-    identity = _canonical_bytes({
+    identity_hash = recovery_digest("looplab-review-create-id-v1", {
         "request_id": request_id,
         "run_id": run_id,
         "v": _CREATE_CONTRACT,
     })
-    identity_hash = hashlib.sha256(
-        b"looplab-review-create-id-v1\0" + identity).hexdigest()
     return "rvl_" + identity_hash[:32], identity_hash
 
 
 def _recovery_token(link_id: str, token_secret: bytes) -> str:
     suffix = link_id[4:]
-    material = hmac.new(
-        token_secret, b"looplab-review-bearer-v1\0" + link_id.encode("ascii"),
-        hashlib.sha256).digest()
-    bearer = base64.urlsafe_b64encode(material).decode("ascii").rstrip("=")
-    return f"rv_{suffix}_{bearer}"
+    return f"rv_{suffix}_{recovery_bearer('looplab-review-bearer-v1', token_secret, link_id)}"
 
 
 def _recovery_intent(run_id: str, generation: str, ttl_seconds: int,
                      include_evidence: bool) -> str:
-    intent = _canonical_bytes({
+    return recovery_digest("looplab-review-create-intent-v1", {
         "expected_generation": generation,
         "include_evidence": include_evidence,
         "run_id": run_id,
         "ttl_seconds": ttl_seconds,
         "v": _CREATE_CONTRACT,
     })
-    return hashlib.sha256(b"looplab-review-create-intent-v1\0" + intent).hexdigest()
 
 
 def _finite_number(value, fallback: float | None = None) -> float | None:
@@ -191,11 +160,7 @@ class ReviewStore:
         atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
 
     def _process_lock(self) -> threading.Lock:
-        # abspath is lexical and cannot turn a transient/missing store directory into a startup I/O
-        # failure; endpoint-time filesystem failures are translated to the structured storage error.
-        key = os.path.normcase(os.path.abspath(os.fspath(self.directory)))
-        with _STORE_LOCKS_GUARD:
-            return _STORE_LOCKS.setdefault(key, threading.Lock())
+        return store_process_lock(self.directory)
 
     @contextmanager
     def _store_lock(self):
@@ -205,25 +170,18 @@ class ReviewStore:
         different command locks while their truncated on-disk ids could still collide.  Pair a
         process-wide lock with a required OS lock, and fail closed when the filesystem cannot provide
         that ordering.  There is intentionally no thread-only fallback.
-        """
-        from looplab.events.eventstore import (
-            EventStoreLockError, InterprocessLockContended, _interprocess_lock)
 
-        if not self._lock.acquire(timeout=_STORE_LOCK_TIMEOUT_SECONDS):
-            raise ReviewError(
-                "timed out waiting for the review-link store lock", kind="storage")
-        try:
-            try:
-                # Non-blocking acquisition gives the HTTP layer a bounded, safely retryable 503
-                # instead of parking a request thread behind another worker indefinitely.
-                with _interprocess_lock(
-                        self._lock_path, required=True, blocking=False):
-                    yield
-            except (EventStoreLockError, InterprocessLockContended, OSError) as exc:
-                raise ReviewError(
-                    "review-link storage is temporarily unavailable", kind="storage") from exc
-        finally:
-            self._lock.release()
+        The protocol itself is `capability_store.capability_store_lock`, shared with `ShareStore`
+        (doc 25 SC-10). Only the two SENTENCES are this store's own: a timeout and a lock failure
+        are reported differently here and identically there, which is why the core takes both.
+        """
+        with capability_store_lock(
+                self._lock, self._lock_path,
+                on_timeout=lambda: ReviewError(
+                    "timed out waiting for the review-link store lock", kind="storage"),
+                on_unavailable=lambda: ReviewError(
+                    "review-link storage is temporarily unavailable", kind="storage")):
+            yield
 
     @staticmethod
     def _ttl(value, *, strict: bool = False) -> int:
@@ -255,85 +213,29 @@ class ReviewStore:
             **extra,
         }
 
-    @staticmethod
-    def _remove_failed_reservation(path: Path) -> None:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-
-    @staticmethod
-    def _strict_existing(path: Path) -> tuple[str, dict | None]:
-        """Distinguish absence, an abandoned reservation, and corrupt persisted state.
-
-        A rolling upgrade may overlap an older worker which reserves the final path before its atomic
-        replace and does not know about the new store lock. Give that narrow empty-file window a
-        bounded chance to finish. Non-empty malformed state is never treated as free space.
-        """
-        for attempt in range(21):
-            try:
-                info = path.lstat()
-            except FileNotFoundError:
-                return "absent", None
-            except OSError:
-                return "unreadable", None
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                return "corrupt", None
-            if info.st_size != 0:
-                try:
-                    raw = path.read_text(encoding="utf-8")
-                    value = json.loads(raw)
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                    return "corrupt", None
-                return ("valid", value) if isinstance(value, dict) else ("corrupt", None)
-            if attempt < 20:
-                time.sleep(0.01)
-        age = max(0.0, time.time() - info.st_mtime)
-        return ("abandoned_empty" if age >= 1.0 else "fresh_empty"), None
+    # The reservation protocol itself lives in `capability_store` and is shared with `ShareStore`
+    # (doc 25 SC-10). These stay as methods because they are read as part of this store's own
+    # lifecycle at four call sites, and because a subclass/monkeypatch seam on them predates the
+    # extraction; each one is now a binding of the shared rule to this store's error type.
+    _strict_existing = staticmethod(reservation_state)
 
     def _publish_reserved(self, path: Path, record: dict) -> None:
         """Publish one owned reservation, preserving any non-empty uncertain result."""
-        try:
-            self._save(path, record)
-            return
-        except Exception as exc:  # noqa: BLE001 - normalize storage failures without leaking paths
-            state, existing = self._strict_existing(path)
-            if state == "valid" and existing == record:
-                # os.replace completed before a later filesystem operation reported failure.
-                return
-            if state in {"fresh_empty", "abandoned_empty"}:
-                # This caller created the reservation and still holds the global transaction lock.
-                self._remove_failed_reservation(path)
-            raise ReviewError("review-link storage is unavailable", kind="storage") from exc
+        publish_reserved(
+            path, record, save=self._save,
+            on_unavailable=lambda: ReviewError(
+                "review-link storage is unavailable", kind="storage"))
 
     def _reserve(self) -> tuple[str, Path]:
-        """Atomically reserve a fresh id without ever overwriting an existing capability.
-
-        Randomness makes a collision extraordinarily unlikely, but relying on probability alone
-        would let a collision replace an existing token digest.  ``O_EXCL`` also makes this safe
-        across threads and multiple server workers.  The empty reservation is fail-closed if the
-        process crashes before the atomic JSON replacement.
-        """
+        """Atomically reserve a fresh id without ever overwriting an existing capability."""
         self.directory.mkdir(parents=True, exist_ok=True)
-        for _ in range(128):
-            link_id = "rvl_" + secrets.token_hex(16)
-            path = self._path(link_id)
-            try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except FileExistsError:
-                continue
-            os.close(fd)
-            return link_id, path
-        raise ReviewError("could not allocate a unique review link")
+        return reserve_unique_id(
+            mint=lambda: "rvl_" + secrets.token_hex(16), path_for=self._path, attempts=128,
+            on_exhausted=lambda: ReviewError("could not allocate a unique review link"))
 
     def _reserve_exact(self, link_id: str) -> tuple[Path, bool]:
         path = self._path(link_id)
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            return path, False
-        os.close(fd)
-        return path, True
+        return path, reserve_exact_id(path)
 
     def create(self, run_id: str, *, generation: str,
                ttl_seconds: int = DEFAULT_TTL_SECONDS,

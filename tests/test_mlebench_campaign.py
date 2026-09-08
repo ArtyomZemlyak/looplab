@@ -145,3 +145,66 @@ def test_the_entrypoint_prints_the_table_and_refuses_a_missing_run(tmp_path, cap
     assert main([str(rd), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["version"] == 1
     assert main([str(tmp_path / "nowhere")]) == 2
+
+
+def test_every_empty_adjusted_cell_states_its_own_cause(tmp_path):
+    """`adjusted_scale` is TOTAL over the four row generations, in the order the reasons bind.
+
+    A blank column with no sentence reads to a reviewer as a missing measurement rather than as a
+    refusal, and that is what a search-scale run with a `null` gap used to get: `adjusted: None`
+    AND `adjusted_scale: None`, while the module docstring already claimed "the table says so".
+    Under the SHIPPED protocol (`holdout_fraction > 0`) the private-grade clause takes every
+    healthy row, so the empty cell is the common case and not the corner.
+
+    Driven through `run_facts` over four recorded runs, never through a re-implementation of the
+    arithmetic.
+    """
+    import json
+
+    from looplab.adapters.mlebench_campaign import run_facts
+
+    def _run(name, rows):
+        run = tmp_path / name
+        (run / "nodes").mkdir(parents=True)
+        (run / "events.jsonl").write_text(
+            "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
+        return run_facts(run)
+
+    started = {"v": 1, "seq": 0, "ts": 1.0, "type": "run_started",
+               "data": {"run_id": "r", "direction": "max", "task_id": "spooky"}}
+
+    def _node(nid, metric, seq):
+        return [{"v": 1, "seq": seq, "ts": 2.0 + seq, "type": "node_created",
+                 "data": {"node_id": nid, "parent_ids": [], "operator": "draft", "code": "x",
+                          "idea": {"operator": "draft", "params": {}, "rationale": ""}}},
+                {"v": 1, "seq": seq + 1, "ts": 3.0 + seq, "type": "node_evaluated",
+                 "data": {"node_id": nid, "metric": metric}}]
+
+    # 1. NOTHING TO ADJUST — no node reached a number at all.
+    empty = _run("empty", [started])
+    assert empty["adjusted"] is None
+    assert "no number to adjust" in (empty["adjusted_scale"] or ""), empty["adjusted_scale"]
+
+    # 2. A SEARCH-SCALE RUN WITH NO GAP: the only scored node carries a violation, so NOTHING
+    # survives the un-flagged / un-salvaged / feasible filter, `mislead_gap.gap` is `null` and
+    # there is no intended-protocol champion to compare. This is the row that used to be silent.
+    lone = _run("lone", [started, _node(1, 0.80, 1)[0],
+                         {"v": 1, "seq": 2, "ts": 3.0, "type": "node_evaluated",
+                          "data": {"node_id": 1, "metric": 0.80,
+                                   "metric_provenance": {"salvaged": True}}}])
+    assert lone["adjusted"] is None
+    assert "no mislead gap" in (lone["adjusted_scale"] or ""), lone["adjusted_scale"]
+
+    # 3. THE PRIVATE GRADE, which is the shipped protocol and binds FIRST.
+    graded = _run("graded", [started] + _node(1, 0.80, 1) + [
+        {"v": 1, "seq": 3, "ts": 9.0, "type": "holdout_evaluated",
+         "data": {"node_id": 1, "metric": 0.77, "gap": 0.03, "protocol": "private_grade"}}])
+    assert graded["private_grade"] == 0.77 and graded["raw"] == 0.77
+    assert graded["adjusted"] is None, "a search-scale gap may not be taken off a private grade"
+    assert "private grade" in (graded["adjusted_scale"] or ""), graded["adjusted_scale"]
+
+    # 4. …and no cell anywhere is blank without a cause.
+    for row in (empty, lone, graded):
+        assert row["adjusted_scale"], row
+        if row["adjusted"] is None:
+            assert row["adjusted_scale"].startswith("unavailable: "), row["adjusted_scale"]
