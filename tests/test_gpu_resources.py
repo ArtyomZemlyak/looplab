@@ -13,7 +13,28 @@ from looplab.engine.evaluate import EvaluateMixin
 from looplab.core.models import Idea, NodeStatus
 from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
                                       detect_gpu_inventory)
+from looplab.events.types import EV_CARD_DROPPED, EV_CARD_RESOURCE_PINNED
 from looplab.runtime.sandbox import GpuPinUnenforceable
+
+
+class _StubLog:
+    """The append-only shape the dispatch loop reads: rows carrying a monotonic `seq`.
+
+    The wait loop gates its re-fold on the tail seq (`Engine._fold_if_tail_moved`, doc 25 ES-12),
+    so a stub whose store answers `[]` forever no longer models the production invariant these
+    tests are about: an operator re-pin, a drop and every terminal APPEND. `fold` stays patched to
+    a fixed state object in these tests — what the log carries here is the tail, not the content.
+    """
+
+    def __init__(self):
+        self.rows = []
+
+    def read_all(self):
+        return list(self.rows)
+
+    def append(self, event_type, data=None, **_kwargs):
+        self.rows.append(types.SimpleNamespace(
+            seq=len(self.rows), type=event_type, data=dict(data or {})))
 
 
 class _Pool(ResourceSchedulingMixin):
@@ -36,6 +57,12 @@ class _Pool(ResourceSchedulingMixin):
         # reserve-first behaviour. `gpu_capable=` opts a case into a task that answers.
         if gpu_capable is not None:
             self.task = types.SimpleNamespace(gpu_capable=lambda: gpu_capable)
+
+
+def _fold_if_tail_moved(self, cached):
+    """The Engine's own tail gate — these hosts are stubs OF the Engine, not of the log."""
+    from looplab.engine.orchestrator import Engine
+    return Engine._fold_if_tail_moved(self, cached)
 
 
 def _node(node_id, footprint, *, attempt=0):
@@ -567,11 +594,14 @@ class _DropWaitHost(_Pool):
         self._concurrent_research_repeat = False
         self.ran = []
         self.terminals = []
-        self.store = types.SimpleNamespace(
-            read_all=lambda: [],
-            append=lambda event_type, data, **_kwargs: self.terminals.append(
-                (event_type, dict(data))),
-        )
+        self.log = _StubLog()
+        self.store = types.SimpleNamespace(read_all=self.log.read_all, append=self._append)
+
+    def _append(self, event_type, data, **_kwargs):
+        self.terminals.append((event_type, dict(data)))
+        self.log.append(event_type, data)
+
+    _fold_if_tail_moved = _fold_if_tail_moved
 
     def _spawn_research(self, _tg, _state):
         return None
@@ -625,8 +655,11 @@ def test_dispatch_closes_operator_dropped_card_while_waiting_for_gpu(
                 tg.start_soon(
                     Engine._dispatch_evals, host, [{"node_id": 0}], state, None)
                 assert await anyio.to_thread.run_sync(wait_entered.wait, 1.0)
+                # The operator's drop lands in the LOG as well as the projection: the serial wait
+                # re-folds on the tail having moved, and in production this control is an append.
                 card.status = "dropped"
                 card.dropped_by = "operator"
+                host.log.append(EV_CARD_DROPPED, {"card_id": "card-0"})
 
     anyio.run(scenario)
 
@@ -717,10 +750,13 @@ def test_parallel_dispatch_releases_reservation_when_pause_lands_during_resource
 class _PinRaceDispatchHost(_Pool):
     def __init__(self):
         super().__init__(ids=(0,), mem={0: 16_000}, parallel=1)
-        self.store = types.SimpleNamespace(read_all=lambda: [])
+        self.log = _StubLog()
+        self.store = types.SimpleNamespace(read_all=self.log.read_all, append=self.log.append)
         self._concurrent_research_repeat = False
         self.releases: list[list[int]] = []
         self.started: list[tuple[int, dict | None, list[list[int]]]] = []
+
+    _fold_if_tail_moved = _fold_if_tail_moved
 
     def _spawn_research(self, _tg, _state):
         return None
@@ -784,7 +820,10 @@ def test_serial_dispatch_releases_stale_pin_reservation_before_eval(monkeypatch)
             )
             with anyio.fail_after(2):
                 await wait_entered.wait()
+            # A re-pin is an APPEND in production (`EV_CARD_RESOURCE_PINNED`) — which is exactly
+            # why the wait may gate its re-fold on the tail seq. Model both halves.
             card.resource_pin = {"gpus": 0, "pinned_by": "operator"}
+            host.log.append(EV_CARD_RESOURCE_PINNED, {"card_id": "card-0", "gpus": 0})
             pin_changed.set()
 
     anyio.run(scenario)
@@ -843,6 +882,7 @@ def test_serial_dispatch_refolds_pin_after_bounded_wait_without_gpu_release(monk
             with anyio.fail_after(2):
                 assert await anyio.to_thread.run_sync(wait_entered.wait, 1.0)
             card.resource_pin = {"gpus": 0, "pinned_by": "operator"}
+            host.log.append(EV_CARD_RESOURCE_PINNED, {"card_id": "card-0", "gpus": 0})
 
     anyio.run(scenario)
 
@@ -852,6 +892,98 @@ def test_serial_dispatch_refolds_pin_after_bounded_wait_without_gpu_release(monk
     assert admitted is not None
     assert admitted["count"] == 0 and admitted["gpu_ids"] == []
     assert releases_at_start == []
+
+
+def test_the_serial_resource_wait_folds_only_when_the_log_moved(monkeypatch):
+    """The tail gate (doc 25 ES-12): a quiet tick costs no fold, an APPENDED re-pin is still seen.
+
+    The wait can last as long as another run holds the host pool, and it used to re-fold the whole
+    log on every bounded tick. Here six ticks pass and the loop folds four times: once at the
+    dispatch loop top, once entering the wait, once because the operator's re-pin moved the tail,
+    and once after the reservation is granted. Removing the gate makes it fold once per tick, which
+    is what this counts.
+    """
+    host = _PinRaceDispatchHost()
+    card = types.SimpleNamespace(
+        resource_pin={"gpus": 1, "gpu_mem_mib": 8_000, "pinned_by": "operator"})
+    node = types.SimpleNamespace(
+        id=0,
+        attempt=0,
+        status=NodeStatus.pending,
+        tombstoned=False,
+        idea=types.SimpleNamespace(
+            card_id="card-0", footprint={"gpus": 1, "gpu_mem_mib": 8_000}),
+    )
+    state = types.SimpleNamespace(
+        total_eval_seconds=0.0,
+        aborted_nodes=set(),
+        nodes={0: node},
+        cards={"card-0": card},
+    )
+    folds: list[int] = []
+
+    def counting_fold(events):
+        folds.append(len(events))
+        return state
+
+    monkeypatch.setattr("looplab.engine.orchestrator.fold", counting_fold)
+    from looplab.engine.orchestrator import Engine
+
+    ticks: list[dict] = []
+
+    async def reserve(nd, *, resource_pin=None, wait_once=False):
+        ticks.append(dict(resource_pin or {}))
+        if len(ticks) < 5:
+            await anyio.sleep(0)                     # the finite condition tick, nothing appended
+            return None
+        if len(ticks) == 5:
+            # The operator re-pins GPU->CPU: no GPU is released and the pool epoch never moves,
+            # but the control APPENDS — which is the only reason the tail is a sound gate.
+            card.resource_pin = {"gpus": 0, "pinned_by": "operator"}
+            host.log.append(EV_CARD_RESOURCE_PINNED, {"card_id": "card-0", "gpus": 0})
+            return None
+        request = host._resource_request_for_node(nd, resource_pin=resource_pin)
+        return {**request, "gpu_ids": []}
+
+    host._wait_reserve_node_resources = reserve
+    anyio.run(Engine._dispatch_evals, host, [{"node_id": 0}], state, None)
+
+    # The wait DID observe the re-pin: the last request asks for no GPU at all.
+    assert [tick["gpus"] for tick in ticks] == [1, 1, 1, 1, 1, 0]
+    assert len(host.started) == 1
+    assert len(folds) == 4, (
+        "the wait must fold at the loop top, on entering the wait, once because the re-pin moved "
+        f"the tail, and once on admission — six ticks folded {len(folds)} times")
+
+
+def test_the_tail_gate_reuses_its_snapshot_and_refolds_the_moment_the_log_grows(tmp_path,
+                                                                                monkeypatch):
+    """`_fold_if_tail_moved` over a REAL store: same tail, same answer; one append, one re-fold."""
+    from looplab.engine import orchestrator as orch
+    from looplab.events.types import EV_PHASE_PROGRESS
+
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "run")
+    real_fold = orch.fold
+    folds: list[int] = []
+
+    def counting_fold(events):
+        folds.append(len(events))
+        return real_fold(events)
+
+    monkeypatch.setattr(orch, "fold", counting_fold)
+
+    first = engine._fold_if_tail_moved(None)
+    assert len(folds) == 1
+    again = engine._fold_if_tail_moved(first)
+    assert again is first                            # the same tuple, so the same RunState object
+    assert len(folds) == 1                           # a quiet log costs a stat, never a fold
+
+    engine.store.append(EV_PHASE_PROGRESS, {"stage": "build", "step": "reserve"})
+    moved = engine._fold_if_tail_moved(again)
+    assert len(folds) == 2
+    assert moved[0] > first[0] and moved[1] is not first[1]
 
 
 def test_docker_device_remap_uses_cached_runtime_probe(monkeypatch, tmp_path):

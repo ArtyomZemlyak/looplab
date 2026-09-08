@@ -5159,6 +5159,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 next_sleep = base
                 continue
 
+    def _fold_if_tail_moved(self, cached: Optional[tuple]) -> tuple:
+        """`(tail_seq, RunState)` for the log as it is now, re-folding ONLY if the tail moved.
+
+        The LOOP-LOCAL half of doc 25 ES-12, and deliberately not the shared `fold_cached` the
+        finding asked for. A resource wait can last as long as another run holds the host GPU pool
+        (hours), and every bounded tick of it re-folded the WHOLE log — an O(total-events) busy-poll
+        the wait's own comment had been asking to gate since it was written. `EventStore.read_all`
+        is already incrementally cached, so an unchanged log costs a stat and the fold is what the
+        gate removes.
+
+        WHY THE TAIL IS A SOUND KEY here and a shared memo is not. Soundness: the wait's stated
+        reason for re-folding is a GPU->CPU Card re-pin, which does not bump the pool epoch — but it
+        does APPEND (`EV_CARD_RESOURCE_PINNED`), as does every operator gate the loop re-checks
+        (pause/stop/abort/reset) and the terminal `_skip_if_aborted` writes itself. Nothing this
+        loop reacts to can land without moving the tail, and seqs are strictly monotonic, so an
+        equal tail means the fold would be the same value. Isolation: the returned state is CACHED
+        BY ONE LOOP and handed to nobody who keeps it (`_evaluate` takes a node id and re-folds).
+        That is the whole difference from the rejected `fold_cached` on the store, which would have
+        handed ONE `RunState` to a build worker thread and to `evaluate.py`'s `node.rerun_stage =
+        None` at the same time. Pass `None` on the first tick; hand back what this returned.
+        """
+        events = self.store.read_all()
+        tail = events[-1].seq if events else -1
+        if cached is not None and cached[0] == tail:
+            return cached
+        return tail, fold(events)
+
     async def _dispatch_evals(self, evals: list, state: RunState,
                               max_es: Optional[float]) -> None:
         # Single experiment at a time is the base mode: run evals sequentially and
@@ -5203,6 +5230,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # there skips the eval, and the loop-top test then ends the queue.
                         if node is not None and hasattr(self, "_wait_reserve_node_resources"):
                             generation = node.attempt
+                            # The wait's own tail-gated fold, loop-local and handed to nobody: with
+                            # the cross-run host lease this wait lasts as long as ANOTHER run holds
+                            # the pool (hours of training), and an unconditional re-fold per 0.5s
+                            # tick was an O(total-events) busy-poll — the cost confirm F26 documents.
+                            waited_fold = None
                             while True:
                                 if budget_stop_recheck(budget_stop):
                                     skip_eval = True
@@ -5211,15 +5243,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 # re-pin does not release a GPU (and therefore does not bump the pool
                                 # epoch), so re-fold after every bounded condition tick and fence the
                                 # exact lifecycle plus run-level operator gates before retrying.
-                                # with the cross-run host lease this wait is no longer
-                                # bounded by a sibling eval in this process — it lasts as long as
-                                # ANOTHER run holds the pool (hours of training), and every 0.5s tick
-                                # re-folds the WHOLE log (the parallel branch folds twice per tick):
-                                # an O(total-events) busy-poll, the same cost confirm F26 documents.
-                                # The stated reason (a re-pin doesn't bump the pool epoch) doesn't
-                                # need an unconditional fold — a re-pin always APPENDS, so gate the
-                                # re-fold on the tail seq having changed, or lengthen the idle tick.
-                                waiting = fold(self.store.read_all())
+                                # The tail gate keeps that promise exactly: a re-pin APPENDS
+                                # (`EV_CARD_RESOURCE_PINNED`), as does every operator gate this loop
+                                # re-checks, so nothing it reacts to can land without moving the tail
+                                # — see `_fold_if_tail_moved` for why the key is sound and why this
+                                # stays loop-local rather than a memo on the store (ES-12).
+                                waited_fold = self._fold_if_tail_moved(waited_fold)
+                                waiting = waited_fold[1]
                                 live = waiting.nodes.get(node.id)
                                 if self._skip_if_aborted(a, waiting):
                                     skip_eval = True

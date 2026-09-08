@@ -974,9 +974,9 @@ reverse direction too — a module that DROPS the import has stopped participati
 
 #### ES-12 · LOW · other · effort: medium — **DEFERRED (2026-08-08)**
 
-> **DECLINED[shared-fold-memo-races-the-build-worker]** a shared `fold_cached` on the EventStore/Engine is refused permanently, not postponed: folded state crosses a thread boundary and is mutated outside `replay.py`. measured: 3 facts verified on the code (`_BuildReservation.state` at orchestrator.py:237, `ToolProvider.bind_state`, `evaluate.py`'s `node.rerun_stage = None`) and 3 tests that model a pin change with no append — docs/25-architecture-modularity-review-2026-08-01.md
+> **DECLINED[shared-fold-memo-races-the-build-worker]** a shared `fold_cached` on the EventStore/Engine is refused permanently, not postponed: folded state crosses a thread boundary and is mutated outside `replay.py`. measured: 3 facts verified on the code (`_BuildReservation.state` at orchestrator.py:237, `ToolProvider.bind_state`, `evaluate.py`'s `node.rerun_stage = None`) — docs/25-architecture-modularity-review-2026-08-01.md
 >
-> **OPEN[loop-local-tail-gated-refold]** the narrow variant the serial resource-wait's own comment asks for — a loop-local re-fold gated on the tail seq having moved — is still not shipped, in that loop or in `engine/confirm_phase.py`'s sibling. proof:absent:_fold_if_tail_moved@looplab/engine/orchestrator.py
+> *Closed 2026-09-08: the marker `loop-local-tail-gated-refold` stood here. The narrow variant shipped as `orchestrator.py::Engine._fold_if_tail_moved` in both wait loops — see the second resolution note below. Deleted per the index rule; the `DECLINED` above is unchanged and still refuses the shared memo.*
 
 **Redundant full-log folds within a single stable decision iteration**
 
@@ -1018,6 +1018,37 @@ for a LOW finding.
 If revisited: loop-local tail gate only, never a shared memo; re-point those three tests to append the
 re-pin event (the production invariant); and cover the sibling wait loop in `engine/confirm_phase.py`
 in the same change.
+
+*Resolution (2026-09-08) — revisited on exactly those terms.*
+
+`Engine._fold_if_tail_moved(cached) -> (tail_seq, RunState)` re-folds only when the log's tail
+moved, and both resource waits carry their own `waited_fold` — the serial dispatch wait and
+`confirm_phase.py`'s sibling. Nothing else uses it: it is a loop's private snapshot, not a memo on
+the store, so the three facts that refuse `fold_cached` (a `RunState` crossing into a build worker,
+`bind_state`, `evaluate.py`'s `node.rerun_stage = None`) are untouched — the state cached here is
+handed to nobody who keeps it, and `_evaluate` takes a node id and folds for itself.
+
+**Why the tail is a sound key for THIS loop.** The wait's stated reason for re-folding is a
+GPU->CPU Card re-pin, which does not bump the pool epoch — but it does APPEND
+(`EV_CARD_RESOURCE_PINNED`), and so does every other thing these loops react to: pause/stop,
+abort/reset/tombstone, and the terminal `_skip_if_aborted` writes itself. Seqs are strictly
+monotonic, so an equal tail means the fold is the same value. `EventStore.read_all` is already
+incrementally cached, so a quiet tick now costs a stat.
+
+**The three tests were re-pointed as the note asked, and the prediction was right about which ones.**
+They broke for a second reason too, which the 2026-08-05 pass could not have seen: the three
+`_dispatch_evals` hosts are stubs whose `store.read_all()` answered `[]` forever, so the tail could
+not move even in principle. They now keep a `_StubLog` of `(seq, type, data)` rows, take the
+Engine's own gate rather than re-implementing one, and every operator intervention in them APPENDS
+beside the projection mutation it used to make alone — which is what production does and is the
+whole premise of the gate.
+
+Two tests DRIVE the gate in `tests/test_gpu_resources.py`: one counts folds across six ticks of a
+real serial wait (four: the loop top, entering the wait, the tail moving under the re-pin, and
+admission) and asserts the re-pin was still seen — the last request asks for no GPU; the other runs
+the gate over a REAL store and asserts the same tuple comes back untouched while the log is quiet
+and a fresh one the moment it grows. Teeth-tested by deleting the gate's `cached[0] == tail` branch:
+both go red.
 
 #### ES-13 · LOW · excessive-logic · effort: medium — **RESOLVED (2026-08-08)**
 
