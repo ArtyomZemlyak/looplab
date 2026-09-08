@@ -528,12 +528,23 @@ site that proves it is open.
    objective") — no algorithm, no selection. `ui/src/panels.jsx` still carries the real
    `paretoFront`. So the entry's claim is right and its "returns nothing" is now literally false;
    the fix is what a marker is for.
-   OPEN[pareto-never-reaches-champion-selection] the non-dominated front is computed in the BROWSER
-   and nothing in the search or the engine consumes it, so a run still elects one champion on one
-   scalar; retire this when a front is computed where selection can read it.
-   proof:absent:pareto_front@looplab/search/policy.py
-   *Mutated before it was written:* True as shipped, False the moment a `pareto_front` lands in the
-   policy.]
+   *Closed 2026-09-08 — the marker `pareto-never-reaches-champion-selection` stood here.*
+   `search/policy.py::pareto_front` is the front where a policy can consult it, with
+   `pareto_objectives` and `dominates` beside it. Its axes are the primary metric in the run's own
+   direction plus every extra metric that is AUTHENTICATED (`declared`/`engine` — an `auto` number
+   off the candidate's own stdout is not admitted as a selection objective, and an untagged one
+   reads `unknown` and is not either), ORIENTABLE (the recorded `min`/`max`; the browser's front
+   assumes every extra metric is cost-like, which inverts a declared nDCG silently) and RECORDED BY
+   EVERY NODE IN THE POOL — the three filters `core/models.py` already argued for, reused rather
+   than re-derived. Selection reads it at `engine/plan.py::endgame_actions`, the ONE gate
+   `_plan_gate` applies to every selected action set: the endgame ensemble's two parents now come
+   off the front, so the merge spends its reserved slot on two nodes that actually differ instead of
+   on an improve and its own parent separated by noise. With no admissible second axis the front is
+   the metric leader alone and the pick falls through to the byte-identical top-2 ranking — which is
+   every run in `runs/` today, which is why this needed no setting. `tests/test_pareto_front.py`
+   drives both halves (14 tests), including the two axes that must be REFUSED and the inertness.
+   The champion itself is still one node on one scale by design: a front reordering the champion
+   would be a selection change smuggled in as a diversity one.]
 13. **The feature-engineering CV gate is a sentence, not an enforcement (P1, M).**
     `engine/proposal_cues.py:231::_cue_feature_engineering` appends prose telling the model
     *"KEEP a feature only if it improves CV"*, gated by `core/config.py:643::feature_engineering =
@@ -545,13 +556,30 @@ site that proves it is open.
    still defaults to `False`; `search/operators.py` still has no FE operator; and the only `caafe`
    in the tree is the words "(CAAFE-style)" in a `core/config.py` COMMENT, which is prose and not a
    symbol, so that claim stands too.
-   OPEN[fe-cv-gate-is-prose-not-enforcement] the eval never drops an engineered feature that fails
-   CV — the only thing that says so is a sentence in the proposer's prompt, and there is no
-   feature-engineering operator to enforce it; retire this when one exists.
-   proof:absent:feature_engineering@looplab/search/operators.py
-   *The falsifier was mutated before it was written:* True as shipped, and False the moment a
-   `feature_engineering` operator lands in that file — checked, because the previous marker written
-   that day was vacuous and only a mutation found it.]
+   *Closed 2026-09-08 — the marker `fe-cv-gate-is-prose-not-enforcement` stood here.* The operator
+   exists and the rule is enforced, in three pieces. (1) `search/operators.py` gained the FE
+   operator beside `merge_idea`: `parse_feature_cv` reads the candidate's own per-feature ledger off
+   its stdout (`FEATURE_CV {"feature": …, "with": …, "without": …, "std": …, "n": …}`) and
+   `feature_engineering_verdicts` decides which features survive — by this repo's OWN >1-SE
+   acceptance test (`trust/gate.py::one_se_better`) when the row declares a spread, strictly when it
+   does not, direction-aware either way. It is a DECISION and not an `Idea` builder because the code
+   an FE step produces is the Developer's, not an arithmetic mean of two parents; the mechanical half
+   is the keep/drop rule, which is exactly the half the prompt was being trusted with. (2) The
+   deterministic rung `trust/cv.py::feature_cv_findings` emits a `findings.py`-shaped, already
+   namespaced `feature_cv:kept_feature_failed_cv` for a feature the ledger fails while the code still
+   builds it (`feature_is_kept` reads a name mentioned only on a dropping line as dropped — reading a
+   removal as a violation would punish the behaviour the gate asks for). (3) The engine runs it as a
+   registered detector (`trust/scan_receipt.py::TRUST_DETECTOR_FEATURE_CV`), gated on the SAME
+   `feature_engineering` flag that puts the directive in the prompt, so the receipt cannot claim a
+   detector that did not look. Whether the flag CHANGES anything stays `Settings.trust_gate`'s
+   decision: advisory under the default `audit`, and under `gate`/`block` the flagged node is out of
+   selection and breeding. Two stated recall gaps, both in the safe direction: a candidate that
+   declares NO ledger is not flagged (nothing claimed is not a claim broken, and inferring feature
+   construction from an AST would flag every honest column assignment), and an explicit drop clears
+   the gate. `tests/test_feature_cv_gate.py` drives all three, including two real runs — flag on, the
+   finding reaches the durable ledger and the `trust_scan` receipt names the detector; flag off,
+   neither happens — and the fold-level proof that under `gate` the flagged leader loses the
+   championship it wins under `audit`.]
 14. **The time-series adapter is a synthetic toy; tabular-AutoML and multimodal do not exist (P1, M
     each).** `adapters/timeseries.py`'s own docstring (line 9) says a real AutoGluon-TS/Darts backend
     "is a drop-in replacement for the templated forecaster" — i.e. it is the template, not the
@@ -4579,14 +4607,29 @@ restored the entry for being invisible.
   second request. The measured cost of leaving it is one untested top-ranked hypothesis per run that
   seeds a card before its first metric lands.
 
-OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/core/context_budget.py
-
-  Both fixes are LOCAL: memos gained sections, the case record leads with its params. Neither
-  establishes the general rule, which is what this entry is for — every bounded surface in the tree
+  Both fixes were LOCAL: memos gained sections, the case record leads with its params. Neither
+  established the general rule, which is what this entry was for — every bounded surface in the tree
   should be checked for the same shape (does the FIRST thing the caller needs survive the bound?),
   and the module rule "a bounded answer names what it did not cover, beside the call that returns
   it" (`tools/log_tools.py`, rule 3) should be the ceiling everywhere rather than in the two places
   that happened to be measured.
+
+  *Closed 2026-09-08 — the marker `tail-truncation-drops-the-payload` stood here.* The rule is now
+  code in the canonical home of the cap it spends: `core/context_budget.py::bounded_page` returns ONE
+  page of a long text under a cap with a receipt charged INSIDE that cap (so the loop's own head-cut
+  in `agents/tool_loop.py::_cap_tool_result` cannot eat the one line saying the answer is partial),
+  naming the range covered, the total, and the exact call that continues (`{offset}` = the first
+  character not covered) — or saying plainly that no continuation exists, because a fabricated resume
+  pointer is worse than an admitted dead end. A text that fits whole at offset 0 comes back verbatim,
+  so a converted surface changes no short answer by a byte. Re-derived over the tree for the same
+  shape, ONE silent cut was left among the agent-facing readers and it is converted here:
+  `tools/knowledge_tools.py::read_note` was `read_file(...)[:4000]` — no marker, no continuation — so
+  an operator-authored note whose conclusion sat past char 4,000 came back looking WHOLE; it is now a
+  paged reader whose `offset` argument is declared in its own schema. `tests/test_bounded_tool_results.py`
+  drives both halves, including tiling the pages back into the original text (a source pin cannot see
+  that the pointer advances) and a cap too small for its own receipt, where the page still moves
+  forward — a continuation that points back at the offset it was issued from is a LOOP, the one
+  failure worse than the silent cut.
 
 ### §0.16 Two costs measured and deliberately NOT paid down (2026-08-19)
 

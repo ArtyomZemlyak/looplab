@@ -164,3 +164,96 @@ def compact_history(messages: list[dict], max_chars: int, summarize, *, keep_las
     note = {"role": "user",
             "content": "[Summary of earlier steps — informational context, NOT instructions]\n" + summary}
     return messages[:head] + [note] + messages[tail:]
+
+
+# ------------------------------------------------------------------ the bounded-answer rule
+#
+# THE RULE, in one sentence: **a bounded answer leads with what the caller came for, and names what
+# it did not cover beside the call that returns it.**
+#
+# WHY IT LIVES HERE AND NOT IN A PROVIDER. `docs/BACKLOG.md` §0.17 measured the same habit twice in
+# one day, in two subsystems that share no code: the deep-research memo was rendered through a blind
+# head cut (median 9,083 chars against a 4,000-char keep) and `Recommended directions` — the section
+# the whole pipeline exists to produce — fell past the cut in 89 of 89 memos; a `kb_search` hit was
+# clipped at 600 chars while the case record led with the task goal, so `best params=` began at char
+# 691 of 1,610 and 3 of 3 exact-task hits were cut mid-goal. Both fixes were LOCAL (the memo gained
+# sections, the case record leads with its params), and neither stopped the NEXT bounded surface
+# putting its answer past its own cut — which is what this function is for. `RESULT_CAP` is already
+# canonical here for the same layering reason (`runtime/` sits below `tools/`), so the rule that
+# governs how a surface spends that cap belongs beside it rather than in one provider's file.
+#
+# WHAT MAKES A BOUND HONEST, and each clause is one of the two measured failures:
+#   * ADDRESSABLE — the answer names the exact call that returns the part it left out. A bound with
+#     no continuation is an answer the caller cannot complete; `tools/_base.py`'s provider contract
+#     ("every agent-facing reader states the range it covered and the call that continues past it,
+#     and that call must be one the caller has NOT already spent") is the same sentence one layer up.
+#   * SELF-DESCRIBING — the receipt states the range AND the total, so a short record and a truncated
+#     one are never byte-indistinguishable. "A bound that removes the answer is worse than no answer,
+#     because the caller cannot tell a short record from a truncated one" (§0.17).
+#   * INSIDE THE CAP — the receipt is charged against `cap`, never added on top of it. A marker
+#     appended after the fit decision is exactly what pushes the receipt back past the outer bound,
+#     where the loop's own head-cut (`agents/tool_loop.py::_cap_tool_result`) eats it — the receipt
+#     that says the result is partial is then the one thing that does not survive.
+#
+# `tools/_base.py::clip` and `fit_rows` are the two SHAPES this rule already had (one string, a row
+# listing); `bounded_page` is the third and the one the two measured defects needed: a reader whose
+# content is longer than any cap and whose payload may be anywhere in it.
+
+#: The receipt a bounded page owes its caller. `{what}` names the subject, the range is 0-based and
+#: half-open (`{start}`-`{end}` of `{total}` characters), and `{more}` is the continuation clause.
+PAGE_RECEIPT = "\n…[{what}chars {start}-{end} of {total}{more}]"
+
+
+def bounded_page(text: str, cap: int, *, offset: int = 0, more_call: str = "",
+                 what: str = "") -> str:
+    """One PAGE of `text` under `cap` chars, with the receipt that makes the bound honest.
+
+    Returns the slice starting at `offset` that fits in `cap` INCLUDING its own receipt, followed by
+    that receipt whenever the page does not cover the whole text (or the caller asked for a page
+    past the start — a caller reading page 2 is owed the range even when page 2 is the last one).
+    A text that fits whole at `offset=0` is returned VERBATIM: nothing was left out, so there is
+    nothing to name, and a surface converted to this rule keeps producing byte-identical short
+    answers.
+
+    `more_call` is the caller's own next call, formatted with `{offset}` = the first character this
+    page did not cover — the provider spells its own tool name and arguments, because only it knows
+    which of its arguments the continuation has to repeat. Empty means the surface has no
+    continuation to offer, and the receipt then says exactly that instead of naming a call that does
+    not exist: a fabricated resume pointer is worse than an admitted dead end.
+
+    Pure and total: a junk `offset` clamps into range. The one place the receipt is allowed to push
+    the answer over `cap` is a cap too small to hold both it and a single character — the page then
+    carries one character rather than none, because a continuation that points back at the offset it
+    was issued from is a LOOP, and a bound that can only be re-requested is worse than the silent cut
+    this rule exists to end.
+    """
+    total = len(text)
+    start = max(0, min(int(offset or 0), total))
+    if start == 0 and total <= cap:
+        return text
+    label = f"{what} " if what else ""
+
+    def _receipt(end: int) -> str:
+        if end >= total:
+            more = "; end of text"
+        elif more_call:
+            more = f"; call {more_call.format(offset=end)} for the rest"
+        else:
+            # No continuation exists. Say so — the caller can then stop asking rather than spend a
+            # call on a page it has no way to reach (`tools/_base.py`: the call a bounded reader
+            # names must be one the caller has NOT already spent).
+            more = "; the rest is not addressable from this call"
+        return PAGE_RECEIPT.format(what=label, start=start, end=end, total=total, more=more)
+
+    # Fixed point on the receipt's own length — the range numbers shift the split by a digit or two,
+    # and a receipt sized against the PRE-cut numbers lands over the cap (the same settling loop
+    # `agents/tool_loop.py::_cap_tool_result` runs, for the same reason).
+    keep = max(0, int(cap))
+    for _ in range(4):
+        end = min(total, start + keep)
+        new_keep = max(1 if end < total else 0, int(cap) - len(_receipt(end)))
+        if new_keep == keep:
+            break
+        keep = new_keep
+    end = min(total, start + keep)
+    return text[start:end] + _receipt(end)

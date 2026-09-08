@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-147 event types — 109 folded into `RunState`, 38 diagnostic; 826 declared payload keys; 26 types whose whole payload is stored by the fold.
+147 event types — 109 folded into `RunState`, 38 diagnostic; 827 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -90,7 +90,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `fork_unfulfilled` | diagnostic | A `fork` request the engine could not serve — recorded instead of silently dropped. | `from_node_id`, `generation`, `idx` | — |
 | `full_retrain_charged` | diagnostic | A repair that forced a full retrain, and the evaluation budget it spent. | `attempt`, `generation`, `node_id`, `spent` | — |
 | `hint` | folded · whole | An operator hint pushed into the next proposals; `replace` swaps the standing one. | `text` | `replace`, `source` |
-| `holdout_evaluated` | folded | The node's number on the agent-invisible holdout split, beside the search metric and their gap. | `gap`, `generation`, `metric`, `n_holdout`, `node_id`, `search_epoch` | `attempt`, `protocol` |
+| `holdout_evaluated` | folded | The node's number on the agent-invisible holdout split, beside the search metric and their gap. | `gap`, `generation`, `metric`, `n_holdout`, `node_id`, `search_epoch` | `attempt`, `program_sha256`, `protocol` |
 | `host_grading` | folded · whole | The host-side scorer's grade over the candidate's predictions. | `predictions`, `scorer` | `competition`, `n_hidden`, `n_labels`, `protocol` |
 | `hypothesis_added` | folded | A research hypothesis on the board — operator-authored, or engine-written after a deep-research pass. | `source`, `statement` | `at_node`, `concept_tags`, `concepts`, `id`, `parent_belief_id` |
 | `hypothesis_concepts` | folded | The concept ids one hypothesis was tagged with, against a named vocabulary. | `at_vocab`, `concepts`, `hyp_id`, `mode` | — |

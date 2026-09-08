@@ -1498,7 +1498,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "holdout_evaluated": PayloadContract(
         "The node's number on the agent-invisible holdout split, beside the search metric and their gap.",
         required=("gap", "generation", "metric", "n_holdout", "node_id", "search_epoch"),
-        optional=("attempt", "protocol"),
+        # `program_sha256`: the digest of the operator's WITHHELD scorer program, on the rows whose
+        # `protocol` is `holdout_scorer` (doc 52 row 10a slice (b)) — the same receipt the consistent
+        # scorer writes to `metric_provenance.host_scorer`, so "the same unseen scorer for every
+        # leader" stays checkable after the fact. Absent on every other protocol and on every log
+        # written before it (reader-side default, invariant #5).
+        optional=("attempt", "program_sha256", "protocol"),
     ),
     "host_grading": PayloadContract(
         "The host-side scorer's grade over the candidate's predictions.",

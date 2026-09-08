@@ -286,13 +286,30 @@ replay byte-identical) and the no-host negative control. `generalization_gap` is
 folded from this pair — the search optimised the host's number, so the self-report is an
 over-reporting audit and not an unseen signal; the unseen signal is slice (b)'s.*
 
-OPEN[repo-task-champion-is-picked-on-the-candidates-own-metric] slice (b), the WITHHELD half:
-the repo task's host scorer is consistent (row 10a) but scores a split the candidate can read, so
-the champion is still picked on a number the candidate could overfit — AIRA₂'s "marginal" half, a
-host-held split scored ONCE at finish for the top-k with selection through `holdout_select`, and
-`generalization_gap` folded for repo runs from that pair. Unenforceable until the run-record fence
-(row 2, shipped) is joined by the Landlock validation on a real GPU eval; a replay-digest proof
-that undeclared runs are byte-identical is part of the slice. proof:absent:HoldoutScorerSpec@looplab/adapters/repo_task.py
+*Closed 2026-09-08 (slice (b) shipped): the marker `repo-task-champion-is-picked-on-the-candidates-own-metric`
+stood here.* `adapters/repo_task.py::HoldoutScorerSpec` is the WITHHELD half — the operator's own
+program over a split the HOST holds, declared as `cmd.holdout_scorer` and refused at submit by the
+same rule as its consistent sibling (`scorer_outside_editables`, now ONE walk for both halves, the
+message naming the field as written). It is never a stage in any pipeline shape, a task declaring
+only a holdout scorer is refused (it scores nothing during the run), and its reader joins
+`EvalSpec.readers()` so every rule about readers covers it. `engine/holdout.py` runs it ONCE at
+finish over the val-top-k in the node's own workdir, under the eval's declared environment plus its
+own — the number lands as `holdout_metric` on a `holdout_evaluated` row stamped
+`protocol: "holdout_scorer"` with the program's `program_sha256` (a new optional payload key), the
+fold derives `generalization_gap` from the pair, and `holdout_select` (on by default) elects the
+champion by the unseen number among those leaders. A scorer that exits non-zero, times out or prints
+nothing readable yields NO number and never falls back to the search metric — that fallback is the
+defect this half removes. `tests/test_holdout_scorer.py` drives all five parts, including the one
+that is the slice: over the repo fixture the withheld ranking DISAGREES with the search ranking and
+the champion follows the withheld one, with `holdout_select=false` the same rows are recorded and the
+scalar pick returns, and an undeclared run folds byte-identically to what it always did.
+
+  **What is still owed, and it is not code:** the split's UNREACHABILITY rests on the read fence
+  (`runtime/read_fence.py` + `Settings.landlock`), whose kernel rung this box can only validate in
+  the advisory tier — the CAP_DAC_OVERRIDE warning every run here prints. An operator running this
+  on a real GPU box must keep the withheld split outside every mount the eval declares and read the
+  fence's own report; the mechanism above makes the number unseen by CONSTRUCTION (no stage can run
+  the scorer, and the split is named only in its `env`), not by kernel enforcement measured here.
 
 *Closed 2026-09-06 (row 3 shipped): the marker `mlebench-search-optimises-the-private-grade` stood
 here. `engine/holdout.py::apply_host_grade` graded every node against the private answers and

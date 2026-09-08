@@ -1088,6 +1088,11 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   `self_report_gap`, positive = over-reported), and the program's sha256 rides on
   `metric_provenance.host_scorer` so the "same scorer for every node" claim is checkable. See
   [Host-side scoring](tasks.md#host-side-scoring-cmdhost_scorer).
+- **The withheld scorer** (2026-09-08, doc 52 row 10a slice (b)) — `cmd.holdout_scorer` is the same
+  operator-owned shape over a split the HOST holds, run once at finish over the val-top-k and never
+  during the search. Its number is the node's `holdout_metric`, so under `holdout_select` the
+  champion is elected on a number no candidate was scored on while it was being built. See
+  [The withheld scorer](tasks.md#the-withheld-scorer-cmdholdout_scorer).
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
   checker (Researcher/Developer) before the next stage runs, so a diverged train can't silently feed
   eval. **Since 2026-09-06 the checker may LOOK** (`stage_check_tools`, on; doc 52 row 9): beside the
@@ -1226,6 +1231,11 @@ Additional safety monitors are off by default. Under the default `trust_gate=aud
   (repeated evaluation on the test split, then a `max`/`> best` choice over those scores).
 - `critic_check` — an execution-free critic of each solution. Broad critic warnings stay advisory;
   `critic:hardcoded_metric` is the narrow high-precision exception that can gate.
+- `feature_engineering` — the same flag that puts the "KEEP a feature only if it improves CV"
+  directive in the proposal prompt also ENFORCES it: the candidate's own per-feature `FEATURE_CV`
+  ledger is run through the operator's keep/drop rule (`search/operators.py`), and a feature the
+  ledger fails while the code still builds it is a `feature_cv:kept_feature_failed_cv` finding. The
+  evidence is the node's own numbers, so a candidate that reports no ledger is not flagged.
 
 Heuristic perfect-score, audit-unavailable and suspicious-output warnings remain advisory in every mode.
 High-precision reward-hack/leakage signals (and `critic:hardcoded_metric`) exclude a node from best-selection

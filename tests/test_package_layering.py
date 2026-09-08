@@ -101,7 +101,9 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("judgebench", "trust"): "`bait` invokes the structured judge at audit time",
     ("search", "adapters"): "`speculation_quality` builds the toy task for its calibration "
                             "benchmark",
-    ("search", "trust"): "`foresight`/`graded_novelty` call the verifier inside a scoring step",
+    ("search", "trust"): "`foresight`/`graded_novelty` call the verifier inside a scoring step, "
+                         "and `operators.feature_engineering_verdicts` applies the >1-SE rule "
+                         "(`trust/gate.py`) to one CV ledger row",
     ("serve", "agents"): "the assistant and preflight routes build roles per request",
     ("serve", "runtime"): "the engine process and the runs router reach the sandbox and "
                           "`command_eval` per request",
