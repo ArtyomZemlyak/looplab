@@ -49,6 +49,11 @@ class TaskAdapter(Protocol):
       grounding pre-phase) and `tools/run_tools.py` (`DataTools`).
     - `leakage_inputs() -> dict` — split/timestamp info for the leakage audit; consumed by
       `engine/orchestrator.py`.
+    - `shift_inputs() -> dict` — `{"reference": {col: values}, "current": {col: values}, "source":
+      str}`: the training sample beside the deployment one, for the ADVISORY distribution-shift
+      record (`trust/drift.py`); consumed by `engine/audit.py`. `{}` means "no comparable pair was
+      declared", which is recorded as such. An adapter without it falls back to the train/test rows
+      `leakage_inputs()` already publishes, so most tasks need not implement it.
     - `host_grader() -> dict` — out-of-process grading spec (labels/grader run host-side, outside
       the sandbox); consumed by `engine/orchestrator.py`.
     - `data_samples() -> dict[str, str]` — raw data samples for tasks that read data by absolute
@@ -90,7 +95,7 @@ class TaskAdapter(Protocol):
 # with no remaining consumer is registry rot (red test). Renaming a hook on one side alone —
 # the historical "the run silently stages/scores nothing" failure — is now a test failure.
 TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
-    "llm_roles", "assets", "columns", "leakage_inputs", "host_grader", "data_samples",
+    "llm_roles", "assets", "columns", "leakage_inputs", "shift_inputs", "host_grader", "data_samples",
     "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "onboarder_llm_roles", "params",
     "comparison_contract", "external_fallback_uses_llm",
     # Scheduler-facing capability declaration probed by engine/resources.py — registered so an
@@ -370,6 +375,36 @@ def validate_task(data: dict, *, existing_run: bool = False) -> TaskAdapter:
             "evaluation. Either give a `cmd` (a command + a metric to read), OR set the metric "
             "reader to \"auto\" (with backend=llm) so an onboarder builds the eval entrypoint first.")
     return adapter
+
+
+def submit_warnings(adapter) -> tuple[str, ...]:
+    """Everything a VALIDATED task earns at submit that must NOT stop the launch.
+
+    ONE rule, because a submit-time warning is worthless on the surface that does not print it. The
+    two below were spelled twice — `serve/launch.py::preflight_start` (which puts them on
+    `LaunchPreflight.warnings`, so `/api/start/preflight` and `/api/validate` return them) and
+    `cli/run_cmds.py::_report_task_warnings` (which echoes them to stderr) — and the CLI's copy was
+    written by hand from the server's, which is how a warning gets added on one surface only
+    (doc 27, `three-new-run-planners-no-shared-schema`).
+
+    Both are about the eval `command`'s argv, both are advisory by design, and both are TOTAL over an
+    injected dict `adapter`: the helpers isinstance-check a RepoTask and return [] otherwise.
+
+      * `eval_entrypoint_unprotected` — the scorer LoopLab cannot protect. The Developer's prompt
+        tells it the scoring cannot be rewritten; when the argv names no in-repo file, nothing
+        enforces that, and the same gap cost `runs/rubertlite-dr-unified-v6` 2x GPU per node before
+        anyone looked.
+      * `eval_source_tree_command_paths` — docs/29 F1c's third piece: an argv token naming the
+        editable SOURCE tree absolutely reaches the operator's original rather than the node's copy,
+        so no node's edits to it ever take effect.
+
+    What is NOT here is the missing-input-path warning: the launch funnel FAILS CLOSED on a task path
+    it cannot stat (`serve/launch.py::_validated_path_fingerprints`), so on that surface the same
+    condition is a refusal, not a warning. A rule that means two different things is not one rule.
+    """
+    from looplab.adapters.repo_task import (eval_entrypoint_unprotected,
+                                            eval_source_tree_command_paths)
+    return (*eval_entrypoint_unprotected(adapter), *eval_source_tree_command_paths(adapter))
 
 
 def load_task(path: str | Path, *, existing_run: bool = False) -> TaskAdapter:

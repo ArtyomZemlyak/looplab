@@ -166,7 +166,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 207)
+  //   207 + 1 -> 208 (2026-09-08): `mlflow_tracking_uri` (docs/BACKLOG.md §16) — the MLflow mirror
+  //   that runs WHILE the run does. A row because it decides whether this run's params, metrics and
+  //   champion code leave the box for an external tracking server; blank is off.
+  assert.equal(Object.keys(schema.fieldByKey).length, 208)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   //   190 -> 193 (2026-09-06): the three bench-driven knobs of docs/60 §60.9 — `llm_stream_stall_

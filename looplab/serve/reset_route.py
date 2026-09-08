@@ -35,7 +35,7 @@ from looplab.serve.appstate import (
     _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.durable_op import refuse_unless_quiescent
-from looplab.serve.http import json_object
+from looplab.serve.http import generation_conflict, json_object
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 from looplab.serve.reset_transaction import (
     RESET_ARTIFACT_NAMES, ResetReceiptError, complete_reset_if_observed,
@@ -233,12 +233,9 @@ def _validate_reset_quiescence(srv, rd: Path, expected_generation: str) -> None:
     """Reject every deterministic preflight failure before publishing reset ownership."""
     current_generation = srv.commands.run_generation(rd)
     if expected_generation != current_generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "expected_generation": expected_generation,
-            "current_generation": current_generation or None,
-            "message": "The run changed before Replay was committed.",
-        })
+        raise generation_conflict("The run changed before Replay was committed.",
+                                  expected=expected_generation,
+                                  current=current_generation or None)
     ownership = _engine_liveness(rd)
     if ownership is None:
         raise HTTPException(409, {
@@ -255,12 +252,9 @@ def _revalidate_reset_quiescence_locked(
     """Repeat mutable quiescence checks after this request owns engine/config/event locks."""
     current_generation = srv.commands.run_generation(rd)
     if expected_generation != current_generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "expected_generation": expected_generation,
-            "current_generation": current_generation or None,
-            "message": "The run changed before Replay ownership was published.",
-        })
+        raise generation_conflict("The run changed before Replay ownership was published.",
+                                  expected=expected_generation,
+                                  current=current_generation or None)
     if (_fresh_resume_launch_pending(rd) or _fresh_run_launch_pending(rd)
             or not srv.state(rd).finished):
         raise HTTPException(409, "run changed or began launching during Replay preflight")

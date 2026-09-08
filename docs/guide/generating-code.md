@@ -45,9 +45,9 @@ below shows both the Genesis path and the equivalent task file.
 | Kinds | `code_regression`, `mlebench`, `mlebench_real` | `repo` (+ its onboarding / framework variants) |
 | Use when | there is no code yet — a Kaggle-style "data in, predictions out" problem | you already have a project and want it improved/completed in place |
 
-> `classification`, `regression`, and `timeseries` also run with an LLM, but they **tune knobs in a
-> fixed template** rather than writing free-form code. The "writes the whole script" kinds are
-> `code_regression`, `mlebench`, `mlebench_real` and `dataset`.
+> `classification` and `regression` also run with an LLM, but they **tune knobs in a fixed
+> template** rather than writing free-form code. The "writes the whole script" kinds are
+> `code_regression`, `timeseries`, `mlebench`, `mlebench_real` and `dataset`.
 
 !!! warning "Which kinds actually have a held-out grader"
 
@@ -73,11 +73,14 @@ project LoopLab-ready. Nothing launches until you confirm; refinement may still 
 model calls even though it has not started a scientific run.
 
 The CLI keeps the historical **Genesis** task author, and the TUI calls the server's `/api/genesis`
-planner. These three surfaces share task-adapter validation and backend-default authority, but they
-do not share one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token;
-the TUI asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
-`/api/start` to the token it returns; CLI validates directly. Refine a proposal in the surface that
-created it.
+planner. These three surfaces author a plan three different ways on purpose, and share one SHAPE for
+what they produce: `core/run_proposal.py::RunProposal` (the proposal fields, the `/api/start` body,
+the run-id slug, the launch-settings filter), plus task-adapter validation and backend-default
+authority. Web additionally submits a reviewed `/api/start/preflight` token; the TUI asks
+`/api/validate` (the same funnel, answered as a verdict) on every draft and binds its `/api/start`
+to the token it returns; CLI validates directly. Refine a proposal in the surface that created it —
+the refine turn keeps every field the planner omitted, so a partial emit tweaks your tuned card
+instead of replacing it.
 
 For a repo it is a real **agent** with read-only scout tools (`list_dir` / `read_file` /
 `find_files`) and is instructed to inspect your README, entry/eval script, requirements and result

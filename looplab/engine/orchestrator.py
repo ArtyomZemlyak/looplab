@@ -4227,6 +4227,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self.store.append(EV_DATA_PROFILED, {"columns": profile_dataset(cols())})
                     _ev("data_profiled")
                     _su_step("data profiled")
+                # Distribution shift (docs/BACKLOG.md §15): record how far the deployment sample is
+                # from the training one, from the SAME declared data the two rungs around it read.
+                # Advisory and appended BEFORE the gate below on purpose — a run the leakage gate
+                # aborts is exactly a run whose operator wants to see what the data looked like.
+                self._record_distribution_shift()
                 # Leakage-first grounding (I9): if the task exposes split/feature/target/time
                 # data and a leak is detected, refuse to run — don't produce results on leaky data.
                 leakage_blocked = self._leakage_blocks()
@@ -5186,6 +5191,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         state = self._maybe_distill_lessons(state)
         state = self._maybe_refresh_lessons(state)
 
+        # M4 auto-skills, same shape and the same `lessons_every` pace: promote the technique of a
+        # card whose evidence has SETTLED into the shared skill store now, instead of holding every
+        # promotion for the run-end reflection — which a killed run never reaches. Replay-safe (the
+        # `skills_promoted` at_node gate), no-op when the cadence is 0, and the run-end pass skips
+        # what this one already wrote so the classifier is still paid once per card.
+        state = self._maybe_promote_skills(state)
+
         # Reconciliation (memory ↔ corrected outcomes): when a node_reset re-eval FLIPS a node's
         # outcome (a false-failure re-scored to evaluated, a demoted champion), this run's DISTILLED
         # lessons grounded in that node go stale — fold-derived memory self-corrects but the LLM-written
@@ -6058,6 +6070,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         with self._op_span("lessons_distill"):
             return self.lessons.maybe_distill_lessons(state)
 
+    @in_llm_lane("enrichment")
+    def _maybe_promote_skills(self, state: RunState) -> RunState:
+        # Own op-trace for the same reason as the distill above: the classifier calls this pass makes
+        # are real money, and a beacon-only phase writes them with `trace_id=null` (CLAUDE.md's span
+        # rule). Not in `FORWARDED_SUBOBJECT_MEMBERS` — like every other `_maybe_*` here it opens a
+        # span and so is not a one-line delegator.
+        with self._op_span("skills_promote"):
+            return self.lessons.maybe_promote_skills(state)
+
     def _lessons_store_stamp(self):
         return self.lessons.lessons_store_stamp()
 
@@ -6278,7 +6299,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         its `client`/`is_code_generating` forwarders come from `WrapsDeveloper`, so they describe the
         DEVELOPER stage only (`agents/unified_agent.py::_wrapped` -> `_active_developer`). On every
         task whose Developer is a fixed template but whose Researcher is an `LLMResearcher` —
-        classification, regression, timeseries — both probes therefore read the same client-less
+        classification, regression (timeseries too, until its LLM path started writing the
+        forecaster on 2026-09-08) — both probes therefore read the same client-less
         template and the whole product default answered "no LLM" while calling the provider once per
         node. Measured on `examples/classification_task.json` with stock Settings: `run_started`
         recorded no `speculation_depth` at all (AUTO had settled to 0) even though the run's own

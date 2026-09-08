@@ -1362,6 +1362,7 @@ def test_resume_shutdown_hook_precedes_jupyter_reaper(tmp_path):
 def test_server_startup_recovers_pending_resume_without_runs_poll(tmp_path, monkeypatch):
     """A UI-server restart autonomously restores a durable intent; `/api/runs` is not required."""
     from looplab.events.eventstore import EventStore
+    from looplab.engine import run_lifecycle   # the grace's owning module (doc 25 XP-03)
     from looplab.serve import engine_proc as ep
 
     rd = tmp_path / "run"
@@ -1371,7 +1372,7 @@ def test_server_startup_recovers_pending_resume_without_runs_poll(tmp_path, monk
     store.append("run_started", {"run_id": "run", "task_id": "t", "direction": "min"})
     store.append("resume_requested", {})
     spawns = []
-    monkeypatch.setattr(ep, "_RESUME_RECONCILE_GRACE_S", 0.0)
+    monkeypatch.setattr(run_lifecycle, "RESUME_RECONCILE_GRACE_S", 0.0)
     monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
     monkeypatch.setattr(ep, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
 
@@ -1384,6 +1385,7 @@ def test_server_startup_recovers_restart_after_command_worker_loss(tmp_path, mon
     """The restart event itself is enough recovery truth; no browser or command thread must survive."""
     from looplab.events.eventstore import EventStore
     from looplab.events.replay import fold
+    from looplab.engine import run_lifecycle   # the grace's owning module (doc 25 XP-03)
     from looplab.serve import engine_proc as ep
 
     rd = tmp_path / "run"
@@ -1397,7 +1399,7 @@ def test_server_startup_recovers_restart_after_command_worker_loss(tmp_path, mon
     assert state.last_resume_request_seq == restart.seq
 
     spawns = []
-    monkeypatch.setattr(ep, "_RESUME_RECONCILE_GRACE_S", 0.0)
+    monkeypatch.setattr(run_lifecycle, "RESUME_RECONCILE_GRACE_S", 0.0)
     monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
     monkeypatch.setattr(ep, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
 
@@ -1440,6 +1442,7 @@ def test_server_startup_recovers_restart_record_lost_before_intent_append(tmp_pa
 
 def test_server_startup_does_not_create_waiter_for_unknown_liveness(tmp_path, monkeypatch):
     """Unknown/reparse runs stay quarantined without one 20 Hz polling thread per directory."""
+    from looplab.engine import run_lifecycle   # the grace's owning module (doc 25 XP-03)
     from looplab.serve import engine_proc as ep
 
     rd = tmp_path / "run"
@@ -1450,7 +1453,7 @@ def test_server_startup_does_not_create_waiter_for_unknown_liveness(tmp_path, mo
     store.append("resume_requested", {})
     spawns = []
     waiters = []
-    monkeypatch.setattr(ep, "_RESUME_RECONCILE_GRACE_S", 0.0)
+    monkeypatch.setattr(run_lifecycle, "RESUME_RECONCILE_GRACE_S", 0.0)
     monkeypatch.setattr(ep, "_engine_liveness", lambda _rd: None)
     monkeypatch.setattr(ep, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
     monkeypatch.setattr(
@@ -4135,6 +4138,71 @@ def test_skills_authoring_lists_nested_packages_read_only_and_rejects_nested_wri
     assert [row["name"] for row in depth_capped["files"]] == ["root.md"]
     assert depth_capped["truncated_files"] == 0
     assert depth_capped["inventory_incomplete"] is True
+
+
+def test_memory_skills_authoring_root_reviews_auto_cards_and_refuses_every_write(
+        tmp_path, monkeypatch):
+    """The auto-distilled store is REVIEWABLE from Authoring and writable from nowhere but the engine.
+
+    Doc 27's `auto-distilled-skills-outside-authoring`: the surface's roots were prompts/skills/
+    knowledge, so a card the engine drafted into `<memory_dir>/skills/` was invisible to the one
+    party who can judge it until cross-task promotion moved it into the production listing. The
+    card here is written by the REAL writer, so the row this route publishes is the row the runtime
+    reads — a hand-rolled fixture would pass while the frontmatter contract drifted.
+    """
+    from looplab.engine.memory import write_auto_skill
+
+    memory_dir = tmp_path / "portfolio-memory"
+    skills = memory_dir / "skills"
+    card = write_auto_skill(skills, "Target-encode high-cardinality categoricals",
+                            "Fit the encoder on train folds only.", ["kaggle", "tabular"], "task-a")
+    assert card is not None and card.parent == skills
+    # A file the store did not write and the runtime would ignore: the listing shows authored
+    # markdown, not a directory glob of whatever else landed there.
+    (skills / "notes.txt").write_text("not markdown", encoding="utf-8")
+
+    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(memory_dir))
+    client = TestClient(make_app(tmp_path))
+    listing = client.get("/api/memory_skills")
+    assert listing.status_code == 200, listing.text
+    payload = listing.json()
+    assert payload["dir"] == str(skills)
+    rows = {row["name"]: row for row in payload["files"]}
+    assert set(rows) == {card.name}
+    row = rows[card.name]
+    # Read-only, and carrying the lifecycle frontmatter the review question is actually about.
+    assert row["read_only"] is True
+    assert "status: candidate" in row["text"] and "provenance: auto" in row["text"]
+    assert row["text"] == card.read_text(encoding="utf-8")
+
+    # Every write route refuses, and refuses as 405 — not "unknown kind", which would deny the
+    # existence of a resource the client just listed.
+    operation_id = "12345678-1234-4234-9234-123456789abc"
+    before = card.read_bytes()
+    assert client.put(f"/api/memory_skills/{card.name}", content=b"# forged\n").status_code == 405
+    forged = client.put(
+        f"/api/memory_skills/{card.name}/operations/{operation_id}",
+        json={"text": "# forged\n", "expected_revision": row["revision"],
+              "expected_target_root_id": payload["target_root_id"]})
+    assert forged.status_code == 405
+    receipt = client.get(
+        f"/api/memory_skills/{card.name}/operations/{operation_id}",
+        params={"expected_target_root_id": payload["target_root_id"],
+                "expected_revision": row["revision"], "desired_revision": row["revision"]})
+    assert receipt.status_code == 405
+    assert card.read_bytes() == before
+    assert client.put("/api/memory_skills/x.md", content=b"# no").status_code == 405
+    assert client.get("/api/nonsense").status_code == 404
+
+
+def test_memory_skills_root_is_empty_without_a_memory_dir(tmp_path, monkeypatch):
+    """No memory dir configured is `dir: null`, never a 404 or a 500 — the tab renders and says so."""
+    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", "")
+    client = TestClient(make_app(tmp_path))
+    response = client.get("/api/memory_skills")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"dir": None, "target_root_id": None, "files": [],
+                               "truncated_files": 0, "inventory_incomplete": False}
 
 
 def test_cross_run_import_origin_names_the_source_attempt(tmp_path):

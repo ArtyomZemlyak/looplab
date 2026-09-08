@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 
+from looplab.core.run_proposal import RunProposal
 from looplab.tools._base import fn_spec
 
 
@@ -141,12 +142,18 @@ class RunLauncherTools:
                         "A repo task MUST carry a `cmd` {command|stages, metric:{reader,key}} — point it "
                         "at a file the agent will BUILD if no scorer exists — or set metric.reader "
                         "\"auto\"; `repo` must be an ABSOLUTE path that exists.)")
-        steps = [str(step).strip() for step in (args.get("setup_steps") or [])
-                 if str(step).strip()][:12]
-        spec = {"proposal_id": str(uuid.uuid4()),
-                "run_id": rid, "task": task or {}, "task_file": task_file,
-                "settings": args.get("settings") if isinstance(args.get("settings"), dict) else {},
-                "rationale": str(args.get("rationale") or ""), "setup_steps": steps}
+        # The card SHAPE is `core/run_proposal.py::RunProposal` (doc 27,
+        # `three-new-run-planners-no-shared-schema`, closed 2026-09-08). This surface, the TUI's
+        # `/api/genesis` card and `looplab run --goal` used to spell the same six fields — plus the
+        # setup-step cap and the settings filter — three times over. `core` and not `serve` because
+        # `tools/` may not import `serve` (doc 25 XP-03); the schema is data, so it belongs below
+        # both. It still VALIDATES nothing on its own: the launch funnel is the one authority, and
+        # the `validate_task` bounce above is what this tool owes the model before it proposes.
+        spec = RunProposal.from_card(
+            {"proposal_id": str(uuid.uuid4()), "run_id": rid, "task": task or {},
+             "task_file": task_file, "settings": args.get("settings"),
+             "rationale": args.get("rationale"), "setup_steps": args.get("setup_steps")},
+            planner="web", normalize_settings=True).card()
         self.proposals.append(spec)
         # describe the proposal by WHAT the composable task carries (there is no `kind` field)
         what = task_file or (task and ("repo" if task.get("repo") else

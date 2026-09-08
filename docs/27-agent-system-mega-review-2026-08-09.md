@@ -112,7 +112,7 @@ Research only.
 | P1 | `Idea.eval_profile` drove dispatch, but an LLM Researcher was not told a repo task's valid profile names or semantics | models guessed names or left a valuable cost/quality control unused | **Fixed:** exact task profiles and effective timeouts are included in the task-specific hint and exercised through real command selection; fresh malformed profiles fail loudly while historical snapshots retain their recorded dispatch semantics |
 | P1 | Auto-memory wrote `status: candidate`, but the skill loader ignored lifecycle metadata and exposed every file immediately; its lifecycle key was also a truncated readable slug | one-run model-authored procedure could masquerade as promoted reusable knowledge, including through a same-prefix slug collision | **Fixed:** manual skills remain compatible; auto candidates are hidden by default, promoted skills are visible and labeled untrusted, explicit inspection can include candidates, lifecycle frontmatter cannot be forged through the model body or a multiline/Unicode task id, and promotion evidence is keyed by the full normalized-claim SHA-256 with exact-match legacy reuse |
 | P1 | `CompositeTools` silently kept the first provider on duplicate function names | capability loss was deterministic but invisible; routing mistakes looked like model failure | **Fixed:** legacy first-wins behavior remains, collisions are recorded and warned, and opt-in strict composition fails immediately |
-| P1 | CLI, TUI and Web had three New-run planners while README implied one shared Genesis | product parity claims exceeded implementation parity; proposal schemas can drift | **Documented truthfully now;** canonical planner/service remains a follow-up rather than a risky launch rewrite |
+| P1 | CLI, TUI and Web had three New-run planners while README implied one shared Genesis | product parity claims exceeded implementation parity; proposal schemas can drift | **Fixed 2026-09-08:** `core/run_proposal.py::RunProposal` is the shared schema (shape, `/api/start` body, run-id slug, settings filter, refine merge, provenance); the three planners are compatibility adapters over it and readiness stays the one `serve/launch.py` funnel. The two run-id slugs had already drifted, which is the drift this row predicted |
 | P1 | Task-facet stewards spend finalize-time model calls and have a ledger plus operator CLI, but facets do not affect retrieval/ranking and are not fetched by the UI | paid product surface has no behavioral consumer | **Fixed without inventing behavior:** fresh `task_facets_finalize=false` stops scheduling the third paid call while concept+claim curation remains enabled; explicit opt-in, manual/on-demand APIs and ledgers remain. Snapshot schema v2 pins the new paid-treatment bit, while v1/missing-field snapshots preserve the historical all-three treatment behind `cross_run_curation`; facets still never authorize or rank |
 | P1 | Prompt files hot-reload without a run/phase-pinned revision; UI prompts have a separate store | identical event inputs can receive different treatment mid-run and cannot be reproduced exactly | **Open architecture item:** pin a prompt bundle/context/tool-schema manifest per run or phase while retaining hot reload for future phases/runs |
 | P1 | Outer event sourcing stops at the inner agent loop | crash recovery reconstructs state but loses unfinished expensive work and trajectory evidence | **Open architecture item:** additive phase/checkpoint/tool-receipt events and safe-boundary resume |
@@ -323,9 +323,25 @@ Research only.
 >   what order), nothing exercises prompt injection or cross-run scope, and nothing repeats a
 >   stochastic trial — the corpus holds one sample per decision, so it carries no confidence
 >   interval and cannot support one.
-> - **OPEN[three-new-run-planners-no-shared-schema]** CLI, TUI and Web still plan a new run three
->   ways; no `RunProposal` service or shared schema exists anywhere in `serve/`, and
->   `engine/genesis.py` says so in production source. proof:absent:RunProposal@looplab/serve
+> - **[closed 2026-09-08 — *the schema landed; three planners is not the defect and did not need
+>   fixing.* `core/run_proposal.py::RunProposal` owns what the row asked a canonical service to own:
+>   the proposal shape, the `/api/start` body (`start_body`), the run-id slug, the launch-settings
+>   filter, the refine merge, the operator-facing rendering and the `planner` provenance. All three
+>   planners are compatibility adapters over it, as the row prescribed —
+>   `tools/machine_runs_tools.py::RunLauncherTools` (Web),
+>   `serve/routers/genesis.py::_normalize_genesis` (TUI) and `looplab run --goal`, which now
+>   announces its plan in the same words the TUI renders. `core/` and not `serve/` because those
+>   three sit in three packages and `tools/` may not import `serve` (doc 25 XP-03);
+>   `serve/launch.py` imports it and adds `validate_proposal`, the readiness QUESTION asked about a
+>   proposal rather than a hand-built body. Validation is deliberately NOT here:
+>   `serve/launch.py::preflight_start` is still the one authority, reached as a verdict through
+>   `/api/validate` and as a refusal through `/api/start`. Two duplications died with measurable
+>   consequences — the two run-id slugs had already drifted (`"--a--"` slugged to `"a"` on the TUI
+>   and `"-a-"` in the router, which is a run name the launch funnel refuses), and the CLI's
+>   hand-copied submit warnings are now `adapters/tasks.py::submit_warnings`, one rule both surfaces
+>   print. `tests/test_run_proposal_schema.py` drives all of it: cards round-trip between planners,
+>   the two slugs agree, and a launch bound to the schema's own body is accepted by a real
+>   `/api/start`.]**
 > - **[closed 2026-09-03 — `McpTools.cached()` is keyed on a digest of the config `load_config`
 >   resolves, which is what actually determines the server set: an operator who edits `.mcp.json` no
 >   longer keeps talking to the old servers, and a per-principal config source would key itself.
@@ -333,11 +349,24 @@ Research only.
 >   the item below — so that key would spawn N identical subprocess sets and buy nothing. Nothing is
 >   evicted (a handle owns a thread, a loop and a subprocess and exposes no close), so the number of
 >   distinct configurations one process connects for is bounded instead.
->   `tests/test_mcp_cache_key.py`.]**
-> - **OPEN[mcp-config-has-no-per-principal-source]** the residue the cache key cannot supply: MCP
->   servers are resolved from `LOOPLAB_MCP_CONFIG` / `LOOPLAB_MCP_SERVERS` / `.mcp.json`, all
->   process-wide, so every session on a shared server gets the same server set whatever principal is
->   driving it. proof:absent:principal_mcp_config@looplab/tools/mcp_tools.py
+>   `tests/test_mcp_cache_key.py`. **2026-09-08: the per-principal source it said would key itself
+>   now exists — see the row below — and the key did not change, which was the claim.**]**
+> - **[closed 2026-09-08 — *the source exists, and it is the PARTY's, decided before the cache.*
+>   `serve/principal.py::mcp_config_scope` is the second decision in that module beside
+>   `portfolio_access`: the owner plane gets a scope NAME (`owner` / `local`), and a `review`
+>   capability, an anonymous caller or a caller that named no principal gets `None` — no
+>   configuration read, no server connected, nothing entered in the cache map. `tools/mcp_tools.py::
+>   principal_mcp_config` resolves that name: with `LOOPLAB_MCP_CONFIG_DIR` declared it is
+>   `<dir>/<scope>.json` and a scope with no file gets NO servers (falling back to the process-wide
+>   set would hand the one party the operator did not configure the servers configured for someone
+>   else); with nothing declared every owner-plane party keeps the historical process-wide sources
+>   byte-identical, so a single-user deployment does not move. The cache stays keyed on the resolved
+>   configuration and that is now the stronger statement: the authorization happened one call
+>   earlier, so two parties share handles exactly when they were told to talk to the same servers —
+>   a cache key that granted access would grant it by collision. `tests/test_mcp_principal_config.py`
+>   drives all four properties through the real `build_tools` with a connect accountant, including
+>   that a refused party reaches no connect at all; `docs/guide/deployment.md` states the table. The
+>   marker `mcp-config-has-no-per-principal-source` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-08 — *the registry is typed, and the residue it does not cover is now
 >   countable.* `core/prompts.py::PromptDefinition` (frozen: key + family + one line about the JOB it
 >   governs) is the row shape, `PROMPT_REGISTRY` the 19 rows, and `PROMPT_KEYS` is DERIVED from it so
@@ -358,11 +387,21 @@ Research only.
 >   asymmetry `core/appconfig.py` already draws. The model half shipped in the same change
 >   (`strategist-developer-field`) — `_StrategyOut.developer` plus a durable receipt for the drop
 >   `validate_strategy` makes. `tests/test_strategist_developer_switch.py` drives both ends.]**
-> - **OPEN[auto-distilled-skills-outside-authoring]** the P2 remaining product gap: the Authoring
->   surface's roots are `prompts`/`skills`/`knowledge` off `Settings`, so auto-distilled
->   `<memory_dir>/skills/` candidates stay hidden until cross-task promotion with no first-party
->   review UI. The named close is a `memory_skills_dir` root on that surface.
->   proof:absent:memory_skills_dir@looplab/serve
+> - **[closed 2026-09-08 — *the fourth root exists and it is READ-ONLY on purpose.*
+>   `serve/routers/misc.py::memory_skills_dir` derives `<memory_dir>/skills` (not a `Settings` field:
+>   the engine writes `Path(memory_dir) / "skills"` and `tools/skills.py` reads that same path, so a
+>   field would be a second spelling of one place), `_AUTHOR_KINDS` lists `memory_skills` beside the
+>   three writable roots, and the UI has its own tab whose copy states the lifecycle a reviewer is
+>   actually asking about — `candidate` means no run loads it, `promoted` is the only status the
+>   production listing shows. Every write route answers 405 rather than "unknown kind": those files
+>   carry the `status`/`claim_sha256`/`fingerprints` frontmatter that `write_auto_skill`'s
+>   read-modify-write and the visibility gate both key on, so a hand edit here would promote a
+>   one-task candidate by typing a word. Driven by
+>   `tests/test_server.py::test_memory_skills_authoring_root_reviews_auto_cards_and_refuses_every_write`
+>   (the card is written by the REAL `write_auto_skill`, so the published row is the row the runtime
+>   reads) and by `ui/test/authoringSkillsReadOnly.test.js`, which mounts the panel and opens the
+>   card. The marker `auto-distilled-skills-outside-authoring` stood here; deleted per the index
+>   rule.]**
 >
 > **Not re-derived here, and saying so:** the `**Fixed:**` rows above (they were not this pass's
 > scope) and the Validation record's suite counts.
@@ -414,10 +453,9 @@ Research only.
 > - **Agent eval corpus — STILL OPEN.** No trajectory/handoff/prompt-injection eval ladder exists
 >   under `tests/`; the closest artifacts are the opt-in live smokes
 >   (`tests/test_live_scenarios.py`, `LOOPLAB_LIVE_SCENARIOS=1`) and the replay/outcome unit suites.
-> - **Canonical `RunProposal` service — STILL OPEN.** No such symbol exists; the three planning
->   stacks below remain separate. The launch boundary itself hardened since
->   (`serve/launch.py::_confine_task_file` + `task_file_roots`), which narrows the risk but is not
->   the shared planner/schema.
+> - **Canonical `RunProposal` service — SHIPPED 2026-09-08.** `core/run_proposal.py::RunProposal`.
+>   The three planning stacks below stay separate as PLANNERS and share one schema, one `/api/start`
+>   body, one slug, one settings filter and one readiness rule; see the resolution on the row above.
 
 ## Duplication and taxonomy debt
 
@@ -463,6 +501,29 @@ whose server validates before spawn but issues no reviewed receipt; CLI validate
 canonical `RunProposal` service should own task validation, normalized settings, provenance,
 editable-field policy and launch fingerprint. Existing callers should be compatibility adapters so
 saved cards and CLI behavior do not disappear.
+
+*Resolution (2026-09-08) — the schema shipped; the three planners stayed, and that was the right
+half to keep.* `core/run_proposal.py::RunProposal` owns the proposal shape, `start_body` (the one
+`/api/start` payload), `slug_run_id`, `normalize_launch_settings`, the refine merge, `lines` (the
+operator-facing rendering) and a `planner` provenance stamp. Every planner is now a compatibility
+adapter over it exactly as this paragraph prescribed, and no saved card or CLI behaviour changed: a
+card that never carried `proposal_id`/`planner` still does not grow them.
+
+Two things this paragraph asked for are deliberately NOT in it. **Task validation** is not, because
+it already had one home and a second would be a second answer: `serve/launch.py::preflight_start`
+validates, and `validate_launch` (`POST /api/validate`, doc 52 row 8) is that same funnel asked as a
+question — `validate_proposal` beside it takes a `RunProposal` so a client never hand-builds the
+body it asks about. **A launch fingerprint** is not, because the server issues one
+(`_launch_token`), and a client-side second one that disagreed would be worse than none.
+
+The measured payoff was not the schema but the two copies it retired. The run-id slug existed twice
+with a comment on each saying they must stay in step, and they had already drifted: `"--a--"` slugged
+to `"a"` in the TUI and `"-a-"` in the genesis router, i.e. the router could name a run something the
+launch funnel refuses. And the CLI's submit-time warnings were hand-copied from the server's two
+calls, so a third would have landed on whichever surface its author was editing; both now read
+`adapters/tasks.py::submit_warnings`. The missing-input-path warning deliberately did NOT join it —
+the launch API fails closed on a path it cannot stat, so that condition is a refusal there and a
+warning on the CLI, and a rule that means two things is not one rule.
 
 ### Paid but inert task facets
 

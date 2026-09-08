@@ -17,10 +17,12 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Optional
 
-# The two looplab imports this module allows itself: the wire-protocol vocabulary it shares with the
-# server (phase names), and the shared metric formatter (doc 25 XP-09 — a dependency-free `core`
-# function, so the TUI still adds no dependencies).
+# The three looplab imports this module allows itself: the wire-protocol vocabulary it shares with the
+# server (phase names), the shared metric formatter (doc 25 XP-09 — a dependency-free `core`
+# function, so the TUI still adds no dependencies), and the shared launch-proposal schema (doc 27 —
+# also `core`, so the TUI still adds no dependencies and still cannot see `looplab.adapters`).
 from looplab.core.fitness import format_metric
+from looplab.core.run_proposal import RunProposal, slug_run_id
 from looplab.serve.protocol import (PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING,
                                     PHASE_ONBOARDING, PHASE_PAUSED, PHASE_SEARCH,
                                     PHASE_SPEC_APPROVAL)
@@ -99,44 +101,15 @@ def sort_runs(runs: list) -> list:
 def spec_lines(spec: Optional[dict]) -> list[str]:
     """Flatten a genesis spec ({run_id, task|task_file, settings, rationale, setup_steps}) into the plain
     lines the proposal panel renders — also the exact thing the launch summary echoes. Pure, so a test
-    can assert the boss's plan is shown faithfully."""
+    can assert the boss's plan is shown faithfully.
+
+    The flattening itself is `core/run_proposal.py::RunProposal.lines` (doc 27's shared-schema row,
+    closed 2026-09-08): `looplab run --goal` prints the same lines under its `Genesis -> kind=…`
+    announcement, so the CLI and the TUI describe a plan in one vocabulary instead of two. Only the
+    empty case is the TUI's own — it is this panel's copy, not a property of a proposal."""
     if not spec:
         return ["(no plan yet — describe a goal and the boss will propose one)"]
-    out: list[str] = []
-    out.append(f"run name : {spec.get('run_id') or '—'}")
-    task = spec.get("task") or {}
-    if spec.get("task_file"):
-        out.append(f"task     : {str(spec['task_file']).split('/')[-1]}  (from the catalogue)")
-    elif task.get("kind"):
-        label = task["kind"]
-        if task.get("kind") == "mlebench_real" and task.get("competition"):
-            label += f" · {task['competition']}"
-        out.append(f"task     : {label}")
-        if task.get("goal"):
-            out.append(f"goal     : {task['goal']}")
-        if task.get("editable_path"):
-            out.append(f"repo     : {task['editable_path']}")
-    elif task:
-        # A COMPOSABLE (kind-less) genesis task — Genesis proposes these with NO `kind`, so the
-        # branches above skip them; still surface the substance of the run (goal + capabilities), not
-        # just the run-name/settings, so the operator sees what they're about to spend tokens on.
-        if task.get("goal"):
-            out.append(f"goal     : {task['goal']}")
-        if task.get("direction"):
-            out.append(f"direction: {task['direction']}")
-        for lbl, key in (("repo", "editable_path"), ("repo", "repo"), ("data", "data_path"),
-                         ("dataset", "dataset"), ("cmd", "cmd"), ("competition", "competition")):
-            if task.get(key):
-                out.append(f"{lbl:<9}: {task[key]}")
-    settings = spec.get("settings") or {}
-    knobs = [(k, settings[k]) for k in ("llm_model", "max_nodes", "n_seeds", "policy") if settings.get(k) is not None]
-    if knobs:
-        out.append("settings : " + ", ".join(f"{k}={v}" for k, v in knobs))
-    if spec.get("rationale"):
-        out.append(f"why      : {spec['rationale']}")
-    for i, step in enumerate(spec.get("setup_steps") or [], 1):
-        out.append(f"  step {i}. {step}")
-    return out
+    return RunProposal.from_card(spec).lines()
 
 
 def launch_body(spec: dict, msgs: Optional[list] = None) -> dict:
@@ -149,15 +122,13 @@ def launch_body(spec: dict, msgs: Optional[list] = None) -> dict:
     `/api/validate` — and every move of the task schema had to be repaired in both (doc 52 row 8).
     This module may not import `looplab.adapters` (pinned in `tests/test_tui.py`), which is what
     keeps the copy from coming back.
+
+    The body SHAPE is `RunProposal.start_body` since 2026-09-08 (doc 27,
+    `three-new-run-planners-no-shared-schema`): the TUI, the Web launch card and any other caller
+    now spell the `/api/start` payload once. This function stays because the TUI's spec is a card
+    and its chat is a message list — reading those INTO the shared shape is the TUI's own job.
     """
-    body: dict = {"run_id": slug(spec.get("run_id") or ""), "settings": spec.get("settings") or {}}
-    if spec.get("task_file"):
-        body["task_file"] = spec["task_file"]
-    else:
-        body["task"] = spec.get("task") or {}
-    if msgs:                                            # carry the planning chat into the run's history
-        body["chat"] = [{"role": m["role"], "content": m["content"]} for m in msgs]
-    return body
+    return RunProposal.from_card(spec).start_body(msgs)
 
 
 def readiness_reason(verdict: Any) -> Optional[str]:
@@ -174,13 +145,15 @@ def readiness_reason(verdict: Any) -> Optional[str]:
     return message + (f" ({'; '.join(named)})" if named else "")
 
 
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-
 def slug(s: str) -> str:
-    """run-id normaliser (lowercase kebab, ≤40) — must stay in step with the server's own
-    slugify+de-dup in serve/routers/genesis.py::_normalize_genesis."""
-    return _SLUG_RE.sub("-", str(s or "").lower()).strip("-")[:40]
+    """run-id normaliser (lowercase kebab, ≤40).
+
+    It no longer has to "stay in step with the server's own slugify" — that instruction was here
+    because `serve/routers/genesis.py::_normalize_genesis` kept a second copy, and the two had
+    already drifted (its `re.sub(r"(^-|-$)", …)` stripped one leading and one trailing dash where
+    this one stripped all of them). Both are now `core/run_proposal.py::slug_run_id`; this name
+    stays because the TUI's own callers and tests use it."""
+    return slug_run_id(s)
 
 
 # Destructive verbs worth a louder confirm marker — the Python twin of the web Dock's isCritical.

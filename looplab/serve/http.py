@@ -149,6 +149,61 @@ def refusal(slug: str) -> "HTTPException":  # noqa: F821 - see `_bad_request`
     return HTTPException(status, {"code": slug, "message": message, "remediation": remediation})
 
 
+# THE GENERATION FENCE'S ONE REFUSAL (doc 25 SR-09).
+#
+# `{"code": "run_generation_changed", "expected_generation": …, "current_generation": …, "message":
+# …, "remediation": …}` was hand-assembled at 26 sites across 10 serve files, and the copies had
+# already drifted: some spelled `current_generation` with an `or None`, some without, some carried no
+# remediation at all, one publishes the SAME fact under the key `actual_generation`. That envelope is
+# a WIRE CONTRACT — twelve `ui/src` modules branch on the code, and `expected_generation`/
+# `current_generation` are what a client CASes on next — so a copy that drops a field breaks the
+# NEXT fenced write at a call site with no visible connection to the one that dropped it.
+#
+# What legitimately differs per site is the SENTENCE (which read or write the run outran) and the
+# REMEDY (which view the operator reloads), so those are arguments; the code and the status are not.
+# The two fence fields are OMITTED rather than null when a site genuinely has no generation to name
+# (the comment feeds, whose 409 says only "the run moved while this was projected"), because a
+# client cannot tell a null it must ignore from a null it should have received.
+#
+# THE LITERAL SURVIVES IN FOUR KINDS OF PLACE AND NONE IS A COPY OF THIS ENVELOPE, which is why the
+# open-item marker was bound to this function's NAME rather than to the string:
+#   * `run_commands.py::_generation_changed_error` builds a durable COMMAND RECORD's error object
+#     (`_error(...)` with `retryable`), not an HTTP body — a record a client polls, not a refusal;
+#   * `deletion_service.py` raises it through that module's OWN shared `_detail(...)` builder, one
+#     code among ~20 in a deletion-receipt envelope that always carries `retryable` and
+#     `operation_id`. It is already shared from one place; folding it into this one would change
+#     that surface's wire shape, which is the opposite of what SR-09 asked for;
+#   * `routers/boss.py` and `serve/assistant.py` READ the code off a caught exception to classify
+#     it, and `trace_clear.py` writes `run_generation_changed_after_pending` as a RECEIPT reason.
+RUN_GENERATION_CHANGED = "run_generation_changed"
+
+#: Distinguishes "this site names no generation" from "this site names None" — see above.
+_OMITTED = object()
+
+
+def generation_conflict(message: str, *, expected=_OMITTED, current=_OMITTED,
+                        remediation: str = "", **extra) -> "HTTPException":  # noqa: F821
+    """The 409 every generation fence raises. `extra` carries a site's own additional identity.
+
+    `expected`/`current` are the generation the caller named and the one the run actually has;
+    passing neither omits both fields, which is what the two comment surfaces do. `remediation` is
+    omitted when empty rather than sent as "", because the field is advice and an empty string reads
+    as advice that was given and was blank.
+    """
+    from fastapi import HTTPException
+
+    detail: dict = {"code": RUN_GENERATION_CHANGED}
+    if expected is not _OMITTED:
+        detail["expected_generation"] = expected
+    if current is not _OMITTED:
+        detail["current_generation"] = current
+    detail["message"] = message
+    if remediation:
+        detail["remediation"] = remediation
+    detail.update(extra)
+    return HTTPException(409, detail)
+
+
 def comment_filter_invalid() -> "HTTPException":  # noqa: F821 - see `_bad_request`
     """`node_id` and `node_generation` name ONE experiment lifecycle and are meaningless apart.
 

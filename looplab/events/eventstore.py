@@ -672,14 +672,40 @@ class EventStore:
         # no-op — no torn line / duplicate seq. Held OUTSIDE the flock (consistent order, no deadlock).
         self._append_lock = threading.Lock()
         self._divergence: Optional[dict] = None
-        self._seq = self._scan_last_seq()
         # Fail closed on a MID-FILE divergence (a corrupt COMPLETE line followed by MORE records —
         # a FUSE/NFS/S3 mount can flip a middle byte; a single local writer never can). read_all()
         # stops at it, so a later append is durable-but-invisible to fold (arch-review §3 P0-4).
         # Seed the diagnostic here; incremental read_all revalidates changed bytes before each
         # append, so corruption introduced after construction also fails closed without rescanning
         # unchanged history. Reads keep returning the recoverable prefix for repair/inspection.
-        self._divergence = log_divergence(self.path) or self._divergence
+        #
+        # ONE WALK, NOT TWO (the CODE_REVIEW row on `_scan_last_seq`). The seeding was a SECOND pass
+        # — `self._divergence = log_divergence(self.path) or self._divergence`, an unconditional
+        # `read_bytes()` + re-decode of every complete line — on top of the `read_all()` this
+        # `_scan_last_seq()` already does. It was redundant, exactly: `read_all` consumes the log
+        # through `scan_jsonl_region`, whose `consumed` offset NEVER covers a rejected line, so an
+        # unconsumed newline in the remainder means the first rejected record is COMPLETE — and on
+        # that (and only that) branch `read_all` itself calls the same `log_divergence` and stores
+        # the same dict. At construction `_cache_bytes` is 0, so that walk sees the whole file and
+        # the two answers are the same answer. A healthy log therefore pays ONE pass instead of two,
+        # and a divergent one still pays the exact-detail walk on the branch that needs it.
+        self._seq = self._scan_last_seq()
+        # THE ONE THING THE CACHE CANNOT SAY. `read_all` treats an OSError on the region read as
+        # "no new bytes" (`new = b""`), so a log we could not OPEN looks exactly like an empty one
+        # from the cache alone — and `cli/__init__.py::log_integrity_from` would then publish
+        # `complete: True` for a file nobody read, which is the "we could not look" rendering as "we
+        # looked and it is fine" that `log_integrity`'s own contract forbids. The dropped second pass
+        # used to raise that OSError out of `__init__`; keep it raising. Consuming zero bytes with no
+        # divergence means the file holds no COMPLETE line at all (a corrupt FIRST line sets the
+        # divergence above), so this walk is only ever reached for a one-torn-line file or an
+        # unreadable one — never for a healthy log, which is the whole point of the paragraph above.
+        if self._cache_bytes == 0 and self._divergence is None:
+            try:
+                unread = self.path.stat().st_size > 0
+            except OSError:
+                unread = False
+            if unread:
+                self._divergence = log_divergence(self.path)
 
     @property
     def divergence(self) -> Optional[dict]:

@@ -826,6 +826,20 @@ suppression drops real findings over bad footnotes. And it states no opinion abo
 foreign — a summary is prose with no per-number provenance, and deciding that from the model's own
 text is what docs/36 forbids.
 
+**And the rule itself is now shared, not two local fixes.** The memo above and the `kb_search` case
+record were the same habit measured twice in one day (`docs/BACKLOG.md` §0.17: the bound cuts the
+TAIL and the payload is at the tail), and each was repaired where it was found — which left nothing
+stopping the next bounded surface from doing it again. `core/context_budget.py::bounded_page` is that
+rule as code, beside `RESULT_CAP` in its canonical home: one PAGE of a long text under a cap, with a
+receipt — charged *inside* the cap, so the loop's own head-cut cannot eat it — that names the range
+it covered, the total, and the exact call that returns the rest (`{offset}` = the first character it
+did not cover). A text that fits whole is returned verbatim, so converting a surface changes no short
+answer by a byte; a surface with no continuation to offer says *that* rather than naming a call that
+does not exist. The scan for the same shape found one silent cut left among the agent-facing readers
+— `knowledge_tools.read_note` was `read_file(...)[:4000]`, no marker and no continuation, so an
+operator-authored note whose conclusion sat past char 4,000 came back looking whole — and it is now a
+paged reader with an `offset` argument its own receipt names.
+
 **The invariant.** `engine/signal_delivery.py` is a registry of these routes (signal → folded field
 → injection site → consumer), and `tests/test_signal_delivery.py` asserts each injection symbol
 resolves *and* that a synthetic input's content actually reaches the rendered output. A signal added
@@ -947,7 +961,9 @@ When `memory_dir` is configured, the same skill tool also reads auto-distilled M
 promotion but is excluded from the production agent surface. Only `status: promoted` auto-skills
 are listed/loaded, and their bodies carry an `UNTRUSTED_MEMORY_AUTO_SKILL` provenance label. The
 library constructor's explicit `include_auto_candidates=True` seam is for review and tests; it is
-not a runtime setting. Hand-written and legacy skills keep their previous visibility and body.
+not a runtime setting — Lab → Authoring → **memory_skills** lists that same directory read-only,
+frontmatter included, so a candidate can be judged without one. Hand-written and legacy skills keep
+their previous visibility and body.
 
 ### Prompt override keys (`prompt_dir`)
 

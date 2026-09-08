@@ -111,6 +111,11 @@ EV_DATA_PROFILED = "data_profiled"
 EV_DATA_PROVENANCE = "data_provenance"
 EV_HOST_GRADING = "host_grading"
 EV_DATA_LEAKAGE = "data_leakage"
+# The deterministic distribution-shift RECORD (docs/BACKLOG.md §15): how far the deployment sample
+# the task declares is from the training one, column by column. DIAGNOSTIC on purpose and not merely
+# fold-ignored — shift is the normal case on a real task, so nothing selects, gates or caveats on it,
+# and no reader may key on its position (`trust/drift.py` has the account).
+EV_DATA_SHIFT = "data_shift"
 EV_APPROVAL_REQUESTED = "approval_requested"
 EV_SPEC_PROPOSED = "spec_proposed"
 EV_SPEC_APPROVAL_REQUESTED = "spec_approval_requested"
@@ -394,6 +399,12 @@ EV_FORESIGHT_SELECTED = "foresight_selected"
 EV_LOG_REPAIRED = "log_repaired"                # operator `repair-log`: provenance of a mid-file
 #                                                 divergence recovery (backup + truncate boundary)
 EV_REFLECTION_NOTE = "reflection_note"          # run-end LLM distillation: causal note + lessons + auto-skills
+# The MID-RUN half of the M4 skill promotion (BACKLOG §0.17). Diagnostic like `reflection_note` and
+# for the same reason — nothing the fold decides reads it — but it is a GATE as well as a receipt:
+# `lessons.py::maybe_promote_skills` reads its `at_node` for the cadence and its `promoted` pairs
+# for "which cards this run has already paid for", so a resume promotes nothing twice (invariant 3).
+# Main-task only, like every other cadence write.
+EV_SKILLS_PROMOTED = "skills_promoted"
 EV_LESSONS_RECONCILED = "lessons_reconciled"    # a node re-eval changed an outcome → this run's lessons
 #                                                 citing it were retired + re-derived from the corrected state
 EV_COMMAND_ACK = "command_ack"                  # engine folded a server command intent (causal ack)
@@ -778,6 +789,34 @@ EV_DEPS_DECLARED = "deps_declared"
 # immaterial — a property of the READERS, not of the event.
 # `engine/evaluate.py::_durable_full_retrains` reads it straight off the log.
 EV_FULL_RETRAIN_CHARGED = "full_retrain_charged"
+# WHAT THE TRAINING PROCESS SAYS IT ACTUALLY RAN AT — `trainer_state.json::train_batch_size`, read
+# off the node's own workdir at the metric read (`runtime/effective_batch.py`). One row per evaluated
+# node that HAS such an artifact; every task that is not a transformers training records none, and
+# that silence is the point (see the module's ABSENCE IS SILENCE rule).
+#
+# WHY IT IS AN EVENT AND NOT A FIELD ON `metric_provenance`. The record it completes is
+# `applied_params`, which states its own bound — a statement about a DOCUMENT, never about an
+# execution — and the batch is the coordinate where that bound has a measured cost:
+# `docs/45-claim-surfaces-2026-08-20.md` §3.2 REFUSED `auto_find_batch_size` as the memory answer
+# because transformers 4.51.0 keeps the DECLARED `per_device_train_batch_size` on `args` while the
+# reduced one survives only in `trainer_state.json` and a `logger.debug` line, so a run would report
+# a batch it never trained at. That document named the condition that lifts the refusal — the
+# effective batch lifted into a DURABLE LoopLab event — and a field merged onto another event's
+# payload is not that: it would be readable only through the terminal that carries it, absent from
+# every node whose terminal is a failure, and invisible to a reader asking "what did this box
+# actually train at" without folding.
+#
+# NOT AN `extra_metrics` CHANNEL, deliberately. The number comes off an artifact the CANDIDATE wrote,
+# and CLAUDE.md's rule is that nothing derivable from such an artifact can authenticate its author —
+# so it may not be spliced as an `engine`-channel metric, and it is not a secondary METRIC at all: it
+# is a coordinate the process recorded about itself. It ranks nothing, gates nothing and cannot cost
+# a node its terminal.
+#
+# DIAGNOSTIC, on `full_retrain_charged`'s ground and with the same caveat: the fold ignores it, and
+# what makes its POSITION immaterial is that `_proposal_receipt_fence` excludes DIAGNOSTIC_EVENTS
+# wholesale — a property of the readers, not of the event. Diagnostic is also what lets the eval
+# worker thread append it at all (invariant 1).
+EV_EFFECTIVE_TRAIN_BATCH = "effective_train_batch"
 # ONE stage ROLLBACK decision — the Developer asserting that a LATER stage's failure was caused by an
 # EARLIER stage that had already been counted successful, and the engine's answer. Written on BOTH
 # outcomes (`accepted` true/false, with `refusal` naming which rung of the ladder said no) because the
@@ -1077,11 +1116,11 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
     EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION, EV_NODE_BUILD_DELTA,
-    EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
+    EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET, EV_DATA_SHIFT,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
-    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,
+    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN, EV_EFFECTIVE_TRAIN_BATCH,
     EV_WORKSPACE_SEEDED,
-    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
+    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
     EV_TRAIN_MONITOR_ALERT,
@@ -1442,6 +1481,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(),
         stored_whole=True,
     ),
+    "data_shift": PayloadContract(
+        "How far the deployment sample the task declares is from the training one, per column.",
+        required=("checked", "columns", "detector", "n_columns", "n_shifted", "only_current",
+                  "only_reference", "shift", "source"),
+        optional=(),
+    ),
     "deep_research": PayloadContract(
         "An operator request for a deep-research pass — the intent itself, with no payload.",
         required=(),
@@ -1471,6 +1516,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "Why the run could not compare its environment against the one it started in.",
         required=("reason",),
         optional=(),
+    ),
+    "effective_train_batch": PayloadContract(
+        "What the training process itself recorded as the batch it ran at, read off the node's own "
+        "workdir at the metric read.",
+        required=("disagree", "generation", "node_id", "read_at", "readings", "train_batch_size"),
+        optional=("files_seen", "truncated"),
     ),
     "env_changed": PayloadContract(
         "A resume observed that the Python/library environment differs from the one the run started in.",
@@ -1544,7 +1595,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "holdout_evaluated": PayloadContract(
         "The node's number on the agent-invisible holdout split, beside the search metric and their gap.",
         required=("gap", "generation", "metric", "n_holdout", "node_id", "search_epoch"),
-        optional=("attempt", "protocol"),
+        # `program_sha256`: the digest of the operator's WITHHELD scorer program, on the rows whose
+        # `protocol` is `holdout_scorer` (doc 52 row 10a slice (b)) — the same receipt the consistent
+        # scorer writes to `metric_provenance.host_scorer`, so "the same unseen scorer for every
+        # leader" stays checkable after the fact. Absent on every other protocol and on every log
+        # written before it (reader-side default, invariant #5).
+        optional=("attempt", "program_sha256", "protocol"),
     ),
     "host_grading": PayloadContract(
         "The host-side scorer's grade over the candidate's predictions.",
@@ -1811,8 +1867,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The run-end distillation: the causal note, the lessons and the auto-skills it proposed.",
         required=(
             "at_nodes", "coverage_digest", "fingerprint", "finish_seq", "lessons", "n_lessons",
-            "n_skill_candidates", "n_skills", "n_skills_demoted", "note", "prior_citations",
-            "skill_candidates", "skills", "skills_demoted", "task_id"
+            "n_skill_candidates", "n_skills", "n_skills_demoted", "n_skills_promoted_earlier",
+            "note", "prior_citations", "skill_candidates", "skills", "skills_demoted", "task_id"
         ),
         optional=(),
     ),
@@ -2000,6 +2056,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "depth", "error", "eval_seconds", "evidence", "generation", "node_id", "previous"
         ),
+    ),
+    "skills_promoted": PayloadContract(
+        "The mid-run per-card skill promotion: which settled cards it judged, and what it wrote.",
+        required=("at_node", "cards", "count", "promoted", "skill_candidates", "skills", "trigger"),
+        optional=(),
     ),
     "stage_finished": PayloadContract(
         "One stage of a multi-stage eval pipeline finished: name, status, exit code, seconds.",

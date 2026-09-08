@@ -602,6 +602,26 @@ def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
     return list(memberships.get(node_id) or [])
 
 
+def authored_node_concepts(state: Any, node_id: int) -> list[str]:
+    """What the PROPOSER authored as this node's concepts, whoever owns the membership now.
+
+    The read side of ``RunState.node_concepts_authored``. It exists so a reader never has to reach
+    back into ``Idea.concepts`` for the answer: that field is the FROZEN authoring and
+    ``events/digest.py::_folded_axes`` forbids resurrecting it into any axis surface, because a node
+    whose tags were deliberately cleared would keep classifying under its old authored axis. This map
+    is cleared by the same lifecycle boundaries as the membership (a propose reset, a subject change),
+    so it is never staler than the Idea it describes.
+
+    ADVISORY, and deliberately not routed through the provenance sidecar: every entry here is
+    authored by construction, so there is no producer to fail closed on. It is never evidence —
+    ``classifier_verified_node_concepts`` remains the single door admission and cross-run consumers
+    cross — and a node whose proposer authored nothing answers ``[]``, exactly as one that never
+    existed does. The two are told apart by membership, not by this list.
+    """
+    authored = getattr(state, "node_concepts_authored", None) or {}
+    return list(authored.get(node_id) or [])
+
+
 def node_concept_event_provenance(data: Any) -> str:
     """Resolve a durable ``node_concepts`` producer without guessing.
 
@@ -2186,6 +2206,24 @@ class RunState(BaseModel):
     # event; the last writer wins for read-model compatibility. Consumers that can affect admission MUST
     # consult node_concept_provenance rather than assuming every membership came from the classifier.
     node_concepts: dict[int, list[str]] = Field(default_factory=dict)
+    # WHAT THE PROPOSER SAID THIS NODE IS ABOUT, kept beside the membership instead of inside it
+    # (node_id -> [concept_id]). The classifier cadence REPLACES `node_concepts` — it does not merge —
+    # so until 2026-09-08 a node's authored ids survived only in the raw event log, and
+    # `events/digest.py::_folded_axes` forbids every read surface from resurrecting `idea.concepts`
+    # (rightly: a cleared node must not keep classifying under its old authored axis). Measured on
+    # `rubertlite-dr-unified-v8`: 2 of 24 authored ids survive into their own node's classifier row,
+    # node 0's authored set and its folded set share nothing, and node 3's exactly-curated
+    # `regularization/r-drop` was replaced by the invented `regularization/rdrop`.
+    # NOT A SECOND MEMBERSHIP, and nothing may read it as one: it is display/audit only, carries no
+    # provenance (it is authored BY DEFINITION), and no admission, ranking, coverage, capsule or
+    # cross-run consumer touches it — `classifier_verified_node_concepts` stays the one evidence door.
+    # It follows the IDEA and never the membership: a new authored envelope replaces it, a propose
+    # reset or a subject change clears it, and a classifier/operator row cannot touch it.
+    # FULL SETS ONLY. A `concept_mode: "delta"` node's authored operands are already durable in
+    # `node_concept_deltas`, which no classifier writer clears, so recording them again here would be
+    # a second copy of a record that already exists — the drift shape doc 25 §0.8 measured.
+    # Additive/reader-defaulted: empty on every log written before today -> byte-identical fold.
+    node_concepts_authored: dict[int, list[str]] = Field(default_factory=dict)
     # PART V (B): the RUN's BASE concept set — the common technologies every node uses unless a node
     # states otherwise (folded from `run_concepts` events). A node may then author only the DELTA vs this
     # base + its parents (see `node_concept_deltas`), keeping per-node annotations minimal. Additive /

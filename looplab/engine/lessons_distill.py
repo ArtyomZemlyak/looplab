@@ -6,9 +6,10 @@ cluster methods through the Engine's thin delegators (so a test monkeypatching e
 `engine._reflect_client` still intercepts every internal call).
 
 The WRITE side's LLM half: the whole-run reflection (`reflect_lessons`, M3), the E4 causal
-meta-note, the M4 skill-card distillation (`distill_skill_body`), the run-end
-`write_reflection_note` that stitches them together, and the shared reflection tool-loop
-plumbing (`_reflect_tools` / `_reflect_loop_opts` / `_merge_prompt_opts`).
+meta-note, the M4 skill-card distillation (`distill_skill_body`), the per-card promotion pass
+`promote_settled_skills` and the run-end `write_reflection_note` that stitches them together, and
+the shared reflection tool-loop plumbing (`_reflect_tools` / `_reflect_loop_opts` /
+`_merge_prompt_opts`).
 
 Layering: like lessons.py, no runtime import of the orchestrator and never serve — only
 engine.memory, events, core and stdlib/orjson (the agent/tool deps stay lazy, method-local
@@ -26,7 +27,7 @@ from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
 from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
 from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient
-from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE
+from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED
 
 
 # The rank the two reflection prompts show as "Experiments (best first)", and the one place the
@@ -114,6 +115,83 @@ def _unmeasured_observation_rows(final: RunState, limit: int) -> list:
         if len(rows) >= limit:
             break
     return rows
+
+
+# The Card lanes in which more evidence for a card is still ARRIVING: a build is queued or running,
+# or an evaluation is in flight. Named rather than spelled as "not evaluated" because the lane
+# vocabulary is open by design (`core/cards.py::Card.status` says so), and a lane added later is a
+# lane this rule has not been thought about for — an unknown lane must read as UNSETTLED.
+UNSETTLED_CARD_STATUSES = ("proposed", "building", "coded", "running")
+
+
+def promoted_skill_keys(events) -> set[tuple[str, str]]:
+    """`{(card_id, source_sha256)}` this run has ALREADY promoted, from its own `skills_promoted` rows.
+
+    The mid-run pass's durable receipt is what makes it replay-safe (invariant 3) and what keeps the
+    run-end pass from paying the classifier a second time for a card whose statement has not moved.
+    Keyed on the pair rather than on the card alone: an operator edit rewrites `Card.statement`, and
+    a promotion is a claim about the STATEMENT — a card whose text changed is a card whose technique
+    has not been assessed.
+    """
+    keys: set[tuple[str, str]] = set()
+    for event in events:
+        if getattr(event, "type", None) != EV_SKILLS_PROMOTED:
+            continue
+        data = getattr(event, "data", None)
+        for row in (data or {}).get("promoted") or ():
+            if isinstance(row, (list, tuple)) and len(row) == 2:
+                card_id, digest = row
+                if isinstance(card_id, str) and isinstance(digest, str):
+                    keys.add((card_id, digest))
+    return keys
+
+
+def settled_skill_cards(state: RunState, promoted: set[tuple[str, str]]) -> list:
+    """The cards whose skill promotion CANNOT change any more this run, minus those already promoted.
+
+    Four clauses, and each of them is about not paying for a verdict that is still moving:
+
+      * the run itself calls the card `supported`. That is the same entry condition the run-end pass
+        has always used, and it is sticky once earned (`events/card_ledger.py::_evidence_verdict`);
+      * `best_delta > 0` — rung 0 of the run-end pass, whose reason is recorded there: a card
+        supported because a node SET the run record improved over nothing. Mid-run this clause does
+        double duty, because a delta that is not yet positive may still become positive, and a
+        `refused` receipt written now would be a receipt about an unfinished measurement;
+      * nothing is still arriving for it: no evidence node is pending and the lane is not one of
+        `UNSETTLED_CARD_STATUSES`. Both, because `Card.evidence` deliberately excludes the
+        `node_building` marker node the `building` lane is derived from, so neither check subsumes
+        the other;
+      * it has not already been promoted at this exact statement (`promoted_skill_keys`).
+
+    WHAT IT SETTLES IS THE EVIDENCE SET, NOT THE IDENTITY, and BACKLOG §0.18 named that residue
+    before this pass existed: a card MERGED after promotion has its `statement` rewritten by the
+    fold, so an early promotion is filed under a title the run later replaces. The ledger key is the
+    `(card_id, statement digest)` pair, so the run-end sweep then judges the consolidated statement
+    as the new claim it is — one extra classifier call and a second card under the merged title.
+    That is the right direction to fail: keying on `card_id` alone would leave the consolidated
+    belief, the one the run actually settled on, with no card at all.
+
+    Pure and total: no I/O, no model, no engine — a truth table a test can drive directly, which is
+    why the mid-run cadence is one gate over this function rather than four conditions inline.
+    """
+    # The same digest rule both promotion writers key on (`memory.skill_source_digest` holds the
+    # reason it is one function), reached function-locally like every other `engine.memory` use in
+    # this module.
+    from looplab.engine.memory import skill_source_digest
+
+    pending = {node.id for node in state.pending_nodes()}
+    out = []
+    for card in state.research_cards():
+        if card.verdict != "supported" or (card.best_delta or 0) <= 0:
+            continue
+        if card.status in UNSETTLED_CARD_STATUSES:
+            continue
+        if any(node_id in pending for node_id in (card.evidence or ())):
+            continue
+        if (card.id, skill_source_digest(str(card.statement or ""))) in promoted:
+            continue
+        out.append(card)
+    return out
 
 
 class LessonDistillMixin:
@@ -269,121 +347,38 @@ class LessonDistillMixin:
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
         # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
         # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
-        from looplab.engine import memory as _memory
-        from looplab.engine.memory import (SKILL_ELIGIBILITY_VERSION, SKILL_PREFILTER_VERSION,
-                                           SKILL_REFUSED_NO_MEASURED_DELTA,
-                                           SKILL_REFUSED_NO_POSITIVE_DELTA,
-                                           assess_skill_statement,
-                                           classify_skill_candidate,
-                                           promotable_skill_statement, unreliable_metric_ids,
-                                           write_auto_skill)
+        #
+        # THE PASS ITSELF IS `promote_settled_skills` and it is no longer only run-end (2026-09-08,
+        # BACKLOG §0.17): the mid-run cadence in `lessons.py::maybe_promote_skills` calls the same
+        # method for the cards that have already SETTLED, so a technique this run established at
+        # node 6 reaches the shared store while the run is still going — the AgentRxiv live-share
+        # shape the M6 lesson write already has. What stays here is the REST of the board: cards
+        # that settled after the last cadence window, cards a stopped run never got a window for,
+        # and every card that must be RECEIPTED as refused (which the mid-run gate deliberately
+        # does not do for a delta that can still move).
         sk_dir = base / "skills"
-        skills: list[str] = []
-        skill_candidates: list[dict] = []
-        # A SKILL CARD IS A CROSS-RUN CLAIM TOO, and its evidence list is the one place a card's own
-        # feasibility filter does not reach. `_evidence_verdict` (events/card_ledger.py) already
-        # requires `n.feasible` to make a card `supported` with a positive Δ, so a salvaged node
-        # cannot be why this loop fires — but `h.evidence` is the RAW id list, and
-        # `distill_skill_body` renders `#id op metric=X` for up to four of them and picks the
-        # best-metric one as the code to quote. That put an unmeasured number, and the code that
-        # never earned it, into a `skills/*.md` a later run reads as a verified best practice.
-        skill_unreliable = unreliable_metric_ids(final)
-        # Distil skills from canonical Card work items. Several retry cards may share one belief; the
-        # skill store's stable title/path makes a repeated statement an idempotent overwrite. `verdict`
-        # is the research status (compatible with old Hypothesis.status via `_evidence_verdict`). Use the DISPLAY
-        # `statement`, not `seed_statement`: for a MERGED card the fold rewrites `statement` to the
-        # agent-consolidated text (replay.py `merged_stmt`) exactly as the old Hypothesis.statement did,
-        # while `seed_statement` stays the raw first-member seed — so `statement` is the behaviour-equal
-        # belief text here. The `h.statement` guard mirrors the fold's old empty-statement skip.
-        # …and it must be a TECHNIQUE. The old four-regex boolean stopped the measured ``node 8``
-        # corpus but accepted semantic junk and had no explanation/canonical identity. The hybrid
-        # gate now does a free deterministic portability pass, then (when a reflection client exists)
-        # a closed seven-axis rubric grounded in the real experiments. Code derives acceptance; the
-        # model cannot mint it with one bool. A canonical title/key lets independently worded evidence
-        # on another task confirm the same technique. Candidate receipts below make every skip visible.
-        classifier_client = self._e._reflect_client()
-        _, classifier_parser = self._merge_prompt_opts()
-        classifier_tools = None
-        classifier_loop_opts = None
-        if classifier_client is not None:
-            try:
-                classifier_tools = self._reflect_tools(final)
-                # This runs once per positive card. Four turns permit inspect → inspect → emit while
-                # preventing a card batch from multiplying the general reflection's 15-turn ceiling.
-                classifier_loop_opts = self._reflect_loop_opts().replace(max_turns=4)
-            except Exception:  # noqa: BLE001 — a plain structured rubric remains available
-                classifier_tools = None
-                classifier_loop_opts = None
-        for h in final.research_cards():
-            if h.verdict != "supported":
+        # `_memory` is the module handle the CONTRADICTION EDGE below reaches
+        # `reconcile_auto_skill_statuses` through — kept here (and not only inside
+        # `promote_settled_skills`, where the promotion loop's own import went) because that block
+        # runs whether or not a single card was promoted, and its blind handler would otherwise
+        # contain a NameError as "skill hygiene is best-effort" and silently demote nothing.
+        from looplab.engine import memory as _memory
+        from looplab.engine.memory import skill_source_digest as _skill_source_digest
+        already_promoted = promoted_skill_keys(self._e.store.read_all())
+        run_end_cards, promoted_earlier = [], []
+        for card in final.research_cards():
+            if card.verdict != "supported":
                 continue
-            source = str(h.statement or "")
-            # RUNG 0, AND ITS RECEIPT (`memory.py::SKILL_ELIGIBILITY_VERSION` holds the measurement).
-            # A card the run itself called `supported` can still be refused here — and until
-            # 2026-08-19 that refusal was a bare `continue`, so the `skill_candidates` receipt built
-            # to say "which statements were refused and why" was blind to the rung that refuses most.
-            # Measured over `runs/`: it is the ONLY thing that fired on v7 and v8, the two finished
-            # runs whose `n_skills: 0` this receipt exists to explain. The eligibility rule itself is
-            # unchanged — a card supported because a node SET the run record has no baseline to have
-            # improved over, and a technique card whose claim is "this improved the metric" must not
-            # be minted from one — it just stops being invisible.
-            if (h.best_delta or 0) <= 0:
-                skill_candidates.append({
-                    "source_sha256": _memory.skill_source_digest(source), "accepted": False,
-                    "reason": (SKILL_REFUSED_NO_MEASURED_DELTA if h.best_delta is None
-                               else SKILL_REFUSED_NO_POSITIVE_DELTA),
-                    "classifier": SKILL_ELIGIBILITY_VERSION,
-                })
+            # Already promoted at this exact statement, by this run's own mid-run pass: promoting it
+            # again would re-spend the classifier for an assessment that is a pure function of the
+            # statement and its evidence, and would double-count it in `n_skills`. The count of what
+            # was skipped rides on the note, so "this run promoted nothing at the end" can be read
+            # apart from "this run promoted nothing".
+            if (card.id, _skill_source_digest(str(card.statement or ""))) in already_promoted:
+                promoted_earlier.append(card.id)
                 continue
-            # The candidate receipt and the durable card name ONE claim, so they take their digest
-            # from one function (`memory.skill_source_digest`, which holds the reason). Reached
-            # through the module rather than by value: `write_auto_skill` calls the same name, and a
-            # test that moves the rule has to move it for BOTH writers or the join it guards is
-            # vacuous.
-            source_digest = _memory.skill_source_digest(source)
-            if not promotable_skill_statement(h.statement):
-                local = assess_skill_statement(h.statement)
-                skill_candidates.append({
-                    "source_sha256": source_digest, "accepted": False,
-                    "reason": local.reason, "classifier": SKILL_PREFILTER_VERSION,
-                })
-                continue
-            ev = [final.nodes[i] for i in h.evidence
-                  if i in final.nodes and i not in skill_unreliable]
-            evidence = [{
-                "node_id": n.id,
-                "operator": n.operator,
-                "rationale": getattr(n.idea, "rationale", ""),
-                "parameter_names": sorted(
-                    str(key) for key in (getattr(n.idea, "params", {}) or {})),
-                "measured": n.metric is not None,
-            } for n in ev[:8]]
-            assessment = classify_skill_candidate(
-                h.statement, client=classifier_client, task_goal=final.goal,
-                task_kind=getattr(getattr(self._e, "task", None), "kind", ""), evidence=evidence,
-                best_delta=h.best_delta, parser=classifier_parser, tools=classifier_tools,
-                loop_opts=classifier_loop_opts)
-            receipt = {
-                "source_sha256": source_digest, "accepted": assessment.promotable,
-                "reason": assessment.reason, "classifier": assessment.classifier_version,
-                "explanation": assessment.explanation[:400],
-            }
-            if assessment.canonical_statement:
-                receipt["canonical_statement"] = assessment.canonical_statement[:240]
-            skill_candidates.append(receipt)
-            if not assessment.promotable:
-                continue
-            written = write_auto_skill(
-                sk_dir, assessment.canonical_statement,
-                self._e._distill_skill_body(final, h, ev), fp, final.task_id,
-                identity_claim=assessment.identity_claim,
-                classifier_version=assessment.classifier_version,
-                source_statement=source)
-            if written is not None:
-                skills.append(assessment.canonical_statement)
-            else:
-                receipt["accepted"] = False
-                receipt["reason"] = "write_failed"
+            run_end_cards.append(card)
+        skills, skill_candidates = self.promote_settled_skills(final, run_end_cards, fp)
 
         # THE CONTRADICTION EDGE of the skill lifecycle (doc 52 row 17): a card whose claim the shared
         # lessons store now records as reversed is demoted here, by code, from the same recorded
@@ -435,6 +430,10 @@ class LessonDistillMixin:
             "coverage_digest": coverage_digest,
             "n_lessons": len(lessons), "n_skills": len(skills),
             "n_skill_candidates": len(skill_candidates),
+            # Cards this run's MID-RUN pass already promoted at the same statement, and which this
+            # pass therefore did not re-judge. Zero on a run with `lessons_every: 0` (and on every
+            # pre-2026-09-08 log, which is why every reader defaults it).
+            "n_skills_promoted_earlier": len(promoted_earlier),
             "n_skills_demoted": len(skills_demoted), "skills_demoted": skills_demoted[:12],
             "prior_citations": prior_citations,
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", ""),
@@ -442,6 +441,135 @@ class LessonDistillMixin:
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}
                         for lz in lessons[:12]],
             "skills": skills[:8], "skill_candidates": skill_candidates[:12]})
+
+    def promote_settled_skills(self, state: RunState, cards: list, fp: list) -> tuple[list, list]:
+        """Promote the given cards’ techniques into `<memory_dir>/skills/`, one candidate at a time.
+
+        The M4 write, extracted from `write_reflection_note` so that the run-end pass and the
+        mid-run per-card pass (`lessons.py::maybe_promote_skills`) are ONE writer rather than two
+        that agree today. Returns `(promoted canonical statements, candidate receipts)`; the caller
+        owns the durable receipt, because what the two passes must record differs (a
+        `reflection_note` at the end, a `skills_promoted` row on the cadence).
+
+        `cards` is already filtered by the caller — the run-end pass passes every `supported` card
+        it has not promoted yet, the mid-run pass passes `settled_skill_cards`. This method judges
+        each one and writes; it does not decide WHICH board rows are ripe, which is the difference
+        between the two passes and the reason that rule is a statable function beside it.
+        """
+        from looplab.engine import memory as _memory
+        from looplab.engine.memory import (SKILL_ELIGIBILITY_VERSION, SKILL_PREFILTER_VERSION,
+                                           SKILL_REFUSED_NO_MEASURED_DELTA,
+                                           SKILL_REFUSED_NO_POSITIVE_DELTA,
+                                           assess_skill_statement,
+                                           classify_skill_candidate,
+                                           promotable_skill_statement, unreliable_metric_ids,
+                                           write_auto_skill)
+        sk_dir = Path(self._e.memory_dir) / "skills"
+        skills: list[str] = []
+        skill_candidates: list[dict] = []
+        # A SKILL CARD IS A CROSS-RUN CLAIM TOO, and its evidence list is the one place a card's own
+        # feasibility filter does not reach. `_evidence_verdict` (events/card_ledger.py) already
+        # requires `n.feasible` to make a card `supported` with a positive Δ, so a salvaged node
+        # cannot be why this loop fires — but `h.evidence` is the RAW id list, and
+        # `distill_skill_body` renders `#id op metric=X` for up to four of them and picks the
+        # best-metric one as the code to quote. That put an unmeasured number, and the code that
+        # never earned it, into a `skills/*.md` a later run reads as a verified best practice.
+        skill_unreliable = unreliable_metric_ids(state)
+        # Distil skills from canonical Card work items. Several retry cards may share one belief; the
+        # skill store's stable title/path makes a repeated statement an idempotent overwrite. `verdict`
+        # is the research status (compatible with old Hypothesis.status via `_evidence_verdict`). Use the DISPLAY
+        # `statement`, not `seed_statement`: for a MERGED card the fold rewrites `statement` to the
+        # agent-consolidated text (replay.py `merged_stmt`) exactly as the old Hypothesis.statement did,
+        # while `seed_statement` stays the raw first-member seed — so `statement` is the behaviour-equal
+        # belief text here. The `h.statement` guard mirrors the fold's old empty-statement skip.
+        # …and it must be a TECHNIQUE. The old four-regex boolean stopped the measured ``node 8``
+        # corpus but accepted semantic junk and had no explanation/canonical identity. The hybrid
+        # gate now does a free deterministic portability pass, then (when a reflection client exists)
+        # a closed seven-axis rubric grounded in the real experiments. Code derives acceptance; the
+        # model cannot mint it with one bool. A canonical title/key lets independently worded evidence
+        # on another task confirm the same technique. Candidate receipts below make every skip visible.
+        classifier_client = self._e._reflect_client()
+        _, classifier_parser = self._merge_prompt_opts()
+        classifier_tools = None
+        classifier_loop_opts = None
+        if classifier_client is not None:
+            try:
+                classifier_tools = self._reflect_tools(state)
+                # This runs once per positive card. Four turns permit inspect → inspect → emit while
+                # preventing a card batch from multiplying the general reflection's 15-turn ceiling.
+                classifier_loop_opts = self._reflect_loop_opts().replace(max_turns=4)
+            except Exception:  # noqa: BLE001 — a plain structured rubric remains available
+                classifier_tools = None
+                classifier_loop_opts = None
+        for h in cards:
+            source = str(h.statement or "")
+            # RUNG 0, AND ITS RECEIPT (`memory.py::SKILL_ELIGIBILITY_VERSION` holds the measurement).
+            # A card the run itself called `supported` can still be refused here — and until
+            # 2026-08-19 that refusal was a bare `continue`, so the `skill_candidates` receipt built
+            # to say "which statements were refused and why" was blind to the rung that refuses most.
+            # Measured over `runs/`: it is the ONLY thing that fired on v7 and v8, the two finished
+            # runs whose `n_skills: 0` this receipt exists to explain. The eligibility rule itself is
+            # unchanged — a card supported because a node SET the run record has no baseline to have
+            # improved over, and a technique card whose claim is "this improved the metric" must not
+            # be minted from one — it just stops being invisible.
+            if (h.best_delta or 0) <= 0:
+                skill_candidates.append({
+                    "source_sha256": _memory.skill_source_digest(source), "accepted": False,
+                    "reason": (SKILL_REFUSED_NO_MEASURED_DELTA if h.best_delta is None
+                               else SKILL_REFUSED_NO_POSITIVE_DELTA),
+                    "classifier": SKILL_ELIGIBILITY_VERSION,
+                })
+                continue
+            # The candidate receipt and the durable card name ONE claim, so they take their digest
+            # from one function (`memory.skill_source_digest`, which holds the reason). Reached
+            # through the module rather than by value: `write_auto_skill` calls the same name, and a
+            # test that moves the rule has to move it for BOTH writers or the join it guards is
+            # vacuous.
+            source_digest = _memory.skill_source_digest(source)
+            if not promotable_skill_statement(h.statement):
+                local = assess_skill_statement(h.statement)
+                skill_candidates.append({
+                    "source_sha256": source_digest, "accepted": False,
+                    "reason": local.reason, "classifier": SKILL_PREFILTER_VERSION,
+                })
+                continue
+            ev = [state.nodes[i] for i in h.evidence
+                  if i in state.nodes and i not in skill_unreliable]
+            evidence = [{
+                "node_id": n.id,
+                "operator": n.operator,
+                "rationale": getattr(n.idea, "rationale", ""),
+                "parameter_names": sorted(
+                    str(key) for key in (getattr(n.idea, "params", {}) or {})),
+                "measured": n.metric is not None,
+            } for n in ev[:8]]
+            assessment = classify_skill_candidate(
+                h.statement, client=classifier_client, task_goal=state.goal,
+                task_kind=getattr(getattr(self._e, "task", None), "kind", ""), evidence=evidence,
+                best_delta=h.best_delta, parser=classifier_parser, tools=classifier_tools,
+                loop_opts=classifier_loop_opts)
+            receipt = {
+                "source_sha256": source_digest, "accepted": assessment.promotable,
+                "reason": assessment.reason, "classifier": assessment.classifier_version,
+                "explanation": assessment.explanation[:400],
+            }
+            if assessment.canonical_statement:
+                receipt["canonical_statement"] = assessment.canonical_statement[:240]
+            skill_candidates.append(receipt)
+            if not assessment.promotable:
+                continue
+            written = write_auto_skill(
+                sk_dir, assessment.canonical_statement,
+                self._e._distill_skill_body(state, h, ev), fp, state.task_id,
+                identity_claim=assessment.identity_claim,
+                classifier_version=assessment.classifier_version,
+                source_statement=source)
+            if written is not None:
+                skills.append(assessment.canonical_statement)
+            else:
+                receipt["accepted"] = False
+                receipt["reason"] = "write_failed"
+        return skills, skill_candidates
 
     def _reflect_tools(self, state: RunState):
         """Read-only run-introspection tools so reflection / distillation READS the real experiments

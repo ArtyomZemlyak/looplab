@@ -29,6 +29,7 @@ looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV 
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab novelty-recall  Audit executed proposals for paraphrases the novelty gate missed (PART IV E3)
 looplab lesson-guard    Audit distilled lessons for over-generalization and contradiction (PART IV D6/E4)
+looplab concept-authorship How much of each proposer's authored concept set survived the classifier's answer (PART IV D5)
 looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cross-run Step 1)
 looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
@@ -158,11 +159,14 @@ A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys)
 
 **Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task. This is
 the CLI planning surface; the Web **New run** flow uses the owner Assistant's `propose_run` tool and
-the TUI uses `/api/genesis`. They share task-adapter validation and backend-default authority, but
-not one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token; the TUI
-asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
+the TUI uses `/api/genesis`. Three ways to AUTHOR a plan; one shape for the plan itself since
+2026-09-08 — `core/run_proposal.py::RunProposal` owns the proposal fields, the `/api/start` body,
+the run-id slug and the launch-settings filter, and all three surfaces share task-adapter validation
+and backend-default authority. Web additionally submits a reviewed `/api/start/preflight` token; the
+TUI asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
 `/api/start` to the token it returns; CLI validates directly. The CLI announces its choice
-(`Genesis -> kind=…`) before launching, and:
+(`Genesis -> kind=…`) and then the PLAN itself — run name, task, goal, the settings knobs and the
+rationale, in the same lines the TUI's proposal panel renders — before launching, and:
 
 - picks the `kind` from your words — *or* stays within the kind you **pin** with `--kind` (it doesn't
   skip Genesis, it constrains it; what the run does within a kind depends on the model);
@@ -1280,7 +1284,7 @@ looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--mo
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
-| `--task-type NAME` | inferred from the run's `task_id` | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches |
+| `--task-type NAME` | inferred from the run's `task_id`, then from its GOAL | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches. Since 2026-09-08 an id that names no pack (every run answers `repo_task` or a run name) falls back to the run's own goal, which selects a pack only when it names ≥2 distinct concepts of that pack's DOMAIN axes — so a goal naming only a batch size and a learning rate still selects nothing |
 | `--offline` | off (**default is the agentic build**) | Skip the LLM/network and use only the deterministic alias heuristic over the curated seed pack — a fast local fallback (needs a pack; no per-task importance) |
 | `--model ID` | configured model | Override the model for the agentic build |
 | `-j, --jobs N` | `8` | Concurrent node-tagging calls in the agentic build |
@@ -1326,7 +1330,7 @@ looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5] [--offline] [--model 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton (e.g. `dense-retrieval`) |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (e.g. `dense-retrieval`). Since 2026-09-08 an id that names no curated pack falls back to the run’s own goal, which selects one only when the goal names ≥2 distinct concepts of that pack’s domain axes |
 | `--threshold N` | `5` | Consecutive same-lever experiments that trip the alarm |
 | `--offline` | off | Do not call the LLM; build tags with the deterministic heuristic |
 | `--model ID` | configured model | Override the model used for the agentic tag build |
@@ -1347,7 +1351,7 @@ looplab board-dedup RUN_DIR [--task-type NAME] [--offline] [--model ID]
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory whose Card belief board to analyze |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (an id naming no curated pack falls back to the goal — see `concept-coverage`) |
 | `--offline` | off | Do not call the LLM; use deterministic graph and hypothesis tags |
 | `--model ID` | configured model | Override the model used for the agentic build/tag pass |
 
@@ -1368,7 +1372,7 @@ looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH] [--offli
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory whose coverage to target |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (an id naming no curated pack falls back to the goal — see `concept-coverage`) |
 | `--asset-repo PATH` | — | Task repo used to ground the derived importance and queries in a D1 asset brief |
 | `--offline` | off | Do not call the LLM; use the deterministic graph and axis targets only |
 | `--model ID` | configured model | Override the model used for the agentic build |
@@ -1416,6 +1420,33 @@ looplab lesson-guard RUN_DIR [--model ID]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run whose distilled lessons should be audited |
 | `--model ID` | configured model | Override the verifier model |
+
+---
+
+## `concept-authorship`
+
+PART IV D5, the READ side. The classifier cadence REPLACES a node's concept membership rather than
+merging into it, so once it has run, what the PROPOSER said the node was about is invisible to every
+read surface (`events/digest.py::_folded_axes` forbids resurrecting the frozen `idea.concepts`, and
+rightly: a deliberately cleared node must not keep classifying under its old authored axis). The fold
+therefore keeps the authored set beside the membership in `RunState.node_concepts_authored`, and this
+is the instrument over it: per node the authored set, the folded set, what survived and what was
+replaced, plus the run totals and a survival rate.
+
+Pure projection — no model call, no write, nothing appended. Both sides are canonicalized through the
+run's consolidation rename map first, so a concept a later merge RENAMED is not reported as a
+classifier replacement. A run whose log predates the record reports zero authored nodes, which is the
+honest reading of a log that never carried the claim.
+
+```bash
+looplab concept-authorship RUN_DIR [--limit 30] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run whose folded memberships to compare against their authoring |
+| `--limit N` | `30` | How many node rows to print (the totals are always over the whole run) |
+| `--json` | off | Emit the whole report as JSON |
 
 ---
 
@@ -1837,13 +1868,13 @@ the evidence mixed. Legacy rows without the verifier payload remain
 `unverified` and never become positive support merely because they cited a node. New distilled lessons carry an
 explicit `claim_stance` separating literal proposition support from action guidance, so a confirmed negative
 fact is no longer inverted; legacy rows without the field keep the historical outcome mapping. This is still not
-an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is normalized statement text unless
-`--structured` is selected. `--scope` narrows every joined store (lessons, D8 research claims and, with
+an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is the
+scope+polarity-safe structured claim key unless the deprecated `--lean` projection is selected. `--scope` narrows every joined store (lessons, D8 research claims and, with
 `--pack`, concept capsules) to one task — the CLI spelling of the HTTP `/api/cross-run/claims?scope_task=`
 read. Pure read; no LLM/endpoint.
 
 ```bash
-looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structured] [--scope TASK_ID]
+looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--structured|--lean] [--scope TASK_ID]
                [--json] [--governance-receipt]
 ```
 
@@ -1853,11 +1884,10 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | `--top N` | `20` | How many most-evidenced claims to list — **and, with `--pack`, the pack's `max_claims` cap** (`engine/claims_retrieval.py::build_context_pack`), so it bounds both listings and the rendered context pack |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly. Concept tendencies are derived from the full retained pre-cap aggregate while the rendered labels remain bounded |
-| `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
-| `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
+| `--structured` / `--lean` | `--structured` | Claim identity. `--structured` (the default) groups by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`): claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge); governance overlays by scope-precise `claim_uid`. `--lean` is the deprecated normalized-statement projection kept for reading a review built under it — its rows carry no `claim_uid`/`evidence_digest`, so its `--governance-receipt` can never satisfy `claim-decide` |
 | `--scope TASK_ID` | `""` (portfolio-wide) | Project only this task's evidence, filtering **every** joined store through the same access boundary the Atlas and HTTP reads use. **Required to obtain a usable `--governance-receipt` for a task-scoped claim** — see the projection rule below. Empty keeps the portfolio-wide read |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
-| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--structured --scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide`. `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
+| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide` (the structured projection is the default; `--lean` cannot produce them). `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
 
 ### The projection rule: review at the scope you decide at
 
@@ -2210,6 +2240,12 @@ looplab export-mlflow RUN_DIR [--tracking-uri URI] [--experiment NAME]
 | `RUN_DIR` | *(required)* | Run directory to export |
 | `--tracking-uri URI` | local `./mlruns` | MLflow tracking URI |
 | `--experiment NAME` | — | MLflow experiment name |
+
+This command exports a run that has already happened. To have MLflow receive a run **while it runs**
+— a child MLflow run per node as each one lands, with `node_metric` / `best_metric` series on the
+parent — set [`mlflow_tracking_uri`](configuration.md) (`LOOPLAB_MLFLOW_TRACKING_URI`) before
+`looplab run` / `looplab resume`. It is blank (off) by default because a tracking server is an
+egress boundary.
 
 ## `export-notebook`
 

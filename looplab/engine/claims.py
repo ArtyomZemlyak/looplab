@@ -747,14 +747,15 @@ def load_claim_lessons(memory_dir) -> list[dict]:
 
 
 def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
-                      scope_task: str = "", fuzzy: bool = False,
-                      structured: bool = False) -> list[dict]:
+                      scope_task: str = "", structured: bool = True) -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
-    research claims AND decisions consistently. `fuzzy` (opt-in) merges paraphrased claims (CR1b);
-    `structured` (opt-in) uses the scope+polarity-safe structured claim key (the full CR); `scope_task`
-    filters the D8 research claims to the bound task so a task-scoped caller does not re-read another task's
-    research claims (mega-review) — the decisions overlay is applied scope-safely by `claim_assessments`."""
+    research claims AND decisions consistently. `structured` (THE DEFAULT) uses the scope+polarity-safe
+    structured claim key — the same projection `record_claim_decision` validates an operator's
+    `evidence_digest` against, so a review surface that opts out hands out a digest the write path
+    cannot match; `scope_task` filters the D8 research claims to the bound task so a task-scoped caller
+    does not re-read another task's research claims (mega-review) — the decisions overlay is applied
+    scope-safely by `claim_assessments`."""
     if lessons is None:
         lessons = load_claim_lessons(memory_dir)
     lessons = _valid_claim_source_rows(lessons, research=False)
@@ -764,12 +765,12 @@ def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisio
         task_id=scope_task, lessons=lessons, research=research)
     dec = load_claim_decisions(memory_dir) if decisions is None else decisions
     return claim_assessments(lessons, research_claims=research, decisions=dec,
-                             fuzzy=fuzzy, structured=structured)
+                             structured=structured)
 
 
 def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims=None,
                      decisions=None, scope_task: str = "", max_items: int = 8,
-                     structured: bool = False, _governance: Optional[dict] = None) -> dict:
+                     structured: bool = True, _governance: Optional[dict] = None) -> dict:
     """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
     claims + operator decisions + concept aliases + splits. One call so every atlas surface is consistent.
     `structured` keeps the claim projection consistent with the researcher advisory; `scope_task` filters
@@ -830,8 +831,6 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
 # The lessons+research assessment projections, re-exported so `engine.claims` keeps its historical
 # surface (doc 25 EM-01). Imported before the retrieval barrel below, which reads these names.
 from looplab.engine.claims_assessments import (  # noqa: F401,E402
-    _fuzzy_merge_claims,
-    _stmt_tokens,
     _ingest_evidence,
     _register_incarnation,
     _structured_assessments,

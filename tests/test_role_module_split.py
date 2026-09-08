@@ -89,12 +89,19 @@ def _composed_prompts(m) -> list[str]:
 def test_the_moved_prompts_are_byte_identical_to_before_the_move():
     """The bytes, not the file they live in. If this goes red because a prompt was DELIBERATELY
     changed, re-pin it in the same change and say so — that is a prompt-contract decision, which is
-    exactly the decision this pin exists to make visible."""
+    exactly the decision this pin exists to make visible.
+
+    RE-PINNED 2026-09-08, and this is the decision it was made to surface: the `gpu_footprint_cue`
+    OFF branch stopped being the pre-correction paragraph and became SILENCE
+    (`_FOOTPRINT_BUDGET_QUIET`). The old text told an unstamped role that declaring more than the
+    ceiling buys no hardware, which `resources.py::_acquire_gpus` contradicts — and since
+    `gpu_footprint_cue` has no `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, nothing ever resumed onto
+    those bytes, so there was no in-flight run whose treatment the restoration protected."""
     parts = _composed_prompts(role_prompts)
     assert len(parts) == 18, "a fragment left the composition — extend the pin, do not shrink it"
     blob = "\n\x00\n".join(parts).encode("utf-8")
     assert hashlib.sha256(blob).hexdigest() == (
-        "c5f9564d107c2c67eb02559932522c0a59b26f92a3907a91d24544b5e4c24db2"), (
+        "abfd2cb82deb39e8051f70cc1b6ba9c45342d99a51ae6e41cdae97e35058dba1"), (
         "the role prompts changed. If the move was supposed to be verbatim, revert the edit; if a "
         "prompt was changed on purpose, re-pin this digest in the SAME change")
 
@@ -111,7 +118,7 @@ def test_the_researcher_prompt_is_still_assembled_from_the_shared_fragments():
     # The two budget clauses are ALTERNATIVES spliced at one position, never both.
     choice = role_prompts._researcher_system(footprint_choice=True)
     assert role_prompts._FOOTPRINT_BUDGET_CHOICE in choice
-    assert role_prompts._FOOTPRINT_BUDGET_LEGACY not in choice
+    assert role_prompts._FOOTPRINT_BUDGET_QUIET not in choice
 
 
 # ------------------------------------------------------------- 2. one object through both paths
@@ -213,8 +220,13 @@ def test_roles_is_no_longer_a_god_module():
     with slack in it is a cap nobody consults. Spending it means asking whether the lines belong to
     the role CONTRACTS and the LLM roles — which is what this module is — or to one of the four
     siblings, or to a fifth.
+
+    `role_prompts.py` 283 -> 302 on 2026-09-08: every added line is the WHY-comment on
+    `_FOOTPRINT_BUDGET_QUIET` (the decision that an off-switch may narrow a prompt but may not be
+    the value under which it is false). Prompt bytes belong to the fragments; the reasoning behind a
+    fragment belongs beside it, so this raise is not the extraction the cap otherwise asks for.
     """
-    caps = {"agents/roles.py": 788, "agents/role_prompts.py": 283, "agents/state_brief.py": 463,
+    caps = {"agents/roles.py": 788, "agents/role_prompts.py": 302, "agents/state_brief.py": 463,
             "agents/role_wrappers.py": 446, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

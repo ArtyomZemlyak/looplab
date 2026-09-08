@@ -71,13 +71,15 @@ def _node_lifecycle_unchanged(store, *, node_id: int, expected_tail: int,
 
 @dataclass(frozen=True)
 class RunLifecycleFns:
-    """The `serve`-owned primitives a run-MUTATING tool needs, as an explicit contract.
+    """The run-lifecycle primitives a run-MUTATING tool needs, as an explicit contract.
 
     Every field is a fence, not a convenience: the lifecycle lock is the only thing standing between
     a delete and a resume that has been claimed but has not yet taken `engine.lock`, and the two
     launch-pending predicates are what make that window observable. Naming them here means a
     caller can substitute them (a test, a different host) without `tools/` reaching upward into
-    `serve/` — see doc 25 XP-03.
+    `serve/` — see doc 25 XP-03. Since 2026-09-08 the DEFAULT does not reach upward either: the
+    five live in `looplab/engine/run_lifecycle.py`, below both packages, and `serve/` re-exports
+    them. They were `serve`-owned only because that is where the server happened to write them.
     """
     engine_alive: Callable
     fresh_resume_launch_pending: Callable
@@ -134,24 +136,28 @@ class RunControlTools:
             if mutation_journal_path is not None and command_key_namespace else None)
 
     def lifecycle(self) -> "RunLifecycleFns":
-        """The injected run-lifecycle primitives, or the lazily-imported serve defaults.
+        """The injected run-lifecycle primitives, or the lazily-imported defaults.
 
         Resolved per call rather than in `__init__` so the default path keeps its historical import
-        timing — these are only needed by the mutating tools, and importing `serve` at construction
-        would make every read-only assistant session pay for (and depend on) the server package.
+        timing — these are only needed by the mutating tools, and importing the fences at
+        construction would make every read-only assistant session pay for them.
+
+        The default reaches DOWN into `looplab/engine/run_lifecycle.py` since 2026-09-08 (doc 25
+        XP-03). It used to reach UP into `serve/engine_proc` + `serve/run_files`, which left the
+        injection seam as the only thing standing between this module and a tools<->serve cycle:
+        whenever nothing injected — every embedder, and the assistant's own default path — the
+        cycle was there. `serve/engine_proc` and `serve/run_files` re-export every one of these
+        names, so the server and this tool still share one implementation and one monkeypatch seam.
         """
         if self._lifecycle is not None:
             return self._lifecycle
-        from looplab.serve.engine_proc import (
-            _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending,
-            _run_lifecycle_lock)
-        from looplab.serve.run_files import run_config_write_lock
+        from looplab.engine import run_lifecycle
         return RunLifecycleFns(
-            engine_alive=_engine_alive,
-            fresh_resume_launch_pending=_fresh_resume_launch_pending,
-            fresh_run_launch_pending=_fresh_run_launch_pending,
-            run_lifecycle_lock=_run_lifecycle_lock,
-            run_config_write_lock=run_config_write_lock,
+            engine_alive=run_lifecycle.engine_alive,
+            fresh_resume_launch_pending=run_lifecycle.fresh_resume_launch_pending,
+            fresh_run_launch_pending=run_lifecycle.fresh_run_launch_pending,
+            run_lifecycle_lock=run_lifecycle.run_lifecycle_lock,
+            run_config_write_lock=run_lifecycle.run_config_write_lock,
         )
 
     def bind_state(self, state=None, parent=None) -> None:

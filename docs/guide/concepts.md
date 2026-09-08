@@ -181,6 +181,22 @@ surface resolves ids through it), and a per-row stamp cannot express that. Once 
 quiescent pass re-tags what the in-flight one wrote — bounded by the existing `_RETAG_CAP` — so a
 run that reaches a quiet moment ends with exactly the evidence it would have had before.
 
+**What the classifier replaces is kept (2026-09-08).** The cadence REWRITES a node's membership
+rather than merging into it, which is the designed behaviour — the proposer must not certify its own
+taxonomy — but until now the ids the proposer authored survived only in the raw event log, since
+`events/digest.py::_folded_axes` (rightly) forbids every read surface from resurrecting
+`idea.concepts`: a node whose tags were deliberately cleared must not keep classifying under its old
+authored axis. The fold now keeps the authored claim beside the membership in
+`RunState.node_concepts_authored` (`core/models.py::authored_node_concepts` reads it). It follows the
+IDEA and never the membership — a new authored envelope replaces it, a propose reset or a subject
+change clears it, and a classifier or operator row cannot touch it — and it is display/audit only:
+`classifier_verified_node_concepts` remains the single door admission and cross-run evidence cross.
+`concept_mode: "delta"` nodes are not duplicated into it, because their authored operands already
+live in `node_concept_deltas`, which no classifier writer clears. `looplab concept-authorship` is the
+instrument over the pair: per node the authored set, the folded set, what survived and what was
+replaced, with both sides resolved through the run's consolidation renames so a RENAMED id is never
+reported as a classifier replacement.
+
 ## Event log = canonical replay state
 
 **Every event type, what it records and the keys its payload carries: [Event reference](event-reference.md)** — generated from `looplab/events/types.py::EVENT_PAYLOAD_KEYS`, which is also what pins engine invariant #5 (a payload key is additive, and every reader defaults it).
@@ -1105,6 +1121,11 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   `self_report_gap`, positive = over-reported), and the program's sha256 rides on
   `metric_provenance.host_scorer` so the "same scorer for every node" claim is checkable. See
   [Host-side scoring](tasks.md#host-side-scoring-cmdhost_scorer).
+- **The withheld scorer** (2026-09-08, doc 52 row 10a slice (b)) — `cmd.holdout_scorer` is the same
+  operator-owned shape over a split the HOST holds, run once at finish over the val-top-k and never
+  during the search. Its number is the node's `holdout_metric`, so under `holdout_select` the
+  champion is elected on a number no candidate was scored on while it was being built. See
+  [The withheld scorer](tasks.md#the-withheld-scorer-cmdholdout_scorer).
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
   checker (Researcher/Developer) before the next stage runs, so a diverged train can't silently feed
   eval. **Since 2026-09-06 the checker may LOOK** (`stage_check_tools`, on; doc 52 row 9): beside the
@@ -1194,6 +1215,14 @@ A reported number is only useful if it generalizes. The trust layer is leakage-f
   candidate is scored the same way.
 - **Leakage detectors** — train/test contamination, target leakage, and temporal leakage are
   flagged.
+- **Distribution shift** — at setup the run also records how far the deployment sample is from the
+  training one, column by column (PSI + a two-sample KS statistic for numeric columns, total
+  variation distance plus the share of unseen categories for categorical ones), as a `data_shift`
+  event. It is **advisory and read by nothing that decides**: shift is the normal case on a real
+  task, so it is a fact beside a worse metric, never a refusal. The pair compared is whatever the
+  task declares — a `train*` table beside a `test*`/`valid*` one in a data mount, else the
+  train/test rows the leakage gate already asks for; a task that declares no pair records nothing,
+  because "not compared" and "compared, no shift" are different facts.
 - **Variance gate** — a candidate must beat the incumbent by more than ~1 standard error to be
   promoted, so noise doesn't crown a lucky run.
 - **Optional multi-seed confirmation** — when `confirm_top_k` and `confirm_seeds` enable it, re-run the
@@ -1243,6 +1272,11 @@ Additional safety monitors are off by default. Under the default `trust_gate=aud
   (repeated evaluation on the test split, then a `max`/`> best` choice over those scores).
 - `critic_check` — an execution-free critic of each solution. Broad critic warnings stay advisory;
   `critic:hardcoded_metric` is the narrow high-precision exception that can gate.
+- `feature_engineering` — the same flag that puts the "KEEP a feature only if it improves CV"
+  directive in the proposal prompt also ENFORCES it: the candidate's own per-feature `FEATURE_CV`
+  ledger is run through the operator's keep/drop rule (`search/operators.py`), and a feature the
+  ledger fails while the code still builds it is a `feature_cv:kept_feature_failed_cv` finding. The
+  evidence is the node's own numbers, so a candidate that reports no ledger is not flagged.
 
 Heuristic perfect-score, audit-unavailable and suspicious-output warnings remain advisory in every mode.
 High-precision reward-hack/leakage signals (and `critic:hardcoded_metric`) exclude a node from best-selection
@@ -2100,7 +2134,7 @@ Where each concept lives in the code:
 | Serve-side paid work: metering lease + claim→terminal receipt ledger | `serve/paid_work.py`, `serve/paid_ledger.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |
-| Leakage detectors + data profiler | `trust/leakage.py`, `core/profile.py` |
+| Leakage detectors + data profiler + the advisory distribution-shift record | `trust/leakage.py`, `core/profile.py`, `trust/drift.py` |
 | Vector store + agentic retrieval | `tools/vectorstore.py`, `tools/retrieval.py`, `tools/knowledge_tools.py`, `agents/agent.py` |
 | Typed tool capabilities/results, MCP structure/cancellation, and operator-pinned Developer commands | `tools/_base.py`, `agents/tool_loop.py`, `tools/mcp_tools.py`, `tools/dev_commands.py`, `engine/workspace_seed.py` |
 | Cross-run case library | `engine/memory.py` |

@@ -34,7 +34,8 @@ from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorage
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
     load_run_reset_marker)
-from looplab.serve.http import if_none_match, json_object, request_body_contract, refusal
+from looplab.serve.http import (
+    generation_conflict, if_none_match, json_object, request_body_contract, refusal)
 from looplab.events.eventstore import (
     EventStore, EventStoreLockError, JsonlRecordInvalid,
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
@@ -633,13 +634,10 @@ def build_router(srv) -> APIRouter:
             })
         generation = srv.commands.run_generation(rd)
         if expected_generation is not None and generation != expected_generation:
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation,
-                "current_generation": generation or None,
-                "message": f"The run was reset or replaced before {subject} was read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
+            raise generation_conflict(
+                f"The run was reset or replaced before {subject} was read.",
+                expected=expected_generation, current=generation or None,
+                remediation="Reload run state and request the current generation.")
         return generation
 
     def _finish_trace_read(rd: Path, before_generation: str,
@@ -650,13 +648,11 @@ def build_router(srv) -> APIRouter:
         if (generation != before_generation
                 or (expected_generation is not None
                     and generation != expected_generation)):
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation or before_generation or None,
-                "current_generation": generation or None,
-                "message": "The run was reset or replaced while its trace was being read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
+            raise generation_conflict(
+                "The run was reset or replaced while its trace was being read.",
+                expected=expected_generation or before_generation or None,
+                current=generation or None,
+                remediation="Reload run state and request the current generation.")
         return generation
     _base_state_payload = srv.state_payload
 
@@ -897,13 +893,10 @@ def build_router(srv) -> APIRouter:
             })
         _rd, current = srv.commands.generation_fence(rd)
         if expected != current:
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected,
-                "current_generation": current or None,
-                "message": "The run was reset or replaced before historical detail was read.",
-                "remediation": "Open the current generation or reload the exact historical view.",
-            })
+            raise generation_conflict(
+                "The run was reset or replaced before historical detail was read.",
+                expected=expected, current=current or None,
+                remediation="Open the current generation or reload the exact historical view.")
         return current
 
     @router.get("/api/runs/{run_id}/events")
@@ -1327,13 +1320,11 @@ def build_router(srv) -> APIRouter:
         if (after_generation != before_generation
                 or (expected_generation is not None
                     and after_generation != expected_generation)):
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation or before_generation or None,
-                "current_generation": after_generation or None,
-                "message": "The run was reset or replaced while its node logs were being read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
+            raise generation_conflict(
+                "The run was reset or replaced while its node logs were being read.",
+                expected=expected_generation or before_generation or None,
+                current=after_generation or None,
+                remediation="Reload run state and request the current generation.")
         if after_attempt != current_attempt:
             # NOT `_assert_attempt_unchanged`: this route's `after_attempt` carries the legacy
             # log-directory identity recheck above (a replaced directory reads as None), so the
@@ -1477,13 +1468,11 @@ def build_router(srv) -> APIRouter:
         if (after_generation != before_generation
                 or (expected_generation is not None
                     and after_generation != expected_generation)):
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation or before_generation or None,
-                "current_generation": after_generation or None,
-                "message": "The run was reset or replaced while its node trace was being read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
+            raise generation_conflict(
+                "The run was reset or replaced while its node trace was being read.",
+                expected=expected_generation or before_generation or None,
+                current=after_generation or None,
+                remediation="Reload run state and request the current generation.")
         return _trace_response({**payload, "run_generation": after_generation or None})
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/episodes")
@@ -1667,13 +1656,11 @@ def build_router(srv) -> APIRouter:
             if (after_generation != before_generation
                     or (expected_generation is not None
                         and after_generation != expected_generation)):
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation or before_generation or None,
-                    "current_generation": after_generation or None,
-                    "message": "The run was reset or replaced while its live trace was being read.",
-                    "remediation": "Reload run state and request the current generation.",
-                })
+                raise generation_conflict(
+                    "The run was reset or replaced while its live trace was being read.",
+                    expected=expected_generation or before_generation or None,
+                    current=after_generation or None,
+                    remediation="Reload run state and request the current generation.")
             payload["run_generation"] = after_generation or None
             return payload
         # Default poll stays small (the Dock polls limit=40); the ceiling is raised so the UI's
@@ -1939,13 +1926,11 @@ def build_router(srv) -> APIRouter:
             if (after_generation != before_generation
                     or (expected_generation is not None
                         and after_generation != expected_generation)):
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation or before_generation or None,
-                    "current_generation": after_generation or None,
-                    "message": "The run was reset or replaced while its conversation was being read.",
-                    "remediation": "Reload run state and request the current generation.",
-                })
+                raise generation_conflict(
+                    "The run was reset or replaced while its conversation was being read.",
+                    expected=expected_generation or before_generation or None,
+                    current=after_generation or None,
+                    remediation="Reload run state and request the current generation.")
             if after_attempt != current_attempt:
                 raise _attempt_cas_409(
                     nid, current_attempt, after_attempt,
@@ -2115,13 +2100,10 @@ def build_router(srv) -> APIRouter:
         # the Files surface 503 whenever a writer held the run.
         rd, current = srv.commands.generation_fence(rd)
         if current != expected:
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected,
-                "current_generation": current or None,
-                "message": f"The run was reset or replaced {phase} its files were read.",
-                "remediation": "Reload Files and request only the current run generation.",
-            })
+            raise generation_conflict(
+                f"The run was reset or replaced {phase} its files were read.",
+                expected=expected, current=current or None,
+                remediation="Reload Files and request only the current run generation.")
         return current
 
     def _artifact_attempt_conflict(node_id: int, expected_attempt: Optional[int],
@@ -2900,13 +2882,10 @@ def build_router(srv) -> APIRouter:
         # config lock, so the named generation cannot be replaced between this check and the write.
         current_generation = srv.commands.run_generation(rd)
         if current_generation != expected_generation:
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation,
-                "current_generation": current_generation or None,
-                "message": "The run was reset while these settings were being edited.",
-                "remediation": "Reload the run's configuration and re-apply your changes.",
-            })
+            raise generation_conflict(
+                "The run was reset while these settings were being edited.",
+                expected=expected_generation, current=current_generation or None,
+                remediation="Reload the run's configuration and re-apply your changes.")
         atomic_write_text(snap, json.dumps(updated, indent=2))
         # trust_gate is enforced by the fold, so repair its event while this config transaction is
         # still serialized. A legacy request can retry an ambiguous dual-write failure safely.

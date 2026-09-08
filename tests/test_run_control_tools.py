@@ -648,8 +648,12 @@ def test_delete_run_retires_root_start_record(tmp_path):
 def test_delete_node_rejects_fresh_run_launch_marker(tmp_path, monkeypatch):
     rd = tmp_path / "node-delete-reset-launch"
     _run(rd, nodes=(0, 1)).append("pause", {})
+    # The tool's DEFAULT lifecycle provider reads this out of `looplab.engine.run_lifecycle`, which
+    # is where the five primitives live since doc 25 XP-03 closed (2026-09-08) — patching the
+    # `serve/engine_proc` re-export would leave the tool's own binding untouched, and the delete
+    # would go through with no launch fence at all.
     monkeypatch.setattr(
-        "looplab.serve.engine_proc._fresh_run_launch_pending", lambda _rd: True)
+        "looplab.engine.run_lifecycle.fresh_run_launch_pending", lambda _rd: True)
     tool = RunControlTools(
         tmp_path, alive_fn=lambda _rd: False, mode="auto",
         approver=lambda _action: "allow_once",
