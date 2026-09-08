@@ -95,6 +95,7 @@ from looplab.agents.role_wrappers import (  # noqa: F401
     ValidatingDeveloper,
     WrapsDeveloper,
     WrapsResearcher,
+    audit_extra_of,
     bind_state_on,
 )
 
@@ -197,46 +198,17 @@ class DeveloperResult:
     last_budget_exhausted: str = ""
     last_budget_facts: Any = None
     last_edit_calls: int = 0
-    # THE ONE FIELD THAT IS NOT A REGISTRY MEMBER, and the exception is stated rather than assumed.
-    # `DEVELOPER_OUTPUT_ATTRS` registers ATTRIBUTES a Developer assigns; `audit_extra()` is a
-    # METHOD a wrapper offers (`role_wrappers.py::ValidatingDeveloper`: attempts / fell_back /
-    # shipped_ok), so it cannot be a member of that registry — and `engine/audit.py::
-    # _emit_agent_report` was still CALLING it on the shared instance, after `developer_call_lock`
-    # was released, which is the same unlocked window `last_report` was moved onto this envelope to
-    # escape: between a worker returning from `_run_developer` and reaching that line, a sibling
-    # build's `_record` overwrites those three values, and this node's `agent_validated` row then
-    # carries another node's attempt count and fallback flag. Silent either way — the ADR-7 trail
-    # is wrong with nothing red. Captured because it annotates exactly the call this envelope IS.
-    # `tests/test_developer_result.py` pins the field set as the registry plus `code` plus this
-    # one, NAMED, so a future field cannot slip in unnamed.
+    # THE ONE FIELD THAT IS NOT A REGISTRY MEMBER, and the exception is stated rather than assumed:
+    # `DEVELOPER_OUTPUT_ATTRS` registers ATTRIBUTES a Developer assigns, and `audit_extra()` is a
+    # METHOD a wrapper offers, so it can never be a member. It is captured because it annotates
+    # exactly the call this envelope IS, and because it was the last channel read off the SHARED
+    # instance after the lock — see `engine/audit.py::_emit_agent_report`, the site that decides
+    # it, for the race and its measurement. Filled by `role_wrappers.py::audit_extra_of`.
     audit_extra: Optional[dict] = None
 
     @classmethod
     def failed(cls, code: str) -> "DeveloperResult":
         return cls(code=code)
-
-
-def audit_extra_of(developer) -> Optional[dict]:
-    """`developer.audit_extra()` as a plain dict, or None — total over anything a stub can do.
-
-    Here rather than in the engine because it is part of the Developer contract this module owns,
-    and because BOTH sides need it: `engine/node_build.py::_capture_developer_result` calls it
-    inside the capture, under `developer_call_lock` (the wrapper builds the dict from its own
-    instance state, and that state is only this call's while the lock is held), and
-    `engine/audit.py::_emit_agent_report` calls it on the fallback path for a node whose build
-    made no fresh Developer call. Total over junk like every read in the capture: a stub whose
-    `audit_extra` raises, or returns a string, must read as "no annotation", never break a build.
-    """
-    fn = getattr(developer, "audit_extra", None)
-    if not callable(fn):
-        return None
-    try:
-        extra = fn()
-    except Exception:  # noqa: BLE001 — an optional audit annotation must never break a build
-        return None
-    return dict(extra) if isinstance(extra, dict) else None
-
-
 # One `RLock` per Developer INSTANCE, so a call and the capture of its outputs are one atomic
 # step: two repairs offloaded to two worker threads on the SAME shared instance now queue on it
 # instead of interleaving their `last_*` writes. Keyed weakly so a pooled per-build Developer is

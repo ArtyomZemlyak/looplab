@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from looplab.agents.roles import audit_extra_of
+from looplab.agents.role_wrappers import audit_extra_of
 from looplab.core.containment import contain
 from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
                                   EV_DATA_SHIFT, EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,

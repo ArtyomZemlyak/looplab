@@ -16,7 +16,8 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Optional
 
-from looplab.agents.roles import DeveloperResult, audit_extra_of, developer_call_lock
+from looplab.agents.role_wrappers import audit_extra_of
+from looplab.agents.roles import DeveloperResult, developer_call_lock
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (Idea, NodeStatus, RunState, normalize_researcher_footprint,
                                  is_developer_error, is_developer_stuck)
