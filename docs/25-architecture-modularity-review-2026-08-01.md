@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 168 resolved, 18 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 169 resolved, 17 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -9360,9 +9360,11 @@ controls (now read against `controlActions.js`, with an anti-vacuity length chec
 residue the finding calls "every endpoint function" is deliberately still in api.js: that is what an
 API module is for.
 
-#### UI-03 · HIGH · mergeable-entities · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
+#### UI-03 · HIGH · mergeable-entities · effort: large — **RESOLVED (2026-09-08)**
 
-> **OPEN[runview-retained-work-machinery]** the recovery saga and the page shell were extracted; the ~200-line retained-work machinery and the `workspaceFocusOwnerRef` switchyard are untouched, and RunView.jsx has grown from the 2,784 lines this resolution left it at to **3,110** (2026-08-19). proof:present:workspaceFocusOwnerRef@ui/src/RunView.jsx
+*Closed 2026-09-08 — the two named residues (the retained-work machinery and the
+`workspaceFocusOwnerRef` switchyard) are extracted, each as a pure model beside its React half. See
+the second resolution note at the end of this finding.*
 
 **RunView.jsx is a 2,000-line god-component; start-over recovery saga and repeated page-shell markup should be extracted**
 
@@ -9500,6 +9502,52 @@ load in a parallel scratch copy and pass alone — unrelated to this change.
 mergeable entity and is a better candidate than merge intent, but it feeds the navigation-loss
 guard, the Start-over preflight and the fence screen's notices, so it wants its own finding. The
 `workspaceFocusOwnerRef` switchyard (922, 1120-1150) is untouched.
+
+*Resolution (2026-09-08, the two named residues) — both extracted as a pure model beside its React
+half, and the reason to do it was never the line count.*
+
+RunView.jsx 3,148 -> **2,827** lines; four new modules, 666 lines between them. The retained-work
+machinery is `ui/src/retainedWorkModel.js` (349, pure) + `ui/src/useRetainedWork.js` (177, the
+choreography); the switchyard is `ui/src/workspaceFocusModel.js` (75, pure) +
+`ui/src/useWorkspaceFocusOwner.js` (65). The bodies moved verbatim; what changed is the NAME of each
+input, from a `retained*` local to a parameter, and the hook returns the same flat names the
+component body already used, so all 23 downstream read sites are byte-identical.
+
+**Why these two and not merge intent** — the 2026-08-05 note rejected merge intent with a count (8
+declarations read at 61 sites spanning lines 27-2618, and extracting it would mean exporting the
+component's own DOM refs back out of a hook). These are the opposite shape. The retained-work block
+is 250 lines of pure DERIVATION over three store reads and one guard registration, consumed as five
+booleans and four strings; the switchyard is two if/else chains that are truth tables. Nothing in
+either returns a DOM ref or a toast channel.
+
+**The reason is testability, not size.** Every consumer of retained work is a refusal or a warning —
+the navigation-loss guard, the panel-close confirm, the fence screen's notices, the Comments discard
+path — so a wrong count is either silent data loss or a run the operator cannot start; and while the
+derivations lived in the component the only way to reach them was to render a whole run route with a
+populated draft store behind a generation fence, which is why they had no test at all. Focus is the
+same story: crossing the compact/desktop breakpoint UNMOUNTS the surface the operator was on, and
+with nothing to catch focus a keyboard operator loses their place mid-run with no visible cause.
+`ui/test/retainedWork.test.js` (27 tests) now drives both over the cases that actually decide
+something: the protected/releasable split (a current-generation `create` is append-only and may
+never be discarded, damaged or not), unreadable recovery storage as a THIRD state rather than a
+synonym for "nothing retained", one Authoring recovery seen through three channels counted once with
+durable winning over memory-only, a live panel controller phrasing its own refusal but only for the
+route that is actually unsafe, `keepsMutablePanel` (moving within the same run/panel/generation is
+not leaving the draft — blocking it would freeze the address bar), a repeated `panel=`/`gen=`
+parameter refused as ambiguous, and the focus tables in both directions.
+
+**Two things deliberately did NOT move.** `submitStartOver`'s preflight keeps its own SYNCHRONOUS
+re-read of both stores rather than using these derivations — the confirmation dialog can outlive the
+render that opened it, and a just-created comment command must never race Start over — and it is now
+the only `listCommentOperationRecoveries(String(runId))` call left in RunView, which the test counts
+rather than merely greps. The panel-guard REGISTRY (`publishPanelNavigationGuard`) also stays,
+because the lazy panels are handed that callback as a prop; the hook only reads the registration.
+
+**One hazard found in doing it.** The switchyard's surfaces are exactly the elements the breakpoint
+swap replaces, so the bag handed to the hook holds the REFS, not a snapshot of the elements taken
+during render — a snapshot would have handed the post-swap frame the layout that had just unmounted.
+The `focusin` classifier and the post-swap frame both dereference at read time, and the effect keeps
+its original dependency list including `selectedGroup`, which nothing in it reads.
 
 #### UI-04 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
