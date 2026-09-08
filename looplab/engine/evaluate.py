@@ -2976,6 +2976,21 @@ class EvaluateMixin:
         """DECIDE_REPAIR — the two dependency rounds (`PHASE_RETRY`: re-run, no repair spent), the
         eval-budget stop, the floors, the inline-repair gate, the triage judge with its diagnosis
         record, and the critic. `PHASE_SETTLED` on every stop; `PHASE_NEXT` means "repair"."""
+        # A REFUSED GATE READER IS THE OPERATOR'S TASK FILE, AND NO REPAIR CAN REACH IT. When a
+        # task declares an `adapter` reader under `eval.metrics` / `constraints` / `cross_check`,
+        # `run_command_eval` refuses by RETURNING a metric-less result (it used to raise, which
+        # killed the run with no node terminal). That result classifies `no_metric`, which is in
+        # `REPAIRABLE_REASONS` — so every node ran its full pipeline for hours and then bought a
+        # triage judge plus `inline_repair_attempts` Developer repairs, per node, for the whole run,
+        # trying to fix candidate code for a fault that lives in the spec. `metric_salvage.py`
+        # already reads this flag for the same reason ("the gates were never run"); the repair path
+        # is the other half and had no clause. Read as a FLAG, not through the classifier's label:
+        # it is a property of the RESULT, the argument `diverged` is read on further down.
+        if getattr(a.res, "gate_readers_refused", False):
+            a.triage_outcome = ("abandon",
+                                "the task's declared metric/constraint readers were refused: this "
+                                "is the eval SPEC, not the candidate — no repair can reach it")
+            return PHASE_SETTLED
         # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
         # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
         # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
