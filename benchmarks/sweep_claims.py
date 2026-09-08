@@ -628,7 +628,14 @@ def check_money_cue_reaches_the_choosers(bench: str):
     import subprocess
     tool = Path(bench) / "looplab" / "benchmarks" / "cue_reach.py"
     roots = sorted(glob.glob(f"{bench}/model-probes/*/runs"), key=os.path.getmtime, reverse=True)
-    roots = [str(Path(r).parent) for r in roots if "/_ruler/" not in r][:3]
+    # EVERY PROBE TREE, NOT THE THREE NEWEST (§341). The revisit line the foresight panel's blindness
+    # carries -- "if either grows past a few per cent" -- is a statement about the corpus, and a
+    # three-probe window cannot fail it or clear it honestly. On 2026-09-08 the three newest were
+    # all `discrete_log`, the task that ranks highest on this phase, and the window read 3.0 %:
+    # the check announced the line crossed. Pooled over all 142 trees that have the span the figure
+    # is 2.06 % (per probe: median 2.01, p75 2.63, max 5.56 -- 21 of 142 at or above 3 %). The
+    # decision stands; the alarm was the sample. Pooling all of them costs 13 s.
+    roots = [str(Path(r).parent) for r in roots if "/_ruler/" not in r]
     if not tool.is_file() or not roots:
         return False, "cue_reach.py or a probe tree is missing, so the claim cannot be driven"
     # `--json`, not the columns: §289 measured what parsing this kind of table by eye costs.
@@ -654,6 +661,7 @@ def check_money_cue_reaches_the_choosers(bench: str):
     named = {"plan", "foresight_rank", "hyp_prioritize"}
     blind_named = {p for p, _ in still_blind} & named
     detail = "; ".join(said)
+    detail = f"over {len(roots)} probe tree(s): " + detail
     if blind_named:
         over = [f"{p} at {sh:.1f} %" for p, sh in still_blind if p in named and sh >= 3.0]
         detail += ("; STILL BLIND: " + ", ".join(sorted(blind_named))
