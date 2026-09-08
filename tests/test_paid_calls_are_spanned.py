@@ -46,7 +46,7 @@ import pytest
 from looplab.core import tracing
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.llm import BudgetExceeded, CostAccountant, OpenAICompatibleClient
-from looplab.core.models import ResearchMemo
+from looplab.core.models import Idea, ResearchMemo
 from looplab.events.replay import fold
 from factories import make_engine
 
@@ -212,6 +212,39 @@ class _Graph:
 
 def _card(card_id, statement):
     return types.SimpleNamespace(id=card_id, statement=statement, card_id=card_id)
+
+
+def test_the_batch_proposal_pays_inside_a_span(tmp_path, monkeypatch):
+    """THE LANE A RUN ACTUALLY TAKES, and the one this file never drove.
+
+    `_consume_batch_proposal` is `width` paid Researcher calls, and it opened a `_progress` beacon
+    and no span — so every one of them was written with `trace_id=null`: real money attributable to
+    nothing, invisible to `looplab timings`, to the trace view and to every per-phase cost question.
+    Its own comment already called it "the single longest wholly invisible stretch in the loop".
+
+    The asymmetry is why it hid: the SERIAL propose one method over runs inside `_create_node`'s
+    `create_node` span, so a run at width 1 looked fine, and at the shipped `llm_parallel` AUTO
+    width on a GPU box the batch lane — the one that pays most — was the spanless one.
+
+    Driven through the real method with a paying `_propose_batch`, and asserted by the same
+    conservation check every other scenario here uses: every dollar in the ledger is in a span.
+    """
+    engine = make_engine(tmp_path / "run", max_nodes=2)
+    state = fold(engine.store.read_all())
+
+    def _paying_batch(_state, width):
+        for _ in range(int(width)):
+            _pay(engine)
+        return [Idea(operator="draft", params={"x": float(i)}) for i in range(int(width))]
+
+    monkeypatch.setattr(type(engine), "_propose_batch",
+                        lambda self, st, w: _paying_batch(st, w), raising=True)
+    engine._consume_batch_proposal(state, 3)
+
+    assert "propose" in _span_names(engine), (
+        "the batch proposal must open an operation span; a beacon alone leaves every one of its "
+        "paid calls with trace_id=null")
+    assert_span_channel_accounts_for_every_paid_call(engine, at_least=3)
 
 
 def test_hypothesis_tagging_pays_inside_a_span(tmp_path, monkeypatch):

@@ -2071,9 +2071,11 @@ class SpeculationMixin:
             # and the beacon must NOT ride the `_capture_proposal_events` sink around it, which
             # buffers until the main task publishes. See `SharedEngineMixin._progress` for why a
             # DIAGNOSTIC row may be appended straight from this worker.
-            with self._progress(PROGRESS_STAGE_BUILD, "propose",
-                                node_id=proposal_node_ceiling, prospective=True,
-                                speculative=True, operator=raw_action.get("kind")), \
+            # `_paid_progress`: the comment above already says this is a full paid Researcher
+            # call. A beacon alone opens no span, so its money was attributable to nothing.
+            with self._paid_progress(PROGRESS_STAGE_BUILD, "propose",
+                                     node_id=proposal_node_ceiling, prospective=True,
+                                     speculative=True, operator=raw_action.get("kind")), \
                     self._capture_proposal_events() as captured:
                 idea = self._prepare_node_idea(
                     raw_action,

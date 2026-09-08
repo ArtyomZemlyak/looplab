@@ -1666,9 +1666,12 @@ class CardReservationMixin:
                     # the note below on why the two do not share `_link`). One paid Researcher call
                     # per action, run serially, so without a beacon a width-4 stage is four
                     # invisible waits in a row that read as one hang.
-                    with self._progress(PROGRESS_STAGE_BUILD, "propose",
-                                        node_id=proposal_node_ceiling + offset, prospective=True,
-                                        operator=action.get("kind")):
+                    # `_paid_progress`: this is a paid Researcher call, and a beacon alone leaves
+                    # it `trace_id=null`. See `SharedEngineMixin::_paid_progress`.
+                    with self._paid_progress(PROGRESS_STAGE_BUILD, "propose",
+                                             node_id=proposal_node_ceiling + offset,
+                                             prospective=True,
+                                             operator=action.get("kind")):
                         # OFF THE EVENT-LOOP THREAD, and only this half. `_prepare_node_idea` is a
                         # paid Researcher call — minutes of provider latency with no `await` in it —
                         # and it ran as ONE event-loop callback, so nothing else on the loop could
