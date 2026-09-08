@@ -27,11 +27,26 @@ from looplab.engine.governance_health import (
     confirm_governance_durable,
     observed_path_missing,
     read_governance_rows,
-    raise_governance_storage_unavailable,
+    # Kept after `record_claim_decision` stopped calling it directly: `claims.py` is a BARREL over
+    # the post-split modules and `tests/test_claims.py::test_the_barrel_re_exports_the_same_objects`
+    # holds it to re-exporting every name they own.
+    raise_governance_storage_unavailable,  # noqa: F401 — barrel re-export, not a local caller
     validate_action_ids,
     validate_local_revisions,
     validate_optional_text,
     validate_revision_fields,
+)
+# The claim ledger is a governance ledger, and it now composes the SHARED protocol steps rather
+# than hand-rolling them (doc 25 EM-05): one required-lock spelling, one idempotency-before-CAS
+# lookup, one expected-revision rule, one durable append with its fsync/parent-fsync/refusal
+# translation. What stays local is what is genuinely claim-specific — the LOGICAL revision derived
+# by `_logical_decision_rows`, the sanitize-on-replay projection, and the two `ClaimDecision*`
+# conflict types an operator surface reports by name.
+from looplab.engine.governance_protocol import (
+    action_replay,
+    durable_governance_append,
+    governance_lock,
+    validate_expected_revision,
 )
 from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, normalize_statement
 from looplab.trust.cross_run import (
@@ -321,11 +336,9 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         rec["action_id"] = aid
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    from looplab.core.atomicio import strict_fsync, strict_fsync_parent
-    from looplab.events.eventstore import _interprocess_lock
     # Idempotency lookup, revision CAS, allocation and append are one critical section. A
     # pre-lock check lets two UI writers both accept revision N and silently create divergent policy.
-    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+    with governance_lock(path):
         # governance corruption is not a zero-row revision. Refuse every operator
         # write until the ledger is explicitly repaired; a later pin/clear must never hide the
         # quarantine behind a fresh, apparently healthy revision.
@@ -333,22 +346,25 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         logical = _logical_decision_rows(rows)
         created = not path.exists()
         if aid:
-            existing = next((r for r in logical
-                             if _identity_text(r.get("action_id"), _MAX_DECISION_ACTION_ID) == aid), None)
+            # Resolved BEFORE the CAS, over the LOGICAL rows: a transport retry carrying the
+            # original — now stale — revision must return its first durable receipt.
+            existing, exact = action_replay(
+                logical, rec, aid, payload=_decision_payload,
+                action_id_of=lambda row: _identity_text(row.get("action_id"),
+                                                        _MAX_DECISION_ACTION_ID))
             if existing is not None:
-                if _decision_payload(existing) == _decision_payload(rec):
-                    confirm_governance_durable(path)
-                    return sanitize_cross_run_projection(
-                        existing, max_chars=16_000, max_items=64, max_total_items=256)
-                raise ClaimDecisionIdempotencyConflict(
-                    f"action_id {aid!r} was already used for a different claim decision")
+                if not exact:
+                    raise ClaimDecisionIdempotencyConflict(
+                        f"action_id {aid!r} was already used for a different claim decision")
+                confirm_governance_durable(path)
+                # A replay returns the SANITIZED projection, not the raw row: this receipt crosses
+                # an API/CLI boundary carrying persisted operator text.
+                return sanitize_cross_run_projection(
+                    existing, max_chars=16_000, max_items=64, max_total_items=256)
         current = len(logical)
-        if expected_revision is not None:
-            if (isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
-                    or expected_revision < 0):
-                raise ValueError("expected_revision must be a non-negative integer")
-            if expected_revision != current:
-                raise ClaimDecisionConflict(expected_revision, current)
+        validate_expected_revision(expected_revision)
+        if expected_revision is not None and expected_revision != current:
+            raise ClaimDecisionConflict(expected_revision, current)
         def _persist(governance=None):
             if validate is not None:
                 validate()
@@ -363,15 +379,8 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
                     decisions=governance["decisions"])
                 validate_evidence(evidence_snapshot)
             stored = {**rec, "revision": current + 1}
-            try:
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(stored) + "\n")
-                    f.flush()
-                    strict_fsync(f.fileno())
-                if created:
-                    strict_fsync_parent(path)
-            except (OSError, TimeoutError, RuntimeError) as exc:
-                raise_governance_storage_unavailable(path, exc)
+            durable_governance_append(path, json.dumps(stored) + "\n",
+                                      created=created, require_durable=True)
             return stored
 
         if validate_evidence is None:
@@ -768,17 +777,11 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     claims/contradictions (mega-review)."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
+    from looplab.engine.governance_health import observed_path_missing
+    from looplab.engine.governance_protocol import governed_projection
     from looplab.engine.memory import ConceptCapsuleStore, _dedup_valid_capsules
     if _governance is None:
-        source_names = []
-        if lessons is None:
-            source_names.append("lessons.jsonl")
-        if research_claims is None:
-            source_names.append("research_claims.jsonl")
-        if capsules is None:
-            source_names.append("concept_capsules.jsonl")
-        return project_governed_sources(
+        return governed_projection(
             memory_dir,
             lambda governance: atlas_for_memory(
                 memory_dir, lessons=lessons, capsules=capsules,
@@ -786,7 +789,9 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
                 scope_task=scope_task, max_items=max_items, structured=structured,
                 _governance=governance,
             ),
-            include_concepts=True, source_names=source_names,
+            include_concepts=True,
+            unsupplied={"lessons.jsonl": lessons, "research_claims.jsonl": research_claims,
+                        "concept_capsules.jsonl": capsules},
         )
     base = Path(memory_dir) if memory_dir else None
     if lessons is None:

@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 150 resolved, 36 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 153 resolved, 33 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -1835,9 +1835,7 @@ to be all-or-nothing; `tests/test_width_settling.py` pins that as a decision, no
 The ops sub-dict block EC-11 also mentions, and the `_apply_strategy` if-chain's remaining
 governance-sensitive sections, are left explicit as the finding itself recommends.
 
-#### EC-12 · LOW · mergeable-entities · effort: small — **PARTIALLY RESOLVED (2026-08-08)**
-
-> **OPEN[isolated-producer-wrapper-not-extracted]** the two speculation producers still repeat the to_thread/except/store/clear/notify wrapper, and `SpecRawStageResult` still has no `failure(...)` constructor. proof:absent:_run_isolated_producer@looplab/engine/speculation.py
+#### EC-12 · LOW · mergeable-entities · effort: small — **RESOLVED (2026-09-08)**
 
 **Mirrored producer pipelines: SpecBuildResult vs SpecRawStageResult async wrappers duplicate scaffolding**
 
@@ -1859,13 +1857,39 @@ THREE anyio teardown errors, each of which means the consumer is already gone or
 main task re-scans the durable slots anyway — letting one escape would tear down the task group, i.e.
 cancel live evaluations, over a hint nobody needed.
 
-The `_run_isolated_producer` wrapper is not extracted: the two producers' lifecycles genuinely
-differ (one clears a KEY from a set and discards a superseded result, the other clears a bool flag
-and additionally discards role telemetry) and their result types are different dataclasses. Forcing
-them into one shape would mean threading three callbacks through it — more machinery than the
-duplication it removes. The `SpecRawStageResult.failure(...)` classmethod is likewise left open: the
-two payload sites differ in which optional fields they carry, and a classmethod defaulting the rest would
-hide that. Recorded as a deliberate partial rather than dropped.
+*Closure (2026-09-08): the wrapper and the failure constructor landed.* The 2026-08-03 objection was
+that a shared coroutine means threading three callbacks through it. That is exactly what
+`speculation.py::SpeculationMixin._run_isolated_producer` does — `on_failure` / `store` / `release`,
+plus the `limiter` the raw producer needs — and the reason it is worth those three is that the
+callbacks are the parts that legitimately DIFFER, while everything around them is a rule that fails
+SILENTLY when a copy drops it:
+
+* `abandon_on_cancel=False`, with its whole standing caveat about an operator stop paying the
+  transport timeout, is now stated once instead of twice;
+* a worker that RAISES still STORES a result. The main task advances the durable gate off the stored
+  slot, so a producer that stored nothing is indistinguishable from one still running — the session
+  waits out its exit gate on a fault that already happened;
+* the release and the notification are in `finally`, in that order. Releasing after the wake-up would
+  let the consumer re-scan the slots while the flag still says "inflight".
+
+That third rule is what `tests/test_live_producer_survives_commit_refusal.py`'s no-`await`-between
+pin was reading out of `_produce_card_build`; it now reads it out of the wrapper, and additionally
+checks that the request-driven producer still reaches the pair THROUGH the wrapper — a pin that
+describes code its subject does not run is the failure mode of moving a rule.
+
+`SpecRawStageResult.failure(exc, …)` is the one builder of the consumed, non-staged payload. The
+objection there was that "a classmethod defaulting the rest would hide" the two sites' disagreement,
+so it defaults nothing that matters: `audit_events` is an explicit parameter (the worker's own guard
+may already have buffered folded intents the main task must publish; the wrapper's guard fires when
+the worker never returned and has nothing to carry), and `at_node` is NOT a parameter for the
+opposite reason — a failed proposal is always at the ceiling it was prepared against, which the two
+sites already agreed on. `raw_stage_source(action)` is the third copy this closed: the same proposal
+used to be attributed to `engine` when it returned and re-derived independently when it raised.
+
+`tests/test_replay_queue_and_producer_seams.py` gains three tests, two of which DRIVE the code rather
+than read it: a raising proposal worker taken end to end through `_produce_raw_card_stage` (stored
+consumed result, released flag, one notification, role telemetry discarded, in that order) and the
+wrapper's own store/release/notify order over a fault.
 
 #### EC-13 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
@@ -2197,9 +2221,7 @@ from the identity, coercing an absent `finish_seq` to zero (which makes "never f
 "finished at seq 0" the same source), and letting an empty task id mint a shared facets key — which
 would serve one task's paid overlay to another.
 
-#### EM-05 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
-
-> **OPEN[append-governance-homed-in-concept-registry]** the generic governance-append primitive four subsystems import still lives in the concept-specific module, and `record_claim_decision` still hand-rolls its own copy of the same locked/CAS/idempotency protocol. proof:present:_append_governance@looplab/engine/concept_registry.py
+#### EM-05 · MEDIUM · inconsistency · effort: medium — **RESOLVED (2026-09-08)**
 
 **Two parallel governance-append implementations; the shared one is homed in the wrong module**
 
@@ -2232,14 +2254,69 @@ now pin what the branch used to: the primitive contains no ledger filename, and 
 `_append_governance` call in `concept_registry` passes `read_rows`. Both were verified to fail when
 broken.
 
-NOT done, and deliberately: the relocation and the `record_claim_decision` port. `_append_governance`
-still depends on concept-specific machinery — `concept_governance_global_revision`,
-`ConceptGovernanceConflict`, `_idempotency_payload`, `_validate_expected_revision` — so moving it to
-`governance_health.py` means injecting or relocating those too, and `record_claim_decision` is a
-durable CAS protocol on operator policy where a behaviour-preserving port needs its own evidence
-rather than a shared one. `_ledger_revision`'s dispatch stays for the same reason: it is reached from
-`concept_governance_revision(memory_dir, kind)`, which legitimately knows the two ledgers, and it now
-carries the fail-closed guarantee that the deleted branches used to duplicate.
+*Closure (2026-09-08): the relocation landed and the claim writer composes the same steps.*
+
+**The relocation.** `looplab/engine/governance_protocol.py` now owns the write half as
+`append_governance`, and the four concept-specific dependencies the 2026-08-05 note listed were dealt
+with one at a time rather than moved wholesale:
+
+* `concept_governance_global_revision` is GONE from the primitive. `governance_memory_dir` became
+  `global_revision`, a callable the caller closes over — the same shape as `read_rows`, and for the
+  same reason: a primitive four subsystems import as generic must not know one subsystem's
+  cross-ledger policy by name. The double call (health preflight before the idempotency lookup, then
+  the real read for the CAS) is preserved exactly, because those two reads are the linearization
+  point, not a redundancy.
+* `_idempotency_payload` and `_validate_expected_revision` moved with it as `idempotency_payload` and
+  `validate_expected_revision` — neither was ever concept-specific.
+* the three conflict types moved and kept their `Concept…` spellings verbatim, and
+  `concept_registry` RE-EXPORTS them. The name is a contract:
+  `tools/concept_tools.py::ConceptGovernanceTools.execute` classifies them by `type(exc).__name__`
+  against a literal set, so renaming them would silently downgrade an agent-facing "concept edit
+  conflict: taxonomy changed during approval; read concept_taxonomy and retry" into the generic
+  "invalid request" branch — a rename with no red test anywhere.
+
+One guarantee genuinely thinned and it is recorded rather than glossed. The 2026-08-05 note observed
+that the structural "this path implies a strict reader" property survived the filename branches only
+because `_ledger_revision` keeps its own dispatch. That dispatch stays in `concept_registry` (it is
+reached from `concept_governance_revision`, which legitimately knows the two ledgers) but the
+primitive no longer routes through it: `read_rows is None` now carries the whole distinction for the
+revision exactly as it already did for the torn-tail separator. The backstop is therefore the
+call-site convention alone, and
+`tests/test_concept_registry.py::test_every_policy_ledger_append_passes_its_strict_reader` is what
+holds it — re-pointed at the new name in the same change.
+
+**The `record_claim_decision` port**, and its shape is the part worth reading. The finding says "port
+it onto `_append_governance`, keeping its sanitize-on-replay as a wrapper". Done literally that would
+need `payload`, `action_id_of`, an `on_replay` projection, two injected conflict types and an
+`around` hook for the policy-then-evidence lock chain — eleven keywords, i.e. a framework whose
+configuration IS the duplicated code. What it composes instead is the four steps that are the same
+protocol and whose copies could only ever agree by hand:
+
+* `governance_lock(path)` — one spelling of the required per-ledger critical section;
+* `validate_expected_revision` — the claim writer had its own `isinstance(bool) / isinstance(int) /
+  < 0` copy, and `True` is an `int` subclass, so the rule that a JSON `true` is not revision 1 was
+  written twice;
+* `action_replay(rows, rec, id, payload=…, action_id_of=…)` — idempotency resolved BEFORE the CAS,
+  first-commit-wins, with the two per-ledger rules as parameters. `action_id_of` is not ceremony: the
+  claim ledger reads a persisted id through `_identity_text` (sanitized and bounded, because a stored
+  row is untrusted text) and a raw comparison would miss a replay and append a SECOND operator
+  decision;
+* `durable_governance_append` — the write/flush/`strict_fsync`/parent-fsync/`OSError` →
+  `GovernanceLedgerUnavailable` block, which is what decides whether a write that reported success is
+  actually published.
+
+What stays local to `claims.py` is what is genuinely claim-specific and would have been LOOSENED by
+sharing: the revision derived from `_logical_decision_rows` rather than physical rows, the sanitized
+projection returned on replay, the two `ClaimDecision*` conflict types an operator surface reports by
+name, and the `project_governed_sources` chain that must hold every lock through digest validation
+AND the append.
+
+Three of the four new tests DRIVE rather than read: `action_replay`'s truth table (first commit wins,
+a reused id with a different payload is a conflict not a replay, receipt metadata is not identity, a
+row whose id needs normalizing is invisible to the wrong reader), both writers refusing `True`/`-1`
+with the same sentence, and both writers reporting an fsync failure as `GovernanceLedgerUnavailable`
+rather than a raw `OSError` carrying a path across an API boundary. Teeth-tested by relaxing the bool
+guard (4 failures) and by narrowing the storage-fault translation to `TimeoutError` (2 failures).
 
 #### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
@@ -2309,9 +2386,7 @@ owns (`test_claims.py::test_the_assessments_barrel_re_exports_the_same_objects`)
 needed adding there, which that guard caught immediately. Second time this session a guarded
 post-split barrel contract has caught an omission; it is doing its job.
 
-#### EM-08 · MEDIUM · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-02)**
-
-> **OPEN[governed-projection-recursion-copied]** the `_governance is None -> recurse via project_governed_sources` skeleton is still copy-pasted; re-derived 2026-08-19 it is at **six** sites, not the four the finding names (`claims.py`, `claims_retrieval.py`, `claim_steward.py`, `concept_steward.py`, `proposal_cues.py`, `strategy.py`). proof:absent:governed_projection@looplab/engine
+#### EM-08 · MEDIUM · duplication · effort: small — **RESOLVED (2026-09-08)**
 
 **The '_governance is None → recurse via project_governed_sources' pattern and the scope-filter block are copy-pasted across four/three call sites**
 
@@ -2341,9 +2416,46 @@ the filter, the None/blank contract, a narrow grep guard over the two joining mo
 end-to-end atlas read proving a foreign task's lesson text and concept id are absent from the
 rendered payload. Teeth-tested against five breaks.
 
-The `_governance is None → recurse via project_governed_sources` half of this finding is NOT done and
-stays open: it is a different shape (a recursion/decorator over four functions with differing
-`source_names` derivations) and does not gate an access boundary.
+*Closure (2026-09-08): the recursion half landed as `governance_protocol.governed_projection`.*
+Re-derived before touching it, the skeleton was at SIX sites, not the four the finding names:
+`claims.atlas_for_memory`, `claims_retrieval.cross_run_retrieve`,
+`claim_steward.claim_curation_snapshot`, `concept_steward.concept_curation_snapshot`, and — through
+`cross_run_context.enter_governed` — the Strategist note and the Researcher advisory.
+
+The recursion itself is two lines and was never the bug. What was copy-pasted with it is the
+`source_names` DERIVATION, and that is the part that fails silently: a projection whose governed set
+omits a store it then reads still returns a complete-looking payload, governed by a ledger that never
+saw that store — the same failure `CROSS_RUN_SOURCE_NAMES` was written to prevent for the two live
+builders, four sites away. `governed_projection(memory_dir, reenter, *, include_concepts,
+source_names, unsupplied)` states it once: `unsupplied` maps each store's FILENAME to the value the
+caller passed, and every entry left as `None` — every store this call is about to load itself — joins
+the governed set. A store the caller SUPPLIED is already frozen by whoever loaded it, so locking it
+again would be a claim about bytes this call never reads; an EMPTY supplied store is still supplied,
+because "this task has no lessons" and "we did not read lessons" are different claims.
+
+Two decisions are pinned rather than left implicit. A store the projection reads unconditionally
+(`research_claims.jsonl` for the claim steward, `concept_capsules.jsonl` for the concept steward, and
+the whole cross-run trio for the live builders) stays a FIXED `source_names` entry — it is not a
+derivation, so it does not pretend to be one. And `claim_locked` is deliberately NOT exposed on the
+helper: it asserts "this caller already owns the claim-decision lock", which is true only of
+`record_claim_decision`'s persist chain — a writer wrapping its own append, not a projection
+re-entering itself — so offering it to readers would invite one to declare a fence it does not hold.
+
+A decorator was considered and refused: `concept_curation_snapshot`'s `include_concepts` depends on
+its arguments, two of the six sites are METHODS reaching the helper through a fixed-name wrapper, and
+the introspection needed to cover all six would be larger and less readable than the guard it
+removes.
+
+One further re-entry of this shape lives outside the engine and is deliberately left alone:
+`tools/cross_run_tools.py::CrossRunTools._execute` re-enters per TOOL NAME off the
+`_GOVERNED_TOOL_SOURCES` table, so its governed set is a lookup rather than a derivation over the
+caller's arguments — the half of this finding that fails silently is not present there.
+
+`tests/test_cross_run_scope_boundary.py` gains two tests: the derivation DRIVEN through a stubbed
+`project_governed_sources` (supplied vs unsupplied vs empty-but-supplied, fixed names composing with
+derived ones, a name listed both ways appearing once) and an AST scan proving all six sites reach the
+helper and that no `project_governed_sources(` call came back inside a `_governance is None` guard.
+Teeth-tested by governing every store regardless of what the caller supplied — 1 failure.
 
 Worth noting for the next collapse in this area: dropping `_filter_claim_source_rows` from
 `claims.py`'s import list broke 37 tests, because `claims.py` RE-EXPORTS it as a guarded post-split

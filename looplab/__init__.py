@@ -109,6 +109,7 @@ _LAYOUT = {
     "task_kinds": "core",       # shared launch/backend defaults used by generated and interactive configs
     "task_facets": "engine",     # PART IV cross-run §21.20.2: agentic task faceting overlay (off the index)
     "governance_health": "engine",  # PART IV cross-run: paid-curation ledger health / fail-closed gates
+    "governance_protocol": "engine",  # the shared governance transaction: the durable ledger APPEND and the governed-projection re-entry (doc 25 EM-05/EM-08)
     "steward_invocation": "engine",  # PART IV cross-run: agentic steward invocation/session bookkeeping
     "curation_protocol": "engine",  # the FINALIZE at-most-once paid-curation transaction (doc 25 EM-03)
     "concept_tidy": "engine",      # the cross-run concept RATIFICATION stage (§22.4)

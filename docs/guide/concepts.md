@@ -2088,7 +2088,7 @@ Where each concept lives in the code:
 | Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, the five-module concept cluster `search/concept_graph.py` (structure) → `search/concept_tagging.py` / `search/concept_lens.py` → `search/concept_analytics.py` → `search/concept_map.py` |
 | Live concept cadence (re-tag, consolidation, edges, coverage snapshot) | `engine/concept_cadence.py` |
 | Cross-run index, claims + agent reads | `engine/cross_run_index.py`, `engine/claims.py`, `tools/cross_run_tools.py` |
-| Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
+| Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_protocol.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
 | Claim/curation projections + typed owner governance HTTP | `serve/routers/cross_run.py` |
 | Claims & Curation UI + evidence validation | `ui/src/ClaimsCuration.jsx`, `ui/src/claimsCurationModel.js` |
 | Trace span exporter | `core/tracing.py` |

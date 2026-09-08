@@ -965,7 +965,7 @@ def test_concurrent_steward_retry_pays_for_one_llm_invocation(tmp_path, monkeypa
 
 def test_steward_paid_call_without_terminal_receipt_is_not_replayed(tmp_path, monkeypatch):
     import looplab.core.llm as llm_module
-    import looplab.engine.concept_registry as registry_module
+    import looplab.engine.governance_protocol as protocol_module
     import looplab.engine.concept_steward as steward_module
 
     _initialize_memory()
@@ -977,21 +977,21 @@ def test_steward_paid_call_without_terminal_receipt_is_not_replayed(tmp_path, mo
 
     monkeypatch.setattr(llm_module, "make_llm_client", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(steward_module, "steward_concepts", fake_steward)
-    real_append = registry_module._append_governance
+    real_append = protocol_module.append_governance
 
     def lose_terminal_receipt(path, record, **kwargs):
         if record.get("action") == "steward-invocation":
             raise RuntimeError("simulated process loss after the provider returned")
         return real_append(path, record, **kwargs)
 
-    monkeypatch.setattr(registry_module, "_append_governance", lose_terminal_receipt)
+    monkeypatch.setattr(protocol_module, "append_governance", lose_terminal_receipt)
     app = make_app(tmp_path)
     first = TestClient(app, raise_server_exceptions=False).post(
         "/api/cross-run/concept-steward", params={"action_id": "paid-ambiguous"},
     )
     assert first.status_code == 500 and calls == [1]
 
-    monkeypatch.setattr(registry_module, "_append_governance", real_append)
+    monkeypatch.setattr(protocol_module, "append_governance", real_append)
     retry = TestClient(app).post(
         "/api/cross-run/concept-steward", params={"action_id": "paid-ambiguous"},
     )
@@ -1155,11 +1155,11 @@ def test_concept_policy_makes_a_ratified_merge_visible_to_the_map(tmp_path):
     global map would keep drawing both spellings and keep reporting them as drift.
     """
     from looplab.engine.concept_tidy import RATIFIER_ACTOR, ratify_concept_merges
-    from looplab.engine.concept_registry import _append_governance
+    from looplab.engine.governance_protocol import append_governance
     from looplab.engine.governance_health import curation_source_key
 
     md = _seed_memory()
-    _append_governance(md / "concept_curation_log.jsonl", {
+    append_governance(md / "concept_curation_log.jsonl", {
         "v": 2, "curation_key": "concept:v2:" + "d" * 64,
         "source_key": curation_source_key(run_id="r1", task_id="t", finish_seq=1),
         "run_id": "r1", "task_id": "t", "finish_seq": 1, "input_digest": "d" * 64,

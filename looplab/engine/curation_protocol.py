@@ -482,7 +482,7 @@ class CurationProtocolMixin:
                               provenance: dict, rec: dict, *,
                               require_durable: bool = False) -> bool:
         """Append one semantic steward outcome; unavailable audits remain non-blocking."""
-        from looplab.engine.concept_registry import _append_governance
+        from looplab.engine.governance_protocol import append_governance
         from looplab.engine.governance_health import read_curation_rows
 
         class _AlreadyLogged(RuntimeError):
@@ -527,7 +527,7 @@ class CurationProtocolMixin:
             **rec,
         }
         try:
-            _append_governance(
+            append_governance(
                 path, payload, validate=_validate_locked, read_rows=_read_locked,
                 require_durable=require_durable)
             return True
