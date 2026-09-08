@@ -1461,6 +1461,11 @@ class Settings(BaseSettings):
     # identically under either value, and pinning a resumed run to `false` would preserve the defect
     # for exactly the multi-hour runs it costs the most. `EngineOptions` keeps it OFF, like every
     # other Part IV/V knob, so a bare `Engine(...)` gains no unasked work.
+    # THE FIFTH CONSUMER READS IT CONJOINED (F1i-b, 2026-09-08): the serial deep-research gate
+    # `research_cadence.py::_maybe_deep_research` reaches the boundary only when
+    # `concurrent_research` is OFF, because that is the only configuration in which it is the run's
+    # ONLY research path and therefore cannot race the background half for one node-count's spend.
+    # With `concurrent_research` on — the shipped default — this knob leaves that gate untouched.
     cadence_while_evaluating: bool = True
     # PART IV Phase 2a live steering (§21.11/§21.13). When on, the `concept_retag_every` cadence (NOT
     # `strategist_every` — the producer gates on `_should_consult_concepts`, which uses the seed boundary

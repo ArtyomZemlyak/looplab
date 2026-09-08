@@ -453,7 +453,7 @@ predominantly behaviour-driven.
 | EM-17 | L | C | `research_cadence.py`/`strategy.py` module headers | Layering claims stale ("only core, events and stdlib" — imports `agents`; "…search, agents" — also `trust`, `governance_health`). Permitted edges, wrong sentences. | Replace prose with the AST guard used for the search/agents edge. |
 | EM-18 | L | C | `test_watchdog_stage_scope.py`, `test_monitor_log_tools_wiring.py`, `test_ablation.py` | Three positive text pins guarding properties other tests drive. | Convert or delete. |
 
-Tracked: `asha-inert-on-this-task-family`, `f1i-b-serial-deep-research-gate`,
+Tracked: `asha-inert-on-this-task-family`,
 `first-propose-runs-with-every-gpu-idle`, `monitor-fault-has-no-outcome-label`,
 `judge-bench-covers-two-judges-of-four`, `strategist-developer-field`,
 `concept-skeleton-matches-no-run`, `classifier-rewrites-authored-membership`, `overrun-grace-bar`,
