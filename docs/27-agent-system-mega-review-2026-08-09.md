@@ -230,9 +230,19 @@ Research only.
 >   `llm_token_limit`; the durable ledger's sink commits and a resume seeds from the `llm_usage`
 >   rows. `tests/test_run_budget.py` drives it. The marker `no-shared-reserve-commit-run-budget`
 >   stood here; deleted per the index rule.]**
-> - **OPEN[research-cap-counts-passes-not-provider-calls]** the cap is still incremented once per
->   research PASS in the spine, not debited at the provider broker, so the named ceiling undercounts
->   real spend. proof:absent:concurrent_research_max_calls@looplab/core/llm_broker.py
+> - **[closed 2026-09-08 — the cap is debited at the provider broker.
+>   `core/llm_broker.py::ProviderCallMeter` counts one per request inside `llm_request_permit`, the
+>   single seam every outbound provider request of every client passes (both branches: an engine
+>   scoped to no broker still calls a provider), and `_research_overlap_loop` spends
+>   `concurrent_research_max_calls` on what a pass ACTUALLY asked the provider for instead of
+>   one-per-pass. Debited AFTER admission, so a request the run budget refused before it left costs
+>   the window nothing; floored at one per pass, which keeps the old attempt-counting backstop
+>   exactly — a pass that fails before it reaches the provider still cannot re-tick every cadence for
+>   free. A pass is an indivisible receipt -> provider -> record hop, so the comparison stays at the
+>   pass boundary; only the number compared changed. `tests/test_research_overlap.py` drives a pass
+>   making three real borrows against a cap of 7 (three passes, not seven) and
+>   `tests/test_llm_broker.py` drives the meter, its worker threads and the refused reservation. The
+>   marker `research-cap-counts-passes-not-provider-calls` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-08 — *time is the second resource a lane reserves.*
 >   `resources.py::eval_time_admission_blocked` is the rule and `_reserve_eval_seconds` /
 >   `_release_eval_seconds` its ledger, keyed by the same `(node_id, generation)` lifecycle the
@@ -257,20 +267,44 @@ Research only.
 >   step as the call; every build and repair site reads the envelope and none reads the shared
 >   instance afterwards, which is what let those calls leave the loop thread.
 >   `tests/test_developer_result.py` drives it.]**
-> - **OPEN[cancel-not-propagated-into-provider-request]** two of the three legs: nothing reaches an
->   in-flight provider request (`core/llm.py` has no `cancel_check` at all) and the external CLI is
->   killed on TIMEOUT rather than on a cancel token. The MCP leg shipped 2026-08-17.
->   proof:absent:cancel_check@looplab/core/llm.py
+> - **[closed 2026-09-08 — the remaining two legs. `core/llm_transient.py::cancel_check_scope` /
+>   `request_cancelled` / `sleep_or_cancel` are the cancel token as a ContextVar, re-exported through
+>   `core/llm.py` like `model_override` and read by the request itself: `_post` asks at the head of
+>   EVERY attempt (so a token that fires while attempt 1 is in flight stops attempt 2 from being
+>   sent), every backoff in `_RETRY_POLICY` waits through `_retry_sleep` and wakes on it (a
+>   `Retry-After` is honoured up to 120 s, so this is most of a cancelled call's wall clock), the
+>   blocking stream reader raises `LLMCancelled` mid-generation and the streamed one stops reading and
+>   closes the connection — which is what actually stops the provider generating — without falling
+>   through to the paid blocking fallback. `LLMCancelled` is an `LLMError` on purpose: the role layer
+>   already degrades around that family, and any fallback client re-checks the same ambient token at
+>   its own first attempt, so a cancelled context sends nothing new while the scope is up.
+>   `drive_tool_loop` publishes its own guarded `_cancelled` probe around the paid turn, so the token
+>   the assistant's Stop already held now reaches the request. The external CLI agent takes a
+>   `cancel_check` (else the ambient token), polls it in slices around `communicate` and tree-kills on
+>   a cancel with its own `cancelled` verdict, instead of living to its timeout. Driven against fake
+>   providers in `tests/test_cancel_reaches_the_provider.py` (attempts sent, backoff woken, chunks
+>   consumed, the loop's token visible inside the call) and `tests/test_cli_agent.py` (a 120 s agent
+>   under a 120 s timeout, stopped in under a second). The marker
+>   `cancel-not-propagated-into-provider-request` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-03 for the TIMEOUT half — `Settings.agent_timeout` (default 600.0, the
 >   constructor's own value, bounded 0 < t <= 24 h) is passed by `agents/factory.py`. It was not a
 >   default an operator could override, it was one nobody could REACH: the argument was never passed,
 >   so on every composed run the constructor value WAS the value, and no config, env var or form
 >   field could move it. `tests/test_agent_timeout_is_settings_bound.py` drives it through the real
->   `make_roles`.]** **OPEN[external-cli-usage-is-unpriced]** the other half of the original row:
->   `CliAgentDeveloper` returns no usage result, so an external coding agent's spend reaches neither
->   the `llm_usage` ledger nor `looplab tokens` — a run whose Developer is a CLI agent reports the
->   cost of everything except the role that writes the code.
->   proof:absent:CostAccountant@looplab/agents/cli_agent.py
+>   `make_roles`.]** **[closed 2026-09-08 for the USAGE half — `CliAgentDeveloper` holds a
+>   `CostAccountant` (the RUN's, handed to it by `agents/factory.py`, so it meters on the same
+>   ceiling) and commits ONE delta per launched invocation, under a `generation` span of its own so
+>   the spend is attributable in `looplab timings`/`looplab tokens` as well as in `llm_usage`. The
+>   delta is EXPLICITLY UNPRICED — one `calls`, zero `priced_calls`, no tokens — which is the ledger's
+>   existing "a paid call happened and we do not know what it cost", and the only honest answer here:
+>   the tokens are spent inside the child process against the endpoint we handed it, and nothing the
+>   agent prints on stdout is a receipt LoopLab can authenticate (the same rule that made
+>   `extra_metrics` carry its channel — nothing derivable from an artifact the subject writes can
+>   authenticate its author). A launcher that never started is charged nothing; a timed-out or
+>   cancelled one is. `AgentRun` carries the invocation's `duration_s`, `cancelled` and a `usage`
+>   slot a future metering transport fills in. `tests/test_cli_agent.py` drives the per-invocation
+>   delta, the missing binary, and the ledger's own walk reaching it through `ValidatingDeveloper`.
+>   The marker `external-cli-usage-is-unpriced` stood here; deleted per the index rule.]**
 > - **OPEN[agent-trajectory-eval-ladder-absent]** rungs 2-5 of §4 — curated trajectory cases, frozen
 >   outcome cases, confused-deputy/cross-run-scope, repeated stochastic trials with CIs — have no
 >   corpus. (Rung 1 exists and predates this document; see the correction above.)

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from looplab.core.llm import resolve_llm_target
+from looplab.core.llm import resolve_llm_target, run_cost_accountant
 
 if TYPE_CHECKING:                      # `adapters.tasks` re-exports through the factory, so a
     from looplab.adapters.tasks import TaskAdapter   # runtime import here would be a cycle.
@@ -147,7 +147,15 @@ def external_cli_developer(task: TaskAdapter, settings, developer, *, param_sear
         surface=surface, seed_dirs=seed_dirs,
         protect=(repo_spec["protected_names"] if repo_spec else None),
         editable_prefixes=([e["name"] for e in repo_spec["editables"]
-                            if e["name"] not in (".", "")] if repo_spec else None))
+                            if e["name"] not in (".", "")] if repo_spec else None),
+        # THE RUN'S OWN ACCOUNTANT, like every in-process role (doc 27
+        # `external-cli-usage-is-unpriced`). The external agent has no `.client` for
+        # `_set_role_client` to rebind — the same asymmetry the model/base-url resolution above
+        # exists for — so its ledger entry has to be wired at the constructor too, or the role
+        # that WRITES THE CODE is the one role missing from `llm_usage` and `looplab tokens`.
+        # Its invocations land unpriced (`calls` without `priced_calls`), which is the honest
+        # shape: the tokens are spent inside the child process.
+        accountant=run_cost_accountant(settings))
     if settings.validate_agent:
         from looplab.agents.roles import ValidatingDeveloper
         return ValidatingDeveloper(

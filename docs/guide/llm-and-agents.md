@@ -313,6 +313,16 @@ this robust (all on by default):
   Accepted files become `Node.files` (files-as-truth, resumable) and are materialized into the eval
   workdir.
 
+Each invocation that actually launched is recorded in the run's ledger as one **unpriced** call —
+one `calls`, no `priced_calls`, no tokens — under a `generation` span of its own, so an external
+Developer appears in `llm_usage`, `looplab tokens` and `looplab timings` instead of being the one
+role whose spend is invisible. The tokens themselves are spent inside the agent's process against
+the endpoint it was handed, and nothing it prints is a receipt LoopLab can authenticate, so the gap
+is *stated* rather than guessed (unpriced is not free — see the accounting section below). A
+launcher that never started is charged nothing. The agent is also stopped by a **cancel token**, not
+only by `agent_timeout`: a stopped run tree-kills the agent and its children within a second and
+records the invocation as cancelled rather than timed out.
+
 A dedicated `developer` profile may therefore describe the external tool's model/remote endpoint,
 but an external-only role must omit `api_key_env`: promising a LoopLab-managed key is rejected because
 the secret-scrubbed CLI can never receive it. A trusted in-process validation fallback or active Repo

@@ -29,7 +29,7 @@ from looplab.core.containment import contain
 from looplab.core.phase_events import (PHASE_CHECKPOINTED, PHASE_COMPLETED, PHASE_STARTED,
                                        emit_phase_event)
 from looplab.tools.clock import LoopClock, set_current_clock
-from looplab.core.llm import BudgetExceeded
+from looplab.core.llm import BudgetExceeded, cancel_check_scope
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult, collect_inventory,
                                  capability_manifest)
 from looplab.core.redact import redact_secrets
@@ -1160,7 +1160,20 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # error dict; the engine's agentic callers (ToolUsingResearcher.propose /
         # UnifiedAgent.choose_action / triage_crash) wrap this loop and fall back to a safe default,
         # the same way ToolUsingStrategist.decide does. BudgetExceeded likewise propagates (hard stop).
-        msg = client.chat(messages, tool_specs, tool_choice="auto")
+        # PUBLISH THE TOKEN FOR THE REQUEST ITSELF, not just for this turn boundary. Until doc 27's
+        # `cancel-not-propagated-into-provider-request` closed, `_cancelled` was read here between
+        # turns and by the MCP transport, and nothing reached the call below — so a Stop pressed
+        # during a long generation waited out the whole answer, every remaining retry and every
+        # backoff in between. `cancel_check_scope` puts the same guarded probe on the context the
+        # client reads (`core/llm.py::request_cancelled`), which stops the in-flight stream, refuses
+        # the next attempt, and wakes the ladder's sleeps. Scoped to the CALL, so a tool the loop
+        # runs afterwards keeps its own cancellation story (`execute_result(cancel_check=…)`).
+        # `None` when the CALLER supplied no token, deliberately: `_cancelled` would answer False
+        # forever, but publishing it still tells the client a token exists, and the client then polls
+        # its backoffs instead of sleeping them (`core/llm_transient.py::sleep_or_cancel`). A loop
+        # nobody can cancel must stay byte-identical to one that never heard of cancellation.
+        with cancel_check_scope(_cancelled if cancel_check is not None else None):
+            msg = client.chat(messages, tool_specs, tool_choice="auto")
         calls = msg.get("tool_calls") or []
         if not calls:
             # Model replied in prose instead of calling a tool — it's done exploring. Force the

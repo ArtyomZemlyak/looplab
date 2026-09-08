@@ -8,6 +8,9 @@ Design (see 08-tracing-architecture.md):
 - When `opentelemetry-api` (+ an SDK/exporter configured via OTEL_* env) is importable, each
   span is ALSO opened as a genuine OpenTelemetry span, so ANY OTLP collector (Jaeger / Tempo /
   Honeycomb / …) receives it with no code change. Without the package the bridge is a no-op.
+  A mirrored generation/tool span carries the OTel GenAI semantic conventions (`gen_ai.*`) BESIDE
+  LoopLab's own attribute names, never instead of them — see `genai_semconv` for the mapping, for
+  what it refuses to guess, and for why the durable `spans.jsonl` row is left byte-identical.
 - Export is ASYNCHRONOUS, so a reader/owner boundary raises a barrier (`Tracer.force_flush`) over
   everything the exporter has accepted — a row already handed to the writer included, not just the
   queued ones. State what it settles precisely: the ONE delegate attempt each accepted row gets, and
@@ -2165,6 +2168,92 @@ class AsyncJsonlSpanExporter:
         self.shutdown()
 
 
+# --- OTel GenAI semantic conventions (the OTLP mirror only) --------------------------------------
+# WHY BESIDE AND NOT INSTEAD. The bridge opened every span with LoopLab's own attribute names — `op`,
+# `model`, `model_parameters`, `usage` — so a collector could see the tree and nothing generic could
+# read the LLM call inside it: no GenAI dashboard, no cost/token panel, no cross-tool comparison.
+# RENAMING them was refused: `spans.jsonl` is the same attribute map, and `events/traceview.py`,
+# `looplab timings`, `looplab tokens`, the trace view and every source pin over them read the current
+# names. So the conventions are ADDITIVE — the same facts, restated under `gen_ai.*`, written to the
+# OTLP span only (`SpanHandle._mirror`), leaving the durable row byte-identical.
+#
+# WHAT IS DELIBERATELY NOT ASSERTED. `gen_ai.provider.name` / `gen_ai.system`: LoopLab talks to an
+# OpenAI-COMPATIBLE endpoint that may be Ollama, vLLM, SGLang, a LiteLLM proxy or OpenAI itself, and
+# the client cannot tell which — a guessed provider is worse than an absent one, because a collector
+# groups spend by it. `gen_ai.response.model`: no span records what the endpoint answered WITH, only
+# what was asked for. Neither is invented here; both land the day the client records the fact.
+#
+# The conventions are still Development-status upstream, which is why this stays a mirror of facts we
+# already hold rather than a schema LoopLab depends on: a renamed convention key changes this table
+# and nothing else.
+_GENAI_REQUEST_PARAMS = {"temperature": "gen_ai.request.temperature",
+                         "top_p": "gen_ai.request.top_p",
+                         "max_tokens": "gen_ai.request.max_tokens",
+                         "seed": "gen_ai.request.seed"}
+# `_norm_usage`'s short form is what a span carries; the OpenAI spelling is accepted too so a caller
+# that stamps a raw provider payload maps the same way.
+_GENAI_USAGE = {"prompt": "gen_ai.usage.input_tokens", "completion": "gen_ai.usage.output_tokens",
+                "prompt_tokens": "gen_ai.usage.input_tokens",
+                "completion_tokens": "gen_ai.usage.output_tokens"}
+
+
+def _mirror_attributes(otel_span, attributes: Mapping) -> None:
+    """Write attributes to an OTLP span and nowhere else — the ONE mirror-only write.
+
+    Kept a free function so the two callers (`Tracer.span` at open, `SpanHandle.set` for a late key)
+    share one containment site instead of growing one each: mirroring is diagnostics, and a bridged
+    provider that raises must cost the span nothing.
+    """
+    if not attributes:
+        return
+    for key, value in attributes.items():
+        try:
+            otel_span.set_attribute(key, value)
+        except Exception:  # noqa: BLE001 — a broken bridged provider must not fail the span
+            pass
+
+
+def genai_semconv(kind: str, attributes: Mapping) -> dict:
+    """LoopLab's span attributes restated in the OTel GenAI conventions — a pure, total mapping.
+
+    Takes whatever subset of a span's attributes is at hand (the initial map at `Tracer.span`, or one
+    late `SpanHandle.set` key) and returns only the conventions those facts support. Never guesses:
+    an attribute that is absent, empty or the wrong type simply produces no convention key, because a
+    wrong `gen_ai.*` value is read by generic tooling as authoritative.
+    """
+    out: dict = {}
+    if kind == "generation":
+        op = str(attributes.get("op") or "").strip().lower()
+        if op:
+            # The convention's operation vocabulary, not ours: everything this client does is a chat
+            # completion except an embedding call. `op` itself stays on the span under its own name.
+            out["gen_ai.operation.name"] = "embeddings" if "embed" in op else "chat"
+        model = attributes.get("model")
+        if isinstance(model, str) and model.strip():
+            out["gen_ai.request.model"] = model
+        params = attributes.get("model_parameters")
+        if isinstance(params, Mapping):
+            for ours, theirs in _GENAI_REQUEST_PARAMS.items():
+                value = params.get(ours)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    out[theirs] = value
+        usage = attributes.get("usage")
+        if isinstance(usage, Mapping):
+            for ours, theirs in _GENAI_USAGE.items():
+                value = usage.get(ours)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    out.setdefault(theirs, value)
+    elif kind == "tool" and attributes.get("tool"):
+        # Only a real TOOL observation: `structured_parse` also opens `kind="tool"` (it carries a
+        # `parser`, never a `tool`), and calling a parser choice an executed tool would be a lie in
+        # the one vocabulary a collector reads without knowing anything about LoopLab.
+        name = attributes.get("tool")
+        if isinstance(name, str) and name.strip():
+            out["gen_ai.operation.name"] = "execute_tool"
+            out["gen_ai.tool.name"] = name
+    return out
+
+
 class SpanHandle:
     """Handle yielded by `Tracer.span` to enrich the span after it opens: attributes (e.g. the
     metric/exit once known) and point-in-time events (e.g. a tool call). Mirrors to OTel."""
@@ -2238,7 +2327,16 @@ class SpanHandle:
                 self._otel.set_attribute(key, value if isinstance(value, (str, int, float, bool)) else str(value))
             except Exception:  # noqa: BLE001
                 pass
+            # BESIDE it, the same fact under the GenAI conventions (see `genai_semconv`). Late keys
+            # matter as much as the opening ones: `usage` is stamped after the call returns, and it
+            # is the whole of `gen_ai.usage.*`. The durable record is untouched — mirror only.
+            self._mirror(genai_semconv(self._rec.get("kind"), {raw_key: value}))
         return self
+
+    def _mirror(self, attributes: Mapping) -> None:
+        """Write attributes to the OTLP span ONLY — never to `self._rec`, which is `spans.jsonl`."""
+        if self._otel is not None:
+            _mirror_attributes(self._otel, attributes)
 
     def set_many(self, **kv) -> "SpanHandle":
         for k, v in kv.items():
@@ -2436,6 +2534,10 @@ class Tracer:
                     otel_span.set_attribute(k, v if isinstance(v, (str, int, float, bool)) else str(v))
                 except Exception:  # noqa: BLE001
                     pass
+            # The GenAI conventions BESIDE our own names, so a collector can read this span as an LLM
+            # call without knowing anything about LoopLab (`genai_semconv`). Same values, same
+            # sanitized attribute map, OTLP only — the durable row keeps LoopLab's names alone.
+            _mirror_attributes(otel_span, genai_semconv(kind, attributes))
             try:
                 # The random trace id is insufficient to join concurrent LoopLab runs in an external
                 # collector.  Keep the opaque, already-sanitized run identity on every mirrored span;

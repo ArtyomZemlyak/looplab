@@ -10,6 +10,7 @@ import anyio
 import pytest
 
 from looplab.core.llm import BudgetExceeded
+from looplab.core.llm_broker import llm_request_permit
 from looplab.engine.orchestrator import Engine
 from looplab.engine.research_cadence import ResearchCadenceMixin, research_memo_sig
 
@@ -272,6 +273,45 @@ def test_loop_stops_calling_the_llm_past_the_per_window_cap():
     anyio.run(Engine._research_overlap_loop, stub, "cadence")
     assert stub.compute_calls == 3                              # never calls past the cap
     assert len(stub.recorded) == 3                              # all three were distinct -> all recorded
+
+
+def test_the_window_cap_counts_provider_calls_not_passes():
+    """THE DEFECT (doc 27 P1). `concurrent_research_max_calls` was incremented ONCE per research
+    pass, and a pass is a multi-turn agentic think plus its forced emit and its memo verification —
+    so a ceiling named "max calls" bounded somewhere between one and several dozen of them at a
+    time. The meter is debited inside `llm_request_permit`, the one seam every outbound provider
+    request passes, so what the window compares against its cap is what it actually spent.
+
+    DRIVEN, not pinned: this pass makes THREE real borrows per compute (a fake provider, no source
+    read). cap=7 -> 3 + 3 + 3 = 9 >= 7 stops after the THIRD pass; counting passes would have run
+    seven of them and spent 21 calls under a cap of 7.
+    """
+    class _ThreeCallsPerPass(_LoopStub):
+        def _compute_deep_research(self, state, trig, *, trace=True):
+            for _ in range(3):
+                with llm_request_permit():          # exactly what a provider request borrows
+                    pass
+            return super()._compute_deep_research(state, trig, trace=trace)
+
+    distinct = [_memo(f"m{i}", [f"d{i}"]) for i in range(10)]
+    stub = _ThreeCallsPerPass(distinct, cap=7)
+    anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    assert stub.compute_calls == 3                              # 3 passes x 3 calls, not 7 passes
+
+
+def test_a_pass_that_reaches_no_provider_still_spends_one_call():
+    """The floor under the meter, and it is the OLD backstop kept exactly: a pass that fails before
+    it ever borrows (a refused thread hop, a role that will not build) debits nothing of its own, so
+    without `max(1, …)` the window would re-tick it every cadence for the whole eval — the failure
+    mode the attempt-counting comment in `_research_overlap_loop` was written against."""
+    class _NeverReachesTheProvider(_LoopStub):
+        def _compute_deep_research(self, state, trig, *, trace=True):
+            self.compute_calls += 1
+            raise RuntimeError("the role never got as far as a request")
+
+    stub = _NeverReachesTheProvider([_memo("unused")], cap=3, cadence=0.001)
+    anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    assert stub.compute_calls == 3                              # bounded by the cap, not unbounded
 
 
 def test_a_provider_that_always_raises_still_spends_the_per_window_cap():
