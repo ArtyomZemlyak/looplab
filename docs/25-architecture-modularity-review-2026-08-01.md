@@ -4659,9 +4659,15 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Recommendation:* Extract two shared services in looplab/serve/: an event-ledger paid-action protocol (claim event, terminal event, fsync-confirm, generation fence — parameterized by event types) covering report_refresh and concept-lens, and keep the file-ledger machinery of scope actions as its own module. Each new hand-rolled variant is a fresh set of crash-window bugs to re-find; the near-identical helper pairs prove the abstraction already exists implicitly.
 
-#### SR-02 · HIGH · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
+#### SR-02 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-09-08)**
 
-> **OPEN[generate-scope-report-endpoint-still-in-router]** `generate_scope_report_ep` (548 lines re-measured 2026-08-19, `reports.py:582-1129`) and the ~210-line source-probe staleness cache are still inside the router. proof:present:generate_scope_report_ep@looplab/serve/routers/reports.py
+> *Closed 2026-09-08: the last arm landed. `serve/scope_generate.py` now owns the eight scope
+> projections, the source-probe staleness cache (as `ScopeSourceProbes`, a class because the
+> closures captured three mutable `build_router` locals) and `durable_generate_scope_report`;
+> `routers/reports.py` goes 1 131 → 180 lines and is endpoint wiring plus the staleness GET, exactly
+> what this finding asked for. `tests/test_scope_generate.py` is the instrument — 14 tests that drive
+> the cache, the projections and the whole paid protocol against a stub `srv` and a real
+> `JobRegistry`, with no ASGI app. See "Still open" below, now answered.*
 
 **reports.py is a god-module: a distributed-storage subsystem inside a router file**
 
@@ -4721,7 +4727,8 @@ would have added ZERO new patch surface, which is a real argument. It loses on l
 docstring commits to "none of it is HTTP", and reconciliation is policy OVER the store (it decides
 when to write a tombstone and when a visible terminal must still read as running), not more store.
 
-**Not attempted:** `generate_scope_report_ep`. See "still open" below.
+**Not attempted in that change:** `generate_scope_report_ep`. It landed on 2026-09-08 —
+see the resolution below.
 
 *The seam this move creates, and the guard.* Importing a store name binds it BY VALUE exactly as the
 router's star import does, so `scope_actions.py` is a THIRD copy of every seam it names — and it is
@@ -4759,17 +4766,51 @@ comment-only mutation is the one a substring pin would have missed;
 threading is proven to have landed rather than asserted;
 (9) rebind the router's imported name to an alias → the identity test.
 
-**Still open:** `generate_scope_report_ep` — 550 lines with five nested closures
-(`_stamp_scope_action_usage`, `_compute`, `_inputs_unchanged`, `_persist_terminal`,
-`_compute_durable`) — stays in the router, as does the ~210-line source-probe staleness cache
-(`_source_probe_key` … `_omission_is_current`), which SR-02 explicitly wants the router to keep but
-whose caching machinery is not HTTP either and captures three mutable `build_router` locals, so
-extracting it needs a class rather than a move. `generate` is the harder half: it interleaves the
-action protocol with agent invocation, the `anyio` job hand-off, `_scope_run_ids`/`_scope_sig`/
-`_scope_context_digest`, and lease RETENTION (the quarantine path), and a verbatim move cannot
-establish that its crash windows are unchanged the way a 497-line differential can here. It wants
-the SR-03 treatment — a byte-level differential harness against a pre-extraction worktree — and is
-a separate change.
+*Resolution (2026-09-08, the generation arm).* `looplab/serve/scope_generate.py` (1 070 lines) now
+owns all three things this paragraph left open, and `routers/reports.py` goes 1 131 → **180** lines:
+3 117 → 180 across the three changes. What moved, in the order the endpoints use it:
+
+* the eight scope PROJECTIONS (`scope_label`, `scope_label_from_data`, `scope_run_ids`,
+  `scope_context_digest`, `run_brief`, `scope_drill`, `scope_sig`, `scope_source_sizes`), renamed to
+  public spellings because the staleness GET still calls four of them;
+* `ScopeSourceProbes` — the source-probe cache, as the CLASS this paragraph predicted. The eight
+  closures become methods and the three captured `build_router` locals (a lock and two
+  `OrderedDict`s) become instance state, built once per app in `build_router` because the cache's
+  lifetime is the app's: a per-request one would re-parse every event log on every GET, which is the
+  cost the cache exists to remove;
+* `durable_generate_scope_report` — the endpoint body with its five closures intact.
+
+The moved bodies are VERBATIM; the mechanical edits are the ones the two earlier extractions made
+and wrote down (`srv` threaded explicitly, `srv.reports_dir`/`srv.projects`/`srv.phase` in place of
+the three captures, the renames above). The route keeps its docstring, because that docstring is the
+OpenAPI description `docs/guide/api-reference.md` is generated from, and is one delegating `await`.
+
+**The differential this paragraph asked for was not the instrument that would have proved it.** A
+byte-level differential against a pre-extraction worktree establishes that the same HTTP requests
+produce the same HTTP responses — which is exactly what the existing 60-odd scope tests in
+`test_report.py` already do, and they were re-run unchanged. What no differential and no HTTP test
+can observe is the property the cache exists for: `stale:false` reads identically whether the server
+re-parsed a 30 MB event log or answered from memory. So the instrument is
+`tests/test_scope_generate.py` — 14 tests against a stub `srv` (six attributes) and a REAL
+`JobRegistry`, no app, no engine, no router. Three of them COUNT captures: an unchanged source is
+parsed once however many times it is checked; a rewritten one is re-read exactly once; and the two
+staleness rungs treat an unreadable source differently on purpose — the revision rung
+negative-caches it, the omission rung re-opens it every time, because accessibility is not part of
+the cheap stat key and a repaired source is new model-visible evidence. The rest drive the paid
+protocol end to end offline: one confirmed record with its fence cleared, a replayed UUID that reads
+its terminal instead of recomputing it, evidence that moves after the reservation refusing to
+publish anything, a second UUID refused while another action holds the scope, and the four pre-claim
+refusals leaving no durable state behind.
+
+*The seam this move creates.* `scope_generate.py` star-imports the store, so it is a FOURTH by-value
+patch site — and the only reader of `strict_atomic_write_text` and `capture_scope_source` outside
+the store, since the router now neither writes a report nor captures a source.
+`test_report.py::_STORE_PATCH_MODULE_PATHS` names it (the eleven write-failure tests and the four
+capture-failure tests read those two seams off `scope_generate` now, not off the router), and
+`test_scope_actions_service.py::test_the_store_patch_sweep_names_every_module_that_binds_a_store_name`
+is what would have caught leaving it out. The identity guard there was re-derived rather than
+extended: it now asserts each protocol name on the module that actually imports it, because a name
+asserted on a module that no longer imports it is a guard that cannot fail.
 
 #### SR-03 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-02)**
 
