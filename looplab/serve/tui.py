@@ -44,9 +44,10 @@ from looplab.serve.tui_api import (  # noqa: F401
     normalize_run_generation,
 )
 from looplab.serve.tui_format import (  # noqa: F401 — re-exported for the import-compat note above
-    _free_port, _stop_child, dashboard_sig, ensure_server, fmt_ago, fmt_metric, history_for_boss,
-    is_critical, launch_body, parse_pick, phase_meta, readiness_reason, run_sig, slug, sort_runs,
-    spec_lines)
+    _command_failure_line, _esc, _free_port, _stop_child, dashboard_sig, draw_dashboard, draw_run,
+    ensure_server, fmt_ago, fmt_metric, history_for_boss, is_critical, launch_body, parse_pick,
+    phase_meta, readiness_reason, render_chat, render_spec, run_sig, runs_table, slug, sort_runs,
+    spec_lines, status_panel)
 
 
 _COMMAND_DONE = {"succeeded", "noop"}
@@ -164,26 +165,15 @@ def _observed_command(record: dict, staged: Optional[dict] = None) -> dict:
     return observed
 
 # ----------------------------------------------------------------------------- the interactive app
-
-def _esc(value) -> str:
-    """Escape one server/LLM/user-supplied value before it enters a rich markup f-string. A stray
-    ``[/tag]`` in a command label, error, run id, or chat line otherwise raises rich ``MarkupError``
-    and aborts the TUI; for a PERSISTED row (``_reconcile_pending``) that re-crashes on every reopen."""
-    from rich.markup import escape
-    return escape(str(value))
-
-
-def _command_failure_line(label, error) -> str:
-    """Escape server/LLM-supplied text before it enters a rich markup string: a stray ``[/tag]`` in a
-    label or error message otherwise raises rich ``MarkupError`` and aborts the TUI — and, because
-    ``_reconcile_pending`` re-prints the persisted row, it re-crashes on every reopen of the run."""
-    return f"  [red]✗[/red] {_esc(label)} — {_esc(error)}"
+# `_esc` and `_command_failure_line` moved to `tui_format.py` with the screen renderers that share
+# them (doc 25 SC-15) and are imported above, so every call site here — and `looplab.serve.tui._esc`
+# — still resolves to the one escape rule.
 
 
 class Tui:
-    """The redraw-then-prompt REPL. Holds the rich Console + the Api client; each surface is a method
-    that draws itself then reads one line. Kept thin: the heavy lifting is in the pure helpers above and
-    on the server."""
+    """The redraw-then-prompt REPL. Holds the rich Console + the Api client; each surface fetches,
+    hands what it fetched to a `tui_format` renderer, then reads one line. Kept thin: the drawing is
+    in `tui_format.py`, the rest of the heavy lifting is on the server."""
 
     def __init__(self, api: Api, run_root: str):
         from rich.console import Console
@@ -254,50 +244,6 @@ class Tui:
         from rich.rule import Rule
         self.console.print(Rule(f"[bold]{title}[/bold]", style="dim"))
 
-    def _runs_table(self, runs: list):
-        from rich.table import Table
-        from rich import box
-        t = Table(box=box.SIMPLE_HEAD, expand=True, pad_edge=False)
-        t.add_column("#", justify="right", style="dim", width=3)
-        t.add_column("run", style="bold", no_wrap=True)
-        t.add_column("status", no_wrap=True)
-        t.add_column("nodes", justify="right", width=6)
-        t.add_column("best", justify="right", width=12)
-        t.add_column("task", no_wrap=True, style="dim")
-        t.add_column("updated", justify="right", style="dim", no_wrap=True)
-        for i, r in enumerate(runs, 1):
-            glyph, colour, label = phase_meta(r)
-            best = r.get("best_confirmed")
-            best = r.get("best_metric") if best is None else best
-            t.add_row(str(i), _esc(r.get("run_id", "?")), f"[{colour}]{glyph} {_esc(label)}[/{colour}]",
-                      str(r.get("nodes", 0)), fmt_metric(best),
-                      _esc((r.get("task_id") or r.get("goal") or "—")[:28]), fmt_ago(r.get("mtime")))
-        return t
-
-    def _status_panel(self, run_id: str, state: dict):
-        from rich.panel import Panel
-        glyph, colour, label = phase_meta(state)
-        nodes = state.get("nodes") or {}
-        best_id = state.get("best_node_id")
-        best = None
-        if best_id is not None and str(best_id) in {str(k) for k in nodes}:
-            bn = nodes.get(str(best_id)) or nodes.get(best_id) or {}
-            best = bn.get("confirmed_mean")
-            best = bn.get("metric") if best is None else best
-        running = sum(1 for n in nodes.values() if n.get("status") == "pending")
-        ok = sum(1 for n in nodes.values() if n.get("metric") is not None and not n.get("error"))
-        lines = [
-            f"[{colour}]{glyph} {_esc(label)}[/{colour}]"
-            + (f"   direction={state.get('direction')}" if state.get("direction") else ""),
-            f"nodes: [bold]{len(nodes)}[/bold] total · {ok} scored · {running} in flight",
-            f"best:  [bold]{fmt_metric(best)}[/bold]" + (f"  (node {best_id})" if best_id is not None else ""),
-        ]
-        if state.get("goal"):
-            lines.append(f"goal:  {_esc(state['goal'])}")
-        if state.get("stop_reason"):
-            lines.append(f"[dim]stopped: {_esc(state['stop_reason'])}[/dim]")
-        return Panel("\n".join(lines), title=f"[bold]{_esc(run_id)}[/bold]", border_style=colour, expand=True)
-
     # ---- data fetch (quiet: the live loop polls on a timer, so no per-poll spinner/flicker) ---------
     def _fetch_runs(self) -> list:
         try:
@@ -312,24 +258,16 @@ class Tui:
             return None
 
     # ---- dashboard ----------------------------------------------------------
-    def _draw_dashboard(self, runs: list) -> None:
-        self.console.clear()
-        live = "[green]● live[/green]" if self._interactive() else ""
-        self.console.print("[bold cyan]LoopLab[/bold cyan] [dim]· terminal control plane[/dim]   "
-                           f"[dim]{_esc(self.api.base)}[/dim]  {live}")
-        if runs:
-            self.console.print(self._runs_table(runs))
-        else:
-            self.console.print("[dim]no runs yet — type a goal below to start your first one.[/dim]\n")
-        self.console.print("[dim]Pick a run by number · type a goal to start one · "
-                           "[bold]n[/bold]ew · [bold]r[/bold]efresh · [bold]q[/bold]uit[/dim]")
-
     def dashboard(self) -> None:
         """The home surface: a LIVE table of runs (auto-refreshes when anything changes) + a command bar.
         Returns when the user quits."""
         while True:
-            raw, runs = self._live_prompt("[bold green]» [/bold green]",
-                                          fetch=self._fetch_runs, render=self._draw_dashboard, sig=dashboard_sig)
+            # The two facts the renderer cannot know are supplied per redraw, not captured once: the
+            # live marker asks the terminal on every pass, exactly as the method's own body did.
+            raw, runs = self._live_prompt(
+                "[bold green]» [/bold green]", fetch=self._fetch_runs, sig=dashboard_sig,
+                render=lambda rows: draw_dashboard(self.console, rows, base=self.api.base,
+                                                   live=self._interactive()))
             if raw is None:                                  # EOF / ^C
                 return
             if not raw:
@@ -418,7 +356,9 @@ class Tui:
                 spec = new_spec
             if (r or {}).get("ok") is False and (r or {}).get("error"):
                 self.console.print(f"[yellow]{_esc(r['error'])}[/yellow]")
-            self._render_spec(spec)
+            # The readiness verdict is the SERVER's and is asked here, beside the client that can ask
+            # it; `render_spec` only draws the answer (doc 52 row 8 — the TUI keeps no rule of its own).
+            render_spec(self.console, spec, self._validate(spec)[0])
 
     def _validate(self, spec: Optional[dict],
                   msgs: Optional[list] = None) -> tuple[Optional[str], Optional[str]]:
@@ -441,13 +381,6 @@ class Tui:
         reason = readiness_reason(verdict)
         token = verdict.get("validation_token") if reason is None else None
         return reason, (str(token) if token else None)
-
-    def _render_spec(self, spec: Optional[dict]) -> None:
-        from rich.panel import Panel
-        body = "\n".join(spec_lines(spec))
-        reason, _token = self._validate(spec)
-        foot = "[green]ready — type [bold]launch[/bold] to start[/green]" if reason is None else f"[yellow]{_esc(reason)}[/yellow]"
-        self.console.print(Panel(_esc(body) + "\n\n" + foot, title="proposed run", border_style="green", expand=True))
 
     def _launch(self, spec: Optional[dict], msgs: list) -> bool:
         reason, token = self._validate(spec, msgs)
@@ -499,7 +432,8 @@ class Tui:
         while True:
             raw, _ = self._live_prompt("[bold green]» [/bold green]",
                                        fetch=lambda: self._fetch_state(run_id),
-                                       render=lambda st: self._draw_run(run_id, st, history),
+                                       render=lambda st: draw_run(self.console, run_id, st, history,
+                                                                  live=self._interactive()),
                                        sig=lambda st: run_sig(st or {}))
             if raw is None:                                  # EOF / ^C -> back to dashboard
                 return
@@ -537,39 +471,6 @@ class Tui:
             self._persist(run_id, user_turn)                 # save the question too (the web persists it)
             self.console.print(f"[green]you ›[/green] {_esc(raw)}")
             self._boss_turn(run_id, raw, history)
-
-    def _draw_run(self, run_id: str, state: Optional[dict], history: list) -> None:
-        self.console.clear()
-        if state is None:
-            self.console.print(f"[red]could not load {_esc(run_id)} — is the server still up?[/red]")
-        else:
-            self.console.print(self._status_panel(run_id, state))
-        self._render_chat(history)
-        live = "[green]● live[/green] · " if self._interactive() else ""
-        self.console.print(f"[dim]{live}Chat with the boss · [bold]s[/bold]tatus · "
-                           "[bold]stop/finalize/resume[/bold] · [bold]?[/bold] help · "
-                           "[bold]back[/bold] · [bold]q[/bold]uit[/dim]")
-
-    def _render_chat(self, history: list, tail: int = 8) -> None:
-        from rich.markdown import Markdown
-        shown = [m for m in history if m.get("role") in ("user", "assistant", "action", "summary")]
-        if not shown:
-            self.console.print("[dim](no chat yet — ask the boss anything, or tell it what to change)[/dim]")
-            return
-        for m in shown[-tail:]:
-            role = m.get("role")
-            if role == "user":
-                self.console.print(f"[bold green]you ›[/bold green] {_esc(m.get('content', ''))}")
-            elif role == "action":
-                act = m.get("action") or {}
-                mark = {"done": "[green]✓[/green]", "pending": "[yellow]…[/yellow]",
-                        "failed": "[red]✗[/red]"}.get(m.get("status"), "[cyan]·[/cyan]")
-                self.console.print(f"  {mark} [cyan]{_esc(act.get('label') or act.get('type', 'action'))}[/cyan]")
-            elif role == "summary":
-                self.console.print(f"[dim]— recap: {_esc(m.get('content', ''))}[/dim]")
-            else:
-                self.console.print("[bold cyan]boss ›[/bold cyan]")
-                self.console.print(Markdown(m.get("content", "")))
 
     def _boss_turn(self, run_id: str, instruction: str, history: list) -> None:
         """One boss command: free text -> a plan applied in order by the command service, or an

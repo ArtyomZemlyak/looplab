@@ -232,7 +232,18 @@ def test_the_CROSS_RUN_REPORT_loop_asks_for_the_fence():
 
     from looplab.serve import scope_report
 
-    src = inspect.getsource(scope_report)
-    call = src.index("drive_tool_loop(client, _CrossRunTools(")
-    assert "tool_result_label=" in src[call:call + 800], (
-        "a loop that STATES the untrusted-evidence rule must also mark the channel")
+    # AST OVER THE CALL, not 800 characters of text around it. As a substring this was one comment
+    # away from vacuous, and driven: commenting out `tool_result_label=BOSS_EVIDENCE_LABEL,` at the
+    # call site kept this file and `test_evidence_envelope` green (36 passed), and every test file
+    # naming `scope_report` — nine of them, `test_prompt_injection_rule` included — stayed green at
+    # 327. Untrusted cross-run goal, label and node text would have reached the model unlabelled, in
+    # the loop whose OUTPUT is a persisted report other runs read as evidence.
+    calls = [node for node in ast.walk(ast.parse(inspect.getsource(scope_report)))
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name) and node.func.id == "drive_tool_loop"]
+    assert calls, "`drive_tool_loop` is no longer called from `scope_report.py`"
+    unlabelled = [call.lineno for call in calls
+                  if "tool_result_label" not in {kw.arg for kw in call.keywords}]
+    assert not unlabelled, (
+        f"`drive_tool_loop` at line(s) {unlabelled} is handed no `tool_result_label` — a loop that "
+        "STATES the untrusted-evidence rule must also mark the channel")

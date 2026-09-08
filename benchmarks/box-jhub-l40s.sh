@@ -139,18 +139,20 @@ echo "box: jhub-l40s | bench root $BENCH_ROOT | model $LOOPLAB_LLM_MODEL via ${M
 #
 # Ставится ТОЛЬКО pip, из встроенного в ensurepip колеса. `python -m ensurepip` притащил бы ещё
 # setuptools 65.5.0 поверх стоящего 84.0.0 — откат посреди живых оценок, чего делать нельзя.
-# OPEN[box-profile-pip-repair-noops-on-undefined-root] the default python path expands through an
-# undefined variable, so the pip repair this function exists for silently returns without looking.
-# proof:`present:$ROOT/AlgoTune@benchmarks/box-jhub-l40s.sh`
-# REVIEW 2026-08-30 (correctness): the profile defines BENCH_ROOT and ALGOTUNE_ROOT and never ROOT,
-# so the default is `/AlgoTune/.venv/bin/python`, `[ -x ]` fails, `return 0` — and the guard whose
-# own comment records the cost of a pip-less arena venv (every `.pyx`+`setup.py` candidate scored
-# `compilation_failed`/0.0; a 5-9x champion gap) does nothing after any container restart rebuilds
-# the venv. Nothing says so, because the miss path is the silent success path. `$ALGOTUNE_ROOT` is
-# the intended spelling.
+# THE INTERPRETER IS `$ALGOTUNE_ROOT`'s, and until 2026-09-08 it was `$ROOT/AlgoTune/...` — a
+# variable this profile never defines. REVIEW 2026-08-30 (correctness) measured what that cost: the
+# default expanded to `/AlgoTune/.venv/bin/python`, `[ -x ]` failed, `return 0`, and the guard whose
+# own comment above records the price of a pip-less arena venv (every `.pyx`+`setup.py` candidate
+# scored `compilation_failed`/0.0; a 5-9x champion gap) did nothing after any container restart
+# rebuilt the venv. Nothing said so, because the miss path WAS the silent success path — which is
+# why the miss now speaks: a profile sourced before the arena exists is a normal state and says so
+# once, and a profile sourced after it is one is the case this function is for.
 _algotune_ensure_pip() {
-  local py="${1:-$ROOT/AlgoTune/.venv/bin/python}"
-  [ -x "$py" ] || return 0
+  local py="${1:-$ALGOTUNE_ROOT/.venv/bin/python}"
+  if [ ! -x "$py" ]; then
+    echo "[box] арены нет по $py — pip не проверялся (запусти setup_algotune.sh, потом source ещё раз)" >&2
+    return 0
+  fi
   "$py" -m pip --version >/dev/null 2>&1 && return 0
   local whl
   whl=$("$py" -c "import ensurepip,os,glob;d=os.path.join(os.path.dirname(ensurepip.__file__),'_bundled');print((glob.glob(os.path.join(d,'pip-*.whl'))+[''])[0])" 2>/dev/null)

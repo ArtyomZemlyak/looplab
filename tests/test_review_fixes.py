@@ -293,7 +293,7 @@ def test_scrub_json_bounds_recursion_depth():
 def test_lifecycle_lock_is_required_and_reports_503(tmp_path, monkeypatch):
     """The cross-process half of the lifecycle fence must FAIL, not silently degrade.
 
-    `_interprocess_lock` swallows an unsupported lock backend by default, so the lifecycle lock
+    `interprocess_lock` swallows an unsupported lock backend by default, so the lifecycle lock
     quietly collapsed to the in-process RLock alone — and reset/delete are pure check-then-act around
     `_fresh_resume_launch_pending`, with no CAS to fall back on. Two server processes (or two startup
     reconcilers) could then claim and spawn the SAME resume and race event appends before engine.lock
@@ -314,7 +314,7 @@ def test_lifecycle_lock_is_required_and_reports_503(tmp_path, monkeypatch):
     (rd / "events.jsonl").write_text(
         '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t","direction":"min"}}\n',
         encoding="utf-8")
-    original = eventstore._interprocess_lock
+    original = eventstore.interprocess_lock
 
     @contextmanager
     def unavailable(path, *, required=False):
@@ -335,7 +335,7 @@ def test_lifecycle_lock_is_required_and_reports_503(tmp_path, monkeypatch):
         "expected_generation": run_generation_token(events),
         "expected_seq": events[-1].seq if events else -1,
     }
-    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    monkeypatch.setattr(eventstore, "interprocess_lock", unavailable)
     responses = [
         ("reset", client.post("/api/runs/demo/reset")),
         ("delete", client.post("/api/runs/demo/deletions", json=delete_body)),

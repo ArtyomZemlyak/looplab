@@ -54,17 +54,10 @@ _LANES = (("per-action", card_reservation, "_stage_card_creates"),
           # enumerated and the third simply was not in it.
           ("serial build", orchestrator, "_offload_build"))
 
-# OPEN[offload-sink-guards-scan-one-file] the REAL `_propose_batch` closure is still never driven
-# under a watched store — the behavioural twins stub the paid callee.
-# proof:`absent:def test_the_real_batch_closure@tests/test_offload_lane_writes_no_folded_events.py`
-# (backtick-quoted because the literal carries a SPACE — the bare form splits on whitespace and
-# the index guard refused it as malformed, which is the guard doing its job on my amendment.)
-# AMENDED 2026-08-31: the scan half is CLOSED — every guard here now runs over both lanes, scoped to
-# the owning function. What remains is the second half of the same review: a direct folded
-# `store.append` added under `_propose_batch` (exactly the fix novelty.py's duplicate-receipt marker
-# prescribes for its drop branch) would run on the worker thread with every AST guard green, because
-# these follow the SHAPE and not the execution. Drive it once: stub only the provider call, watch
-# the store, assert zero folded appends land off the loop thread.
+# CLOSED 2026-09-08: `test_the_real_batch_closure_writes_no_folded_row_off_the_loop_thread`
+# (bottom of this file) drives the REAL `_propose_batch` through the REAL wrapper with only
+# the paid provider roll stubbed, under a watched store, and holds every folded append to the
+# thread that made it. A direct `store.append` added under the closure now goes red.
 _SOURCES = {label: pathlib.Path(inspect.getsourcefile(mod)).read_text(encoding="utf-8")
             for label, mod, _fn in _LANES}
 # ONE parse per module, shared by every assertion below. Each test parsing its own copy was the first
@@ -328,3 +321,97 @@ def test_the_buffer_is_BOUND_before_the_try_so_the_finally_can_read_it(label):
     assert bound_before or ann, (
         f"the {label} lane must bind `captured` before the `try`, or the `finally` raises "
         "NameError and hides the real failure")
+
+
+@pytest.mark.anyio
+async def test_the_real_batch_closure_writes_no_folded_row_off_the_loop_thread(tmp_path):
+    """The EXECUTION half, driven through the REAL `_propose_batch` — nothing stubbed but the pay.
+
+    Every other guard in this module follows the SHAPE: it reads `_await_batch_proposal`'s AST and
+    asserts the sink wraps the offload. That is one call short of the property. The rows the
+    invariant is about are written INSIDE `_propose_batch` and its callees
+    (`_link_card` -> `_append_proposal_event`, `_apply_novelty_gate` -> `EV_NOVELTY_GRADED`), and a
+    direct `self.store.append(...)` added down there — precisely the shape `novelty.py`'s
+    duplicate-receipt marker prescribes for its drop branch — runs on the worker thread with every
+    AST guard in this file green. The behavioural twins in
+    `test_propose_does_not_freeze_the_loop.py` do not catch it either: both replace
+    `engine._propose_batch` wholesale, so the real closure and everything it calls are never
+    executed under a watched store at all.
+
+    So: stub ONLY the paid provider call (`researcher.propose`), drive the real batch lane through
+    the real wrapper, and hold every append to the thread that made it.
+
+    The receipt is FORCED rather than hoped for: `state.best_node_id` names a node that does not
+    exist, so `_plan_native_card` refuses the score snapshot, `_link_card` plans `invalid`, and the
+    real `EV_NOVELTY_REJECTED` card-contract receipt is emitted from inside the offloaded closure.
+    Without that the assertion below would pass over an empty list — vacuous exactly the way this
+    module exists to refuse.
+
+    MUTATIONS, all of which turn this red and none of which any other guard here sees:
+      * replace `_append_proposal_event` in `_link_card` with a direct `self.store.append(...)`;
+      * make `_append_proposal_event` ignore the sink;
+      * delete the publish from `_offload_under_proposal_sink`'s `finally` (the receipt vanishes
+        and the "it really landed" assertion fails).
+    """
+    import threading
+
+    from looplab.events.replay import fold
+    from looplab.events.types import DIAGNOSTIC_EVENTS
+    from tests.test_card_speculation_engine import _RawResearcher, _engine
+
+    engine, _producer = _engine(tmp_path / "real-batch-closure", depth=0)
+    # THE ONLY STUB: the paid provider roll. Everything below it — the card planner, the novelty
+    # gate, the receipt writers — is the real code the worker thread really runs.
+    engine.researcher = _RawResearcher()
+
+    loop_thread = threading.get_ident()
+    appends: list[tuple[str, int]] = []
+    real_append = engine.store.append
+
+    def _watched_append(event_type, data=None, **kw):
+        appends.append((event_type, threading.get_ident()))
+        return real_append(event_type, data, **kw)
+
+    engine.store.append = _watched_append
+
+    propose_threads: list[int] = []
+    real_propose = engine.researcher.propose
+
+    def _watched_propose(state, parent):
+        propose_threads.append(threading.get_ident())
+        return real_propose(state, parent)
+
+    engine.researcher.propose = _watched_propose
+
+    state = fold(engine.store.read_all())
+    # An anchor that is not in `state.nodes`: `_card_score_snapshot` refuses it, so `_link_card`
+    # plans `invalid` and writes the card-contract receipt. A REAL refusal on a real code path,
+    # not an injected append.
+    state.best_node_id = 9_999
+
+    await engine._await_batch_proposal(state, 2)
+
+    assert propose_threads, "precondition: the real paid roll never ran, so nothing was driven"
+    assert loop_thread not in propose_threads, (
+        f"the paid proposal must run on a worker thread, got {propose_threads} against a loop "
+        f"thread of {loop_thread} — the 62-minute freeze this lane was moved off the loop for")
+
+    folded = [(kind, ident) for kind, ident in appends if kind not in DIAGNOSTIC_EVENTS]
+    assert folded, (
+        "precondition: the real closure emitted no folded row at all, so the assertion below "
+        "would have passed over an empty list. Re-point the forced refusal above")
+    off_loop = [(kind, ident) for kind, ident in folded if ident != loop_thread]
+    assert not off_loop, (
+        f"{off_loop} was appended off the main task by the REAL batch closure. Every folded row "
+        "must be buffered by `_capture_proposal_events` and published by the main task — these "
+        "types are authority-bearing for `_proposal_authority_seq` and are named by none of the "
+        "thread-append registries")
+
+    # And it must really be ON the log — a sink that buffers and never publishes would satisfy the
+    # assertion above by writing nothing at all.
+    from looplab.events.types import EV_NOVELTY_REJECTED
+    kinds = [e.type for e in engine.store.read_all()]
+    assert EV_NOVELTY_REJECTED in kinds, (
+        "the refused proposal's receipt never landed: buffering without publishing turns an "
+        "invariant breach into the silent data loss `bd182357` measured (24.1 min / 81 calls / "
+        "4.27M tokens leaving no trace)")
