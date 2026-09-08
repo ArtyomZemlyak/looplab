@@ -220,32 +220,19 @@ def test_b2_a_taken_stamp_does_not_become_a_shared_directory():
 # 2026-08-29 failure -- an empty backup under a success code -- reintroduced by its own repair.
 
 
-# OPEN[unwritable-destination-refusal-undriven-as-root] the "NOTHING WAS WRITTEN" refusal is the
-# one rung here with no falsifier a root suite can run: `chmod 0555` refuses root nothing, and the
-# root-respecting alternatives (an immutable attribute, a read-only bind mount) need privileges a
-# container may not have, while making the store a FILE tests ENOTDIR rather than permission. Until
-# one is found this property is asserted only where the suite runs unprivileged.
-# proof:present:os.geteuid()@tests/test_snapshot_refuses_a_store_that_is_not_there.py
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the write bit, so there is no refusal")
-def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
-    """FALSELY GREEN UNTIL 2026-09-07, and only on a box with no arena.
-
-    Root bypasses directory write permission, so `chmod 0555` refuses this process nothing and the
-    snapshot writes happily. It passed anyway because `_run` was pointed at the box's own
-    `/var/tmp/looplab-bench`: with no such tree the script exited 1 for six MISSING sources, and the
-    `returncode != 0` below read that as the permission refusal it is about. Giving the tests their
-    own source removed the second cause and left the first visible. Same rule as
-    `test_read_fence.py`'s write-bit falsifier: a permission test cannot be run by the user that
-    has none.
-    """
-    store = tmp_path / "looplab-bench"
-    store.mkdir()
-    (store / ".persistent-store-id").write_text("test")
-    store.chmod(0o555)
-    try:
-        r = _run(store / "snapshots")
-    finally:
-        store.chmod(0o755)
+# THE REFUSAL HAS A FALSIFIER EVERY SUITE CAN RUN, since 2026-09-08. It used to have exactly one —
+# `chmod 0555` — and root ignores the write bit, so on a root container (which is where this suite
+# runs) the only test of this rung SKIPPED and the branch was undriven. The rung's own condition is
+# not "the directory is unwritable"; it is `! : > "$DEST/.snapshot.lock"` — the destination cannot
+# hold a lock file — and permission is only one way to fail that. A lock PATH that is a directory
+# fails it as EISDIR for root and non-root alike, so the same branch is driven either way and the
+# two spellings share one body below.
+#
+# Rejected: making $DEST itself a file (ENOTDIR aborts one line earlier, at `mkdir -p`, so it never
+# reaches this branch and would pin a different refusal under this name), an immutable attribute
+# (`chattr +i` needs CAP_LINUX_IMMUTABLE and a filesystem that has it — unavailable in a plain
+# container), and a read-only bind mount (needs CAP_SYS_ADMIN).
+def _assert_it_refused_without_claiming_busy(r, dest):
     assert r.returncode != 0, (
         "a destination that cannot even hold a lock file reported SUCCESS:\n" + r.stdout + r.stderr
     )
@@ -255,6 +242,59 @@ def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
     assert "another snapshot is running" not in r.stderr, (
         "it still blames a concurrent snapshot for a permission problem"
     )
+    # …and the sentence must be TRUE, not merely printed. Asserting the words alone would pass a
+    # script that wrote a half tree and then said it had not: `snapshot_timer.sh` reads the exit
+    # code, but an operator reads this line, and the 2026-08-29 failure was believing one.
+    if dest.is_dir():
+        wrote = sorted(e.name for e in dest.iterdir() if e.name != ".snapshot.lock")
+        assert wrote == [], f"it said NOTHING WAS WRITTEN and wrote {wrote}"
+
+
+def test_a_destination_that_cannot_hold_a_lock_file_is_a_failure_not_a_skip(tmp_path):
+    """THE ROOT-RUNNABLE SPELLING of the rung, and the reason this branch was undriven for a week.
+
+    `$DEST/.snapshot.lock` is a DIRECTORY, so `: > "$DEST/.snapshot.lock"` fails with EISDIR for
+    every user including root — which is exactly the condition the branch guards on, and exactly
+    the "destination not creatable" case its comment measured on 2026-09-01 (the redirect fails,
+    flock gets a bad fd, and the script printed "another snapshot is running" instantly and exited
+    0: a lie about the reason on top of a lie about the outcome).
+
+    MUTATION: delete the `if ! : > "$DEST/.snapshot.lock"` guard from `benchmarks/snapshot.sh` and
+    `exec 9>` fails, flock reports on a bad fd, and this run claims busy or claims success.
+    """
+    store = tmp_path / "looplab-bench"
+    dest = store / "snapshots"
+    dest.mkdir(parents=True)
+    (store / ".persistent-store-id").write_text("test")
+    # The name the script must be able to create as a FILE, occupied by a directory.
+    (dest / ".snapshot.lock").mkdir()
+
+    r = _run(dest)
+    _assert_it_refused_without_claiming_busy(r, dest)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the write bit, so there is no refusal")
+def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
+    """THE PERMISSION SPELLING of the same rung — kept, but no longer the only one.
+
+    FALSELY GREEN UNTIL 2026-09-07, and only on a box with no arena. Root bypasses directory write
+    permission, so `chmod 0555` refuses this process nothing and the snapshot writes happily. It
+    passed anyway because `_run` was pointed at the box's own `/var/tmp/looplab-bench`: with no such
+    tree the script exited 1 for six MISSING sources, and the `returncode != 0` below read that as
+    the permission refusal it is about. Giving the tests their own source removed the second cause
+    and left the first visible. Same rule as `test_read_fence.py`'s write-bit falsifier: a
+    permission test cannot be run by the user that has none — which is why the sibling above
+    reaches the identical branch by a route root cannot bypass.
+    """
+    store = tmp_path / "looplab-bench"
+    store.mkdir()
+    (store / ".persistent-store-id").write_text("test")
+    store.chmod(0o555)
+    try:
+        r = _run(store / "snapshots")
+    finally:
+        store.chmod(0o755)
+    _assert_it_refused_without_claiming_busy(r, store / "snapshots")
 
 
 def test_a_busy_lock_exits_non_zero_so_the_timer_retries(tmp_path):

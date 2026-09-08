@@ -368,13 +368,21 @@ def test_every_agent_side_toolset_is_composed_through_the_one_helper():
     # single BOM'd or cp1252 source anywhere in the package would have turned this guard from a
     # refusal into a `UnicodeDecodeError` at collection -- red for the wrong reason, and green the
     # moment somebody widened the `except`.
+    from _source_scan import PKG
+
+    # Keyed on the PATH RELATIVE TO `looplab/`, never on `path.name`. A basename key exempts every
+    # file of that name anywhere in the package, which is how one declared `genesis.py` was silently
+    # covering both `engine/genesis.py` and `serve/routers/genesis.py`, and how a new hand-rolled
+    # composite in ANY `__init__.py` would have passed this guard — the exact "silently opts its
+    # whole phase out of the flag" defect the test exists to catch. The prose below exempts SITES,
+    # so the set must too.
     offenders = []
     for path, tree in iter_trees():
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "CompositeTools"
                     and not any(kw.arg == "hide_empty_tools" for kw in node.keywords)):
-                offenders.append(f"{path.name}:{node.lineno}")
+                offenders.append(f"{path.relative_to(PKG).as_posix()}:{node.lineno}")
     # DECLARED EXEMPTIONS, two-way. Widening the scan from `agents/` to the whole package exposed
     # nine more hand-rolled composites; listing them is honest where a narrower glob was not, and
     # the two-way assertion means a NEW bypass goes red and a FIXED one must be struck off here.
@@ -395,22 +403,14 @@ def test_every_agent_side_toolset_is_composed_through_the_one_helper():
     # path — the engine holds a run, not a settings object — so routing it through `compose_tools`
     # would mean inventing a settings argument for four frames, not adding a keyword. Listed, not
     # silently tolerated.  proof:absent:settings@looplab/engine/failure_diagnosis.py::_diag_tools
-    # OPEN[composite-exemptions-keyed-by-basename] the exemption set admits every file of a given
-    # NAME anywhere in the package, not the specific sites the prose above argues for.
-    # proof:`present:found = {name.split(":")[0] for name in offenders}@tests/test_answered_by_context.py`
-    # REVIEW 2026-08-25 (guard-test): offenders are keyed on `path.name` over the whole `looplab/`
-    # walk, so a NEW hand-rolled `CompositeTools(...)` in ANY `__init__.py` -- or in any future
-    # module that happens to share a basename with an exempted one (a second `assistant.py`,
-    # another `genesis.py`) -- passes this guard silently, which is precisely the "silently opts
-    # its whole phase out of the flag" defect the test exists to catch. The prose exempts SITES
-    # (`cli/__init__.py`, `serve/assistant.py`, ...) while the set exempts NAMES. Fix: key
-    # `found`/`declared` on `path.relative_to(PKG)` so each exemption names one file, and the
-    # two-way assertion keeps its teeth.
     declared = {
-        "repo_developer.py", "__init__.py", "genesis.py", "train_monitor.py",
-        "assistant.py", "boss.py", "run_tools.py", "failure_diagnosis.py",
+        "adapters/repo_developer.py", "cli/__init__.py", "engine/genesis.py",
+        "engine/train_monitor.py", "engine/failure_diagnosis.py", "serve/assistant.py",
+        "serve/routers/boss.py", "serve/routers/genesis.py", "tools/run_tools.py",
     }
-    found = {name.split(":")[0] for name in offenders}
+    # `rsplit`, not `split`: a relative path may itself carry no colon, but keying on the LAST one
+    # is what keeps the line number off the name on every platform spelling.
+    found = {name.rsplit(":", 1)[0] for name in offenders}
     assert found <= declared, (
         "a NEW hand-rolled toolset appeared, so it cannot honour hide_empty_tools: "
         f"{sorted(found - declared)}")
