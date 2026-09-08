@@ -227,7 +227,20 @@ def _arm_b_final(final_json: Path) -> tuple[float | None, str]:
         # EXCEPT WHEN THE EVIDENCE SAYS THE CANDIDATE ANSWERED AND ANSWERED WRONGLY. The reason word
         # is the bridge's summary; `is_solution_errors` beside it is what actually happened.
         if validation_failed(block):
-            return value, f"{reason} (every instance failed is_solution -- a real zero)"
+            # WHAT THE EVIDENCE ACTUALLY SAYS. §338: `remDL13`'s zero came back
+            # `evaluator_error … Failed in nopython mode pipeline (step: nopython frontend)` --
+            # the candidate's own `@njit` code would not compile, and the row was described as
+            # "every instance failed is_solution", which sends a reader looking for validation
+            # failures that do not exist. Both are the candidate's fault and both are real zeros;
+            # only the sentence differs, and the sentence is what gets read.
+            errs = " ".join(str(e.get("message", e)) for e in (block.get("is_solution_errors") or [])
+                            if isinstance(e, (dict, str)))
+            built = any(k in errs.lower() for k in
+                        ("nopython", "numba", "compil", "importerror", "modulenotfound",
+                         "syntaxerror"))
+            why = ("the candidate's own code would not build or import"
+                   if built else "every instance failed is_solution")
+            return value, f"{reason} ({why} -- a real zero)"
         return None, reason
     return value, reason
 
