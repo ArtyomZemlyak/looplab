@@ -578,6 +578,33 @@ def test_a_best_of_n_audit_row_describes_the_candidate_that_SHIPPED():
     solo_inner.last_report = "moved on"     # …and it is a READ-THROUGH, not a stored copy
     assert solo.last_report == "moved on"
 
+    # THE `n == 1` CLEAR IS NOT DEAD CODE, and it stopped being defensive the day `last_report`
+    # gained a setter: `_discard_node_build_telemetry` writes `None` INTO `_chosen_report`, which
+    # is not the sentinel, so without the clear the next single-shot build would answer that
+    # discarded `None` forever instead of reading through to the inner.
+    solo.last_report = None                 # what the discard does
+    assert solo.last_report is None, "fixture: the discard's write must stand"
+    solo.implement(object())
+    solo_inner.last_report = "after the discard"
+    assert solo.last_report == "after the discard", (
+        "a single-shot build kept a discarded pick and stopped reading through")
+
+    # AND `repair_from`, the fourth site, which nothing drove: it clears for the same reason
+    # `repair` does — a repair is single-shot, so reporting the previous BUILD's chosen candidate
+    # would name a call this receipt was not taken from.
+    class _FromInner(_Inner):
+        def repair_from(self, _idea, _node, _err):
+            self.last_report = "repair-from-report"
+            return "fixed"
+
+    from_inner = _FromInner()
+    from_dev = BestOfNDeveloper(from_inner, n=2, listwise=False, foresight=False)
+    from_dev.implement(object())
+    assert from_dev.last_report == "report-1", "fixture: a build pick must be standing"
+    from_dev.repair_from(object(), object(), "err")
+    assert from_dev.last_report == "repair-from-report", (
+        "`repair_from` kept the previous build's chosen candidate on the receipt")
+
 
 def test_the_discard_can_still_clear_a_best_of_n_report():
     """A read-only property silently disarmed `_discard_node_build_telemetry`.
