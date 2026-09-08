@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from looplab.cli import (concept_cmds, governance_cmds, inspect_cmds, maintenance_cmds,
-                         memory_cmds)
+from looplab.cli import (concept_cmds, corpus_cmds, governance_cmds, inspect_cmds,
+                         maintenance_cmds, memory_cmds)
 
 _CLI = Path(__file__).resolve().parents[1] / "looplab" / "cli"
 
@@ -114,6 +114,19 @@ GROUPS = {
     # sits at its own ceiling and the subject is the cross-run store's usefulness, not one run's
     # account of itself.
     "memory_cmds": {"memory-orphans", "prior-citations"},
+    # CORPUS INSTRUMENTS. Its own group for the same two reasons `memory_cmds` and `audit_cmds` are,
+    # and they point the same way. The DOMAIN first: every command here takes a runs ROOT, folds
+    # each run's own event log and reports ONE reading a `docs/BACKLOG.md` marker named as the
+    # precondition for a decision it refuses to take on faith — the belief-key disagreement the
+    # concept key would merge, the undercut rule's stated trigger, whether ASHA ever had a curve to
+    # halve. None of them makes that decision, calls a model, writes a file, appends an event or
+    # reads a cross-run store; what distinguishes them from `inspect_cmds` (`comparability`
+    # included) is that the subject is the CORPUS rather than any named run's account of itself.
+    # THE CEILING SECOND, and it is not the reason but it agrees with it: the two groups whose
+    # subject is nearest — `inspect_cmds` (1194 lines against a 1200 cap) and `governance_cmds`
+    # (1092 against 1100) — are both at the bound below, whose own stated norm is that an overrun is
+    # answered by an extraction or a new home and never by a raise.
+    "corpus_cmds": {"belief-key-split", "card-ladder", "asha-rungs"},
     # OFFLINE RECORD REPAIRS. Its own group rather than `governance_cmds` because the subject is a
     # SINGLE run's account of itself — a node whose durable record kept the proposal and lost what
     # actually ran — not the cross-run store. It appends events, so it is not `inspect_cmds` either;
@@ -178,6 +191,12 @@ def test_each_group_docstring_says_what_it_mutates():
     assert "--persist" in concept_cmds.__doc__ and "appending" in concept_cmds.__doc__
     for phrase in ("DURABLE WRITES", "PAID LLM STEWARDS", "READ-ONLY"):
         assert phrase in governance_cmds.__doc__, f"{phrase} missing from the governance header"
+    # The corpus group's whole claim is that it touches NOTHING — an instrument that quietly grew a
+    # write would be the same drift as a "read-only" module that spent money, so its header states
+    # the four things it does not do and this pins them.
+    for phrase in ("read-only", "calls a model", "writes a file", "appends an event",
+                   "cross-run store"):
+        assert phrase in corpus_cmds.__doc__, f"{phrase} missing from the corpus header"
 
 
 def test_no_group_is_a_god_module_again():
