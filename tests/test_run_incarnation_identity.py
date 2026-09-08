@@ -204,8 +204,10 @@ def test_the_atlas_counts_two_incarnations_as_two_runs():
     atlas = portfolio_atlas([], [_valid(_UID_A, 0.5), _valid(_UID_B, 0.9)])
     assert atlas["n_runs"] == 2 and atlas["context_pack"]["coverage"]["n_runs"] == 2
     # …and a lesson-only memory still counts its runs, by incarnation where it has one.
-    lessons = [{"statement": "s", "outcome": "supported", "evidence": [0], "run_id": "demo",
-                "run_uid": uid, "task_id": "t"} for uid in (_UID_A, _UID_B)]
+    # A real assertion, not a placeholder: the atlas projects with the structured claim key by
+    # default, where a string carrying no subject/relation is not a claim at all.
+    lessons = [{"statement": "hard negatives help recall", "outcome": "supported", "evidence": [0],
+                "run_id": "demo", "run_uid": uid, "task_id": "t"} for uid in (_UID_A, _UID_B)]
     assert portfolio_atlas(lessons, [])["n_runs"] == 2
     # A capsule and a lesson from the SAME incarnation are one run, not two.
     assert portfolio_atlas(lessons[:1], [_valid(_UID_A, 0.5)])["n_runs"] == 1

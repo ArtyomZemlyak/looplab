@@ -2318,9 +2318,9 @@ with the same sentence, and both writers reporting an fsync failure as `Governan
 rather than a raw `OSError` carrying a path across an API boundary. Teeth-tested by relaxing the bool
 guard (4 failures) and by narrowing the storage-fault translation to `TimeoutError` (2 failures).
 
-#### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
+#### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[structured-claim-identity-not-default]** the structured projection is still opt-in (`structured: bool = False`), so the fuzzy path and the `_scoped_key`/`_global_key` shadow namespaces stay live and every governance fix is still reasoned about three times. proof:present:_fuzzy_merge_claims@looplab/engine/claims_assessments.py
+> **OPEN[structured-claim-identity-not-default]** the DEFAULT is structured and the fuzzy path is deleted; what remains is the deprecated lean read path (`structured=False`) and the `_scoped_key`/`_global_key` shadow namespaces it is the last reader of, so a governance fix is still reasoned about twice. proof:present:_scoped_key@looplab/engine/claims.py
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**
 
@@ -2349,6 +2349,59 @@ The guard checks the TABLE, not the function text. Its first draft grepped
 `inspect.getsource(claim_assessments)` for the mode names — every one of which also occurs in the
 BODY, so deleting a table row left it green. It now counts the three comment rows; removing one
 fails it.
+
+*Closure (2026-09-08), two of the three modes: the DEFAULT IS FLIPPED and the fuzzy merge is DELETED.*
+
+The 2026-08-05 decline said the flip "wants an evaluation of the existing decision ledger, not a
+modularity pass". That evaluation is what changed the answer, and it is short: **the durable side was
+never lean on either end.** `record_claim_decision` validates an operator's `evidence_digest` against
+`claim_assessments(..., structured=True)` — hard-coded, no flag — and `record_observed_claim_decision`
+re-projects through `claims_for_memory(..., structured=True)`; `load_claim_decisions` indexes a scoped
+or metric-qualified row by its structured UID *only*, and a v1 row's UID is recomputed on read. So the
+lean default was not a conservative choice about an existing store, it was a projection the store's own
+writer could not have produced: `looplab claims --governance-receipt` (no `--structured`) emitted rows
+carrying no `claim_uid` and no `evidence_digest` at all, and the test that pinned that behaviour was
+literally named *"the governance receipt is undecidable without structured identity"*.
+
+What the flip can therefore break is bounded to READS, and in the one direction that matters for an
+existing ledger it breaks nothing: no durable decision becomes unreachable. An unscoped, unqualified
+row stays indexed at its legacy statement key and at `_global_key`, and `_decision_for` still consults
+both after its five UID candidates — `test_maturity_overlay_on_assessments` (a decisions dict keyed by
+`normalize_statement`) passes unchanged under the new default and is the driven proof of it. A SCOPED
+row was only ever reachable by UID, which is the structured path's first candidate. What does change is
+that a decision recorded in task A no longer reaches a same-worded claim in task B — the finding's own
+complaint, arriving as a behaviour change rather than as a docstring.
+
+Flipped together, because a half-flipped default is the same defect: `claim_assessments`,
+`claims_for_memory`, `atlas_for_memory`, `cross_run_retrieve`, `portfolio_atlas`, the CLI (`--structured`
+is now the default, `--lean` the opt-out), and `EngineOptions.cross_run_structured_claims`. That last one
+LEFT `tests/test_options_divergence.py`'s frozen table rather than being re-frozen: it never belonged
+beside its neighbours, which all buy paid work or admit proposals, and a bare `Engine(...)` reading a
+projection its own decision writer cannot produce is not a lean default, it is a broken one.
+`LEGACY_CONFIG_SNAPSHOT_DEFAULTS` keeps its `False`, so a resumed pre-field run is untouched.
+
+`_fuzzy_merge_claims` and `_stmt_tokens` are DELETED, with the `fuzzy=` keyword (a silently-ignored
+kwarg would read as "paraphrases still merge") and the CLI's `--fuzzy`. It was a similarity score
+applied transitively where `claim_key` does the same job by exact key; its own docstring called the
+structured key its full CR. The two tests that drove it are replaced by one that drives what now
+collapses the same paraphrase pair — the structured key — and one that pins the kwarg's refusal.
+`_CLAIM_WORD` lost its last `claims_assessments` reader with it, so the shared-leaf guard now carries a
+reader SET per name instead of one module list, rather than an unused import kept alive to satisfy a
+test.
+
+**What is still open, exactly:** the lean read path itself (`structured=False`) and the
+`_scoped_key`/`_global_key` shadow namespaces. The recommendation asks for lean to stay a documented
+legacy read path until consumers migrate, and it is the only thing that can read a projection built
+under it — deleting it in the same change that flips the default would leave a store's existing lean
+review with no reader at all. Note also that `_global_key` cannot leave with it: `_decision_for` reads
+it as the structured path's explicitly-UNSCOPED fallback, so its deletion is a separate question about
+the fallback chain, not about the lean mode. The mode table at `claim_assessments` now lists TWO modes
+and `tests/test_claim_key.py` counts them.
+
+The digest tripwire moved and the answer is recorded where it asks for one: the `fuzzy` dimension left
+the CORPUS, not the projections. The harness passed every flag explicitly and the deleted branch was
+`rows = out` when `fuzzy=False`, so each surviving key's value is byte-identical and the whole payload
+change is eight vanished `:f=True` entries plus eight renamed keys.
 
 #### EM-07 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
@@ -4547,9 +4600,9 @@ fifth (dropping `len(raw) <= _MAX_ITEMS` from a list verifier) turned out to be 
 already slices to the bound, so `_refs(raw) == list(raw)` fails on a long list anyway and the guard
 is redundant in the original expression, which is preserved verbatim.
 
-#### SC-10 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
+#### SC-10 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[capability-store-core-not-shared]** `ShareStore` now matches `ReviewStore`'s locking contract, but the two remain separate implementations of one bearer-capability store — `ShareStore` still owns its own per-path lock table and has no analogue of `ReviewStore`'s O_EXCL reservation, abandoned-reservation healing or recovery contract. proof:present:_SHARE_STORE_LOCKS@looplab/serve/assistant.py
+> **OPEN[capability-store-core-not-shared]** the locking, reservation and publish core is now ONE implementation both stores parameterize, and the last divergence in guarantees is the CREATE-RECOVERY contract: a lost response to the share-create leaves the client with no token and a retry mints a SECOND live capability, where `ReviewStore.create_or_replay` reconstructs the exact original bearer from a client-held envelope. proof:absent:create_or_replay@looplab/serve/assistant.py
 
 **ShareStore duplicates ReviewStore's capability-link concept with weaker, inconsistent hardening**
 
@@ -4596,6 +4649,87 @@ and a partial extraction that leaves one path on the weaker primitive is worse t
 The duplication remains; the divergence in guarantees does not. Remaining differences, for whoever
 takes the extraction: `ReviewStore` also has `O_EXCL` id reservation, abandoned-reservation healing,
 and a recovery/replay contract that `ShareStore` has no analogue for.
+
+*Closure (2026-09-08) — the core IS extracted: `serve/capability_store.py`, and `ShareStore` now
+reserves with `O_EXCL` and heals abandoned reservations.*
+
+The 2026-08-04 pass closed the guarantee gap by writing `ReviewStore`'s locking contract out a SECOND
+time in `assistant.py`, and its own test file had to re-derive the sibling's mutation/read split from
+`reviews.py` source so "a change to one is visibly a change to both". That re-derivation is the
+symptom the extraction removes: what both stores share is now one implementation each parameterizes.
+
+**What moved, and why each piece is genuinely one protocol rather than two that look alike:**
+
+* `store_process_lock` — ONE per-path lock table for both stores. They key on different directories,
+  so sharing costs nothing, and it deletes the second place the "keyed on the instance, not the
+  path" regression can come back (that keying is the whole reason the process half of the guarantee
+  is not vacuous with two server objects over one directory).
+* `capability_store_lock` — the process lock (bounded timeout) then a REQUIRED, non-blocking OS
+  lock, with no thread-only fallback, taking each store's own error as a callable. The two SENTENCES
+  stay per-store on purpose: `ReviewStore` reports a timeout and a lock failure differently and
+  `ShareStore` reports them identically, so the core takes both and neither store's HTTP contract
+  moves. `prepare` is the one shape difference — `ShareStore` creates `.shares` inside the failure
+  boundary — and it is a parameter rather than a branch.
+* `reserve_unique_id` / `reserve_exact_id` — the `O_EXCL` reservation, which `ShareStore` did not
+  have. Its old loop was a check (`exists()` / `is_symlink()`) followed by a write, and the gap
+  between them is exactly where a writer that does not hold this store's lock — a rolling upgrade,
+  an uncoordinated legacy worker — can land and have its live capability's `token_hash` replaced by
+  a new secret's, silently revoking a link the owner still believes in. `O_EXCL | O_CREAT` refuses
+  an existing file AND a symlink (a dangling one included), so it IS the existence check and the
+  claim in one step. The store's own pathname boundary survives as the `verify` hook, re-checked per
+  candidate: the parent must still resolve inside the verified directory before anything is claimed.
+* `reservation_state` + `publish_reserved` + `remove_failed_reservation` — the crash contract. An
+  empty file is the fail-closed footprint of a process that died between reserving and publishing;
+  it authorizes nothing (`_validated_record` refuses it), it is never treated as free space, and a
+  publish that fails removes only the footprint THIS caller created while preserving any non-empty
+  uncertain result (the `os.replace` that landed before a later operation reported failure).
+* `token_digest` — the one hashing of a bearer value.
+
+`ShareStore._prune_locked` gained the other half of the healing and it is the subtle one: the sweep
+now SKIPS an empty file younger than a second and reclaims an older one. Removing a fresh reservation
+would hand a live creator's id to a second creator — the exact collision `O_EXCL` was just added to
+prevent — and it is reachable across workers, because the sweep runs under the store lock and an
+uncoordinated writer's claim does not. It passes `wait=False`: a sweep decides about somebody else's
+footprint and the mtime settles it, so it must not sleep per entry the way a caller claiming that one
+id does.
+
+**What stays local to each store, because sharing it would have LOOSENED it** — this is the half the
+2026-08-04 note was right about, now written down per member rather than as a reason not to start:
+
+* `resolve`. `ShareStore` returns ONE indistinguishable `None` for every failure, because a reader
+  who can tell a revoked link from a never-existing one has a session-existence oracle.
+  `ReviewStore` raises TYPED errors naming revoked / expired / generation, because its reader is the
+  owner's own guest and the surface must say why the link stopped working. A merged resolve picks
+  one, and either choice is a regression for the other store.
+* TTL validation. Not one rule spelled twice: `ShareStore` refuses a `bool` and a non-integer float,
+  while `ReviewStore`'s ordinary path truncates a float and only its recovery path demands an exact
+  `int`. Parameterizing every difference produces a validator whose configuration IS the duplicated
+  code, and the bounds and messages are per-surface anyway.
+* The record schemas and their validators. They read different durable records (a session +
+  transcript bound vs a run + generation + scopes), and both are fail-closed readings of
+  authorization state.
+
+`tests/test_share_store_cross_process.py` (12 → 20) DRIVES the new properties instead of pinning
+source, which is what the 2026-08-04 pass could not do for the interprocess half: the OS-lock refusal
+is driven by making the store's `.lock` a DIRECTORY (unopenable, so `required=True` refuses) and
+asserting the body never ran and no capability was minted; the reservation is driven by forcing the
+first minted id to collide with a live record and proving the existing capability still resolves; the
+crash contract is driven by leaving a real empty reservation behind and proving it authorizes
+nothing, that an ABANDONED one is swept, and that an IN-FLIGHT one survives a concurrent create; and
+the publish contract is driven both ways — a failing write heals its own reservation and reports the
+store's 503 without leaking the OS message, while a write that LANDED before a later failure is kept.
+Teeth-tested against five mutations, all five biting: dropping the fresh-reservation skip (1),
+dropping `O_EXCL` (3 — including a pre-existing `ReviewStore` collision test, which is the point of
+sharing the code), dropping the publish healing (1), yielding from the lock's exception handler (1),
+and re-keying the lock table per call (2).
+
+**Still open, and it is one thing:** the create-RECOVERY contract. `ReviewStore.create_or_replay`
+reconstructs the exact original bearer from a client-held envelope (a canonical request id plus a
+256-bit token secret, bound by durable identity/intent/token hashes), so a lost HTTP response is
+recoverable. `POST /api/assistant/sessions/{sid}/share` carries no such envelope: a lost response
+leaves the client with no token and a retry mints a SECOND live capability. That is not a property
+of the store — it is the create PROTOCOL, and porting it means changing an HTTP contract and the UI
+that speaks it, so it stays a named item rather than being smuggled into an extraction.
 
 #### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 

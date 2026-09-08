@@ -49,9 +49,10 @@ other work items that test the same hypothesis), **cross-run memory**
     are deduped (exact hash + an agentic paraphrase merge), prioritized (foresight), and tracked to a
     verdict. The base
     cross-run memory paths and reflection priors are **on by default** (`~/.looplab/memory` +
-    `~/.looplab/knowledge`). Product `Settings` also enable the Part-IV concept, advisory and
-    structured-claim reads by default; only callers that construct bare `EngineOptions` directly
-    retain the lower-level opt-in defaults.
+    `~/.looplab/knowledge`). Product `Settings` also enable the Part-IV concept and advisory reads by
+    default; only callers that construct bare `EngineOptions` directly retain the lower-level opt-in
+    defaults. Structured claim identity is the exception that converged: it is the default on BOTH
+    sides (doc 25 EM-06), because the durable governance write path never had another mode.
     A run with an eligible best result can write a case and reflection artifacts, while only a
     supported improving hypothesis can seed an auto-skill. Later matching runs may retrieve the
     applicable records. A model-authored meta-note is an explanatory hypothesis over recorded

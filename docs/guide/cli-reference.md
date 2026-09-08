@@ -1837,13 +1837,13 @@ the evidence mixed. Legacy rows without the verifier payload remain
 `unverified` and never become positive support merely because they cited a node. New distilled lessons carry an
 explicit `claim_stance` separating literal proposition support from action guidance, so a confirmed negative
 fact is no longer inverted; legacy rows without the field keep the historical outcome mapping. This is still not
-an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is normalized statement text unless
-`--structured` is selected. `--scope` narrows every joined store (lessons, D8 research claims and, with
+an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is the
+scope+polarity-safe structured claim key unless the deprecated `--lean` projection is selected. `--scope` narrows every joined store (lessons, D8 research claims and, with
 `--pack`, concept capsules) to one task — the CLI spelling of the HTTP `/api/cross-run/claims?scope_task=`
 read. Pure read; no LLM/endpoint.
 
 ```bash
-looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structured] [--scope TASK_ID]
+looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--structured|--lean] [--scope TASK_ID]
                [--json] [--governance-receipt]
 ```
 
@@ -1853,11 +1853,10 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | `--top N` | `20` | How many most-evidenced claims to list — **and, with `--pack`, the pack's `max_claims` cap** (`engine/claims_retrieval.py::build_context_pack`), so it bounds both listings and the rendered context pack |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly. Concept tendencies are derived from the full retained pre-cap aggregate while the rendered labels remain bounded |
-| `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
-| `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
+| `--structured` / `--lean` | `--structured` | Claim identity. `--structured` (the default) groups by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`): claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge); governance overlays by scope-precise `claim_uid`. `--lean` is the deprecated normalized-statement projection kept for reading a review built under it — its rows carry no `claim_uid`/`evidence_digest`, so its `--governance-receipt` can never satisfy `claim-decide` |
 | `--scope TASK_ID` | `""` (portfolio-wide) | Project only this task's evidence, filtering **every** joined store through the same access boundary the Atlas and HTTP reads use. **Required to obtain a usable `--governance-receipt` for a task-scoped claim** — see the projection rule below. Empty keeps the portfolio-wide read |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
-| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--structured --scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide`. `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
+| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide` (the structured projection is the default; `--lean` cannot produce them). `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
 
 ### The projection rule: review at the scope you decide at
 

@@ -126,6 +126,7 @@ _LAYOUT = {
     "assistant": "serve",
     "assistant_watch": "serve",  # the durable always-on watch record + scheduler (F4): a wake-up outlives its HTTP request, so the instruction is stored rather than held in a timer
     "assistant_commands": "serve",
+    "capability_store": "serve",  # the bearer-capability store core shared by ShareStore/ReviewStore (doc 25 SC-10)
     "atomicio": "core",
     "best_of_n": "search",
     "card_ledger": "events",  # the derived Card ledger: receipt bounds + derive_cards (doc 25 EV-01)

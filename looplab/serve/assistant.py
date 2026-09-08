@@ -31,6 +31,14 @@ from typing import Callable, Optional
 from looplab.core.atomicio import atomic_write_text, best_effort_fsync, strict_atomic_write_text
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.events.eventstore import iter_jsonl
+from looplab.serve.capability_store import (
+    capability_store_lock,
+    publish_reserved,
+    reservation_state,
+    reserve_unique_id,
+    store_process_lock,
+    token_digest,
+)
 from looplab.serve.llm_context import ASSISTANT_EVIDENCE_GUARD, BOSS_EVIDENCE_LABEL
 from looplab.serve.principal import portfolio_access
 
@@ -925,11 +933,10 @@ SHARE_TITLE_MAX_CHARS = 120
 SHARE_REVOKED_RETENTION_SECONDS = SHARE_MAX_TTL_SECONDS
 
 
-# One process lock PER STORE PATH, shared by every ShareStore instance in this interpreter, so two
-# server objects over the same `.shares` dir cannot each hold their own private lock (doc 25 SC-10).
-_SHARE_STORE_LOCKS_GUARD = threading.Lock()
-_SHARE_STORE_LOCKS: dict[str, threading.Lock] = {}
-_SHARE_STORE_LOCK_TIMEOUT_SECONDS = 5.0
+# How many ids `create` may try before it declares the namespace exhausted. Reserved with `O_EXCL`
+# (`capability_store.reserve_unique_id`), so an attempt is a real claim and not a check that a later
+# write could still lose.
+_SHARE_ID_RESERVE_ATTEMPTS = 32
 
 
 class ShareError(ValueError):
@@ -959,10 +966,10 @@ class ShareStore:
 
     def _process_lock(self) -> threading.Lock:
         # Keyed on the STORE PATH, not the instance: `abspath` is lexical, so a missing `.shares`
-        # dir cannot turn construction into an I/O failure.
-        key = os.path.normcase(os.path.abspath(os.fspath(Path(self.root) / ".shares")))
-        with _SHARE_STORE_LOCKS_GUARD:
-            return _SHARE_STORE_LOCKS.setdefault(key, threading.Lock())
+        # dir cannot turn construction into an I/O failure. One TABLE with `ReviewStore` since
+        # 2026-09-08 — they key on different directories, and a second table is a second place the
+        # "keyed on the instance" regression can come back (doc 25 SC-10).
+        return store_process_lock(Path(self.root) / ".shares")
 
     @contextmanager
     def _store_lock(self):
@@ -972,26 +979,21 @@ class ShareStore:
         of records, and with only an in-process lock two uvicorn workers could interleave it — one
         worker's revocation lost behind the other's write, leaving a link the owner believes is dead.
         `ReviewStore` already pairs a per-path process lock with a REQUIRED OS lock for exactly this,
-        and this is now the same pattern rather than a second, weaker one.
+        and this is now the SAME CODE rather than a second, weaker one — or a second copy of the same
+        one, which is what it was between 2026-08-04 and the extraction.
 
         Non-blocking on purpose: a contended store gives the HTTP layer a bounded, retryable 503
         instead of parking a request thread behind another worker indefinitely. There is deliberately
-        no thread-only fallback — a filesystem that cannot provide the ordering fails closed.
+        no thread-only fallback — a filesystem that cannot provide the ordering fails closed. The
+        `.shares` dir is created INSIDE the failure boundary (`prepare`), so a store that cannot be
+        created reports the same retryable 503 as one that cannot be locked.
         """
-        from looplab.events.eventstore import (
-            EventStoreLockError, InterprocessLockContended, _interprocess_lock)
-
-        if not self._lock.acquire(timeout=_SHARE_STORE_LOCK_TIMEOUT_SECONDS):
-            raise self._store_unavailable()
-        try:
-            try:
-                self.dir.mkdir(parents=True, exist_ok=True)
-                with _interprocess_lock(self._lock_path, required=True, blocking=False):
-                    yield
-            except (EventStoreLockError, InterprocessLockContended, OSError) as exc:
-                raise self._store_unavailable() from exc
-        finally:
-            self._lock.release()
+        with capability_store_lock(
+                self._lock, self._lock_path,
+                on_timeout=self._store_unavailable,
+                on_unavailable=self._store_unavailable,
+                prepare=lambda: self.dir.mkdir(parents=True, exist_ok=True)):
+            yield
 
     def _safe_dir_locked(self, *, create: bool = False) -> Optional[Path]:
         """Return the real, direct ``.shares`` directory or fail closed.
@@ -1063,9 +1065,9 @@ class ShareStore:
             return None
         return current if current >= 0 and math.isfinite(current) else None
 
-    @staticmethod
-    def _digest(token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    # The one hashing of a bearer value, shared with `ReviewStore`: what is stored is the digest,
+    # never the token, so a leaked store cannot be replayed as a link.
+    _digest = staticmethod(token_digest)
 
     def _path(self, link_id: str, directory: Path) -> Optional[Path]:
         # Validate the SHAPE before touching the filesystem: the id arrives inside an attacker-chosen
@@ -1217,9 +1219,20 @@ class ShareStore:
         Expired and malformed records are already unauthorized and can be removed immediately.
         Revoked tombstones get a long normal retention window, but a capacity recovery may remove
         them earlier because their old token hash can never authenticate a future fresh-secret record.
+
+        The ONE thing this sweep may not remove is an in-flight RESERVATION: `create` claims its id
+        with `O_EXCL` and publishes the record afterwards, so an empty file is either a crashed
+        worker's abandoned footprint (remove it — the id is unusable until it goes) or somebody's
+        live claim a fraction of a second old. Deleting the latter would hand the same id to a
+        second creator, which is the exact collision the reservation exists to prevent — and it is
+        reachable across workers, because this sweep runs under the store lock and an uncoordinated
+        legacy writer's reservation does not. `wait=False`: a sweep is deciding about somebody
+        else's footprint, and the mtime already settles it, so it must not sleep per entry.
         """
         for path in self._paths_locked(expected_directory=directory):
             record = self._validated_record(path, strict_io=True)
+            if record is None and reservation_state(path, wait=False)[0] == "fresh_empty":
+                continue
             if record is None or record["expires_at"] <= now:
                 if not self._remove(path):
                     raise self._store_unavailable()
@@ -1279,24 +1292,29 @@ class ShareStore:
                 raise ShareError(
                     "share capability capacity is full; revoke or wait for existing links to expire",
                     code="assistant_share_capacity", status_code=503)
-            for _ in range(32):
-                link_id = secrets.token_hex(16)
-                path = self._path(link_id, directory)
-                assert path is not None
+            def _boundary_holds(path: Path) -> bool:
+                # Resolving the missing leaf confirms that its parent has not been redirected since
+                # the directory boundary check above. (This used to also spell `not path.exists()
+                # and not path.is_symlink()`; `O_EXCL | O_CREAT` refuses an existing file AND a
+                # symlink — a dangling one included — so the reservation itself is now that check,
+                # and unlike the old one it cannot be lost between the look and the write.)
                 try:
-                    # ``is_symlink`` catches a broken link for which ``exists`` is false.  Resolving
-                    # the missing leaf also confirms that its parent has not been redirected since
-                    # the directory boundary check above.
-                    if (not path.exists() and not path.is_symlink()
-                            and path.resolve(strict=False).parent == directory):
-                        break
+                    if path.resolve(strict=False).parent == directory:
+                        return True
                 except (NotADirectoryError, OSError, RuntimeError):
                     pass
                 if self._safe_dir_locked() is None:
                     raise self._store_unavailable()
-            else:  # practically unreachable, but never overwrite an existing capability on collision
-                raise ShareError("could not reserve a unique share capability",
-                                 code="assistant_share_capacity", status_code=503)
+                return False
+
+            link_id, path = reserve_unique_id(
+                mint=lambda: secrets.token_hex(16),
+                path_for=lambda candidate: self._path(candidate, directory),
+                attempts=_SHARE_ID_RESERVE_ATTEMPTS, verify=_boundary_holds,
+                # practically unreachable, but never overwrite an existing capability on collision
+                on_exhausted=lambda: ShareError(
+                    "could not reserve a unique share capability",
+                    code="assistant_share_capacity", status_code=503))
             # The secret is the whole capability; the id is only where the record lives.
             token = f"{link_id}.{secrets.token_urlsafe(32)}"
             record = {"id": link_id, "session": sid, "token_hash": self._digest(token),
@@ -1304,7 +1322,14 @@ class ShareStore:
                       "live": live, "upto": None if live else message_count, "title": title}
             if self._safe_dir_locked() != directory:
                 raise self._store_unavailable()
-            atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
+            # A publish that fails leaves this caller's own EMPTY reservation behind, and an empty
+            # file authorizes nothing (`_validated_record` refuses it) — so the shared publish heals
+            # it rather than leaving the id permanently claimed by a write that never landed.
+            publish_reserved(
+                path, record,
+                save=lambda target, value: atomic_write_text(
+                    target, json.dumps(value, indent=2, sort_keys=True)),
+                on_unavailable=self._store_unavailable)
         return token, self.public(record)
 
     @staticmethod
