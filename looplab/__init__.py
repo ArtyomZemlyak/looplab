@@ -83,6 +83,7 @@ _LAYOUT = {
     "audit": "engine",   # engine audit/trust-emitter mixin
     "concept_cadence": "engine",  # PART IV/V concept re-tag + snapshot mixin (doc 25 EC-09)
     "concept_capsules": "engine",  # durable per-run concept record + portfolio views (doc 25 EM-10)
+    "knowledge_views": "engine",  # the PUBLIC cross-run knowledge read model (doc 25 XP-01/TO-09 §6.6)
     "concept_shelf": "engine",   # the per-run concept surface the memory views sort by
     "concept_graph": "search",   # PART IV D5 concept vocabulary + axis-DAG + curated skeletons
     "concept_analytics": "search",  # ...its pure coverage/metrics/alarm read-models (doc 25 SE-09)

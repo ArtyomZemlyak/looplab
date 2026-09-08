@@ -887,14 +887,14 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
         result["failures"].append({"store": "memory_dir", "error": "no cross-run memory directory"})
         return result
 
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     for filename, label, keep_reason in _tier_rules(base, run):
         path = base / filename
         if not path.exists():
             continue
         try:
-            with _interprocess_lock(Path(f"{path}.lock"), required=True):
+            with interprocess_lock(Path(f"{path}.lock"), required=True):
                 rows = _rows(path)
                 # ONE predicate pass. `keep_reason` reaches into `evidence_refs` and re-derives a
                 # claim identity per row, and this runs while holding the store's interprocess lock.

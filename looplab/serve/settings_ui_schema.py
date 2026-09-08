@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 208
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 209
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -221,12 +221,20 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # so it is RE-DERIVED over the merged keyset, which the 2026-08-31 entry prescribes.
 # Verified by intersection rather than by adding the integers: 207 unique keys, 197 common
 # to this branch's file plus master's ten, no duplicate and none removed.
-# 207 + 1 -> 208 on 2026-09-08: `mlflow_tracking_uri` (docs/BACKLOG.md §16), the MLflow mirror that
-# runs WHILE the run does. A row rather than an uncurated omission for the reason `redact_output`
-# next to it is one: it decides whether this run's params, metrics and champion CODE leave the box
-# for an external server, so the operator has to be able to see it and turn it off. Exactly one key
-# added, none removed; both pins re-derived over the file rather than incremented.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5521c195af21a9aeee1e76e4ddc9782a4a742c148387ccc362b0424a76d0acdf"
+# 207 + 2 -> 209 on 2026-09-08, at the MERGE: two rows landed on the same day from two branches
+# and NEITHER side's digest describes the result, because each was pinned against a tree without the
+# other's row. Re-derived over the merged keyset, the way the 2026-08-31 entry above prescribes, and
+# verified by INTERSECTION rather than by adding the integers: 207 keys common to both files plus
+# exactly `lesson_operator_scope` and `mlflow_tracking_uri`, no duplicate and none removed.
+# +`lesson_operator_scope` (doc 52 §4.3), whether the Developer's cross-run prior is ranked by the
+# operator about to fire. A row because it changes a PROMPT — the same ground `memo_verdict_cue` and
+# `evidence_envelope` are rows on — and because OFF is the shipped default, so the operator turning
+# it ON is the one who needs to see it.
+# +`mlflow_tracking_uri` (docs/BACKLOG.md §16), the MLflow mirror that runs WHILE the run does. A row
+# rather than an uncurated omission for the reason `redact_output` next to it is one: it decides
+# whether this run's params, metrics and champion CODE leave the box for an external server, so the
+# operator has to be able to see it and turn it off.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "bc7bbe2c1516a8add511ea53c4079d8a2f413b97b8c639ad204f85479ead71b8"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

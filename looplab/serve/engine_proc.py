@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 # `_`-prefixed spelling here, so every existing import site and every
 # `monkeypatch.setattr(engine_proc, "_engine_alive", …)` still resolves — and this module's own
 # functions still read them out of this module's globals, so such a patch still lands.
+from looplab.core.atomicio import file_identity
 from looplab.engine import run_lifecycle
 from looplab.engine.run_lifecycle import (  # noqa: F401 - re-exported for the historical import path
     RESUME_RECONCILE_GRACE_S as _RESUME_RECONCILE_GRACE_S,
@@ -164,10 +165,10 @@ def engine_write_lock_http(rd: Path):
     """
     from fastapi import HTTPException
     from looplab.events.eventstore import (
-        EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+        EventStoreLockError, InterprocessLockContended, interprocess_lock)
 
     try:
-        with _interprocess_lock(rd / "engine.lock", required=True, blocking=False):
+        with interprocess_lock(rd / "engine.lock", required=True, blocking=False):
             yield
     except InterprocessLockContended as exc:
         raise HTTPException(409, {
@@ -491,10 +492,14 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
         except Exception:  # noqa: BLE001 - unreadable state stays recoverable; keep waiting
             return None
 
-    def _log_sig() -> Optional[tuple[int, int]]:
+    def _log_sig() -> Optional[tuple[int, ...]]:
+        # `file_identity`, not the (size, mtime_ns) pair this used to spell: the waiter is asking
+        # "has anything happened to the log since I last looked", and a REPLACEMENT (a reset that
+        # atomically swapped a fresh events.jsonl in) is the loudest thing that can happen to it —
+        # invisible to size+mtime when the new file happens to match, and exactly the case where
+        # continuing to wait is wrong (doc 25 SC-11).
         try:
-            st = (run_dir / "events.jsonl").stat()
-            return st.st_size, st.st_mtime_ns
+            return file_identity((run_dir / "events.jsonl").stat())
         except OSError:
             return None
 

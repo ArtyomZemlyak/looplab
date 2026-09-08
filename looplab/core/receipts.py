@@ -144,8 +144,8 @@ class ReceiptRows(list):
       fail-CLOSED. Collapsing those onto one default would turn one of "we could not read the
       store" / "the store is complete" / "look at the rows" into another.
     * How a receipt is INHERITED when rows arrive as a plain list also stays with the subclass:
-      ``_claim_source_rows`` re-validates and conservatively ADDS newly visible schema failures to a
-      carried receipt, ``_dedup_valid_capsules`` takes the per-field max against the duplicates it
+      ``claim_source_rows`` re-validates and conservatively ADDS newly visible schema failures to a
+      carried receipt, ``dedup_valid_capsules`` takes the per-field max against the duplicates it
       finds itself. Neither is a copy.
 
     What IS shared is the hazard the finding named: a plain list operation over one of these silently

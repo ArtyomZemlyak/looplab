@@ -1071,6 +1071,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         digest_char_cap = _opt("digest_char_cap")
         research_verify = _opt("research_verify")
         memo_verdict_cue = _opt("memo_verdict_cue")
+        lesson_operator_scope = _opt("lesson_operator_scope")
         workdir_audit = _opt("workdir_audit")
         trace_llm_io = _opt("trace_llm_io")
 
@@ -1275,6 +1276,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # it) for the two propose paths, and an engine attribute for the three call sites that are
         # engine methods (`crash_repair._ask_triage`/`_ask_repair_critic`, `node_build._choose_action`).
         self._memo_verdict_cue = bool(memo_verdict_cue)
+        # Read at ONE place, `lessons_priors.py::operator_scoped_prior` — the engine attribute exists
+        # so a build worker can ask without reaching for Settings (doc 52 §4.3). Off = the Developer
+        # prior is the run-wide text, byte for byte.
+        self._lesson_operator_scope = bool(lesson_operator_scope)
         try:
             setattr(researcher, "_memo_verdict_cue", bool(memo_verdict_cue))
         except Exception:  # noqa: BLE001 — toy researchers without attrs are fine

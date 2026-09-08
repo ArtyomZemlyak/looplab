@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 import orjson
 
-from looplab.core.atomicio import append_jsonl_bytes_locked
+from looplab.core.atomicio import append_jsonl_bytes_locked, file_identity
 from looplab.core.models import (
     NODE_CONCEPT_PROVENANCE_CLASSIFIER,
     RunState,
@@ -70,9 +70,13 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
 
     def __init__(self, engine: "Engine") -> None:
         self._e = engine
-        self.seen_stamp = None   # (size, mtime_ns) of the store at the last read
+        self.seen_stamp = None   # `file_identity` of the store at the last read
         self.prior_note_text = ""   # E4: cross-run RESEARCHER prior (R&D lessons), loaded at run start
         self.dev_prior_note_text = ""   # §role-split: cross-run DEVELOPER prior (code-fix lessons)
+        # The last `_scan_prior_context` result, retained ONLY for `operator_scoped_prior` (the
+        # opt-in per-operator Developer render) so a build never re-reads the shared store. None
+        # until the first prior load; replaced wholesale by every load and refresh.
+        self.prior_ctx = None
         # Reconcile gate: a hash of {node_id -> outcome-signature} at the last reconcile scan. Recomputed
         # each cadence pass (cheap, no I/O); when it CHANGES (a node reached / left / flipped a terminal —
         # in particular a node_reset re-eval that altered a metric or status), we re-read the lesson file
@@ -114,7 +118,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         hygiene can wait for run end instead of rewriting a shared file every few nodes."""
         if not (lessons and self._e.memory_dir):
             return
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
         base = Path(self._e.memory_dir)
         path = base / "lessons.jsonl"
         # The concept SHELF's durable tag, stamped at the ONE funnel both producers reach so a lesson
@@ -151,7 +155,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # Degrading there would be indistinguishable from silently dropping the lock requirement.
         try:
             base.mkdir(parents=True, exist_ok=True)
-            with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+            with interprocess_lock(Path(str(path) + ".lock"), required=True):
                 append_jsonl_bytes_locked(path, payload)
         except OSError as e:  # noqa: BLE001 - advisory cross-run memory cannot fail the run
             self._e.store.append(EV_LESSONS_STORE_UNAVAILABLE, {
@@ -323,13 +327,19 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         return fold(self._e.store.read_all())
 
     def lessons_store_stamp(self):
-        """(size, mtime_ns) of the shared lessons store, or None — the cheap change detector the
-        refresh gate uses to skip a full re-read/re-score when no run has written since."""
+        """`core/atomicio.py::file_identity` of the shared lessons store, or None — the cheap change
+        detector the refresh gate uses to skip a full re-read/re-score when no run has written since.
+
+        The canonical tuple rather than the (size, mtime_ns) pair this used to spell (doc 25 SC-11):
+        the store is not only appended to, it is REPLACED — `compact_lessons` /
+        `consolidate_lessons_file` rewrite it through an atomic replace, and a compaction that lands
+        on the same size and nanosecond is invisible to the weaker pair. The cost is identical (one
+        `stat`), the comparison is in-memory only, and a false CHANGE merely re-reads the store.
+        """
         if not self._e.memory_dir:
             return None
         try:
-            st = (Path(self._e.memory_dir) / "lessons.jsonl").stat()
-            return (st.st_size, st.st_mtime_ns)
+            return file_identity((Path(self._e.memory_dir) / "lessons.jsonl").stat())
         except OSError:
             return None
 
@@ -426,20 +436,20 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         exactly the loss the lock exists to prevent. Hygiene is best-effort and cadence-driven, so a
         skipped round costs nothing: the next one merges the combined file."""
         try:
-            from looplab.engine.claims import (_load_claim_source_path,
+            from looplab.engine.claims import (load_claim_source_path,
                                                _valid_claim_source_row)
             from looplab.engine.memory import consolidate_lessons
-            from looplab.events.eventstore import (_interprocess_lock,
+            from looplab.events.eventstore import (interprocess_lock,
                                                    replace_jsonl_rows_atomic_preserving_quarantine)
             lock_path = Path(str(path) + ".lock")
-            with _interprocess_lock(lock_path, required=True):
+            with interprocess_lock(lock_path, required=True):
                 before = LessonMemory.lessons_file_token(path)
-                rows = _load_claim_source_path(path, research=False)
+                rows = load_claim_source_path(path, research=False)
             merged = consolidate_lessons(rows, client=client, embed=embed,   # unlocked: may be paid
                                          parser=parser, prompts=prompts)
             if len(merged) >= len(rows):
                 return
-            with _interprocess_lock(lock_path, required=True):
+            with interprocess_lock(lock_path, required=True):
                 if before is None or LessonMemory.lessons_file_token(path) != before:
                     return              # a concurrent writer moved the store under the merge
                 # hygiene owns only understood lesson rows. Raw malformed/future records stay
@@ -462,12 +472,12 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         across the paid consolidation pass. There is no unlocked window to swap against here: no
         provider call sits between the read and the write."""
         try:
-            from looplab.engine.claims import (_load_claim_source_path,
+            from looplab.engine.claims import (load_claim_source_path,
                                                _valid_claim_source_row)
-            from looplab.events.eventstore import (_interprocess_lock,
+            from looplab.events.eventstore import (interprocess_lock,
                                                    replace_jsonl_rows_atomic_preserving_quarantine)
-            with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-                rows = _load_claim_source_path(path, research=False)
+            with interprocess_lock(Path(str(path) + ".lock"), required=True):
+                rows = load_claim_source_path(path, research=False)
                 if len(rows) > max_lines:
                     # Retention applies to interpreted lessons, never to quarantine bytes. A damaged/
                     # future row may exceed the soft file cap but cannot be silently laundered by

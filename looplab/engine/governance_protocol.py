@@ -145,9 +145,9 @@ def governance_lock(path: Path):
     policy decision, so this lock is `required=True` everywhere: governance fails CLOSED when the
     locking guarantee is unavailable rather than proceeding unserialized.
     """
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
-    return _interprocess_lock(Path(str(path) + ".lock"), required=True)
+    return interprocess_lock(Path(str(path) + ".lock"), required=True)
 
 
 def _row_action_id(row: dict) -> str:

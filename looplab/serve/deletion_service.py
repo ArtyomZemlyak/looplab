@@ -20,7 +20,7 @@ from looplab.core.run_deletion import (
     run_deletion_snapshot_token)
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.events.eventstore import (
-    EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+    EventStoreLockError, InterprocessLockContended, interprocess_lock)
 from looplab.events.span_index import (
     invalidate as invalidate_span_index, span_destructive_write_guard)
 from looplab.serve.appstate import (
@@ -437,7 +437,7 @@ def _purge_quarantine(path: Path) -> bool:
         return True
     engine_lock = path / "engine.lock"
     try:
-        with _interprocess_lock(engine_lock, required=True, blocking=False):
+        with interprocess_lock(engine_lock, required=True, blocking=False):
             pass
     except InterprocessLockContended:
         return False
@@ -472,7 +472,7 @@ def _purge_recreated_writer_shell(rd: Path) -> bool:
             if is_reparse(lock_info) or not stat.S_ISREG(lock_info.st_mode):
                 return False
             try:
-                with _interprocess_lock(engine_lock, required=True, blocking=False):
+                with interprocess_lock(engine_lock, required=True, blocking=False):
                     pass
             except InterprocessLockContended:
                 return False
@@ -707,7 +707,7 @@ def begin_or_resume_run_deletion(
                         try:
                             with (run_config_write_lock(
                                       snap, deletion_operation_id=operation_id),
-                                  _interprocess_lock(
+                                  interprocess_lock(
                                       Path(str(rd / "events.jsonl") + ".lock"), required=True),
                                   span_destructive_write_guard(
                                       rd / "spans.jsonl", required=True)):

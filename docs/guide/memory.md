@@ -618,6 +618,9 @@ number. Doc 52 row 17 adds two diagnostic records, one ledger and one instrument
   `lesson_id`, the sha256 of its normalized statement — derived, never stored — with its outcome,
   task, run and similarity), how many meta-notes and whether the case were spliced in, how many
   rows the forgetting rung withheld, and the store window's digests. Main task only, fold-ignored.
+  With `lesson_operator_scope` on (below) a per-build row is written too, carrying the `operator`
+  the render was scoped to — that is what makes the scoping's effect measurable rather than
+  arguable.
 - **`memory_read`** — every `search_lessons` / `recall_notes` / `cross_run_*` / `use_skill` call
   reports an invocation id, the exact rendered result's sha256 and length, and the rows it showed,
   through the same engine-installed sink the agent phases use. The answer's bytes do not change;
@@ -806,6 +809,7 @@ leaves another. Those unpaired sidecars are collected by the same sweep once col
 - `LOOPLAB_KNOWLEDGE_DIR` — knowledge base home (default `~/.looplab/knowledge`; `""` disables).
 - `LOOPLAB_MEMORA` — harmonic indexing (abstraction+anchors) over the stores; **on by default**, set `=0`/`false` to restore the raw-text index.
 - `LOOPLAB_RESEARCHER_TOOLS` — master switch for the tool-using Researcher (agentic retrieval); off → a plain researcher that only sees the injected memory.
+- `LOOPLAB_LESSON_OPERATOR_SCOPE` — rank the Developer's cross-run prior by the OPERATOR about to fire (this operator's own lessons, then untagged ones, then rows tagged only with others). **Off by default**: retrieval is otherwise task-fingerprint + role and nothing about the action, and the only per-operator scoping ablation in the field is null — so this ranks rather than filters (nothing is withheld) and off reproduces the Developer prompt byte for byte. The operators of each lesson's own evidence are recorded either way, so turning it on later reads a store that already carries the fact.
 
 The assistant can grow the knowledge base directly: share experiment results/lessons and ask it to
 remember them, and it distils + saves a note via its `remember` tool. The tool is unavailable in

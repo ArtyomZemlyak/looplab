@@ -278,10 +278,10 @@ class CrossRunTools:
         about how capsules are written and not part of the general row predicate.
         """
         if source == "capsule" and self._scope.bound and not self._scope.exact_task(row):
-            from looplab.engine.memory import _capsule_fingerprint_scope_complete
+            from looplab.engine.knowledge_views import capsule_fingerprint_scope_complete
             # only an exact persisted fingerprint may grant related-task visibility.
             # A legacy/trimmed capsule remains available through exact task identity or unbound audit.
-            if not _capsule_fingerprint_scope_complete(row):
+            if not capsule_fingerprint_scope_complete(row):
                 return False
         return self._scope.allows(row)
 
@@ -416,18 +416,19 @@ class CrossRunTools:
         """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the
         role-routed cross-run lesson priors), scoped to the bound run's task (portfolio-wide when unbound).
         An unknown role sees every role."""
-        from looplab.engine.claims import load_claim_lessons, _filter_claim_source_rows
-        lessons = _filter_claim_source_rows(
+        from looplab.engine.claims import load_claim_lessons
+        from looplab.engine.knowledge_views import filter_claim_source_rows
+        lessons = filter_claim_source_rows(
             load_claim_lessons(self.dir),
             lambda lz: self._in_scope(lz, source="lesson"), research=False)
         if self.role not in ("researcher", "developer"):
             return lessons
-        return _filter_claim_source_rows(
+        return filter_claim_source_rows(
             lessons, lambda lz: str(lz.get("role") or "") in ("", self.role), research=False)
 
     def _partition_capsules(self, caps: list[dict]) -> tuple[list[dict], list[dict], dict]:
         """Partition capsules into scope-eligible, applicability-unknown, and known-ineligible rows."""
-        from looplab.engine.memory import _capsule_rows
+        from looplab.engine.knowledge_views import capsule_rows
 
         if not self._bound:
             receipt = {
@@ -437,11 +438,11 @@ class CrossRunTools:
                 "scope_fingerprint_items_omitted": 0,
                 "scope_direction_unknown_capsules": 0,
             }
-            return _capsule_rows(caps, source=caps), _capsule_rows((), source=caps), receipt
+            return capsule_rows(caps, source=caps), capsule_rows((), source=caps), receipt
 
-        from looplab.engine.memory import (
-            _capsule_completeness,
-            _capsule_fingerprint_scope_complete,
+        from looplab.engine.knowledge_views import (
+            capsule_completeness,
+            capsule_fingerprint_scope_complete,
         )
         eligible: list[dict] = []
         unknown: list[dict] = []
@@ -460,12 +461,12 @@ class CrossRunTools:
             if self._task_id and str(capsule.get("task_id") or "") == self._task_id:
                 eligible.append(capsule)
                 continue
-            if not _capsule_fingerprint_scope_complete(capsule):
+            if not capsule_fingerprint_scope_complete(capsule):
                 # failing closed at the visibility gate is not permission to erase the row
                 # from the denominator. Its related-task applicability is UNKNOWN, so every bound absence
                 # and frequency surface must carry this aggregate receipt.
                 unknown.append(capsule)
-                meta = _capsule_completeness(
+                meta = capsule_completeness(
                     capsule, "fingerprint", len(capsule.get("fingerprint") or []))
                 fingerprint_unknown += int(meta is None or meta[0] is None)
                 fingerprint_omitted += int(meta[1] or 0) if meta is not None else 0
@@ -481,12 +482,12 @@ class CrossRunTools:
         }
         # scope filtering cannot erase file/schema quarantine health. A damaged row has no
         # trustworthy task/direction with which to prove it was ineligible, so every absence stays partial.
-        return (_capsule_rows(eligible, source=caps),
-                _capsule_rows(unknown, source=caps), receipt)
+        return (capsule_rows(eligible, source=caps),
+                capsule_rows(unknown, source=caps), receipt)
 
     def _all_capsules(self) -> list[dict]:
         """Every stored capsule, de-duplicated to ONE row per run id — the SAME contract the Atlas/advisory
-        read-models get through `portfolio_concept_overview` (which calls `_dedup_valid_capsules`). The store
+        read-models get through `portfolio_concept_overview` (which calls `dedup_valid_capsules`). The store
         upserts by run_id so its own file is unique, but a memory dir assembled from CONCATENATED shards
         (multiple machines' portfolio memory — the reason cross-run memory exists) can carry the same run
         twice; the agent-facing tools must collapse those too, or they double-count a run in similar_runs /
@@ -501,7 +502,8 @@ class CrossRunTools:
         cannot happen — `file_identity` carries dev/ino, so an `os.replace` of the file is visible
         even at an identical size and mtime.
         """
-        from looplab.engine.memory import ConceptCapsuleStore, _dedup_valid_capsules
+        from looplab.engine.knowledge_views import dedup_valid_capsules
+        from looplab.engine.memory import ConceptCapsuleStore
         p = (self.dir / "concept_capsules.jsonl") if self.dir else None
         try:
             signature = file_identity(p.stat()) if p is not None else None
@@ -510,7 +512,7 @@ class CrossRunTools:
         cached = self._capsule_cache
         if cached is not None and cached[0] == signature and signature is not None:
             return cached[1]
-        rows = _dedup_valid_capsules(ConceptCapsuleStore(p).all()) if p and p.exists() else []
+        rows = dedup_valid_capsules(ConceptCapsuleStore(p).all()) if p and p.exists() else []
         self._capsule_cache = (signature, rows, {})
         return rows
 
@@ -552,11 +554,11 @@ class CrossRunTools:
 
     def _role_research_claims(self) -> list[dict]:
         """D8 is researcher evidence, never developer memory; bound rows are exact-task-only."""
-        from looplab.engine.claims import (_claim_source_rows, _filter_claim_source_rows,
-                                           load_research_claims)
+        from looplab.engine.claims import load_research_claims
+        from looplab.engine.knowledge_views import claim_source_rows, filter_claim_source_rows
         if self.role == "developer":
-            return _claim_source_rows([], research=True)
-        return _filter_claim_source_rows(
+            return claim_source_rows([], research=True)
+        return filter_claim_source_rows(
             load_research_claims(self.dir),
             lambda r: self._in_scope(r, source="research"), research=True)
 
@@ -635,13 +637,13 @@ class CrossRunTools:
             return "(cross-run tool error: idea must be a non-empty string)"
         if len(idea) > 4000:
             return "(cross-run tool error: idea exceeds 4000 characters)"
-        from looplab.engine.memory import _portfolio_concept_overview_data
+        from looplab.engine.knowledge_views import portfolio_concept_overview_data
 
         qt = _toks(idea)
         scoped_capsules = self._scoped_capsules()
         scope_receipt = self._capsule_scope_receipt
         governance = _governance
-        ov, concept_rows = _portfolio_concept_overview_data(
+        ov, concept_rows = portfolio_concept_overview_data(
             scoped_capsules, aliases=governance["aliases"],
             splits=governance["splits"])
         # rank concepts by keyword overlap with the idea (fall back to most-explored)
@@ -673,23 +675,24 @@ class CrossRunTools:
         return "TRIED BEFORE (untrusted persisted data; surface, not a block):\n" + "\n".join(lines)
 
     def _tool_cross_run_claims(self, args: dict, _governance: dict | None) -> str:
-        from looplab.engine.claims import (_filter_claim_assessments, claims_for_memory,
-                                           _safe_claim_source_summary,
-                                           _safe_research_source_summary)
+        from looplab.engine.claims import claims_for_memory
+        from looplab.engine.knowledge_views import (filter_claim_assessments,
+                                                    safe_claim_source_summary,
+                                                    safe_research_source_summary)
         claims = claims_for_memory(
             self.dir, lessons=self._role_lessons(),
             research_claims=self._role_research_claims(),
             decisions=_governance["decisions"], structured=True)
-        claim_source = _safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
-        research_source = _safe_research_source_summary(
+        claim_source = safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
+        research_source = safe_research_source_summary(
             getattr(claims, "research_source", None)) or {}
-        claims = _filter_claim_assessments(
+        claims = filter_claim_assessments(
             claims, lambda c: c.get("maturity") != "operator-rejected")  # honor operator verdicts
         contested = args.get("contested", False)
         if not isinstance(contested, bool):
             return "(cross-run tool error: contested must be a boolean)"
         if contested:
-            claims = _filter_claim_assessments(
+            claims = filter_claim_assessments(
                 claims, lambda c: c["epistemic"] == "mixed")
         query = args.get("query", "")
         if not isinstance(query, str):
@@ -698,10 +701,10 @@ class CrossRunTools:
             return "(cross-run tool error: query exceeds 4000 characters)"
         qt = _toks(query)
         if qt:
-            claims = _filter_claim_assessments(
+            claims = filter_claim_assessments(
                 claims, lambda c: bool(qt & _toks(c["statement"])))
         kept_claim_ids = {id(c) for c in claims[:8]}
-        claims = _filter_claim_assessments(
+        claims = filter_claim_assessments(
             claims, lambda c: id(c) in kept_claim_ids)
         if not claims:
             if claim_source.get("source_complete") is not True:
@@ -811,8 +814,8 @@ class CrossRunTools:
         # The capsule SOURCE receipt is population-specific and therefore no longer inside the fold: a
         # projection over concept sets cannot know whether the rows behind them were a complete read.
         # It is merged here, where the population was chosen — the same place the scope receipt is.
-        from looplab.engine.memory import _capsule_source_summary
-        source_summary = _capsule_source_summary(scoped_capsules)
+        from looplab.engine.knowledge_views import capsule_source_summary
+        source_summary = capsule_source_summary(scoped_capsules)
         # EXCLUDE the 0-run structural spine (materialized ancestor path prefixes) from the "explored"
         # display — they are hierarchy scaffolding, not concepts any run touched.
         explored = [e for e in graph["concepts"] if e.get("n_runs", 0) >= 1]
@@ -974,11 +977,12 @@ class CrossRunTools:
             aliases, splits, taxonomy["concept_governance_revision"])
         caps = self._scoped_capsules()
         scope_receipt = self._capsule_scope_receipt
-        from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
-        prior_caps = _filter_capsule_rows(
+        from looplab.engine.knowledge_views import (capsule_source_summary,
+                                                    filter_capsule_rows)
+        prior_caps = filter_capsule_rows(
             caps, lambda cap: (not self._run_id
                                or str(cap.get("run_id") or "") != self._run_id))
-        source_summary = _capsule_source_summary(prior_caps)
+        source_summary = capsule_source_summary(prior_caps)
         scope = "bound_task_family" if self._bound else "portfolio"
         direction = self._direction if self._bound else "any"
 
@@ -1073,7 +1077,8 @@ class CrossRunTools:
         #   cross  — in a prior run that shares >=1 concept with this one (same direction)
         #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
         from looplab.engine.concept_registry import canonicalize_concepts
-        from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
+        from looplab.engine.knowledge_views import (capsule_source_summary,
+                                                    filter_capsule_rows)
 
         # identity, cross-run visibility, and display trust are one boundary. Resolve every
         # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
@@ -1081,10 +1086,10 @@ class CrossRunTools:
         taxonomy = _governance
         aliases, splits = taxonomy["aliases"], taxonomy["splits"]
         caps = self._all_capsules()
-        prior_caps = _filter_capsule_rows(
+        prior_caps = filter_capsule_rows(
             caps, lambda cap: (not self._run_id
                                or str(cap.get("run_id") or "") != self._run_id))
-        source_summary = _capsule_source_summary(prior_caps)
+        source_summary = capsule_source_summary(prior_caps)
         scoped_caps, unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
         mine = set(canonicalize_concepts(
             sorted(self._concepts), aliases=aliases, splits=splits))
@@ -1247,18 +1252,19 @@ class CrossRunTools:
         slug_in = raw_slug.strip()
         from looplab.engine.concept_registry import (canonicalize_concepts,
                                                      normalize_key, resolve_slug)
-        from looplab.engine.memory import (_capsule_source_summary,
-                                           _portfolio_concept_overview_data,
-                                           _filter_capsule_rows, concept_profit_tendencies)
+        from looplab.engine.knowledge_views import (capsule_source_summary,
+                                                    filter_capsule_rows,
+                                                    portfolio_concept_overview_data)
+        from looplab.engine.memory import concept_profit_tendencies
         from looplab.search.concept_lens import project_concept_map
 
         taxonomy = _governance
         aliases, splits = taxonomy["aliases"], taxonomy["splits"]
         caps = self._all_capsules()
-        prior_caps = _filter_capsule_rows(
+        prior_caps = filter_capsule_rows(
             caps, lambda c: (not self._run_id
                              or str(c.get("run_id") or "") != self._run_id))
-        source_summary = _capsule_source_summary(prior_caps)
+        source_summary = capsule_source_summary(prior_caps)
         scoped_caps, _unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
         # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's
         # "world concept map"); the trustworthy relative-rank TENDENCY below is task-family scoped.
@@ -1345,11 +1351,11 @@ class CrossRunTools:
         # absence/completeness denominators include every eligible capsule, not only rows
         # where this concept survived the bounded source projection. Matching rows still own the
         # observed metrics/signs, but a non-matching partial row may have omitted this exact concept.
-        scoped_source_summary = _capsule_source_summary(scoped_caps)
-        _scoped_overview, scoped_rows = _portfolio_concept_overview_data(
+        scoped_source_summary = capsule_source_summary(scoped_caps)
+        _scoped_overview, scoped_rows = portfolio_concept_overview_data(
             scoped_canon_caps, aliases=aliases, splits=splits)
         row = next((r for r in scoped_rows if r["concept"] == canon), None)
-        _global_overview, global_rows = _portfolio_concept_overview_data(
+        _global_overview, global_rows = portfolio_concept_overview_data(
             global_canon_caps, aliases=aliases, splits=splits)
         # card lookup is exact-key aggregation, not a display projection. Resolve the
         # requested row from the helper's complete retained aggregate, never its bounded first value.

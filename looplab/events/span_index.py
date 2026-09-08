@@ -49,7 +49,7 @@ from looplab.core.trace_files import (
     open_private_trace_file, trace_file_change_token, trace_file_identity,
     windows_file_change_time)
 from looplab.events.eventstore import (
-    JsonlRecordInvalid, _interprocess_lock, decode_jsonl_line, scan_jsonl_region)
+    JsonlRecordInvalid, interprocess_lock, decode_jsonl_line, scan_jsonl_region)
 from looplab.events.traceview import (
     _normalize_span, _strip_span_io, card_research_root_card, claimed_trace_node_id,
     effective_node_id, root_span_generation, root_span_node_id, span_build_trace_claim,
@@ -205,7 +205,7 @@ def span_index_write_guard(
     path = Path(_path_key(spans_path))
     lock = _path_lock(str(path))
     with lock:
-        manager = _interprocess_lock(
+        manager = interprocess_lock(
             path.with_name(_INDEX_LOCK_NAME), required=required)
         try:
             manager.__enter__()
@@ -234,7 +234,7 @@ def span_destructive_write_guard(
     publish old-source derived offsets or accept a late attempt-A append behind their replacement.
     """
     path = Path(_path_key(spans_path))
-    with (_interprocess_lock(
+    with (interprocess_lock(
               path.with_name(TRACE_WRITER_LOCK_NAME), required=required),
           span_index_write_guard(path, required=required)):
         yield

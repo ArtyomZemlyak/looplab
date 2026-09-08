@@ -773,7 +773,7 @@ def test_both_governance_writers_report_a_publication_failure_as_ledger_unavaila
 def test_the_claim_ledger_no_longer_hand_rolls_the_append_protocol():
     """The residue, as AST rather than substrings (CLAUDE.md tier 3, behind the three above).
 
-    `record_claim_decision` reached for `_interprocess_lock`, `strict_fsync`, `strict_fsync_parent`
+    `record_claim_decision` reached for `interprocess_lock`, `strict_fsync`, `strict_fsync_parent`
     and its own action-id scan; every one of those is a second answer to a question the shared
     protocol already answers, and the two answers only ever agreed by hand.
     """
@@ -784,5 +784,5 @@ def test_the_claim_ledger_no_longer_hand_rolls_the_append_protocol():
     assert {"governance_lock", "action_replay", "validate_expected_revision",
             "durable_governance_append"} <= called, (
         f"record_claim_decision stopped composing the shared protocol steps (calls: {sorted(called)})")
-    assert not (called & {"_interprocess_lock", "strict_fsync", "strict_fsync_parent"}), (
+    assert not (called & {"interprocess_lock", "strict_fsync", "strict_fsync_parent"}), (
         "record_claim_decision re-inlined a step the shared governance protocol owns")

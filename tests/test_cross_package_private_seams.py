@@ -3,7 +3,7 @@ XP-01 / TO-09).
 
 An underscore normally licenses the owning module to rename freely. Twenty-six of them are load
 bearing across packages — `tools/` reaches into `engine.memory` and `engine.claims`, `serve/` into
-`events.traceview`, four packages into `events.eventstore._interprocess_lock` — and every one of
+`events.traceview`, four packages into `events.eventstore.interprocess_lock` — and every one of
 those imports is FUNCTION-LOCAL (deliberately, to keep the import graph acyclic). So a rename
 produces no import-time error at all. `CrossRunTools.execute` then swallows the ImportError into
 the generic "(cross-run tool unavailable)" string, and the affected tools simply stop answering.
@@ -71,10 +71,9 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "cli": {
         "looplab.adapters.tasks": ("_make_abstractor",),
-        "looplab.engine.claims": ("_load_claim_source_path", "_safe_claim_source_summary",
-                                  "_safe_research_source_summary"),
-        "looplab.engine.memory": ("_portfolio_concept_overview_data",),
-        "looplab.events.eventstore": ("_interprocess_lock",),
+        # PROMOTED 2026-09-08 (doc 25 XP-01/TO-09 §6.6): the claim/lesson source views and the
+        # portfolio concept overview are public names on `engine/knowledge_views.py`, so `cli/`
+        # imports a declared read model instead of two engine privates.
     },
     "engine": {
         "looplab.agents.roles": ("_state_brief",),
@@ -95,7 +94,6 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # the fourth, and a private-by-convention rule that three readers already share is exactly
         # what this registry exists to make renameable-with-a-red-test instead of promotable.
         "looplab.events.card_ledger": ("_drop_author",),
-        "looplab.events.eventstore": ("_interprocess_lock",),
         # The finalize-scope read side moved DOWN to `events/` so `search` could stop importing the
         # engine (doc 25 XP-07). Its two public names are the cluster's API; these three are the
         # cluster's own internals, and `engine/finalize.py` — the module they moved OUT of — still
@@ -168,9 +166,8 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # no-replace rename INTO atomicio as the public `durable_no_replace_rename` — the two serve
         # callers no longer reach past the package boundary to assemble it themselves.
         "looplab.core.atomicio": ("_ensure_strict_parent",),
-        "looplab.engine.claims": ("_filter_claim_assessments", "_safe_claim_source_summary",
-                                  "_safe_research_source_summary"),
-        "looplab.events.eventstore": ("_interprocess_lock",),
+        # PROMOTED 2026-09-08 (doc 25 XP-01): the three claim-assessment views this router used to
+        # reach for are public on `engine/knowledge_views.py`.
         "looplab.events.traceview": ("_bounded_tail", "_cap_span_io", "_cap_str", "_finite_number",
                                      "_normalize_span", "_normalized_id", "_projection_counter",
                                      "_response_projection", "_tree"),
@@ -178,15 +175,14 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     "tools": {
         "looplab.core": ("_pathsafe",),
         "looplab.core.gitenv": ("_GIT_CRED_KEY_MARKERS", "_GIT_IDENTITY"),
-        "looplab.engine.claims": ("_claim_source_rows", "_filter_claim_assessments",
-                                  "_filter_claim_source_rows", "_safe_claim_source_summary",
-                                  "_safe_research_source_summary"),
-        "looplab.engine.concept_registry": ("_TOMBSTONE",),
-        "looplab.engine.memory": ("_capsule_completeness", "_capsule_fingerprint_scope_complete",
-                                  "_capsule_rows", "_capsule_source_summary",
-                                  "_dedup_valid_capsules", "_filter_capsule_rows",
-                                  "_portfolio_concept_overview_data"),
-        "looplab.events.eventstore": ("_interprocess_lock",),
+        # PROMOTED 2026-09-08 — the thirteen capsule/claim read-model privates and the purge
+        # sentinel this package used to import by their underscore names are now the public
+        # `engine/knowledge_views.py` surface (doc 25 XP-01/TO-09 §6.6). This was the registry's
+        # own stated preference ("the moment to ask whether it should be public instead") and the
+        # widest debt on the list, so the rows are GONE rather than re-pointed; the two-way guard
+        # moved to `tests/test_knowledge_views.py`, which pins the surface AND that no consumer
+        # outside `engine/` reaches around it. `looplab.events.eventstore._interprocess_lock` left
+        # with them, promoted to the public `interprocess_lock`.
         # `looplab.serve.engine_proc` stood here with four names, and stands here no longer: the
         # run-lifecycle primitives moved DOWN to `looplab/engine/run_lifecycle.py` and came out
         # PUBLIC (doc 25 XP-03, closed 2026-09-08), so `tools/` neither reaches up nor reaches a
@@ -259,12 +255,15 @@ def test_the_scan_can_actually_see_a_cross_package_private_import():
     """A scan that matches nothing is indistinguishable from one whose walk is broken."""
     edges = _actual_edges()
     assert edges, "the AST walk found no cross-package private imports at all"
-    # The most-depended-on one, named explicitly: four packages outside `events` take this lock.
-    lock_consumers = {consumer for consumer, module, name in edges
-                      if name == "_interprocess_lock"}
-    assert len(lock_consumers) >= 3, (
-        f"expected several packages to depend on events.eventstore._interprocess_lock, saw "
-        f"{sorted(lock_consumers)} — either the walk regressed or the name was finally promoted")
+    # `events.eventstore.interprocess_lock` used to be the exemplar here — four packages outside
+    # `events` took it, and this assertion said "either the walk regressed or the name was finally
+    # promoted". It was promoted on 2026-09-08, so the exemplar moves to the widest surviving debt,
+    # which keeps the check honest about a broken walk without pinning a debt anyone is paying.
+    traceview_privates = {name for consumer, module, name in edges
+                          if module == "looplab.events.traceview" and consumer == "serve"}
+    assert len(traceview_privates) >= 9, (
+        f"expected serve/ to depend on nine events.traceview privates, saw "
+        f"{sorted(traceview_privates)} — either the walk regressed or they were finally promoted")
 
 
 def test_the_widest_debts_are_the_ones_the_review_named():
@@ -274,8 +273,16 @@ def test_the_widest_debts_are_the_ones_the_review_named():
         module for _consumer, module, _name in _DECLARED)
     assert per_provider["looplab.events.traceview"] >= 9, (
         "serve/ leans on nine traceview privates — doc 25 SR-* proposes a public projection API")
-    assert per_provider["looplab.engine.memory"] >= 7, (
-        "tools/ + cli/ lean on the capsule read-model — doc 25 XP-01's primary promotion candidate")
+    # `looplab.engine.memory` was the OTHER pinned debt — seven capsule read-model privates reached
+    # by `tools/` and `cli/`, XP-01's primary promotion candidate. It was promoted on 2026-09-08 to
+    # `engine/knowledge_views.py`, so the pin inverts: the capsule/claim read model must NOT come
+    # back as a private cross-package surface. A `>= 7` assertion kept here would have to be
+    # weakened to `>= 0`, which is not a pin at all.
+    assert not [module for module in per_provider
+                if module in ("looplab.engine.memory", "looplab.engine.claims",
+                              "looplab.engine.concept_capsules", "looplab.engine.claims_health")], (
+        "the cross-run read model is public (engine/knowledge_views.py) — a new private import of "
+        "it is a regression of doc 25 XP-01, not a new debt to declare")
 
 
 # --- the tools -> serve inversion (doc 25 XP-03 / TO-03) --------------------------------------

@@ -174,11 +174,11 @@ class StrategyCadenceMixin:
             from pathlib import Path
 
             from looplab.engine.claims import (
-                _filter_claim_source_rows,
-                _safe_claim_source_summary,
+                filter_claim_source_rows,
+                safe_claim_source_summary,
                 atlas_for_memory,
             )
-            from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
+            from looplab.engine.memory import capsule_source_summary, filter_capsule_rows
             base = Path(self.memory_dir)
             if _governance is None:
                 return ctx.enter_governed(
@@ -188,10 +188,10 @@ class StrategyCadenceMixin:
             run_id, task_id = ctx.scoped_identity(state)
             _visible = ctx.visible_row_predicate(
                 current_direction, task_id=task_id, excluded_run=run_id)
-            lessons = _filter_claim_source_rows(lessons, _visible, research=False)
-            caps = _filter_capsule_rows(caps, _visible)
-            research = _filter_claim_source_rows(research, _visible, research=True)
-            capsule_source = _capsule_source_summary(caps)
+            lessons = filter_claim_source_rows(lessons, _visible, research=False)
+            caps = filter_capsule_rows(caps, _visible)
+            research = filter_claim_source_rows(research, _visible, research=True)
+            capsule_source = capsule_source_summary(caps)
             # Use the same scope+polarity-safe projection as the Researcher advisory while
             # retaining the already-filtered, current-run-excluding snapshot used for the audit receipt.
             a = atlas_for_memory(
@@ -202,7 +202,7 @@ class StrategyCadenceMixin:
                 structured=getattr(self, "_cross_run_structured_claims", False),
                 _governance=_governance,
             )
-            claim_source = _safe_claim_source_summary(a.get("claim_source"))
+            claim_source = safe_claim_source_summary(a.get("claim_source"))
             if ctx.empty_after_complete_read(lessons, caps, research, capsule_source, claim_source):
                 self._cross_run_note_receipt = {}
                 return ""

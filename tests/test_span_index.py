@@ -1670,7 +1670,7 @@ def test_process_writer_guard_remains_exclusive_for_the_same_path(tmp_path, monk
         # Isolate the process-local guarantee; an OS flock must not be what makes this test pass.
         yield
 
-    monkeypatch.setattr(span_index, "_interprocess_lock", no_file_lock)
+    monkeypatch.setattr(span_index, "interprocess_lock", no_file_lock)
     source = tmp_path / "spans.jsonl"
     start = threading.Barrier(2)
     state_lock = threading.Lock()

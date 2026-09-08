@@ -110,7 +110,7 @@ def capability_store_lock(process_lock: threading.Lock, lock_path: Path, *,
     reach an HTTP handler as a path-bearing 500.
     """
     from looplab.events.eventstore import (
-        EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+        EventStoreLockError, InterprocessLockContended, interprocess_lock)
 
     if not process_lock.acquire(timeout=timeout):
         raise on_timeout()
@@ -118,7 +118,7 @@ def capability_store_lock(process_lock: threading.Lock, lock_path: Path, *,
         try:
             if prepare is not None:
                 prepare()
-            with _interprocess_lock(lock_path, required=True, blocking=False):
+            with interprocess_lock(lock_path, required=True, blocking=False):
                 yield
         except (EventStoreLockError, InterprocessLockContended, OSError) as exc:
             raise on_unavailable() from exc

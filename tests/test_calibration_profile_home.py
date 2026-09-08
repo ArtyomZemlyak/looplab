@@ -134,7 +134,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:1f500c53d7933c745a419d88639e55df9d825d136d7536c83706413d3c66badf"
+_EXPECTED_DIGEST = "sha256:6f7f9abfdaafa795b399e9df972ae59b902e497b670d3e9093e098f62ca3a0d8"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -574,6 +574,22 @@ _EXPECTED_DIGEST = "sha256:1f500c53d7933c745a419d88639e55df9d825d136d7536c837064
 #               threshold, so the prompt bytes a replicate's Developer sees are now a function of a
 #               value the envelope did not record. The default matching the former literal makes
 #               today's behaviour identical; it does not make the envelope the same.
+#   2026-09-08  MERGE: two fields landed the same day, one per branch, and neither side's digest
+#               describes the result — each was pinned against a tree without the other's field.
+#               Both pins are RECOMPUTED from the merged module, the way every merge entry above
+#               prescribes, and verified by DIFFING the field set rather than adding integers: an
+#               AST scan of `Settings`' annotated assignments reports exactly
+#               `['lesson_operator_scope', 'mlflow_tracking_uri']` added and `[]` removed, so
+#               239 -> 241 is two real additions and a +3/-1 cannot hide behind it.
+#   2026-09-08  + lesson_operator_scope (one of the two, 239 -> 241 together): whether the Developer's cross-run
+#               prior is RANKED by the operator about to fire (doc 52 §4.3). Verified the way this
+#               history prescribes rather than by adding integers: an AST scan of `Settings`'
+#               annotated assignments reports exactly `['lesson_operator_scope']` added and `[]`
+#               removed. Old receipts SHOULD stop verifying, and here the reason is unusually clean:
+#               the field decides WHICH five cross-run lessons reach the Developer's prompt, so a
+#               replicate calibrated before it ran under an envelope that could not record the
+#               ordering its build was shown. The default (off) reproduces that ordering byte for
+#               byte; it does not make the envelope the same.
 #   2026-09-08  + mlflow_tracking_uri  (docs/BACKLOG.md §16: the MLflow mirror that runs WHILE the
 #               run does). The 'field set changed too' branch, verified that way rather than from
 #               the count: an AST scan of `Settings`' annotated assignments against the pre-change
@@ -591,7 +607,7 @@ _EXPECTED_DIGEST = "sha256:1f500c53d7933c745a419d88639e55df9d825d136d7536c837064
 #               decides whether a run's params, metrics and champion CODE leave the box for an
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
-_EXPECTED_FIELD_COUNT = 240
+_EXPECTED_FIELD_COUNT = 241
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

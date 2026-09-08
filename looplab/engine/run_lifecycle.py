@@ -37,11 +37,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
-from looplab.core.atomicio import same_file_entry
+from looplab.core.atomicio import same_file_entry, same_file_kind
 from looplab.core.pathsafe import is_reparse
 from looplab.core.run_deletion import assert_run_deletion_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
-from looplab.events.eventstore import _interprocess_lock
+from looplab.events.eventstore import interprocess_lock
 
 
 # --------------------------------------------------------------------------- engine.lock liveness
@@ -67,8 +67,7 @@ def engine_liveness(rd: Path) -> Optional[bool]:
             return bool(
                 stat.S_ISDIR(current.st_mode)
                 and not is_reparse(current)
-                and (current.st_dev, current.st_ino, current.st_mode)
-                == (run_entry.st_dev, run_entry.st_ino, run_entry.st_mode)
+                and same_file_kind(current) == same_file_kind(run_entry)
                 and rd.resolve(strict=True) == canonical_run
             )
         except (FileNotFoundError, OSError):
@@ -125,9 +124,7 @@ def engine_liveness(rd: Path) -> Optional[bool]:
             return bool(
                 stat.S_ISREG(current.st_mode)
                 and not is_reparse(current)
-                and (current.st_dev, current.st_ino, current.st_mode)
-                == (entry.st_dev, entry.st_ino, entry.st_mode)
-                == (opened.st_dev, opened.st_ino, opened.st_mode)
+                and same_file_kind(current) == same_file_kind(entry) == same_file_kind(opened)
                 and lock.resolve(strict=True).parent == canonical_run
             )
         except (FileNotFoundError, OSError):
@@ -193,20 +190,20 @@ def run_lifecycle_lock(rd: Path):
     # DELIBERATELY function-local, even though this module imports the same name at module scope for
     # `run_config_write_lock` below: the lock backend is a monkeypatch SEAM
     # (`tests/test_review_fixes.py::test_lifecycle_lock_is_required_and_reports_503` replaces
-    # `eventstore._interprocess_lock` to prove an unavailable backend becomes a 503), and a
+    # `eventstore.interprocess_lock` to prove an unavailable backend becomes a 503), and a
     # module-level binding here would freeze the original at import time and make that patch inert.
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     key = run_lifecycle_key(rd)
     with _run_lifecycle_locks_guard:
         local = _run_lifecycle_locks.setdefault(key, threading.RLock())
-    # REQUIRED, not best-effort. Without it, `_interprocess_lock` swallows an unsupported lock backend
+    # REQUIRED, not best-effort. Without it, `interprocess_lock` swallows an unsupported lock backend
     # and this degrades to the in-process RLock alone — so two server processes (or two startup
     # reconcilers) could claim and spawn the SAME resume, and race event appends before engine.lock
     # exists to catch them. reset/delete are pure check-then-act around `fresh_resume_launch_pending`,
     # so they have no CAS to fall back on. Callers map the resulting EventStoreLockError to a 503; the
     # same fail-closed contract `_put_run_config_locked` already uses for run config.
-    with local, _interprocess_lock(run_lifecycle_lock_path(rd), required=True):
+    with local, interprocess_lock(run_lifecycle_lock_path(rd), required=True):
         yield
 
 
@@ -371,7 +368,7 @@ def run_config_write_lock(
         deletion_operation_id: Optional[str] = None) -> Iterator[None]:
     """Own the config transaction and enforce every whole-run writer fence."""
     with (run_config_thread_lock(snapshot_path),
-          _interprocess_lock(Path(str(snapshot_path) + ".lock"), required=True)):
+          interprocess_lock(Path(str(snapshot_path) + ".lock"), required=True)):
         assert_run_reset_write_allowed(snapshot_path.parent, operation_id)
         assert_run_deletion_write_allowed(snapshot_path.parent, deletion_operation_id)
         yield

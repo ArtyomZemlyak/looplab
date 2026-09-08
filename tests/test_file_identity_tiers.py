@@ -9,6 +9,7 @@ re-derived for every sibling.
 The strengths genuinely differ, so this is NOT full unification. What is unified is the vocabulary:
 
   * `same_file_entry`  — replacement only. Growth keeps the answer; a new inode changes it.
+  * `same_file_kind`   — replacement OR a change of what the entry IS (type/mode/reparse point).
   * `file_identity`    — same file AND unchanged. Every way the bytes could have been swapped.
 
 A site needing something between the two says so AGAINST these definitions. This file pins that no
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from looplab.core.atomicio import file_identity, same_file_entry
+from looplab.core.atomicio import file_identity, same_file_entry, same_file_kind
 
 _PKG = Path(__file__).resolve().parents[1] / "looplab"
 
@@ -64,6 +65,95 @@ def test_the_full_tier_notices_a_same_size_rewrite_the_weak_tier_cannot(tmp_path
 
     assert same_file_entry(log.stat()) == entry_before, "the weak tier is deliberately blind here"
     assert file_identity(log.stat()) != full_before, "the full tier must catch a same-size rewrite"
+
+
+def test_the_kind_tier_survives_growth_but_not_a_mode_change(tmp_path):
+    """The middle tier's whole reason to exist: it is a TOCTOU re-validation, so it must hold across
+    the normal path (a lock file gains bytes, a run directory gains children) and break the moment the
+    entry stops being the entry that was validated."""
+    lock = tmp_path / "engine.lock"
+    lock.write_bytes(b"1234\n")
+    before = same_file_kind(lock.stat())
+
+    lock.write_bytes(b"1234\n5678\n")                  # grew in place — still the same lock
+    assert same_file_kind(lock.stat()) == before
+
+    os.chmod(lock, 0o600)                              # authority changed under the probe
+    assert same_file_kind(lock.stat()) != before
+    # ...and the weakest tier cannot see that at all, which is why these fences could not use it.
+    assert same_file_entry(lock.stat()) == same_file_entry(lock.stat())
+
+
+def test_the_kind_tier_refuses_an_entry_that_became_a_different_kind(tmp_path):
+    """A regular file swapped for a directory (or a symlink, on the platforms that have them) under
+    the same name is the exact substitution `_engine_liveness` and the events-stream fence exist to
+    refuse — and `st_dev`/`st_ino` alone can answer it only by luck of inode reuse."""
+    entry = tmp_path / "run"
+    entry.mkdir()
+    before = same_file_kind(entry.lstat())
+
+    entry.rmdir()
+    entry.write_bytes(b"not a directory\n")
+    assert same_file_kind(entry.lstat()) != before
+
+
+def test_the_lessons_store_stamp_notices_a_compaction_that_preserved_size_and_mtime(tmp_path):
+    """A DRIVEN regression for one of the 2026-09-08 conversions.
+
+    `lessons_store_stamp` gated the cross-run refresh on `(size, mtime_ns)`, but `compact_lessons` /
+    `consolidate_lessons_file` REPLACE the store through an atomic rename. A compaction that lands on
+    the same byte count with the mtime restored is a different file the old stamp called unchanged —
+    so the run kept serving priors from the pre-compaction window until some later write moved the
+    size. `file_identity` carries `st_dev`/`st_ino`, so the replacement is visible.
+    """
+    from looplab.engine.lessons import LessonMemory
+
+    class _Engine:
+        memory_dir = str(tmp_path)
+
+    memory = LessonMemory.__new__(LessonMemory)        # the stamp reads nothing else off the engine
+    memory._e = _Engine()
+
+    store = tmp_path / "lessons.jsonl"
+    store.write_bytes(b'{"statement": "aaa"}\n')
+    before = memory.lessons_store_stamp()
+    stat_before = store.stat()
+
+    replacement = tmp_path / "lessons.jsonl.tmp"       # same LENGTH, different bytes, then renamed
+    replacement.write_bytes(b'{"statement": "bbb"}\n')
+    os.utime(replacement, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+    os.replace(replacement, store)
+
+    after = memory.lessons_store_stamp()
+    assert store.stat().st_size == stat_before.st_size and store.stat().st_mtime_ns == stat_before.st_mtime_ns, (
+        "the fixture failed to reproduce a size- and mtime-preserving replacement")
+    assert after != before, (
+        "the lessons refresh gate served the pre-compaction window: a replaced store read as unchanged")
+
+
+def test_the_knowledge_index_revision_notices_a_replaced_note(tmp_path):
+    """The second driven conversion: `KnowledgeTools._source_revision` keyed the in-memory index on
+    `(path, size, mtime_ns)`, so an edited-and-renamed note of the same length with a restored mtime
+    kept the OLD embeddings serving `kb_search`."""
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    note = tmp_path / "one.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+    tools = KnowledgeTools(knowledge_dir=str(tmp_path))
+    before = tools._source_revision()
+    stat_before = note.stat()
+
+    replacement = tmp_path / "one.md.tmp"
+    replacement.write_text("gamma delt\n", encoding="utf-8")   # same LENGTH, different bytes
+    os.utime(replacement, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+    os.replace(replacement, note)
+
+    # The teeth, in the assertion rather than in a claim: the two fields the OLD tuple carried are
+    # provably identical here, so the old revision was equal by construction.
+    assert (note.stat().st_size, note.stat().st_mtime_ns) == (
+        stat_before.st_size, stat_before.st_mtime_ns)
+    assert tools._source_revision() != before, (
+        "the knowledge index kept a replaced note's stale embedding")
 
 
 def test_the_full_tier_is_strictly_stronger():
@@ -238,7 +328,7 @@ def _hand_rolled_signature_lines() -> list[str]:
 # The sites SC-11 named are converted. An AST sweep then found the pattern is far more widespread
 # than the finding's "six different ways" — measured below — so the rest is a LEDGER rather than a
 # silent backlog: the number cannot grow without this test going red, and shrinking it is the work.
-UNCONVERTED_SIGNATURE_SITES = 17
+UNCONVERTED_SIGNATURE_SITES = 5
 
 
 def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
@@ -256,7 +346,11 @@ def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
     The cross-run state cache was the first follow-up conversion: its hand-rolled tuple omitted
     `st_file_attributes`, so it could not see a file that gained a reparse point. The 2026-09-08
     pass converted the four sites that spelled `(st_dev, st_ino)` by hand — exactly
-    `same_file_entry`, the replacement tier — and took the ledger from 21 to 17.
+    `same_file_entry`, the replacement tier — and took the ledger from 21 to 17. The second
+    2026-09-08 pass named the tier those conversions kept ALMOST asking for — `same_file_kind`,
+    `(dev, ino, mode, file_attributes)`, the TOCTOU re-validation four sites spelled by hand and two
+    spelled without the Windows reparse field — and converted the five weak (size, mtime_ns) change
+    detectors that could not see a REPLACEMENT: 17 to 5.
     """
     offenders = sorted(set(_hand_rolled_signature_lines()))
     undeclared = [o for o in offenders if o.split(":")[0] not in DOCUMENTED_VARIANTS]
@@ -273,8 +367,13 @@ def test_the_sites_this_change_converted_stay_converted():
     # is that growth keeps the answer. Two of the four files still carry other signatures
     # (`eventstore`'s trusted-growth tuple, `engine_proc`'s dev/ino/MODE triples), so only the two
     # that came out clean can be pinned here; the other two stay in the ledger count above.
+    #
+    # The second 2026-09-08 pass took `engine_proc` off that list by naming its triples
+    # `same_file_kind`, and added `routers/runs.py`, `engine/lessons.py` and `tools/knowledge_tools.py`
+    # — every hand-rolled signature in those four files is now one of the three tiers.
     converted = {"serve/routers/attention.py", "serve/appstate.py", "tools/_runcache.py",
-                 "engine/resources.py", "serve/run_commands.py"}
+                 "engine/resources.py", "serve/run_commands.py", "serve/engine_proc.py",
+                 "serve/routers/runs.py", "engine/lessons.py", "tools/knowledge_tools.py"}
     offenders = {o.split(":")[0] for o in _hand_rolled_signature_lines()}
     assert not (converted & offenders), (
         f"a converted site went back to a hand-rolled signature: {sorted(converted & offenders)}")

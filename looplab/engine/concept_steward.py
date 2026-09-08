@@ -78,7 +78,7 @@ def _concept_source_receipt(overview: dict, payload: list[dict]) -> dict:
     """Normalize capsule-source and model-visible vocabulary projection receipts."""
     # The field set is the WRITER's declaration, imported rather than respelled (doc 25 EM-12).
     # This tuple used to be a local copy of four literals whose producer lives in another module,
-    # so a count added to `_capsule_source_summary` would have been read here as absent — i.e. as
+    # so a count added to `capsule_source_summary` would have been read here as absent — i.e. as
     # zero, the OPTIMISTIC direction — while this validator went on reporting the receipt known.
     source = overview if isinstance(overview, dict) else {}
     raw_counts = {key: source.get(key) for key in CAPSULE_SOURCE_COUNTS}
@@ -94,7 +94,7 @@ def _concept_source_receipt(overview: dict, payload: list[dict]) -> dict:
         key: value if bounded_receipt_count(value, _MAX_RECEIPT_COUNT) else 0
         for key, value in raw_counts.items()
     }
-    # `_capsule_source_summary` defines source_complete = (partial_capsules == 0 AND
+    # `capsule_source_summary` defines source_complete = (partial_capsules == 0 AND
     # source_store_complete), so the consistency check has to read BOTH axes. Comparing it against
     # `partial_capsules == 0` alone reported a well-formed overview whose only defect was quarantined
     # durable rows (no partial capsules, store incomplete) as receipt_known=False — "malformed or
