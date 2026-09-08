@@ -114,3 +114,38 @@ def test_a_standing_watch_pins_the_party_that_armed_it(tmp_path):
                        trigger={"kind": "schedule", "every_s": 600})
     assert legacy["principal"] == "anonymous", "a record that pins nothing runs with no portfolio"
     assert P.coerce(record["principal"]) == P.OWNER_PRINCIPAL
+
+
+def test_every_portfolio_mount_in_serve_asks_the_PARTY():
+    """`portfolio_access` is "the ONE decision that mounts the portfolio providers", and whether
+    the cross-run stores may be read "is a property of the PARTY and never of the process".
+
+    `assistant.py` was converted to it on 2026-09-06; `routers/genesis.py` was not, and went on
+    deciding on the two Settings clauses alone with no principal in sight. Nothing reached it from
+    a non-owner plane — `POST /api/genesis` is outside `_SAFE_UNAUTH_API` and a review bearer is
+    confined to GET/HEAD/OPTIONS on `/api/review*` — so what was wrong was the INVARIANT, one
+    router-mount edit from being a live gap. `test_the_toolset_carries_the_portfolio_only_for_the
+    _owner_plane` drives `build_tools` and could not see a second mount site.
+
+    AST over the whole package, so a THIRD site cannot appear unguarded: every construction of a
+    portfolio provider must sit in a function that also calls `portfolio_access`.
+    """
+    import ast
+    from pathlib import Path
+
+    serve = Path(__file__).resolve().parents[1] / "looplab" / "serve"
+    providers = {"CrossRunTools", "ConceptGovernanceTools"}
+    offenders = []
+    for path in sorted(serve.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            called = {n.func.id for n in ast.walk(fn)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            mounted = providers & called
+            if mounted and "portfolio_access" not in called:
+                offenders.append(f"{path.name}::{fn.name} mounts {sorted(mounted)}")
+    assert not offenders, (
+        "a portfolio provider is mounted without asking `portfolio_access` — the decision is a "
+        f"property of the party, not of the process: {offenders}")
