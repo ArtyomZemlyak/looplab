@@ -166,6 +166,47 @@ def process_table(root="/proc") -> list:
     return out
 
 
+BENCH_SCRIPTS = ("run_probe.sh", "campaign.sh", "ruler_selfcheck.py", "looplab_eval.py",
+                 "snapshot.sh")
+
+
+def stray_bench_processes(table) -> list:
+    """Bench work whose parent is gone AND which is nobody's parent -- a leftover, not a daemon.
+
+    §332. The wide orphan scan the sweep ran by hand counted two on a healthy box, and both were
+    MY OWN launcher shells: `bash -c source …/shell-snapshots/… && nohup run_probe.sh …`, reparented
+    to init the moment the tool call returned, each holding the live probe as a child. Matching the
+    script name ANYWHERE in a command line is the `pkill -f` mistake the sweep list warns about, one
+    layer up: the launcher's argv mentions the script it launched.
+
+    Two discriminators, and both are needed:
+
+      * THE PROCESS ITSELF, not a mention. `argv[0]` or `argv[1]` is the script; a wrapper that
+        passes it to `bash -c` has it further along.
+      * NO CHILDREN. A deliberately detached daemon (`nohup … &`) is reparented to init too -- that
+        is what `nohup` is for -- and the thing that tells it from a leftover is whether anything is
+        still running under it. The 23 forkservers of §313 had none; the probe launcher has one.
+
+    `table` is `{"pid", "ppid", "cmdline"}` rows so the rule can be tested against a fabricated
+    tree; `/proc` cannot be asked to hold an abandoned campaign on demand.
+    """
+    children: dict = {}
+    for row in table:
+        children.setdefault(str(row.get("ppid")), []).append(str(row.get("pid")))
+    out = []
+    for row in table:
+        if str(row.get("ppid")) != "1":
+            continue
+        argv = (row.get("cmdline") or "").split()
+        head = argv[:2]
+        if not any(any(name in part for name in BENCH_SCRIPTS) for part in head):
+            continue
+        if children.get(str(row.get("pid"))):
+            continue                       # something is running under it: detached, not abandoned
+        out.append(str(row.get("pid")))
+    return sorted(out)
+
+
 def orphans(bench: str) -> dict:
     """Bench workers still pinned to a lane whose parent is gone (ppid 1).
 
