@@ -424,6 +424,7 @@ _LAYOUT = {
     "vectorstore": "tools",
     "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
     "verifier_tiebreak": "engine",  # R1-c calibrated-verifier metric tie-break mixin (doc 25 EC-09)
+    "value_estimate": "engine",  # the LLM value estimate cadence (docs/BACKLOG.md §0.1 row 17)
     # The D8 memo-claim verifier. It was `trust/verify.py` — two letters from `trust/verifier.py`,
     # which is a DIFFERENT verifier (doc 25 CT-09). Both legacy spellings live in `_RENAMED` below,
     # because this map's contract is canonical-stem -> package and `verify` is no longer a stem.

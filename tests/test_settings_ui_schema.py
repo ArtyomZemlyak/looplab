@@ -100,7 +100,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 209
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 210
     # 207 + 2 -> 209 on 2026-09-08, at the MERGE: two branches each added one row on the same day,
     # and each pinned 208 against a tree without the other's. Verified by INTERSECTION rather than by
     # adding the integers: 207 keys are common to both files, and removing exactly
@@ -335,6 +335,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # the two counts move together because it is a curated row.
     # 227 -> 229 Settings on 2026-09-06: A5's `established_context` / `established_context_bytes`,
     # the pair whose catalogue entry was also missing until 2026-09-07.
+    # 244 + 1 -> 245 on 2026-09-08, at the same merge sequence: `mcts_value_weight` was the day's
+    # THIRD field, from a third branch, and it pinned 242 for the same reason. Re-derived with the
+    # delta CHECKED by an AST diff against the merge base: exactly that key added, none removed.
     # 242 + 2 -> 244 on 2026-09-08, at the MERGE: `lesson_operator_scope` (doc 52 §4.3) and
     # `mlflow_tracking_uri` (docs/BACKLOG.md §16). Both counts move with the catalogue because both
     # are curated rows — see the note above, and note that neither branch's 243 described a tree
@@ -342,7 +345,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 241 + 1 -> 242 on 2026-09-07, at the SECOND merge: `agent_read_loop_nudge_after`,
     # the one field this branch added after master already carried its ten. The two counts
     # move together because it is a curated row.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 244
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 245
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

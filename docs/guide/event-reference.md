@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-152 event types — 109 folded into `RunState`, 43 diagnostic; 865 declared payload keys; 26 types whose whole payload is stored by the fold.
+153 event types — 110 folded into `RunState`, 43 diagnostic; 870 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -125,6 +125,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_repaired` | folded | One repair round on a failing node: what it changed, on what evidence, and the verdict on the change. | `attempt`, `changed`, `deleted`, `error_in`, `files`, `generation`, `node_id`, `rationale`, `stages_passed`, `triage_action` | `attribution`, `budget_exhausted`, `code`, `edit_calls`, `engine_reason`, `error_evidence`, `eval_seconds`, `footprint_finalized`, `idea_footprint`, `param_overrides`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `salvaged_metric`, `unmet`, `unparseable_repairs`, `verified` |
 | `node_reset` | folded | The operator re-ran an existing node in place from a named stage. | `node_id` | `attempt`, `from_stage`, `generation` |
 | `node_tombstoned` | folded | Nodes struck from selection without deleting their history. | `node_ids` | — |
+| `node_value_estimated` | folded | How much a model thinks expanding one node's branch still has left, in [0, 1]. | `generation`, `node_id`, `value` | `attempt`, `rationale` |
 | `node_verified` | folded | The selection verifier's score for one node, over a named evidence digest. | — | `attempt`, `evidence_digest`, `generation`, `node_id`, `score` |
 | `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `literature`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
 | `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |

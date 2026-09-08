@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 209
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 210
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -221,6 +221,10 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # so it is RE-DERIVED over the merged keyset, which the 2026-08-31 entry prescribes.
 # Verified by intersection rather than by adding the integers: 207 unique keys, 197 common
 # to this branch's file plus master's ten, no duplicate and none removed.
+# 209 + 1 -> 210 on 2026-09-08, at the SAME merge sequence: `mcts_value_weight` was the third
+# row of the day, from a third branch, and its own pin said 209 because it was cut against a
+# tree holding neither of the other two. Re-derived over the merged keyset with the delta
+# CHECKED rather than assumed: exactly `mcts_value_weight` added, nothing removed.
 # 207 + 2 -> 209 on 2026-09-08, at the MERGE: two rows landed on the same day from two branches
 # and NEITHER side's digest describes the result, because each was pinned against a tree without the
 # other's row. Re-derived over the merged keyset, the way the 2026-08-31 entry above prescribes, and
@@ -234,7 +238,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # rather than an uncurated omission for the reason `redact_output` next to it is one: it decides
 # whether this run's params, metrics and champion CODE leave the box for an external server, so the
 # operator has to be able to see it and turn it off.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "bc7bbe2c1516a8add511ea53c4079d8a2f413b97b8c639ad204f85479ead71b8"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "8f8354eafdb4fde7dd887cbd3486a951a56288c89aecb6f5cb4b7c85af815f54"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

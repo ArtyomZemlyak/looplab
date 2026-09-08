@@ -134,7 +134,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:6f7f9abfdaafa795b399e9df972ae59b902e497b670d3e9093e098f62ca3a0d8"
+_EXPECTED_DIGEST = "sha256:0ef3f50167eab2dbada434ada5cc54630f641f51138134a178b9aa02df15c788"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -298,6 +298,12 @@ _EXPECTED_DIGEST = "sha256:6f7f9abfdaafa795b399e9df972ae59b902e497b670d3e9093e09
 #               whether a replicate that installs a system package, or writes a cache under $HOME,
 #               succeeds or fails. An envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
+#   2026-09-08  + mcts_value_weight  (docs/BACKLOG.md §0.1 row 17: the LLM value estimate the MCTS
+#               tree never had). The THIRD field of that day, landing at the merge after
+#               `lesson_operator_scope` and `mlflow_tracking_uri`; its own branch pinned 241
+#               because it was cut against a tree holding neither. Re-derived here with the delta
+#               CHECKED by an AST diff of Settings' annotated assignments against the merge base:
+#               exactly ['mcts_value_weight'] added, [] removed.
 #   2026-08-15  redact_output False -> True. **The 'field set UNCHANGED' branch**, which this file's
 #               own assertion message tells you not to re-pin — so read why this is the second
 #               legitimate instance rather than the bug that message is written for, and the
@@ -607,7 +613,7 @@ _EXPECTED_DIGEST = "sha256:6f7f9abfdaafa795b399e9df972ae59b902e497b670d3e9093e09
 #               decides whether a run's params, metrics and champion CODE leave the box for an
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
-_EXPECTED_FIELD_COUNT = 241
+_EXPECTED_FIELD_COUNT = 242
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
