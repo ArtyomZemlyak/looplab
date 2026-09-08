@@ -326,13 +326,40 @@ def main(argv=None) -> int:
         when = (datetime.datetime.fromtimestamp(row["mtime"]).strftime("%m-%d %H:%M")
                 if row["mtime"] else "?")
         prov = row.get("provenance") or {}
-        note = ("" if not prov else
+        # AN ABSENT SIDECAR IS SAID, NOT LEFT BLANK (§345). A row with no provenance printed
+        # nothing after its date, exactly like a row taken on a quiet box with nothing to remark on,
+        # and the two are opposite states: one is "measured under conditions I can show you", the
+        # other is "nobody recorded what this was taken under". Every entry that gates a WIDE score
+        # on this box -- discrete_log, edge_expansion, pde_heat1d, pagerank, eight files -- is the
+        # second kind, and pde_heat1d's wide ruler is also the one the self-check finds 3.7 % out.
+        # That is not proof the two are connected; it is the reason the blank had to stop reading
+        # like a clean bill.
+        note = ("   [conditions NOT recorded -- written before §297's sidecar]" if not prov else
                 f'   [{prov.get("eval_workers", "?")} workers, load '
                 f'{(prov.get("loadavg") or ["?"])[0]:.1f}]'
                 if isinstance((prov.get("loadavg") or [None])[0], (int, float))
                 else f'   [{prov.get("eval_workers", "?")} workers]')
         print(f'{row["task"]:22s} {row["subset"]:>6s} {row["regime"]:>10s} {row["n"]:4d} '
               f'{row["median"]:10.2f}  {when}{note}')
+    # AND THE COUNT, because a reader scanning fifty-six rows will not tally the blanks. The load
+    # each sidecar recorded is printed beside it and NOT judged here: this box mints a wide ruler
+    # with twenty-two workers running at once, so a high load is inherent to that regime rather
+    # than evidence against the entry. What is reportable without inventing a threshold is the
+    # spread the file actually holds, and the two regimes are nothing alike -- serial entries were
+    # taken at load 9-21, wide ones at 80-1817.
+    unrecorded = [r for r in rows if not (r.get("provenance") or {})]
+    if unrecorded:
+        loads = sorted(
+            first for first in
+            (((row.get("provenance") or {}).get("loadavg") or [None])[0] for row in rows)
+            if isinstance(first, (int, float)))
+        print(f"  {len(unrecorded)} of {len(rows)} entr{'y' if len(rows) == 1 else 'ies'} "
+              "record no conditions: "
+              + ", ".join(sorted(r["file"].replace(".json", "") for r in unrecorded)))
+        if loads:
+            print(f"  the {len(loads)} that do span load {loads[0]:.1f} to {loads[-1]:.1f} "
+                  f"(this box has {os.cpu_count()} cpus) -- printed, not judged: a wide ruler is "
+                  "minted with 22 workers at once, so load is inherent to the regime")
     bad = problems(rows, args.expect_regime, args.min_instances)
     bad += stale_entries(rows, latest_readings())
     for line in bad:
