@@ -177,7 +177,11 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   `mlflow_tracking_uri` (docs/BACKLOG.md §16) — the MLflow mirror that runs WHILE the run does.
   //   A row because it decides whether this run's params, metrics and champion code leave the box
   //   for an external tracking server; blank is off.
-  assert.equal(Object.keys(schema.fieldByKey).length, 210)
+  //   210 -> 211 (2026-09-08): `eval_noise_seeds`, the eval NOISE FLOOR (doc 52 row 11) — how many
+  //   times ONE candidate is re-evaluated so the run records the spread of its own metric. A row
+  //   because it buys N full evaluations at the end of the run and 0 (off) is the shipped
+  //   behaviour; the Python half moved in the same change, as this tripwire's history demands.
+  assert.equal(Object.keys(schema.fieldByKey).length, 211)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

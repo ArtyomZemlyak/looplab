@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 210
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 211
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -238,7 +238,14 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # rather than an uncurated omission for the reason `redact_output` next to it is one: it decides
 # whether this run's params, metrics and champion CODE leave the box for an external server, so the
 # operator has to be able to see it and turn it off.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "8f8354eafdb4fde7dd887cbd3486a951a56288c89aecb6f5cb4b7c85af815f54"
+# 210 -> 211 on 2026-09-08: `eval_noise_seeds`, the eval NOISE FLOOR (doc 52 row 11) — how many
+# times ONE candidate is re-evaluated so the run records the spread of its own metric. A ROW rather
+# than an uncurated omission on the same ground the spend caps are rows: it spends N full
+# evaluations at the end of the run, so the operator who buys that has to be able to see the number
+# they set, and 0 (off) is the shipped behaviour they must be able to get back to. Re-derived by
+# INTERSECTION and not by adding the integer: 210 keys are common to the previous catalogue and
+# exactly `eval_noise_seeds` is new, no duplicate and none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "f828e7409a415679996af8e2ffb85c5f61929c5bcf474dd9534cd87469f3ab40"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

@@ -66,6 +66,15 @@ _SUMMARY_OMIT_KEYS = {
     # is omitted — `research_origin` is WITHIN-run provenance (which deep-research memo steered the
     # proposal) and deliberately survives.
     "origin",
+    # A property of the SERVER PROCESS, not of this run: which of the operator's `.py` modules
+    # moved under a running `looplab ui`, by relative path, plus the package's file counts. A
+    # review link is a capability over ONE RUN — it was granted the run, not the deployment — and
+    # "restart the UI server" is not a remedy its bearer has. It arrives on the envelope AND
+    # mirrored into `state`, and `_scrub_json`'s `omit_keys` is recursive, so one row removes both.
+    # This is the line `review_config` already refuses to cross by answering 404 rather than
+    # "disclose present-day deployment configuration to a legacy review link". The OWNER `/state`
+    # keeps it — that is who the receipt is for.
+    "server_code",
 }
 _BENIGN_SECRET_KEYS = {
     "tokenizer", "max_tokens", "num_tokens", "n_tokens", "total_tokens", "prompt_tokens",

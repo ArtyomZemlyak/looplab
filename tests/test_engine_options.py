@@ -64,6 +64,9 @@ ATTR_BY_FIELD = {
     "confirm_top_k": "confirm_top_k",
     "confirm_seeds": "confirm_seeds",
     "confirm_seed_base": "confirm_seed_base",
+    # The eval NOISE FLOOR's repeat count (`engine/noise_floor.py`, doc 52 row 11). Same name on
+    # the Engine: it is clamped there (0 and 1 both mean off), not renamed.
+    "eval_noise_seeds": "eval_noise_seeds",
     "max_seconds": "max_seconds",
     "max_eval_seconds": "max_eval_seconds",
     # The run's LLM spend caps, reserved at the broker's permit (`core/llm_budget.py`, doc 52 row 15).
@@ -247,6 +250,20 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         card_driven_selection=False,
         speculation_depth=4,
         task_facets_finalize=True,
+        # SEVEN ROWS THAT PAID FOR THEMSELVES AND WERE NEVER SPENT (2026-09-08). CLAUDE.md names
+        # the `ATTR_BY_FIELD` row as the cost that keeps this differential covering a new knob, but
+        # a row alone buys nothing here: the comparison is old-kwarg Engine vs options Engine, so a
+        # field absent from BOTH blocks, or present at its default in both, is compared as its
+        # default against itself. Severing `syscall_fence` and `llm_cost_limit` in the tree left
+        # this file green — the run's USD reserve cap disabled, unnoticed. (Their dedicated suites
+        # do catch it, which is what keeps this a coverage-attribution defect and not a live one.)
+        stage_check_tools=False,
+        llm_cost_limit=1.5,
+        llm_token_limit=1000,
+        model_arms={"cheap": "m@0.5"},
+        novelty_literature=True,
+        steady_state_build=True,
+        syscall_fence="mutators",
     )
 
     # (a) the OLD explicit-kwarg style: the literal Settings->Engine mapping cli.py::_engine used
@@ -372,6 +389,14 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the plan's endgame reserve (doc 52 row 18), ON in Settings (0.2) and 0 in the bare
         # library for the reason frozen in tests/test_options_divergence.py.
         endgame_reserve_frac=settings.endgame_reserve_frac,
+        # …and the seven above, so the differential compares a NON-DEFAULT value on both sides.
+        stage_check_tools=settings.stage_check_tools,
+        llm_cost_limit=settings.llm_cost_limit,
+        llm_token_limit=settings.llm_token_limit,
+        model_arms=settings.model_arms,
+        novelty_literature=settings.novelty_literature,
+        steady_state_build=settings.steady_state_build,
+        syscall_fence=settings.syscall_fence,
     )
 
     # (b) the NEW single-bundle style.
@@ -383,6 +408,43 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     assert not mismatches, f"old-kwarg vs options engines diverge: {mismatches}"
     # digest_char_cap is stamped onto the researcher, not stored on the engine.
     assert old.researcher._digest_cap == new.researcher._digest_cap == 1234
+
+    # …AND EVERY NON-DEFAULT VALUE ACTUALLY MOVED THE ATTRIBUTE, which the differential above
+    # structurally cannot check. Both engines are built through the same `Engine.__init__`, so
+    # severing a wiring breaks BOTH sides identically and the comparison still matches: with
+    # `self._syscall_fence = "off"` and `self._llm_cost_limit = 0.0` hard-coded in the tree — the
+    # syscall fence and the run's USD reserve cap both disabled — this file stayed green. So the
+    # `ATTR_BY_FIELD` row, which CLAUDE.md names as the cost that keeps a new knob covered here,
+    # bought nothing on its own. This is the half that makes it real, and it is TOTAL rather than
+    # the six-line spot-check it replaces: every field given a non-default `Settings` value above
+    # must leave its engine attribute off the bare-library default.
+    #
+    # Compared against `EngineOptions()`'s default rather than for equality with the Settings
+    # value, because several are coerced on the way in (`model_arms` is parsed, `syscall_fence` is
+    # stringified, the widths are settled) — "it moved" is the property a wiring test owns, and
+    # what each attribute becomes is its own module's business.
+    library = EngineOptions()
+    fresh = Settings()
+    unmoved = []
+    for field, attr in sorted(ATTR_BY_FIELD.items()):
+        asked = getattr(settings, field, None)
+        if asked == getattr(fresh, field, None):
+            continue                       # left at its default above: this rule says nothing
+        if not hasattr(library, field):
+            continue
+        if asked == getattr(library, field):
+            # UNDECIDABLE, not skipped for convenience: the fixture asked for a value that HAPPENS
+            # to equal the bare-library default (`card_driven_selection=False` against a Settings
+            # default of True), so "the attribute holds the library default" cannot tell a wired
+            # knob from an unwired one. The differential and the spot-checks below still cover
+            # these; what this rule adds is the case where the two defaults differ.
+            continue
+        if getattr(new, attr, None) == getattr(library, field):
+            unmoved.append(f"{field} -> {attr}")
+    assert not unmoved, (
+        "a non-default Settings value did not reach its engine attribute — the knob is unwired and "
+        f"the differential cannot see it (both engines share `__init__`): {unmoved}")
+
     # Spot-check a few of the deliberately non-default values actually made it through (guards
     # against a both-sides-defaults false pass).
     # `max_parallel`/`parallel_build` are read-through aliases for the canonical widths, so the

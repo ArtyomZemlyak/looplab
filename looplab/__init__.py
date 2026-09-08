@@ -55,6 +55,11 @@ _LAYOUT = {
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
+    # The three CORPUS instruments behind `looplab/cli/corpus_cmds.py`: each is the READ a backlog
+    # marker says must exist before its decision may be taken, and each decides nothing itself.
+    "belief_key_split": "events",  # concept-equal card groups the seed-TEXT belief key splits
+    "card_ladder": "events",       # ladder depth + the undercut rule's stated trigger
+    "asha_curve": "events",        # whether any run published a rung curve ASHA could halve
     "concept_authorship": "events",  # how much of each proposer's authored concept set survived the classifier
     "bundle": "engine",  # the RO-Crate reviewer bundle export (doc 52 row 23); composes events + engine, so not `events`
     "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
@@ -158,6 +163,7 @@ _LAYOUT = {
     "config": "core",
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
+    "noise_floor": "engine",     # the eval noise-floor probe (doc 52 row 11)
     "context_budget": "core",
     # the HTTP control-payload validator `run_commands.py` shed (doc 25 SC-01) — registered so the
     # package-layout audit sees it and the flat `looplab.control_validation` alias resolves

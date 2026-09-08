@@ -692,6 +692,13 @@
           "help": "D1: first confirm seed. Default 1 keeps confirm splits DISJOINT from the search’s implicit seed 0, so the confirm metric is a generalization signal (0 = legacy overlap)."
         },
         {
+          "key": "eval_noise_seeds",
+          "label": "Eval noise-floor repeats",
+          "type": "int",
+          "default": 0,
+          "help": "Re-evaluate ONE candidate — the champion — this many times under the SEARCH's own protocol (its own eval profile, seeds 0..N-1) and record the spread of its metric: the run's evaluation NOISE FLOOR. 0 = off (and 1 is off too: one number has no spread). Not confirmation \u2014 confirm re-scores the top-k at the FULL profile from a DISJOINT seed base and its mean SELECTS; this repeats the same protocol on one node and selects nothing. The record (`eval_noise_floor`) carries the metrics, the mean, the sample std, the range and `sem`, the same quantity the >1-SE selection rule compares a margin against, so \u201cis this champion's margin bigger than the noise?\u201d becomes checkable. It spends real eval seconds \u2014 N full evaluations at the end of the run \u2014 which is why it is opt-in, and nothing that decides reads it."
+        },
+        {
           "key": "holdout_fraction",
           "label": "Holdout fraction",
           "type": "float",

@@ -226,17 +226,19 @@ def test_roles_is_no_longer_a_god_module():
     the value under which it is false). Prompt bytes belong to the fragments; the reasoning behind a
     fragment belongs beside it, so this raise is not the extraction the cap otherwise asks for.
 
-    `roles.py` 787 -> 793 and `role_wrappers.py` 445 -> 466 on 2026-09-08, and the cap did its job
+    `roles.py` 787 -> 803 and `role_wrappers.py` 445 -> 466 on 2026-09-08, and the cap did its job
     on the way: `audit_extra_of` was first written into `roles.py`, which put it 33 over, and the
     question the cap forces — do these lines belong to the role CONTRACTS, or to a sibling? — has
     a plain answer. `audit_extra()` is DEFINED in `role_wrappers.py`, twice (the read-through on
     `WrapsDeveloper` and `ValidatingDeveloper`'s own), so its reader belongs beside its implementers
     and moved there; what stays in `roles.py` is the five lines of `DeveloperResult.audit_extra`,
     the envelope field itself, which is exactly what this module is for, plus the one re-export line
-    the rule above then demanded. An extraction happened and the residue is the contract — so these
+    the rule above then demanded — and, later the same day, `last_foresight_pick`, the second
+    envelope field of the same shape (a Developer output the engine read off the SHARED instance
+    and that the registry cannot hold). An extraction happened and the residue is the contract — so these
     are the same kind of raise as the one above, not a waiver of it.
     """
-    caps = {"agents/roles.py": 794, "agents/role_prompts.py": 302, "agents/state_brief.py": 463,
+    caps = {"agents/roles.py": 804, "agents/role_prompts.py": 302, "agents/state_brief.py": 463,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

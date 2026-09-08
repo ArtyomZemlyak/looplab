@@ -82,14 +82,23 @@ class AuditMixin:
             self.store.append(EV_AGENT_VALIDATED, data)
 
     def _emit_role_telemetry(self, role, attr: str, event_type: str, node_id: int,
-                             generation: int | None = None) -> None:
+                             generation: int | None = None, value=_REPORT_OMITTED) -> None:
         """Append `event_type` from a role's predictive-telemetry attr (a dict set during
         propose/implement), stamped with `node_id`, then CONSUME it (reset to None). Like
         `_emit_agent_report` this relies on sequential node creation for correctness; the consume adds
         a further guard specific to these predictive channels — a following non-propose action (merge /
         debug-repair, which never re-predicts) then finds None and can't re-emit a stale pick for the
-        wrong node. No-op when the attr is absent/None (the role didn't predict for this node)."""
-        pick = getattr(role, attr, None)
+        wrong node. No-op when the attr is absent/None (the role didn't predict for this node).
+
+        `value=` IS THE CALLER'S OWN COPY, on the same `_REPORT_OMITTED` rule as `report=` and
+        `audit_extra=`: what to EMIT comes from the call that produced it, while what to CONSUME
+        stays the role object. The two are not the same thing here — a repair on the shared
+        developer nulls `last_foresight_pick` between the build's call and this emit, so reading it
+        back off the instance publishes nothing (or a sibling's pick against this node's id), while
+        the consume must still clear whatever the role is holding so it cannot leak to the next
+        node. Omitted (not None) selects the instance read, because a build that genuinely
+        predicted nothing must not fall back to whatever the instance carries."""
+        pick = getattr(role, attr, None) if value is self._REPORT_OMITTED else value
         if isinstance(pick, dict):
             pick = dict(pick)   # copy before consuming; strip the captured op-trace ids out of the data
             tid, sid = pick.pop("_trace_id", None), pick.pop("_span_id", None)
@@ -99,6 +108,11 @@ class AuditMixin:
             if generation is not None:
                 data["generation"] = generation
             self.store.append(event_type, data, trace_id=tid, span_id=sid)
+        # CONSUMED UNCONDITIONALLY, and outside the `isinstance` above since 2026-09-08: with
+        # `value=` supplied, the instance can hold a DIFFERENT dict (a sibling's) or None while
+        # this call emits its own — and leaving a sibling's pick standing is exactly the leak this
+        # consume exists to stop.
+        if getattr(role, attr, None) is not None:
             setattr(role, attr, None)
 
     def _emit_hypothesis_ranked(self, node_id: int, generation: int | None = None,
@@ -211,16 +225,24 @@ class AuditMixin:
             setattr(role, "last_hyp_priority", None)
 
     def _emit_foresight_selected(self, node_id: int, generation: int | None = None,
-                                 researcher=None, developer=None) -> None:
+                                 researcher=None, developer=None,
+                                 foresight_pick=_REPORT_OMITTED) -> None:
         """FOREAGENT predict-before-execute receipt: when the world model picked WHICH candidate becomes
         this node — the best of K generated ideas (the researcher panel) or of N code implementations
         (best-of-N) — record the ranking + confidence + the model's reasoning as a `foresight_selected`
         event. Without it the choice and its discarded alternatives vanish (only the winner survives in
         `node_created`). `researcher=`/`developer=` (Variant-1): read THIS build's pooled roles so a
         concurrent sibling's pick is not cross-wired onto this node."""
+        # `pick=` IS THE ENVELOPE'S COPY, on the same rule as `report=`/`audit_extra=` one method
+        # up. `last_foresight_pick` is written by `best_of_n.implement` and CLEARED by its
+        # `repair`/`repair_from`, so a repair on the SHARED developer running in another worker
+        # nulls the pick this build made — driven: `foresight_selected` silently never written for
+        # that node, and in the mirror order emitted against another node's id. The CONSUME still
+        # happens on the role object, which is this build's pooled developer where there is one.
         self._emit_role_telemetry(
             developer if developer is not None else self.developer,
-            "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, generation)
+            "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, generation,
+            value=foresight_pick)
         self._emit_role_telemetry(
             researcher if researcher is not None else self.researcher,
             "last_foresight", EV_FORESIGHT_SELECTED, node_id, generation)

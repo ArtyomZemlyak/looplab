@@ -4288,9 +4288,16 @@ rule this repo set itself — a rule that would have killed a node that went on 
 is disqualified — is failed in three runs out of four. **Not built.** Reading what exists would be the
 stronger claim only if what exists were comparable; measured, it is not.
 
-    OPEN[asha-inert-on-this-task-family] ASHA still has no curve to halve on this task family, and
-    `resource_key` — the one declaration that makes its kill reachable — is unnamed in the task schema
-    an operator authors against. proof:absent:resource_key@looplab/adapters/repo_task.py
+    OPEN[asha-inert-on-this-task-family] ASHA still has no curve to halve on this task family,
+    and `resource_key` — the one declaration that makes its kill reachable — is unnamed in the
+    task schema an operator authors against. THE READ IS NOW AN INSTRUMENT: `looplab asha-rungs
+    <runs-root>` (`events/asha_curve.py`) reports the CONTRACT rung (the `inert_reason` the
+    engine stamps where it decides the kill is unreachable) beside the OBSERVATIONAL one
+    (distinct resource coordinates per node, and how many nodes share one), with each run's
+    pinned `asha_live` / `asha_live_kill` / `asha_live_min_siblings`; a run with no readable
+    `spans.jsonl` reads UNREADABLE, never as a run without a curve. What remains is the
+    measurement over the bench corpus — and, if it still prints NO CURVE, the two task-side
+    declarations named above. proof:absent:resource_key@looplab/adapters/repo_task.py
 
 **What the remaining half would cost, measured, so the next agent argues from a number.** The only
 comparable quantity is the objective itself, and only the training script can emit it mid-run — so this
@@ -4304,7 +4311,10 @@ So the task-side fix is a SUBSAMPLED intermediate eval (a query slice, reported 
 and the engine-side residue is that `resource_key` reaches the watchdog through a free-form
 `EvalSpec.metric: dict` — it is named in `docs/guide/tasks.md` and in no schema field, no validator and
 no Genesis prompt, so nothing an operator authors against ever mentions the one switch that arms the
-kill. That is what the marker above is pointed at.
+kill. That is what the marker above is pointed at. Whether the corpus has since produced a
+curve at all is now `looplab asha-rungs <runs-root>`'s question to answer: it reports the
+engine's own `inert_reason` beside the distinct resource coordinates each node published, and
+says UNREADABLE rather than "no curve" for a run whose `spans.jsonl` it could not read.
 
 ✅ **Auto-skill promotion runs per CARD on the `lessons_every` pace — landed 2026-09-08.**
   *The named fix is what shipped: `lessons_distill.py::promote_settled_skills` is the ONE promotion
@@ -7195,14 +7205,16 @@ would ship machinery with zero possible firings, which is the `_MemoOut` inert-f
 neighbour) approached from the other side: there a prompt named a field the schema lacked, here the
 code would name a state the board cannot enter.
 
-OPEN[claim-refutation-undercut] refutation does not flow DOWN as undercut — a parent whose own experiments failed leaves its children unmarked; do NOT build until a parent carries own-level evidence proof:absent:undercut@looplab/events/card_ledger.py
+OPEN[claim-refutation-undercut] refutation does not flow DOWN as undercut — a parent whose own experiments failed leaves its children unmarked. THE TRIGGER IS NOW EVALUABLE BY COMMAND: `looplab card-ladder <runs-root>` (`events/card_ladder.py`) folds every run's own log and reports the ladder depth histogram, the parents with children, and every card carrying BOTH `child_card_ids` and a non-empty `evidence` — printing TRIGGER FIRED or NOT FIRED. What remains is the measurement over the bench corpus; do NOT build the undercut derivation until that command prints FIRED there. proof:absent:undercut@looplab/events/card_ledger.py
 
 **The trigger, stated so nobody has to re-derive it:** build rule 3 when a fold produces a card with
 BOTH `child_card_ids` and a non-empty `evidence`. Until then the ladder is one edge deep and the
-prohibitions that matter are already enforced.
+prohibitions that matter are already enforced. `looplab card-ladder <runs-root>` evaluates that
+sentence over a corpus and prints FIRED / NOT FIRED, so "is it time yet?" is a command rather
+than a re-derivation.
 
 **The SIBLING design is the one the corpus supports.** #58 proposes belief identity =
-{concepts} + metric + direction, against today's `card_ledger.py::_apply_card_beliefs`, which sets
+{concepts} + metric + direction, against today's `card_ledger.py::_apply_card_belief_lineage`, which sets
 `c.belief_id = hypothesis_statement_digest(seed)` — a digest of the seed TEXT. Measured over the same
 691 cards: 528 carry `concept_tags`, forming 84 (run, concept-set, direction) groups, and the text
 key splits **18 of the 84** into more than one `belief_id` (distinct ids per group: 66×1, 9×2, 2×3,
@@ -7215,6 +7227,9 @@ positions on one axis and not one claim. Merging them is a CLAIM that they are t
 a wrong merge pools the evidence of two different experiments under one verdict — strictly worse
 than today's fragmentation, which at least keeps them apart. What would settle it is reading the
 18 split groups and counting how many are genuine restatements versus genuine distinctions; that
-read has not been done and no key should change before it is.
+read has not been done and no key should change before it is. The INSTRUMENT for it now exists —
+`looplab belief-key-split <runs-root>` prints each split group's statements, evidence and
+verdicts, and flags the ones a merge would pool across disagreeing verdicts — so what is owed is
+the reading, not another throwaway script.
 
-OPEN[belief-identity-text-keyed] belief identity is a digest of the seed TEXT, which splits 18 of 84 concept-equal groups; the semantic key is unbuilt and unvalidated proof:present:hypothesis_statement_digest(seed)@looplab/events/card_ledger.py
+OPEN[belief-identity-text-keyed] belief identity is a digest of the seed TEXT (the 2026-08-26 hand fold: 18 of 84 concept-equal groups split) and the semantic key is unbuilt. THE READ THIS ENTRY DEMANDS IS NOW AN INSTRUMENT: `looplab belief-key-split <runs-root>` (`events/belief_key_split.py`) groups tagged cards by (run, concept set, direction), lists the groups the text digest SPLITS, and prints the statements, evidence and verdicts a concepts-keyed merge would pool — flagging the groups whose members' verdicts already disagree. What remains is the measurement over the bench corpus and the reading it enables: how many split groups are genuine restatements versus genuine distinctions. No key changes before that number exists. proof:present:hypothesis_statement_digest(seed)@looplab/events/card_ledger.py

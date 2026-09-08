@@ -23,6 +23,9 @@ looplab proxy-accuracy  Was the proxy that KILLED candidates any good? Pairwise 
 looplab seed-distance   How far each experiment moved from the SEED program it descends from, and how much of that movement is tuning (doc 52 row 31)
 looplab workspace-bytes What this run's node workspaces actually WEIGH on disk, beside the seed claim its log made about them — bounded, and it says so (doc 37 §8 R1)
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
+looplab belief-key-split Concept-equal card groups the seed-TEXT belief key SPLITS, and what a concept key would merge (corpus instrument)
+looplab card-ladder     The direction -> experiment ladder over a corpus, and whether the undercut rule's trigger fired (corpus instrument)
+looplab asha-rungs      Did any run publish a rung CURVE the ASHA watchdog could have halved? (corpus instrument)
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab lock-in         Action-space lock-in detector (PART IV D7)
@@ -1298,6 +1301,130 @@ directory it claims to be measuring.
 workspace disk budget stated to the Developer (R2), and reclaiming non-champion checkpoints at run
 end (R3) — both need something this command deliberately is not: R3 deletes evidence
 `engine/metric_salvage.py` reads, and needs a written retention policy first.
+
+---
+
+## `belief-key-split`
+
+Read-only, no model, **over a runs root**. Where the seed-TEXT belief key and a CONCEPT key would
+disagree — and what a concept key would merge.
+
+```bash
+looplab belief-key-split RUNS_ROOT [--limit 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUNS_ROOT` | `runs` | The runs root (one subdirectory per run), or a single run directory. One `fold` per run |
+| `--limit` | `20` | How many split groups to print, widest first |
+| `--json` | off | Emit the whole report as JSON |
+
+`card_ledger.py::_apply_card_belief_lineage` keys belief identity on the seed TEXT
+(`hypothesis_statement_digest(seed)`); the sibling design proposes {concepts} + metric + direction
+instead. This groups tagged cards by **(run, concept set, direction)** and lists the groups the text
+key SPLITS, with the statements, evidence and verdicts a concepts-keyed merge would pool:
+
+```
+84 concept-equal group(s) over 691 card(s) in 7 run(s) — 528 tagged, 163 untagged, 0 with no seed statement (excluded)
+distinct belief ids per group: 1x66 2x9 3x2 4x3 5x3 7x1
+18 group(s) SPLIT by the seed-TEXT key, covering 61 card(s); 5 of them would pool CONFLICTING verdicts
+```
+
+*(the shape of the report; the numbers above are the 2026-08-26 hand fold this command replaces, not
+this command's own output.)*
+
+**It changes no key and calls no group a restatement.** Disagreement is not evidence that the
+concept key is right: an identical concept set does not establish an identical belief —
+"temperature 0.05" and "temperature 0.01" are two positions on one axis — so a merge POOLS two
+experiments' evidence under one verdict, which is worse than today's fragmentation. Groups whose
+members' verdicts already differ are flagged `CONFLICTING VERDICTS` because those are the ones a
+human must read first. Reading them is the decision; this is the corpus.
+
+**Two stated scope limits.** The key is (run, concept set, direction) and not (concepts, metric,
+direction): within one run the objective is constant, so the metric changes no group here, and
+merging ACROSS runs is a bigger claim this instrument does not make. Runs are identified by
+`core/run_identity.py::run_ref`, so two incarnations of one directory name stay two runs. A card
+with no concept tags, or with no seed statement (hence no `belief_id`), is counted and EXCLUDED —
+neither can agree or disagree.
+
+---
+
+## `card-ladder`
+
+Read-only, no model, **over a runs root**. The direction → experiment ladder, and the one trigger
+the unbuilt UNDERCUT rule is waiting on.
+
+```bash
+looplab card-ladder RUNS_ROOT [--limit 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUNS_ROOT` | `runs` | The runs root, or a single run directory. One `fold` per run |
+| `--limit` | `20` | How many trigger rows / runs to list |
+| `--json` | off | Emit the whole report as JSON |
+
+Three of the four card propagation rules already hold by construction (support does not flow up,
+refutation does not flow up, a broad claim gets a child TALLY rather than a verdict). Rule 3 —
+refutation flows DOWN as **undercut** — was deferred against a measurement, and its trigger was
+written down: *build it when a fold produces a card with BOTH `child_card_ids` and a non-empty
+`evidence`*. This evaluates that sentence:
+
+```
+691 card(s) over 7 run(s); 1 parent/child edge(s); max depth 1
+ladder depth histogram: 0x690 1x1
+1 card(s) with children, of which 1 carry NO own-level evidence
+
+TRIGGER NOT FIRED — no card in this corpus carries both `child_card_ids` and a non-empty `evidence`,
+so the undercut rule would have zero possible firings.
+```
+
+*(the shape; the counts are the 2026-08-26 fold this command replaces.)*
+
+Both halves of the predicate are load-bearing: a card with children and no own evidence is a
+research direction nobody ran an experiment against at its own generality (nothing to refute), and a
+card with evidence and no children has nobody to undercut. Only the conjunction is the state rule 3
+acts from. FIRED means the corpus can now reach that state — never that the rule should be written
+a particular way, which stays the operator's decision.
+
+---
+
+## `asha-rungs`
+
+Read-only, no model, **over a runs root**. Did any run publish a rung CURVE the ASHA watchdog could
+have halved?
+
+```bash
+looplab asha-rungs RUNS_ROOT [--limit 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUNS_ROOT` | `runs` | The runs root, or a single run directory |
+| `--limit` | `20` | How many runs to list |
+| `--json` | off | Emit the whole report as JSON |
+
+Successive halving needs a sequence of intermediate objective observations at increasing training
+plus siblings at the same rung to rank against. Two rungs are reported separately, in the
+watchdog's own order:
+
+| Rung | Read from | What it decides |
+|---|---|---|
+| contract | the `inert_reason` + `kill_reachable=false` `asha_monitor` span `engine/asha_monitor.py::_state_asha_inert` writes | whether a kill was reachable AT ALL for that metric contract — decided before the first tick |
+| observational | distinct `resource` coordinates on `asha_monitor` spans and `asha_rank` rows | whether the training ever printed the objective more than once (`CURVE_MIN_POINTS` = 2), and how many nodes share one coordinate |
+
+The launch snapshot's `asha_live` / `asha_live_kill` / `asha_live_min_siblings` are printed beside
+each run, because the contradiction this is pointed at is a config that says underperformers are
+being stopped over a corpus where the kill could never fire.
+
+**Its silence is bounded, and the report says so.** The samples it can see are the ones the watchdog
+PUBLISHED — an `asha_monitor` span opens on a verdict CHANGE or to announce inertness, and
+`asha_rank` rows are appended only on a warning/recovery edge — so an empty reading is consistent
+with "the curve existed and never changed the verdict" as well as with "there was no curve". An
+`inert_reason` is the strong evidence: the engine said the kill was unreachable before it read any
+log. A run with no readable `spans.jsonl` is reported UNREADABLE, never as a run without a curve.
+It arms nothing: `Settings.asha_live_kill`, the min-siblings floor and the undeclared
+`eval.metric.resource_key` are all exactly where they were.
 
 ---
 
