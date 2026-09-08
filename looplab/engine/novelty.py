@@ -70,6 +70,29 @@ def proposal_limiter():
     return _PROPOSAL_LIMITER
 
 
+# THE SPECULATIVE CARD BUILD'S OWN POOL, and it is ONE token by derivation rather than by taste:
+# `_request_card_build` admits only the HEAD request and refuses while its key is in
+# `_spec_build_inflight`, so at most one such producer is ever in flight. It is NOT the proposal
+# pool -- that size is argued from "three lanes, each bounded to one in flight, doubled", and a
+# fifth consumer would make the number false while making the starvation it prevents worse. It is
+# not anyio's default either, which is the whole point: `_produce_card_build` offloaded a PAID
+# Developer session (`_build_requested_card`) onto the shared 40-token pool the evals pin, so a
+# speculative build queued behind the evaluations it was meant to run beside -- invisible in every
+# span, because the wait happens before the work starts. Same argument as `proposal_limiter`, same
+# `evaluate.py::_watch_limiter` precedent, one lane over.
+_CARD_BUILD_THREADS = 1
+_CARD_BUILD_LIMITER = None
+
+
+def card_build_limiter():
+    """The dedicated pool the offloaded speculative CARD BUILD rides. One object per process."""
+    global _CARD_BUILD_LIMITER
+    if _CARD_BUILD_LIMITER is None:
+        import anyio
+        _CARD_BUILD_LIMITER = anyio.CapacityLimiter(_CARD_BUILD_THREADS)
+    return _CARD_BUILD_LIMITER
+
+
 def _idea_vec_key(text: str) -> tuple[int, str]:
     """Cache key for one idea text's embedding — CONTENT, never `hash(text)`.
 
