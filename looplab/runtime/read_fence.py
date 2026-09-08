@@ -577,7 +577,6 @@ It also refuses every MUTATION of that tree — `open` is not the only way to to
 """
 import os
 import sys
-import threading
 
 _ROOTS = %(roots)r
 _ALLOW = %(allow)r
@@ -619,7 +618,27 @@ _normpath = os.path.normpath
 _realpath = os.path.realpath
 _realcache = {}
 _seen = set()
-_busy = threading.local()
+
+# THE DIAGNOSTIC'S OWN DESCRIPTOR, opened HERE — in the module body, which runs before the
+# `sys.addaudithook` at the bottom of this file. `_record` appends with `os.write`, which raises
+# no `open` audit event, so the fence's own log write needs no exemption FROM the fence.
+#
+# THE EXEMPTION IT USED TO NEED WAS `_busy`, and that is an attribute of a module the
+# CANDIDATE's own interpreter imports: `import sitecustomize; sitecustomize._busy.on = True`
+# followed by `open(<fence>/sitecustomize.py, "w")` disarmed the `_SELF` rung and destroyed the
+# fence for every later process of the run — driven 2026-09-08. Dropping the exemption without
+# this descriptor is the other failure: under `deny` `_report` RAISES out of `_record`'s own
+# `open`, its `except Exception` swallows it, and the violation log goes SILENTLY EMPTY, which
+# is the one thing `warn` exists to produce (driven the same day: 0 rows).
+#
+# `O_APPEND` keeps concurrent launches' short lines atomic, exactly as the per-call
+# `open(..., "a")` relied on. A fence that cannot open its diagnostic still fences.
+_LOG_FD = -1
+if _LOG:
+    try:
+        _LOG_FD = os.open(_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError:
+        _LOG_FD = -1
 
 if _RECORD:
     # The one per-launch input. Resolved ONCE at startup, symlinks included, because the record
@@ -1005,17 +1024,18 @@ def _record(path, rung, event):
 
     The EVENT is the last column, because "the file is gone" and "the file was read" are different
     incidents and an operator reading this log has to be able to tell them apart."""
-    if not _LOG or getattr(_busy, "on", False):
+    # NO RE-ENTRANCY GUARD, and no exemption: `os.write` on `_LOG_FD` raises no audit event, so
+    # this cannot re-enter the hook and there is nothing for a flag to protect. The flag it used
+    # to take — `_busy` — lived in a module the CANDIDATE's own interpreter imports, so setting
+    # `sitecustomize._busy.on = True` silenced this log while every refusal still fired: the
+    # fence held and its audit trail went empty, which is the shape `warn` exists to refuse.
+    if _LOG_FD < 0:
         return
-    _busy.on = True
     try:
-        with open(_LOG, "a", encoding="utf-8") as fh:
-            fh.write("%%s\\t%%s\\t%%s\\t%%s\\t%%s\\n" %% (
-                rung, os.getpid(), sys.argv[0], path, event))
+        os.write(_LOG_FD, ("%%s\\t%%s\\t%%s\\t%%s\\t%%s\\n" %% (
+            rung, os.getpid(), sys.argv[0], path, event)).encode("utf-8", "replace"))
     except Exception:
         pass
-    finally:
-        _busy.on = False
 
 
 def _report(path, event, message):
@@ -1046,6 +1066,25 @@ def _report(path, event, message):
             pass
 
 
+# WHAT THIS HOOK CANNOT DEFEND, stated because the rungs beside it exist for exactly this and
+# the docstring above did not say it. The hook is installed by a module the FENCED interpreter
+# imports, and it reads `_ROOTS` / `_ALLOW` / `_RECORD` / `_SELF` / `_WRITABLE` as MODULE
+# GLOBALS at call time — so the fenced process disarms any rung with one assignment:
+#
+#     import sitecustomize; sitecustomize._ROOTS = ()      # the source fence
+#     import sitecustomize; sitecustomize._RECORD = ""     # the record fence
+#
+# Driven 2026-09-08: both reads went through immediately afterwards. `sys.addaudithook` cannot
+# be REMOVED, which is what makes the hook worth having against ordinary generated code; it
+# cannot make its own inputs immutable, which is why `runtime/landlock.py` and
+# `runtime/seccomp.py` are kernel rungs BESIDE this one rather than belt-and-braces. Closing it
+# here means the hook must read a closure rather than these names — and a closure cell is itself
+# writable from Python, so the honest ceiling is 'costs more than one line', not 'closed'.
+#
+# OPEN[read-fence-inputs-are-writable-by-the-fenced-process] the hook reads its policy from
+# module globals the fenced interpreter can assign, so any rung is one assignment from off.
+# proof:absent:_POLICY_CELL@looplab/runtime/read_fence.py
+
 def _hook(event, args):
     # Hot path: one interned-string compare for every audited event that is not an open.
     if event == "open":
@@ -1075,10 +1114,14 @@ def _hook(event, args):
             # (see `_harden`'s open item `fence-kernel-rung-rests-on-ambient-caps`, which this
             # does not close: a NATIVE writer raises no audit event at all). Checked BEFORE the record and
             # regardless of `_WRITABLE`, because `install()` passes the fence dir as a writable
-            # prefix so `_record` can append its own log — the `_busy` re-entrancy flag that append
-            # already sets is what exempts it here, rather than a prefix the candidate shares.
-            if (writing and _SELF and not getattr(_busy, "on", False)
-                    and _join(p, "").startswith(_SELF)):
+            # prefix so `_record` can append its own log. That append takes NO exemption here:
+            # `_record` writes through a descriptor opened before this hook existed (`_LOG_FD`),
+            # so it raises no `open` event to exempt. It used to be exempted by `_busy` — a
+            # module attribute the candidate's OWN interpreter can reach, so `import
+            # sitecustomize; sitecustomize._busy.on = True` followed by
+            # `open(<fence>/sitecustomize.py, "w")` disarmed the fence for every later process of
+            # the run. Driven 2026-09-08; an exemption the attacker can set is not an exemption.
+            if writing and _SELF and _join(p, "").startswith(_SELF):
                 _report(p, event, _MUTATION_MESSAGE)
                 return                   # one incident per open: under `warn` this returns, under
                                          # `deny` `_report` has already raised
