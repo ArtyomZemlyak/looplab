@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -168,6 +169,36 @@ DRIFT_LOG = "looplab/benchmarks/algotune/ruler_selfcheck_log.jsonl"
 DRIFT_TOLERANCE = 0.02      # 2 %; the measured disagreements are 5-11 %, so this is not a hair
 
 
+def _n_values(row) -> int:
+    """Readings on a row, not rows. One sitting carries four reps, so counting sittings printed
+    "1 of them INFERRED" beside "4 quiet wide read(s)" -- one doubtful in four, when all four were
+    the same untagged sitting. The unit counted has to be the unit the sentence beside it names."""
+    vals = row.get("values")
+    return len([v for v in vals if isinstance(v, (int, float))]) if isinstance(vals, list) else 1
+
+
+def _first_trace_of(bench: str, regime: str) -> str:
+    """When `regime` first showed up on this box, as an ISO stamp, or a stamp past every reading."""
+    seen = []
+    for path in glob.glob(f"{bench}/looplab/benchmarks/algotune/.baseline_times/*__{regime}.json"):
+        try:
+            seen.append(datetime.datetime.fromtimestamp(os.path.getmtime(path)).isoformat()[:19])
+        except OSError:
+            continue
+    try:
+        for line in open(Path(bench) / DRIFT_LOG, encoding="utf-8", errors="replace"):
+            if f'"{regime}"' in line:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("regime") == regime and row.get("stamp"):
+                    seen.append(str(row["stamp"])[:19])
+    except OSError:
+        pass
+    return min(seen) if seen else "9999"
+
+
 def check_ruler_constants(bench: str):
     """"Эталон против себя ~1.0: pagerank 1.0024, pde_heat1d 0.9958, edge_expansion 0.9847,
     discrete_log 1.0162"
@@ -183,6 +214,14 @@ def check_ruler_constants(bench: str):
     latest: dict = {}
     quiet: dict = {}
     pool: dict = {}
+    inferred: dict = {}
+    unattributed: dict = {}
+    # THE EARLIEST EVIDENCE THAT THE SERIAL REGIME EXISTED HERE, from two independent places: a
+    # cache file's mtime and the log's own first regime-tagged row. The earlier of the two is the
+    # cutoff, so a copied file or a late-added field can only make the rule STRICTER, never let an
+    # unattributable reading through. With no trace at all, the wide regime was the only one there
+    # was and every undated row is wide.
+    serial_first = _first_trace_of(bench, ruler_check.SERIAL_REGIME)
     try:
         for line in open(Path(bench) / DRIFT_LOG, encoding="utf-8", errors="replace"):
             line = line.strip()
@@ -196,6 +235,19 @@ def check_ruler_constants(bench: str):
             if not isinstance(med, (int, float)) or task not in SWEEP_CONSTANTS:
                 continue
             busy = row.get("busy_cpus_outside_lane")
+            # ATTRIBUTED FIRST, THEN USED -- for every route, not only the pool. §340's first cut
+            # filtered the pool and left `latest`/`quiet` regime-blind, so a dropped reading walked
+            # back in through the "ONE reading" fallback that runs when the pool holds fewer than
+            # two: the value was refused as evidence for a band and then judged the constant alone.
+            reg = row.get("regime")
+            if not reg and stamp and stamp[:19] < serial_first:
+                reg = ruler_check.CAMPAIGN_REGIME
+                if busy == 0:
+                    inferred[task] = inferred.get(task, 0) + _n_values(row)
+            if not reg:
+                if busy == 0:
+                    unattributed[task] = unattributed.get(task, 0) + _n_values(row)
+                continue
             if task not in latest or stamp > latest[task][1]:
                 latest[task] = (float(med), stamp, busy)
             # AND THE MOST RECENT ONE TAKEN ON A QUIET BOX, kept separately. §313: `discrete_log`
@@ -216,7 +268,17 @@ def check_ruler_constants(bench: str):
                 # eight wide reads (mean 1.0331) and four serial ones (0.9865) came out as twelve
                 # reads meaning 1.0177, a number measured nowhere. The same mixing §314 forbade,
                 # reintroduced by the fix for a different mistake, in the file about that mistake.
-                reg = row.get("regime") or ruler_check.CAMPAIGN_REGIME
+                #
+                # A ROW THAT DOES NOT NAME ITS REGIME IS DATED, NOT ASSUMED (§340). `or
+                # CAMPAIGN_REGIME` filed every pre-§329 reading under the wide regime silently, and
+                # the line it produced was the confident-looking one: `discrete_log: 4 quiet wide
+                # read(s) mean 1.0192 +-0.0034` was FOUR INFERRED READS AND ZERO RECORDED ONES, as
+                # was edge_expansion's. On pde_heat1d the mixing moved the verdict (1.0331 +-0.0068
+                # on 8 against 1.0427 +-0.0094 on 4) and halved the standard error -- tightening a
+                # band with evidence that was never taken. Attribution now needs a fact: the row
+                # must predate every trace of the serial regime on this box, which is when the wide
+                # one was the only cache a self-check COULD have read. Anything later is dropped
+                # and counted, because there is nothing on the row to attribute it by.
                 pool.setdefault((task, reg), []).extend(
                     float(v) for v in (row.get("values") or [med])
                     if isinstance(v, (int, float)))
@@ -242,7 +304,15 @@ def check_ruler_constants(bench: str):
             # that fails the same way every sweep.
             staged = glob.glob(f"{bench}/model-probes/*/ws/{task}/reference_{task}.py")
             elsewhere = len(glob.glob(f"{bench}/model-probes/*/ws/*/reference_*.py"))
-            why = (f"no probe has staged its reference module here ({elsewhere} staged for other "
+            # AND THE THIRD REASON, which the first two hid. A task can have readings and still be
+            # unmeasured here: if every one of them was taken without recording a regime, after
+            # both regimes existed, there is nothing to attribute them by. Reporting that as "no
+            # probe has staged its reference module" sends the reader to stage a tree that is
+            # already there, and the readings stay unexplained.
+            why = (f"{unattributed[task]} reading(s) recorded but NONE attributable: no regime on "
+                   f"the row and both regimes existed by then -- re-read it with the regime named"
+                   if unattributed.get(task) else
+                   f"no probe has staged its reference module here ({elsewhere} staged for other "
                    "tasks), so the self-check cannot build a solver for it -- stage one or run a "
                    "probe on this task"
                    if not staged else "no reading recorded yet")
@@ -277,8 +347,17 @@ def check_ruler_constants(bench: str):
             beside = (f"; {len(other)} serial read(s) mean {statistics.fmean(other):.4f} "
                       f"({100 * (statistics.fmean(other) - mean) / mean:+.1f} % vs wide)"
                       if len(other) >= 2 else "")
+            # HOW MANY OF THEM ARE INFERRED, said out loud. Four of four on two of these tasks:
+            # a reader who sees `4 quiet wide read(s)` and a tight error bar has no way to tell
+            # that number came from rows that never named a regime.
+            how = ""
+            if inferred.get(task):
+                how = f" ({inferred[task]} of them INFERRED, taken before {serial_first[:16]})"
+            if unattributed.get(task):
+                how += (f" [{unattributed[task]} later reading(s) DROPPED: no regime recorded and "
+                        "both regimes existed by then]")
             said.append(f"{task}: list {quoted:.4f}, {n} quiet wide read(s) mean {mean:.4f} "
-                        f"+-{sem:.4f} ({100 * delta:+.1f} %){beside}"
+                        f"+-{sem:.4f} ({100 * delta:+.1f} %){how}{beside}"
                         f"{'  <-- ' if moved else ''}")
             continue
         delta = (got - quoted) / quoted
