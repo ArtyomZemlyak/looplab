@@ -234,15 +234,58 @@ def subscript_string_keys(scope, name: str, *, after: int, before: int) -> set[s
     dict literal this payload resolved to and `before` the append call, so only the writes that
     can actually reach THAT payload are collected.
     """
+    def _subscripts(target):
+        """Every `name["k"]` this assignment TARGET binds, unpacking included.
+
+        `data["triage_action"], data["triage_rationale"] = (…)` is one `Assign` whose single
+        target is a `Tuple` of two Subscripts, and a walk that only accepted a bare Subscript saw
+        NEITHER — `node_failed.triage_action` reached the durable log with no contract row while
+        this scan reported the type fully covered, which is the same class of miss the subscript
+        hop itself was added for. Starred and nested targets unpack the same way.
+        """
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                yield from _subscripts(elt)
+        elif isinstance(target, ast.Starred):
+            yield from _subscripts(target.value)
+        elif isinstance(target, ast.Subscript):
+            yield target
+
     out: set[str] = set()
     for node in scope:
+        if not (after < getattr(node, "lineno", 0) < before):
+            continue
         for target in (node.targets if isinstance(node, ast.Assign) else
-                       [node.target] if isinstance(node, ast.AnnAssign) else []):
-            if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
-                    and target.value.id == name and isinstance(target.slice, ast.Constant)
-                    and isinstance(target.slice.value, str)
-                    and after < getattr(node, "lineno", 0) < before):
-                out.add(target.slice.value)
+                       [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign)) else []):
+            for sub in _subscripts(target):
+                if (isinstance(sub.value, ast.Name) and sub.value.id == name
+                        and isinstance(sub.slice, ast.Constant)
+                        and isinstance(sub.slice.value, str)):
+                    out.add(sub.slice.value)
+        # `payload.update({...})` / `payload.update(k=…)` / `payload.setdefault("k", …)` put keys in
+        # the payload without ever being an assignment TARGET, so a target-only walk cannot see
+        # them: `train_monitor_alert` reached the log with FIVE undeclared columns — two of them
+        # read live by `serve/attention.py` — and `asha_rank`/`asha_verdict` with two each, while
+        # `test_every_key_a_writer_writes_is_declared` reported all three types fully covered.
+        # Only CONSTANT keys are collected; `update(<a name>)` is a spread this cannot resolve and
+        # is reported as opaque by `event_payload_writers` instead, which is the honest answer.
+        for call in ast.walk(node):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name) and call.func.value.id == name):
+                continue
+            if call.func.attr == "setdefault" and call.args:
+                key = call.args[0]
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    out.add(key.value)
+            elif call.func.attr == "update":
+                for kw in call.keywords:
+                    if kw.arg:
+                        out.add(kw.arg)
+                for arg in call.args:
+                    if isinstance(arg, ast.Dict):
+                        for k in arg.keys:
+                            if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                                out.add(k.value)
     return out
 
 
@@ -346,11 +389,34 @@ def event_payload_writers() -> dict[str, dict]:
                            next((k.value for k in node.keywords if k.arg == "data"), None))
                 if payload is None:
                     continue
+
+                def _unreadable(_etype=etype, _path=path, _node=node):
+                    """A PAYLOAD THIS WALK CANNOT READ MUST NOT READ AS AN ABSENT ONE.
+
+                    The two `continue`s below used to leave the type with NO row at all, which
+                    `test_the_writer_scan_says_which_types_it_cannot_verify` cannot name — it only
+                    checks the types the scan DID reach. So 42 registered types were unverified and
+                    silent, and four real defects lived there: `llm_usage` declared 2 of its 7
+                    columns (the durable money ledger, and the fold reads all five missing ones),
+                    `plan` omitted the `max_nodes` its own `replan` reads back, `trace_export_health`
+                    omitted 15 keys including the two a human debugging a stalled exporter needs, and
+                    `card_build_done`'s `required` named three columns NO writer has ever written —
+                    a fabricated claim that could not fail, because `test_required_keys_are_written
+                    _by_every_literal_writer` skips a type with no writer row. Marking them opaque
+                    forces each into `OPAQUE_PAYLOAD_WRITERS` WITH a hand-written key list, which is
+                    the discipline that registry already imposes.
+                    """
+                    row = found.setdefault(_etype, {"always": None, "any": set(), "sites": [],
+                                                    "opaque": False})
+                    row["opaque"] = True
+                    row["sites"].append(f"{_path.relative_to(PKG.parent)}:{_node.lineno}")
+
                 subscripts: set[str] = set()
                 if isinstance(payload, ast.Name):
                     payload_name = payload.id
                     literals = [v for v in assigned.get(payload.id, []) if isinstance(v, ast.Dict)]
                     if not literals:
+                        _unreadable()
                         continue
                     # `data["source"] = …` AFTER the literal is a payload key too, and one the
                     # dict walk cannot see: `memory_read.source` reached the log undeclared while
@@ -367,6 +433,7 @@ def event_payload_writers() -> dict[str, dict]:
                     subscripts = subscript_string_keys(
                         scope, payload_name, after=payload.lineno, before=node.lineno)
                 if not isinstance(payload, ast.Dict):
+                    _unreadable()
                     continue
                 always, maybe, opaque = _payload_dict_keys(payload)
                 maybe |= subscripts
