@@ -146,7 +146,15 @@ def in_process_ms(task: str, n: int, root: str = f"{BENCH}/AlgoTune", repeats: i
 
 
 def _cached_median_ms(task: str, subset: str, key: str = "w22x1r3"):
-    """The median of the cached per-instance timings this reading is divided by."""
+    """The median of the cached per-instance timings this reading is divided by.
+
+    §353. `key` defaulted to `w22x1r3` and every caller took the default, so a SERIAL reading
+    recorded the WIDE median as its denominator -- 45.48 ms on `edge_expansion` where the serial
+    cache says 28.21. The field is called `cached_ms` and named itself "what this reading divided
+    by", which it was not. Caught by §352's cross-check firing on a reading taken forty minutes
+    after that check was written, with the regime label correct: the label was right and the
+    DENOMINATOR was the one lying. See the correction to §352 in docs/56.
+    """
     path = f"{baseline_dir()}/{task}__{subset}__{key}.json"
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -564,7 +572,11 @@ def main(argv=None) -> int:
     if os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR"):
         print(f"  (dividing by the cache you named: {baseline_dir()})")
     target = dataset_target_ms(args.task)
-    cached = _cached_median_ms(args.task, args.subset)
+    # THE REGIME THE RUN ACTUALLY RESOLVED, same source as §350's fix. Passing nothing here is
+    # what made every serial reading claim a wide denominator.
+    ran_regime = observed_regime(args.task, args.subset, seen_evals)
+    cached = (_cached_median_ms(args.task, args.subset, ran_regime) if ran_regime
+              else _cached_median_ms(args.task, args.subset))
     if target and cached:
         print(f"  (the dataset name says the reference took {target:.0f} ms per instance on the "
               f"machine that BUILT it; our cached baseline says {cached:.1f} ms, "
@@ -602,7 +614,7 @@ def main(argv=None) -> int:
             ref_from = ref_sha = None
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
                        args.lane, max(seen) if seen else None,
-                       observed_regime(args.task, args.subset, seen_evals), direct, cached,
+                       ran_regime, direct, cached,
                        reference_sha=ref_sha, reference_from=ref_from,
                        interpreter=bench_python())
         print(f"  recorded to {args.record}")

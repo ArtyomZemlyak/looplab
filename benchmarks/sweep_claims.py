@@ -200,6 +200,11 @@ def _first_trace_of(bench: str, regime: str) -> str:
     return min(seen) if seen else "9999"
 
 
+# When `ruler_selfcheck` began recording the denominator of the regime it actually ran in (§353).
+# Before this, `cached_ms` was the wide median whatever the run did, so it cannot refute a label.
+DENOMINATOR_FOLLOWS_THE_REGIME = "2026-09-08T18:30:00"
+
+
 def _cache_medians(bench: str) -> dict:
     """`{(task, regime): median ms}` for every baseline entry, so a row can be checked against the
     denominator it claims to have divided by."""
@@ -224,6 +229,14 @@ def _label_contradicted_by_its_own_denominator(row, medians) -> str | None:
     """
     task, said, cached = row.get("task"), row.get("regime"), row.get("cached_ms")
     if not said or not isinstance(cached, (int, float)) or cached <= 0:
+        return None
+    # ONLY ROWS WHOSE DENOMINATOR COULD HAVE BEEN REGIME-AWARE (§353). Until 2026-09-08T18:30
+    # `_cached_median_ms` defaulted to the WIDE key for every caller, so a correct SERIAL reading
+    # recorded a wide `cached_ms` and this check would convict it of a mislabel it does not have.
+    # That is what happened on the first §352 accusation: four rows of 2026-09-07 were called
+    # mislabelled on a field that was wide by construction. They are unattributable for §350's
+    # reason -- the label came from the newest cache FILE -- and not for this one.
+    if str(row.get("stamp") or "")[:19] < DENOMINATOR_FOLLOWS_THE_REGIME:
         return None
     other = (ruler_check.SERIAL_REGIME if said == ruler_check.CAMPAIGN_REGIME
              else ruler_check.CAMPAIGN_REGIME)

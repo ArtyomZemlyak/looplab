@@ -28,8 +28,8 @@ WIDE, SERIAL = ruler_check.CAMPAIGN_REGIME, ruler_check.SERIAL_REGIME
 MEDIANS = {("pde_heat1d", WIDE): 146.49, ("pde_heat1d", SERIAL): 78.16}
 
 
-def _row(regime, cached_ms, values=(1.0, 1.0)):
-    return {"task": "pde_heat1d", "stamp": "2026-09-07T01:58:15", "subset": "test",
+def _row(regime, cached_ms, values=(1.0, 1.0), stamp="2026-09-09T10:00:00"):
+    return {"task": "pde_heat1d", "stamp": stamp, "subset": "test",
             "regime": regime, "cached_ms": cached_ms, "values": list(values),
             "median": values[0], "busy_cpus_outside_lane": 0}
 
@@ -108,3 +108,38 @@ def test_two_caches_that_happen_to_agree_do_not_convict_a_correct_row():
         _row(SERIAL, 100.5), close) is None
     assert sweep_claims._label_contradicted_by_its_own_denominator(
         _row(WIDE, 100.0), close) is None
+
+
+def test_a_row_older_than_the_regime_aware_denominator_is_not_accused():
+    """§353. До 2026-09-08T18:30 `_cached_median_ms` брал ШИРОКИЙ ключ при любом вызове, значит
+    правильное ПОСЛЕДОВАТЕЛЬНОЕ чтение записывало широкий `cached_ms`. Обвинить его — значит
+    осудить строку за поле, которое было широким по построению. Первое обвинение §352 было ровно
+    таким, и его пришлось отозвать."""
+    old = _row(SERIAL, 146.49, stamp="2026-09-07T01:58:15")
+    assert sweep_claims._label_contradicted_by_its_own_denominator(old, MEDIANS) is None
+    new = _row(SERIAL, 146.49, stamp="2026-09-09T10:00:00")
+    assert sweep_claims._label_contradicted_by_its_own_denominator(new, MEDIANS) == WIDE
+
+
+def test_the_recorded_denominator_follows_the_regime_that_ran(tmp_path, monkeypatch):
+    """§353. Поле зовётся «на что это чтение делило». До правки оно было широкой медианой при
+    любом прогоне: последовательное чтение `edge_expansion` записывало 45.48 мс там, где его
+    собственный кэш говорит 28.21."""
+    import ruler_selfcheck
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "pde_heat1d__test__w22x1r3.json").write_text(
+        json.dumps({f"i{i}": 146.36 for i in range(3)}), encoding="utf-8")
+    (cache / "pde_heat1d__test__lane22r3.json").write_text(
+        json.dumps({f"i{i}": 78.16 for i in range(3)}), encoding="utf-8")
+    monkeypatch.setattr(ruler_selfcheck, "baseline_dir", lambda: str(cache))
+    assert ruler_selfcheck._cached_median_ms("pde_heat1d", "test", "lane22r3") == 78.16
+    assert ruler_selfcheck._cached_median_ms("pde_heat1d", "test", "w22x1r3") == 146.36
+
+
+def test_the_caller_hands_the_regime_to_the_denominator():
+    """Умолчание — это и был дефект: все вызывающие брали его, и никто не замечал."""
+    src = (Path(__file__).resolve().parents[1] / "benchmarks" / "ruler_selfcheck.py").read_text(
+        encoding="utf-8")
+    assert "_cached_median_ms(args.task, args.subset, ran_regime)" in src, \
+        "знаменатель снова не знает, в каком режиме шёл прогон"
