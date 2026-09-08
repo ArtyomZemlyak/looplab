@@ -99,9 +99,16 @@ def test_neither_module_is_a_god_module_again():
     `make_roles` is 222 lines, nearly half the file, and `_shared_providers` (75) is a coherent
     unit — "the providers every agentic role shares" — that would move cleanly behind its existing
     re-export. Raise this number a third time and the guard means nothing.
+
+    Both halves of that rule have now been exercised, which is why the ledger below runs in two
+    directions. `agents/developer_backends.py` was RAISED for eight lines a merge spent wiring the
+    backend it is named for. `adapters/tasks.py` was not raised at all: its cap was spent, so the
+    extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
+    file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 385),
-                     ("agents/developer_backends.py", 178)):
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 385),
+                     ("agents/developer_backends.py", 186),
+                     ("adapters/task_schema.py", 231)):
     #
     # 2026-08-29, MERGE with master: master's 530 is KEPT and not raised. The merged file is 529
     # lines -- master's additions plus this branch's two composition lines, `stage_guidance=` and
@@ -137,6 +144,23 @@ def test_neither_module_is_a_god_module_again():
     # measured + 1 (384 measured). A cap left at 547 over a 384-line file is 163 lines of slack
     # nobody decided to bank — the same failure as raising it seven times further than the change
     # needed, one direction over. The new module gets the same discipline: 177 measured, cap 178.
+    #
+    # 178 -> 186, 2026-09-08 MERGE, and this is again the case the docstring is FOR: nothing
+    # conflicted, so nothing was chosen. `external_cli_developer` gained the run's own
+    # `CostAccountant` on a parallel branch (doc 27 `external-cli-usage-is-unpriced`) — one keyword,
+    # a six-line why and the widened `core.llm` import, eight lines measured (177 -> 185) — which is
+    # this module wiring the backend it is named for, not a second domain. The raise pays for those
+    # eight and leaves the same ONE line of headroom.
+    #
+    # 400 -> 233, 2026-09-08: `adapters/tasks.py` SPENT its 399-of-400 and the answer this guard
+    # names — an EXTRACTION, not a raise — was taken. Two parallel changes spent it (the
+    # `shift_inputs` hook row, and `submit_warnings` single-sourcing the CLI's hand-copied submit
+    # warnings), and both are the task module doing its job. What came out is the other half of the
+    # file's own docstring: `normalize_task`, the composable/legacy SCHEMA front-end, 203 lines that
+    # take a dict and return a dict, now `adapters/task_schema.py` and re-exported. tasks.py is 232
+    # measured, so the cap follows the file DOWN to measured + 1 rather than banking 167 lines of
+    # slack nobody decided on — the same rule the entry above applies upward. The new module gets it
+    # too: 230 measured, cap 231.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 
