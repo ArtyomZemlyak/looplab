@@ -11,6 +11,9 @@ at its site so a reader meets the reasoning where the cost is paid, rather than 
 only three of the five do** (re-derived 2026-08-19: `grep -c 'docs/34'` is 0 in both
 `core/tracing.py` and `ui/test/settingsSchemaResource.test.js`). D-02's own status update admits it
 while this paragraph asserted the opposite; `docs/00-INDEX.md` propagates the false version.
+*(2026-09-08: `core/tracing.py` now carries its pointer, on the `JsonlSpanExporter._export_lines`
+docstring that closed D-02 — so it is four of five, and `ui/test/settingsSchemaResource.test.js`
+is the one left.)*
 
 Nothing below is a bug you can fix without deciding something first. That is the entry criterion.
 
@@ -27,9 +30,14 @@ Nothing below is a bug you can fix without deciding something first. That is the
 >   inside the f-strings that BUILD the path, so `test_no_proof_is_satisfiable_only_by_prose`
 >   rightly refused it and the guard sat red from the day this row was indexed — the exact
 >   silent-red this index exists to end. The deciding symbol is the function itself.)
-> - **OPEN[trace-exporter-hardens-per-span-not-per-batch]** the worker still takes exactly one row per
->   iteration and runs the whole hardened ladder (guarded open, torn-tail heal, identity CAS before
->   and after, one append receipt) per SPAN. proof:`line:item: Optional[bytes]&&= None@looplab/core/tracing.py`
+> - *D-02 closed 2026-09-08: the async worker now drains the whole queue per iteration and
+>   `JsonlSpanExporter._export_lines` runs the hardened ladder ONCE for the batch — one guarded
+>   open, one heal, one identity CAS, one append receipt binding the whole appended byte range.
+>   No property was traded away and no schema moved: the receipt reader has always proved a byte
+>   RANGE rather than a row, so a receipt covering N spans is validated exactly as strictly
+>   (`tests/test_span_index.py::test_a_batched_multi_row_append_is_trusted_like_n_single_row_ones`).
+>   Driven in `tests/test_async_trace_exporter.py::test_one_drain_pays_the_hardened_ladder_once_for_the_whole_batch`:
+>   six spans across two drains pay two source opens instead of six.*
 > - **OPEN[card-trace-scans-whole-run-span-index]** `card_trace_view` still copies the whole run's
 >   light spans; `SpanIndex` has no `card_id` dimension and `_SCHEMA` is unbumped.
 >   proof:`line:_SCHEMA&&= 12@looplab/events/span_index.py`
@@ -103,6 +111,19 @@ the agent is allowed to do to the run's own history.
 > rows, and writes ONE receipt binding the whole appended byte range — the identity CAS then holds
 > at flush granularity, which is the amortization choice the paragraph below already names. Measure
 > before/after on the geesefs mount that motivated the numbers here.
+>
+> **CLOSED 2026-09-08, exactly as that paragraph prescribes.** `_worker_loop` takes the whole queue
+> per iteration and `JsonlSpanExporter._export_lines` (the pointer comment now lives on its
+> docstring) runs the ladder once for the batch: one guarded open, one heal, one before/after
+> identity CAS, one append receipt whose `append_sha256` covers the whole appended range. The
+> per-row physical-JSONL contract is still checked per ROW and before the lock, so one malformed row
+> refuses the drain with nothing appended. What moved is granularity, and it moved in the one place
+> the review said it could: the identity CAS now catches a run-root replacement mid-DRAIN rather
+> than between two rows of it, and a raising ladder loses the drain rather than one row — which is
+> the honest cost, since the failures this ladder produces (a replaced root, a full disk, a stale
+> descriptor) are properties of the path and fail every row of a drain together anyway. The
+> before/after measurement on the geesefs mount is still owed; what is measured here is the open
+> count itself (six spans across two drains: two source opens, not six).
 
 **What it is.** Each exported span performs roughly three hardened opens (~12 `stat` calls), two
 `flock`s, a torn-tail heal read and a 4 KiB read-and-parse of the append receipt journal, where the
