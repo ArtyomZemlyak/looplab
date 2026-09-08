@@ -11,7 +11,7 @@ Design docs live in `docs/` (see `docs/02-architecture.md`, ADRs in
 
 ```bash
 pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/TUI tests (fastapi)
-python -m pytest                  # full suite (16,637 collected, ~40 min; addopts already has -q)
+python -m pytest                  # full suite (16,681 collected, ~40 min; addopts already has -q)
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
 python -m pytest -m "not docker"  # skip Docker-daemon tests
