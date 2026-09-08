@@ -80,7 +80,7 @@ def test_a_process_that_is_gone_answers_no(tmp_path):
 
 def test_the_line_is_printed_only_for_a_stale_looking_probe():
     src = (BENCH / "pulse.py").read_text(encoding="utf-8")
-    assert "call has been OPEN to the meter" in src
+    assert "a call is OPEN to the meter now" in src
     assert "call_age > 240 and call_in_flight" in src, "иначе строка печатается на каждом вызове"
 
 
@@ -94,3 +94,20 @@ def test_another_process_talking_to_the_meter_is_not_this_probe(tmp_path):
     (tmp_path / "net" / "tcp").write_text(
         HEADER + _row("9005", "0050", "01") + _row("9999", "2261", "01"), encoding="utf-8")
     assert pulse.call_in_flight("80", port=0x2261, root=str(tmp_path)) is False
+
+
+def test_the_open_call_is_younger_than_the_last_completed_one():
+    """§339 правит формулировку §335. Новейшая строка леджера — последний ЗАВЕРШЁННЫЙ вызов;
+    открытый начался ПОСЛЕ него, значит его возраст ограничен сверху, а не снизу. «Не менее 1373 с»
+    превращало верхнюю границу в нижнюю и делало каждую долго молчавшую пробу хуже, чем позволяет
+    свидетельство."""
+    src = (BENCH / "pulse.py").read_text(encoding="utf-8")
+    assert "so this one is younger than that" in src
+    assert "for at least" not in src, "старая формулировка вернулась"
+
+
+def test_a_phase_without_a_wall_prints_no_budget_clause():
+    """Измерено на живой пробе: `deep_research`, `emit` и `Researcher·propose` пишут
+    `time_budget_s = 0.0` — стены нет. Печатать «0 % от 0 с» значило бы выдумать ограничение."""
+    src = (BENCH / "pulse.py").read_text(encoding="utf-8")
+    assert "if budget:" in src and "0.0 means the phase was given no wall" in src

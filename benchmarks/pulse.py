@@ -148,6 +148,28 @@ def readers_of_the_tree(bench: str, table=None) -> list:
     return sorted(set(out))
 
 
+def phase_budget(events_path: str) -> tuple:
+    """The phase a run is in and the seconds it was given, from its own last `agent_phase_started`.
+
+    §339. An open call is not alarming by itself -- §335 exists because a long generation reads as
+    silence -- but "17.8 minutes in flight" and "17.8 minutes of a 20-minute phase budget" are
+    different sentences, and only the second one can be acted on. The budget is in the event the
+    engine already writes; nothing new has to be measured.
+    """
+    label, budget = None, None
+    try:
+        for event in events_read.iter_events(events_path):
+            if event.get("type") != "agent_phase_started":
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            label = data.get("label") or label
+            got = data.get("time_budget_s")
+            budget = float(got) if isinstance(got, (int, float)) else budget
+    except OSError:
+        return (None, None)
+    return (label, budget)
+
+
 def call_in_flight(pid, port: int = 8801, root: str = "/proc") -> bool:
     """Is a request open RIGHT NOW from this process to the meter?
 
@@ -479,8 +501,17 @@ def main(argv=None) -> int:
         # waiting on one looks identical to a probe waiting on nothing -- §335 measured 7.5 minutes
         # of it, with no worker on the lane and nothing in state R.
         if call_age is not None and call_age > 240 and call_in_flight(row["pid"]):
-            print(f'      a call has been OPEN to the meter for at least {call_age:.0f}s -- a long '
-                  "generation in flight, not silence (the ledger records a call when it ends)")
+            # AT MOST, NOT AT LEAST -- §339 corrects §335's own wording. The ledger's newest row
+            # is the last COMPLETED call; the open one started after it, so `call_age` bounds the
+            # open call's age from ABOVE. Saying "at least" turned an upper bound into a lower one
+            # and made every long-quiet probe look worse than the evidence allows.
+            label, budget = phase_budget(found[0])
+            against = ""
+            if budget:      # 0.0 means the phase was given no wall -- most of them are
+                against = (f'; its {label or "phase"} has a {budget:.0f}s budget')
+            print(f'      a call is OPEN to the meter now (the last one COMPLETED {call_age:.0f}s '
+                  f'ago, so this one is younger than that{against}) -- a long generation in flight, '
+                  "not silence: the ledger records a call when it ends")
         if call_age is not None and age > args.stall / 4 and call_age < age / 4:
             print(f'      CALLING BUT NOT PRODUCING: last call {call_age:.0f}s ago, log last grew '
                   f'{age:.0f}s ago. Three consecutive 504s at exactly 300 s are the nginx ceiling, '
