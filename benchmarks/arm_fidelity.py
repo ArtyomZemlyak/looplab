@@ -214,11 +214,53 @@ def is_finished(root: str, name: str) -> bool:
     return _run_finished(root, name) or _at_ceiling(root, name)
 
 
+def node_open_floor(root: str, name: str):
+    """The money a run needs in hand to open another node, off its own `config.snapshot.json`.
+
+    §363. `_at_ceiling` asked one question -- "is 99 % of the budget spent?" -- and the engine asks
+    a different one before every node, in these words:
+
+        Refused: LLM spend ceiling reached before opening a speculative Card build: $0.0654 of the
+        $1.0000 set by `llm_budget_usd` remains, below the `node_open_budget_floor_usd` of $0.1000
+        a new node needs. The run stops here rather than open work it cannot finish.
+
+    That is `pgr2`, 2026-09-08, stopped at $0.9594 -- 95.9 % of its budget, comfortably under the
+    99 % bar. It was saved from being called "owed work" only because the engine wrote
+    `run_finished` beside it. A run that PAUSES with less than the floor in hand has the same
+    nothing-left-to-do and would be resumed to pay again, which is §213.
+
+    Recorded in 2 of 145 snapshots on this box -- the field is new -- so a run without it falls back
+    to `None` and the old 99 % rule alone, which is the old behaviour and not a new claim.
+    """
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/config.snapshot.json")):
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if not isinstance(node, dict):
+                continue
+            got = node.get("node_open_budget_floor_usd")
+            if isinstance(got, (int, float)) and got > 0:
+                return float(got)
+            stack.extend(v for v in node.values() if isinstance(v, dict))
+    return None
+
+
 def _at_ceiling(root: str, name: str, budget: float | None = None) -> bool:
     """A pause that is really the end of the money -- see `_paused`."""
     budget = probe_budget(root, name) if budget is None else budget
-    return (_last_lifecycle(root, name) == "pause"
-            and _spend(root, name) >= budget * CEILING_SHARE)
+    if _last_lifecycle(root, name) != "pause":
+        return False
+    spend = _spend(root, name)
+    if spend >= budget * CEILING_SHARE:
+        return True
+    # AND THE RUN'S OWN FLOOR, where it recorded one: a pause with less than that left cannot open
+    # another node, so there is nothing owed however far it is from 99 %.
+    floor = node_open_floor(root, name)
+    return floor is not None and (budget - spend) < floor
 
 
 CEILING_SHARE = 0.99      # of `llm_budget_usd`; below this a pause is a pause
@@ -253,10 +295,13 @@ def _paused(root: str, name: str, budget: float | None = None) -> bool:
     The engine no longer does it, but every probe recorded before the fix still reads that way, so
     the disposition is decided here on the spend rather than on the word.
     """
+    # DELEGATED, NOT REPEATED (§363). The docstring's own words are "paused AND not simply at the
+    # end of its money", and the second half was a second copy of the 99 % threshold. When the
+    # ceiling learned about the run's own node floor, the copy did not, and the two disagreed: a
+    # pause at 95.9 % with $0.0406 left was at its ceiling AND owed work at the same time.
     if _last_lifecycle(root, name) != "pause":
         return False
-    budget = probe_budget(root, name) if budget is None else budget
-    return _spend(root, name) < budget * CEILING_SHARE
+    return not _at_ceiling(root, name, budget)
 
 
 def report(root: str, treat, control) -> dict:
