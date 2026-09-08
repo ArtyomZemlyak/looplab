@@ -2409,6 +2409,107 @@ def test_unknown_spawn_claim_has_explicit_recovery_but_exact_live_child_cannot_b
     assert claim_path.exists()
 
 
+def test_both_escape_hatches_are_one_scaffold_that_cannot_unlink_before_it_revalidates(tmp_path):
+    """doc 25 SC-12: the two operator escape hatches run ONE protocol, and its ORDER is the safety.
+
+    `resolve_active_claims` and `resolve_spawn_claim` used to repeat the safety window, the
+    confirmation phrase, the revalidate-then-unlink pair and the structured 409 verbatim. The order
+    is the whole argument: an owner that becomes provable while the operator is typing must stop the
+    unlink, so the liveness re-read has to sit AFTER the phrase check and BEFORE the destructive
+    step. That is a property no reviewer can hold across two copies, so it is now structural —
+    `guarded_claim_resolution` is the only route to the destructive callable — and this drives it
+    with accountants rather than asserting the shape of the source.
+    """
+    _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    commands = srv.commands
+    old = tmp_path / "demo" / "aged-subject.json"
+    old.write_text(json.dumps({"created_at": time.time() - 600}), encoding="utf-8")
+    fresh = tmp_path / "demo" / "fresh-subject.json"
+    fresh.write_text(json.dumps({"created_at": time.time()}), encoding="utf-8")
+
+    for hatch in (run_commands_module.ACTIVE_CLAIM_HATCH, run_commands_module.SPAWN_CLAIM_HATCH):
+        seen = {"revalidate": 0, "retire": 0}
+
+        def _revalidate(conflict=None):
+            seen["revalidate"] += 1
+            return conflict
+
+        def _retire():
+            seen["retire"] += 1
+            return {"ok": True, "resolved": True}
+
+        # 1. Inside the safety window: neither the liveness probe nor the unlink is reached, and the
+        #    refusal carries THIS hatch's code (the two hatches answer differently on purpose).
+        with pytest.raises(HTTPException) as window:
+            commands.guarded_claim_resolution(
+                hatch, [fresh], confirmation=hatch.phrase,
+                revalidate=_revalidate, retire=_retire)
+        assert window.value.status_code == 409
+        assert window.value.detail["code"] == hatch.uncertain_code
+        assert seen == {"revalidate": 0, "retire": 0}
+
+        # 2. Aged out of the window but unconfirmed: still nothing destructive, and the refusal
+        #    SUPPLIES the exact phrase — an operator who has never seen it has no other way in.
+        with pytest.raises(HTTPException) as unconfirmed:
+            commands.guarded_claim_resolution(
+                hatch, [old], confirmation="I promise it is dead",
+                revalidate=_revalidate, retire=_retire)
+        assert unconfirmed.value.detail["code"] == hatch.confirmation_code
+        assert hatch.phrase in unconfirmed.value.detail["remediation"]
+        assert seen == {"revalidate": 0, "retire": 0}
+
+        # 3. Confirmed, but an owner became provable in the meantime: revalidation refuses and the
+        #    destructive step is never reached. This is the crash-safety property of the pair.
+        with pytest.raises(HTTPException) as raced:
+            commands.guarded_claim_resolution(
+                hatch, [old], confirmation=hatch.phrase,
+                revalidate=lambda: _revalidate("an owner became live during resolution"),
+                retire=_retire)
+        assert raced.value.status_code == 409
+        assert seen == {"revalidate": 1, "retire": 0}
+
+        # 4. Only now — aged, confirmed, revalidated clear — is the subject retired, exactly once.
+        assert commands.guarded_claim_resolution(
+            hatch, [old], confirmation=hatch.phrase,
+            revalidate=_revalidate, retire=_retire) == {"ok": True, "resolved": True}
+        assert seen == {"revalidate": 2, "retire": 1}
+
+
+def test_a_freshly_quarantined_spawn_claim_is_dated_from_the_quarantine_not_its_creation(tmp_path):
+    """The safety window is about the DECISION to call a claim unknown, not the file's age.
+
+    A spawn claim can be hours old and quarantined a second ago — the child it names may have been
+    running that whole time. Dating the window from `created_at` would let the confirmed phrase clear
+    it instantly, which is the one thing the window exists to prevent, so `SPAWN_CLAIM_HATCH` reads
+    `quarantined_at` FIRST and only falls back to creation.
+    """
+    rd = _seed(tmp_path)
+    client, srv = _client(tmp_path, _Driver(pid_running=True))
+    phrase = "I verified no LoopLab engine process is running"
+
+    srv.commands.begin_external_spawn(rd, "start")  # crash-window owner: PID was never persisted
+    claim_path = srv.commands._spawn_claim_path(rd)
+    row = json.loads(claim_path.read_text(encoding="utf-8"))
+    row["created_at"] = time.time() - 3600      # ancient claim...
+    row["quarantined_at"] = time.time()         # ...declared unknown just now
+    row["expires_at"] = None
+    row["quarantined"] = True
+    claim_path.write_text(json.dumps(row), encoding="utf-8")
+
+    refused = client.post("/api/start/demo/resolve-claim", json={"confirmation": phrase})
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "engine_start_uncertain"
+    assert claim_path.exists()
+
+    # Age the quarantine decision itself and the same confirmed request goes through.
+    row["quarantined_at"] = time.time() - 600
+    claim_path.write_text(json.dumps(row), encoding="utf-8")
+    resolved = client.post("/api/start/demo/resolve-claim", json={"confirmation": phrase})
+    assert resolved.status_code == 200 and resolved.json()["resolved"] is True
+    assert not claim_path.exists()
+
+
 def test_live_but_unacknowledging_driver_has_bounded_observation_ceiling(tmp_path):
     _seed(tmp_path)
     driver = _Driver(alive=True)

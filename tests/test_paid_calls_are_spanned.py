@@ -45,8 +45,8 @@ import pytest
 
 from looplab.core import tracing
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
-from looplab.core.llm import BudgetExceeded, CostAccountant
-from looplab.core.models import ResearchMemo
+from looplab.core.llm import BudgetExceeded, CostAccountant, OpenAICompatibleClient
+from looplab.core.models import Idea, ResearchMemo
 from looplab.events.replay import fold
 from factories import make_engine
 
@@ -99,7 +99,13 @@ def assert_span_channel_accounts_for_every_paid_call(engine, *, at_least: int = 
         "taken over the span channel")
 
     paid = sum(float(e["data"].get("cost") or 0) for e in events)
-    traced = sum(float(by_id[e["span_id"]]["attributes"]["cost"]) for e in events)
+    # ONCE PER SPAN, not once per row. A generation can be billed more than once — a keepalive
+    # stall on attempt 1 and the retry that succeeded on attempt 2 are two `llm_usage` rows under
+    # ONE span — and `tracing.record_paid_call` now accumulates, so that span's `cost` is the SUM
+    # of both rows. Summing it per ROW would count the pair twice and fail the very shape this
+    # check was extended to cover.
+    traced = sum(float(by_id[span_id]["attributes"]["cost"])
+                 for span_id in {e["span_id"] for e in events})
     assert paid == pytest.approx(traced, abs=1e-9), (
         f"event log says ${paid:.6f}, generation spans say ${traced:.6f}")
     return paid
@@ -208,6 +214,39 @@ def _card(card_id, statement):
     return types.SimpleNamespace(id=card_id, statement=statement, card_id=card_id)
 
 
+def test_the_batch_proposal_pays_inside_a_span(tmp_path, monkeypatch):
+    """THE LANE A RUN ACTUALLY TAKES, and the one this file never drove.
+
+    `_consume_batch_proposal` is `width` paid Researcher calls, and it opened a `_progress` beacon
+    and no span — so every one of them was written with `trace_id=null`: real money attributable to
+    nothing, invisible to `looplab timings`, to the trace view and to every per-phase cost question.
+    Its own comment already called it "the single longest wholly invisible stretch in the loop".
+
+    The asymmetry is why it hid: the SERIAL propose one method over runs inside `_create_node`'s
+    `create_node` span, so a run at width 1 looked fine, and at the shipped `llm_parallel` AUTO
+    width on a GPU box the batch lane — the one that pays most — was the spanless one.
+
+    Driven through the real method with a paying `_propose_batch`, and asserted by the same
+    conservation check every other scenario here uses: every dollar in the ledger is in a span.
+    """
+    engine = make_engine(tmp_path / "run", max_nodes=2)
+    state = fold(engine.store.read_all())
+
+    def _paying_batch(_state, width):
+        for _ in range(int(width)):
+            _pay(engine)
+        return [Idea(operator="draft", params={"x": float(i)}) for i in range(int(width))]
+
+    monkeypatch.setattr(type(engine), "_propose_batch",
+                        lambda self, st, w: _paying_batch(st, w), raising=True)
+    engine._consume_batch_proposal(state, 3)
+
+    assert "propose" in _span_names(engine), (
+        "the batch proposal must open an operation span; a beacon alone leaves every one of its "
+        "paid calls with trace_id=null")
+    assert_span_channel_accounts_for_every_paid_call(engine, at_least=3)
+
+
 def test_hypothesis_tagging_pays_inside_a_span(tmp_path, monkeypatch):
     """The 88-call, $0.0211 hole: a paid step that runs after `concept_coverage` has closed."""
     engine = make_engine(tmp_path / "run", max_nodes=2)
@@ -267,6 +306,87 @@ def test_a_call_aborted_on_the_spend_ceiling_still_carries_its_cost(tmp_path):
                    if line.strip() and json.loads(line)["name"] == "generation"]
     assert generations[0]["status"] == "ERROR"                    # the abort is still recorded…
     assert generations[0]["attributes"]["phase"] == "card_build"  # …under the phase that bought it
+
+
+# --------------------------------------------------------------------------- the twice-billed call
+
+def _stall_body():
+    """A keepalive-only 200: choices present, and nothing usable in them (`_keepalive_stall`)."""
+    return {"choices": [{"message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 0, "total_tokens": 9,
+                      "cost": 0.004}}
+
+
+def _answer_body():
+    return {"choices": [{"message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14,
+                      "cost": 0.006}}
+
+
+def test_a_generation_billed_twice_carries_the_sum_of_both_ledger_rows(tmp_path, monkeypatch):
+    """ONE span, TWO `llm_usage` rows: the span says what the PAIR cost, not what the last did.
+
+    Driven through the real `_post` retry ladder, because the defect lives in the seam between its
+    two billing sites: `_account_keepalive_stall` bills the stalled attempt from inside the loop,
+    the accepted body bills the retry after it, and `complete_text` then stamps `.usage().cost()`
+    with the SECOND attempt's figures on the ONE generation span both were charged under. With a
+    write-once stamp from below and a replacing stamp from above, the span said $0.006 against
+    $0.010 of ledger — `sum(llm_usage.cost) > sum(generation cost)` on every stall-retry run.
+    """
+    engine = make_engine(tmp_path / "run", max_nodes=2)
+    accountant = CostAccountant(
+        on_delta=lambda d: engine.store.append("llm_usage", dict(d)))
+    client = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True,
+                                    accountant=accountant)
+    bodies = [_stall_body(), _answer_body()]
+    sent: list[bool] = []
+    monkeypatch.setattr(client, "_sdk_chat",
+                        lambda _payload, use_stream: sent.append(use_stream) or bodies.pop(0))
+    monkeypatch.setattr("looplab.core.llm._backoff", lambda _attempt: 0.0)
+
+    with engine.tracer.span("card_build"):
+        assert client.complete_text([{"role": "user", "content": "go"}]) == "ok"
+
+    # The scenario itself has to be the real one: two attempts, two commits, one span.
+    assert len(sent) == 2 and accountant.calls == 2
+    engine.tracer.force_flush()
+    events, spans = _rows(engine.run_dir)
+    assert len(events) == 2, "the stalled attempt and the retry are two ledger rows"
+    assert len({e["span_id"] for e in events}) == 1, "…charged to the ONE generation span"
+
+    generation = spans[0]
+    assert generation["attributes"]["cost"] == pytest.approx(0.010)
+    assert generation["attributes"]["cost_billings"] == 2, (
+        "a reader has to be able to see that this generation's money is spread over retries")
+    # Tokens follow the same rule: two provider requests, two rows, one span that sums them.
+    assert generation["attributes"]["usage"] == {"prompt": 20, "completion": 3, "total": 23}
+    assert_span_channel_accounts_for_every_paid_call(engine, at_least=2)
+
+
+def test_a_generation_billed_once_keeps_exactly_the_bytes_it_always_had(tmp_path, monkeypatch):
+    """The overwhelming case, pinned beside its sibling: a sum of one term is that term.
+
+    Accumulation is only safe if it is invisible where nothing accumulates — the caller's stamp and
+    the commit describe the SAME attempt there, so the span must carry that attempt's figures once,
+    not twice.
+    """
+    engine = make_engine(tmp_path / "run", max_nodes=2)
+    accountant = CostAccountant(
+        on_delta=lambda d: engine.store.append("llm_usage", dict(d)))
+    client = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True,
+                                    accountant=accountant)
+    monkeypatch.setattr(client, "_sdk_chat", lambda _payload, _stream: _answer_body())
+
+    with engine.tracer.span("card_build"):
+        assert client.complete_text([{"role": "user", "content": "go"}]) == "ok"
+
+    engine.tracer.force_flush()
+    _events, spans = _rows(engine.run_dir)
+    assert spans[0]["attributes"]["cost"] == pytest.approx(0.006)
+    assert spans[0]["attributes"]["cost_billings"] == 1
+    assert spans[0]["attributes"]["usage"] == {"prompt": 11, "completion": 3, "total": 14}
+    assert_span_channel_accounts_for_every_paid_call(engine, at_least=1)
 
 
 # --------------------------------------------------------------------------- the verifier tie-break

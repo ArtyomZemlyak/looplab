@@ -135,6 +135,36 @@ REFUSALS: dict[str, tuple[int, str, str]] = {
     "config_snapshot_not_object": (
         503, "the run configuration snapshot is not a JSON object",
         "Restore config.snapshot.json from a backup or from another run of the same task."),
+    # THE COMMAND-LIFECYCLE SITES, added 2026-09-08. Eight of them raised 409/503 with an f-string
+    # of the caught `OSError`, i.e. exactly what `refusal()`'s own docstring one screen down
+    # forbids — driven: a stray regular file where the server wants its lock directory reflects
+    # `[Errno 17] File exists: '/abs/host/path/.command-locks'` to the browser. They were invisible
+    # to `test_no_route_answers_a_literal_500_for_input_it_could_not_read`, which walked only
+    # `HTTPException(500, …)`, so the census that ended this class for the 500s never saw the
+    # siblings raising other codes.
+    "run_lock_path_unreadable": (
+        409, "the run's command-lock path could not be validated",
+        "The run directory's `.command-locks` entry is not a plain directory the server can "
+        "resolve — most often a leftover file, a symlink, or a permission change. Remove or fix "
+        "that entry inside the run directory and retry."),
+    "run_path_unreadable": (
+        409, "the run's command path could not be validated",
+        "The run directory's `events.jsonl` or `.commands` entry is not a plain file/directory the "
+        "server can resolve — most often a symlink or a permission change. Fix that entry inside "
+        "the run directory and retry."),
+    "run_record_unquarantinable": (
+        503, "an unreadable command record could not be quarantined",
+        "A damaged file under the run's `.commands` directory could not be moved aside. Check the "
+        "run directory's permissions and free space, then retry."),
+    "run_command_locking_unsupported": (
+        503, "the filesystem under the run directory does not support command locking",
+        "The run directory is on a filesystem whose advisory locks the server cannot take (some "
+        "network and FUSE mounts). Move the run directory to local storage, or run the server on "
+        "the host that owns the mount."),
+    "run_claim_unretirable": (
+        503, "a run's start or spawn claim could not be retired",
+        "The claim file under the run directory could not be removed. Check the run directory's "
+        "permissions and free space, then retry; the claim is re-checked on every attempt."),
 }
 
 
@@ -147,6 +177,61 @@ def refusal(slug: str) -> "HTTPException":  # noqa: F821 - see `_bad_request`
 
     status, message, remediation = REFUSALS[slug]
     return HTTPException(status, {"code": slug, "message": message, "remediation": remediation})
+
+
+# THE GENERATION FENCE'S ONE REFUSAL (doc 25 SR-09).
+#
+# `{"code": "run_generation_changed", "expected_generation": …, "current_generation": …, "message":
+# …, "remediation": …}` was hand-assembled at 26 sites across 10 serve files, and the copies had
+# already drifted: some spelled `current_generation` with an `or None`, some without, some carried no
+# remediation at all, one publishes the SAME fact under the key `actual_generation`. That envelope is
+# a WIRE CONTRACT — twelve `ui/src` modules branch on the code, and `expected_generation`/
+# `current_generation` are what a client CASes on next — so a copy that drops a field breaks the
+# NEXT fenced write at a call site with no visible connection to the one that dropped it.
+#
+# What legitimately differs per site is the SENTENCE (which read or write the run outran) and the
+# REMEDY (which view the operator reloads), so those are arguments; the code and the status are not.
+# The two fence fields are OMITTED rather than null when a site genuinely has no generation to name
+# (the comment feeds, whose 409 says only "the run moved while this was projected"), because a
+# client cannot tell a null it must ignore from a null it should have received.
+#
+# THE LITERAL SURVIVES IN FOUR KINDS OF PLACE AND NONE IS A COPY OF THIS ENVELOPE, which is why the
+# open-item marker was bound to this function's NAME rather than to the string:
+#   * `run_commands.py::_generation_changed_error` builds a durable COMMAND RECORD's error object
+#     (`_error(...)` with `retryable`), not an HTTP body — a record a client polls, not a refusal;
+#   * `deletion_service.py` raises it through that module's OWN shared `_detail(...)` builder, one
+#     code among ~20 in a deletion-receipt envelope that always carries `retryable` and
+#     `operation_id`. It is already shared from one place; folding it into this one would change
+#     that surface's wire shape, which is the opposite of what SR-09 asked for;
+#   * `routers/boss.py` and `serve/assistant.py` READ the code off a caught exception to classify
+#     it, and `trace_clear.py` writes `run_generation_changed_after_pending` as a RECEIPT reason.
+RUN_GENERATION_CHANGED = "run_generation_changed"
+
+#: Distinguishes "this site names no generation" from "this site names None" — see above.
+_OMITTED = object()
+
+
+def generation_conflict(message: str, *, expected=_OMITTED, current=_OMITTED,
+                        remediation: str = "", **extra) -> "HTTPException":  # noqa: F821
+    """The 409 every generation fence raises. `extra` carries a site's own additional identity.
+
+    `expected`/`current` are the generation the caller named and the one the run actually has;
+    passing neither omits both fields, which is what the two comment surfaces do. `remediation` is
+    omitted when empty rather than sent as "", because the field is advice and an empty string reads
+    as advice that was given and was blank.
+    """
+    from fastapi import HTTPException
+
+    detail: dict = {"code": RUN_GENERATION_CHANGED}
+    if expected is not _OMITTED:
+        detail["expected_generation"] = expected
+    if current is not _OMITTED:
+        detail["current_generation"] = current
+    detail["message"] = message
+    if remediation:
+        detail["remediation"] = remediation
+    detail.update(extra)
+    return HTTPException(409, detail)
 
 
 def comment_filter_invalid() -> "HTTPException":  # noqa: F821 - see `_bad_request`

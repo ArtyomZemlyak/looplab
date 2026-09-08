@@ -40,6 +40,11 @@ class _Host:
     # a protocol test stops testing the protocol. It needs no `store` — `_progress` emits nothing when
     # `self` has none, which is exactly this host and also every `Engine.__new__` instance in the suite.
     _progress = Engine._progress
+    # …and `_paid_progress` beside it since the propose lane became a SPENDING phase: it is the
+    # beacon AND a span, and its own docstring says it "degrades to the beacon alone when no tracer
+    # is wired", which is this host. Borrowed for the same reason as the others rather than stubbed.
+    _paid_progress = Engine._paid_progress
+    _op_span = Engine._op_span
 
     def __init__(self, ideas, *, telemetry=None, dropped=None):
         self._ideas = ideas
