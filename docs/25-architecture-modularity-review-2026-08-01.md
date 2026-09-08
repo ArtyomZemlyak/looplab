@@ -6407,9 +6407,9 @@ tests stayed green. Verified by three breaks on a scratch copy — removing the 
 into a replacement, and restoring `confidence_weight = 0.65` as the default — each failing only its
 own assertions.
 
-#### SE-12 · LOW · over-engineering · effort: medium — **DEFERRED (2026-08-08)**
+#### SE-12 · LOW · over-engineering · effort: medium — **DECLINED (2026-09-08)**
 
-> **OPEN[scorer-fidelity-selftests-ship-as-production-code]** the 15-case suite and its fixture factories are still production code re-executed on every gate and receipt revalidation (568 lines, `_extrema_case`/`_merge_cases`/`_ablate_cases`/`_bandit_cases`). Closing it is an explicit receipt-schema change with its own evaluation, not a modularity sweep. proof:present:_extrema_case@looplab/search/scorer_fidelity.py
+> **DECLINED[scorer-fidelity-selftests-ship-as-production-code]** measured: the move deletes 5 of the 8 policy verdicts the receipt carries parity evidence for, to save 0.13 % of one receipt validation and 2.2 % of the scorer byte bound — full evaluation in docs/25-architecture-modularity-review-2026-08-01.md, SE-12's 2026-09-08 resolution below. The five verdicts lost are every `merge`, every `ablate` and the whole operator-bandit path; both numbers are re-derived on every suite run by `tests/test_card_scorer_fidelity_gate.py` rather than trusted from this line.
 
 **scorer_fidelity.py ships a 15-case unit-test suite (with its own fixture factories) as production code, re-executed on every gate and receipt revalidation**
 
@@ -6440,6 +6440,94 @@ Deliberately not done here. The cost the finding names (a matrix recomputed per 
 performance concern with no measurement attached; the cost of getting it wrong is a fleet of
 unverifiable receipts. If revisited, do it as an explicit receipt-schema change with its own
 evaluation, not as part of a modularity sweep.
+
+*Resolution (2026-09-08) — DECLINED, carrying the evaluation the 2026-08-05 adjudication asked for.*
+
+The 2026-08-05 note deferred this "pending an explicit receipt-schema change with its own
+evaluation", and named the missing half itself: "the cost the finding names (a matrix recomputed per
+gate) is a performance concern with no measurement attached". Here is that measurement. It settles
+the item AGAINST the recommendation, so the schema bump, the one-time revocation and the digest
+guard that a move would have required were not written — there is nothing here worth revoking a
+receipt for.
+
+**The cost side, measured on this box (2026-09-08).** `scorer_fidelity_gate()` runs in **5.55 ms**
+and produces **5,858 bytes** of canonical JSON. A receipt validation executes it **twice** (once in
+`speculation_quality_gate`, once inside `validated_speculation_gate_receipt`'s full recompute), so
+the matrix costs **11.1 ms** per validation. The same validation cannot avoid one
+`speculation_implementation_digest()`, which reads and AST-parses every shipped `.py`: **4,162 ms**,
+beside a second identity derivation of comparable weight. The 15-case matrix is therefore **0.13 %**
+of one receipt validation. In the receipt body it is **2.2 %** of `_MAX_SCORER_BYTES` (262,144) and
+**0.56 %** of `_MAX_RECEIPT_BYTES` (1,048,576). The wall-clock halves are timed by calling
+`scorer_fidelity_gate()` and `speculation_implementation_digest()` in a loop; the byte half is
+re-derived on every suite run by
+`tests/test_card_scorer_fidelity_gate.py::test_the_matrix_the_receipt_carries_is_a_bounded_share_of_its_byte_budget`,
+so that number cannot go stale behind this paragraph.
+
+**The benefit side, measured — and this is what decides it.** The recommendation's second branch
+keeps "a handful of forced-gate cases" — `forced_pending`, `forced_seed`, `no_forced_debug`,
+`forced_budget` — and moves the other 11 to `tests/`. Those four make the legacy authority emit
+**3 of the 8** distinct `(kind, _reason)` verdicts the whole matrix reaches. The five they never
+reach are `merge top-2`, `ablate highest-impact param`, `bandit: merge top-2`,
+`bandit: ablate highest-impact param` and `bandit: exploit best` — the entire merge cadence, the
+entire ablate cadence and the whole operator-bandit path, which is exactly where the Card lane and
+`GreedyTree.next_actions` have the most room to disagree (the two protected cadences are the only
+places the Card lane must decline to own an action at all, and `ablate_every_at` /
+`bandit_untried_ablate` are the two rows that pin that). A receipt issued after the shrink would
+carry an assertion of parity it had not checked on any of them. Trading 5 of 8 verdicts of live
+evidence for 0.13 % of a validation is not a cleanup.
+
+The recommendation's first branch — "a digest of the offline test result" — is worse rather than
+cheaper. The matrix is the receipt's ONLY runtime evidence that the tree that issued it still has
+`card_next_actions` tracking `GreedyTree.next_actions`; a test-suite result is a property of a tree
+nobody is obliged to have tested before issuing a receipt. `scorer_fidelity.py`'s own docstring is
+built the other way on purpose ("the gate is deliberately pure and self-contained: it reads no
+configuration, files, clocks, or environment variables"), and swapping evidence for a reference to a
+test run that may never have happened is the substitution this gate exists to refuse.
+
+**The blocker the 2026-08-05 note named is mis-identified — which does not save the finding.** That
+note treats "every already-issued receipt stops verifying" as the distinctive cost of touching the
+scorer body. It is not distinctive: `speculation_implementation_digest` hashes the semantic AST of
+*every* shipped `.py` plus `serve/settings_ui_schema.json` and `pyproject.toml`, and
+`validated_speculation_gate_receipt` refuses outright when that digest moved — so **every semantic
+commit anywhere in `looplab/` already revokes every issued receipt**, exactly as
+`engine/speculation_gate.py`'s own comment records ("The next `pip install -U` (or any source edit)
+revoked the receipt"). The incremental revocation breadth of the move would have been zero, and the
+`self_digest` bump would have been redundant with a refusal that fires first. So the reason not to do
+it is the evidence loss above, not the receipt fleet.
+
+**A later review wants this matrix EXTENDED, not moved out.**
+`docs/50-architecture-review-2026-09-02.md` SE-01 (severity M, confidence C, driven on a 5-node
+board) records that the Card lane's width is unrestricted for `EvolutionaryPolicy` and `MCTSPolicy`
+while "the fidelity matrix is pinned 'greedy-only' as a fact", and proposes "add both policies to the
+fidelity matrix"; `tests/test_asha_expansion_parity.py` exists for the same gap and pins that
+`SCORER_FIDELITY_CASE_NAMES` is still GreedyTree-only. A LOW `over-engineering` finding that deletes
+the matrix from the receipt and an M finding with driven evidence that grows it cannot both be right.
+
+**Nothing moved, so nothing had to be ported — and the four self-raising assertions the finding
+cites already have test twins.** The `AssertionError`s at the module's canon check, `_bandit_cases`'
+`yield_counts` check, `_cases`' order/bound check and `scorer_fidelity_gate`'s per-case accounting
+stay in production because they are the gate's fail-closed guards, not its coverage; the same
+properties are driven from `tests/` by
+`test_bandit_yield_fixture_uses_unequal_nonzero_exploration_counts` (the unequal-count fixture
+property) and `test_scorer_fidelity_matrix_is_exact_bounded_and_json_ready` (the canonical 15-name
+order and the bounded JSON). What this decline added is two more of those:
+`test_the_matrix_the_receipt_carries_is_a_bounded_share_of_its_byte_budget` and
+`test_the_forced_cases_alone_would_drop_the_cadence_and_bandit_verdicts`, which re-derive both halves
+of the number above so the decline cannot quietly become false — the same rule CLAUDE.md states for
+machine constraints (measure it, do not write it down).
+
+**This resolution revokes no receipt.** It adds `#` comments only to shipped Python (above the
+fixture builders in `looplab/search/scorer_fidelity.py`), and `_semantic_source` hashes
+`ast.dump(...)` without attributes, so comments never reach the digest at all. Verified by
+re-deriving `_manifest_entry` for that file with and without the added comment: identical row,
+`sha256:8ac6a022…`. Everything else landed in `tests/` and `docs/`, neither of which the manifest
+covers.
+
+**What this decline does NOT close.** It refuses the removal, not the module. Growing the matrix
+(doc 50 SE-01's `EvolutionaryPolicy`/`MCTSPolicy` rows, or the ASHA lane
+`tests/test_asha_expansion_parity.py` names) is a separate, welcome change — and, unlike this one, it
+IS a receipt-schema change with the revocation the 2026-08-05 note describes, because it moves
+`SCORER_FIDELITY_CASE_NAMES` and therefore the scorer body every receipt carries.
 
 #### SE-13 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
