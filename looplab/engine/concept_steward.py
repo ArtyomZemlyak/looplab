@@ -21,6 +21,7 @@ from typing import Optional
 
 from looplab.trust.cross_run import cross_run_text
 from looplab.core.receipts import bounded_receipt_count
+from looplab.engine.concept_capsules import CAPSULE_SOURCE_COUNTS
 
 _MAX_PROPOSALS = 12          # a bounded curation per pass — the steward suggests the highest-value few
 _MAX_GRAPH = 200             # cap the concepts shown to the model (most-explored first) — bounded prompt
@@ -75,12 +76,12 @@ def _concept_prompt_payload(overview: dict) -> tuple[list[dict], dict[str, str]]
 
 def _concept_source_receipt(overview: dict, payload: list[dict]) -> dict:
     """Normalize capsule-source and model-visible vocabulary projection receipts."""
-    keys = (
-        "partial_capsules", "source_unknown_capsules",
-        "source_concepts_omitted", "source_outcomes_omitted",
-    )
+    # The field set is the WRITER's declaration, imported rather than respelled (doc 25 EM-12).
+    # This tuple used to be a local copy of four literals whose producer lives in another module,
+    # so a count added to `capsule_source_summary` would have been read here as absent — i.e. as
+    # zero, the OPTIMISTIC direction — while this validator went on reporting the receipt known.
     source = overview if isinstance(overview, dict) else {}
-    raw_counts = {key: source.get(key) for key in keys}
+    raw_counts = {key: source.get(key) for key in CAPSULE_SOURCE_COUNTS}
     # This validator spelled the count guard `isinstance(v, int) and not isinstance(v, bool)` while
     # its siblings in `claims_health`/`memory` spelled it `type(v) is int` (doc 25 EM-12). The two
     # agree on everything JSON can produce and disagree only on an in-process `int` subclass, so no
@@ -93,7 +94,7 @@ def _concept_source_receipt(overview: dict, payload: list[dict]) -> dict:
         key: value if bounded_receipt_count(value, _MAX_RECEIPT_COUNT) else 0
         for key, value in raw_counts.items()
     }
-    # `_capsule_source_summary` defines source_complete = (partial_capsules == 0 AND
+    # `capsule_source_summary` defines source_complete = (partial_capsules == 0 AND
     # source_store_complete), so the consistency check has to read BOTH axes. Comparing it against
     # `partial_capsules == 0` alone reported a well-formed overview whose only defect was quarantined
     # durable rows (no partial capsules, store incomplete) as receipt_known=False — "malformed or
@@ -174,16 +175,19 @@ def concept_curation_snapshot(memory_dir, *, aliases: Optional[dict] = None,
     """Freeze one portfolio overview and its exact prompt digest before a durable paid claim."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
+    from looplab.engine.governance_health import observed_path_missing
+    from looplab.engine.governance_protocol import governed_projection
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
 
     base = Path(memory_dir) if memory_dir else None
     if _governance is None:
-        return project_governed_sources(
+        return governed_projection(
             memory_dir,
             lambda governance: concept_curation_snapshot(
                 memory_dir, aliases=aliases, splits=splits,
                 max_proposals=max_proposals, _governance=governance),
+            # The capsules are read unconditionally below, so they are a fixed name; the concept
+            # POLICY is taken only when this call has to resolve one of the two halves itself.
             include_concepts=aliases is None or splits is None,
             source_names=("concept_capsules.jsonl",),
         )

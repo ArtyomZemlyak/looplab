@@ -8,6 +8,9 @@ Design (see 08-tracing-architecture.md):
 - When `opentelemetry-api` (+ an SDK/exporter configured via OTEL_* env) is importable, each
   span is ALSO opened as a genuine OpenTelemetry span, so ANY OTLP collector (Jaeger / Tempo /
   Honeycomb / …) receives it with no code change. Without the package the bridge is a no-op.
+  A mirrored generation/tool span carries the OTel GenAI semantic conventions (`gen_ai.*`) BESIDE
+  LoopLab's own attribute names, never instead of them — see `genai_semconv` for the mapping, for
+  what it refuses to guess, and for why the durable `spans.jsonl` row is left byte-identical.
 - Export is ASYNCHRONOUS, so a reader/owner boundary raises a barrier (`Tracer.force_flush`) over
   everything the exporter has accepted — a row already handed to the writer included, not just the
   queued ones. State what it settles precisely: the ONE delegate attempt each accepted row gets, and
@@ -385,6 +388,28 @@ def current_ids() -> tuple[Optional[str], Optional[str]]:
     return (st[-1]["trace_id"], st[-1]["span_id"]) if st else (None, None)
 
 
+# How many COMMITS produced a generation span's `cost`/`usage`. Set only by `record_paid_call`,
+# i.e. only from inside `CostAccountant.add`, so its presence is the span's proof that the money on
+# it came from the ledger's own commit rather than from a caller's after-the-fact stamp — which is
+# exactly what `ObservationHandle.cost`/`.usage` need to know before overwriting a sum with one
+# attempt's figure. A generation with no such key was never billed from below (a test double, a
+# client with no accountant), and there the caller's stamp remains the only account there is.
+SPAN_BILLINGS_KEY = "cost_billings"
+
+
+def _sum_usage(existing, delta: dict) -> dict:
+    """Add one commit's normalized usage onto what the span already carries.
+
+    Every field is summed, `total` included: two attempts of one call are two provider requests and
+    the ledger records two rows, so the span that stands for both has to say what the pair cost in
+    tokens as well as in dollars. `_token_int` is total over junk, so a provider that reported "n/a"
+    on one attempt contributes 0 rather than taking the traced call down with it.
+    """
+    base = existing if type(existing) is dict else {}
+    return {key: _token_int(base.get(key)) + _token_int(delta.get(key))
+            for key in ("prompt", "completion", "total")}
+
+
 def record_paid_call(cost, usage=None) -> bool:
     """Stamp what one provider call COST onto the generation span open around it, AT THE MOMENT THE
     MONEY IS COMMITTED — not after the call returns. Returns whether a generation span took it.
@@ -402,22 +427,22 @@ def record_paid_call(cost, usage=None) -> bool:
     no span record at all it is the whole of the $2.3214 by which `sum(llm_usage.cost)` exceeded
     `sum(generation span cost)` on that arm.
 
-    Deliberately WRITE-ONCE-FROM-BELOW: it fills `cost`/`usage` only when they are absent, and the
-    caller's own richer stamp still runs afterwards on the success path and wins. Deliberately
-    silent when nothing is traced (or the innermost span is not a generation) — like every other
-    entry point here, observability may not decide whether the paid work proceeds.
+    IT ACCUMULATES, because one generation can be billed more than once. `_account_keepalive_stall`
+    bills attempt 1 of a stalled stream and the retry's success bills attempt 2, both under the ONE
+    span the caller opened around the whole call, and both append their own `llm_usage` row. A
+    write-once stamp kept the first figure and the caller's own `.cost(...)` then replaced it with
+    the last attempt's alone, so `sum(llm_usage.cost) > sum(generation cost)` on any stall-retry run
+    — the inequality the MEASURED paragraph above exists to close, one attempt further in. The span
+    therefore carries the SUM of every commit made under it, and `cost_billings` says how many
+    commits that was: `1` is the ordinary call, `>= 2` is a generation whose money is spread over
+    retries, which no reader could previously see at all.
 
-    OPEN[span-cost-keeps-the-last-attempt-only] a generation billed MORE THAN ONCE — a keepalive
-    stall billed on attempt 1, a success billed on attempt 2, under ONE span — still leaves the
-    span carrying only the last attempt's cost against two ledger rows.
-    proof:`present:and "cost" not in attrs:@looplab/core/tracing.py`
-    REVIEW 2026-08-30 (money-accounting): `_account_keepalive_stall` appends an `llm_usage` row
-    and stamps here; the retry's success appends a second row and the caller's stamp overwrites
-    with attempt 2's figures alone, so `sum(llm_usage.cost) > sum(generation cost)` on any
-    stall-retry run — the exact inequality this function's own MEASURED paragraph was written to
-    close, and `tests/test_paid_calls_are_spanned.py`'s conservation check would fail on that
-    shape if a scenario produced it. Accumulate instead of write-once (and let the caller's stamp
-    add rather than replace), or narrow the headline claim to single-billing generations.
+    The caller's own `.usage(...).cost(...)` still runs on the success path and now DEFERS to that
+    sum (`ObservationHandle.cost`), because the last attempt's figure is already inside it. Nothing
+    else changes for the single-billing generation that is the overwhelming case: a sum of one term
+    is that term, and its `cost`/`usage` bytes are what they always were. Deliberately silent when
+    nothing is traced (or the innermost span is not a generation) — like every other entry point
+    here, observability may not decide whether the paid work proceeds.
     """
     rec = next((r for r in reversed(_stack.get()) if r.get("kind") == "generation"), None)
     if rec is None:
@@ -425,12 +450,28 @@ def record_paid_call(cost, usage=None) -> bool:
     try:
         handle = SpanHandle(rec, None)
         attrs = rec.get("attributes") or {}
-        if usage and "usage" not in attrs:
-            handle.set("usage", _norm_usage(usage))
-        if cost is not None and "cost" not in attrs:
+        # How many commits already landed on THIS span. `0` means this is the first, so the stamp
+        # replaces (there is nothing to add to, and any earlier caller-side value described no
+        # committed money); from the second commit on, every figure is added to the running total.
+        prior = attrs.get(SPAN_BILLINGS_KEY)
+        prior = prior if type(prior) is int and prior > 0 else 0
+        billed = False
+        if usage:
+            delta = _norm_usage(usage)
+            handle.set("usage", _sum_usage(attrs.get("usage"), delta) if prior else delta)
+            billed = True
+        if cost is not None:
             value = float(cost)
             if math.isfinite(value):
+                if prior:
+                    already = attrs.get("cost")
+                    already = float(already) if type(already) in (int, float) else 0.0
+                    value = already + value if math.isfinite(already) else value
                 handle.set("cost", value)
+                billed = True
+        if billed:
+            # Written LAST, so a span only ever claims a billing whose figures are already on it.
+            handle.set(SPAN_BILLINGS_KEY, prior + 1)
     except Exception:  # noqa: BLE001 - the tracer's diagnostic boundary must stay non-throwing
         return False
     return True
@@ -651,13 +692,29 @@ class ObservationHandle:
             self._h.set("output", _trace_text(text if isinstance(text, str) else _as_text(text)))
         return self
 
+    def _billed_from_below(self) -> bool:
+        """Has `record_paid_call` already committed this generation's money onto the span?
+
+        THE ONE PLACE THE TWO STAMPS COULD DISAGREE. Every priced call reaches the span twice: once
+        from inside `CostAccountant.add` at the moment of commit, once from the caller on the line
+        after the provider returns. For a call billed ONCE those are the same figures and it never
+        mattered which wrote last. For a call billed TWICE — a keepalive stall, then the retry that
+        succeeded — the commits sum to what the ledger holds and the caller's stamp names only the
+        last attempt, so replacing is how a run's spans came to say less than its `llm_usage` rows.
+        The commit side is authoritative because it is the side that sees every attempt.
+        """
+        # No handler on purpose, like every sibling stamp here: `attributes` is the span record's
+        # own dict (`SpanHandle.attributes` creates it), and the callers below have already checked
+        # `self._h is not None`. A `try` here would be containment theatre around a dict lookup.
+        return type(self._h.attributes.get(SPAN_BILLINGS_KEY)) is int
+
     def usage(self, tokens) -> "ObservationHandle":
-        if self._h is not None and tokens:
+        if self._h is not None and tokens and not self._billed_from_below():
             self._h.set("usage", _norm_usage(tokens))
         return self
 
     def cost(self, c) -> "ObservationHandle":
-        if self._h is not None and c is not None:
+        if self._h is not None and c is not None and not self._billed_from_below():
             try:
                 value = float(c)
                 if math.isfinite(value):
@@ -1388,15 +1445,54 @@ class JsonlSpanExporter:
         self._export_line(_span_jsonl_line(span))
 
     def _export_line(self, line: bytes, *, pre_commit=None) -> None:
-        """Commit one row prepared by this module's bounded serializer.
+        """Commit ONE prepared row — `_export_lines` with a batch of one, kept for the callers that
+        genuinely have one row: `export` (the synchronous path) and the async exporter's loss
+        receipt, which must never be batched behind the queue it reports on."""
+        self._export_lines((line,), pre_commit=pre_commit)
 
-        This private seam lets ``AsyncJsonlSpanExporter`` serialize once on submit for exact byte
-        accounting, then move only the file I/O to its worker.  It is deliberately not a generic raw
-        append API: callers cannot use it to bypass the one-row/newline/physical-size contract.
+    def _export_lines(self, lines, *, pre_commit=None) -> None:
+        """Commit N rows prepared by this module's bounded serializer under ONE hardened ladder.
+
+        THE COST THIS AMORTIZES (`docs/34-review-deferred-decisions-2026-08-13.md` D-02, closed
+        2026-09-08). Every exported row used to run the whole ladder for itself: roughly three
+        hardened opens (~12 `stat` calls), two `flock`s, a torn-tail heal read and a 4 KiB
+        read-and-parse of the receipt journal, where the previous synchronous exporter did one
+        `open(path, "ab")` and one `write`. On the node this codebase
+        measures elsewhere — 14,507 spans — that is ~43k opens and ~174k stat calls for a single
+        node, and on the geesefs/S3 mount a run root usually lives on (a present-file `lstat` ~0.4
+        ms) the metadata I/O alone is on the order of a minute per node, paid on the ONE exporter
+        worker thread whose queue is bounded and drop-newest. Overflow there is silently lost spans,
+        so the throughput of this ladder is a data-loss question, not only a latency one.
+
+        WHAT IS AMORTIZED AND WHAT IS NOT. The hardening is unchanged in KIND and moves in
+        GRANULARITY, which is the trade doc 34 named and refused to make silently: the guarded open
+        (`O_NOFOLLOW`/`O_NONBLOCK`), the torn-tail heal, the before/after identity stats and the
+        change-token CAS all still run — once per DRAIN instead of once per row — and the drain
+        writes one append receipt binding the whole appended byte range. No property is dropped: the
+        receipt reader (`events/span_index.py::_validated_append_transition`) already validates a
+        transition by hashing `[before_size, after_size)`, so a receipt covering N rows is checked
+        exactly as strictly as N receipts covering one row each, with no schema change and no new
+        key. What changes is that the identity CAS now holds at flush granularity — a run-root
+        replacement mid-drain is caught before the drain commits rather than between two rows of it.
+
+        WHAT A FAILURE COSTS. One drain is one delegate attempt, so a raising ladder now loses the
+        rows of that drain rather than one row; the exporter counts every one of them
+        (`_export_failures`) and the loss receipt reports them. That is the honest accounting: the
+        failures this ladder produces (a replaced run root, a full disk, a stale descriptor) are
+        properties of the path and not of the row, so the rows of one drain fail together anyway.
+
+        It is deliberately not a generic raw append API: callers cannot use it to bypass the
+        one-row/newline/physical-size contract, which is checked per row BEFORE the lock is taken.
         """
-        if (type(line) is not bytes or not line.endswith(b"\n")
-                or b"\n" in line[:-1] or len(line) > TRACE_JSONL_ROW_MAX_BYTES):
-            raise ValueError("prepared trace row violates the physical JSONL contract")
+        rows = tuple(lines)
+        for line in rows:
+            if (type(line) is not bytes or not line.endswith(b"\n")
+                    or b"\n" in line[:-1] or len(line) > TRACE_JSONL_ROW_MAX_BYTES):
+                raise ValueError("prepared trace row violates the physical JSONL contract")
+        if not rows:
+            # No bytes to append is no ladder, no receipt and no file creation: an empty drain must
+            # not look like a zero-length append to the receipt chain.
+            return
         # An exporter object can survive ``fork()``.  Never acquire the inherited process-local lock:
         # its owner may have been another thread that does not exist in the child.
         pid = os.getpid()
@@ -1415,9 +1511,9 @@ class JsonlSpanExporter:
             # after our append, so there is still no late data in the published generation.
             if pre_commit is not None and not pre_commit():
                 raise _AsyncExportAbandoned()
-            self._export_line_guarded(line)
+            self._export_lines_guarded(rows)
 
-    def _export_line_guarded(self, line: bytes) -> None:
+    def _export_lines_guarded(self, lines) -> None:
         """Commit while the canonical path lock and cross-plane writer guard are both held."""
         with _open_export_append(self.path) as f, _interprocess_export_guard(f):
             # A killed writer can leave the final JSON record without its committing newline.  Every
@@ -1437,7 +1533,12 @@ class JsonlSpanExporter:
             # also pins the write to the healed EOF, but the seek keeps the Python buffering contract
             # explicit and portable.
             f.seek(0, os.SEEK_END)
-            f.write(line)
+            # Hashed as it is written rather than joined first: the receipt binds the whole appended
+            # REGION, and a 16 MiB drain has no reason to exist twice in memory to say so.
+            appended = hashlib.sha256()
+            for line in lines:
+                f.write(line)
+                appended.update(line)
             # Release the cross-process guard only after the buffered bytes reach the descriptor.
             # This is a visibility/serialization boundary, not an fsync durability promise.
             f.flush()
@@ -1454,7 +1555,7 @@ class JsonlSpanExporter:
                 "after_mtime_ns": after_stat.st_mtime_ns,
                 "after_ctime_ns": after_stat.st_ctime_ns,
                 "after_change_token": trace_file_change_token(f.fileno(), after_stat),
-                "append_sha256": hashlib.sha256(line).hexdigest(),
+                "append_sha256": appended.hexdigest(),
             })
 
 
@@ -1746,7 +1847,12 @@ class AsyncJsonlSpanExporter:
 
     def _worker_loop(self) -> None:
         while True:
-            item: Optional[bytes] = None
+            # ONE DRAIN, ONE LADDER (doc 34 D-02). The worker takes everything the queue holds and
+            # hands it to the writer as a single append, so the hardened open / heal / identity
+            # CAS / receipt ladder is paid per FLUSH instead of per span. The batch is bounded
+            # by the queue's own admission bounds (`max_queue_spans`, `max_queue_bytes`) — the rows
+            # already resident and charged to `_buffered_bytes`, never a new allocation policy.
+            batch: list[bytes] = []
             loss: Optional[tuple[dict[str, int], int]] = None
             with self._condition:
                 while True:
@@ -1775,8 +1881,9 @@ class AsyncJsonlSpanExporter:
                         self._active = True
                         break
                     if self._queue:
-                        item = self._queue.popleft()
-                        # Keep its bytes charged until delegate export returns.
+                        batch = list(self._queue)
+                        self._queue.clear()
+                        # Keep their bytes charged until the delegate export returns.
                         self._active = True
                         break
                     if self._shutdown or self._retire_requested:
@@ -1856,20 +1963,21 @@ class AsyncJsonlSpanExporter:
                     self._condition.notify_all()
                 continue
 
-            assert item is not None
+            assert batch
             succeeded = False
             abandoned = False
             export_error = ""
             try:
-                # Exactly one delegate attempt. Retrying after an exception could duplicate a row
-                # whose bytes committed before a post-write identity/visibility check failed.
-                self._writer._export_line(item, pre_commit=self._active_may_commit)
+                # Exactly one delegate attempt for the drain. Retrying after an exception could
+                # duplicate rows whose bytes committed before a post-write identity/visibility check
+                # failed — the same ambiguity rule as before, now over the batch that was attempted.
+                self._writer._export_lines(batch, pre_commit=self._active_may_commit)
                 succeeded = True
             except _AsyncExportAbandoned:
                 abandoned = True
                 with self._condition:
                     self._record_drop_locked(
-                        "shutdown_timeout", durable=False)
+                        "shutdown_timeout", len(batch), durable=False)
             except Exception as exc:  # noqa: BLE001 - diagnostics never crash the observed operation
                 # SWALLOWED, but no longer SILENT. Retaining the delta for a later attempt is right;
                 # discarding the reason is what made this class undiagnosable.
@@ -1877,14 +1985,18 @@ class AsyncJsonlSpanExporter:
             with self._condition:
                 if export_error:
                     self._last_export_error = export_error
-                self._buffered_bytes = max(0, self._buffered_bytes - len(item))
+                self._buffered_bytes = max(
+                    0, self._buffered_bytes - sum(len(row) for row in batch))
                 self._active = False
                 if succeeded:
-                    self._exported_spans += 1
+                    self._exported_spans += len(batch)
                 elif not abandoned:
-                    self._export_failures += 1
+                    # COUNTED IN ROWS, not in attempts: this number is a LOSS figure — it is what
+                    # the durable loss receipt and the trace-view summary publish as spans that
+                    # never reached the file — and a batched attempt loses every row it carried.
+                    self._export_failures += len(batch)
                     if not self._abandon_active:
-                        self._unreported_export_failures += 1
+                        self._unreported_export_failures += len(batch)
                         if self._next_receipt_at <= 0:
                             self._next_receipt_at = time.monotonic()
                 self._condition.notify_all()
@@ -2056,6 +2168,92 @@ class AsyncJsonlSpanExporter:
         self.shutdown()
 
 
+# --- OTel GenAI semantic conventions (the OTLP mirror only) --------------------------------------
+# WHY BESIDE AND NOT INSTEAD. The bridge opened every span with LoopLab's own attribute names — `op`,
+# `model`, `model_parameters`, `usage` — so a collector could see the tree and nothing generic could
+# read the LLM call inside it: no GenAI dashboard, no cost/token panel, no cross-tool comparison.
+# RENAMING them was refused: `spans.jsonl` is the same attribute map, and `events/traceview.py`,
+# `looplab timings`, `looplab tokens`, the trace view and every source pin over them read the current
+# names. So the conventions are ADDITIVE — the same facts, restated under `gen_ai.*`, written to the
+# OTLP span only (`SpanHandle._mirror`), leaving the durable row byte-identical.
+#
+# WHAT IS DELIBERATELY NOT ASSERTED. `gen_ai.provider.name` / `gen_ai.system`: LoopLab talks to an
+# OpenAI-COMPATIBLE endpoint that may be Ollama, vLLM, SGLang, a LiteLLM proxy or OpenAI itself, and
+# the client cannot tell which — a guessed provider is worse than an absent one, because a collector
+# groups spend by it. `gen_ai.response.model`: no span records what the endpoint answered WITH, only
+# what was asked for. Neither is invented here; both land the day the client records the fact.
+#
+# The conventions are still Development-status upstream, which is why this stays a mirror of facts we
+# already hold rather than a schema LoopLab depends on: a renamed convention key changes this table
+# and nothing else.
+_GENAI_REQUEST_PARAMS = {"temperature": "gen_ai.request.temperature",
+                         "top_p": "gen_ai.request.top_p",
+                         "max_tokens": "gen_ai.request.max_tokens",
+                         "seed": "gen_ai.request.seed"}
+# `_norm_usage`'s short form is what a span carries; the OpenAI spelling is accepted too so a caller
+# that stamps a raw provider payload maps the same way.
+_GENAI_USAGE = {"prompt": "gen_ai.usage.input_tokens", "completion": "gen_ai.usage.output_tokens",
+                "prompt_tokens": "gen_ai.usage.input_tokens",
+                "completion_tokens": "gen_ai.usage.output_tokens"}
+
+
+def _mirror_attributes(otel_span, attributes: Mapping) -> None:
+    """Write attributes to an OTLP span and nowhere else — the ONE mirror-only write.
+
+    Kept a free function so the two callers (`Tracer.span` at open, `SpanHandle.set` for a late key)
+    share one containment site instead of growing one each: mirroring is diagnostics, and a bridged
+    provider that raises must cost the span nothing.
+    """
+    if not attributes:
+        return
+    for key, value in attributes.items():
+        try:
+            otel_span.set_attribute(key, value)
+        except Exception:  # noqa: BLE001 — a broken bridged provider must not fail the span
+            pass
+
+
+def genai_semconv(kind: str, attributes: Mapping) -> dict:
+    """LoopLab's span attributes restated in the OTel GenAI conventions — a pure, total mapping.
+
+    Takes whatever subset of a span's attributes is at hand (the initial map at `Tracer.span`, or one
+    late `SpanHandle.set` key) and returns only the conventions those facts support. Never guesses:
+    an attribute that is absent, empty or the wrong type simply produces no convention key, because a
+    wrong `gen_ai.*` value is read by generic tooling as authoritative.
+    """
+    out: dict = {}
+    if kind == "generation":
+        op = str(attributes.get("op") or "").strip().lower()
+        if op:
+            # The convention's operation vocabulary, not ours: everything this client does is a chat
+            # completion except an embedding call. `op` itself stays on the span under its own name.
+            out["gen_ai.operation.name"] = "embeddings" if "embed" in op else "chat"
+        model = attributes.get("model")
+        if isinstance(model, str) and model.strip():
+            out["gen_ai.request.model"] = model
+        params = attributes.get("model_parameters")
+        if isinstance(params, Mapping):
+            for ours, theirs in _GENAI_REQUEST_PARAMS.items():
+                value = params.get(ours)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    out[theirs] = value
+        usage = attributes.get("usage")
+        if isinstance(usage, Mapping):
+            for ours, theirs in _GENAI_USAGE.items():
+                value = usage.get(ours)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    out.setdefault(theirs, value)
+    elif kind == "tool" and attributes.get("tool"):
+        # Only a real TOOL observation: `structured_parse` also opens `kind="tool"` (it carries a
+        # `parser`, never a `tool`), and calling a parser choice an executed tool would be a lie in
+        # the one vocabulary a collector reads without knowing anything about LoopLab.
+        name = attributes.get("tool")
+        if isinstance(name, str) and name.strip():
+            out["gen_ai.operation.name"] = "execute_tool"
+            out["gen_ai.tool.name"] = name
+    return out
+
+
 class SpanHandle:
     """Handle yielded by `Tracer.span` to enrich the span after it opens: attributes (e.g. the
     metric/exit once known) and point-in-time events (e.g. a tool call). Mirrors to OTel."""
@@ -2129,7 +2327,16 @@ class SpanHandle:
                 self._otel.set_attribute(key, value if isinstance(value, (str, int, float, bool)) else str(value))
             except Exception:  # noqa: BLE001
                 pass
+            # BESIDE it, the same fact under the GenAI conventions (see `genai_semconv`). Late keys
+            # matter as much as the opening ones: `usage` is stamped after the call returns, and it
+            # is the whole of `gen_ai.usage.*`. The durable record is untouched — mirror only.
+            self._mirror(genai_semconv(self._rec.get("kind"), {raw_key: value}))
         return self
+
+    def _mirror(self, attributes: Mapping) -> None:
+        """Write attributes to the OTLP span ONLY — never to `self._rec`, which is `spans.jsonl`."""
+        if self._otel is not None:
+            _mirror_attributes(self._otel, attributes)
 
     def set_many(self, **kv) -> "SpanHandle":
         for k, v in kv.items():
@@ -2327,6 +2534,10 @@ class Tracer:
                     otel_span.set_attribute(k, v if isinstance(v, (str, int, float, bool)) else str(v))
                 except Exception:  # noqa: BLE001
                     pass
+            # The GenAI conventions BESIDE our own names, so a collector can read this span as an LLM
+            # call without knowing anything about LoopLab (`genai_semconv`). Same values, same
+            # sanitized attribute map, OTLP only — the durable row keeps LoopLab's names alone.
+            _mirror_attributes(otel_span, genai_semconv(kind, attributes))
             try:
                 # The random trace id is insufficient to join concurrent LoopLab runs in an external
                 # collector.  Keep the opaque, already-sanitized run identity on every mirrored span;
