@@ -170,7 +170,7 @@ def test_partial_source_receipt_changes_paid_digest_and_prompt_envelope():
 def test_quarantined_durable_row_is_a_known_receipt_not_an_unreadable_one(tmp_path):
     """A store that lost a row to quarantine is READABLE and says the source is INCOMPLETE.
 
-    `_capsule_source_summary` derives source_complete from BOTH axes (no partial capsules AND a
+    `capsule_source_summary` derives source_complete from BOTH axes (no partial capsules AND a
     healthy store), so a receipt check that reads only `partial_capsules == 0` misfiles this
     overview as malformed/unknown. Both verdicts fail closed for split/purge, but they tell the
     steward two different facts and imply two different repairs (re-read the producer vs. repair

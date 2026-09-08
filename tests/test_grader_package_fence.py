@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from looplab.tools.env_inspect import EnvInspectTools
+from looplab.tools.env_inspect import PACKAGE_NAMING_SLOTS, EnvInspectTools
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,18 +62,33 @@ def test_an_undeclared_package_is_untouched_and_no_fence_is_the_default():
         "pkg_info", {"name": "json"})
 
 
+# Every STRING argument in this provider's specs that is NOT a package/module name, with the reason.
+# A written-down omission, the shape CLAUDE.md's registries use: the coverage test below refuses a
+# string slot that is in neither this set nor `PACKAGE_NAMING_SLOTS`, so a fifth naming slot lands
+# either fenced or red — never silent, which is what a bare intersection gave.
+NOT_A_PACKAGE_SLOT = {
+    "query": "a search string run against a package the `package` slot already fenced",
+}
+
+
 def test_every_naming_tool_is_covered_rather_than_the_four_we_remembered():
-    """Re-derived from the provider's OWN specs, not from the table above: a tool added later that
-    names a package gets no fence unless its slot is one the dispatch checks, and the table would
-    not know. Tier 3 of CLAUDE.md's ladder — AST over the real spec list, never a substring."""
-    slots = {"name", "target", "module", "package"}
+    """Re-derived from the provider's OWN specs AND from the fence's own slot tuple.
+
+    The previous version intersected the specs with a hand-copy of the four slot names and
+    `continue`d when the intersection was empty, so a tool naming a package in a FIFTH slot passed
+    this test exactly as it passed dispatch. Both halves now come from the module under test.
+    """
     for spec in EnvInspectTools().specs():
         fn = spec.get("function", spec)
         props = ((fn.get("parameters") or {}).get("properties") or {})
-        named = slots & set(props)
-        if not named:
-            continue                      # gpu_info names no package — nothing to fence
-        for slot in named:
+        for slot, schema in props.items():
+            if (schema or {}).get("type") != "string":
+                continue                  # `lines`, `max_hits`: an integer names no package
+            assert slot in PACKAGE_NAMING_SLOTS or slot in NOT_A_PACKAGE_SLOT, (
+                f"{fn.get('name')} takes a string `{slot}` the grader fence never screens — "
+                "add it to PACKAGE_NAMING_SLOTS, or record here why it cannot name a package")
+            if slot not in PACKAGE_NAMING_SLOTS:
+                continue
             out = EnvInspectTools(deny_packages=["AlgoTuner"]).execute(
                 fn.get("name", ""), {slot: "AlgoTuner"})
             assert "refused" in out, (

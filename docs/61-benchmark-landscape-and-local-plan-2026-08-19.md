@@ -5,7 +5,8 @@
 > line, plus **measurements taken on this box on 2026-08-19**, re-verified against `master`
 > `6fbd263b`. Nothing here flips a default.
 > Companion authorities: [docs/MLEBENCH.md](MLEBENCH.md) (the runbook),
-> [doc 27](27-agent-system-mega-review-2026-08-09.md) §4 (the agent eval ladder, still open),
+> [doc 27](27-agent-system-mega-review-2026-08-09.md) §4 (the agent eval ladder; rungs 2/4/5
+> closed 2026-09-08 — `looplab/judgebench/trajectory.py`),
 > [doc 41](41-external-works-synergy-2026-08-14.md) §3/§8 (the "run the benchmark" recommendation).
 
 **The question.** What benchmarks exist for agentic R&D systems, has anyone published a
@@ -35,7 +36,7 @@ consumer-GPU (4090-class) result, and what is the cheapest credible way to get a
 | [doc 10](10-autoresearch-improvement-research.md) | Leaderboard clustering 61–64 %; **pass@1 16.9 % → pass@8 34.1 %** — more attempts ≫ more compute per attempt. |
 | [doc 11](11-agent-systems-research.md) | Arbor 86.4 % MLE-bench-Lite; B6 held-out/generalization-gap named as the most-validated missing piece. |
 | [doc 13](13-external-works-analysis-2026-07.md) | MARS 62.67 % All (no framework code released); **AgentDS** (17 domain DS challenges) named as a ready-made eval target for the Genesis/deep-research half. |
-| [doc 27](27-agent-system-mega-review-2026-08-09.md) §4 | The five-tier **agent eval ladder** (routing → trajectories → outcomes → injection/confused-deputy → stochastic trials with CIs). Re-verified **STILL OPEN** on 2026-08-14. |
+| [doc 27](27-agent-system-mega-review-2026-08-09.md) §4 | The five-tier **agent eval ladder** (routing → trajectories → outcomes → injection/confused-deputy → stochastic trials with CIs). Re-verified STILL OPEN on 2026-08-14; **rungs 2, 4 and 5 closed 2026-09-08** (`looplab/judgebench/trajectory.py` + `trajectory_score.py`, `python -m looplab.judgebench score-trajectory`). Rung 3's task corpus — the outcome half this page is about — is still what the plan below is for. |
 | [doc 41](41-external-works-synergy-2026-08-14.md) §3, §8 | Frontis-MA1/OpenMLE; the explicit finding *"LoopLab has zero real MLE-bench runs with a private held-out grader … no published number"*; step 5 of the recommended order is one MLE-Bench Lite run reporting **raw and hack-adjusted** scores. |
 | [BACKLOG.md](BACKLOG.md) Theme D | **D1 real MLE-bench — shipped** (`adapters/mlebench_real.py`). **D2 self-benchmark harness — shipped** (`looplab bench`, `cli/export_cmds.py:66`). |
 
