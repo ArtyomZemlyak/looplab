@@ -2252,7 +2252,7 @@ class EvaluateMixin:
                             break
                         # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
                     await self._eval_write_terminal(a)
-        except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS):
+        except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS) as exc:
             # A deliberate stop is not a node failure. Cancellation is how a reset, an operator abort
             # and a run stop reach this worker; answering one with a `node_failed` would invent a
             # failure out of an intervention, and swallowing it would break structured concurrency.
@@ -2275,6 +2275,15 @@ class EvaluateMixin:
             # unconfirmed prediction was about to cross into the sandbox. Recording that as a node
             # failure and pausing would hide the exact thing the invariant exists to make impossible,
             # and would let the next run make the same crossing with a tidier receipt.
+            #
+            # …AND THE ONE THING THAT DOES HAPPEN BEFORE THE RE-RAISE. A `BudgetExceeded` in this
+            # tuple may have been raised by this node's OWN post-score bookkeeping — the inline
+            # repair, a stage check, the triage/diagnosis call — long after the sandbox finished and
+            # wrote its score. Propagating it straight up loses the terminal for compute the run has
+            # already bought, which is the same defect `orchestrator.py::_drain_inflight_evaluation`
+            # documents for the SIBLINGS of such a node. The stop is unchanged in class, message and
+            # timing; only the record survives it.
+            await self._land_terminal_before_ceiling(a, exc)
             raise
         except Exception as exc:                                       # noqa: BLE001 — see above
             # `Exception`, NOT `BaseException`, and the line is deliberate. Every measured production
@@ -2300,8 +2309,52 @@ class EvaluateMixin:
             # existed anyway.
             if any(isinstance(leaf, _EVAL_DELIBERATE_STOPS + (anyio.get_cancelled_exc_class(),))
                    for leaf in exception_leaves(exc)):
+                # Same terminal-first rule as the clause above, and it has to be repeated here
+                # rather than hoisted: a ceiling raised inside the nested watcher group arrives
+                # WRAPPED, so this is the branch a real one takes on the measured path.
+                await self._land_terminal_before_ceiling(a, exc)
                 raise
             await self._contain_eval_crash(node_id, a.generation, exc)
+
+    async def _land_terminal_before_ceiling(self, a: "EvalAttempt", exc: BaseException) -> None:
+        """Land THIS node's terminal before a spend ceiling raised by its own post-score bookkeeping
+        leaves the worker. No-op for every other stop, and for a node that has nothing to record.
+
+        THE WINDOW. `_evaluate`'s attempt loop runs RUN_ATTEMPT (the sandbox; the score is on disk
+        when it returns) and only then SETTLE_OUTCOME -> SALVAGE -> DECIDE_REPAIR -> APPLY_REPAIR,
+        every one of which can make a PAID call: the inter-stage check, the training-log judge, the
+        triage/diagnosis call, the repair critic, the repair itself. On a run that is at its ceiling
+        the next of those raises `BudgetExceeded`, and the terminal is written by WRITE_TERMINAL,
+        after all of them. So the run stopped holding a measured number it never recorded — the
+        node reads `pending` on resume and its GPU hours are bought a second time.
+
+        THREE GUARDS, and each is the reason this cannot double-write. `budget_stop_leaf` is asked
+        of the LEAVES (a ceiling from the nested watcher group arrives as an `ExceptionGroup`), so
+        an operator cancel, a reset and an ordinary crash all fall through untouched. `a.res is
+        None` means RUN_ATTEMPT never returned, i.e. there is no measurement to lose. And the
+        durable ledger is consulted for a terminal this lifecycle already wrote, because invariant
+        #2 is "exactly one terminal per node" — the fold takes the first and would ignore a second,
+        but a log carrying two is a lie about what happened, not a harmless duplicate.
+
+        CONTAINED, and deliberately so: this runs while a `BudgetExceeded` is already unwinding, and
+        a store error raised HERE would REPLACE it — the operator's own spend limit reaching them as
+        an ENOSPC. Losing the terminal to a store that cannot append is the lesser harm and it is
+        said out loud, exactly as `novelty.py::_offload_under_proposal_sink`'s publish `finally`
+        says it.
+        """
+        if budget_stop_leaf(exc) is None:
+            return
+        if a.res is None or a.generation < 0 or a.node is None:
+            return
+        try:
+            if any(e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED)
+                   and _durable_row_belongs(e.data, a.node_id, a.generation)
+                   for e in self.store.read_all()):
+                return                     # invariant #2: this lifecycle is already terminal
+            await self._eval_write_terminal(a)
+        except Exception:  # noqa: BLE001 — never replace the ceiling with a bookkeeping error
+            _LOG.warning("could not land node %s's terminal before the spend ceiling propagated",
+                         a.node_id, exc_info=True)
 
     async def _eval_record_superseded(self, a: "EvalAttempt") -> None:
         """The stale-generation terminal a reset owes this lifecycle: fold-budget-only (replay

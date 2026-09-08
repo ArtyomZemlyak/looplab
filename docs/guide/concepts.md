@@ -151,14 +151,17 @@ need no memo, because they record their `at_node` on every path: `lessons_distil
 even with zero lessons, and the report writer stamps `at_node` outside its own try, so even a
 provider failure closes the window.
 
-**Four of the five call it; the fifth is a refusal.** The serial deep research
-(`_maybe_deep_research`) keeps the old predicate on purpose. Its phase never stopped happening —
+**Four of the five call it outright; the fifth calls it conditionally.** The serial deep research
+(`_maybe_deep_research`) keeps the old predicate while `concurrent_research` is on. Its phase never
+stopped happening —
 the *concurrent* half of that same decision (`_spawn_research`) carries no such guard, and
 `research_completed (trigger=cadence)` is alive in every run on this box, including the three with
 zero quiescent prefixes. Opening the serial half mid-eval would put a main-task think and a
 background think at the same node count with only a read-then-write window between their shared
-mark check and their receipts, buying a double-spend to reach work already being done. The residual
-hole — `concurrent_research=false`, not the shipped default — is filed as backlog F1i-b.
+mark check and their receipts, buying a double-spend to reach work already being done. Under
+`concurrent_research=false` there is no second path to race, so there the serial gate DOES reach the
+creation boundary — it is the run's only research path, and on a GPU-shaped run the old predicate
+meant it never fired at all (backlog F1i-b, closed 2026-09-08).
 
 `Settings.cadence_while_evaluating` (ON) is the kill switch back, and it carries a
 `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row pinning it `false` for a run resumed from a snapshot written

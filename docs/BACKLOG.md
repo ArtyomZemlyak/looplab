@@ -3930,8 +3930,10 @@ the SERIAL half of a decision whose CONCURRENT half (`orchestrator._spawn_resear
 the three with zero quiescent prefixes. Opening the serial half mid-eval would put a main-task think
 and a background think at the same node count with only a read-then-write window between their shared
 `_cadence_research_marks` check and their receipts — a double-spend bought to reach work already being
-done. So four of five now call `at_creation_boundary` and the fifth is a stated refusal, pinned by
-`test_the_serial_deep_research_gate_is_deliberately_left_on_the_old_predicate`.
+done. So four of five call `at_creation_boundary` outright and the fifth calls it CONDITIONALLY —
+a refusal while `concurrent_research` is on, and the run's only research path when it is off — pinned
+by `test_the_serial_deep_research_gate_refuses_while_the_concurrent_half_is_live` and its twin
+`test_the_serial_gate_is_the_only_path_under_concurrent_research_false_and_now_fires` (F1i-b, below).
 
 **THE MONEY, and why these two need no memo.** §0.14's two consumers carry an in-process
 attempted-at-`n` memo because they record no `at_node` on their "nothing changed" path. These two
@@ -3951,15 +3953,21 @@ a status quo of never distilling at all.
 test reports `paid 0 distillations at one node count`. Each carries its kill-switch negative control
 in the same body, so `cadence_while_evaluating=false` still reproduces the historical predicate.
 
-**STILL OPEN — filed rather than patched.**
+**FILED RATHER THAN PATCHED HERE — AND SINCE CLOSED.**
 
-⬜ **F1i-b · the serial deep-research gate under `concurrent_research=false`.** Not the shipped default
-  OPEN[f1i-b-serial-deep-research-gate] proof:present:cadence_due@looplab/engine/cadence.py
-(`Settings.concurrent_research = True`), so no run on this box is affected, and every run in `runs/`
-carries `true`. Under `false` the concurrent half does not exist and the serial gate is the only path,
-which in a GPU-shaped run means deep research never fires at all. The fix is not the one-liner the
-other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
-under one claim rather than two reads. Do it when someone actually wants serial research.
+*F1i-b · the serial deep-research gate under `concurrent_research=false` — CLOSED 2026-09-08.* Under
+`false` the concurrent half does not exist (`_spawn_research` returns at its first line) and the
+serial gate is the only path, which in a GPU-shaped run meant deep research never fired at all. This
+entry asked for "the two paths to agree on a single spend, i.e. the mark check and the receipt under
+one claim rather than two reads" — and that is the fix for opening the gate GENERALLY, which is not
+what the hole needed. In the configuration the hole is about there is only ONE path, so there is
+nothing to agree with: `_maybe_deep_research` now reaches `cadence.at_creation_boundary` with
+`while_evaluating = cadence_while_evaluating AND NOT concurrent_research`, and with the shipped
+`concurrent_research=True` the predicate stays the historical one byte for byte. The money bound is
+the same one `lessons_distilled` and `report_generated` are held to and needs no in-process memo:
+`_record_research_attempt` writes its receipt BEFORE the provider call and `_cadence_research_marks`
+counts an ATTEMPT as a spent window, so one node-count buys exactly one think however many times the
+outer loop turns at it (`test_a_fixed_node_count_buys_exactly_one_serial_think`, 25 turns).
 
 **THIRTY DUPLICATE CARDS OF ONE IDEA HALVED A TWO-GPU BOX — measured live 2026-08-22.**
 
