@@ -51,6 +51,7 @@ import argparse
 import glob
 import os
 import json
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -171,8 +172,38 @@ def _run_finished(root: str, name: str) -> bool:
     return "run_finished" in _event_types(root, name)
 
 
-def _at_ceiling(root: str, name: str, budget: float = 1.0) -> bool:
+def probe_budget(root: str, name: str, default: float = 1.0) -> float:
+    """The budget THIS probe was launched with, off its own `INSTRUMENT.txt`.
+
+    §359. `_paused` and `_at_ceiling` took `budget: float = 1.0` and every caller took the default.
+    Every probe on this box happens to carry `budget_usd: 1.00` -- 125 of them, checked -- so the
+    assumption is right today by accident of history rather than by rule. `run_probe.sh` takes the
+    budget as its sixth argument (`BUDGET="${6:-1.00}"`) and writes it into the instrument, so a
+    probe launched at $0.50 would finish its money and be read as "PAUSED and owed work" at $0.50
+    against a ceiling of $0.99 -- and `resume_paused` would resume it. That is §213 exactly, the
+    $0.1056 `freeB3` was sent back for, re-entering through the number nobody read.
+
+    A probe with no instrument (70 of them predate it) falls back to the default, which is the old
+    behaviour and not a new claim.
+    """
+    try:
+        body = Path(f"{root}/{name}/INSTRUMENT.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return default
+    got = re.search(r"^budget_usd:\s*([0-9]+(?:\.[0-9]+)?)\s*$", body, re.M)
+    if not got:
+        return default
+    # NO try/except HERE. The pattern captures digits with an optional decimal part and nothing
+    # else, so `float` cannot raise on what it matched -- a guard against that would be dead code
+    # dressed as care, and a mutation removing it could never go red. A line the regex does not
+    # match returns the default above; that is the only way this can fail to read a number.
+    value = float(got.group(1))
+    return value if value > 0 else default
+
+
+def _at_ceiling(root: str, name: str, budget: float | None = None) -> bool:
     """A pause that is really the end of the money -- see `_paused`."""
+    budget = probe_budget(root, name) if budget is None else budget
     return (_last_lifecycle(root, name) == "pause"
             and _spend(root, name) >= budget * CEILING_SHARE)
 
@@ -196,7 +227,7 @@ def _spend(root: str, name: str) -> float:
     return total
 
 
-def _paused(root: str, name: str, budget: float = 1.0) -> bool:
+def _paused(root: str, name: str, budget: float | None = None) -> bool:
     """Paused AND not simply at the end of its money.
 
     A run that reaches `llm_budget_usd` inside a developer session used to be paused with
@@ -211,6 +242,7 @@ def _paused(root: str, name: str, budget: float = 1.0) -> bool:
     """
     if _last_lifecycle(root, name) != "pause":
         return False
+    budget = probe_budget(root, name) if budget is None else budget
     return _spend(root, name) < budget * CEILING_SHARE
 
 
