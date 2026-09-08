@@ -87,6 +87,7 @@ def pulse(events_path: str) -> dict:
     spend = 0.0
     nodes = zeros = errors = 0
     bad = []
+    spend_at_last_node = None
     for event in events_read.iter_events(events_path):
         kind = event.get("type")
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -96,6 +97,11 @@ def pulse(events_path: str) -> dict:
             except (TypeError, ValueError):
                 pass
         elif kind == "node_evaluated":
+            # EVERY evaluated node, scored or zero. §347's question is "when did this probe last
+            # get an ANSWER back from the arena", and a zero is an answer: the money spent after it
+            # bought no further reading either way. Counting only scored nodes would call a probe
+            # that keeps earning zeros "productive" while it spends.
+            spend_at_last_node = spend
             scored = data.get("metric")
             if isinstance(scored, (int, float)) and scored > 0:
                 nodes += 1
@@ -117,7 +123,8 @@ def pulse(events_path: str) -> dict:
                             (isinstance(secs, (int, float)) and secs < REFUSAL_SECONDS)})
         elif kind in ("error", "developer_crash", "build_interrupted"):
             errors += 1
-    return {"spend": spend, "nodes": nodes, "zeros": zeros, "errors": errors, "bad": bad}
+    return {"spend": spend, "nodes": nodes, "zeros": zeros, "errors": errors, "bad": bad,
+            "spend_at_last_node": spend_at_last_node}
 
 
 def zero_sentence(z: dict) -> str:
@@ -145,6 +152,28 @@ def zero_sentence(z: dict) -> str:
     # all there is. It stays the fallback and says so.
     return ("RULER REFUSAL -- the harness declined, the solver was never the question"
             if z.get("refusal") else "the evaluation ran and came back invalid")
+
+
+# NOT A LIVE SIGNAL, AND THE TOOL NEXT DOOR SAYS WHY (§347). The share of a probe's spend that has
+# landed since its last evaluated node is a real number for a FINISHED probe -- point 9's waste --
+# and it is not one for a running one. `probe_summary` records the reason in as many words: "for a
+# RUNNING one it is just 'time since the last node', which grows until the next one lands and then
+# collapses", which is why it marks the live figure with a `+`.
+#
+# Driven here, against myself. On 2026-09-08 remDL13 held 55.5 % with one node while the worst
+# FINISHED probe on this box had ever held 47.4 %, and a line was added saying it was "still paying
+# and no longer learning". Forty minutes later the probe evaluated its second node, scored 5.3676,
+# and the same figure read 0.44 %. The alarm was the shape of the metric, not the state of the run.
+#
+# `spend_at_last_node` stays on the reading because it costs nothing and a finished probe's tail is
+# computed from it. Nothing here judges a running probe by it.
+def tail_after_the_last_node(got: dict) -> float | None:
+    """Share of spend since the last evaluated node -- meaningful only once a probe has ENDED."""
+    at = got.get("spend_at_last_node")
+    spend = got.get("spend") or 0.0
+    if at is None or spend <= 0:
+        return None
+    return 100.0 * (spend - at) / spend
 
 
 def wchan(pid) -> str:
