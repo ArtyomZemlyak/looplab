@@ -1394,6 +1394,27 @@ class Settings(BaseSettings):
     # generalization signal, not a re-measurement (AIRA: selecting on a signal the search saw
     # overfits by 9-13 pp). Set 0 to restore the legacy overlapping seeds 0..N-1.
     confirm_seed_base: int = Field(default=1, ge=0)
+    # THE EVAL NOISE FLOOR (doc 52 row 11). How many times ONE candidate — the run's champion at the
+    # moment the search runs out of actions — is RE-EVALUATED so the run records what its own metric
+    # does when nothing about the candidate changes. 0 = off and is the shipped default; a value of 1
+    # is off too, because one number has no spread. The probe spends real eval seconds, so it is
+    # opt-in and OFF leaves the run byte-identical (`engine/noise_floor.py` is never entered).
+    #
+    # WHY IT IS NOT CONFIRMATION, which also runs seeds. Confirm is a SELECTION step on the top-k at
+    # the FULL profile and from `confirm_seed_base` (1), deliberately DISJOINT from the search's
+    # implicit seed 0 — its mean is a generalization signal about a different split. The noise floor
+    # asks the opposite question about the SAME split: re-run the search's own protocol (the node's
+    # own `idea.eval_profile`, seeds 0..N-1, so the first repeat re-measures the exact configuration
+    # the search scored) and record how far the number moves. AIRA₂ reports that what the field read
+    # as "overfitting" was evaluation noise; a margin is only a result once it is bigger than this.
+    #
+    # RECORDED, READ BY NOTHING THAT DECIDES. `noise_floor_measured` carries the per-seed metrics,
+    # the mean, the sample std and `sem` — the SAME quantity `trust/gate.py::one_se_better` compares
+    # a margin against (`core/fitness.py::standard_error_difference(std, n, 0.0, 0)`), so the >1-SE
+    # rule and `engine/champion_caveats.py::mislead_gap`'s gap are on the floor's scale by
+    # construction. Nothing consults it: an instrument that also moved a champion could not be used
+    # to judge the champions it moved.
+    eval_noise_seeds: int = Field(default=0, ge=0)
     # D1 holdout-gated promotion (B6, Arbor-style): for host-graded tasks, reserve this fraction of
     # the held-out labels as a FINAL holdout partition the search never sees — every search/confirm
     # eval is scored on the remaining rows only, and at finish the val-top-k are re-scored on the

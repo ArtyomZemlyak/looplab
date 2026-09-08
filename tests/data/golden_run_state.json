@@ -140,6 +140,8 @@
   "drifts": [],
   "env": null,
   "env_changed": false,
+  "eval_noise_floor": null,
+  "eval_noise_seed_results": {},
   "eval_seconds_by_kind": {
     "node": 0.273
   },

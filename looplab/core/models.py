@@ -2343,6 +2343,15 @@ class RunState(BaseModel):
     # lets a crash-interrupted confirm pass RESUME mid-node (skip seeds already run) instead of
     # re-executing every expensive full-profile seed from scratch.
     confirm_seed_results: dict[int, dict] = Field(default_factory=dict)
+    # THE EVAL NOISE FLOOR (doc 52 row 11), from `eval_noise_seed` / `eval_noise_floor`.
+    # `eval_noise_seed_results` is {node_id: {seed: metric|None}} — the per-seed resume memo, the
+    # same shape and the same job as `confirm_seed_results` above; `eval_noise_floor` is the pass's
+    # SUMMARY (metrics, mean, std, sem, spread) and doubles as its completion gate, so a finished
+    # probe is never bought twice. Both default empty/None on old logs. Read by nothing that
+    # decides: the floor is what makes a champion's margin CHECKABLE, and an instrument that also
+    # moved the champion could not be used to judge the champions it moved.
+    eval_noise_seed_results: dict[int, dict] = Field(default_factory=dict)
+    eval_noise_floor: Optional[dict] = None
     # D1: every node that received a `holdout_evaluated` event (even with a null metric — e.g.
     # its predictions file was gone). The replay-safe gate that stops the holdout phase from
     # re-attempting a node forever on resume.

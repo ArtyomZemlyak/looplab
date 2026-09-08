@@ -100,7 +100,14 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 210
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 211
+    # 210 -> 211 on 2026-09-08: `eval_noise_seeds`, the eval NOISE FLOOR (doc 52 row 11) — the
+    # number of times ONE candidate is re-evaluated so the run records the spread of its own metric.
+    # A ROW rather than an uncurated omission for the reason the spend caps are rows: it buys N full
+    # evaluations at the end of the run, and 0 (off) is the shipped behaviour an operator must be
+    # able to return to. Verified by INTERSECTION as every entry below prescribes rather than by
+    # adding the integer: 210 keys common to the previous keyset plus exactly that one, no
+    # duplicate and none removed.
     # 207 + 2 -> 209 on 2026-09-08, at the MERGE: two branches each added one row on the same day,
     # and each pinned 208 against a tree without the other's. Verified by INTERSECTION rather than by
     # adding the integers: 207 keys are common to both files, and removing exactly
@@ -345,7 +352,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 241 + 1 -> 242 on 2026-09-07, at the SECOND merge: `agent_read_loop_nudge_after`,
     # the one field this branch added after master already carried its ten. The two counts
     # move together because it is a curated row.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 245
+    # 245 -> 246 on 2026-09-08: `eval_noise_seeds` (doc 52 row 11; a curated row, so the two counts
+    # move together). An AST scan of `Settings`' annotated assignments against the pre-change tree
+    # reports exactly `['eval_noise_seeds']` added and `[]` removed, so a +2/-1 cannot hide here.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 246
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

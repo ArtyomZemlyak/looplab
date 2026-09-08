@@ -134,7 +134,20 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:0ef3f50167eab2dbada434ada5cc54630f641f51138134a178b9aa02df15c788"
+#   2026-09-08  + eval_noise_seeds (doc 52 row 11: the eval NOISE FLOOR — how many times ONE
+#               candidate is re-evaluated so the run records the spread of its own metric). The
+#               'field set changed too' branch, verified that way rather than from the count: an
+#               AST scan of `Settings`' annotated assignments against the pre-change tree reports
+#               exactly `['eval_noise_seeds']` added and `[]` removed, so a +2/-1 cannot be hiding
+#               behind the +1. `_EXPECTED_FIELD_COUNT` goes 242 -> 243 and both pins are re-set.
+#               INERT for a calibration replicate: the profile ships it 0, `_noise_floor_due` is
+#               then one false comparison and `engine/noise_floor.py` is never entered, so the
+#               replicate evaluates the same nodes in the same order. Re-pinned anyway on the rule
+#               every inert knob above was re-pinned under — the digest binds the COMPLETE
+#               non-variant envelope — and here that rule is doing real work: the ON path buys N
+#               extra FULL evaluations at the end of the run, which is a different amount of
+#               compute on the same search and exactly what a speculation receipt asserts about.
+_EXPECTED_DIGEST = "sha256:2a40f561a3df9d499821dd04528c26af24c3d5ad9c5ea4c23b8bbfb5ba4cb109"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -613,7 +626,7 @@ _EXPECTED_DIGEST = "sha256:0ef3f50167eab2dbada434ada5cc54630f641f51138134a178b9a
 #               decides whether a run's params, metrics and champion CODE leave the box for an
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
-_EXPECTED_FIELD_COUNT = 242
+_EXPECTED_FIELD_COUNT = 243
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
