@@ -540,6 +540,27 @@ def _cut_phrase(state: str, *, footer: bool = False) -> str:
     return pair[1] if footer else pair[0]
 
 
+def runs_root_is_a_probe_tree(runs_root: Path) -> list[str]:
+    """The probe names, if this looks like a PROBE corpus rather than a campaign's runs-root.
+
+    §354. A campaign's runs-root holds one directory per TASK, each with a `run/` inside it. A probe
+    corpus holds one directory per PROBE, each with `runs/<task>/run/`. Handed the second, this tool
+    took every probe name for a task name and printed 140 rows of `(incomplete)` -- correct in the
+    sense that it invented no numbers, and misleading in the sense that a reader sees a comparison
+    that ran and found nothing, rather than a comparison that was never applicable. The distinction
+    is on disk and costs one glob to make.
+    """
+    probes = []
+    for entry in sorted(Path(runs_root).glob("*")):
+        if not entry.is_dir() or entry.name == "_ruler":
+            continue
+        if (entry / "run").is_dir():
+            return []                       # a task directory: this IS a campaign runs-root
+        if list(entry.glob("runs/*/run")):
+            probes.append(entry.name)
+    return probes
+
+
 def marker_state(final_dir: Path | None, arm: str, task: str, runs_root: Path | None = None) -> str:
     """What `campaign.sh` says about this task-arm: `"done"`, `"refused"` or `"unfinished"`.
 
@@ -749,6 +770,13 @@ def main() -> int:
 
     summary = args.algotune_root.resolve() / "reports" / "agent_summary.json"
     a = _arm_a(summary, args.model_fragment)
+    probes = runs_root_is_a_probe_tree(args.runs_root)
+    if probes:
+        print(f"REFUSING: {args.runs_root} holds {len(probes)} PROBE tree(s) "
+              f"({', '.join(probes[:4])}...), not one directory per task. This tool compares a "
+              "campaign's two arms; a probe corpus has no arm A beside it. Point it at a "
+              "campaign runs-root, or read the probes with probe_summary.py.")
+        return 2
     tasks = sorted({p.name for p in args.runs_root.glob("*") if p.is_dir()} | set(a))
     if not tasks:
         print("no campaign output found"); return 1
