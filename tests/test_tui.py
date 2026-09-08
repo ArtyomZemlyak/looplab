@@ -151,12 +151,18 @@ def test_web_and_tui_controls_use_the_authoritative_command_service():
     """
     root = Path(__file__).resolve().parents[1] / "ui" / "src"
     api = (root / "api.js").read_text(encoding="utf-8")
+    # The web's action vocabulary left api.js for `controlActions.js` (doc 25 UI-02, 2026-09-08).
+    # The pin follows it: read against api.js, the slice below is empty and every assertion on it
+    # passes over nothing.
+    actions = (root / "controlActions.js").read_text(encoding="utf-8")
     assistant = (root / "AssistantBar.jsx").read_text(encoding="utf-8")
     inspector = (root / "Inspector.jsx").read_text(encoding="utf-8")
     tui_source = Path(tui.__file__).read_text(encoding="utf-8")
-    control = api[api.index("export const CONTROL = {"):api.index("export async function appendAction")]
+    control = actions[actions.index("export const CONTROL = {")
+                      :actions.index("export async function appendAction")]
+    assert len(control) > 1000, "the action map must still be found where this pin now reads"
 
-    combined = "\n".join((api, assistant, inspector, tui_source))
+    combined = "\n".join((api, actions, assistant, inspector, tui_source))
     assert "NEEDS_RESUME" not in combined
     assert "actionNeedsEngine" not in combined
     assert "applyAction" not in combined
