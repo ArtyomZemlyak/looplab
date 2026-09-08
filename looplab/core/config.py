@@ -1573,8 +1573,9 @@ class Settings(BaseSettings):
     # merge, opposite polarity ("X helps" vs "X never helps") is surfaced as a CONTRADICTION instead of being
     # collapsed, paraphrase/inflection variants group by exact structured key (no transitive over-merge), and
     # operator governance is scope-precise (a decision in task A cannot reach a same-worded claim in task B).
-    # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379);
-    # the bare-library EngineOptions default stays off (engine/options.py). See engine/claims.py.
+    # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379),
+    # and since 2026-09-08 (doc 25 EM-06) in the bare-library EngineOptions and every projection signature
+    # too — the durable write path never had another mode. See engine/claims.py.
     cross_run_structured_claims: bool = True
     # PART IV cross-run §22.4 (AGENTIC portfolio stewards). At finalize, when an LLM client is available,
     # let the concept and claim stewards review the freshly-updated portfolio and PROPOSE curation. Proposals

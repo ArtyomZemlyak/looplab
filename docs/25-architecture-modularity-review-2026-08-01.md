@@ -2318,9 +2318,9 @@ with the same sentence, and both writers reporting an fsync failure as `Governan
 rather than a raw `OSError` carrying a path across an API boundary. Teeth-tested by relaxing the bool
 guard (4 failures) and by narrowing the storage-fault translation to `TimeoutError` (2 failures).
 
-#### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
+#### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[structured-claim-identity-not-default]** the structured projection is still opt-in (`structured: bool = False`), so the fuzzy path and the `_scoped_key`/`_global_key` shadow namespaces stay live and every governance fix is still reasoned about three times. proof:present:_fuzzy_merge_claims@looplab/engine/claims_assessments.py
+> **OPEN[structured-claim-identity-not-default]** the DEFAULT is structured and the fuzzy path is deleted; what remains is the deprecated lean read path (`structured=False`) and the `_scoped_key`/`_global_key` shadow namespaces it is the last reader of, so a governance fix is still reasoned about twice. proof:present:_scoped_key@looplab/engine/claims.py
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**
 
@@ -2349,6 +2349,59 @@ The guard checks the TABLE, not the function text. Its first draft grepped
 `inspect.getsource(claim_assessments)` for the mode names — every one of which also occurs in the
 BODY, so deleting a table row left it green. It now counts the three comment rows; removing one
 fails it.
+
+*Closure (2026-09-08), two of the three modes: the DEFAULT IS FLIPPED and the fuzzy merge is DELETED.*
+
+The 2026-08-05 decline said the flip "wants an evaluation of the existing decision ledger, not a
+modularity pass". That evaluation is what changed the answer, and it is short: **the durable side was
+never lean on either end.** `record_claim_decision` validates an operator's `evidence_digest` against
+`claim_assessments(..., structured=True)` — hard-coded, no flag — and `record_observed_claim_decision`
+re-projects through `claims_for_memory(..., structured=True)`; `load_claim_decisions` indexes a scoped
+or metric-qualified row by its structured UID *only*, and a v1 row's UID is recomputed on read. So the
+lean default was not a conservative choice about an existing store, it was a projection the store's own
+writer could not have produced: `looplab claims --governance-receipt` (no `--structured`) emitted rows
+carrying no `claim_uid` and no `evidence_digest` at all, and the test that pinned that behaviour was
+literally named *"the governance receipt is undecidable without structured identity"*.
+
+What the flip can therefore break is bounded to READS, and in the one direction that matters for an
+existing ledger it breaks nothing: no durable decision becomes unreachable. An unscoped, unqualified
+row stays indexed at its legacy statement key and at `_global_key`, and `_decision_for` still consults
+both after its five UID candidates — `test_maturity_overlay_on_assessments` (a decisions dict keyed by
+`normalize_statement`) passes unchanged under the new default and is the driven proof of it. A SCOPED
+row was only ever reachable by UID, which is the structured path's first candidate. What does change is
+that a decision recorded in task A no longer reaches a same-worded claim in task B — the finding's own
+complaint, arriving as a behaviour change rather than as a docstring.
+
+Flipped together, because a half-flipped default is the same defect: `claim_assessments`,
+`claims_for_memory`, `atlas_for_memory`, `cross_run_retrieve`, `portfolio_atlas`, the CLI (`--structured`
+is now the default, `--lean` the opt-out), and `EngineOptions.cross_run_structured_claims`. That last one
+LEFT `tests/test_options_divergence.py`'s frozen table rather than being re-frozen: it never belonged
+beside its neighbours, which all buy paid work or admit proposals, and a bare `Engine(...)` reading a
+projection its own decision writer cannot produce is not a lean default, it is a broken one.
+`LEGACY_CONFIG_SNAPSHOT_DEFAULTS` keeps its `False`, so a resumed pre-field run is untouched.
+
+`_fuzzy_merge_claims` and `_stmt_tokens` are DELETED, with the `fuzzy=` keyword (a silently-ignored
+kwarg would read as "paraphrases still merge") and the CLI's `--fuzzy`. It was a similarity score
+applied transitively where `claim_key` does the same job by exact key; its own docstring called the
+structured key its full CR. The two tests that drove it are replaced by one that drives what now
+collapses the same paraphrase pair — the structured key — and one that pins the kwarg's refusal.
+`_CLAIM_WORD` lost its last `claims_assessments` reader with it, so the shared-leaf guard now carries a
+reader SET per name instead of one module list, rather than an unused import kept alive to satisfy a
+test.
+
+**What is still open, exactly:** the lean read path itself (`structured=False`) and the
+`_scoped_key`/`_global_key` shadow namespaces. The recommendation asks for lean to stay a documented
+legacy read path until consumers migrate, and it is the only thing that can read a projection built
+under it — deleting it in the same change that flips the default would leave a store's existing lean
+review with no reader at all. Note also that `_global_key` cannot leave with it: `_decision_for` reads
+it as the structured path's explicitly-UNSCOPED fallback, so its deletion is a separate question about
+the fallback chain, not about the lean mode. The mode table at `claim_assessments` now lists TWO modes
+and `tests/test_claim_key.py` counts them.
+
+The digest tripwire moved and the answer is recorded where it asks for one: the `fuzzy` dimension left
+the CORPUS, not the projections. The harness passed every flag explicitly and the deleted branch was
+`rows = out` when `fuzzy=False`, so each surviving key's value is byte-identical and the whole payload
+change is eight vanished `:f=True` entries plus eight renamed keys.
 
 #### EM-07 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
