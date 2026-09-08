@@ -35,6 +35,7 @@ import pytest
 
 from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, DeveloperResult, developer_call_lock
 from looplab.core.models import Idea
+from looplab.engine.audit import AuditMixin
 from looplab.engine.node_build import NodeBuildMixin
 from tests._source_scan import function_tree
 from tests.factories import make_engine
@@ -464,6 +465,65 @@ def test_the_state_BIND_is_inside_the_locked_window_too(tmp_path):
     assert quiet.saw[3] is state_a, "an omitted bind must not overwrite what was already bound"
     NodeBuildMixin._run_developer(engine, quiet, quiet.implement, {"i": 4}, bind_to=None)
     assert quiet.saw[4] is None, "binding None is a bind, not an omission"
+
+
+def test_the_agent_report_is_emitted_from_the_envelope_not_the_shared_instance():
+    """`DeveloperResult.last_report` was captured under the lock and then read by nobody.
+
+    `_emit_agent_report` read `last_report` off the ACTIVE developer, and it runs AFTER
+    `developer_call_lock` has been released. Between a worker returning from `_run_developer` and
+    reaching that line, a sibling's `_discard_node_build_telemetry` does `setattr(current,
+    'last_report', None)` — also unlocked — so this node emits no `agent_validated` row at all; with
+    the opposite interleaving it emits the sibling's report against this node's id. Both are silent,
+    which is what makes the ADR-7 audit trail wrong or missing with nothing red.
+
+    The instance is CLOBBERED here between the call and the emit, which is the schedule stated as a
+    fixture: with the envelope's copy the row still describes the call that produced it.
+    """
+    class _Report:
+        def __init__(self, name):
+            self.name = name
+
+        def summary(self):
+            return {"report": self.name}
+
+    class _Dev:
+        def __init__(self):
+            self.last_report, self.last_files, self.last_footprint = None, {}, None
+
+        def implement(self, _idea):
+            self.last_report = _Report("mine")
+            return "code"
+
+    appended: list = []
+
+    class _Engine(NodeBuildMixin, AuditMixin):
+        store = SimpleNamespace(append=lambda t, d: appended.append((t, d)))
+
+    engine = _Engine.__new__(_Engine)
+    dev = _Dev()
+    built = NodeBuildMixin._run_developer(engine, dev, dev.implement, {"i": 1})
+
+    dev.last_report = None            # a sibling's `_discard_node_build_telemetry`, unlocked
+    engine._emit_agent_report(7, 0, developer=dev, report=built.last_report)
+    assert [d["report"] for _t, d in appended] == ["mine"], appended
+    assert appended[0][1]["node_id"] == 7
+
+    # …and the other interleaving: the sibling left ITS report behind, and the envelope wins.
+    appended.clear()
+    dev.last_report = _Report("a sibling's")
+    engine._emit_agent_report(7, 0, developer=dev, report=built.last_report)
+    assert [d["report"] for _t, d in appended] == ["mine"], appended
+
+    # An OMITTED report still falls back to the instance — the paths that made no fresh Developer
+    # call (a pre-coded producer commit) have no envelope to hand over.
+    appended.clear()
+    engine._emit_agent_report(7, 0, developer=dev)
+    assert [d["report"] for _t, d in appended] == ["a sibling's"], appended
+    # …but a build whose Developer genuinely reported NOTHING must not fall back to it.
+    appended.clear()
+    engine._emit_agent_report(7, 0, developer=dev, report=None)
+    assert appended == [], appended
 
 
 def test_no_build_site_clears_the_footprint_on_its_own():
