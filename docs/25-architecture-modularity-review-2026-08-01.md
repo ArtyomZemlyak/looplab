@@ -97,7 +97,7 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 148 resolved, 38 partially resolved, 2 deferred, 0 open (188 total).** The heading
+**Status totals: 149 resolved, 37 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
 
@@ -565,9 +565,9 @@ lines, a rebinding preamble, and an AST-located `self` → `engine` rename.
 `_require_pinned_speculation_receipt` stays in orchestrator.py: it is read by the run spine at three
 re-entry boundaries and by `cli/run_cmds.py`, so it is engine surface, not envelope.
 
-#### ES-02 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### ES-02 · HIGH · duplication · effort: medium — **RESOLVED (2026-09-08)**
 
-> **OPEN[node-commit-epilogue-triplicated]** the parent-refetch guard, `_emit_node_created` and the landed-check are still hand-coded in all three creation paths; the shared commit helper does not exist. proof:absent:_commit_built_node@looplab/engine/orchestrator.py
+> *Closed 2026-09-08: the marker `node-commit-epilogue-triplicated` stood here. The remaining three stages landed as `orchestrator.py::Engine._commit_built_node` — see the second resolution note below. Deleted per the index rule.*
 
 **Three node-creation paths triplicate a ~70-line commit epilogue that has already forced the same fix to be applied three times**
 
@@ -579,15 +579,48 @@ emits with no shared name, so a path could quietly keep two and lose the third, 
 left behind is then attributed to the NEXT created node — which is exactly what
 `_emit_role_telemetry` exists to prevent.
 
-*Still open:* the parent-refetch guard, `_emit_node_created` and the landed-check. Those carry the
-real per-path divergence (`materialize_abort`'s first-terminal branch, generation payloads,
-`developer_called`) and the review's own §6 requires the extraction to read as parameterized
-unification with the two fold-monkeypatch test files re-verified — a change that wants its own
-pass rather than being appended to this one.
-
-`tests/test_developer_crash_transaction.py` guards the resolved half: every creation path consumes
+`tests/test_developer_crash_transaction.py` guards that half: every creation path consumes
 through the shared helper and none re-spells an individual emit, and the consume/discard pairing is
 pinned. Verified to have teeth by making the inject path keep two emits and drop the third.
+
+*Resolution (2026-09-08) — the other three stages, as parameterized unification.*
+
+`Engine._commit_built_node(...)` is the parent-refetch guard, the `node_created` emit and the
+landed-check, once. The three paths now say only how they obtained the idea/code and what happens
+AFTER the node lands (`materialize_abort`'s first-terminal branch, the two Developer sentinels, the
+telemetry consume) — the parts the finding itself records as genuinely per-path.
+
+**Every keyword is a measured divergence, not a knob**, which is the bar §6 sets: the two refusal
+sentences (durable operator-facing text), `check_node_lifecycle` (a rerun re-enters an EXISTING
+lifecycle and must fence its own node on the SAME fold as the parents), `strict_landing` (a rerun
+must see THIS generation land carrying THIS build's code; a first landing only has to exist),
+`stamp_generation` (only the rerun writes a `generation` key — the other two OMIT it, which is the
+historical payload shape `_emit_node_created`'s docstring pins), `drop_card`, and
+`append_failure_error` (only the operator's inject recovers from an append that RAISES; the two
+agent paths deliberately let it reach `_create_node_guarded` or the test suite). `**emit_extra`
+carries the per-path payload keys and cannot smuggle a typo in: the emitter's signature is explicit,
+so an unknown key is a `TypeError` before any append.
+
+The parent fence itself is now the statable `orchestrator.py::parent_generations_current` — it had
+been spelled twice as an affirmative `all(...)` and once as a NEGATED `any(...)`, i.e. three copies
+of one rule that could drift with every test green.
+
+**The `fold` seam decided the home.** The helper folds twice and stays in orchestrator.py rather
+than moving beside `_emit_node_created` in `node_build.py`, for the reason ES-01's Card-ledger note
+measured: `monkeypatch.setattr(orch, "fold", …)` is written to intercept these three creation paths,
+and a `from looplab.events.replay import fold` in another module would silently narrow every one of
+those interceptions. A guard pins that the helper contains no import and folds through the module
+attribute.
+
+`tests/test_node_commit_epilogue.py` (20) DRIVES the helper over a real engine and a real log: the
+parent truth table (missing / reset / tombstoned / aborted / one-of-two stale), a stale parent
+writing its terminal and NO node, the `generation` key present only when stamped, the typo'd emit
+key raising instead of landing in a payload, `strict_landing` refusing a landing on another
+lifecycle AND one carrying another build's code while the lax check accepts both, and the
+append-failure recovery being opt-in. Plus the single-sourcing itself: each of the three paths calls
+`_commit_built_node` and none of them still spells `_emit_node_created`. Teeth-tested against three
+breaks — ignoring `strict_landing`, dropping the tombstone clause from the parent fence, and
+re-inlining an emit into `_rerun_node` — each reddening the test written for it.
 
 *Locations:* `looplab/engine/orchestrator.py:5173-5260`, `looplab/engine/orchestrator.py:5418-5463`, `looplab/engine/orchestrator.py:5604-5675`
 

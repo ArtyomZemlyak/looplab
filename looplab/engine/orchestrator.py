@@ -363,6 +363,26 @@ def _eval_admission_current(state, node, generation, max_es) -> bool:
     )
 
 
+def parent_generations_current(state, parent_generations) -> bool:
+    """Is every parent this build was reserved against still the exact lifecycle it named?
+
+    The same four clauses were spelled at three creation sites (doc 25 ES-02) — twice as an
+    affirmative `all(...)` and once as a NEGATED `any(...)` — so the three copies could drift on
+    what "the parents are still there" means with every test staying green. Each clause is
+    load-bearing: the parent must still exist, still be on the generation the reservation named (a
+    reset while we built makes this build a child of a lifecycle that no longer exists), and be
+    neither tombstoned nor aborted. An empty mapping is vacuously current, which is what a seed
+    build wants.
+    """
+    return all(
+        pid in state.nodes
+        and state.nodes[pid].attempt == generation
+        and not state.nodes[pid].tombstoned
+        and pid not in state.aborted_nodes
+        for pid, generation in ((int(pid), gen) for pid, gen in parent_generations.items())
+    )
+
+
 def _detect_gpu_ids() -> list[int]:
     """Best-effort list of usable GPU ordinals for the per-eval GPU pinning + `max_parallel=0` AUTO
     (evaluate.py). Honors an existing `CUDA_VISIBLE_DEVICES` (respect an operator/scheduler that already
@@ -6484,55 +6504,36 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         **({"memo_id": _memo_id}
                            if valid_advisory_ref(_memo_id, "memo") else {}),
                     }
-            latest = fold(self.store.read_all())
-            if any(pid not in latest.nodes
-                   or latest.nodes[pid].attempt != generation
-                   or latest.nodes[pid].tombstoned
-                   or pid in latest.aborted_nodes
-                   for pid, generation in ((int(pid), gen)
-                                           for pid, gen in parent_generations.items())):
-                # Clear both the transient node owner and its immutable, now-unbuildable Card.
-                self._fail_reserved_build(
-                    node_id=node_id, card_id=reserved.card_id, generation=0,
-                    error="parent lifecycle changed while building", reason="superseded")
-                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
-                return
+            # Read off the pre-build snapshot, exactly as before, and hoisted above the commit only
+            # because the emit inside it needs the answer: an abort already recorded when this slot
+            # was reserved. A pure read of `state`, so its new position cannot change it.
             materialize_abort = node_id in state.aborted_nodes
-            self._emit_node_created(
-                node_id=node_id,
-                parent_ids=parents,
-                operator=idea.operator,
-                idea=durable_idea_payload(idea),
-                code=code,
-                files=dict(built.last_files),                # the envelope's, never the instance's
-                deleted=list(built.last_deleted),
-                research_origin=research_origin,
-                # doc 52 row 19: the arm this build was routed to (omitted when none was)
-                model_arm=(action.get(META_MODEL) if isinstance(action.get(META_MODEL), str)
-                           else _OMIT_ARM),
-                # Variant-1: read the receipt THIS build stamped on its own researcher (set under
-                # `_advisory_lock` in `_set_complexity_hint`), so a concurrent sibling draft's advisory
-                # write to `self._cross_run_advisory_receipt` can't mis-stamp this node. Falls back to
-                # the shared attr only when a path never refreshed it (attr genuinely absent).
-                cross_run_receipt=(_rcpt if (_rcpt := getattr(researcher, "_cross_run_advisory_receipt", None))
-                                   is not None else getattr(self, "_cross_run_advisory_receipt", {})),
-                # Every engine-created lifecycle promises the same generation-scoped admission
-                # receipt. Besides crash-safe speculative accounting, this is what lets the public
-                # activity projection prove "waiting for a slot" versus "evaluating".
-                eval_start_boundary=True,
-                **({"parent_generations": parent_generations} if parent_generations else {}),
-                **({"footprint_finalized": True} if footprint_finalized else {}),
-                # A legacy generation-less abort may intentionally reserve a not-yet-created slot.
-                # Mark only an intent already present in the reservation snapshot. An abort that lands
-                # after node_building is a losing-worker race and deliberately gets no escape hatch.
-                **({"materialize_aborted_intent": True}
-                   if materialize_abort else {}),
-            )
-            if node_id not in fold(self.store.read_all()).nodes:
-                self._fail_reserved_build(
-                    node_id=node_id, card_id=reserved.card_id, generation=0,
-                    error="node creation was rejected during replay", reason="superseded")
-                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            if not self._commit_built_node(
+                    node_id=node_id, generation=0, card_id=reserved.card_id,
+                    parents=parents, parent_generations=parent_generations,
+                    idea=idea, code=code,
+                    files=dict(built.last_files),                # the envelope's, never the instance's
+                    deleted=list(built.last_deleted),
+                    footprint_finalized=footprint_finalized,
+                    stale_error="parent lifecycle changed while building",
+                    rejected_error="node creation was rejected during replay",
+                    researcher=researcher, developer=developer,
+                    research_origin=research_origin,
+                    # doc 52 row 19: the arm this build was routed to (omitted when none was)
+                    model_arm=(action.get(META_MODEL) if isinstance(action.get(META_MODEL), str)
+                               else _OMIT_ARM),
+                    # Variant-1: read the receipt THIS build stamped on its own researcher (set under
+                    # `_advisory_lock` in `_set_complexity_hint`), so a concurrent sibling draft's advisory
+                    # write to `self._cross_run_advisory_receipt` can't mis-stamp this node. Falls back to
+                    # the shared attr only when a path never refreshed it (attr genuinely absent).
+                    cross_run_receipt=(_rcpt if (_rcpt := getattr(researcher, "_cross_run_advisory_receipt", None))
+                                       is not None else getattr(self, "_cross_run_advisory_receipt", {})),
+                    # A legacy generation-less abort may intentionally reserve a not-yet-created slot.
+                    # Mark only an intent already present in the reservation snapshot. An abort that lands
+                    # after node_building is a losing-worker race and deliberately gets no escape hatch.
+                    **({"materialize_aborted_intent": True}
+                       if materialize_abort else {}),
+            ):
                 return
             if materialize_abort:
                 # Preserve the already-recorded operator intent as the first terminal for this newly
@@ -6629,6 +6630,114 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             node_id, generation,
             **({"researcher": researcher} if researcher is not None else {}),
             **({"developer": developer} if developer is not None else {}))
+
+    def _commit_built_node(self, *, node_id: int, generation: int, card_id: Optional[str],
+                           parents: list, parent_generations: Mapping, idea, code: str,
+                           files: dict, deleted: list, footprint_finalized: bool,
+                           stale_error: str, rejected_error: str,
+                           check_node_lifecycle: bool = False, strict_landing: bool = False,
+                           stamp_generation: bool = False, drop_card: bool = True,
+                           append_failure_error: Optional[str] = None,
+                           researcher=None, developer=None, **emit_extra) -> bool:
+        """Commit ONE finished build as its `node_created`, or close the reservation (doc 25 ES-02).
+
+        The three creation paths — `_create_node_scoped`, `_rerun_node`, `_create_injected_node` —
+        each hand-coded the same three-stage epilogue: re-fold and refuse a build whose parents (and,
+        on a rerun, whose own lifecycle) moved while the Developer worked; emit the `node_created`;
+        re-fold and refuse a node the fold did not accept. That triplication is what forced the
+        false-success sentinel guard to be retrofitted into all three copies SEPARATELY, and it had
+        already let the copies drift mechanically. The sequence now exists once; the callers keep
+        only what genuinely differs — how they obtained the idea/code, and everything AFTER the node
+        has landed (materialize-abort, the two Developer sentinels, telemetry consumption).
+
+        Every keyword below is a MEASURED divergence between the three copies, not a knob:
+
+        * `stale_error` / `rejected_error` — the two refusal sentences. They differ per path, they
+          are durable operator-facing text, so they stay the callers' words.
+        * `check_node_lifecycle` — a rerun re-enters an EXISTING lifecycle and must also fence its
+          own node (reset again / tombstoned / aborted mid-rebuild), on the SAME fold as the parent
+          check. A first creation has no prior lifecycle to lose.
+        * `strict_landing` — a rerun must see THIS generation land carrying THIS build's code and no
+          pending `rerun_from`; for a first landing, existing IS landing.
+        * `stamp_generation` — only the rerun writes a `generation` key into the payload. The other
+          two omit it (never None-fill it), which is the historical shape `_emit_node_created`'s
+          docstring pins.
+        * `drop_card` — a rerun keeps the original work item unless it minted a replacement card;
+          `_fail_reserved_build` owns the ownership half of that rule.
+        * `append_failure_error` — only the injected path recovers from an append that RAISES (the
+          operator's request must not leave a bare `node_building` behind). `None` re-raises
+          untouched, which is exactly what the two agent paths did: the parallel one is caught by
+          `_create_node_guarded`, the serial one deliberately crashes so bugs surface in tests.
+        * `researcher` / `developer` — the pooled roles of THIS build, so a concurrent draft's
+          telemetry is not what gets discarded here. Omitted = the shared instance attrs.
+        * `**emit_extra` — the per-path `node_created` keys (research_origin / model_arm /
+          cross_run_receipt; source / origin / forked_from). A typo cannot silently enter a payload:
+          `_emit_node_created` has an explicit keyword signature and raises `TypeError`.
+
+        Returns True when the node is committed and the caller may run its post-landing epilogue;
+        False when the reservation has already been closed and this build's telemetry discarded —
+        the caller must return without consuming telemetry.
+
+        Lives in orchestrator.py rather than beside `_emit_node_created` in `node_build.py` for the
+        reason the module-global `fold` seam comment gives: both re-folds below belong to the three
+        creation paths that `monkeypatch.setattr(orch, "fold", ...)` is written to intercept, and
+        `fold` resolved as a module attribute at call time is what keeps them intercepted.
+        """
+        latest = fold(self.store.read_all())
+        stale = not parent_generations_current(latest, parent_generations)
+        if check_node_lifecycle and not stale:
+            current = latest.nodes.get(node_id)
+            stale = (current is None or current.attempt != generation
+                     or current.tombstoned or node_id in latest.aborted_nodes)
+        if stale:
+            # Clear both the transient node owner and its immutable, now-unbuildable Card.
+            self._fail_reserved_build(
+                node_id=node_id, card_id=card_id, generation=generation,
+                error=stale_error, reason="superseded", drop_card=drop_card)
+            self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            return False
+        try:
+            self._emit_node_created(
+                node_id=node_id,
+                parent_ids=parents,
+                operator=idea.operator,
+                idea=durable_idea_payload(idea),
+                code=code,
+                files=files,
+                deleted=deleted,
+                # Every engine-created lifecycle promises the same generation-scoped admission
+                # receipt. Besides crash-safe speculative accounting, this is what lets the public
+                # activity projection prove "waiting for a slot" versus "evaluating".
+                eval_start_boundary=True,
+                **({"generation": generation} if stamp_generation else {}),
+                **({"parent_generations": parent_generations} if parent_generations else {}),
+                **({"footprint_finalized": True} if footprint_finalized else {}),
+                **emit_extra,
+            )
+        except Exception:
+            if append_failure_error is None:
+                raise                       # the caller's historical behaviour — see the docstring
+            try:
+                landed = node_id in fold(self.store.read_all()).nodes
+            except Exception:  # noqa: BLE001 — a failed landing probe reads as not landed; the branch below decides
+                landed = False
+            if not landed:
+                self._fail_reserved_build(
+                    node_id=node_id, card_id=card_id, generation=generation,
+                    error=append_failure_error, reason="build_crash", drop_card=drop_card)
+            raise
+        landed = fold(self.store.read_all()).nodes.get(node_id)
+        rejected = landed is None
+        if strict_landing and not rejected:
+            rejected = (landed.attempt != generation or landed.rerun_from is not None
+                        or landed.code != code)
+        if rejected:
+            self._fail_reserved_build(
+                node_id=node_id, card_id=card_id, generation=generation,
+                error=rejected_error, reason="superseded", drop_card=drop_card)
+            self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            return False
+        return True
 
     def _create_node_guarded(self, action: dict, roles=None, reserved=None, preproposed=None,
                              pretelemetry=None) -> None:
@@ -6854,38 +6963,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             code = built.code
             idea, footprint_finalized = self._finalize_developer_footprint(
                 idea, self.developer, code, footprint=built.last_footprint)
-            latest = fold(self.store.read_all())
-            current = latest.nodes.get(node.id)
-            parents_current = all(
-                pid in latest.nodes and latest.nodes[pid].attempt == parent_generation
-                and pid not in latest.aborted_nodes and not latest.nodes[pid].tombstoned
-                for pid, parent_generation in ((int(pid), gen)
-                                                for pid, gen in parent_generations.items()))
-            if (current is None or current.attempt != generation
-                    or current.tombstoned or node.id in latest.aborted_nodes or not parents_current):
-                self._fail_reserved_build(
-                    node_id=node.id, card_id=active_card_id, generation=generation,
-                    error="node lifecycle changed while rebuilding", reason="superseded",
-                    drop_card=replacement_card)
-                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
-                return
-            self._emit_node_created(
-                node_id=node.id, parent_ids=parents, operator=idea.operator,
-                idea=durable_idea_payload(idea), code=code,
-                files=dict(built.last_files),
-                deleted=list(built.last_deleted),
-                generation=generation,
-                eval_start_boundary=True,
-                **({"parent_generations": parent_generations} if parent_generations else {}),
-                **({"footprint_finalized": True} if footprint_finalized else {}))
-            landed = fold(self.store.read_all()).nodes.get(node.id)
-            if (landed is None or landed.attempt != generation or landed.rerun_from is not None
-                    or landed.code != code):
-                self._fail_reserved_build(
-                    node_id=node.id, card_id=active_card_id, generation=generation,
-                    error="rebuilt node creation was rejected during replay", reason="superseded",
-                    drop_card=replacement_card)
-                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
+            if not self._commit_built_node(
+                    node_id=node.id, generation=generation, card_id=active_card_id,
+                    parents=parents, parent_generations=parent_generations,
+                    idea=idea, code=code,
+                    files=dict(built.last_files),
+                    deleted=list(built.last_deleted),
+                    footprint_finalized=footprint_finalized,
+                    stale_error="node lifecycle changed while rebuilding",
+                    rejected_error="rebuilt node creation was rejected during replay",
+                    # A reset re-enters an EXISTING lifecycle, so the fence is wider than the two
+                    # first-creation paths': the node itself may have been reset again, tombstoned or
+                    # aborted while the Developer worked, and the landing must be THIS generation
+                    # carrying THIS build's code — a bare "the id exists" would accept the previous
+                    # attempt's node as proof that the rebuild landed.
+                    check_node_lifecycle=True, strict_landing=True, stamp_generation=True,
+                    # The original work item survives a rerun; only a re-proposal that MINTED a
+                    # replacement card may close the one it superseded (`replacement_card`).
+                    drop_card=replacement_card,
+            ):
                 return
             if is_developer_stuck(code):
                 # SAME DISTINCTION AS THE FRESH-BUILD PATH ABOVE. The model ran out of moves on this
@@ -7076,35 +7172,23 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 idea, footprint_finalized = self._finalize_developer_footprint(
                     idea, self.developer, code,
                     footprint=(_inj.last_footprint if _inj is not None else None))
-            latest = fold(self.store.read_all())
-            if any(pid not in latest.nodes
-                   or latest.nodes[pid].attempt != generation
-                   or latest.nodes[pid].tombstoned
-                   or pid in latest.aborted_nodes
-                   for pid, generation in ((int(pid), gen)
-                                           for pid, gen in parent_generations.items())):
-                self._fail_reserved_build(
-                    node_id=node_id, card_id=reservation.card_id, generation=0,
-                    error="parent lifecycle changed while building", reason="superseded")
-                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
-                return
-            try:
-                self._emit_node_created(
-                    node_id=node_id,
-                    parent_ids=parents,
-                    operator=idea.operator,
-                    idea=durable_idea_payload(idea),
-                    code=code,
+            if not self._commit_built_node(
+                    node_id=node_id, generation=0, card_id=reservation.card_id,
+                    parents=parents, parent_generations=parent_generations,
+                    idea=idea, code=code,
                     # Honour explicit files/deleted on the request (a cross-run `import` ships the
                     # sibling's full multi-file solution); else use the Developer's last build, and
                     # only when the Developer actually implemented (no ready-made code was supplied).
                     files=(req.get("files")
                            or ({} if req.get("code") or _inj is None else dict(_inj.last_files))) or {},
                     deleted=req.get("deleted") or [],
+                    footprint_finalized=footprint_finalized,
+                    stale_error="parent lifecycle changed while building",
+                    rejected_error="injected node creation was rejected during replay",
+                    # The operator's request must not leave a bare `node_building` behind when the
+                    # append itself RAISES; the two agent paths have callers that already handle it.
+                    append_failure_error="injected node append failed",
                     source="manual",
-                    eval_start_boundary=True,
-                    **({"parent_generations": parent_generations} if parent_generations else {}),
-                    **({"footprint_finalized": True} if footprint_finalized else {}),
                     # Cross-run provenance: a DICT when this inject seeded from a sibling run's
                     # experiment (an `import` action), else None. Coerce defensively — a non-dict
                     # origin (a hand-authored/API inject that passed a label string) would make the
@@ -7120,22 +7204,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # leave the inject gate re-creating the SAME id forever.
                     **({"forked_from": req["forked_from"]}
                        if isinstance(req.get("forked_from"), dict) else {}),
-                )
-            except Exception:
-                try:
-                    landed = node_id in fold(self.store.read_all()).nodes
-                except Exception:  # noqa: BLE001 — a failed landing probe reads as not landed; the branch below decides
-                    landed = False
-                if not landed:
-                    self._fail_reserved_build(
-                        node_id=node_id, card_id=reservation.card_id, generation=0,
-                        error="injected node append failed", reason="build_crash")
-                raise
-            if node_id not in fold(self.store.read_all()).nodes:
-                self._fail_reserved_build(
-                    node_id=node_id, card_id=reservation.card_id, generation=0,
-                    error="injected node creation was rejected during replay", reason="superseded")
-                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
+            ):
                 return
             # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the
             # "(developer error: …)" sentinel as its code (an LLM 401/timeout/hard error). Without
