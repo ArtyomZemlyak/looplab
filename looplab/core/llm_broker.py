@@ -139,6 +139,7 @@ BACKGROUND_LANE_PRODUCERS: dict[str, tuple[str, ...]] = {
         "orchestrator.py::_reflect_lessons",
         "orchestrator.py::_comparative_lessons",
         "orchestrator.py::_maybe_distill_lessons",
+        "orchestrator.py::_maybe_promote_skills",
         "orchestrator.py::_maybe_refresh_lessons",
         "orchestrator.py::_maybe_reconcile_lessons",
         "orchestrator.py::_causal_meta_note",
