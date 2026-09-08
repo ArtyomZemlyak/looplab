@@ -133,3 +133,53 @@ def test_a_numeric_failure_is_never_salvaged_while_an_artifact_failure_still_is(
     artifact_row = [{"name": "train", "status": "expect_failed", "expect_declared": ["ckpt.pt"]}]
     assert salvage_condition(_Res(numeric_row), "expect_failed") is None
     assert salvage_condition(_Res(artifact_row), "expect_failed") == "artifact_contract"
+
+
+def test_a_diverged_stage_does_not_satisfy_its_bound_with_the_last_finite_epoch():
+    """FAILS CLOSED, which the module docstring promised and the reader could not express.
+
+    `_NUMBER` was hoisted from `tools/log_tools.py` WITHOUT that module's `nan`/`inf` alternation,
+    and the JSON branch dropped non-finite values too — so a non-finite reading was not "unmet", it
+    was INVISIBLE, and the last FINITE value stayed the last value. Arbor's own margin is the
+    fixture: `val_ndcg: 0.75` at epoch 1, then `nan` for every epoch after, PASSED
+    `val_ndcg >= 0.71` and recorded `numeric_values={'val_ndcg': 0.75}` — a diverged run admitted as
+    having met its declarer's bound.
+    """
+    log = "epoch 1 val_ndcg: 0.75\nepoch 2 val_ndcg: nan\nepoch 3 val_ndcg: nan\n"
+    defects, values = numeric_contract_defects(log, [{"key": "val_ndcg", "op": ">=", "value": 0.71}])
+    assert defects == ["val_ndcg >= 0.71 — the stage printed val_ndcg = nan"]
+    # …and the DURABLE row stays JSON: `nan` decides the relation, it is not what gets recorded.
+    assert values == {}
+    assert last_values(log, ["val_ndcg"]) == {}
+
+    # `!=` is the relation where IEEE's default is exactly backwards — `nan != x` is True — so a
+    # stage would have satisfied it BY diverging.
+    assert numeric_contract_defects(log, [{"key": "val_ndcg", "op": "!=", "value": 0.0}])[0]
+    # Every non-finite spelling the log tools recognise, and the sign, and `infinity`.
+    for word in ("nan", "inf", "-inf", "+inf", "Infinity", "NaN"):
+        assert numeric_contract_defects(f"params = {word}\n",
+                                        [{"key": "params", "op": "<=", "value": 2e6}])[0]
+    # A finite log is unchanged: this is a fail-closed rung, not a new refusal.
+    assert numeric_contract_defects("params = 1500000\n",
+                                    [{"key": "params", "op": "<=", "value": 2e6}]) == ([], {"params": 1500000.0})
+
+
+def test_a_declared_key_does_not_bind_a_longer_key_it_is_the_suffix_of():
+    """`_KEY_RE` admits `.`, `-`, `/` and `@`, and the left boundary excluded only word characters.
+
+    So `loss` bound `train.loss`, `acc` bound `val-acc` and `top5/acc` — and because the LAST
+    occurrence wins, one prefixed summary line after a run of correct per-step prints decided the
+    contract. Both directions are wrong and both are silent: a stage that satisfied its bound fails,
+    and a stage that did not is acquitted by an unrelated key that happens to sit inside the bound.
+    """
+    assert last_values("train.loss: 9.5\n", ["loss"]) == {}
+    assert last_values("val-acc: 0.1\n", ["acc"]) == {}
+    assert last_values("top5/acc = 0.1\n", ["acc"]) == {}
+    assert last_values("run@loss: 9.5\n", ["loss"]) == {}
+    # The per-step prints still decide, with the prefixed summary line beside them.
+    assert last_values("loss: 0.12\ntrain.loss: 9.5\n", ["loss"]) == {"loss": 0.12}
+    assert numeric_contract_defects("loss: 0.12\ntrain.loss: 9.5\n",
+                                    [{"key": "loss", "op": "<=", "value": 0.5}])[0] == []
+    # …and a key that legitimately CONTAINS those characters still binds itself.
+    assert last_values("train.loss: 9.5\n", ["train.loss"]) == {"train.loss": 9.5}
+    assert last_values("top5/acc = 0.9\n", ["top5/acc"]) == {"top5/acc": 0.9}

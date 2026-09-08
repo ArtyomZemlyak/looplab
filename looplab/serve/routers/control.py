@@ -3,11 +3,9 @@ processes. Handler bodies are verbatim moves from `serve/server.py::make_app` (B
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import secrets
-import stat
 import threading
 import time
 from pathlib import Path
@@ -23,9 +21,7 @@ from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.config import Settings
 from looplab.core.errors import LLMError
-from looplab.events.eventstore import (
-    MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, EventStoreLockError,
-    decode_event_record)
+from looplab.events.eventstore import EventStoreConcurrencyError, EventStoreLockError
 from looplab.events.replay import fold
 from looplab.events.types import EV_APPROVAL_GRANTED, EV_RESUME_REQUESTED, EV_SPEC_APPROVED
 from looplab.serve.appstate import _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX
@@ -47,6 +43,9 @@ from looplab.serve.protocol import (
 from looplab.serve.control_validation import normalize_control
 from looplab.serve.reset_route import durable_reset_run
 from looplab.serve.settings_store import SettingsRevisionConflict
+from looplab.serve.start_record import (
+    inspect_keyed_start, raise_existing_start, reconcile_start,
+    release_unspawned_start_namespace)
 from looplab.serve.trace_clear import durable_clear_node_trace
 
 
@@ -221,13 +220,42 @@ def build_router(srv) -> APIRouter:
     # `/commands` is schedulable and its progress readable; what is open is doing it and deleting
     # the route.
     # proof:`present:async def control(@looplab/serve/routers/control.py`
-    # Measured 2026-09-07 (doc 52 row 29, its two sibling markers shipped around this one): 62 call
-    # sites in 9 test files — test_server 27, test_fork_from_seq 17, test_run_command_service 9,
-    # test_review_fixes 3, test_strategist_developer_switch 2, one each in test_review_capabilities,
-    # test_legacy_control_deprecation, test_concept_tag_command, test_collaboration — and no
-    # first-party client. Each site is a contract to RE-VERIFY under `/commands`, not a URL to
-    # rewrite: the durable path applies asynchronously and refuses with coded records, so the
-    # 400/409/401/403 properties those sites guard need their own port.
+    #
+    # WHAT BLOCKS IT, stated so the next pass does not re-derive it (re-measured 2026-09-08). The
+    # port is NOT a URL rewrite, because `/commands` is a different contract in four ways and each
+    # one retires an assertion the suite currently makes:
+    #   1. `Idempotency-Key` is REQUIRED — `run_commands.py::RunCommandService.submit` raises 400
+    #      without one — so every ported site must mint and manage a key, and a site that drives the
+    #      SAME intent twice (the pause/resume pairs) must mint two or get a replay of the first.
+    #   2. `expected_generation` is MANDATORY and strict (`_normalize_expected_generation` 400s on
+    #      anything but 64 hex), so a ported site must first read `/state` for a token this route
+    #      never asked for. There is NO `expected_seq` equivalent: the ~17 `test_fork_from_seq`
+    #      sites CAS on an exact event-log TAIL, and a generation fence answers a different
+    #      question ("is this the same run?" rather than "is this the same tail?"). Either those
+    #      sites lose their CAS or `/commands` grows a tail precondition — an unmade decision.
+    #   3. It applies ASYNCHRONOUSLY for `EV_PAUSE` and for every intent whose engine policy is not
+    #      `NO_SPAWN` (`run_commands.py`'s `synchronous = … NO_SPAWN and … != EV_PAUSE`), so a site
+    #      that asserts on the event log right after the POST must instead poll the record to a
+    #      terminal status. That is a new suite affordance, not a line edit.
+    #   4. 400-class REFUSALS become coded FAILED RECORDS — a 200 carrying an error object — so
+    #      `assert r.status_code == 400` becomes an assertion about a record's `error.code`, and
+    #      per the house rule a refusal that now depends on a race must pin the fail-closed SET.
+    # And the window itself is not ready: it opened 2026-09-07 with `Deprecation` + `Link` and
+    # DELIBERATELY no `Sunset`, because RFC 8594's field carries a DATE and none has been agreed.
+    # Retiring a route inside an announced window that names no removal date would make the header
+    # pair a lie in the other direction.
+    #
+    # SO THE WINDOW NEEDS, in order: (a) a decided removal date, at which point `Sunset` is one
+    # line; (b) a decision on 2's tail precondition; (c) a suite helper for 3 (submit, poll to
+    # terminal, assert) so a ported site reads no worse than the one it replaces; (d) the tally
+    # below reading zero for every agent that is not the suite's own client.
+    # Counted 2026-09-08: 63 occurrences in 10 test files — test_server 27, test_fork_from_seq 17,
+    # test_run_command_service 9, test_review_fixes 3, test_strategist_developer_switch 2, one each
+    # in test_review_capabilities, test_legacy_control_deprecation, test_concept_tag_command,
+    # test_collaboration and test_control_reads_the_log_once — and no first-party client. The
+    # sixty-third is new and deliberate: `test_control_reads_the_log_once.py` measures THIS route's
+    # per-POST log read, so it is an instrument that dies with the route rather than a caller to
+    # migrate. Each of the other sites is a contract to RE-VERIFY under `/commands`.
     @router.post("/api/runs/{run_id}/control")
     async def control(run_id: str, request: Request, response: Response):
         rd = _run_dir(run_id)
@@ -290,7 +318,13 @@ def build_router(srv) -> APIRouter:
                     if isinstance(expected, bool) or not isinstance(expected, int):
                         raise HTTPException(400, "expected_seq must be an integer")
                 try:
-                    ev = EventStore(local_rd / "events.jsonl").append(
+                    # `srv.event_store`, not a fresh `EventStore(...)`: this route built one PER
+                    # POST, and each construction walks the whole log to learn its tail seq — N
+                    # control appends over a session cost N full scans of a log that grew by one
+                    # record each time (the CODE_REVIEW row on `eventstore.py::_scan_last_seq`). The
+                    # shared store reads only the bytes since its last call and re-validates against
+                    # disk under the append lock, so nothing about the CAS below is weakened.
+                    ev = srv.event_store(local_rd).append(
                         etype, data, expected_last_seq=expected)
                 except EventStoreConcurrencyError as exc:
                     raise HTTPException(409, str(exc)) from exc
@@ -364,7 +398,7 @@ def build_router(srv) -> APIRouter:
 
     def _append_resume_request(rd: Path) -> str:
         """Classify and durably append one handoff against the exact folded tail."""
-        store = EventStore(rd / "events.jsonl")
+        store = srv.event_store(rd)   # shared reader; see the note at the /control append
         for _attempt in range(8):
             events = store.read_all()
             state = fold(events)
@@ -452,262 +486,13 @@ def build_router(srv) -> APIRouter:
         return durable_clear_node_trace(
             srv, run_id, nid, body, known_engine_liveness=_known_engine_liveness)
 
-    def _start_public(record: dict) -> dict:
-        status = str(record.get("status") or "uncertain")
-        # ``accepted`` proves only that Popen returned and its ownership evidence was persisted.  The
-        # child is positively started only once its exact PID generation, engine lock, or run_started
-        # event is observed.  Likewise, never advertise retry while a paid effect may have escaped.
-        started = status in {"executing", "succeeded"}
-        paid_effect_unknown = bool(record.get("paid_effect_unknown"))
-        can_retry = (status in {"not_started", "failed"} and not paid_effect_unknown
-                     and record.get("namespace_released") is not False)
-        result = {
-            "ok": status in {"accepted", "executing", "succeeded"},
-            "run_id": str(record.get("run_id") or ""),
-            "start_id": str(record.get("id") or ""),
-            "status": status,
-            "started": started,
-            "can_retry": can_retry,
-            "paid_effect_unknown": paid_effect_unknown,
-        }
-        if record.get("validation_token"):
-            result["validation_token"] = str(record["validation_token"])
-        if record.get("error_code"):
-            result["error"] = {"code": str(record["error_code"])}
-        return result
-
-    def _start_meta_id(rd: Path) -> str:
-        path = rd / "ui_meta.json"
-        if path.is_symlink():
-            return ""
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
-            return ""
-        return str(value.get("start_id") or "") if isinstance(value, dict) else ""
-
-    def _release_unspawned_start_namespace(
-            rd: Path, *, start_id: str, task_file: Path) -> bool:
-        """Remove only this request's pristine materialization before the Popen boundary.
-
-        The caller holds ``commands.sequence(rd)`` and has already retired its exact PID-less claim.
-        Any unexpected/reparse entry leaves the namespace intact and therefore fail-closed; the
-        root-side start record remains as the durable audit receipt either way.
-        """
-        try:
-            run_info = rd.lstat()
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-        attributes = int(getattr(run_info, "st_file_attributes", 0) or 0)
-        try:
-            invalid_run = (
-                stat.S_ISLNK(run_info.st_mode) or not stat.S_ISDIR(run_info.st_mode)
-                or bool(attributes & reparse_flag) or rd.resolve() != rd
-                or rd.parent != root)
-        except OSError:
-            return False
-        if invalid_run:
-            return False
-        try:
-            entries = list(rd.iterdir())
-        except OSError:
-            return False
-        allowed = {"task.input.json", "ui_meta.json", "chat.jsonl"}
-        if any(entry.name not in allowed for entry in entries):
-            return False
-
-        meta = rd / "ui_meta.json"
-        if meta in entries:
-            try:
-                payload = json.loads(meta.read_text(encoding="utf-8"))
-            except (OSError, ValueError, UnicodeDecodeError):
-                return False
-            if (not isinstance(payload, dict)
-                    or str(payload.get("task_file") or "") != str(task_file)
-                    or (start_id and str(payload.get("start_id") or "") != start_id)
-                    or (not start_id and payload.get("start_id"))):
-                return False
-
-        for entry in entries:
-            try:
-                info = entry.lstat()
-                entry_attributes = int(getattr(info, "st_file_attributes", 0) or 0)
-                if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
-                        or bool(entry_attributes & reparse_flag)
-                        or entry.resolve().parent != rd):
-                    return False
-            except OSError:
-                return False
-        try:
-            for entry in entries:
-                entry.unlink()
-            rd.rmdir()
-        except OSError:
-            return False
-        return True
-
-    def _has_first_run_started(rd: Path) -> bool:
-        """Whether the first identity event is a durable, correlated ``run_started``.
-
-        Current engines durably emit ``setup_started``/``setup_step`` immediately before their
-        identity anchor; older valid engines emitted ``run_started`` at sequence zero.  Accept both
-        layouts, but fail closed on a torn line, a malformed/unsupported envelope, a sequence gap,
-        an unrelated pre-identity event, or a run id that does not name this exact directory.  A
-        merely parseable ``{"type": "run_started"}`` is not process evidence.
-        """
-        path = rd / "events.jsonl"
-        if path.is_symlink():
-            return False
-        try:
-            with path.open("rb") as stream:
-                expected_seq = 0
-                total_bytes = 0
-                for _ in range(4096):
-                    raw = stream.readline(MAX_EVENT_BATCH_BYTES + 1)
-                    if not raw:
-                        return False
-                    total_bytes += len(raw)
-                    if (len(raw) > MAX_EVENT_BATCH_BYTES
-                            or total_bytes > 2 * MAX_EVENT_BATCH_BYTES
-                            or not raw.endswith(b"\n") or not raw.strip()):
-                        return False
-                    physical = orjson.loads(raw)
-                    if (not isinstance(physical, dict)
-                            or not {"v", "seq", "ts", "type", "data"} <= set(physical)):
-                        return False
-                    for event in decode_event_record(physical, strict=True):
-                        version = event.v
-                        seq = event.seq
-                        ts = event.ts
-                        event_type = event.type
-                        data = event.data
-                        if (type(version) is not int or version != 1
-                                or type(seq) is not int or seq != expected_seq
-                                or isinstance(ts, bool) or not isinstance(ts, (int, float))
-                                or not math.isfinite(ts) or ts <= 0
-                                or not isinstance(event_type, str)
-                                or not isinstance(data, dict)):
-                            return False
-                        expected_seq += 1
-                        if event_type == "run_started":
-                            run_id = data.get("run_id")
-                            return isinstance(run_id, str) and run_id == rd.name
-                        if event_type not in {"setup_started", "setup_step"}:
-                            return False
-                return False
-        except (OSError, ValueError, TypeError, orjson.JSONDecodeError):
-            return False
-
-    def _reconcile_start(rd: Path, record: dict) -> tuple[dict, dict]:
-        """Fold durable run/claim evidence into one observational startup state.
-
-        Callers hold ``commands.sequence(rd)``. This function may retire an observed/dead spawn
-        claim and finish an explicitly recorded pre-Popen namespace cleanup, but never creates a
-        directory, lease, event, or process.
-        """
-        updated = dict(record)
-        start_id = str(updated.get("id") or "")
-        meta_matches = _start_meta_id(rd) == start_id
-        liveness = _engine_liveness(rd)
-
-        def transition(**changes) -> None:
-            # Stable polling must be observational: publish a new timestamp only for an actual state
-            # transition, not on every GET of the same evidence.
-            if any(updated.get(key) != value for key, value in changes.items()):
-                updated.update(changes)
-                updated["updated_at"] = time.time()
-
-        if (updated.get("status") == "failed"
-                and updated.get("phase") == "failed_before_spawn"
-                and updated.get("paid_effect_unknown") is False
-                and updated.get("namespace_released") is False):
-            evidence = srv.commands.observe_external_spawn(rd, f"start:{start_id}")
-            if evidence in {"absent", "dead_or_cleared"} and liveness is False:
-                released = _release_unspawned_start_namespace(
-                    rd, start_id=start_id, task_file=rd / "task.input.json")
-                if released:
-                    transition(namespace_released=True)
-
-        if meta_matches and _has_first_run_started(rd):
-            transition(status="succeeded", phase="event_observed", paid_effect_unknown=False,
-                       error_code=None)
-        elif meta_matches and (liveness is True
-                               or (liveness is False and _engine_alive(rd))):
-            transition(status="executing", phase="engine_observed", paid_effect_unknown=False,
-                       error_code=None)
-        elif str(updated.get("phase") or "") in {
-                "popen_pending", "popen_returned", "engine_observed"}:
-            evidence = srv.commands.observe_external_spawn(rd, f"start:{start_id}")
-            # A start_id in ui_meta is the durable correlation between this sidecar and this run
-            # directory.  An engine lock without it may belong to a manually replaced incarnation.
-            if meta_matches and evidence in {"live", "pending_known"}:
-                transition(status="executing", paid_effect_unknown=False, error_code=None)
-            elif not meta_matches or evidence in {"uncertain", "mismatched"}:
-                transition(status="uncertain", paid_effect_unknown=True,
-                           error_code="start_uncertain")
-            else:
-                # Popen may already have crossed the provider boundary before dying. A new explicit
-                # launch is possible only after review/revalidation; never call it automatically.
-                transition(status="failed", phase="failed_after_spawn",
-                           paid_effect_unknown=True, error_code="start_failed_after_spawn")
-        elif str(updated.get("phase") or "") in {"reserved", "materialized"}:
-            evidence = srv.commands.observe_external_spawn(rd, f"start:{start_id}")
-            if evidence in {"absent", "dead_or_cleared"}:
-                transition(status="not_started", paid_effect_unknown=False, error_code=None)
-            else:
-                transition(status="uncertain", paid_effect_unknown=True,
-                           error_code="start_uncertain")
-        if updated != record:
-            srv.commands.save_start_record(rd, updated)
-        return updated, _start_public(updated)
-
-    def _inspect_keyed_start(rd: Path, key_digest: str, request_digest: str):
-        record = srv.commands.load_start_record(rd)
-        if record is None:
-            return None, None, False
-        same_key = secrets.compare_digest(
-            str(record.get("idempotency_key_digest") or ""), key_digest)
-        if same_key and not secrets.compare_digest(
-                str(record.get("request_digest") or ""), request_digest):
-            raise HTTPException(409, {
-                "code": "idempotency_key_reused",
-                "message": "this idempotency key belongs to a different launch request",
-                "field_errors": {"idempotency_key": "generate a new key for the edited proposal"},
-            })
-        reconciled, public = _reconcile_start(rd, record)
-        return reconciled, public, same_key
-
-    def _raise_existing_start(public: dict, *, same_key: bool) -> None:
-        status = str(public.get("status") or "uncertain")
-        if not same_key:
-            raise HTTPException(409, {
-                "code": "run_id_conflict",
-                "message": "this run name is already owned by another startup",
-                "start_id": public.get("start_id"),
-                "field_errors": {"run_id": "choose another run name"},
-                "remediation": "Use the card that owns the existing startup, or choose another name.",
-            })
-        if status == "uncertain" or public.get("paid_effect_unknown") is True:
-            raise HTTPException(409, {
-                "code": "start_uncertain",
-                "message": "the earlier startup may have crossed Popen; observe it before retrying",
-                "start_id": public.get("start_id"),
-                "status": status,
-                "paid_effect_unknown": bool(public.get("paid_effect_unknown")),
-                "remediation": "Use the startup status endpoint; do not submit another launch.",
-            })
-        if status in {"accepted", "executing", "succeeded"}:
-            return
-        if same_key:
-            raise HTTPException(409, {
-                "code": "start_not_completed",
-                "message": "this startup did not establish a run",
-                "start_id": public.get("start_id"),
-                "remediation": "Review provider/error evidence, then validate again before a new launch.",
-            })
+    # THE DURABLE START RECORD'S PROTOCOL IS NOT A ROUTER'S BUSINESS (doc 25 SR-01). Seven closures
+    # — the observational reconciliation, the keyed-replay inspection, the public projection, the
+    # pre-Popen namespace release, the run_started evidence walk — captured `srv` and `root` and
+    # nothing else, which made every branch of a crash-window state machine reachable only by
+    # building the whole ASGI app and driving HTTP. They now live in `serve/start_record.py`, which
+    # also STATES the protocol as a `StartRecordSpec` beside `paid_ledger.py`'s two event-ledger
+    # specs (shared vocabulary, deliberately separate storage — see that module's docstring).
 
     @router.post("/api/start/{run_id}/resolve-claim")
     async def resolve_start_claim(run_id: str, request: Request, response: Response):
@@ -758,7 +543,7 @@ def build_router(srv) -> APIRouter:
                     "code": "start_not_found",
                     "message": "no startup is recorded for this run name and idempotency key",
                 })
-            _record, public = _reconcile_start(rd, record)
+            _record, public = reconcile_start(srv, rd, record)
         return public
 
     @router.post("/api/start/preflight")
@@ -821,13 +606,14 @@ def build_router(srv) -> APIRouter:
         def _replay_keyed_start():
             with srv.commands.sequence(rd):
                 srv.commands._reject_unresolved_reset(rd, "replay this run start")
-                record, public, same_key = _inspect_keyed_start(rd, key_digest, request_digest)
+                record, public, same_key = inspect_keyed_start(
+                    srv, rd, key_digest, request_digest)
                 if record is not None:
                     if (same_key and public.get("paid_effect_unknown") is not True
                             and public["status"] in {"accepted", "executing", "succeeded"}):
                         return JSONResponse(public)
                     if same_key or public.get("can_retry") is not True:
-                        _raise_existing_start(public, same_key=same_key)
+                        raise_existing_start(public, same_key=same_key)
             return None
 
         if key:
@@ -883,14 +669,14 @@ def build_router(srv) -> APIRouter:
                 with srv.commands.sequence(rd):
                     srv.commands._reject_unresolved_reset(rd, "start a run with this id")
                     if key:
-                        existing, public, same_key = _inspect_keyed_start(
-                            rd, key_digest, request_digest)
+                        existing, public, same_key = inspect_keyed_start(
+                            srv, rd, key_digest, request_digest)
                         if existing is not None:
                             if (same_key and public.get("paid_effect_unknown") is not True
                                     and public["status"] in {"accepted", "executing", "succeeded"}):
                                 return JSONResponse(public)
                             if same_key or public.get("can_retry") is not True:
-                                _raise_existing_start(public, same_key=same_key)
+                                raise_existing_start(public, same_key=same_key)
 
                     # A crashed Replay can temporarily leave the direct run directory without
                     # events.jsonl. The durable marker still owns that namespace.
@@ -1016,7 +802,7 @@ def build_router(srv) -> APIRouter:
                         # Fold immediately available positive evidence into the response: a known-live
                         # PID becomes executing and a durable run_started becomes succeeded. PID-less or
                         # uncorrelated evidence becomes uncertain, so clients never navigate on Popen alone.
-                        record, start_result = _reconcile_start(rd, record)
+                        record, start_result = reconcile_start(srv, rd, record)
             except BaseException as exc:
                 exposed_exc: BaseException = exc
                 if isinstance(exc, SettingsRevisionConflict):
@@ -1065,14 +851,14 @@ def build_router(srv) -> APIRouter:
                                        else "failed_before_spawn"),
                                 error_code=code, paid_effect_unknown=popen_boundary_entered,
                                 # Publish the pre-Popen fact before removing its directory. If this
-                                # process dies during cleanup, _reconcile_start can finish it safely.
+                                # process dies during cleanup, reconcile_start can finish it safely.
                                 namespace_released=False,
                                 updated_at=time.time(),
                             )
                             srv.commands.save_start_record(rd, record)
                         if materialization_created and not popen_boundary_entered:
-                            namespace_released = _release_unspawned_start_namespace(
-                                rd, start_id=start_id, task_file=task_file)
+                            namespace_released = release_unspawned_start_namespace(
+                                srv, rd, start_id=start_id, task_file=task_file)
                             if record is not None and namespace_released:
                                 record.update(namespace_released=True, updated_at=time.time())
                                 srv.commands.save_start_record(rd, record)

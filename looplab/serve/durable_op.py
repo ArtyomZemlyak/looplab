@@ -5,8 +5,10 @@ This is the RECEIPT tier of the same split `core/fence.py` made one layer down f
 
   * `core/fence.py` owns the *fence* protocol — the marker that blocks every other writer while an
     operation is unresolved. It is read by the engine, the CLI and five serve modules.
-  * this module owns the *receipt* protocol — the operation's own durable state machine, read only by
-    the transaction that wrote it: identity, phase, and the rules for advancing one.
+  * `core/receipt.py` owns the *receipt* protocol — the operation's own durable state machine, read
+    only by the transaction that wrote it: identity, phase, and the rules for advancing one. It
+    lived HERE until 2026-09-08 and is re-exported below unchanged; see the import comment for why
+    it moved down a layer.
 
 `reset_transaction.py` and `deletion_transaction.py` are two receipts with genuinely different
 schemas, phase lattices, error types and size budgets — but they implemented the same paranoid
@@ -21,7 +23,7 @@ lines above. **The deletion RECEIPT still had that exact lambda when SC-06 was i
 same defect, in the second location, surviving the commit that fixed the first. One copy quietly
 gaining a fix the other misses is not a hypothetical failure mode here; it is the observed one.
 
-So the PROTOCOL lives here and the SCHEMAS stay with their owners. Each owner declares one
+So the PROTOCOL lives in one place and the SCHEMAS stay with their owners. Each owner declares one
 `ReceiptProtocol` naming its label, error class, size cap, validator, immutable identity fields and —
 the asymmetry that must never be flattened — its own `check_transition`. Reset's phase lattice is an
 unordered adjacency table (a launch can go back to `archived`); deletion's is a monotonic index with
@@ -46,142 +48,20 @@ as "four spellings". It is not four, and it is not one — see `refuse_unless_qu
 """
 from __future__ import annotations
 
-import json
-import os
-import stat
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Callable
 
 from fastapi import HTTPException
 
-from looplab.core.atomicio import file_identity, strict_atomic_write_text
-from looplab.core.pathsafe import is_reparse
-
-
-class ReceiptProtocol(NamedTuple):
-    """One owner's per-receipt facts. Everything here differs between reset and deletion.
-
-    ``label`` is the noun every message in this module is built from, so an owner's error text stays
-    byte-identical to what it raised before the protocol was shared (``"reset receipt cannot be
-    read: …"``). ``validate`` returns the normalized receipt and raises the owner's own error with
-    the owner's own message — a bool would have collapsed six distinct schema refusals into one.
-    ``check_transition`` raises when ``value``'s phase may not follow ``current``'s.
-    """
-
-    label: str
-    error_cls: type[Exception]
-    max_bytes: int
-    validate: Callable[..., dict[str, Any]]
-    immutable: frozenset[str]
-    check_transition: Callable[[dict[str, Any], dict[str, Any]], None]
-
-
-def regular_receipt_stat(path: Path, protocol: ReceiptProtocol) -> Optional[os.stat_result]:
-    """``lstat`` a receipt, or ``None`` when there is none; refuse anything not service-owned.
-
-    An absent receipt is the one case that must not raise — every resume path distinguishes "no
-    operation" from "an operation whose state cannot be read", and collapsing them would let a
-    destructive transaction restart from scratch over its own unfinished work.
-    """
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise protocol.error_cls(f"{protocol.label} cannot be inspected: {exc}") from exc
-    if is_reparse(info) or not stat.S_ISREG(info.st_mode):
-        raise protocol.error_cls(f"{protocol.label} is not a regular service-owned file")
-    return info
-
-
-def load_receipt(path: Path, protocol: ReceiptProtocol) -> Optional[dict[str, Any]]:
-    """Read a receipt under the paranoid protocol above, or ``None`` when there is none."""
-    before = regular_receipt_stat(path, protocol)
-    if before is None:
-        return None
-    if before.st_size > protocol.max_bytes:
-        raise protocol.error_cls(f"{protocol.label} exceeds its safety limit")
-    try:
-        with path.open("rb") as stream:
-            raw = stream.read(protocol.max_bytes + 1)
-        after = regular_receipt_stat(path, protocol)
-    except OSError as exc:
-        raise protocol.error_cls(f"{protocol.label} cannot be read: {exc}") from exc
-    # `file_identity` is the canonical same-file-unchanged stat tuple. The deletion receipt used to
-    # spell its own six-field lambda here — the very drift CO-01 removed from the deletion FENCE and
-    # did not reach — so a change to the canonical tuple would have left this copy comparing a weaker
-    # identity, with nothing to notice.
-    if after is None or file_identity(before) != file_identity(after):
-        raise protocol.error_cls(f"{protocol.label} changed while it was being read")
-    # `st_size` is not a promise about what the read returned: the file can grow between the two
-    # calls, and on an attribute-caching filesystem the stat can simply be stale. The pre-read guard
-    # is what keeps an oversized receipt from being pulled into memory at all; this one is what
-    # refuses it once it has been.
-    if len(raw) > protocol.max_bytes:
-        raise protocol.error_cls(f"{protocol.label} exceeds its safety limit")
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeError, RecursionError) as exc:
-        raise protocol.error_cls(f"{protocol.label} cannot be decoded: {exc}") from exc
-    return protocol.validate(value, path=path)
-
-
-def save_receipt(
-        path: Path, value: dict[str, Any], protocol: ReceiptProtocol, *,
-        load: Callable[[Path], Optional[dict[str, Any]]]) -> dict[str, Any]:
-    """Validate, admit the phase move, write durably, then READ IT BACK and confirm it.
-
-    ``load`` is the owner's own public loader rather than `load_receipt` directly: both halves of
-    this function (the read-current that the immutable/transition checks judge, and the read-back)
-    are decisions the owner is entitled to intercept, and routing them through its module-level name
-    keeps that a live monkeypatch seam instead of one that resolves past the owner. `core/fence.py`
-    passes its `confirm` callable for the same reason.
-
-    The read-back is not belt-and-braces: a strict write can fail after the replacement became
-    visible, callers retry the same operation, and that later read is the authority on every
-    subsequent decision. Confirming here means a half-published receipt is a loud storage error
-    rather than a phase nobody can advance.
-    """
-    value = protocol.validate(value, path=path)
-    current = load(path)
-    if current is not None:
-        if any(current.get(key) != value.get(key) for key in protocol.immutable):
-            raise protocol.error_cls(f"{protocol.label} immutable identity changed")
-        protocol.check_transition(current, value)
-    try:
-        encoded = json.dumps(
-            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        if len(encoded.encode("utf-8")) > protocol.max_bytes:
-            raise ValueError(f"{protocol.label} exceeds its safety limit")
-        strict_atomic_write_text(path, encoded)
-    except (OSError, TypeError, ValueError) as exc:
-        raise protocol.error_cls(
-            f"{protocol.label} could not be published durably: {exc}") from exc
-    confirmed = load(path)
-    if confirmed != value:
-        raise protocol.error_cls(f"{protocol.label} publication could not be confirmed")
-    return confirmed
-
-
-def receipts_for_run(
-        root: Path, pattern: str,
-        load: Callable[[Path], Optional[dict[str, Any]]]) -> list[tuple[Path, dict[str, Any]]]:
-    """Every readable receipt matching one run's glob, as ``(path, receipt)``.
-
-    Deliberately takes an already-derived ``root`` and ``pattern`` instead of ``(srv, rd)``: the two
-    owners derive the run key from DIFFERENT authorities — reset from the command sequencer's file
-    stem (having first proved that path sits in the canonical lock namespace), deletion from
-    `run_deletion_key(rd)` cross-checked against that same stem — and those derivations are the
-    identity binding each transaction rests on. Folding them into a shared "get the run key" would
-    make one owner's binding silently answer for the other's.
-    """
-    found: list[tuple[Path, dict[str, Any]]] = []
-    for path in root.glob(pattern):
-        receipt = load(path)
-        if receipt is not None:
-            found.append((path, receipt))
-    return found
-
+# The RECEIPT tier itself MOVED DOWN to `core/receipt.py` on 2026-09-08 (doc 34 D-01), unchanged,
+# and is re-exported here so both owners' imports and their `durable_op.load_receipt` monkeypatch
+# seam are untouched. It moved because a THIRD owner appeared below `serve`: the agent-facing node
+# purge (`tools/run_control_tools.py`) is an irreversible multi-file transaction, `tools` may not
+# import `serve`, and the only other way to give it a receipt was a fourth hand-rolled protocol —
+# the exact duplication SC-06 extracted this kit to end. What stays here is the quiescence LADDER,
+# which raises `HTTPException` and is therefore the server's.
+from looplab.core.receipt import (
+    ReceiptProtocol, load_receipt, receipts_for_run, regular_receipt_stat, save_receipt)
 
 # --------------------------------------------------------------- the destructive-quiescence ladder
 

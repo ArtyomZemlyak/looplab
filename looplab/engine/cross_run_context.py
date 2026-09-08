@@ -42,10 +42,15 @@ def enter_governed(base: Path, reenter: Callable[[dict], str]) -> str:
     Written out twice before, and the failure mode of getting it wrong is invisible — a builder that
     forgets `include_concepts` or drops a source name still returns text, just governed by a ledger
     that never saw one of the stores it is projecting.
-    """
-    from looplab.engine.governance_health import project_governed_sources
 
-    return project_governed_sources(
+    This is the fixed-name case of `governance_protocol.governed_projection` (doc 25 EM-08): both
+    builders load all three stores themselves every time, so there is nothing for the shared helper's
+    `unsupplied` derivation to decide — the trio is a constant. It goes THROUGH the helper anyway so
+    the re-entry itself has one implementation across all six governed projections.
+    """
+    from looplab.engine.governance_protocol import governed_projection
+
+    return governed_projection(
         base, reenter, include_concepts=True, source_names=CROSS_RUN_SOURCE_NAMES)
 
 
