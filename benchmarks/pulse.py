@@ -116,6 +116,49 @@ def wchan(pid) -> str:
         return "gone"
 
 
+PAUSED_WINDOW_S = 86_400.0     # a pause older than a day is history, not news
+
+
+def paused_probes(bench: str, now: float | None = None) -> list:
+    """Probes that are PAUSED AND OWED WORK -- not running, not finished, and not out of money.
+
+    §334. `remDL13` auto-paused when the provider went down mid-proposal: the Researcher got a 503,
+    returned a degraded fallback, nothing was proposed and no node was built. `run_probe.sh`
+    reported `rc=0` and "чемпион: НЕТ", and this tool said "no bench probe running" -- the same
+    sentence it says about a probe that finished perfectly. Those are opposite dispositions: one is
+    done, the other keeps $0.1114 of paid state and wants `looplab resume`, and re-launching it
+    instead pays for that state twice (§213 measured what the reverse mistake costs).
+
+    The disposition comes from `arm_fidelity._paused`, which decides it on the SPEND rather than on
+    the word "pause" -- a run that stopped at its ceiling is complete however it was worded.
+
+    Bounded to the last day: a pause from last week is history, and walking every probe tree on the
+    box costs more than the answer is worth.
+    """
+    now = time.time() if now is None else now
+    out = []
+    for path in glob.glob(f"{bench}/model-probes/*/runs/*/run/events.jsonl"):
+        name = path.split("/model-probes/")[1].split("/")[0]
+        try:
+            if now - os.path.getmtime(path) > PAUSED_WINDOW_S:
+                continue
+        except OSError:
+            continue
+        try:
+            # NO SEPARATE `_run_finished` CHECK. It was here and a mutation deleting it stayed
+            # green: `_paused` decides on the LAST lifecycle event, so a finished run is already
+            # not paused. Keeping the line would have been an untested branch dressed as a guard --
+            # the fixture for it can only be a state the engine does not produce.
+            if not arm_fidelity._paused(f"{bench}/model-probes", name):
+                continue
+            spend = arm_fidelity._spend(f"{bench}/model-probes", name)
+        except Exception:                       # noqa: BLE001 - a probe is not a reason to fail
+            continue
+        out.append({"probe": name, "spend": spend,
+                    "age_s": now - os.path.getmtime(path)})
+    return sorted(out, key=lambda r: r["probe"])
+
+
 def timer_processes(table) -> dict:
     """The snapshot DAEMONS in a process table, told apart from the forks of a cycle in flight.
 
@@ -306,8 +349,12 @@ def main(argv=None) -> int:
         print(f'{orph["count"]} orphaned bench worker(s) pinned across {orph["cpus"]} cpu(s), '
               f'{orph["rss_mib"]} MiB, oldest {orph["oldest_h"]} h -- parent gone (ppid 1), '
               f'state S so the zombie check does not see them')
+    held = paused_probes(args.bench, now)
+    for row in held:
+        print(f'{row["probe"]} is PAUSED and owed work: ${row["spend"]:.4f} of paid state, idle '
+              f'{row["age_s"] / 60:.0f} min -- `looplab resume`, do NOT relaunch (that pays twice)')
     if not live and not args.expect:
-        print("no bench probe running")
+        print("no bench probe running" + (" (see the paused one(s) above)" if held else ""))
         return 0
     print(f'{"probe":10s} {"lane":12s} {"$":>8s} {"nodes":>5s} {"zeros":>5s} {"errs":>4s} '
           f'{"log age":>8s} {"call age":>9s}  wchan')
@@ -332,14 +379,36 @@ def main(argv=None) -> int:
             # (`litellm.ServiceUnavailableError: No available workers`). The list's rule for the
             # other wall is a rule about a streak too ("three consecutive 504s at exactly 300 s =
             # the nginx ceiling, not a hang"), and one sample cannot express either.
+            # A STREAK OF ONE IS THE SINGLE SAMPLE, and saying "1 consecutive 401s over 0 min"
+            # about it is worse prose for the commonest case -- a lone 401 between 200s (§122 saw
+            # four, forty seconds apart, and they mattered). Two or more is a run, which is the
+            # thing the streak was added to express.
             run = (health.get("streak") or {}).get(name)
-            if run and str(run["status"]) == str(called[1]):
+            if run and run["count"] >= 2 and str(run["status"]) == str(called[1]):
                 mins = (now - run["since"]) / 60.0
                 print(f'      {run["count"]} consecutive {run["status"]}s over {mins:.0f} min '
                       "-- the endpoint is refusing, not this probe stalling")
             else:
                 print(f'      last call came back {called[1]}, not 200 -- check the endpoint before '
                       "the probe")
+        if call_age is not None and age > args.stall / 4 and call_age < age / 4:
+            print(f'      CALLING BUT NOT PRODUCING: last call {call_age:.0f}s ago, log last grew '
+                  f'{age:.0f}s ago. Three consecutive 504s at exactly 300 s are the nginx ceiling, '
+                  "not a hang (§175); check the ledger's statuses before the process")
+        for z in got["bad"]:
+            # THE ZERO'S OWN SECONDS ARE THE DIAGNOSIS. A zero under five seconds means the harness
+            # declined to measure -- a regime mismatch, an unloadable solver -- and blaming the
+            # model for it sends the next hour in the wrong direction. All 12 corpus zeros are the
+            # other kind: 41-47 s of real evaluation that came back invalid.
+            # AND THE BRIDGE'S OWN NAME WHERE IT SAID ONE. The seconds are the fallback now, not
+            # the diagnosis: `evaluator_timeout` is a refusal that costs the FULL timeout, so the
+            # rule "a zero at 45 s is the solver's" gets that one exactly backwards.
+            what = (f'RULER REFUSAL ({z["reason"]}) -- the harness declined, the solver was never '
+                    "the question" if z.get("reason") else
+                    "RULER REFUSAL -- the harness declined, the solver was never the question"
+                    if z["refusal"] else "the evaluation ran and came back invalid")
+            print(f'      zero at node {z["node_id"]}: eval_seconds={z["eval_seconds"]}, '
+                  f'violations={z["violations"]} -- {what}')
         if age > args.stall:
             stalled += 1
             print(f'      STALLED: {age:.0f}s since the log last grew, past the {args.stall:.0f}s '

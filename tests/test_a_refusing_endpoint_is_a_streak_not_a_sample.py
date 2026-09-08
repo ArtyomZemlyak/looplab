@@ -64,3 +64,10 @@ def test_pulse_prints_the_streak_rather_than_the_last_sample():
     assert "consecutive" in src and 'health.get("streak")' in src
     # И запасной вариант остаётся: строка без серии всё ещё сообщает статус, а не молчит.
     assert "last call came back" in src
+
+
+def test_a_streak_of_one_is_printed_as_the_single_sample_it_is():
+    """Одиночный 401 между двумя 200 — не серия, и «1 consecutive 401s over 0 min» о нём хуже, чем
+    «came back 401». §122 видел четыре таких за сорок секунд, и они значили истёкший ключ."""
+    src = (BENCH / "pulse.py").read_text(encoding="utf-8")
+    assert 'run["count"] >= 2' in src, "серия из одного напечатается как серия"
