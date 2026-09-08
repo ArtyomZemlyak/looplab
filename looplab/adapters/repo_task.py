@@ -1770,6 +1770,27 @@ class RepoTask(BaseModel):
                 break
         return out
 
+    def shift_inputs(self) -> dict:
+        """For the distribution-shift record (docs/BACKLOG.md §15): the training sample and the
+        deployment one off the SAME declared `data:` mounts `columns()` profiles, under the same
+        bounds. A mount that holds a `train*` table beside a `test*`/`valid*`/`holdout*`/`eval*` one
+        offers the pair (the first that does, in declaration order); everything else answers `{}` and
+        the engine records "not compared" rather than comparing two arbitrary tables."""
+        from looplab.adapters import perception as _perception
+        for name, spec in self.data.items():
+            pair = _perception.split_tables(spec.path)
+            if pair is None:
+                continue
+            reference = _perception.tabular_columns(
+                pair[0], _perception.SAMPLE_ROWS, max_json_bytes=_perception.MAX_JSON_BYTES)
+            current = _perception.tabular_columns(
+                pair[1], _perception.SAMPLE_ROWS, max_json_bytes=_perception.MAX_JSON_BYTES)
+            if reference and current:
+                return {"reference": reference, "current": current,
+                        "source": (f"{name}: {os.path.basename(pair[0])} vs "
+                                   f"{os.path.basename(pair[1])}")}
+        return {}
+
     def data_samples(self) -> dict[str, str]:
         """Bounded previews of each declared data mount for `DataTools` (`read_asset`,
         `data_schema`, `data_profile`): a directory mount lists its entries and samples its primary

@@ -43,8 +43,10 @@ TASK_KIND_GUIDE = (
     "- quadratic — a pure numeric objective with named variables and bounds, no data or code "
     '(great offline). {"kind":"quadratic","goal":"minimize ...","direction":"min",'
     '"bounds":{"x":[-10,10],"y":[-10,10]}}.\n'
-    "- classification / regression / timeseries — tune a fixed model template (knobs, not free code) "
+    "- classification / regression — tune a fixed model template (knobs, not free code) "
     "for a synthetic/tabular objective.\n"
+    "- timeseries — the LLM writes a forecaster for a synthetic seasonal series, scored by a "
+    "rolling-origin backtest the task ships and protects.\n"
     "- code_regression / mlebench — the LLM writes a numpy script scored by a held-out grader the "
     "agent can't see (use when an anti-cheat guarantee matters and there is no repo).\n"
     "Rules: author exactly ONE `task`. Set `direction` (max for score/accuracy, min for error/loss). "

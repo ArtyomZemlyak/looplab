@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-150 event types — 109 folded into `RunState`, 41 diagnostic; 846 declared payload keys; 26 types whose whole payload is stored by the fold.
+151 event types — 109 folded into `RunState`, 42 diagnostic; 855 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -74,6 +74,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `data_leakage` | folded · whole | The deterministic leakage scan's verdicts over the task's data. | `leak`, `verdicts` | — |
 | `data_profiled` | folded | The task's data profile: the columns the bounded profiler read. | `columns` | — |
 | `data_provenance` | folded · whole | Where each of the task's declared data assets came from. | `assets` | — |
+| `data_shift` | diagnostic | How far the deployment sample the task declares is from the training one, per column. | `checked`, `columns`, `detector`, `n_columns`, `n_shifted`, `only_current`, `only_reference`, `shift`, `source` | — |
 | `deep_research` | folded · whole | An operator request for a deep-research pass — the intent itself, with no payload. | — | — |
 | `deps_declared` | diagnostic | The dependency directives a task declared, what the resolver pinned, and what it dropped. | `action`, `command`, `digest`, `directives`, `dropped`, `env_delta`, `file`, `observed`, `pin_count`, `pins`, `pins_truncated`, `root` | — |
 | `deps_installed` | diagnostic | The packages one evaluation installed and how they resolved. | `generation`, `node_id`, `packages`, `resolved`, `round` | `source` |

@@ -4227,6 +4227,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self.store.append(EV_DATA_PROFILED, {"columns": profile_dataset(cols())})
                     _ev("data_profiled")
                     _su_step("data profiled")
+                # Distribution shift (docs/BACKLOG.md §15): record how far the deployment sample is
+                # from the training one, from the SAME declared data the two rungs around it read.
+                # Advisory and appended BEFORE the gate below on purpose — a run the leakage gate
+                # aborts is exactly a run whose operator wants to see what the data looked like.
+                self._record_distribution_shift()
                 # Leakage-first grounding (I9): if the task exposes split/feature/target/time
                 # data and a leak is detected, refuse to run — don't produce results on leaky data.
                 leakage_blocked = self._leakage_blocks()
@@ -6265,7 +6270,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         its `client`/`is_code_generating` forwarders come from `WrapsDeveloper`, so they describe the
         DEVELOPER stage only (`agents/unified_agent.py::_wrapped` -> `_active_developer`). On every
         task whose Developer is a fixed template but whose Researcher is an `LLMResearcher` —
-        classification, regression, timeseries — both probes therefore read the same client-less
+        classification, regression (timeseries too, until its LLM path started writing the
+        forecaster on 2026-09-08) — both probes therefore read the same client-less
         template and the whole product default answered "no LLM" while calling the provider once per
         node. Measured on `examples/classification_task.json` with stock Settings: `run_started`
         recorded no `speculation_depth` at all (AUTO had settled to 0) even though the run's own

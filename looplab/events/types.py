@@ -111,6 +111,11 @@ EV_DATA_PROFILED = "data_profiled"
 EV_DATA_PROVENANCE = "data_provenance"
 EV_HOST_GRADING = "host_grading"
 EV_DATA_LEAKAGE = "data_leakage"
+# The deterministic distribution-shift RECORD (docs/BACKLOG.md §15): how far the deployment sample
+# the task declares is from the training one, column by column. DIAGNOSTIC on purpose and not merely
+# fold-ignored — shift is the normal case on a real task, so nothing selects, gates or caveats on it,
+# and no reader may key on its position (`trust/drift.py` has the account).
+EV_DATA_SHIFT = "data_shift"
 EV_APPROVAL_REQUESTED = "approval_requested"
 EV_SPEC_PROPOSED = "spec_proposed"
 EV_SPEC_APPROVAL_REQUESTED = "spec_approval_requested"
@@ -1099,7 +1104,7 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
     EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION, EV_NODE_BUILD_DELTA,
-    EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
+    EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET, EV_DATA_SHIFT,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN, EV_EFFECTIVE_TRAIN_BATCH,
     EV_WORKSPACE_SEEDED,
@@ -1463,6 +1468,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("assets",),
         optional=(),
         stored_whole=True,
+    ),
+    "data_shift": PayloadContract(
+        "How far the deployment sample the task declares is from the training one, per column.",
+        required=("checked", "columns", "detector", "n_columns", "n_shifted", "only_current",
+                  "only_reference", "shift", "source"),
+        optional=(),
     ),
     "deep_research": PayloadContract(
         "An operator request for a deep-research pass — the intent itself, with no payload.",

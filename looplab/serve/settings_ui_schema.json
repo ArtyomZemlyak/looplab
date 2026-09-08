@@ -1368,6 +1368,14 @@
           "help": "B3, ON by default since 2026-08-15: adds the HIGH-ENTROPY pass to the persisted event, trace and UI stdout/stderr tail redactor. It is NOT the on/off switch for tail redaction — known credential shapes (sk-…, AKIA…, ghp_…, Authorization:, key=value, URL userinfo) and the values of your own secret-named environment variables are masked on every persisted tail whatever this says. What it adds is masking of a 24+ character high-entropy run that mixes upper case, lower case AND digits — the composition of a base64 credential, and deliberately not that of a path, a slug or a CamelCase class name (/ is treated as a separator for the same reason). That screen is why it now ships on: measured over every persisted tail under runs/, the pass changed 13 of 744 before the screen and all 13 were traceback file paths, and 0 of 1,652 after. Turn it OFF only if you would rather a high-entropy credential your eval prints reach the durable log than accept that residual risk; ordinary diagnostic output survives verbatim either way. Raw node-workdir setup.log, stage logs, eval.log, code and artifacts are outside this boundary and may contain secrets — protect the run root and avoid exposing secrets to candidate code."
         },
         {
+          "key": "mlflow_tracking_uri",
+          "label": "MLflow tracking URI",
+          "type": "text",
+          "default": "",
+          "placeholder": "off",
+          "help": "Mirror this run into MLflow WHILE IT RUNS (2026-09-08): a follower thread tails the run's event log and publishes each evaluated node as it lands — a child MLflow run per node with its params and metrics, plus node_metric / best_metric series on the parent run — instead of nothing reaching MLflow until someone runs `looplab export-mlflow` after the fact. Blank (the default) is OFF and nothing leaves the box: an external tracking server is an EGRESS boundary, so only a URI you type here starts it, and the champion's code is redacted on the way out exactly as the export redacts it. Needs the optional `mlflow` package — without it the setting degrades to today's behaviour with no error. The mirror only ever READS the log: it never appends, holds no lock, and a dead tracking server costs the mirror, never the search."
+        },
+        {
           "key": "reward_hack_detect",
           "label": "Reward-hack detector",
           "type": "bool",

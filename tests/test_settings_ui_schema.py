@@ -100,7 +100,13 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 207
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 208
+    # 207 + 1 -> 208 on 2026-09-08: `mlflow_tracking_uri` (docs/BACKLOG.md §16), the live MLflow
+    # mirror. Verified by intersection as every entry below prescribes rather than by bumping the
+    # integer: removing exactly that key from the catalogue gives back the 207 keys of the previous
+    # tree, so this is one real addition with nothing renamed away underneath it. It is a ROW and
+    # not an uncurated omission because it decides whether this run's params, metrics and champion
+    # code leave the box for an external server — the operator has to see it to turn it off.
     # 206 + 1 -> 207 on 2026-09-07, at the SECOND merge with master: master's ten rows had
     # already met this branch's ten, and this is the one row this branch authored after
     # that merge — `agent_read_loop_nudge_after`. Verified by intersection as every entry
@@ -327,7 +333,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 241 + 1 -> 242 on 2026-09-07, at the SECOND merge: `agent_read_loop_nudge_after`,
     # the one field this branch added after master already carried its ten. The two counts
     # move together because it is a curated row.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 242
+    # 242 + 1 -> 243 on 2026-09-08: `mlflow_tracking_uri` — see the catalogue note above; the two
+    # counts move together because it is a curated row.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 243
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

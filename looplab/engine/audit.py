@@ -9,7 +9,8 @@ which a mixin preserves.
 The cluster: the per-node audit-event emitters (`_emit_agent_report` / `_emit_role_telemetry` /
 `_emit_hypothesis_ranked` / `_emit_foresight_selected`), the protected-file tamper audit
 (`_audit_workdir_writes`), output redaction (`_redact`), the crash-injection test hook
-(`_maybe_crash`), and the leakage detector set (`_leakage_blocks`)."""
+(`_maybe_crash`), the leakage detector set (`_leakage_blocks`) and the advisory distribution-shift
+record beside it (`_record_distribution_shift`)."""
 from __future__ import annotations
 
 import os
@@ -17,8 +18,9 @@ from pathlib import Path
 
 from looplab.core.containment import contain
 from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
-                                  EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
+                                  EV_DATA_SHIFT, EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
                                   EV_NODE_EVALUATED)
+from looplab.trust.drift import distribution_shift, rows_to_columns
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 
 
@@ -388,3 +390,40 @@ class AuditMixin:
         leak = any(v.get("leak") for v in verdicts)
         self.store.append(EV_DATA_LEAKAGE, {"leak": leak, "verdicts": verdicts})
         return leak
+
+    def _record_distribution_shift(self) -> None:
+        """Distribution-shift RECORD (docs/BACKLOG.md §15): how far the deployment sample the task
+        declares is from the training one, appended once at setup as a `data_shift` event.
+
+        Two sources, in this order, and neither is a new read of anything on disk that the run was
+        not already reading: `shift_inputs()` (the declared train/test TABLES, read by
+        `adapters/perception.py` under its own row/column bounds) and, for the adapters that publish
+        no such pair, the `train_rows`/`test_rows` the leakage gate already asks for — positionally,
+        which is all a row list carries.
+
+        It RECORDS and returns nothing. Shift is not misconduct: on a real task the deployment sample
+        is SUPPOSED to differ from the training one, so a rung that could abort would be refusing the
+        normal case, and the number an operator actually wants is "how far, on which columns" beside
+        a worse metric. A task that declares no comparable pair appends nothing at all rather than an
+        empty verdict, because "not compared" and "compared, no shift" are different facts and only
+        the second one is evidence."""
+        inp: dict = {}
+        fn = getattr(self.task, "shift_inputs", None)
+        if callable(fn):
+            inp = fn() or {}
+        reference, current = inp.get("reference"), inp.get("current")
+        source = str(inp.get("source") or "shift_inputs")
+        if not (isinstance(reference, dict) and isinstance(current, dict)
+                and reference and current):
+            leak_fn = getattr(self.task, "leakage_inputs", None)
+            if not callable(leak_fn):
+                return
+            rows = leak_fn() or {}
+            if "train_rows" not in rows or "test_rows" not in rows:
+                return
+            reference = rows_to_columns(rows["train_rows"])
+            current = rows_to_columns(rows["test_rows"])
+            source = "leakage_inputs: train_rows vs test_rows"
+            if not reference or not current:
+                return
+        self.store.append(EV_DATA_SHIFT, distribution_shift(reference, current, source=source))

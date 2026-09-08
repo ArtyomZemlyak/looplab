@@ -45,9 +45,9 @@ below shows both the Genesis path and the equivalent task file.
 | Kinds | `code_regression`, `mlebench`, `mlebench_real` | `repo` (+ its onboarding / framework variants) |
 | Use when | there is no code yet — a Kaggle-style "data in, predictions out" problem | you already have a project and want it improved/completed in place |
 
-> `classification`, `regression`, and `timeseries` also run with an LLM, but they **tune knobs in a
-> fixed template** rather than writing free-form code. The "writes the whole script" kinds are
-> `code_regression`, `mlebench`, `mlebench_real` and `dataset`.
+> `classification` and `regression` also run with an LLM, but they **tune knobs in a fixed
+> template** rather than writing free-form code. The "writes the whole script" kinds are
+> `code_regression`, `timeseries`, `mlebench`, `mlebench_real` and `dataset`.
 
 !!! warning "Which kinds actually have a held-out grader"
 

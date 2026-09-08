@@ -593,14 +593,19 @@ site that proves it is open.
     repo_write_tools and tasks. Only the timeseries half gets a marker: the missing-adapter half has
     no falsifier that isn't a filename guess, and a proof that names a FILE THAT MIGHT ARRIVE UNDER
     ANOTHER NAME is the mechanism-not-property shape this file was corrected for nine times.
-    OPEN[timeseries-adapter-embeds-its-own-forecaster] the adapter generates its own exponential
-    forecaster inline, so the task validates LoopLab's plumbing rather than any forecasting
-    capability; retire this when a real backend is imported.
-    proof:present:_TS_TEMPLATE@looplab/adapters/timeseries.py
-    *Mutated before it was written:* True as shipped, False the moment that import lands. Re-pointed
-    2026-09-06 (doc 52 §2.2): `autogluon` was one backend of many; the deciding symbol is the inline
-    template the adapter hands the sandbox, which any real backend deletes (the forecaster's own
-    `def` line sits INSIDE that string, which the guard rightly refuses as prose).]
+    *CLOSED 2026-09-08 — `_TS_TEMPLATE` is gone, and NOT by importing a forecasting library.* The
+    marker's own falsifier named the deciding symbol correctly (the inline template the adapter hands
+    the sandbox), and what deletes it is the split the item's first sentence asks for: the adapter now
+    ships the DATA (`series.json`), the METRIC (`backtest.py`, a rolling-origin MASE whose origin set
+    is fixed by the series and `backtest_h` alone — the old template's `max(period + 1, n - h)` moved
+    with the candidate's own hyperparameter, so two nodes were not comparable) and a DECLARED BASELINE
+    (`baseline.py`, the seasonal blend that used to BE the solution), all three staged and protected
+    per eval. `llm_roles` hands the model an `LLMDeveloper` that writes the forecaster against that
+    contract, so the kind is a coding loop like `code_regression` rather than a two-float sweep; the
+    offline pair runs the declared baseline, which keeps `backend=toy` end-to-end. A real backend
+    (AutoGluon-TS/Darts) is now a candidate's import, not the adapter's — which is the half of this
+    entry that never needed LoopLab's permission. The missing tabular-AutoML/multimodal adapters
+    stay open, unmarked, for the reason stated above.]
 15. **Drift detection is absent (P2, M).** `trust/leakage.py` DID go past exact-match —
     `code_leakage_scan` (`:147`, self-described "static-dataflow-lite": preprocessor fit on full data
     before the split, `.fit()` on test data), plus `target_leakage` and `temporal_leakage`. But every
@@ -608,11 +613,21 @@ site that proves it is open.
     (`engine/confirm_phase.py:273`), never a distribution-shift detector.
    **[RE-DERIVED 2026-08-21 — HOLDS.** No population-stability index, no KS test, no
    `distribution_shift`/`drift_detect` symbol anywhere under `looplab/`.
-   OPEN[no-distribution-shift-detector] nothing compares the deployment distribution against the
-   training one, so a run cannot tell a shifted input from a worse model; retire this when a
-   detector exists.
-   proof:missing:looplab/trust/drift.py
-   *Mutated before it was written:* True as shipped, False the moment that module exists.]
+   *CLOSED 2026-09-08 — `trust/drift.py` exists, and it RECORDS.* Three classical statistics over
+   the pair the task already declares, no new reader and no second profiler: PSI over ten reference
+   quantiles and a two-sample KS D for a numeric column, total variation distance plus the unseen-
+   category share for a categorical one, with `core/profile.py` deciding which a column is so there
+   is still one answer to "is this numeric" across the profile, the leakage verdicts and this. The
+   pair comes from `shift_inputs()` (a `train*` table beside a `test*`/`valid*` one in a declared
+   mount, read by `adapters/perception.py::split_tables` + `tabular_columns` under the same bounds)
+   or, for the adapters that publish no tables, the `train_rows`/`test_rows` the leakage gate
+   already asks for. `engine/audit.py::_record_distribution_shift` appends it at setup as the
+   DIAGNOSTIC `data_shift` event and nothing reads it: shift is the normal case on a real task, so a
+   rung that could abort would be refusing the ordinary run — whether a deterministic flag ever
+   moves selection is `Settings.trust_gate`'s question and this one is not in it. One claim from the
+   first draft was measured and deleted rather than shipped: "KS catches a location shift PSI's bins
+   hide" is false at these thresholds (past ~0.6σ PSI is the larger of the two), and
+   `tests/test_distribution_shift.py` now carries the ladder that says so.]
 16. **MLflow is manual export, not autolog; there are no data connectors (P2, S–M).**
     `events/mlflow_export.py::export_run` + `cli/export_cmds.py:93` ship a per-run push; grep for
     `autolog` across `looplab/` is **empty**, and there is no `DataConnector`/`connector` symbol.
@@ -625,10 +640,22 @@ site that proves it is open.
     Nothing is broken by that; what would have been broken is the obvious falsifier. `absent:autolog`
     reads FALSE as shipped, which the guard would have reported as an item already fixed — an
     open item closed by an English word. The pin is bound to the CALL instead.
-    OPEN[mlflow-is-export-not-autolog] MLflow receives a run only when a human runs the export
-    command, so nothing is tracked while a run is in flight; retire this when autologging is wired.
-    proof:`absent:mlflow.autolog@looplab/events/mlflow_export.py`
-    *Mutated before it was written:* True as shipped, False the moment that call lands.]
+    *CLOSED 2026-09-08 — autologging is wired, and the falsifier's own call is NOT what landed.*
+    Read that as a correction to the marker rather than an evasion of it: `mlflow.autolog()`
+    monkeypatches training libraries in the process that calls it, and the process that would call
+    it — the engine — trains nothing. The candidate does, inside a sandbox subprocess the engine may
+    not reach into, so that call would patch nothing and log nothing. What the ITEM asks for is the
+    sentence that follows the slug ("nothing is tracked while a run is in flight"), and that is now
+    false: `Settings.mlflow_tracking_uri` (blank = off, because a tracking server is egress) starts
+    `events/mlflow_export.py::autolog` around the drive both `run` and `resume` go through
+    (`cli/run_cmds.py::_run_engine_guarded`), and a follower thread tails the run's own
+    `events.jsonl` and publishes each node terminal as it lands — a child MLflow run per node with
+    its params, metric and channel-tagged extras, plus `node_metric`/`best_metric` series on the
+    parent, and the champion's redacted code at close. Tailing the LOG rather than hooking the loop
+    is what makes it shippable: the mirror never appends, holds no lock, is idempotent by node id
+    (so it survives a resume), and gives up after three consecutive failures — a dead tracking
+    server costs the mirror and not the search, which `tests/test_mlflow_export.py` drives with the
+    dependency absent, the CI condition here.]
 17. **The MCTS tree has no LLM value estimate and no reflection (P2, M).**
     `search/policy.py:393::MCTSPolicy` is classic UCB1 (`:475-478`) with reward folded straight from
     the metric (`_mcts_reward`, `:374`). No `lats.py`, no LLM valuation, and it is not wired to
