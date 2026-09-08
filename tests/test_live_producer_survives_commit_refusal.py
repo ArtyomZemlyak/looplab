@@ -118,17 +118,19 @@ def test_no_await_separates_storing_a_result_from_clearing_the_in_flight_marker(
     """WHY the `allow_commit` conjunct is unobservable today, pinned as the ordering it rests on.
 
     Dropping `commit_refused_this_turn` from the new guard passes every behavioural test above, and
-    that is not a weak test — it is a real equivalence, and this is the fact it rests on.
-    `_produce_card_build` stores its result and clears the in-flight marker back to back:
+    that is not a weak test — it is a real equivalence, and this is the fact it rests on. The
+    producer stores its result and releases its in-flight marker back to back:
 
-        self._spec_builds[key] = result
+        store(result)
         finally:
-            self._spec_build_inflight.discard(key)
+            release()
 
-    with NO `await` between them. `_produce_card_build` is a coroutine, so the main task can only be
-    scheduled at an await point — which means the pair "a result is stored AND the key is still
-    in-flight" is unreachable from `_serve_card_builds`, and an in-flight key therefore always
-    implies no result to commit.
+    with NO `await` between them. Both producers reach that pair through the ONE wrapper
+    `_run_isolated_producer` (doc 25 EC-12), so the ordering is stated once and this test reads it
+    there; `_produce_card_build` supplies `store`/`release` and adds no await of its own between
+    them. `_produce_card_build` is a coroutine, so the main task can only be scheduled at an await
+    point — which means the pair "a result is stored AND the key is still in-flight" is unreachable
+    from `_serve_card_builds`, and an in-flight key therefore always implies no result to commit.
 
     The conjunct is KEPT anyway, because it states the rule the branch is about rather than a
     coincidence of the current scheduling, and because the day an `await` appears between those two
@@ -136,38 +138,85 @@ def test_no_await_separates_storing_a_result_from_clearing_the_in_flight_marker(
     finished build. This test is what goes red on that day: it is the invariant, not the conjunct,
     that the equivalence depends on.
 
-    Mutation: put any `await` between the store and the discard and this fails.
+    Mutation: put any `await` between the store and the release and this fails.
     """
     import ast
     import inspect
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(
-        speculation.SpeculationMixin._produce_card_build)))
-    stores, discards, awaits = [], [], []
+        speculation.SpeculationMixin._run_isolated_producer)))
+    stores, releases, awaits = [], [], []
     for node in ast.walk(tree):
         if isinstance(node, ast.Await):
             awaits.append(node.lineno)
-        elif isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Subscript)
-                and isinstance(t.value, ast.Attribute)
-                and t.value.attr == "_spec_builds" for t in node.targets):
-            stores.append(node.lineno)
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and node.func.attr == "discard" \
-                and isinstance(node.func.value, ast.Attribute) \
-                and node.func.value.attr == "_spec_build_inflight":
-            discards.append(node.lineno)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "store":
+                stores.append(node.lineno)
+            elif node.func.id == "release":
+                releases.append(node.lineno)
 
-    assert len(stores) == 1 and len(discards) == 1, (
-        f"expected exactly one result store and one in-flight discard, got {stores}/{discards} — "
+    assert len(stores) == 1 and len(releases) == 1, (
+        f"expected exactly one result store and one in-flight release, got {stores}/{releases} — "
         "a second of either makes the ordering claim unstatable")
-    between = [ln for ln in awaits if stores[0] < ln < discards[0]]
+    between = [ln for ln in awaits if stores[0] < ln < releases[0]]
     assert not between, (
         f"an `await` at line offset {between} now separates storing the result from clearing the "
         "in-flight marker. The main task can be scheduled there, so it can observe a STORED result "
         "on an IN-FLIGHT key — and `_serve_card_builds`'s in-flight skip would then refuse to "
         "commit a finished build on a turn that is allowed to. The `commit_refused_this_turn` "
         "conjunct stops that; re-read it before changing this ordering")
+
+    # ...and that the request-driven producer really does reach the pair through that wrapper,
+    # rather than keeping a second copy whose ordering nothing above reads.
+    call = next(node for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(
+        speculation.SpeculationMixin._produce_card_build))))
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "_run_isolated_producer")
+    passed = {kw.arg for kw in call.keywords}
+    assert {"store", "release", "notify", "notify_key"} <= passed, (
+        f"_produce_card_build no longer hands the wrapper its store/release pair (got {passed}); "
+        "the ordering this test reads would then describe code the producer does not run")
+
+
+def test_the_isolated_producer_wrapper_stores_a_fault_and_releases_after_storing():
+    """The wrapper's contract, DRIVEN rather than read (doc 25 EC-12).
+
+    Three rules live in `_run_isolated_producer` and each fails silently on its own: a worker that
+    RAISES must still leave a stored result (the main task advances the durable gate off the slot,
+    so a producer that stored nothing looks like one still running); the release must happen AFTER
+    the store (releasing first lets the consumer re-scan while the slot is still empty); and the
+    notification comes last, because it is only a hint that the slots are worth re-reading.
+
+    Mutations that fail it: drop the `store(result)` from the except path, swap `release()` and
+    `store(...)`, or move `notify_producer` above the release.
+    """
+    import anyio
+
+    from looplab.engine.speculation import SpeculationMixin
+
+    order: list[str] = []
+    stored: list[object] = []
+
+    class _Notify:
+        def send_nowait(self, key):
+            order.append(f"notify:{key}")
+
+    def _boom():
+        raise ValueError("provider went away")
+
+    async def _drive():
+        await SpeculationMixin._run_isolated_producer(
+            object(), _boom,
+            on_failure=lambda exc: ("failed", type(exc).__name__),
+            store=lambda result: (order.append("store"), stored.append(result)),
+            release=lambda: order.append("release"),
+            notify=_Notify(), notify_key=("producer", ("card-1", 0)),
+        )
+
+    anyio.run(_drive)
+    assert stored == [("failed", "ValueError")], (
+        "a raising worker must still leave a STORED result — an empty slot is indistinguishable "
+        "from a producer that is still running")
+    assert order == ["store", "release", "notify:('producer', ('card-1', 0))"], order
 
 
 def test_an_ALLOWED_commit_is_untouched_by_the_in_flight_check(tmp_path):

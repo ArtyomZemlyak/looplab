@@ -126,11 +126,20 @@ def test_the_task_list_comes_from_the_campaign_itself(tmp_path):
 
 def test_the_real_bench_sorts_into_the_measured_groups():
     """The end-to-end shape §309 recorded: sixteen of twenty scorable."""
+    import pytest
+
     tasks = ti.campaign_tasks()
     if len(tasks) != 20:
-        import pytest
         pytest.skip("campaign task list is not the twenty this was measured on")
     rows = ruler_check.entries(ruler_check.DEFAULT_DIR)
+    # THE SAME GUARD, on the OTHER input this test reads off the box. The counts below are a claim
+    # about a MEASURED bench box — its `.baseline_times` cache and its AlgoTune checkout — not about
+    # the classifier, which the eleven hermetic tests above cover with their own fixtures. Without
+    # the cache every task sorts to `no baseline` and this failed with `{'no baseline': 20}` on any
+    # machine that is not that box: the suite red about a missing measurement, which is what the
+    # task-list guard one line up already declines to do.
+    if not rows:
+        pytest.skip("no baseline cache on this box; these counts are a claim about the bench box")
     # THROUGH THE SHIPPED WIRING, not a second copy of it: see `inventory`'s docstring.
     out = ti.inventory(tasks, rows)
     counts = {}

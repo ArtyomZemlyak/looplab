@@ -297,16 +297,21 @@ def test_every_star_re_exported_name_is_declared():
 
 
 def test_the_shared_write_seam_is_read_from_both_modules():
-    """The hazard this extraction carries: a star import BINDS BY VALUE, so a monkeypatch on one
+    """The hazard these extractions carry: a star import BINDS BY VALUE, so a monkeypatch on one
     module does not reach the other's lookup. `strict_atomic_write_text` is genuinely called from
-    both — the store writes receipts and fences, the router writes the report record — so a test
-    that injects a write failure has to patch both, which `test_report.py::_patch_store` does."""
-    from looplab.serve import scope_report_store
-    from looplab.serve.routers import reports
+    both — the store writes receipts and fences, and the report RECORD is written by whichever
+    module owns the paid generation. That was `routers/reports.py` until 2026-09-08, when SR-02's
+    remaining arm moved it to `serve/scope_generate.py`; the seam is asserted on the module that
+    actually calls it, because a module that no longer does cannot fail this."""
+    from looplab.serve import scope_generate, scope_report_store
 
-    for module in (scope_report_store, reports):
+    for module in (scope_report_store, scope_generate):
         source = inspect.getsource(module)
         assert "strict_atomic_write_text(" in source, module.__name__
+    from looplab.serve.routers import reports
+
+    assert "strict_atomic_write_text(" not in inspect.getsource(reports), (
+        "the router publishes report records again — then `_patch_store` has a third site to sweep")
 
 
 def test_the_run_list_projections_are_appstate_methods():
@@ -322,11 +327,14 @@ def test_the_run_list_projections_are_appstate_methods():
 
 
 def test_the_scope_report_reads_the_method_not_the_bag():
+    """The membership projection moved with the rest of the scope projections (SR-02, 2026-09-08);
+    what must never come back is the late-bound bag attribute, and that half is asserted on BOTH."""
+    from looplab.serve import scope_generate
     from looplab.serve.routers import reports
 
-    source = inspect.getsource(reports)
-    assert "srv.run_membership()" in source
-    assert "list_runs_membership_fn" not in source
+    assert "srv.run_membership()" in inspect.getsource(scope_generate)
+    for module in (scope_generate, reports):
+        assert "list_runs_membership_fn" not in inspect.getsource(module), module.__name__
 
 
 def test_the_projection_module_imports_no_router():

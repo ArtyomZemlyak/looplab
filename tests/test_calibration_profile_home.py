@@ -134,7 +134,20 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               taken from either side — neither side's digest describes it. Verified the
 #               prescribed way, by DIFFING the field set rather than adding the integers:
 #               master adds `agent_timeout`, this branch adds ten, nothing is removed.
-_EXPECTED_DIGEST = "sha256:e52ed9295f43ebe0a22007ed040641edc0c25c041f15bebe40f1d254d8211a68"
+#   2026-09-08  + eval_noise_seeds (doc 52 row 11: the eval NOISE FLOOR — how many times ONE
+#               candidate is re-evaluated so the run records the spread of its own metric). The
+#               'field set changed too' branch, verified that way rather than from the count: an
+#               AST scan of `Settings`' annotated assignments against the pre-change tree reports
+#               exactly `['eval_noise_seeds']` added and `[]` removed, so a +2/-1 cannot be hiding
+#               behind the +1. `_EXPECTED_FIELD_COUNT` goes 242 -> 243 and both pins are re-set.
+#               INERT for a calibration replicate: the profile ships it 0, `_noise_floor_due` is
+#               then one false comparison and `engine/noise_floor.py` is never entered, so the
+#               replicate evaluates the same nodes in the same order. Re-pinned anyway on the rule
+#               every inert knob above was re-pinned under — the digest binds the COMPLETE
+#               non-variant envelope — and here that rule is doing real work: the ON path buys N
+#               extra FULL evaluations at the end of the run, which is a different amount of
+#               compute on the same search and exactly what a speculation receipt asserts about.
+_EXPECTED_DIGEST = "sha256:2a40f561a3df9d499821dd04528c26af24c3d5ad9c5ea4c23b8bbfb5ba4cb109"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -298,6 +311,12 @@ _EXPECTED_DIGEST = "sha256:e52ed9295f43ebe0a22007ed040641edc0c25c041f15bebe40f1d
 #               whether a replicate that installs a system package, or writes a cache under $HOME,
 #               succeeds or fails. An envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
+#   2026-09-08  + mcts_value_weight  (docs/BACKLOG.md §0.1 row 17: the LLM value estimate the MCTS
+#               tree never had). The THIRD field of that day, landing at the merge after
+#               `lesson_operator_scope` and `mlflow_tracking_uri`; its own branch pinned 241
+#               because it was cut against a tree holding neither. Re-derived here with the delta
+#               CHECKED by an AST diff of Settings' annotated assignments against the merge base:
+#               exactly ['mcts_value_weight'] added, [] removed.
 #   2026-08-15  redact_output False -> True. **The 'field set UNCHANGED' branch**, which this file's
 #               own assertion message tells you not to re-pin — so read why this is the second
 #               legitimate instance rather than the bug that message is written for, and the
@@ -574,7 +593,40 @@ _EXPECTED_DIGEST = "sha256:e52ed9295f43ebe0a22007ed040641edc0c25c041f15bebe40f1d
 #               threshold, so the prompt bytes a replicate's Developer sees are now a function of a
 #               value the envelope did not record. The default matching the former literal makes
 #               today's behaviour identical; it does not make the envelope the same.
-_EXPECTED_FIELD_COUNT = 239
+#   2026-09-08  MERGE: two fields landed the same day, one per branch, and neither side's digest
+#               describes the result — each was pinned against a tree without the other's field.
+#               Both pins are RECOMPUTED from the merged module, the way every merge entry above
+#               prescribes, and verified by DIFFING the field set rather than adding integers: an
+#               AST scan of `Settings`' annotated assignments reports exactly
+#               `['lesson_operator_scope', 'mlflow_tracking_uri']` added and `[]` removed, so
+#               239 -> 241 is two real additions and a +3/-1 cannot hide behind it.
+#   2026-09-08  + lesson_operator_scope (one of the two, 239 -> 241 together): whether the Developer's cross-run
+#               prior is RANKED by the operator about to fire (doc 52 §4.3). Verified the way this
+#               history prescribes rather than by adding integers: an AST scan of `Settings`'
+#               annotated assignments reports exactly `['lesson_operator_scope']` added and `[]`
+#               removed. Old receipts SHOULD stop verifying, and here the reason is unusually clean:
+#               the field decides WHICH five cross-run lessons reach the Developer's prompt, so a
+#               replicate calibrated before it ran under an envelope that could not record the
+#               ordering its build was shown. The default (off) reproduces that ordering byte for
+#               byte; it does not make the envelope the same.
+#   2026-09-08  + mlflow_tracking_uri  (docs/BACKLOG.md §16: the MLflow mirror that runs WHILE the
+#               run does). The 'field set changed too' branch, verified that way rather than from
+#               the count: an AST scan of `Settings`' annotated assignments against the pre-change
+#               tree reports exactly `['mlflow_tracking_uri']` added and `[]` removed, so a +2/-1
+#               cannot be hiding behind the +1. `_EXPECTED_FIELD_COUNT` goes 239 -> 240 and both
+#               pins are re-set.
+#               INERT for a calibration replicate, and inert twice over: the profile ships it "" —
+#               the OFF value and the shipped default, so no follower thread is ever started — and
+#               the mirror is a pure READER of the event log besides, appending nothing, holding no
+#               lock and spending no tokens, so even a replicate run WITH a URI would evaluate the
+#               same nodes in the same order. Re-pinned anyway on the rule every inert knob above
+#               was re-pinned under: the digest binds the COMPLETE non-variant envelope and the
+#               guard is deliberately not clever enough to exempt a knob it can prove unreachable.
+#               What makes re-pinning right rather than merely necessary is what the field IS: it
+#               decides whether a run's params, metrics and champion CODE leave the box for an
+#               external server, and an envelope that cannot state that is not the envelope a later
+#               receipt would be compared against.
+_EXPECTED_FIELD_COUNT = 243
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
@@ -706,11 +758,31 @@ def test_the_profile_ignores_the_launcher_environment(monkeypatch):
             f"the profile read {field} from the environment instead of the schema default")
 
 
-def test_the_derivation_refuses_a_required_settings_field():
+def test_the_derivation_refuses_a_required_settings_field(monkeypatch):
     """A required field has no declared default to read, so the profile cannot be inferred at all.
-    Failing loudly at import beats emitting a digest that silently omits it."""
-    source = inspect.getsource(speculation_calibration._declared_settings_json_defaults)
-    assert "is_required()" in source and "raise RuntimeError" in source
+    Failing loudly beats emitting a digest that silently omits it.
+
+    DRIVEN, because the pin this replaces (`assert "is_required()" in source and "raise
+    RuntimeError" in source`) is the shape CLAUDE.md names: one comment away from vacuous. Replacing
+    the guard with `# if field.is_required(): raise RuntimeError(...)` kept both literals in the
+    source and the whole file green, and nothing else in the tree covers this function — so the
+    property the test is NAMED for was not being checked at all. With the raise gone,
+    `field.get_default()` answers `PydanticUndefined` for a required field, and that flows into
+    `SPECULATION_CALIBRATION_PROFILE_SETTINGS` and into the digest every issued receipt is keyed
+    on: the silent omission, exactly.
+    """
+    from pydantic.fields import FieldInfo
+
+    fields = dict(Settings.model_fields)
+    fields["_probe_required"] = FieldInfo(annotation=int)      # no default -> `is_required()`
+    monkeypatch.setattr(Settings, "model_fields", fields, raising=False)
+    with pytest.raises(RuntimeError, match="required Settings field"):
+        speculation_calibration._declared_settings_json_defaults()
+
+    # …and the fixture is not vacuous either: without the probe field the derivation succeeds, so a
+    # green `pytest.raises` above can only come from the guard and never from an unrelated error.
+    monkeypatch.undo()
+    assert speculation_calibration._declared_settings_json_defaults()["max_nodes"] is not None
 
 
 @pytest.mark.parametrize("name", ["_declared_settings_json_defaults",

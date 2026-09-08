@@ -110,13 +110,29 @@ def test_the_setting_defaults_to_uncapped():
 
 def test_the_factory_threads_the_setting_to_the_role():
     """One place turns a setting into behaviour; if this stops passing it, the arm silently runs
-    uncapped and its control and treatment become the same thing."""
-    import inspect
+    uncapped and its control and treatment become the same thing.
 
-    from looplab.agents import factory
-    src = inspect.getsource(factory)
-    assert "probe_max_calls=getattr(settings, \"developer_probe_max_calls\", 0)" in src, (
+    Driven rather than pinned to a source line: the pin read `agents/factory.py` until 2026-09-08,
+    when doc 25 RA-01's second half moved the in-house repo Developer's constructor call into
+    `agents/developer_backends.py::in_house_repo_developer` — the gate `make_roles` now calls — and
+    a pin that has to be re-pointed on every legitimate move is a pin nobody trusts. Building the
+    role from real `Settings` covers the same hop and cannot be satisfied by a comment.
+    """
+    from pathlib import Path
+
+    from looplab.adapters.tasks import load_task
+    from looplab.agents.developer_backends import in_house_repo_developer
+    from looplab.core.config import Settings
+
+    task = load_task(Path(__file__).resolve().parents[1] / "examples" / "repo_task.json")
+
+    def _role(**fields):
+        return in_house_repo_developer(task, Settings(backend="llm", unified_agent=False, **fields),
+                                       client=None, param_search=False, established=None)
+
+    assert _role(developer_probe_max_calls=12)._probe_max_calls == 12, (
         "make_roles no longer passes the cap; an arm setting it would measure nothing")
+    assert _role()._probe_max_calls == 0, "and an unset cap must still reach the role as uncapped"
 
 
 def test_the_role_hands_the_cap_to_the_tool():

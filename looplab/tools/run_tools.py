@@ -1198,6 +1198,16 @@ class ForeignRunReader:
     def _state(self, run_id: Optional[str], *, scan: bool = False) -> Optional[RunState]:
         return self._runs.state(run_id, scan=scan)
 
+    def _summary(self, run_id: Optional[str]) -> Optional[dict]:
+        """The LISTING row for one run (`_runcache.py::run_summary`), or None.
+
+        ALWAYS a sweep read, so it takes no `scan` flag: every caller here walks the whole
+        population, and the row survives the eviction of the state it was projected from — which is
+        what stops the second sweep of a turn re-folding the corpus. A read that needs more than the
+        row is not a listing and calls `_state` instead.
+        """
+        return self._runs.summary(run_id)
+
     # --- evaluation-contract receipt -----------------------------------------
     #
     # WHY THIS SITS IN THE SHARED PLUMBING and not in one provider: all three foreign-run readers
@@ -1431,9 +1441,12 @@ class SiblingRunTools(ForeignRunReader):
                 continue
             # A SWEEP, not a working read: this walks every run under the root to answer "which are
             # my siblings", so its folds must not evict the runs the turn is actually reasoning
-            # about (`_runcache.py::_cache_max`).
-            st = self._state(rid, scan=True)
-            if st is None or st.task_id != self.task_id:
+            # about (`_runcache.py::_cache_max`) — and it asks for the ROW rather than the state,
+            # because one task id is all it reads and the row outlives the eviction, so calling
+            # this twice in a turn (which `_list_runs` and `_analogous` both do) folds nothing the
+            # second time (`_runcache.py::summary`).
+            row = self._summary(rid)
+            if row is None or row["task_id"] != self.task_id:
                 continue
             out.append(rid)
         return out
@@ -1574,14 +1587,15 @@ class AllRunsTools(ForeignRunReader):
     def _list_runs(self) -> str:
         lines = []
         for rid in self._all_ids():
-            st = self._state(rid, scan=True)          # a sweep — see `_sibling_ids` above
-            if st is None:
+            row = self._summary(rid)                  # a sweep — see `_sibling_ids` above
+            if row is None:
                 continue
-            best = st.best()
-            phase = "finished" if st.finished else "running"
-            lines.append(f"{rid} [{st.task_id or '?'}]: best={digest.fmt_num(best.metric) if best else '—'} "
-                         f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
-                         + (f" · best=#{best.id}" if best else "")
+            best = row["best_node_id"] is not None
+            phase = "finished" if row["finished"] else "running"
+            lines.append(f"{rid} [{row['task_id'] or '?'}]: "
+                         f"best={digest.fmt_num(row['best_metric']) if best else '—'} "
+                         f"({row['direction']}) · {row['nodes']} nodes · {phase}"
+                         + (f" · best=#{row['best_node_id']}" if best else "")
                          + self._partial_suffix(rid) + self._contract_suffix(rid))
         return (f"{len(lines)} run(s) under this configured run root (across all tasks):\n"
                 + "\n".join(lines)

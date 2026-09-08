@@ -9,3 +9,12 @@
 # longer differs from it, which is what a stale line in this file looks like.
 
 benchmarks/algotune/looplab_check_pre99.py <- benchmarks/algotune/looplab_check.py  # the checker as of 103c4b1e^, for §115's arm (§134)
+
+# VERBATIM HAS ONE RECORDED EXCEPTION, 2026-09-08. When the live counterpart's `Solver` gate was
+# fixed (a valid solver that BINDS `Solver` by import or assignment is no longer convicted), its
+# open-item marker (slug `solver-check-requires-a-literal-class-statement`) was deleted -- and the
+# index's own frozen-manifest guard refuses a frozen file declaring a slug no file it reads does. So
+# marker and its `proof:` line were deleted from the frozen copy too, and nothing else was: the
+# CODE is still `103c4b1e^`'s, regex and all, which is the only property §115's arm depends on. The
+# alternative -- applying the fix there -- would have destroyed the arm, since the arm exists to run
+# the old gate beside the new one. A comment at the deletion site in that file says the same thing.
