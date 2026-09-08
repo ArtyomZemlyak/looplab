@@ -526,6 +526,59 @@ def test_the_agent_report_is_emitted_from_the_envelope_not_the_shared_instance()
     assert appended == [], appended
 
 
+def test_a_best_of_n_audit_row_describes_the_candidate_that_SHIPPED():
+    """The eleventh registered member, and the one a `setattr` could not reach.
+
+    `WrapsDeveloper.last_report` reads THROUGH to the inner developer — correct for a single-shot
+    wrapper, wrong for best-of-N: N candidates each overwrite the inner's report, so the read-through
+    describes candidate N while `last_files`, the footprint and the other eight describe the one
+    that was PICKED. `_emit_agent_report` writes that value to the durable `agent_validated` row and
+    `_capture_developer_result` copies the same read-through into the envelope, so a best-of-N
+    node's ADR-7 audit trail described a candidate that did not ship, beside files that did.
+
+    A property cannot be assigned, so the per-candidate snapshot loop raised `AttributeError` on
+    exactly this member and swallowed it — the mixture was invisible. It goes through the wrapper's
+    own `last_report` property now, and the single-shot paths still read through.
+    """
+    from looplab.search.best_of_n import BestOfNDeveloper
+
+    class _Inner:
+        def __init__(self):
+            self.last_files, self.last_deleted, self.last_footprint = {}, [], None
+            self.last_report, self.calls = "before-any-build", 0
+
+        def implement(self, _idea):
+            self.calls += 1
+            self.last_report = f"report-{self.calls}"
+            # Candidate 1 scores better, so candidate 2 is the one that must NOT be reported.
+            return "def solve():\n    return 1\n" if self.calls == 1 else "x"
+
+        def repair(self, _idea, _code, _err):
+            self.last_report = "repair-report"
+            return "fixed"
+
+    inner = _Inner()
+    dev = BestOfNDeveloper(inner, n=2, listwise=False, foresight=False)
+    shipped = dev.implement(object())
+
+    assert shipped.startswith("def solve"), "fixture: candidate 1 must be the pick"
+    assert inner.last_report == "report-2", "fixture: the inner must have moved on"
+    assert dev.last_report == "report-1", "the audit row describes a candidate that did not ship"
+    assert NodeBuildMixin._capture_developer_result(dev, shipped).last_report == "report-1"
+
+    # A repair is single-shot: the pick is dropped and the read-through applies again, or a repair
+    # would report the previous BUILD's chosen candidate.
+    dev.repair(object(), "code", "err")
+    assert dev.last_report == "repair-report"
+
+    # …and n == 1 is a transparent pass-through, as it has always been.
+    solo_inner = _Inner()
+    solo = BestOfNDeveloper(solo_inner, n=1, listwise=False, foresight=False)
+    solo.implement(object())
+    solo_inner.last_report = "moved on"     # …and it is a READ-THROUGH, not a stored copy
+    assert solo.last_report == "moved on"
+
+
 def test_no_build_site_clears_the_footprint_on_its_own():
     """The walk has ONE caller, and it is the one holding the lock.
 
