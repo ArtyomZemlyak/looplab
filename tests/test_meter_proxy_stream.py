@@ -208,21 +208,30 @@ def _call(srv, *, mode: str, model: str = UNPRICED_MODEL, stream: bool = True) -
                 closed = True
                 break
             got += chunk
-            if got.endswith(b"0\r\n\r\n") or b"\r\n\r\n" in got and _content_length_done(got):
+            if _response_complete(got):
                 break
     finally:
         sock.close()
     return got, closed
 
 
-def _content_length_done(raw: bytes) -> bool:
-    """True once a `Content-Length` response has been read whole (the non-streamed route)."""
-    head, sep, rest = raw.partition(b"\r\n\r\n")
+def _response_complete(raw: bytes) -> bool:
+    """Has a whole response arrived -- a chunked body's zero-length chunk, or the last byte of a
+    `Content-Length` one?
+
+    THE TERMINATOR IS MATCHED AGAINST THE BODY, NOT THE WHOLE RESPONSE. A `Content-Length` whose
+    value ends in `0` makes the header block itself end in `0\\r\\n\\r\\n`, which reads as a
+    finished chunked body: this returned the headers of a 350-byte answer with none of its bytes,
+    on the ~1-in-3 of runs where the priced body happened to be that long.
+    """
+    head, sep, body = raw.partition(b"\r\n\r\n")
     if not sep:
         return False
+    if body == b"0\r\n\r\n" or body.endswith(b"\r\n0\r\n\r\n"):
+        return True
     for line in head.split(b"\r\n"):
         if line.lower().startswith(b"content-length:"):
-            return len(rest) >= int(line.split(b":", 1)[1])
+            return len(body) >= int(line.split(b":", 1)[1])
     return False
 
 
