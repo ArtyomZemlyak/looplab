@@ -121,12 +121,22 @@ available GPUs by default" and, worse, "Put operational guidance the agent needs
 in the task `goal` in plain words". Genesis WRITES goal text. That instruction is the upstream half
 of item 1: it tells the author to put a configuration into the one channel no guard reads.
 
-**Still open, stated rather than patched:** `agents/roles.py::_FOOTPRINT_BUDGET_LEGACY` is the
-pre-correction paragraph, byte for byte, and it is what an UNSTAMPED role gets — a bare
-`LLMResearcher` in a library caller. The engine path always stamps (`gpu_footprint_cue` defaults
-`True`), so no run gets it; a library caller does. `proposal_cues.py`'s legacy branch is the same
-shape and the same argument. Both are deliberate — `false` must restore the old prompt byte for byte
-— and both are false sentences that ship.
+**Closed 2026-09-08 — the off-switch is SILENCE now, not the false sentence.** This paragraph used
+to read "still open, stated rather than patched": `agents/roles.py`'s pre-correction clause shipped
+byte for byte as the `gpu_footprint_cue=false` branch AND as what an UNSTAMPED role got — a bare
+`LLMResearcher` in a library caller — with `proposal_cues.py`'s legacy branch the same shape and the
+same argument. Both were deliberate, on the rule that `false` must restore the old prompt byte for
+byte, and both were false sentences that shipped.
+
+The rule does not reach this switch, and that is the decision. A byte-for-byte restoration is owed to
+a run ALREADY IN FLIGHT — the `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` contract — and `gpu_footprint_cue`
+has no row there, because it buys no paid call and mounts no intervention. Nothing resumes onto that
+branch, so `false` was reaching only live prompts: an operator asking for it today, and a caller who
+asked for nothing. Both branches now state the ordinary share, the arithmetic and the rule that the
+command must target the count you declare, and say NOTHING about what a larger count buys
+(`agents/roles.py::_FOOTPRINT_BUDGET_QUIET`). A knob may narrow a prompt; it may not be the value
+under which the prompt is wrong. `tests/test_gpu_footprint_choice.py` drives both halves, including
+the unstamped role's real turn.
 
 ---
 
@@ -159,7 +169,22 @@ the class of defect this whole document is about, reintroduced by the fix for it
 elsewhere, because LoopLab RANKS nodes: two nodes whose recorded configs differ only in batch could
 have trained at the same one. **Admissible only if the effective batch is lifted into a durable
 LoopLab event**, which is an `extra_metrics`-shaped problem (`core/models.py::EXTRA_METRIC_CHANNELS`:
-who authored the print statement) and is left open.
+who authored the print statement).
+
+**Lifted 2026-09-08, and NOT as an `extra_metrics` channel.** `runtime/effective_batch.py` reads
+`trainer_state.json::train_batch_size` off the node's own workdir at the METRIC READ — same instant,
+same freshness floor and same `bind_one` identity rule as `applied_params`' resolved tier, bound
+beside it — and `EV_EFFECTIVE_TRAIN_BATCH` records it. It is the fourth side of the metric record and
+the one `applied_params` cannot be: that module states its own bound (*a statement about a DOCUMENT,
+not about an execution*), and this coordinate is exactly where the bound costs. The channel framing
+above is the part that did not survive contact: the number comes off an artifact the CANDIDATE wrote,
+and nothing derivable from such an artifact can authenticate its author, so it may not be spliced as
+an `engine`-channel metric — and it is not a secondary METRIC at all, but a coordinate the process
+recorded about itself. It derives nothing the artifact does not hold (no accumulation steps, no world
+size), publishes a scalar only when every reading agrees, and records NOTHING when there is no
+trainer artifact, which is the permanent state of every task here that is not a transformers
+training. So the refusal's condition is met and `auto_find_batch_size` is admissible; whether the GPU
+cue should recommend it is a prompt decision and is deliberately not made here.
 
 ### 3.3 ADOPTED, the general rule — **a constraint of the machine is DISCOVERED by the thing that runs on it, never asserted in prose an agent reads**
 

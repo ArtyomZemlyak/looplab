@@ -292,6 +292,7 @@
   "node_concepts": {},
   "node_concepts_at_pending": {},
   "node_concepts_at_vocab": {},
+  "node_concepts_authored": {},
   "nodes": {
     "0": {
       "agent_report": null,

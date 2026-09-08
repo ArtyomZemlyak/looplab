@@ -1010,6 +1010,38 @@ cost a node its terminal; it is `None` (never an empty record) when nothing was 
 carries `checked` beside `diverged` so "everything agreed" and "nothing was looked at" can never read
 the same. Old logs carry no key at all and every reader defaults them to silence (invariant #5).
 
+### What the PROCESS says it ran at — `effective_train_batch`
+
+The record above states its own bound out loud: it is a statement about a **document**, not about an
+execution. A key the loader never reads, a section a different code path ignores, an environment
+variable that wins over the file — none of them are visible to any reader of bytes. The training
+batch is the coordinate where that bound has a measured cost. HuggingFace's
+`TrainingArguments.auto_find_batch_size` halves the batch on OOM and retries, and in the installed
+transformers 4.51.0 `Trainer.train` writes the reduced value to `self.state.train_batch_size` while
+`args.per_device_train_batch_size` keeps the DECLARED one everywhere except the DeepSpeed branch — so
+every saved config, including the resolved one, records a batch the run never trained at. That is why
+`docs/45-claim-surfaces-2026-08-20.md` refused `auto_find_batch_size` as the memory answer, and it
+named the condition that lifts the refusal: the effective batch has to become a durable event.
+
+`runtime/effective_batch.py` reads `trainer_state.json::train_batch_size` off the node's own workdir
+at the **same metric read**, under the same freshness floor and the same `bind_one`
+identity/containment rule as the `resolved` tier, and the engine records it as the diagnostic
+`effective_train_batch` event (one per evaluated node that has such an artifact). Three refusals are
+built in. It **derives nothing** the artifact does not hold — `trainer_state.json` carries neither
+the accumulation steps nor the world size, so no "effective batch" is composed from facts the file
+cannot support, and the record says what that library means by the field (the per-step batch of one
+process). Two trainings in one pipeline are **two facts**: readings are deduplicated on the value and
+a scalar is published only when they all agree, never tie-broken on `global_step`. And **absence is
+silence** — no artifact means no row at all, which is the permanent state of every task that is not a
+transformers training, so the log never fills with rows recording that this box does not use
+HuggingFace.
+
+It is deliberately **not** an `extra_metrics` channel. The number comes off an artifact the candidate
+wrote, and nothing derivable from such an artifact can authenticate its author, so it may not be
+spliced as an `engine`-channel metric — and it is not a secondary metric at all, but a coordinate the
+process recorded about itself. Like its three siblings it ranks nothing, gates nothing, and cannot
+cost a node its terminal.
+
 **A repaired declaration whose contract then passes is not a salvage at all** (since 2026-08-13).
 When the failure was an artifact contract and the cause fix corrected the manifest, the engine
 re-asks the **artifact check** — never the stage, which is the whole economy of salvaging — against

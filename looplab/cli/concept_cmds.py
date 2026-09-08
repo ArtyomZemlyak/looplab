@@ -1,5 +1,5 @@
 """Part IV concept / novelty diagnostics: `concept-coverage`, `asset-brief`, `lock-in`,
-`board-dedup`, `research-targets`, `novelty-recall`, `lesson-guard`.
+`board-dedup`, `research-targets`, `novelty-recall`, `lesson-guard`, `concept-authorship`.
 
 Split out of `inspect_cmds.py` (doc 25 CT-01), which had accumulated three unrelated command
 domains behind a docstring naming four commands.
@@ -8,6 +8,11 @@ These are offline analyses over ONE run that may invoke an LLM to tag/grade — 
 with an `--offline` heuristic fallback, so by default they send node code and logs to the endpoint
 the run was pinned to. Read-only over the run EXCEPT `concept-coverage --persist`, which retro-tags
 a finished run by appending generation-fenced `EV_NODE_CONCEPTS` under the engine lock.
+
+`concept-authorship` is the one exception to "agentic by default" and stays here rather than in
+`inspect_cmds` for the domain reason `prior-citations` sits in `memory_cmds`: it is the READ side of
+this domain — a pure projection over the fold (`events/concept_authorship.py`) that calls no model
+and writes nothing.
 """
 from __future__ import annotations
 
@@ -547,6 +552,44 @@ def novelty_recall_cmd(
         if client is not None:
             parser = settings.llm_parser
     typer.echo(novelty_recall_report(state, client=client, parser=parser, max_pairs=max_pairs))
+
+
+@app.command(name="concept-authorship")
+def concept_authorship_cmd(
+    run_dir: Path = typer.Argument(..., help="Run dir whose folded concept memberships to compare."),
+    limit: int = typer.Option(30, "--limit", help="How many nodes to list, lowest node id first."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the whole report as JSON."),
+):
+    """How much of what each proposer said its node was about survived the classifier's answer?
+
+    The classifier cadence REPLACES a node's membership rather than merging into it, so the authored
+    ids are invisible to every read surface once it has run. `RunState.node_concepts_authored` keeps
+    them beside the membership and this is the instrument over that record
+    (`events/concept_authorship.py` states the rename resolution). Pure read: no model, no write.
+    A run whose log predates the record reports zero authored nodes — that is a log that never
+    carried the claim, not a run whose proposers authored nothing.
+    """
+    import orjson
+
+    from looplab.events.concept_authorship import concept_authorship_report
+
+    store = _require_run_dir(run_dir)
+    report = concept_authorship_report(fold(store.read_all()), limit=max(0, limit))
+    if as_json:
+        typer.echo(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
+        return
+    rate = report["survival_rate"]
+    typer.echo(f"authored nodes {report['authored_nodes']} · reclassified "
+               f"{report['reclassified_nodes']} · authored ids {report['authored_ids']} · "
+               f"survived {report['survived_ids']} "
+               f"({('%.1f%%' % (100 * rate)) if rate is not None else 'n/a'})")
+    for row in report["nodes"]:
+        typer.echo(f"node {row['node_id']:>4} [{row['provenance'] or 'unrecorded'}] "
+                   f"authored {','.join(row['authored']) or '-'} -> "
+                   f"folded {','.join(row['folded']) or '-'}"
+                   + (f"  replaced {','.join(row['replaced'])}" if row["replaced"] else ""))
+    if report["truncated"]:
+        typer.echo(f"... (+{report['truncated']} more nodes; --limit)")
 
 
 @app.command(name="lesson-guard")

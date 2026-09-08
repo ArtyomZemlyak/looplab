@@ -120,7 +120,8 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # saying a larger one "does NOT get this experiment more hardware" and that the run "serialises at
 # the same per-experiment cost". The scheduler contradicts both halves. It buys no paid call and
 # moves nothing the operator's numbers rest on; it is a row because a prompt is a contract and OFF
-# must restore both historical paragraphs byte for byte — and because the operator is the one who
+# is a paragraph the operator can ask for — the QUIET one since 2026-09-08, because the historical
+# text closed on a false sentence and nothing resumes onto this switch — and because the operator is the one who
 # has to know that their own task statement still overrides it, which is what has kept every Card
 # on this box at `{"gpus": 1}`.)
 # (181 since `cadence_while_evaluating`: may the node-count cadences fire at a creation decision

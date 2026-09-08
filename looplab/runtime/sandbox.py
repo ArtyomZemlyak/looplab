@@ -554,6 +554,13 @@ class RunResult:
     # stops the record attributing a number to parameters the node never used. It gates nothing and
     # cannot fail a node. None when the node declares no comparable coordinate or no carrier read.
     applied_params: Optional[dict] = None
+    # EFFECTIVE TRAIN BATCH (`runtime/effective_batch.py`): what the training PROCESS recorded about
+    # the one coordinate the field above cannot speak for — `trainer_state.json::train_batch_size`,
+    # bound at the same metric read. `applied_params` states its own bound (a document, never an
+    # execution), and `auto_find_batch_size` is exactly where that bound costs: the declared number
+    # stays in every saved config while the batch that ran survives only in the trainer's own state
+    # file. None on every task that is not a transformers training, which is silence and not a claim.
+    effective_train_batch: Optional[dict] = None
     # HOST-SIDE SCORING (doc 52 row 10a, `adapters/repo_task.py::HostScorerSpec`): when the task
     # declared a host scorer, `metric` above is ITS number and these two carry what the candidate
     # said about itself. `self_metric` is the candidate's own printed number, read off the last

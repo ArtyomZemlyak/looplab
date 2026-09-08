@@ -676,6 +676,7 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
                                   EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
                                   EV_TRAIN_MONITOR_ALERT,
                                   EV_REPAIR_CRITIC_VERDICT,
+                                  EV_EFFECTIVE_TRAIN_BATCH,
                                   EV_REWARD_HACK_SUSPECTED, EV_TRUST_SCAN,
                                   EV_SPEC_DRIFT, EV_STAGE_FINISHED, EV_STAGE_ROLLBACK)
 # Module level, like `hashlib` above and for the same reason: a function-local import of these names
@@ -4263,6 +4264,36 @@ class EvaluateMixin:
                         _eval_payload.get("metric_provenance") or {},
                         applied_params=_applied_prov)
                 self.store.append(EV_NODE_EVALUATED, _eval_payload)
+                # WHAT THE TRAINING PROCESS SAID IT RAN AT (`runtime/effective_batch.py`), bound at
+                # the metric read beside the applied coordinates and recorded as its own diagnostic
+                # row. `docs/45-claim-surfaces-2026-08-20.md` §3.2 refused `auto_find_batch_size` as
+                # the memory answer because the reduced batch survives only in `trainer_state.json`
+                # while every saved config keeps the declared one, and named the durable event as
+                # the condition that lifts the refusal; this is it.
+                #
+                # AFTER the terminal, on the trust-scan row's ground: a record may not sit between an
+                # evaluation and the one row the run cannot afford to lose, and a row lost to a kill
+                # in this window simply is not there — which is the honest reading, since ABSENCE is
+                # what this record already means on every task that is not a transformers training.
+                #
+                # AND ONLY WHEN THERE IS ONE. Unlike the trust scan — whose "we looked and it was
+                # clean" is the load-bearing claim — a row saying no trainer artifact exists would be
+                # appended once per node on every task on this box that never trains one, i.e. an
+                # unbounded log recording that this deployment does not use HuggingFace.
+                _batch = getattr(a.res, "effective_train_batch", None)
+                if isinstance(_batch, dict) and _batch.get("readings"):
+                    self.store.append(EV_EFFECTIVE_TRAIN_BATCH, {
+                        "node_id": a.node_id,
+                        "generation": a.generation,
+                        # None when the readings disagree — two trainings each recorded their own
+                        # true number and this record settles neither (see the module's rule).
+                        "train_batch_size": _batch.get("train_batch_size"),
+                        "disagree": bool(_batch.get("disagree")),
+                        "readings": _batch.get("readings") or [],
+                        "read_at": time.time(),
+                        "files_seen": int(_batch.get("files_seen") or 0),
+                        "truncated": bool(_batch.get("truncated")),
+                    })
                 # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                 # emission does not rewrite the metric, but the folded trust_gate policy
                 # can exclude high-precision signals from champion/breeding under gate/block.

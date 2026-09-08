@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-147 event types — 109 folded into `RunState`, 38 diagnostic; 826 declared payload keys; 26 types whose whole payload is stored by the fold.
+148 event types — 109 folded into `RunState`, 39 diagnostic; 834 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -79,6 +79,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `deps_installed` | diagnostic | The packages one evaluation installed and how they resolved. | `generation`, `node_id`, `packages`, `resolved`, `round` | `source` |
 | `diversity_archive` | folded · whole | The finalization snapshot of the diversity archive. | — | `elites`, `finalize_scope`, `finish_seq`, `niches`, `resolution` |
 | `drift_unavailable` | diagnostic | Why the run could not compare its environment against the one it started in. | `reason` | — |
+| `effective_train_batch` | diagnostic | What the training process itself recorded as the batch it ran at, read off the node's own workdir at the metric read. | `disagree`, `generation`, `node_id`, `read_at`, `readings`, `train_batch_size` | `files_seen`, `truncated` |
 | `env_changed` | folded | A resume observed that the Python/library environment differs from the one the run started in. | `now`, `was` | — |
 | `finalization_finished` | folded | The wrap-up for one finish (keyed by that finish's seq) completed. | `finish_seq` | — |
 | `finalize_step` | diagnostic | One replay-safe step gate inside a single logical finalization. | — | `after_seq`, `finish_data`, `finish_report_planned`, `outcome`, `scope`, `step` |
