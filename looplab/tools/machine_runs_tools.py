@@ -864,21 +864,22 @@ class MachineRunsTools(ForeignRunReader):
         out = []
         for rid in self._run_ids():
             # A SWEEP over every run under the root — its folds must not evict the runs the turn is
-            # actually working with (`tools/_runcache.py::_cache_max`).
-            st = self._state(rid, scan=True)
-            if st is None:
+            # actually working with (`tools/_runcache.py::_cache_max`), and the ROW it needs is
+            # kept when that state is dropped, so the assistant's second sweep of a turn (this is
+            # also the @run-mention expansion) folds nothing (`tools/_runcache.py::summary`).
+            row = self._summary(rid)
+            if row is None:
                 continue
             live = self._alive(rid)
             if only_live and not live:
                 continue
-            best = st.best()
             out.append({
-                "run_id": rid, "goal": st.goal or st.task_id, "direction": st.direction,
-                "phase": ("finished" if st.finished else ("live" if live else "idle")),
-                "nodes": len(st.nodes),
-                "best_metric": (digest.node_metric(best) if best else None),
-                "best_node_id": (best.id if best else None),
-                "engine_running": live, "finished": st.finished,
+                "run_id": rid, "goal": row["goal"] or row["task_id"], "direction": row["direction"],
+                "phase": ("finished" if row["finished"] else ("live" if live else "idle")),
+                "nodes": row["nodes"],
+                "best_metric": row["best_display_metric"],
+                "best_node_id": row["best_node_id"],
+                "engine_running": live, "finished": row["finished"],
             })
         return out
 

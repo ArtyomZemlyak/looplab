@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import os
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional, Protocol
 
@@ -343,6 +344,38 @@ def fn_spec(name: str, description: str, props: dict, required: Optional[list] =
 #: count is exact at any size, this only bounds what is resident while it is taken.
 _ROW_COUNT_CHUNK = 1 << 20
 
+#: The byte CEILING above which `jsonl_row_count` declines to count at all. Unlike the window above
+#: this one bounds the TIME, and it is a REFUSAL rather than an approximation: the hook's vocabulary
+#: has exactly two values (a count the provider stands behind, or the reason it has none), so a
+#: partial count is unrepresentable and a guessed one would be a lie the prompt publishes as fact.
+#: THE NUMBER, off the measurement that narrowed this: 14.7 MB / 200k rows counted in 0.09 s, i.e.
+#: ~6 ms per MB, and the synchronous prompt-assembly path pays this 2-3x per prompt. 16 MiB is ~0.1 s
+#: per count and ~0.3 s per prompt, which is the most this path may spend before "I could not look"
+#: is the better answer than "I looked, slowly" — and the stores this counts (`lessons.jsonl`,
+#: `cases.jsonl`) grow monotonically ACROSS runs, so the ceiling is what stops a corpus from taxing
+#: every prompt of every future run. (`core/memory_window.MEMORY_SOURCE_BYTES` caps a related read at
+#: 2 MiB; it is 8x smaller because that one RETAINS its window and answers from it, while this one
+#: only walks.)
+_ROW_COUNT_CEILING = 16 * 1024 * 1024
+
+
+class RowCountTooLarge(OSError):
+    """`jsonl_row_count` declined to walk a store past `_ROW_COUNT_CEILING`.
+
+    An `OSError` SUBCLASS on purpose. A caller that has never heard of this type still catches it
+    with the `OSError` it already catches and still turns it into the contract's UNKNOWN — the one
+    outcome that must never happen here is a large store being published as an empty one. A caller
+    that HAS heard of it catches this first and says WHICH unknown this is: "too large to count"
+    sends an operator to the store's size, "unreadable store" sends them hunting a corrupt file that
+    does not exist.
+    """
+
+    def __init__(self, size: int, ceiling: int):
+        self.size, self.ceiling = int(size), int(ceiling)
+        super().__init__(f"store too large to count: {self.size} bytes over the "
+                         f"{self.ceiling}-byte ceiling")
+
+
 # ------------------------------------------------------------------------------ tool inventory
 #
 # WHAT IT IS. The optional `inventory()` hook (see `ToolProvider`) lets a provider publish how much
@@ -377,29 +410,39 @@ def jsonl_row_count(path) -> int:
     full parse of every row to publish one integer.
 
     Raises `OSError` on an unreadable store -- the caller turns that into an UNKNOWN reason,
-    which must never be collapsed into a zero.
+    which must never be collapsed into a zero. A store over `_ROW_COUNT_CEILING` bytes raises the
+    `RowCountTooLarge` subclass of it rather than being walked: that is the same UNKNOWN, reached
+    because looking would cost the prompt more than the call the count exists to save.
     """
     with open(path, 'rb') as handle:
-        # OPEN[jsonl-row-count-reads-the-whole-store] NARROWED 2026-09-08, half of it landed: the
-        # memory is now constant (chunked, below), MEASURED 37.4 MB -> 5.4 MB peak and 0.32 s ->
-        # 0.09 s on a 14.7 MB / 200k-row store. What is still open is the TIME: the read is still
-        # unbounded and still synchronous, so a store that has grown across runs is walked end to
-        # end 2-3x per prompt. The close is a byte ceiling above which this answers the contract's
-        # UNKNOWN — "could not look" is a value this vocabulary already has (`core/memory_window`
-        # caps at 2 MiB for exactly this path) — and it needs the two callers' reason strings to
-        # stop saying "unreadable store" about a store that is merely large.
-        # proof:absent:_ROW_COUNT_CEILING@looplab/tools/_base.py
+        # BOUNDED IN TIME as well as in memory, and the two bounds are different in KIND. The
+        # memory bound below is a window and costs the answer nothing; this one is a ceiling and
+        # costs the answer itself, so it is spent as late as possible: a store under it is still
+        # counted exactly, at any size, and only above it does the hook fall back to the UNKNOWN
+        # its vocabulary already has. The stat is taken from THIS descriptor rather than the path,
+        # so the size decided on is the file that is about to be read.
+        size = os.fstat(handle.fileno()).st_size
+        if size > _ROW_COUNT_CEILING:
+            raise RowCountTooLarge(size, _ROW_COUNT_CEILING)
         # CHUNKED, because this runs on the synchronous prompt-assembly path 2-3x per prompt
         # (`collect_inventory` + the `hide_empty_tools` offer) over stores that grow monotonically
         # across runs — `read().split()` held the whole file AND a list of every row in memory at
         # once. The split rule is unchanged and must stay unchanged: ONLY `b"\n"` ends a record
         # (see the docstring), so the tail of each chunk is carried into the next rather than
         # counted, and a final unterminated row still counts.
-        count, carry = 0, b""
+        count, carry, walked = 0, b"", 0
         while True:
             chunk = handle.read(_ROW_COUNT_CHUNK)
             if not chunk:
                 break
+            walked += len(chunk)
+            if walked > _ROW_COUNT_CEILING:
+                # The stat above describes ONE INSTANT. Every store this counts is append-only and
+                # live -- a writer can push the file past the ceiling while we walk it -- and a
+                # non-regular source (a fifo an operator pointed a path at) reports `st_size` 0 and
+                # would otherwise be walked forever on the prompt path. The running total is what
+                # actually bounds the work; the stat above only makes the common refusal free.
+                raise RowCountTooLarge(walked, _ROW_COUNT_CEILING)
             rows = (carry + chunk).split(b'\n')
             carry = rows.pop()              # may be a partial record; the next chunk completes it
             count += sum(1 for row in rows if row.strip())
