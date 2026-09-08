@@ -33,7 +33,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
-from looplab.core.models import FAILURE_REASONS, REPAIRABLE_REASONS
+from looplab.core.models import REPAIRABLE_REASONS
 
 if TYPE_CHECKING:  # layering: engine may import core, but avoid the import cost at runtime
     from looplab.core.config import Settings

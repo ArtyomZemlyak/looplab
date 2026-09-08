@@ -27,7 +27,7 @@ import math as _math
 
 from typing import Optional
 
-from looplab.core.errors import BudgetExceeded, OperatorRefusal, is_run_ending
+from looplab.core.errors import BudgetExceeded, OperatorRefusal, budget_stop_leaf
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -2573,7 +2573,13 @@ class LLMRepoDeveloper:
         except BudgetExceeded:
             raise
         except OperatorRefusal as e:
-            if not is_run_ending(e):
+            # `budget_stop_leaf`, not `is_run_ending`: the `except BudgetExceeded: raise` above
+            # already took every BARE ceiling, and `is_run_ending` is exactly that isinstance — so
+            # the only exception this test can still see is a WRAPPED one (a ceiling re-raised as a
+            # `ConfigRefusal`/`LLMError` from inside the session, or carried in an `ExceptionGroup`
+            # from a nested task group), which is the case the else-branch below exists for and the
+            # narrow predicate answered False for. Same fix as `engine/evaluate.py`'s repair guard.
+            if budget_stop_leaf(e) is None:
                 # A FAULT, not an ending: an outage, a bad key, a misconfiguration. These keep the
                 # crash sentinel on purpose -- the orchestrator pauses, and "resume once it's fixed"
                 # is the right sentence for them. Only the ceiling is re-raised. See

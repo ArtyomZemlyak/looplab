@@ -1338,9 +1338,18 @@ class SpeculationMixin:
                 # all — an unexplained engine crash on the one path the stuck/crash split was added
                 # for. `created` is bound thirteen lines up and its `attempt` is the node's real
                 # generation, which is what the crash branch below already identifies it by.
+                # `never_evaluated`, LIKE EVERY OTHER DISCARD ON THIS METHOD'S PATH — the rule is
+                # written a hundred lines up ("the created node is closed in the same turn … Stamp
+                # the durable receipt so the L5 refund is PROVEN, not inferred") and this terminal
+                # was the one that did not carry it. `is_unevaluated_speculative_discard` failed on
+                # that clause alone (the reason is `developer_stuck`, not the `superseded`/freshness
+                # pair), so the refund was denied and `max_nodes` was spent on an experiment that
+                # never dispatched: no `eval_started`, zero eval seconds, no `stage_finished`. One
+                # stuck card per budget slot, repeatedly, on the shipped `card_driven_selection`.
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node_id, "generation": created.attempt,
                     "error": result.code, "reason": "developer_stuck", "eval_seconds": 0.0,
+                    "never_evaluated": True,
                 })
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
@@ -2157,14 +2166,30 @@ class SpeculationMixin:
         records: list[tuple[str, dict[str, Any]]]
         if pending is not None:
             node = pending
-            records = developer_crash_records(
-                node.id, node.attempt, node.code,
-                "auto-paused: recovered a Developer crash before GPU dispatch")
-            # The terminal this sweep appends takes the next crash rank; below the run's
-            # `developer_crash_pause_after` it owns no pause, exactly as the live sites decide.
-            pause_due = self._developer_crash_pause_due(state, node.id)
-            if not pause_due:
-                records = records[:1]
+            if is_developer_stuck(node.code):
+                # STUCK IS NOT A CRASH, and the sweep is the one place that conflated them.
+                # `_developer_sentinel` recognises BOTH spellings on purpose — it answers "did this
+                # build return a sentinel", and a stuck build that lost its terminal to a process
+                # death needs recovering exactly as much as a crashed one. What it must not decide
+                # is WHICH terminal to write: filing a stuck build as `developer_crash` says "the
+                # LLM is unreachable or hit a hard error", auto-pauses the run at the default
+                # `developer_crash_pause_after=1` on a provider that was fine, and inflates
+                # `developer_crash_rank` so the NEXT real crash mis-computes its own threshold. The
+                # live site three hundred lines up draws this distinction ("no crash record, no
+                # circuit breaker"); the sweep now writes the same terminal it would have.
+                records = [(EV_NODE_FAILED, {
+                    "node_id": node.id, "generation": node.attempt, "error": node.code,
+                    "reason": "developer_stuck", "eval_seconds": 0.0, "never_evaluated": True,
+                })]
+            else:
+                records = developer_crash_records(
+                    node.id, node.attempt, node.code,
+                    "auto-paused: recovered a Developer crash before GPU dispatch")
+                # The terminal this sweep appends takes the next crash rank; below the run's
+                # `developer_crash_pause_after` it owns no pause, exactly as the live sites decide.
+                pause_due = self._developer_crash_pause_due(state, node.id)
+                if not pause_due:
+                    records = records[:1]
         else:
             # A legacy writer (or a crash in the old two-append path) may already have made the
             # sentinel terminal while losing only its pause. Folded ``paused`` cannot distinguish

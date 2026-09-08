@@ -50,8 +50,16 @@ def test_the_developer_handler_re_raises_the_ceiling_before_the_blanket_catch():
     # pausing, and the circuit breaker a 403 blowout of 67 dead nodes was written for never
     # engages. The guard has to be a real test of `is_run_ending`, not a constant, so the assertion
     # is on the If's CONDITION rather than on the presence of the branch.
+    # EITHER SPELLING OF THE SAME QUESTION. `is_run_ending` is `isinstance(exc, BudgetExceeded)`;
+    # `budget_stop_leaf` walks `exceptions`/`__cause__`/`__context__` for the same class. The
+    # `except BudgetExceeded: raise` clause pinned above already takes every BARE ceiling, so the
+    # narrow predicate is unreachable in this handler and the wider one is the only thing that can
+    # still answer YES — pinning the narrow NAME would pin the dead branch. The property is that the
+    # handler ASKS, not which of the two it asks with.
     guards = [n for h in handlers for n in ast.walk(h)
-              if isinstance(n, ast.If) and "is_run_ending" in ast.dump(n.test)]
+              if isinstance(n, ast.If)
+              and ("is_run_ending" in ast.dump(n.test)
+                   or "budget_stop_leaf" in ast.dump(n.test))]
     assert guards, ("the handler no longer asks `is_run_ending`, so every operator refusal takes "
                     "the same path -- either all of them re-raise or none of them do")
     assert any(isinstance(stmt, ast.Return) for g in guards for stmt in ast.walk(g)), (
@@ -68,7 +76,8 @@ def test_the_repair_path_re_raises_it_too():
     import ast
     tree = ast.parse(src)
     guards = [n for n in ast.walk(tree) if isinstance(n, ast.If)
-              and ("BudgetExceeded" in ast.dump(n.test) or "is_run_ending" in ast.dump(n.test))]
+              and ("BudgetExceeded" in ast.dump(n.test) or "is_run_ending" in ast.dump(n.test)
+                   or "budget_stop_leaf" in ast.dump(n.test))]
     assert guards, "the repair path no longer asks whether the refusal is a run ENDING at all"
     assert any(isinstance(stmt, ast.Raise) for g in guards for stmt in g.body), (
         "the repair path still wraps a spend-ceiling refusal in the developer-crash sentinel")

@@ -380,12 +380,24 @@ class NodeBuildMixin:
             if current is None or id(current) in seen:
                 continue
             seen.add(id(current))
-            if hasattr(current, "last_footprint"):
+            # ONLY ON THE OBJECT THAT OWNS THE ATTRIBUTE. `search/foresight.py::
+            # ForesightPanelResearcher` is a READ-ONLY `__getattr__` proxy with no `__setattr__`,
+            # and under the shipped defaults (`unified_agent`, `foresight`, `foresight_panel=2`)
+            # it IS the engine's `developer`. `hasattr` there resolves THROUGH to the wrapped
+            # agent, so this clear used to land in the PROXY's own `__dict__` and shadow the inner
+            # agent's real value for the rest of the run: `_capture_developer_result` read None off
+            # the proxy on every build from the second one on, `_finalize_developer_footprint` fell
+            # back to the Researcher's proposal every time, and a build that RAISED its own resource
+            # estimate was scheduled at the old one — exactly what the envelope prevents. Walking to
+            # `base` (below) reaches the real slot; declining to CREATE the attribute is what stops
+            # the proxy from shadowing it. An object that has never set it is already "cleared".
+            if "last_footprint" in getattr(current, "__dict__", {}):
                 try:
                     current.last_footprint = None
                 except Exception:  # noqa: BLE001 - optional audit output must never block a build
                     pass
-            for attr in ("inner", "developer", "fallback"):
+            # `base` is the `__getattr__` proxy's delegate; the other three are the wrapper chain.
+            for attr in ("inner", "developer", "fallback", "base"):
                 try:
                     child = getattr(current, attr, None)
                 except Exception:  # noqa: BLE001 - a plugin property may be defensive/remote
