@@ -164,6 +164,23 @@ _V8_ABBREVIATION_REGION = (
     "+    config.train.training.gradient_accumulation_steps = 4\n")
 
 
+# `rubertlite-dr-unified-v6` node 1 attempt 1, verbatim — the row the module docstring filed as the
+# NEGATED claim and the one the 2026-09-08 clause-scanner correction moves. BOTH of its concrete
+# lists sit inside a clause about another node, and the old digit-only rule cut the first of those
+# clauses at the dot in `train.py` and the second at the dot in `loss.temperature`, so seven tokens
+# the citation rule had already excused convicted anyway.
+_V6_NEGATED_CLAIM = (
+    "The crash is purely mechanical: node 1 passed three CLI args the harness's train.py "
+    "argparse does not define (gradient_accumulation_steps, max_grad_norm, weight_decay). The "
+    "fix is to drop those unsupported args and keep the supported set node 0 used "
+    "(loss.temperature, batch_size, learning_rate, n_epochs, warmup_ratio), still applying the "
+    "symmetric mnsr loss + lr 1e-3 change in the solution code.")
+_V6_NEGATED_CLAIM_CHANGED = ["looplab_stages.json"]
+_V6_NEGATED_CLAIM_REGION = (
+    'looplab_stages.json\n@@\n     "python",\n     "-m",\n-    "vectorsearch.train",\n'
+    '-    "%params%"\n+    "vectorsearch.train"\n    ],\n-   "gpus": 1,\n')
+
+
 class _ClaimingDev:
     """A developer that makes exactly the change the rationale's SECOND half promises (and still
     fails, so the loop runs to the operator's cap rather than to a metric)."""
@@ -705,6 +722,147 @@ def test_an_exception_class_may_acquit_but_never_convict_alone():
     assert "mine_stage.py" in mixed.unmet and "IndentationError" not in mixed.unmet
 
 
+def _digit_only_clause_end(text, k):
+    """The clause rule as it stood until 2026-09-08: a `.` is exempt ONLY between two digits.
+
+    Re-derived here rather than imported, because the point of the tests that install it is that the
+    shipped rule answers DIFFERENTLY — a defect no longer in the tree cannot be reproduced from it.
+    Kept byte-for-byte equivalent to the code it replaces so the comparison is honest."""
+    ch = text[k]
+    if ch not in repair_verify._CLAUSE_ENDS:
+        return False
+    if ch == "." and 0 < k < len(text) - 1 and text[k - 1].isdigit() and text[k + 1].isdigit():
+        return False
+    return True
+
+
+@pytest.mark.parametrize("text,index,is_end", [
+    ("train.py argparse", 5, False),           # a file extension: inside the token
+    ("loss.temperature, batch_size", 4, False),  # a dotted configuration path: likewise
+    ("Node 1 used lr 0.5 and nll_cos", 16, False),  # the decimal the digit rule was written for
+    ("mine_stage.py. Then I edited", 10, False),   # the extension's dot …
+    ("mine_stage.py. Then I edited", 13, True),    # … and the sentence's, one character later
+    ("Node 1 used version 2. Then", 21, True),  # a trailing `2.` still ends it
+    ("the ratio was .5 there", 14, True),       # so does a leading `.5`
+    ("node 1 reached 0.73; I will", 19, True),  # `;` is untouched by any of this
+    ("node 1 reached 0.73\nI will", 19, True),  # so is the newline
+])
+def test_a_clause_ends_at_a_sentence_and_never_inside_a_token(text, index, is_end):
+    """The rule as a truth table, because it is a SHAPE and a shape is what quietly widens.
+
+    The two bounds the digit-only spelling stated out loud are the load-bearing negatives here: a
+    trailing `2.` and a leading `.5` must still END the clause, or one sentence about another node
+    swallows the paragraph after it into the citation. They hold as CONSEQUENCES of the shape rule
+    (prose puts a space after the period that ends a sentence) rather than as special cases."""
+    from looplab.engine.repair_verify import _clause_end_at
+
+    assert _clause_end_at(text, index) is is_end
+
+
+def test_a_citation_clause_does_not_end_inside_a_filename(monkeypatch):
+    """`rubertlite-dr-unified-v6` node 1 attempt 1, the row the module docstring filed as the fourth
+    unpatched `unmet` shape, driven both ways.
+
+    Its rationale is two sentences and BOTH of them are about another node — "node 1 passed three
+    CLI args … (gradient_accumulation_steps, max_grad_norm, weight_decay)" and "keep the supported
+    set node 0 used (loss.temperature, batch_size, …)". The citation rule has excused tokens like
+    those since 2026-08-15; what convicted this row anyway was the clause SCANNER, which took the
+    dot in `train.py` and the dot in `loss.temperature` for sentence ends and closed each window
+    before it reached the parenthetical it was opened for."""
+    from looplab.engine.repair_verify import _citation_clauses
+
+    # 1. THE DEFECT, reproduced on the shipped path by restoring the old predicate and nothing else.
+    monkeypatch.setattr(repair_verify, "_clause_end_at", _digit_only_clause_end)
+    before = _verdict(_V6_NEGATED_CLAIM, _V6_NEGATED_CLAIM_CHANGED, _V6_NEGATED_CLAIM_REGION)
+    assert before.verdict == REPAIR_UNMET
+    assert "gradient_accumulation_steps" in before.unmet and "warmup_ratio" in before.unmet
+    # The scanner is the whole difference: the first clause stopped mid-`train.py`.
+    assert [_V6_NEGATED_CLAIM[a:b] for a, b in _citation_clauses(_V6_NEGATED_CLAIM)][0].endswith(
+        "the harness's train")
+
+    # 2. THE FIX. Each clause now runs to its own sentence end, so it covers the list it was about.
+    monkeypatch.undo()
+    clauses = [_V6_NEGATED_CLAIM[a:b] for a, b in _citation_clauses(_V6_NEGATED_CLAIM)]
+    assert clauses[0].endswith("(gradient_accumulation_steps, max_grad_norm, weight_decay)")
+    assert ("(loss.temperature, batch_size, learning_rate, n_epochs, warmup_ratio)"
+            in clauses[1]), "the second clause reaches its own parenthetical too"
+    after = _verdict(_V6_NEGATED_CLAIM, _V6_NEGATED_CLAIM_CHANGED, _V6_NEGATED_CLAIM_REGION)
+    assert after.verdict == REPAIR_UNSTATED and after.unmet == ()
+
+    # 3. AND THE NEGATION IS STILL UNREAD, which is what the row was actually filed for. The same
+    #    promise made OUTSIDE a citation clause — kept by deleting the `%params%` placeholder that
+    #    passed the flag — still convicts, because reading it needs the manifest and not the text.
+    negated = _verdict("Fix: drop the --weight_decay flag the harness cannot parse",
+                       _V6_NEGATED_CLAIM_CHANGED, _V6_NEGATED_CLAIM_REGION)
+    assert negated.verdict == REPAIR_UNMET and "--weight_decay" in negated.unmet
+
+
+def test_the_old_rule_convicted_a_sentence_only_because_it_happened_to_name_a_file(monkeypatch):
+    """The argument that the widening costs no conviction the rung ever meant to make: under the old
+    predicate the SAME sentence was scored two different ways depending on whether it mentioned a
+    dotted token, and the version without one — which nothing here changes — was already `unstated`.
+
+    So what the correction removes is an inconsistency, not a signal."""
+    plain = "node 1 used the same config so I will edit mine_stage"
+    dotted = "node 1 used config.yaml so I will edit mine_stage"
+    changed, region = ["looplab_eval.py"], "looplab_eval.py\n@@\n+pass\n"
+
+    monkeypatch.setattr(repair_verify, "_clause_end_at", _digit_only_clause_end)
+    assert _verdict(plain, changed, region).verdict == REPAIR_UNSTATED
+    assert _verdict(dotted, changed, region).verdict == REPAIR_UNMET, "the inconsistency"
+
+    monkeypatch.undo()
+    assert _verdict(plain, changed, region).verdict == REPAIR_UNSTATED
+    assert _verdict(dotted, changed, region).verdict == REPAIR_UNSTATED
+    # A promise made BEFORE the citation is untouched in either regime — a longer clause runs
+    # forward from the reference, so it can never reach back over a claim already made.
+    promise_first = "Fix mine_stage.py to relax the threshold; node 1's config.yaml passed at 0.73"
+    assert _verdict(promise_first, changed, region).verdict == REPAIR_UNMET
+
+
+def test_the_clause_correction_can_only_ever_withdraw_an_accusation(monkeypatch):
+    """The direction bound, as a truth table over every verbatim corpus row these tests carry rather
+    than as a fixture count — the claim the module docstring makes and the one that matters, because
+    the corpus that sized every other rule here (`runs/`) no longer exists on any box.
+
+    A longer clause can only REMOVE a token from the convicting set; `_is_citation_only` is
+    consulted only where NOTHING was met at all; and its single landing place is `unstated`. So
+    `verified` and `inert` are unreachable here, and `unmet` can only be withdrawn, never widened."""
+    rows = {
+        "v8 n3 a1 (the true positive)": (_V8_TRUE_POSITIVE, _V8_TRUE_POSITIVE_CHANGED,
+                                         _V8_TRUE_POSITIVE_REGION),
+        "v8 n3 a2 (cited baseline)": (_V8_CITED_BASELINE, _V8_CITED_BASELINE_CHANGED,
+                                      _V8_CITED_BASELINE_REGION),
+        "v8 n3 a4 (abbreviation)": (_V8_ABBREVIATION, _V8_ABBREVIATION_CHANGED,
+                                    _V8_ABBREVIATION_REGION),
+        "v6 n1 a1 (the negated claim)": (_V6_NEGATED_CLAIM, _V6_NEGATED_CLAIM_CHANGED,
+                                         _V6_NEGATED_CLAIM_REGION),
+        "kept promise": ("cutting n_epochs 10 -> 5 to fit the budget", ["train.py"],
+                         "train.py\n@@\n-n_epochs = 10\n+n_epochs = 5\n"),
+        "broken promise": ("cutting n_epochs 10 -> 5 to fit the budget", ["train.py"],
+                           "train.py\n@@\n-lr = 1e-4\n+lr = 3e-4\n"),
+        "the crash's own word": ("the crash is an IndentationError in mine_stage.py; re-indent it",
+                                 ["train.py"], "train.py\n@@\n-x = 1\n+x = 2\n"),
+    }
+    monkeypatch.setattr(repair_verify, "_clause_end_at", _digit_only_clause_end)
+    old = {k: _verdict(*v) for k, v in rows.items()}
+    monkeypatch.undo()
+    new = {k: _verdict(*v) for k, v in rows.items()}
+
+    moved = []
+    for name in rows:
+        was, now = old[name], new[name]
+        if was.verdict == now.verdict:
+            assert was.unmet == now.unmet, f"{name}: the accusation changed without the verdict"
+            continue
+        moved.append(name)
+        assert (was.verdict, now.verdict) == (REPAIR_UNMET, REPAIR_UNSTATED), (name, was, now)
+        assert now.unmet == () and set(was.claims) == set(now.claims), "nothing is dropped"
+    # And the one row that moves is the one the docstring names. The true positive is not on this
+    # list, which is the regression floor for every future widening of the clause window.
+    assert moved == ["v6 n1 a1 (the negated claim)"], moved
+
+
 def test_the_exception_rule_leaves_a_real_corpus_row_convicted():
     """The regression floor for the widening, and it is a REAL row rather than a fixture written to
     pass: `rubertlite-dense-retrieval` n40's rationale (verbatim from `bench-out/cand.durable.jsonl`,
@@ -733,22 +891,17 @@ def test_the_historical_corpus_cases_the_docstring_cites_keep_their_verdicts():
 
     Rules that only ever get tested on the cases they were written for are how an extractor drifts
     into noise — these are the ones they must NOT touch."""
-    # rubertlite-dr-unified-v6 node 1 attempt 1: a NEGATED claim ("drop those unsupported args")
-    # kept by deleting the `"%params%"` placeholder that passed them. Still `unmet`, and left that
-    # way on purpose — a rule for the indirection would have to model the manifest, not the text.
-    # What the citation rule DOES do here is drop `train.py`, which sits in the node-1 clause.
-    v6 = _verdict(
-        "The crash is purely mechanical: node 1 passed three CLI args the harness's train.py "
-        "argparse does not define (gradient_accumulation_steps, max_grad_norm, weight_decay). The "
-        "fix is to drop those unsupported args and keep the supported set node 0 used "
-        "(loss.temperature, batch_size, learning_rate, n_epochs, warmup_ratio), still applying the "
-        "symmetric mnsr loss + lr 1e-3 change in the solution code.",
-        ["looplab_stages.json"],
-        'looplab_stages.json\n@@\n     "python",\n     "-m",\n-    "vectorsearch.train",\n'
-        '-    "%params%"\n+    "vectorsearch.train"\n    ],\n-   "gpus": 1,\n')
-    assert v6.verdict == REPAIR_UNMET
-    assert "train.py" not in v6.unmet, "a token inside the node-1 clause may not convict"
-    assert "gradient_accumulation_steps" in v6.unmet, "the promise itself still stands"
+    # rubertlite-dr-unified-v6 node 1 attempt 1: filed as a NEGATED claim ("drop those unsupported
+    # args") kept by deleting the `"%params%"` placeholder that passed them. `unstated` since the
+    # 2026-09-08 clause-scanner correction, and NOT because the indirection is now read — every
+    # concrete token it names sits in a clause citing another node, which the shipped citation rule
+    # already excused and a scanner that stopped at the dot inside `train.py` did not. Driven in
+    # both directions by `test_a_citation_clause_does_not_end_inside_a_filename` below.
+    v6 = _verdict(_V6_NEGATED_CLAIM, _V6_NEGATED_CLAIM_CHANGED, _V6_NEGATED_CLAIM_REGION)
+    assert v6.verdict == REPAIR_UNSTATED, v6
+    assert v6.unmet == (), "a rationale whose every token is cited accuses nobody"
+    # NOTHING IS DROPPED, exactly as for the other two demotions: the tokens stay on the record.
+    assert {"train.py", "gradient_accumulation_steps", "warmup_ratio"} <= set(v6.claims)
 
     # rubertlite-dense-retrieval node 11 attempt 2: the rationale names the BROKEN component and the
     # repair edits the eval harness. Deliberately left `unmet` — a claim-clause whitelist would
