@@ -282,3 +282,91 @@ def echo_card_and_build_tables(rows, *, state, ev_path: Path, ledger_total: Opti
             # that trade, which until now had no visible price at all.
             typer.echo(f"{spent:>14,}  {share:>5.1f}%  {'':>6}  "
                        f"built and never evaluated ({len(lost)} card(s) discarded before dispatch)")
+
+
+def echo_edit_types(state) -> None:
+    """`looplab edit-types`' whole body: classify every parent->child diff and print the tally.
+
+    Extracted 2026-09-08 for the same cap this module was created under
+    (`tests/test_cli_command_groups.py::test_no_group_is_a_god_module_again`), when
+    `workspace-bytes` needed room in `inspect_cmds.py` — an extraction, which is the norm that
+    guard's own docstring states, rather than the fourth raise it refused. Moved VERBATIM: the
+    command keeps its docstring (which the CLI reference is written against) and its fold, and
+    every why-comment below is the one it shipped with.
+    """
+    from looplab.tools.node_diff import (EDIT_TYPES, classify_edits, node_record,
+                                         reintroduced_lines)
+
+    minimize = str(getattr(state, "direction", "min") or "min").lower() != "max"
+    pairs = []
+    unreadable = 0
+    for node_id in sorted(state.nodes):
+        node = state.nodes[node_id]
+        parents = [p for p in (getattr(node, "parent_ids", None) or ())
+                   if isinstance(p, int) and not isinstance(p, bool) and p in state.nodes]
+        if not parents:
+            continue
+        left, right = node_record(state, parents[0]), node_record(state, node_id)
+        if left is None or right is None:
+            continue
+        counts = classify_edits(left, right)
+        if not counts["recoverable"]:
+            unreadable += 1        # a missing file set is not a pair that made no edit
+            continue
+        if not counts["files"]:
+            continue
+        parent_metric, metric = state.nodes[parents[0]].metric, node.metric
+        gain = None
+        if isinstance(parent_metric, (int, float)) and isinstance(metric, (int, float)):
+            gain = (parent_metric - metric) if minimize else (metric - parent_metric)
+        pairs.append({"node": node_id, "parent": parents[0], "counts": counts, "gain": gain})
+    if not pairs:
+        typer.echo("no parent->child pair in this run carries two comparable file sets — "
+                   "nothing to classify. (A run of seeds only has no edits to measure.)")
+        return
+
+    scored = [p for p in pairs if p["gain"] is not None]
+    typer.echo(f"edit types over {len(pairs)} parent->child pair(s), {len(scored)} with both "
+               f"metrics (direction={'min' if minimize else 'max'})")
+    if unreadable:
+        typer.echo(f"  {unreadable} pair(s) NOT classified — a file set is missing from the "
+                   "record, which is not the same as a pair that changed nothing.")
+    typer.echo(f"{'type':<16}{'+lines':>8}{'-lines':>8}{'pairs':>7}{'improved':>10}{'mean gain':>13}")
+    for kind in EDIT_TYPES:
+        added = sum(p["counts"]["added"].get(kind, 0) for p in pairs)
+        removed = sum(p["counts"]["removed"].get(kind, 0) for p in pairs)
+        if not added and not removed:
+            continue
+        # A pair is COUNTED under every type it touches, and that is the honest reading: a diff that
+        # changes a hyperparameter and a control-flow line is evidence about both, and splitting the
+        # gain between them would invent an attribution the record cannot support.
+        touching = [p for p in scored
+                    if p["counts"]["added"].get(kind) or p["counts"]["removed"].get(kind)]
+        improved = sum(1 for p in touching if p["gain"] > 0)
+        mean = (sum(p["gain"] for p in touching) / len(touching)) if touching else None
+        typer.echo(f"{kind:<16}{added:>8}{removed:>8}{len(touching):>7}"
+                   f"{(str(improved) + '/' + str(len(touching))) if touching else '—':>10}"
+                   f"{(f'{mean:+.6g}' if mean is not None else '—'):>13}")
+    typer.echo("  a pair is counted under EVERY type its diff touches; the gain is the pair's, not "
+               "the type's share of it — this ranks kinds, it does not attribute a metric to one.")
+
+    total_added = total_back = 0
+    cycling = []
+    for pair in pairs:
+        cycle = reintroduced_lines(state, pair["node"])
+        total_added += cycle["added"]
+        total_back += cycle["count"]
+        if cycle["count"]:
+            cycling.append((pair["node"], cycle))
+    share = (100.0 * total_back / total_added) if total_added else 0.0
+    typer.echo(f"\nre-introduced lines: {total_back} of {total_added} substantive added lines "
+               f"({share:.0f}%) had already been deleted earlier in the same lineage")
+    for node_id, cycle in cycling[:8]:
+        node_share = 100.0 * cycle["count"] / max(cycle["added"], 1)
+        typer.echo(f"  node {node_id}: {cycle['count']}/{cycle['added']} ({node_share:.0f}%), "
+                   f"lineage depth {cycle['depth']}")
+        for example in cycle["examples"][:2]:
+            typer.echo(f"      {example['path']}: {example['line'][:100]}  "
+                       f"(deleted at {example['deleted_between']})")
+    if not cycling:
+        typer.echo("  none — no line this run added had been deleted by its own ancestry.")
