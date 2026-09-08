@@ -762,7 +762,8 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
 # so this is a leaf import and not a cycle.
 from looplab.trust import scan_receipt as _scan_receipt
 from looplab.trust.scan_receipt import (TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC,
-                                        TRUST_DETECTOR_EXPLOIT_SUITE, TRUST_DETECTOR_REWARD_HACK,
+                                        TRUST_DETECTOR_EXPLOIT_SUITE, TRUST_DETECTOR_FEATURE_CV,
+                                        TRUST_DETECTOR_REWARD_HACK,
                                         TRUST_DETECTOR_WORKDIR_AUDIT, TRUST_DETECTORS,
                                         TRUST_SCAN_EVIDENCE_VERSION)
 # The two WRITERS below reach their shared rules through the MODULE, never by value: `trust_scan` and
@@ -1473,6 +1474,11 @@ class EvaluateMixin:
             names.append(TRUST_DETECTOR_CODE_LEAKAGE)
         if self._critic_check and scan_src:
             names.append(TRUST_DETECTOR_CRITIC)
+        # The FE CV gate rides the SAME flag that puts the "KEEP a feature only if it improves CV"
+        # directive in the proposal prompt (docs/BACKLOG.md §0.1 row 13): a run that never asked for
+        # engineered features has no ledger to read and must not report that this detector looked.
+        if self._feature_engineering and scan_src:
+            names.append(TRUST_DETECTOR_FEATURE_CV)
         return tuple(name for name in TRUST_DETECTORS if name in set(names))
 
     def _trust_gate_signals(self, node, scan_src: str, detectors=None) -> list[dict]:
@@ -1602,6 +1608,13 @@ class EvaluateMixin:
         # was invisible to every trust test that does not drive a whole run. See that
         # method's docstring.
         sigs += self._trust_gate_signals(node, scan_src, detectors)
+        # …and the feature-engineering CV gate LAST, because it is the one detector that reads the
+        # node's STDOUT as well as its code (the per-feature ledger the FE directive asks for), so it
+        # cannot live in `_trust_gate_signals`' pure `(idea, scan_src)` contract. Appending keeps the
+        # documented order of everything ahead of it byte-identical.
+        if TRUST_DETECTOR_FEATURE_CV in detectors:
+            from looplab.trust.cv import feature_cv_findings
+            sigs += feature_cv_findings(scan_src, res.stdout, state.direction)
         return sigs
 
     def _eval_intervention_seen(self, node_id: int, generation: int, start_seq: int,

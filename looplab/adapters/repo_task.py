@@ -791,6 +791,60 @@ def eval_entrypoint_unprotected(task) -> list[str]:
         "executing — list those files in `protect` if the scoring code must be frozen."]
 
 
+# ------------------------------------------------------------------ the two host-side scorers' rules
+#
+# `HostScorerSpec` (consistent, every node) and `HoldoutScorerSpec` (withheld, once at finish) declare
+# the SAME four things about the operator's own program, and the refusals are the same refusals for
+# the same reasons. They are functions rather than a shared base class because the two specs are not
+# a type hierarchy — one is a stage of every eval and the other may never be a stage at all — and
+# because the message has to name the field the operator actually wrote (`host_scorer.command` vs
+# `holdout_scorer.command`), which an inherited validator cannot do.
+
+def _scorer_argv(field: str, v):
+    """The argv, refusing anything the record cannot digest as ONE program."""
+    from looplab.runtime.command_eval import host_program_token
+    argv = [a for a in (v or []) if isinstance(a, str)]
+    if not argv or len(argv) != len(v or []):
+        raise ValueError(f"{field}.command must be a non-empty argv list of strings")
+    if host_program_token(argv) is None:
+        raise ValueError(
+            f"{field}.command must name its program by an ABSOLUTE path (e.g. "
+            "[\"python\", \"/opt/scorers/score.py\", \"%subject%\"]) — a relative path "
+            "resolves inside the candidate's workdir, and `-m module` names no file the record "
+            "can digest, so neither can be shown to be the same scorer for every node")
+    return argv
+
+
+def _scorer_timeout(field: str, v):
+    if not isinstance(v, (int, float)) or isinstance(v, bool) or not v > 0:
+        raise ValueError(f"{field}.timeout must be a positive number of seconds")
+    return float(v)
+
+
+def _scorer_env(field: str, v):
+    if not v:
+        return {}
+    from looplab.core.envsafe import validate_env_map
+    clean, err = validate_env_map(f"{field} `env`", v)
+    if err:
+        raise ValueError(err)
+    return clean
+
+
+def _scorer_reader(field: str, v):
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        raise ValueError(f"{field}.metric must be a reader spec object")
+    kind = v.get("kind") or v.get("reader")
+    if kind in ("adapter", "auto"):
+        raise ValueError(f"{field}.metric must be a declarative reader (stdout_json / "
+                         "stdout_regex / file_json / file_regex) — the scorer is the "
+                         "operator's, and an agent-authored reader over it would hand the "
+                         "number back to the candidate")
+    return v
+
+
 class HostScorerSpec(BaseModel):
     """A HOST-SIDE scorer: the operator's own scoring program, run by the engine as the final
     protected `score` stage over the candidate's artifact, from a path the candidate cannot reach
@@ -810,8 +864,10 @@ class HostScorerSpec(BaseModel):
     read with `metric` (the task's own reader when absent).
 
     What it does NOT do: it does not withhold a split — a scorer that reads a test set the
-    candidate can also read is CONSISTENT and nothing more (the withheld-split half is doc 52's
-    slice (b), which needs the run-record fence and the Landlock validation first).
+    candidate can also read is CONSISTENT and nothing more. That is `HoldoutScorerSpec` below,
+    which is a different mechanism rather than a stricter version of this one: never a stage, run
+    once at finish over the val-top-k, and its number is the node's `holdout_metric` rather than
+    the metric the search ranks on.
     """
 
     _refuse_unknown = model_validator(mode="before")(
@@ -825,50 +881,124 @@ class HostScorerSpec(BaseModel):
     @field_validator("command")
     @classmethod
     def _names_a_program(cls, v):
-        from looplab.runtime.command_eval import host_program_token
-        argv = [a for a in (v or []) if isinstance(a, str)]
-        if not argv or len(argv) != len(v or []):
-            raise ValueError("host_scorer.command must be a non-empty argv list of strings")
-        if host_program_token(argv) is None:
-            raise ValueError(
-                "host_scorer.command must name its program by an ABSOLUTE path (e.g. "
-                "[\"python\", \"/opt/scorers/score.py\", \"%subject%\"]) — a relative path "
-                "resolves inside the candidate's workdir, and `-m module` names no file the record "
-                "can digest, so neither can be shown to be the same scorer for every node")
-        return argv
+        return _scorer_argv("host_scorer", v)
 
     @field_validator("timeout")
     @classmethod
     def _timeout_positive(cls, v):
-        if not isinstance(v, (int, float)) or isinstance(v, bool) or not v > 0:
-            raise ValueError("host_scorer.timeout must be a positive number of seconds")
-        return float(v)
+        return _scorer_timeout("host_scorer", v)
 
     @field_validator("env")
     @classmethod
     def _env_valid(cls, v):
-        if not v:
-            return {}
-        from looplab.core.envsafe import validate_env_map
-        clean, err = validate_env_map("host_scorer `env`", v)
-        if err:
-            raise ValueError(err)
-        return clean
+        return _scorer_env("host_scorer", v)
 
     @field_validator("metric")
     @classmethod
     def _reader_declarative(cls, v):
-        if v is None:
-            return None
-        if not isinstance(v, dict):
-            raise ValueError("host_scorer.metric must be a reader spec object")
-        kind = v.get("kind") or v.get("reader")
-        if kind in ("adapter", "auto"):
-            raise ValueError("host_scorer.metric must be a declarative reader (stdout_json / "
-                             "stdout_regex / file_json / file_regex) — the host scorer is the "
-                             "operator's, and an agent-authored reader over it would hand the "
-                             "number back to the candidate")
-        return v
+        return _scorer_reader("host_scorer", v)
+
+
+class HoldoutScorerSpec(BaseModel):
+    """A HOST-HELD scorer, run ONCE at finish over the val-leaders — the WITHHELD half (doc 52 row
+    10a's slice (b); AIRA2's "marginal" scoring).
+
+    `HostScorerSpec` made the repo task's number CONSISTENT: one program, outside the editable tree,
+    the same bytes for every node. It does not make it UNSEEN — a scorer that reads a test set the
+    candidate can also read is consistent and nothing more, so the champion was still elected on a
+    number the candidate could overfit by looking at the split. This is the other property, and it
+    is a different mechanism rather than a stricter version of the same one: the program declared
+    here is NEVER run during the search. It runs at the end of the run, on the top-k the search
+    metric elected, against a split the operator holds (its own data, reached through its own `env`,
+    outside every path the eval mounts), and its number lands as the node's `holdout_metric` — from
+    which `holdout_select` (on by default) picks the champion among those leaders and the fold
+    derives `generalization_gap`.
+
+    So the search metric still decides WHO is measured on the unseen split, and the unseen number
+    decides who WINS — the same division `engine/holdout.py` already applies to a host-graded task,
+    reached here without labels the engine has to hold in memory. AIRA-2's measurement is the reason
+    it is worth a second program: picking on the signal the search optimised overfits it by 9-13 pp.
+
+    Same submit-time refusals as its consistent sibling, for the same reasons (an absolute program
+    outside every editable root, a positive timeout, no secret-shaped env, a declarative reader —
+    an agent-authored reader over the withheld number would hand it straight back to the candidate),
+    and one more that is specific to this half: **it is never a stage**. Nothing in the eval
+    pipeline can run it, so no candidate process shares a machine state with it, and the ONLY thing
+    the run does with its number is the end-of-run selection above.
+    """
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
+    command: list[str]                      # argv, no shell; must name the program by absolute path
+    timeout: float = 1800.0
+    env: dict[str, str] = Field(default_factory=dict)
+    metric: Optional[dict] = None           # reader for its stdout; None = eval.metric
+
+    @field_validator("command")
+    @classmethod
+    def _names_a_program(cls, v):
+        return _scorer_argv("holdout_scorer", v)
+
+    @field_validator("timeout")
+    @classmethod
+    def _timeout_positive(cls, v):
+        return _scorer_timeout("holdout_scorer", v)
+
+    @field_validator("env")
+    @classmethod
+    def _env_valid(cls, v):
+        return _scorer_env("holdout_scorer", v)
+
+    @field_validator("metric")
+    @classmethod
+    def _reader_declarative(cls, v):
+        return _scorer_reader("holdout_scorer", v)
+
+
+def scorer_outside_editables(task, which: str = "host_scorer") -> Optional[str]:
+    """Why the named scorer is NOT outside this task's editable trees, or None when it is.
+
+    `which` is the field the operator wrote — `host_scorer` (consistent, every node) or
+    `holdout_scorer` (withheld, once at finish). ONE rule for both, because it is one property:
+    a program the candidate can edit or import from is the candidate's own program, and that is
+    worse for the withheld half than for the consistent one (a candidate that can read the holdout
+    scorer can read the split it holds).
+    """
+    spec = task.eval if isinstance(task, RepoTask) else None
+    hs = getattr(spec, which, None)
+    if hs is None:
+        return None
+    from looplab.runtime.command_eval import host_program_token
+    program = host_program_token(hs.command)
+    if program is None:
+        return f"{which}.command names no absolute program path"
+    path = Path(os.path.expanduser(os.path.expandvars(program)))
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        return f"{which} program {program!r} cannot be resolved: {exc}"
+    if not resolved.is_file():
+        return f"{which} program {program!r} is not an existing file"
+    roots = [task.editable_path] + [e.path for e in task.editables]
+    for root in roots:
+        if not root:
+            continue
+        try:
+            src = Path(os.path.expanduser(os.path.expandvars(root))).resolve()
+            resolved.relative_to(src)
+        except (ValueError, OSError):
+            continue
+        return (f"{which} program {program!r} lives INSIDE the editable tree {root!r} — a "
+                "scorer the candidate can edit or import from is the candidate's own scorer; put "
+                f"the {which.replace('_', ' ')} outside every `repo` / `editables` path")
+    return None
+
+
+def holdout_scorer_outside_editables(task) -> Optional[str]:
+    """`scorer_outside_editables` for the WITHHELD scorer — named so a caller states which half it
+    is asking about (`cli/run_cmds.py::resume` warns about each grandfathered declaration)."""
+    return scorer_outside_editables(task, "holdout_scorer")
 
 
 def host_scorer_outside_editables(task) -> Optional[str]:
@@ -881,34 +1011,7 @@ def host_scorer_outside_editables(task) -> Optional[str]:
     runtime digests is never the `program_sha256: None` a missing program would produce. Shared by
     the `RepoTask` validator and `cli/run_cmds.py::resume`'s warnings for a grandfathered snapshot.
     """
-    spec = task.eval if isinstance(task, RepoTask) else None
-    hs = getattr(spec, "host_scorer", None)
-    if hs is None:
-        return None
-    from looplab.runtime.command_eval import host_program_token
-    program = host_program_token(hs.command)
-    if program is None:
-        return "host_scorer.command names no absolute program path"
-    path = Path(os.path.expanduser(os.path.expandvars(program)))
-    try:
-        resolved = path.resolve()
-    except OSError as exc:
-        return f"host_scorer program {program!r} cannot be resolved: {exc}"
-    if not resolved.is_file():
-        return f"host_scorer program {program!r} is not an existing file"
-    roots = [task.editable_path] + [e.path for e in task.editables]
-    for root in roots:
-        if not root:
-            continue
-        try:
-            src = Path(os.path.expanduser(os.path.expandvars(root))).resolve()
-            resolved.relative_to(src)
-        except (ValueError, OSError):
-            continue
-        return (f"host_scorer program {program!r} lives INSIDE the editable tree {root!r} — a "
-                "scorer the candidate can edit or import from is the candidate's own scorer; put "
-                "the host scorer outside every `repo` / `editables` path")
-    return None
+    return scorer_outside_editables(task, "host_scorer")
 
 
 class EvalSpec(BaseModel):
@@ -933,6 +1036,12 @@ class EvalSpec(BaseModel):
     # printed number is recorded as the node's `self_metric`, and a `stages` entry named `score` is
     # refused (the host scorer is the score stage).
     host_scorer: Optional[HostScorerSpec] = None
+    # THE WITHHELD HALF (doc 52 row 10a slice (b)): the operator's own scorer over a split the HOST
+    # holds, run ONCE at finish over the val-top-k and never during the search — see
+    # `HoldoutScorerSpec` and `engine/holdout.py`. Its number is the node's `holdout_metric`, which
+    # `Settings.holdout_select` uses to elect the champion among those leaders; it is never the
+    # search metric, so nothing the search optimises can be measured on it more than once.
+    holdout_scorer: Optional[HoldoutScorerSpec] = None
     # The DECLARED ENVIRONMENT for this task's eval — applied to `setup`, to the single `command`,
     # and to EVERY stage, with a stage's own `env` overlaying it (most specific wins). This is where
     # a fact about the TASK belongs: `VS_LOCAL_DATA_ROOT=/home/jovyan/data/dr-local` says where this
@@ -1332,6 +1441,12 @@ class EvalSpec(BaseModel):
         # slot's place — same consequence when it cannot read (every node fails `no_metric`).
         if self.host_scorer is not None and isinstance(self.host_scorer.metric, dict):
             out.append(("eval.host_scorer.metric", "metric", self.host_scorer.metric))
+        # …and the WITHHELD scorer's reader, in the same slot for the same reason: it reads a
+        # scorer's stdout, and when it cannot read there is no holdout number for the node. It is
+        # here rather than in a slot of its own so every rule about readers — the submit-time path
+        # check, the protected-name list — covers it without being told about this half separately.
+        if self.holdout_scorer is not None and isinstance(self.holdout_scorer.metric, dict):
+            out.append(("eval.holdout_scorer.metric", "metric", self.holdout_scorer.metric))
         return out
 
     @model_validator(mode="after")
@@ -1595,9 +1710,10 @@ class RepoTask(BaseModel):
         # a run that already recorded such a task must stay resumable; `resume` warns instead.
         if _grandfathered(info):
             return self
-        problem = host_scorer_outside_editables(self)
-        if problem:
-            raise ValueError(problem)
+        for problem in (host_scorer_outside_editables(self),
+                        holdout_scorer_outside_editables(self)):
+            if problem:
+                raise ValueError(problem)
         return self
 
     @model_validator(mode="after")

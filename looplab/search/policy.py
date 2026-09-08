@@ -173,6 +173,98 @@ def rank_by_metric(state: RunState, nodes) -> list:
 
 
 # --------------------------------------------------------------------------- #
+# THE NON-DOMINATED FRONT, where selection can read it (docs/BACKLOG.md §0.1 row 12).
+#
+# The real algorithm existed only in the BROWSER — `ui/src/panels.jsx::paretoFront` with its
+# `dominates()` — and `pareto` appeared nowhere under `looplab/search/` or `looplab/engine/` except
+# in two comments, so a run elected one champion on one scalar and the second objective was a
+# picture. These three functions are that front computed where a policy can consult it.
+#
+# WHICH AXES ARE ADMISSIBLE, and both filters are the discipline `core/models.py` already argued for
+# at length rather than a new rule:
+#   * AUTHENTICATED — an extra metric whose channel is `declared` (the operator's own reader spec) or
+#     `engine` (engine-authored artifacts). The `auto` channel is every other number off the
+#     CANDIDATE's own stdout with no gate at all, and `unknown` is a value nobody tagged; letting
+#     either become a selection objective hands the candidate a second axis it can print its way to
+#     the front of. `authenticated_extra_metrics_only` owns that test — expressed over the recorded
+#     TAG so the gate cannot drift from the label.
+#   * ORIENTABLE — an extra metric the record says which way is better on. The browser's front
+#     treats every extra metric as cost-like, which has been harmless only because no run has ever
+#     recorded a real second objective; a higher-is-better nDCG ordered as a cost is a front that is
+#     silently backwards. `oriented_extra_metrics_only` drops an axis nobody oriented rather than
+#     guessing a direction.
+#   * RECORDED BY EVERY NODE IN THE POOL — an axis one node carries and another does not cannot
+#     order the pair, and filling the gap with a default invents a measurement. Same direction as the
+#     two filters above: drop the AXIS from the ordering, never the NODE from the front (dropping a
+#     point publishes a front the record does not support — `ui/src/panels.jsx` argues this out).
+#
+# With no admissible extra axis the front collapses to the metric leaders, which is why every
+# consumer below is inert on the corpus as it stands: one objective, one leader, the scalar answer.
+PRIMARY_OBJECTIVE = "metric"
+
+
+def pareto_objectives(state: RunState, nodes) -> dict[str, str]:
+    """`{objective: "min"|"max"}` for a Pareto comparison over `nodes` — the primary metric in the
+    run's own direction plus every extra metric that survives the three filters above."""
+    from looplab.core.fitness import is_usable_metric
+    from looplab.core.models import (authenticated_extra_metrics_only,
+                                     oriented_extra_metrics_only)
+    pool = list(nodes)
+    if not pool:
+        return {}
+    out: dict[str, str] = {PRIMARY_OBJECTIVE: "max" if state.direction == "max" else "min"}
+    common: dict[str, str] | None = None
+    for n in pool:
+        kept, _ = authenticated_extra_metrics_only(n.extra_metrics, n.extra_metrics_provenance)
+        kept, dirs = oriented_extra_metrics_only(kept, n.extra_metrics_direction)
+        here = {k: dirs[k] for k, v in kept.items() if is_usable_metric(v)}
+        if common is None:
+            common = here
+            continue
+        # Intersect on the KEY and the DIRECTION: two nodes that disagree about which way is better
+        # on the same name have not recorded one axis, and ordering them on it would be a coin flip
+        # dressed as a measurement.
+        common = {k: d for k, d in common.items() if here.get(k) == d}
+    out.update(common or {})
+    return out
+
+
+def dominates(a, b, objectives: dict[str, str]) -> bool:
+    """Does node `a` dominate node `b` — at least as good on EVERY objective and strictly better on
+    at least one? Direction-aware per axis (the run's own direction on the metric, the recorded one
+    on each extra), and False when the two are equal on all of them: a tie is not a domination, so
+    tied nodes stay on the front together."""
+    strictly_better = False
+    for key, direction in (objectives or {}).items():
+        av = a.metric if key == PRIMARY_OBJECTIVE else (a.extra_metrics or {}).get(key)
+        bv = b.metric if key == PRIMARY_OBJECTIVE else (b.extra_metrics or {}).get(key)
+        if av is None or bv is None:
+            return False               # an axis one of the pair does not carry cannot order it
+        better = (av > bv) if direction == "max" else (av < bv)
+        worse = (av < bv) if direction == "max" else (av > bv)
+        if worse:
+            return False
+        strictly_better = strictly_better or better
+    return strictly_better
+
+
+def pareto_front(state: RunState, nodes) -> list:
+    """The non-dominated members of `nodes`, ordered best-first by the primary metric.
+
+    Ordered rather than a set on purpose: every consumer reads it as a RANKING with diversity, and
+    the scalar leader stays at the head — a front that reordered the champion would be a selection
+    change smuggled in as a diversity one. Nodes without a usable metric are excluded (they cannot
+    be placed on the axis every objective set contains), which is the same pool every ranking policy
+    already works over."""
+    from looplab.core.fitness import is_usable_metric
+    pool = [n for n in nodes if is_usable_metric(getattr(n, "metric", None))]
+    objectives = pareto_objectives(state, pool)
+    front = [n for n in pool if not any(dominates(o, n, objectives) for o in pool if o is not n)]
+    return rank_by_metric(state, front)
+
+
+
+# --------------------------------------------------------------------------- #
 # THE DEBUG NODE IS GONE (F5, decided 2026-08-13). `debug_action` and `_debug_lineage`
 # lived here and every policy called them: "the inline-repair limit was exceeded, so
 # open a NEW node and start fixing again". The operator's ruling — *"дебаг ноду нафиг

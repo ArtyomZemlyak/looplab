@@ -189,9 +189,56 @@ the candidate's own code printed. `cmd.host_scorer` (2026-09-06, doc 52 row 10a 
   fails the host stage as `needs_failed`, exactly like a missing `needs` input. `%params%` expands
   as in every stage.
 * **What it does not do.** It does not withhold a split: a host scorer that reads a test set the
-  candidate can also read is *consistent*, not hidden. The withheld-split half (a host-held split
-  scored at finish, selection through `holdout_select`) is doc 52's slice (b) and waits on the
-  run-record fence and the Landlock validation.
+  candidate can also read is *consistent*, not hidden. That is the next section's job.
+
+### The withheld scorer (`cmd.holdout_scorer`)
+
+Consistent is not unseen. A `host_scorer` still scores a split the candidate can read, so the
+champion is elected on a number the candidate can overfit by looking at what it is scored on.
+`cmd.holdout_scorer` (2026-09-08, doc 52 row 10a slice (b) — AIRA₂'s "marginal" scoring) is the
+operator's own program over a split **the host holds**, and it is a different mechanism rather than
+a stricter host scorer:
+
+```jsonc
+"cmd": {
+  "command": ["python", "-m", "vectorsearch.test"],
+  "metric": {"reader": "stdout_json", "key": "recall@100"},
+  "holdout_scorer": {
+    "command": ["python", "/opt/scorers/holdout_dr.py"],      // ABSOLUTE, outside every editable root
+    "timeout": 1800,
+    "env": {"HOLDOUT_DATA": "/data/dr-holdout"},              // the split, never mounted for a candidate
+    "metric": {"reader": "stdout_json", "key": "recall@100"}  // optional: defaults to cmd.metric
+  }
+}
+```
+
+* **When it runs.** Once, at finish, over the val-top-k (`holdout_top_k`, default 3) — never during
+  the search. Nothing in the eval pipeline can reach it: it is not a stage in any shape, so no
+  candidate process ever shares a machine state with it, and a task that declares *only* a holdout
+  scorer is refused (it scores nothing during the run, so it cannot be the thing that runs).
+* **Where it runs.** In the node's own workdir, so the artifacts that node produced are found where
+  its eval left them, under the eval's declared environment plus its own `env` — which is how the
+  operator points the program at the split it holds without that path ever being mounted for a
+  candidate. `%params%` expands as in every stage; `%subject%` does **not** (that token is bound by
+  the runtime at the score stage's start, and there is no such binding at finish).
+* **What its number is.** The node's **`holdout_metric`**, never the search metric. The fold derives
+  `generalization_gap` from the pair, and under `holdout_select` (on by default) the champion is the
+  best of those leaders **on the unseen number** — so the search metric decides *who* is measured on
+  the withheld split and the withheld number decides *who wins*. With `holdout_select=false` the
+  scorer still runs and the number is still recorded; only the pick reverts.
+* **What it must be.** The same refusals as `host_scorer`, for the same reason and with the field
+  named as written: an absolute program outside every `repo` / `editables` root that exists as a
+  file, a positive timeout, no secret-shaped `env`, and a declarative reader (an agent-authored
+  reader over the withheld number would hand it straight back to the candidate).
+* **The receipt.** Each `holdout_evaluated` row carries `protocol: "holdout_scorer"` and the
+  program's `program_sha256`, so "the same unseen scorer for every leader" is checkable after the
+  fact. A scorer that exits non-zero, times out or prints nothing readable gives **no number** — the
+  leader simply has no unseen score. It never falls back to the search metric: that would put the
+  number the search optimised into the field selection reads as unseen.
+* **What it still does not do.** It does not *enforce* that the candidate could not reach the split.
+  That is the read fence's job (`runtime/read_fence.py`, `Settings.landlock`), whose kernel rung is
+  validated on this box only in the advisory tier — an operator running this on a GPU box should
+  keep the split outside every mount the eval declares and confirm the fence's own report.
 
 ### Operator-pinned Developer commands
 
@@ -1527,6 +1574,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `eval.metrics` | Extra **named** readers reported alongside the primary, for audit/observability: `{"latency_ms": {"kind": "stdout_json", "key": "latency"}}`. A `file_*` reader here needs its own `path` — without one it is silently dropped and the node just reports no value under that name. **This is not the only way a value reaches `extra_metrics`, and the difference is now on the record.** Every OTHER numeric key on the primary metric's own stdout JSON line is AUTO-CAPTURED too — no declaration, no reader spec, no `adapter` refusal — which is how all 1,642 secondary metrics in this box's preserved runs got there, 1,636 of them the four keys of a CUDA probe (one a schema VERSION number). `node_evaluated` now carries `extra_metrics_provenance` (`{name: "declared"|"auto"|"engine"}`) beside the values, and every surface that shows a secondary metric says which channel it came through; a value with no tag is from a run recorded before 2026-08-14 and reads `unknown`, never `declared`. **A LABEL NEEDS A VALUE (2026-08-29).** The node metrics table lists the UNION of every node's extras keys, so a key THIS node never reported answered `unknown` too — the same word — and rendered a warn *provenance unknown* beside an EMPTY cell: a caveat about a value that does not exist, which is the invented-caveat shape `objectiveMetricSource` forbids, and it fed `anyUnverified` so a phantom row could summon the whole self-reported footnote. The channel is now `null` where the node holds no value and the source cell renders nothing; the `best #N` column gained its own read against the CHAMPION's record, since until then only the ★ row consulted `champObjective` and a self-reported champion extra sat unlabelled beside this node's labelled one. `engine` names a key the engine's OWN spliced instrumentation declared and its source authenticates — trustworthy, and still a diagnostic rather than a result. Set `auto_extra_metrics: false` to record only what YOUR readers produced (plus that engine instrumentation, which was never the candidate's) |
 | `eval.constraints` | Reader specs carrying a `max`/`min` bound. A node that violates any (or whose constraint value can't be read) is still measured but **excluded from best-selection** — "optimize the metric subject to `latency_ms <= 100`". Operator-owned (trust boundary). A `file_*` reader here needs its own `path`: an unverifiable constraint counts as a violation, so a pathless one excludes *every* node |
 | `eval.inputs` | The files whose CONTENT decides the metric independently of the model — the test set, the product index, an id map. Bound to their content identity at the metric read and digested into `metric_provenance.comparability`, the **comparability key** every ranking surface consults before it orders two numbers. Paths may be ABSOLUTE (the opposite rule to `metric.subject`: an input is by definition not produced by this node), there is no freshness floor, and no globs. Empty is not "comparable by default" — it records `unknown`, which is never read as agreement |
+| `eval.holdout_scorer` | The operator's **withheld scorer** — `{command, timeout, env, metric}`, same refusals as `host_scorer` — run ONCE at finish over the val-top-k and never during the search, in the node's workdir. Its number is the node's `holdout_metric` (never the search metric); `holdout_select` elects the champion by it and the fold derives `generalization_gap`. See [The withheld scorer](#the-withheld-scorer-cmdholdout_scorer) |
 | `eval.host_scorer` | The operator's **host-side scorer** — `{command, timeout, env, metric}`, its program named by an absolute path outside every editable root — appended by the engine as the final protected `score` stage; its number is the node's `metric`, the candidate's own printed number rides beside it as `self_metric`, and the program's sha256 lands on `metric_provenance.host_scorer`. See [Host-side scoring](#host-side-scoring-cmdhost_scorer) |
 | `eval.cross_check` | An INDEPENDENT built-in reader (`stdout_json`/`stdout_regex`/`file_json`/`file_regex` — never `adapter`) that re-reads the same metric from a source the agent can't forge. Used by `eval_trust_mode="ratify_freeze_drift"`; `None` disables it. A `file_*` reader here needs its own `path`: the drift check fails closed, so a pathless one discards *every* node's metric |
 | `eval.drift_tolerance` | Tolerance for the `cross_check` comparison (default `1e-6`; must be finite and ≥ 0) |
