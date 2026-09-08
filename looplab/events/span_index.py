@@ -1524,6 +1524,14 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
     guard is held by that caller for the whole call.
     """
     stt = os.fstat(handle.fileno())
+    # Three LOCALS, not a fourth stat signature (doc 25 SC-11). The identity question is already
+    # answered by `trace_file_identity` below (= `core/atomicio.same_file_entry`, the replacement
+    # tier); these three are never compared as a tuple. Each is threaded separately into
+    # `_load_persisted` / `_topup` and compared FIELD BY FIELD against a persisted per-field header
+    # and the exporter's `before_*`/`after_*` receipt chain, which is what lets the reuse decision
+    # distinguish `shrank` from `non_growth_rewrite` from a true append. Folding them into one
+    # signature would collapse three distinguishable outcomes into "equal / not equal" and would
+    # re-shape a durable journal for nothing.
     size, mtime_ns, ctime_ns = stt.st_size, stt.st_mtime_ns, stt.st_ctime_ns
     source_change_token = _source_change_token(handle, stt)
     identity = trace_file_identity(stt)

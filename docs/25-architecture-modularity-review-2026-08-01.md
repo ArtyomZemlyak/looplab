@@ -4733,7 +4733,7 @@ that speaks it, so it stays a named item rather than being smuggled into an extr
 
 #### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[unconverted-stat-signature-ledger]** the THREE tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 5 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 5@tests/test_file_identity_tiers.py`
+> **OPEN[unconverted-stat-signature-ledger]** the THREE tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 2 unconverted sites, both now CONFIRMED refusals stating their reason at the site, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 2@tests/test_file_identity_tiers.py`
 
 **Event-log rewrite/race detection implemented six different ways across serve/**
 
@@ -4812,17 +4812,61 @@ regressions rather than source assertions: a same-length replacement with the mt
 assertion that the two fields the old tuple carried are provably identical — so the old code was
 equal by construction and the fixture cannot rot into a vacuous pass.
 
-Five sites remain, and each is a judgement rather than a backlog item: `events/eventstore.py`'s
-trusted-growth tuple (compared against an `fstat` where the Windows attribute may not agree with the
-`stat` it is compared to — converting it would make the growth fence spuriously fail on Windows, in
-the direction that ABORTS appends); `serve/scope_report_store.py::_stat_identity` and
-`serve/scope_generate.py`'s `observed`/`directory_identity`, which are PERSISTED in scope-report
-sidecars behind an explicit `len(log_sig) != 7` shape check, so a tuple of a different width is a
-compatibility break, not a strengthening; `events/traceview.py`'s trace revision, which mixes a
-descriptor-bound ChangeTime token into the tuple; and `events/span_index.py::_index_from_handle`,
-which is not a signature at all — it is parallel assignment of three named locals beside a real
-`trace_file_identity` call, and rewriting it as three statements to satisfy the sweep would be the
-comment-shaped pass CLAUDE.md's guard-test rule forbids.
+Five sites remained after that pass, each recorded as a judgement rather than a backlog item.
+
+*Follow-up (2026-09-08, third pass) — the ledger falls from 5 to 2, and it fell because the five
+judgements were RE-DERIVED rather than inherited. Three of the five did not survive contact with the
+code they described.*
+
+* `events/eventstore.py`'s trusted-growth tuple is now `file_identity`. The inherited reason —
+  "converting would make the growth fence spuriously fail on Windows, in the direction that ABORTS
+  appends" — is false at the only site that reads the value. `_trusted_growth_stat` is consulted in
+  exactly one expression in `read_all`, and a mismatch there sets `trusted_growth = False`, which
+  routes the read into the prefix-verification arm that re-proves the cached bytes. It cannot refuse
+  an append; the worst an fstat/stat disagreement can cost is the SHORTCUT, i.e. it buys back the
+  proof the shortcut was skipping. Meanwhile the tuple was `file_identity` minus
+  `st_file_attributes` — the very omission this finding exists to close. Note also that the tuple
+  already compared `st_ctime_ns` across the same fstat/stat pair, so the attribute field introduced
+  no new class of cross-source hazard.
+* `serve/scope_generate.py`'s `directory_identity` is now `same_file_kind`. The persisted-width
+  objection was real for `observed` and inherited wholesale by its neighbour: `directory_identity`
+  was `(st_dev, st_ino, st_mode, st_file_attributes)` — field-for-field AND order-for-order the
+  middle tier — so naming the tier leaves the stored probe digest byte-identical and invalidates no
+  report. Driven, not pinned: a child artifact must not invalidate a report (the tier ignores the
+  container's timestamps) while a `chmod` on the run directory must.
+* `events/span_index.py::_index_from_handle` was never a signature, so the SWEEP was corrected
+  rather than the site. `size, mtime_ns, ctime_ns = stt.st_size, stt.st_mtime_ns, stt.st_ctime_ns`
+  is multiple assignment: Python spells it with tuple syntax and materializes no tuple, the three
+  locals are threaded SEPARATELY into a persisted per-field header and the exporter's
+  `before_*`/`after_*` receipt chain, and the identity question beside them is already
+  `trace_file_identity`. The detector now skips a Tuple that is an `Assign.value` with a Tuple/List
+  target — narrowly, so `sig = (st.st_dev, st.st_ino)` is still caught. A known false positive in a
+  ledger is worse than noise: it pre-pays for a real signature added to that file later.
+
+**The two that remain are CONFIRMED refusals, and each now states its reason at the SITE** — the
+point being that a reason living only here is a reason the next reader of the code will not find:
+
+* `events/traceview.py::trace_file_revision`. The dev/ino half now calls `trace_file_identity`
+  (= `same_file_entry` under the trace sidecar's name), so the hand-spelling is halved; the rest
+  deliberately stays below `file_identity` because the two fields that tier would add are already
+  SUBSUMED by `change_token`. On POSIX the token IS `st_ctime_ns`, so adding it writes the same
+  number into the digest twice. On Windows `st_ctime_ns` is CREATION time and this module's own
+  contract says it is not mutation proof, while `FILE_BASIC_INFO.ChangeTime` moves on any metadata
+  change — an attribute flip included, which is the one thing `st_file_attributes` would have caught
+  — and `open_private_trace_file` has already refused a reparse point outright. The token is
+  strictly stronger than the upgrade, so the upgrade would only churn a client-held CAS token.
+* `serve/scope_report_store.py::_stat_identity`. Two independent reasons, both now in its docstring.
+  Every comparison it feeds is CROSS-SOURCE — `lstat(path)` against `fstat(descriptor)` in the lease
+  open and the bounded report read — which is precisely the pairing `serve/scope_sources.py` is a
+  declared variant for, because Windows diverges on `st_ctime` between the two calls; and it is
+  PERSISTED, spliced by `scope_generate`'s `observed` into the 7-field digest stored on every scope
+  report. A reader that accepts both widths beside a writer that emits the new one is the standard
+  migration and it was weighed and refused here: the digest's ONLY use is equality against a freshly
+  derived one, so widening it buys no strength that `_stat_identity` does not already have, while
+  reading two widths costs every stored report a staleness flip and adds a second shape to a
+  security-relevant fence. It stays counted in the ledger rather than being moved into
+  `DOCUMENTED_VARIANTS`: that dict is FILE-granular, so declaring the file would also pre-authorize
+  the next hand-rolled signature written into it.
 
 `tests/test_file_identity_tiers.py` therefore pins the tiers as BEHAVIOUR (growth keeps
 `same_file_entry`; a same-size in-place rewrite defeats it but not `file_identity`), pins all three

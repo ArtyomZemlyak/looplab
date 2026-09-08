@@ -56,7 +56,7 @@ from typing import Any
 import anyio
 from fastapi import HTTPException
 
-from looplab.core.atomicio import strict_atomic_write_text
+from looplab.core.atomicio import same_file_kind, strict_atomic_write_text
 from looplab.core.comparison import (
     canonical_comparison_contract,
     comparison_measurement,
@@ -361,14 +361,6 @@ class ScopeSourceProbes:
                 ctime_ns = int(status.st_ctime * 1_000_000_000)
             return (*_stat_identity(status), int(ctime_ns))
 
-        def directory_identity(status: os.stat_result) -> tuple[int, ...]:
-            # Child artifact creation changes directory timestamps but not report evidence. Bind the
-            # container itself and let the three exact file observations own model-visible changes.
-            return (
-                int(status.st_dev), int(status.st_ino), int(status.st_mode),
-                int(getattr(status, "st_file_attributes", 0) or 0),
-            )
-
         def optional_file(path: Path) -> tuple:
             try:
                 status = path.lstat()
@@ -383,8 +375,13 @@ class ScopeSourceProbes:
             run_status = run_dir.lstat()
             if not stat.S_ISDIR(run_status.st_mode) or _is_link_or_reparse(run_status):
                 raise ScopeSourceError("scope run is not a trusted directory")
+            # Child artifact creation changes directory timestamps but not report evidence. Bind the
+            # container itself and let the three exact file observations own model-visible changes.
+            # That is the MIDDLE tier by name (doc 25 SC-11): `same_file_kind` is field-for-field AND
+            # order-for-order the tuple this closure spelled by hand, so the persisted probe digest
+            # below is byte-identical and naming the tier invalidates no stored report.
             return (
-                tuple(log_sig), directory_identity(run_status),
+                tuple(log_sig), same_file_kind(run_status),
                 optional_file(run_dir / "events.jsonl"),
                 optional_file(run_dir / "task.snapshot.json"),
                 optional_file(run_dir / "config.snapshot.json"),
