@@ -180,9 +180,20 @@ Research only.
 >
 > **The index (15 items, each proof re-derived against the tree on 2026-08-19):**
 >
-> - **OPEN[prompt-bundle-unpinned-across-hot-reload]** the PromptStore is still re-read on every use
->   with no run/phase-pinned revision; the only run-start pins are the `run_started` settings and the
->   two `core/setup_identity.py` digests. proof:absent:revision@looplab/core/prompts.py
+> - **[closed 2026-09-08 — *the bundle has an identity now, and hot reload is kept.*
+>   `core/prompts.py::PromptStore.revision` is the identity of the body one key resolves to,
+>   `bundle_revision` the digest over the whole {key: revision} MAP (keyed, so a body moving between
+>   two keys is a different bundle, and an override that APPEARS or VANISHES mid-run is a change
+>   rather than a silent one), and `pin()` freezes that answer and starts reporting divergence.
+>   The pin deliberately does NOT lock the text — this row's own prescription keeps hot reload for
+>   future phases, and refusing a freshly edited override mid-phase would change shipped behaviour
+>   for every operator who tunes a prompt live — so a pinned store keeps serving the live body and
+>   records the move (`divergences()`, one WARNING per key per new revision). `NO_REVISION` is not a
+>   digest of `""`: "not overridden" and "overridden with an empty file" are different facts under a
+>   pin. Unpinned is the default, so every store constructed today is byte-identical and pays
+>   nothing. `tests/test_prompt_keys.py` drives the mid-run edit end to end, the frontmatter
+>   exclusion, the appear/vanish pair and the one-line-per-revision rule. The marker
+>   `prompt-bundle-unpinned-across-hot-reload` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-06 (doc 52 row 16) — `agent_phase_started` / `agent_checkpointed` /
 >   `agent_phase_completed` are registered `DIAGNOSTIC_EVENTS` (`events/types.py`), reported by
 >   `drive_tool_loop` through `core/phase_events.py::emit_phase_event` and written by the sink
@@ -263,9 +274,18 @@ Research only.
 >   servers are resolved from `LOOPLAB_MCP_CONFIG` / `LOOPLAB_MCP_SERVERS` / `.mcp.json`, all
 >   process-wide, so every session on a shared server gets the same server set whatever principal is
 >   driving it. proof:absent:principal_mcp_config@looplab/tools/mcp_tools.py
-> - **OPEN[prompt-governance-has-no-typed-registry]** repo onboarding joined the store, but the
->   additive typed registry the row asks for does not exist, so Genesis, assistants, reports, monitors
->   and stewards keep separate prompt families. proof:absent:PromptDefinition@looplab/core/prompts.py
+> - **[closed 2026-09-08 — *the registry is typed, and the residue it does not cover is now
+>   countable.* `core/prompts.py::PromptDefinition` (frozen: key + family + one line about the JOB it
+>   governs) is the row shape, `PROMPT_REGISTRY` the 19 rows, and `PROMPT_KEYS` is DERIVED from it so
+>   nothing re-spells the list — the two-way source scan's contract is unchanged. The half this row
+>   was actually about is `UNGOVERNED_PROMPT_FAMILIES`: the five families it names (Genesis,
+>   assistants, reports, monitors, stewards) each sit beside the module whose module-level constant
+>   holds their hard-coded text, asserted disjoint from `PROMPT_FAMILIES` and asserted to exist, so
+>   "canonical prompt store is only partially true" is a number that shrinks by DELETING a row
+>   rather than a sentence in a review. Migrating one is unchanged from how `repo_onboarder_system`
+>   joined: rows, a `render(prompts, "<key>", <the existing constant>)` with the shipped text as the
+>   byte-for-byte default, delete the row. `tests/test_prompt_keys.py` drives all four properties.
+>   The marker `prompt-governance-has-no-typed-registry` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-03 — `serve/control_validation.py::_normalize_set_strategy` accepts
 >   `strategy.developer` and validates it against `core/config.py::developer_switch_names()`, the one
 >   home the Strategist's own `available_developers` is derived from, so the operator and the model
@@ -286,12 +306,16 @@ Research only.
 > **Status update (2026-08-14) — the open architecture items above, re-verified against master
 > `d307542`.** One consolidated banner so the table's "Open …" dispositions stay honest:
 >
-> - **Prompt/context pinning — STILL OPEN.** No prompt-bundle/manifest pin exists; the PromptStore
->   still hot-reloads mid-run, and the only run-start pins are the settings in `run_started` plus
->   the two `core/setup_identity.py` digests (task payload + sorted config/workspace manifest).
->   *Close at the root:* stamp a content hash per rendered prompt family into `run_started`
->   (additive field) and let `render()` warn or refuse when live text diverges from the pinned hash
->   for an in-flight phase.
+> - **Prompt/context pinning — the PROMPT half landed 2026-09-08, the CONTEXT half is still open.**
+>   The bundle now has a manifest a caller can pin (`core/prompts.py::PromptStore.pin` /
+>   `bundle_revision`) and a pinned store WARNS when the live text diverges, which was the second
+>   clause of this row's own *close at the root*; the store still hot-reloads mid-run on purpose,
+>   which that clause required. What is NOT done is its FIRST half — nothing stamps the
+>   manifest into `run_started`, so the pin is available to a caller and no caller takes it yet, and
+>   the tool-schema/context manifest of §1 remains unpinned entirely. Neither residue carries a
+>   marker of its own yet: the run-start stamp is a one-line caller decision waiting on whoever owns
+>   `run_started`'s additive fields, and the context manifest is §1's typed `ContextEnvelope` rather
+>   than anything this store can supply.
 > - **Durable inner phases — STILL OPEN.** No `agent_phase_started` / `agent_checkpointed` /
 >   `agent_phase_completed` events exist in `events/types.py`; the inner trajectory still lives only
 >   in the diagnostic trace sidecar (`spans.jsonl` via `core/trace_append.py`), which is not folded
