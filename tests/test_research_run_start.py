@@ -202,6 +202,12 @@ def test_the_opening_think_does_not_move_the_ordinary_window():
             _outstanding_manual_research=lambda _s: 0,
             _already_researched_at=lambda _s, n: n in marks,
             _cadence_research_marks=lambda _s: marks,
+            # The Researcher's own question sweep runs at this entry point ahead of every trigger
+            # (`_register_idea_questions`); it reads a carrier this stub's state does not model and
+            # is unrelated to WHICH trigger fires, which is all these tests are about. A passthrough
+            # keeps the stub a stub — the sweep has its own coverage in
+            # `tests/test_open_questions_ask.py`.
+            _register_idea_questions=lambda state: state,
             _cadence_due=Engine._cadence_due,
             _ground_run_start=ResearchCadenceMixin._ground_run_start,
             _run_deep_research=lambda state, *, trigger, manual: (

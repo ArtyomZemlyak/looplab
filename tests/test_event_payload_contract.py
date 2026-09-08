@@ -126,6 +126,21 @@ def test_a_key_added_to_a_payload_after_its_literal_is_seen(writers):
         "the writer scan stopped following subscript writes into the payload")
 
 
+def test_a_key_added_by_an_UNPACKING_assignment_is_seen_too(writers):
+    """`data["a"], data["b"] = (…)` is one `Assign` whose single target is a TUPLE of subscripts.
+
+    A walk that accepted only a bare `ast.Subscript` target saw neither key, so
+    `node_failed.triage_action` — LLM-derived text about a crash, on a durable terminal — reached
+    the log with no contract row and no line in the generated reference, while
+    `test_every_key_a_writer_writes_is_declared` reported the type clean. Pinned on the live
+    instance so the unpacking hop cannot be dropped as dead code, exactly like the subscript hop
+    one test up.
+    """
+    assert "triage_action" in writers["node_failed"]["any"], (
+        "the writer scan stopped unpacking tuple assignment targets")
+    assert "triage_rationale" in writers["node_failed"]["any"]
+
+
 def test_required_keys_are_written_by_every_literal_writer(writers):
     """`required` is a claim about writers TODAY, so it is checked against every literal one. A key
     one site omits (or writes only inside a conditional spread) is `optional`, whatever it means."""

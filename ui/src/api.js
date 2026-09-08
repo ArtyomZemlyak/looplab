@@ -1,9 +1,8 @@
-// The UI's server API: every /api/* endpoint function, the CONTROL action map, and the paid
-// concept-lens / artifact / authoring / launch protocols built on top of them. Originally split out
-// of util.js (mega-refactor P5.2 — bodies verbatim); util.js re-exports everything, so importers are
-// unchanged.
+// The UI's server API: every /api/* endpoint function and the artifact / authoring / launch
+// protocols built on top of them. Originally split out of util.js (mega-refactor P5.2 — bodies
+// verbatim); util.js re-exports everything, so importers are unchanged.
 //
-// It is now also a BARREL. Six concerns that had re-accreted here moved into their own modules
+// It is now also a BARREL. Nine concerns that had re-accreted here moved into their own modules
 // (doc 25 UI-02 — bodies verbatim again) and are re-exported below, so no importer of api.js or
 // util.js changed:
 //
@@ -13,6 +12,14 @@
 //   commandProtocol.js    submit -> observe -> retry, and the generic background-job await
 //   eventStream.js        the WHATWG event-stream parser + authenticated SSE transport
 //   scopeReportActions.js the paid scope-report action protocol and its reconciliation
+//   controlActions.js     CONTROL — the operator action vocabulary over that command lifecycle
+//   conceptLensApi.js     the paid concept-lens submit / abandon / lost-tab recovery family
+//   crossRunLedger.js     the cross-run claim-ledger reads and their payload sanitizers
+//
+// The last three are what UI-02's resolution declined, plus the ninth concern the finding never
+// named; each of their headers records why it was declined then and what changed. All three are
+// CONSUMERS of the members above rather than residents beside them, which is the same seam the
+// first six were cut along.
 //
 // The dependency direction is one-way: those modules never import api.js. A name two of them share
 // goes DOWN into apiClient.js or commandModel.js, because under the build's native ESM execution
@@ -20,17 +27,14 @@
 // lists are explicit rather than `export *` so the browser-facing surface stays exactly what it was;
 // test/apiBarrel.test.js derives the names consumers actually take and proves each one resolves.
 
-import { assertRunMutationAllowed } from './runMode.js'
 import { deadlineRequest } from './requestDeadline.js'
 import {
-  _authHeaders, _throw, apiUrl, assertNotReviewMutation, deadlineGet, get, post, runApiPath,
-  runNodeApiPath, send,
+  _authHeaders, _throw, apiUrl, deadlineGet, get, post, runApiPath, runNodeApiPath, send,
 } from './apiClient.js'
 import {
-  COMMAND_REQUEST_TIMEOUT_MS, TRANSIENT_HTTP, UUID_V4_RE, createIdempotencyKey, hasOnlyKeys,
-  runGenerationError, safeIdentityText, validRunGeneration,
+  TRANSIENT_HTTP, UUID_V4_RE, createIdempotencyKey, hasOnlyKeys, runGenerationError,
+  validRunGeneration,
 } from './commandModel.js'
-import { commandJson, commandRead, jobAwait, runCommand } from './commandProtocol.js'
 import { createEventStreamParser } from './eventStream.js'
 
 export {
@@ -61,285 +65,17 @@ export {
   abandonScopeReportAction, genScopeReport, getScopeReport, getScopeReportAction,
   reconcileScopeReportGeneration,
 } from './scopeReportActions.js'
-
-async function paidConceptLensPost(runId, suffix, body, {
-  idempotencyKey, signal, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
-} = {}) {
-  if (!validRunGeneration(body?.expected_generation)) {
-    throw runGenerationError('invalid_run_generation',
-      'A verified run generation is required before paid concept-lens work.',
-      'Reload Concepts before continuing this request.')
-  }
-  if (!safeIdentityText(idempotencyKey)) {
-    throw new Error('A valid saved concept-lens idempotency key is required.')
-  }
-  const path = runApiPath(runId, suffix)
-  assertNotReviewMutation(path)
-  assertRunMutationAllowed(path)
-  try {
-    return await commandJson(path, {
-      method: 'POST', signal,
-      headers: _authHeaders({
-        'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey,
-      }),
-      body: JSON.stringify(body),
-    }, requestTimeoutMs, { submission: true })
-  } catch (error) {
-    if (error?.status == null || error?.code === 'COMMAND_REQUEST_TIMEOUT'
-        || error?.code === 'COMMAND_PROTOCOL_ERROR') error.submissionMayHaveSucceeded = true
-    throw error
-  }
-}
-
-export const submitConceptLens = (runId, prompt, expectedGeneration, options) =>
-  paidConceptLensPost(runId, '/concepts/lens', {
-    prompt, expected_generation: expectedGeneration,
-  }, options)
-
-export const abandonConceptLens = (runId, expectedGeneration, requestId, options) =>
-  paidConceptLensPost(runId, '/concepts/lens/abandon', {
-    expected_generation: expectedGeneration, request_id: requestId,
-  }, options)
-
-// Lost-tab recovery is deliberately owner-plane even though discovery is a GET.  Do not route it
-// through get(): reviewReadPath() would translate the URL into a reviewer capability, while this
-// projection is the authority used to decide whether another paid identity may be created.
-export async function getConceptLensRecovery(runId, expectedGeneration, {
-  signal, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
-} = {}) {
-  if (!validRunGeneration(expectedGeneration)) {
-    throw runGenerationError('invalid_run_generation',
-      'A verified run generation is required before paid concept-lens recovery.',
-      'Reload Concepts before inspecting paid work.')
-  }
-  const basePath = runApiPath(runId, '/concepts/lens/recovery')
-  assertNotReviewMutation(basePath)
-  const path = `${basePath}?expected_generation=${encodeURIComponent(expectedGeneration)}`
-  return commandRead(path, { errorPath: basePath, signal, requestTimeoutMs })
-}
-
-export function awaitConceptLensRecoveryJob(jobId, options = {}) {
-  const path = `/api/jobs/${encodeURIComponent(String(jobId || ''))}`
-  assertNotReviewMutation(path)
-  if (!/^[0-9a-f]{16}$/.test(jobId || '')) {
-    throw new Error('An exact recovered concept-lens job id is required.')
-  }
-  return jobAwait({ status: 'running', job_id: jobId }, options)
-}
-
-export async function abandonRecoveredConceptLens(
-  runId, expectedGeneration, requestId, expectedStartedSeq, {
-    resolutionIdempotencyKey, signal, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
-  } = {},
-) {
-  if (!validRunGeneration(expectedGeneration)) {
-    throw runGenerationError('invalid_run_generation',
-      'A verified run generation is required before resolving recovered paid work.',
-      'Reload Concepts and inspect the current recovery receipt.')
-  }
-  if (!safeIdentityText(requestId) || !/^[0-9a-f]{64}$/.test(requestId)) {
-    throw new Error('An exact recovered concept-lens request id is required.')
-  }
-  if (!Number.isSafeInteger(expectedStartedSeq) || expectedStartedSeq < 0) {
-    throw new Error('An exact recovered concept-lens start sequence is required.')
-  }
-  if (!UUID_V4_RE.test(resolutionIdempotencyKey || '')) {
-    throw new Error('A valid recovery resolution idempotency key is required.')
-  }
-  const path = runApiPath(runId, '/concepts/lens/recovery/abandon')
-  assertNotReviewMutation(path)
-  assertRunMutationAllowed(path)
-  try {
-    return await commandJson(path, {
-      method: 'POST', signal,
-      headers: _authHeaders({
-        'Content-Type': 'application/json',
-        'Resolution-Idempotency-Key': resolutionIdempotencyKey,
-      }),
-      body: JSON.stringify({
-        expected_generation: expectedGeneration,
-        request_id: requestId,
-        expected_started_seq: expectedStartedSeq,
-      }),
-    }, requestTimeoutMs, { submission: true })
-  } catch (error) {
-    if (error?.status == null || error?.code === 'COMMAND_REQUEST_TIMEOUT'
-        || error?.code === 'COMMAND_PROTOCOL_ERROR') error.submissionMayHaveSucceeded = true
-    throw error
-  }
-}
-
-export const CONTROL = {
-  // Three operator controls (see docs/guide/concepts.md → "Stopping a run"):
-  //   stop     — freeze the run, NO finalization (event: pause). Resumable; finalize later if wanted.
-  //   finalize — stop AND wrap up (report / cross-run lessons+case / cost roll-up). event: run_abort.
-  //   resume   — continue from ANY stopped state (pause / finalize / natural finish). event: resume.
-  stop: (rid) => runCommand(rid, 'pause', {}),
-  finalize: (rid) => runCommand(rid, 'run_abort', { reason: 'finalized' }),
-  resume: (rid) => runCommand(rid, 'resume', {}),
-  // One durable server-owned pause -> replacement-owner handoff. The browser does not orchestrate
-  // two commands, so navigation or reload cannot strand a run between them.
-  restart: (rid) => runCommand(rid, 'restart', {}),
-  // back-compat aliases (older callers / NL control): pause≡stop, abort≡finalize, reopen≡resume.
-  pause: (rid) => runCommand(rid, 'pause', {}),
-  abort: (rid) => runCommand(rid, 'run_abort', { reason: 'finalized' }),
-  nodeAbort: (rid, id, generation) => runCommand(
-    rid, 'node_abort', { node_id: id, generation, reason: 'ui' }),
-  // Re-run an existing node IN PLACE from a stage (no new node): eval=re-score (keep code),
-  // implement=re-run the Developer (keep the idea), propose=full redo. The command service drives it.
-  resetNode: (rid, id, stage, generation) => runCommand(
-    rid, 'node_reset', { node_id: id, generation, from_stage: stage }),
-  approve: (rid, id, generation) => runCommand(
-    rid, 'approval_granted', { node_id: id, generation }),
-  ratify: (rid) => runCommand(rid, 'spec_approved', {}),
-  hint: (rid, text) => runCommand(rid, 'hint', { text }),
-  // `max_eval_seconds` is the absolute cumulative ceiling (durable LWW), not an additive delta.
-  setEvalCeiling: (rid, seconds) =>
-    runCommand(rid, 'budget_extend', { max_eval_seconds: seconds }),
-  forceConfirm: (rid, id, generation) => runCommand(
-    rid, 'force_confirm', { node_id: id, generation }),
-  forceAblate: (rid, id, generation) => runCommand(
-    rid, 'force_ablate', { node_id: id, generation }),
-  fork: (rid, id, generation) => runCommand(
-    rid, 'fork', { from_node_id: id, generation }),
-  annotate: (rid, id, text) => runCommand(rid, 'annotation', { node_id: id, text }),
-  // Structured comments are append-only run commands. The caller supplies the exact displayed run
-  // generation separately from the node's attempt generation; a late click can therefore update
-  // neither a replacement run nor a reset incarnation of the same numeric node id.
-  createComment: (rid, { nodeId, nodeGeneration, text }, options = {}) => runCommand(
-    rid, 'comment_created', { node_id: nodeId, node_generation: nodeGeneration, text }, options),
-  editComment: (rid, { commentId, nodeId, nodeGeneration, expectedVersion, text }, options = {}) => runCommand(
-    rid, 'comment_edited', {
-      comment_id: commentId, node_id: nodeId, node_generation: nodeGeneration,
-      expected_version: expectedVersion, text,
-    }, options),
-  setCommentResolved: (rid, {
-    commentId, nodeId, nodeGeneration, expectedVersion, resolved,
-  }, options = {}) => runCommand(rid, 'comment_resolution_changed', {
-    comment_id: commentId, node_id: nodeId, node_generation: nodeGeneration,
-    expected_version: expectedVersion, resolved,
-  }, options),
-  // PART V Phase 2c: an operator replaces ONE node's concept tags (full set). Generation-fenced like a
-  // comment (the node's attempt separate from the displayed run generation), so a late click cannot
-  // re-tag a replacement run or a reset incarnation of the same numeric node id. Folds with
-  // `operator-edited` provenance the classifier re-tag cadence must not clobber.
-  retagConcepts: (rid, { nodeId, nodeGeneration, concepts }, options = {}) => runCommand(
-    rid, 'concept_tag_edited', {
-      node_id: nodeId, node_generation: nodeGeneration, concepts,
-    }, options),
-  promote: (rid, id, generation) => runCommand(
-    rid, 'promote', { node_id: id, generation, alias: 'champion' }),
-  // Operator-authored experiment: hand-add a node to the search tree. `idea` = {operator, params,
-  // rationale, theme?}; optional parent_id (branch from a node) and code (ship ready-made code).
-  inject: (rid, { idea, parent_id = null, parent_generation = null, code = null }) =>
-    runCommand(rid, 'inject_node', {
-      idea, parent_id, code,
-      parent_generations: parent_id != null && parent_generation != null
-        ? { [parent_id]: parent_generation } : undefined,
-    }),
-  // Fork-to-branch: the operator branches from an experiment they are reading — usually in a
-  // HISTORICAL snapshot — with its idea EDITED. Deliberately `inject_node` and not `fork`: `fork`
-  // asks the Researcher to improve a node and carries no idea at all, while an operator-authored
-  // idea with a parent and a parent-generation CAS is exactly what inject_node already transports.
-  // `payload` comes from `forkFromSeqModel.js::buildForkPayload` whole, so the generation fenced
-  // here is the one the operator SAW; the server validates `forked_from` and stamps its two derived
-  // fields (see `control_validation.py::_normalize_fork_receipt`). Never hand-build this body: the
-  // receipt and the CAS must carry ONE generation, which is the model's invariant, not this call's.
-  //
-  // The only RUN COMMAND that names `allowRunMutationModes`, and `['history']` is its whole content:
-  // the client's own run-access envelope marks a run being read at seq N read-only, so without this
-  // the request never leaves the browser (`runMode.js::assertRunMutationAllowed`). It admits the
-  // HISTORICAL mode only — a review capability, a stale-generation link and an unresolved start-over
-  // each keep refusing this command exactly as they refuse every other one. `resetRun` below is the
-  // seam's other caller and is deliberately wider (`start-over`/`stale-link`/`history`): Start over
-  // is the operation that RESOLVES those two states, so refusing it in them would strand the run. A
-  // branch resolves nothing, which is why its list is one entry long.
-  forkFrom: (rid, payload, options = {}) => runCommand(rid, 'inject_node', payload, {
-    ...options, allowRunMutationModes: ['history'],
-  }),
-  reopen: (rid) => runCommand(rid, 'run_reopened', {}),
-  // U3: merge two nodes — inject a multi-parent `merge` node; the engine recombines the parents'
-  // solutions via its real merge/ensemble operator (not a blank manual node).
-  merge: (rid, ids, parentGenerations = undefined, options = {}) => runCommand(rid, 'inject_node', {
-      idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` },
-      parent_ids: ids, parent_generations: parentGenerations,
-    }, options),
-  // A7/L2: pin the Strategist live. The strict server contract accepts policy/fidelity plus canonical
-  // eval_parallel, llm_parallel, the closed llm_lane_limits allocation, and the atomic Card-scoring
-  // treatment (never legacy aliases).
-  // {policy?, policy_params?, fidelity?, eval_parallel?, llm_parallel?, llm_lane_limits?, card_scoring?}.
-  setStrategy: (rid, strategy) => runCommand(rid, 'set_strategy', { strategy }),
-  // P2: ask the engine to run Deep Research now (read its disclosed bounded result sample + the web,
-  // then write a memo; the compact evidence brief never claims omitted middle results were read).
-  deepResearch: (rid) => runCommand(rid, 'deep_research', {}),
-  // P1: register an open hypothesis on the board (a question the search should resolve), or drop one.
-  addHypothesis: (rid, statement) => runCommand(rid, 'hypothesis_added', { statement, source: 'human' }),
-  abandonHypothesis: (rid, id) => runCommand(rid, 'hypothesis_updated', { id, status: 'abandoned' }),
-  deleteHypothesis: (rid, id) => runCommand(rid, 'hypothesis_updated', { id, status: 'deleted' }),
-  // Layer-6 Card board controls. Authority/provenance is server-stamped; clients submit only the
-  // exact subject and editable value through the generation-fenced command protocol.
-  reprioritizeCard: (rid, id, priority) => runCommand(
-    rid, 'card_reprioritized', { id, priority }),
-  editCard: (rid, id, statement) => runCommand(rid, 'card_edited', { id, statement }),
-  pinCardResources: (rid, id, gpus, gpuMemMiB = null) => runCommand(
-    rid, 'card_resource_pinned', {
-      id, gpus, ...(gpuMemMiB == null ? {} : { gpu_mem_mib: gpuMemMiB }),
-    }),
-  dropCard: (rid, id, reason = 'operator dropped') => runCommand(
-    rid, 'card_dropped', { id, reason }),
-  // The counterpart a drop never had: an operator putting a stopped card back on the board. Same
-  // command path, same generation fence — a reopen is as much a selection decision as the drop was.
-  reopenCard: (rid, id, reason = 'operator reopened') => runCommand(
-    rid, 'card_reopened', { id, reason }),
-  // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
-  // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
-  // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).
-  // Contract preserved: resolves to {ok, seq, generation, content} (or {ok:false} offline), never a
-  // job_id. The same key rejoins ambiguous retries to one paid server job.
-  refreshReport: async (rid, { expectedGeneration, idempotencyKey, signal,
-    requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS } = {}) => {
-    if (!validRunGeneration(expectedGeneration)) {
-      throw runGenerationError(
-        'invalid_run_generation',
-        'A verified run generation is required before refreshing the report.',
-        'Reload the run before generating its report.',
-      )
-    }
-    if (!safeIdentityText(idempotencyKey)) {
-      throw new Error('A valid report refresh idempotency key is required.')
-    }
-    const path = runApiPath(rid, '/report_refresh')
-    assertNotReviewMutation(path)
-    assertRunMutationAllowed(path)
-    const response = await commandJson(path, {
-      method: 'POST',
-      headers: _authHeaders({
-        'Content-Type': 'application/json', 'Idempotency-Key': String(idempotencyKey),
-      }),
-      body: JSON.stringify({ expected_generation: expectedGeneration }),
-      signal,
-    }, requestTimeoutMs, { submission: true })
-    const result = await jobAwait(response, { maxTransientErrors: 3, signal })
-    if (result?.ambiguous !== true
-        && (!validRunGeneration(result?.generation) || result.generation !== expectedGeneration)) {
-      const error = new Error('Invalid report generation receipt.')
-      error.code = 'REPORT_REFRESH_PROTOCOL_ERROR'
-      error.ambiguous = true
-      error.submissionMayHaveSucceeded = true
-      throw error
-    }
-    return result
-  },
-  // Generic authoritative command by {type, data}; slash commands and action routers share this path.
-  raw: (rid, type, data = {}) => runCommand(rid, type, data),
-}
-
-// Apply one assistant/boss action through the same authoritative lifecycle. Report regeneration keeps
-// its dedicated background-job endpoint; all event commands delegate engine policy to the server.
-export async function appendAction(runId, action, options = {}) {
-  if (action.type === '__refresh_report__') return CONTROL.refreshReport(runId, options)
-  return CONTROL.raw(runId, action.type, action.data || {})
-}
+export {
+  CONTROL, appendAction,
+} from './controlActions.js'
+export {
+  abandonConceptLens, abandonRecoveredConceptLens, awaitConceptLensRecoveryJob,
+  getConceptLensRecovery, submitConceptLens,
+} from './conceptLensApi.js'
+export {
+  boundedLedgerText, getCrossRunAtlas, getCrossRunClaimCurationLog, getCrossRunClaims,
+  getCrossRunCurationLog, projectLedgerSource,
+} from './crossRunLedger.js'
 
 // Generation-fenced, operation-idempotent Replay: archive the finished generation and re-spawn the
 // same run id. The durable operation id lets an unknown browser outcome rejoin the exact request.
@@ -928,107 +664,6 @@ export const saveRunConfig = (rid, settings, {
     ...(expectedGeneration == null ? {} : { expected_generation: expectedGeneration }),
   }, options)
 
-// Experimental Claims & Curation reads: owner-only, read-only projections over the shared memory
-// portfolio. The ROUTE names below are the server's and are unchanged by the F7 surface rename
-// (doc 29) — `/api/cross-run/atlas` still serves the mixed-evidence claim records the screen reads.
-// Bypass browser caches so Refresh observes newly finalized runs/governance without a stale intermediary.
-const crossRunRead = (path, options = {}) => get(path, { ...options, cache: 'no-store' })
-export function boundedLedgerText(value, max = 360) {
-  if (!['string', 'number', 'boolean'].includes(typeof value)) return ''
-  const limit = Number.isSafeInteger(max) ? Math.max(0, Math.min(2000, max)) : 360
-  const text = String(value).slice(0, limit)
-  return text.replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ')
-    .replace(/\s+/gu, ' ').trim().slice(0, limit)
-}
-// An ALLOWLIST: a field absent here never reaches React state. F7 dropped the concepts section, so
-// the concept sections of the atlas envelope (`explored`/`thin_coverage` — up to 24 rows carrying 6
-// run references each) and the `concept_capsules.jsonl` read receipt beside them are no longer
-// listed. They are still SERVED; nothing renders them, so nothing keeps them.
-//
-// THE OTHER DIRECTION IS THE ONE THAT BITES, and it had: a field this list omits that something
-// DOES render is not a smaller payload, it is a render branch no server response can reach — and it
-// is silent, because the field simply arrives `undefined`. Five of `CrossRunClaim`'s were in exactly
-// that state (`decision`/`note`/`by`/`at`, `polarity`, `sources`, `verification`,
-// `evidence_digest`), so `ClaimsCuration.jsx`'s Decision line, the polarity half of its metric line
-// and its whole "Sources and verification" disclosure were dead markup while
-// `claimsCurationModel.js::normalizeClaim` went on bounding and validating all five. On a Claims &
-// Curation screen the steward's own verdict — who ratified a claim, when, and why — is the thing an
-// operator came for. `ui/test/claimsCuration.test.js` now derives the model's wire reads and fails
-// on any name that is not here, so the two halves cannot drift apart again.
-const CROSS_RUN_STATE_FIELDS = `portfolio_id n_runs n_contested
-  claim_source contradictions
-  revisions claims n revision v status complete entries limit source_complete
-  runs run_id metric polarity sources verification evidence_digest
-  decision note by at
-  claim_uid statement epistemic maturity decision_fresh n_support n_oppose n_unverified
-  n_contradicts support oppose unverified contradicts scopes receipt_known read_complete
-  research_source_complete lessons research snapshot_digest rows_total rows_retained
-  rows_quarantined malformed_rows invalid_rows outcome proposals receipt merges splits purges
-  decisions applied concept_governance`.split(/\s+/)
-const CROSS_RUN_STATE_CAPS = {
-  contradictions: 12, claims: 40, entries: 20,
-  runs: 6, support: 6, oppose: 6, unverified: 6, contradicts: 6, scopes: 6,
-}
-const CROSS_RUN_COUNT_ARRAYS = new Set(['merges', 'splits', 'purges', 'decisions', 'applied'])
-function projectCrossRunValue(value, key = '', depth = 0) {
-  if (typeof value === 'string') return boundedLedgerText(value, 500)
-  if (typeof value === 'number' || typeof value === 'boolean' || value == null) return value
-  if (Array.isArray(value)) {
-    if (CROSS_RUN_COUNT_ARRAYS.has(key)) return value.length
-    return value.slice(0, CROSS_RUN_STATE_CAPS[key] || 6)
-      .map(item => projectCrossRunValue(item, key, depth + 1))
-  }
-  if (typeof value !== 'object' || depth >= 7) return null
-  const out = {}
-  for (const field of CROSS_RUN_STATE_FIELDS) {
-    if (Object.hasOwn(value, field)) {
-      out[field] = projectCrossRunValue(value[field], field, depth + 1)
-    }
-  }
-  return out
-}
-export function projectLedgerSource(key, value) {
-  const projected = projectCrossRunValue(value)
-  if (key === 'atlas') {
-    const contested = Array.isArray(value?.contradictions) ? value.contradictions.length : 0
-    projected.n_contested = Math.max(
-      Number.isSafeInteger(projected.n_contested) && projected.n_contested >= 0
-        ? projected.n_contested : 0,
-      contested,
-    )
-  }
-  return projected
-}
-const boundedCrossRunInt = (value, fallback, maximum, minimum = 0) => {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.trunc(parsed))) : fallback
-}
-const crossRunLimitArgs = (limitOrOptions, fallback, maximum, options) =>
-  limitOrOptions && typeof limitOrOptions === 'object'
-    ? { limit: fallback, options: limitOrOptions }
-    : { limit: boundedCrossRunInt(limitOrOptions, fallback, maximum, 1), options }
-// Bounds exist on both sides of the wire. Client render caps prevent DOM amplification; these query
-// caps also prevent a routine claim-ledger navigation from requesting an unbounded shared ledger.
-export const getCrossRunAtlas = (limitOrOptions = 24, options) => {
-  const args = crossRunLimitArgs(limitOrOptions, 24, 50, options)
-  return crossRunRead(`/api/cross-run/atlas?limit=${args.limit}`, args.options)
-}
-export const getCrossRunClaims = (limitOrOptions = 80, offset = 0, options) => {
-  const args = crossRunLimitArgs(limitOrOptions, 80, 200, options)
-  const offsetIsOptions = offset && typeof offset === 'object'
-  if (offsetIsOptions && args.options == null) args.options = offset
-  return crossRunRead(
-    `/api/cross-run/claims?limit=${args.limit}&offset=${boundedCrossRunInt(offsetIsOptions ? 0 : offset, 0, 1_000_000)}`,
-    args.options)
-}
-export const getCrossRunCurationLog = (limitOrOptions = 20, options) => {
-  const args = crossRunLimitArgs(limitOrOptions, 20, 50, options)
-  return crossRunRead(`/api/cross-run/curation-log?limit=${args.limit}`, args.options)
-}
-export const getCrossRunClaimCurationLog = (limitOrOptions = 20, options) => {
-  const args = crossRunLimitArgs(limitOrOptions, 20, 50, options)
-  return crossRunRead(`/api/cross-run/claim-curation-log?limit=${args.limit}`, args.options)
-}
 // These four sat in the block of shared constants at the top of api.js; the block moved out with the
 // vocabulary that needed sharing (doc 25 UI-02) and nothing outside this section ever read them.
 const LAUNCH_PREFLIGHT_TIMEOUT_MS = 12_000

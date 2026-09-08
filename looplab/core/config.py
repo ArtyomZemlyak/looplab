@@ -1118,6 +1118,18 @@ class Settings(BaseSettings):
     # a subtree nobody has measured counts as average, never as free. Only the `mcts` policy reads
     # it (greedy/evolutionary/asha ignore it, as they ignore `c`).
     mcts_cost_weight: float = 0.0
+    # THE LLM VALUE ESTIMATE (docs/BACKLOG.md §0.1 row 17): how much a model's opinion of a branch's
+    # remaining HEADROOM counts in the `mcts` policy's UCB1 value term. `0.0` = off and is the
+    # historical behaviour exactly — `search/policy.py::value_estimate` returns its reward argument,
+    # the score expression is unchanged, and the paid call is never made, so a run that cannot use
+    # the number does not buy it. That is also why it needs no `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row:
+    # off IS the pre-field value, so a resumed snapshot that predates the field gains no paid call.
+    # The unit is REWARD, on `_mcts_reward`'s bounded (0, 2) scale and zero-centred at an
+    # uninformative estimate: at `0.4` a once-visited branch the model calls spent loses 0.2 and one
+    # it calls wide open gains 0.2, decayed by `1 / (1 + visits)` as the subtree is really measured.
+    # Only the `mcts` policy reads it (greedy/evolutionary/asha ignore it, as they ignore `c`), and
+    # it buys ONE bounded structured call per unestimated candidate per creation boundary.
+    mcts_value_weight: float = 0.0
     # THE MODEL ARMS of the operator x model router (doc 52 row 19): `{arm: "model-id[@cost]"}` —
     # the models the bandit branch may route a BUILD to beside the configured Developer model (the
     # implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because it is a
@@ -1156,6 +1168,30 @@ class Settings(BaseSettings):
     # run-start read only, the pre-M6 behavior.
     lessons_every: int = Field(default=4, ge=0)
     lessons_refresh_every: int = Field(default=4, ge=0)
+    # OPERATOR-SCOPED cross-run lessons (doc 52 §4.3). Cross-run lessons are retrieved by task
+    # FINGERPRINT (Jaccard >= 0.34, harmonic recall, top 5) and by ROLE, and by nothing about the
+    # action about to fire — so a merge, a repair and an improve on one task all read the same five
+    # rows, while the IN-RUN context has had parent-plus-sibling scoping since
+    # `events/digest.py::lineage_lessons`. ON threads the operator of the `Idea` being built into
+    # the Developer prior's ranking (`lesson_hygiene.py::lesson_operator_bucket`): this operator's
+    # own lessons first, then untagged ones, then rows tagged only with other operators.
+    #
+    # OFF BY DEFAULT, and the default is the finding rather than caution. The only per-operator
+    # scoping ablation in the field (AIRA-dojo) came back NULL, so there is no evidence to spend a
+    # prompt change on — and a prompt is a contract: `false` reproduces the Developer's prior BYTE
+    # FOR BYTE, because the flag decides only WHICH FIVE of the already-eligible rows fill the
+    # slots. It RANKS rather than filters for the same reason: dropping other-operator rows would
+    # bet a real loss (a Developer never shown the fix for a crash class) on an unmeasured effect.
+    #
+    # What the field buys while off is the EVIDENCE to decide it: every distilled lesson now records
+    # the operators of its own evidence nodes unconditionally (no prompt bytes, no call), and a
+    # scoped render writes a `prior_injected` row naming the operator, which
+    # `events/prior_citations.py` joins to what the proposals cited. NO
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: the live default IS the historical behaviour, so a
+    # pre-field snapshot resumes into exactly what it was doing (the map exists for the case where
+    # those two differ). Costs no store read and no provider call — the per-operator render re-ranks
+    # the scan the run-start/refresh load already paid for, with its embedder memo intact.
+    lesson_operator_scope: bool = False
     # B3 output redaction: the HIGH-ENTROPY half of the persisted-tail redactor.
     # **This flag no longer decides whether tails are redacted at all** (backlog C2, 2026-08-14).
     # Known credential SHAPES and the operator's own secret env VALUES are masked on every persisted
@@ -1409,6 +1445,21 @@ class Settings(BaseSettings):
     # a FLOOR on a gateway that reports no prices; `llm_token_limit` counts total tokens and is the
     # one that holds against a local model. 0 = no cap. Neither takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`
     # row: a cap can only REMOVE calls, and a pre-field snapshot resumes at 0 = today's behaviour.
+    #
+    # ONE CEILING WITH `llm_budget_usd`, since 2026-09-08 (`core/llm_budget.py::run_usd_ceiling`).
+    # This field and that one were two run-level USD caps enforced by two different halves — this
+    # one reserving at the broker's permit, that one committing on the shared `CostAccountant` —
+    # each with its own refusal sentence, so an operator who typed one got half a ceiling and an
+    # operator who typed both got a run that stopped at the lower number under a message naming the
+    # other. Both halves now read the TIGHTEST declared cap from one function, and every refusal
+    # names the knob that declared it. `llm_budget_usd` stays the documented spelling (it is the one
+    # the node-open floor, the resume instruction and the stop account already name).
+    #
+    # STILL NO LEGACY ROW, and the ground is the one above rather than an oversight: a resumed run
+    # that declared `llm_budget_usd` now also RESERVES against its own already-declared ceiling, so
+    # the change can only remove calls and can never spend past the number that run was launched
+    # with. The alternative — a new field whose only job is to opt an old snapshot out of enforcing
+    # the ceiling it set — would be a knob for un-enforcing an operator's own instruction.
     llm_cost_limit: float = Field(default=0.0, ge=0.0)
     llm_token_limit: int = Field(default=0, ge=0)
     # Cross-run memory (I19, ADR-10): if set, the best result of each run is stored as
@@ -1446,6 +1497,11 @@ class Settings(BaseSettings):
     # identically under either value, and pinning a resumed run to `false` would preserve the defect
     # for exactly the multi-hour runs it costs the most. `EngineOptions` keeps it OFF, like every
     # other Part IV/V knob, so a bare `Engine(...)` gains no unasked work.
+    # THE FIFTH CONSUMER READS IT CONJOINED (F1i-b, 2026-09-08): the serial deep-research gate
+    # `research_cadence.py::_maybe_deep_research` reaches the boundary only when
+    # `concurrent_research` is OFF, because that is the only configuration in which it is the run's
+    # ONLY research path and therefore cannot race the background half for one node-count's spend.
+    # With `concurrent_research` on — the shipped default — this knob leaves that gate untouched.
     cadence_while_evaluating: bool = True
     # PART IV Phase 2a live steering (§21.11/§21.13). When on, the `concept_retag_every` cadence (NOT
     # `strategist_every` — the producer gates on `_should_consult_concepts`, which uses the seed boundary
@@ -1483,9 +1539,13 @@ class Settings(BaseSettings):
     # an idea reads as new because nothing here tried it while the run's own reading describes it —
     # the form RQ-Bench measured. On, the deterministic overlap (`engine/novelty.py::
     # literature_overlap`, lexical, no model, no call) rides on the novelty audit rows AND is named
-    # in the re-proposal the gate was already buying. It NEVER rejects: running an experiment a
-    # paper describes is often exactly right, so the overlap is evidence, not a verdict. Off by
-    # default because the second half changes a prompt.
+    # in the re-proposal the gate was already buying, AND is the `literature=` input of
+    # `search/graded_novelty.py::grade_novelty` (2026-09-08), where it renames the ONE terminal
+    # whose claim it can falsify: "a new region of the space" becomes level 3
+    # `described_in_retrieved_literature`, a grade the live pre-gate already defers on, so no
+    # proposal's admission moves. It NEVER rejects: running an experiment a paper describes is
+    # often exactly right, so the overlap is evidence, not a verdict — and because its recall is a
+    # stated FLOOR, only a PRESENT overlap ever moves anything. Off by default: the prompt half.
     novelty_literature: bool = False
     # THE BUILD FAN-OUT AS A LANE, NOT A BARRIER (doc 52 row 33). The parallel build joins a whole
     # chunk before anything moves, so the loop pays the SLOWEST build of every chunk and a fast
@@ -1558,8 +1618,9 @@ class Settings(BaseSettings):
     # merge, opposite polarity ("X helps" vs "X never helps") is surfaced as a CONTRADICTION instead of being
     # collapsed, paraphrase/inflection variants group by exact structured key (no transitive over-merge), and
     # operator governance is scope-precise (a decision in task A cannot reach a same-worded claim in task B).
-    # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379);
-    # the bare-library EngineOptions default stays off (engine/options.py). See engine/claims.py.
+    # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379),
+    # and since 2026-09-08 (doc 25 EM-06) in the bare-library EngineOptions and every projection signature
+    # too — the durable write path never had another mode. See engine/claims.py.
     cross_run_structured_claims: bool = True
     # PART IV cross-run §22.4 (AGENTIC portfolio stewards). At finalize, when an LLM client is available,
     # let the concept and claim stewards review the freshly-updated portfolio and PROPOSE curation. Proposals
@@ -2079,6 +2140,14 @@ class Settings(BaseSettings):
     # consequences rather than a comment fix. Stated, not patched.
     #
     # Priced calls only -- a local model reports no cost and can never trip it.
+    #
+    # AND IT IS NOW RESERVED AS WELL AS COMMITTED (2026-09-08). `core/llm_budget.py::
+    # run_usd_ceiling` is the ONE derivation of the run's USD ceiling, read both here (through
+    # `run_cost_accountant`, the post-hoc half) and by the `RunBudget` the broker meters at
+    # `borrow()` (the reserve half),
+    # so this ceiling no longer races `llm_cost_limit`: the tighter of the two declarations binds
+    # both halves and the refusal names the knob that set it. Until then a run declaring only this
+    # field reserved nothing and overshot its own ceiling by up to N concurrent calls.
     llm_budget_usd: float = Field(default=0.0, ge=0.0)
     # Do not OPEN a new node once `llm_budget_usd - spent` is below this many dollars; finish the run
     # on the same `BudgetExceeded` the ceiling raises instead (`CostAccountant.require_headroom`).
@@ -2484,6 +2553,15 @@ class Settings(BaseSettings):
     # created nodes (0 = off; it still regenerates on a manual `report_refresh` from the UI). The
     # deterministic report always renders from the node set regardless of this knob.
     report_every: int = 3
+    # MLflow AUTOLOGGING (2026-09-08, docs/BACKLOG.md §16): a tracking URI to MIRROR this run into
+    # while it runs — `events/mlflow_export.py::autolog` tails the run's event log from a follower
+    # thread and publishes each node terminal as it lands (a child run per node, `node_metric` /
+    # `best_metric` series on the parent). "" is OFF and is the shipped default, because sending a
+    # run to a tracking server is EGRESS and only an operator naming a server may start it; MLflow
+    # is an optional dependency, so an unset or uninstalled mirror degrades to today's behaviour
+    # (`looplab export-mlflow` after the run) with no error. The mirror is a READER: it never
+    # appends to the log, takes no lock, and a dead URI costs the mirror, never the search.
+    mlflow_tracking_uri: str = ""
     # Agent Skills (I18, ADR-9): dir of SKILL.md the Researcher can list/load as tools.
     skills_dir: str | None = None
     # Prompt store (I18, ADR-8): dir of editable, hot-reloaded role prompt .md files.

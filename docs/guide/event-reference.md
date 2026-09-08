@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-147 event types — 109 folded into `RunState`, 38 diagnostic; 826 declared payload keys; 26 types whose whole payload is stored by the fold.
+153 event types — 110 folded into `RunState`, 43 diagnostic; 881 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -50,7 +50,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_build_requested` | folded | The durable selection-and-compute gate for one Card's build. | `card_id`, `generation` | — |
 | `card_dropped` | folded | The operator stopped a Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_edited` | folded | The operator rewrote a Card's statement. | `id` | `source`, `statement` |
-| `card_enriched` | folded · whole | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `generation`, `id`, `node_id`, `proposal_ref` |
+| `card_enriched` | folded · whole | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `claim_refs`, `concept_tags`, `confidence`, `cross_run_prior`, `footprint`, `foresight_rank`, `generation`, `id`, `lesson_refs`, `node_id`, `novelty_verdict`, `proposal_ref`, `research_origin`, `steering_context` |
 | `card_merged` | folded | Alias Cards folded into a canonical one, with the seq that decided the edge. | `aliases`, `canonical`, `merged_by`, `source_event_seq` | `statement` |
 | `card_ranked` | folded | The board's priority order over the Cards, with per-Card confidence and reason. | — | `at_node`, `confidence`, `order`, `ranked`, `reason` |
 | `card_reopened` | folded | The operator resumed a dropped Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
@@ -74,12 +74,16 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `data_leakage` | folded · whole | The deterministic leakage scan's verdicts over the task's data. | `leak`, `verdicts` | — |
 | `data_profiled` | folded | The task's data profile: the columns the bounded profiler read. | `columns` | — |
 | `data_provenance` | folded · whole | Where each of the task's declared data assets came from. | `assets` | — |
+| `data_shift` | diagnostic | How far the deployment sample the task declares is from the training one, per column. | `checked`, `columns`, `detector`, `n_columns`, `n_shifted`, `only_current`, `only_reference`, `shift`, `source` | — |
 | `deep_research` | folded · whole | An operator request for a deep-research pass — the intent itself, with no payload. | — | — |
 | `deps_declared` | diagnostic | The dependency directives a task declared, what the resolver pinned, and what it dropped. | `action`, `command`, `digest`, `directives`, `dropped`, `env_delta`, `file`, `observed`, `pin_count`, `pins`, `pins_truncated`, `root` | — |
 | `deps_installed` | diagnostic | The packages one evaluation installed and how they resolved. | `generation`, `node_id`, `packages`, `resolved`, `round` | `source` |
 | `diversity_archive` | folded · whole | The finalization snapshot of the diversity archive. | — | `elites`, `finalize_scope`, `finish_seq`, `niches`, `resolution` |
 | `drift_unavailable` | diagnostic | Why the run could not compare its environment against the one it started in. | `reason` | — |
+| `effective_train_batch` | diagnostic | What the training process itself recorded as the batch it ran at, read off the node's own workdir at the metric read. | `disagree`, `generation`, `node_id`, `read_at`, `readings`, `train_batch_size` | `files_seen`, `truncated` |
 | `env_changed` | folded | A resume observed that the Python/library environment differs from the one the run started in. | `now`, `was` | — |
+| `eval_invocation_claimed` | diagnostic | One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id. | `attempt`, `generation`, `invocation_id`, `node_id` | `after_interrupted_attempt` |
+| `eval_invocation_settled` | diagnostic | That evaluator invocation returned, with the outcome and the seconds it charged. | `attempt`, `eval_seconds`, `generation`, `invocation_id`, `node_id`, `outcome` | — |
 | `finalization_finished` | folded | The wrap-up for one finish (keyed by that finish's seq) completed. | `finish_seq` | — |
 | `finalize_step` | diagnostic | One replay-safe step gate inside a single logical finalization. | — | `after_seq`, `finish_data`, `finish_report_planned`, `outcome`, `scope`, `step` |
 | `force_ablate` | folded | The operator asked for an ablation of one node. | `node_id` | `attempt`, `generation` |
@@ -90,7 +94,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `fork_unfulfilled` | diagnostic | A `fork` request the engine could not serve — recorded instead of silently dropped. | `from_node_id`, `generation`, `idx` | — |
 | `full_retrain_charged` | diagnostic | A repair that forced a full retrain, and the evaluation budget it spent. | `attempt`, `generation`, `node_id`, `spent` | — |
 | `hint` | folded · whole | An operator hint pushed into the next proposals; `replace` swaps the standing one. | `text` | `replace`, `source` |
-| `holdout_evaluated` | folded | The node's number on the agent-invisible holdout split, beside the search metric and their gap. | `gap`, `generation`, `metric`, `n_holdout`, `node_id`, `search_epoch` | `attempt`, `protocol` |
+| `holdout_evaluated` | folded | The node's number on the agent-invisible holdout split, beside the search metric and their gap. | `gap`, `generation`, `metric`, `n_holdout`, `node_id`, `search_epoch` | `attempt`, `program_sha256`, `protocol` |
 | `host_grading` | folded · whole | The host-side scorer's grade over the candidate's predictions. | `predictions`, `scorer` | `competition`, `n_hidden`, `n_labels`, `protocol` |
 | `hypothesis_added` | folded | A research hypothesis on the board — operator-authored, or engine-written after a deep-research pass. | `source`, `statement` | `at_node`, `concept_tags`, `concepts`, `id`, `parent_belief_id` |
 | `hypothesis_concepts` | folded | The concept ids one hypothesis was tagged with, against a named vocabulary. | `at_vocab`, `concepts`, `hyp_id`, `mode` | — |
@@ -117,10 +121,11 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_created` | folded | A node exists: its idea, the code and files the Developer wrote, and its parents. | `code`, `files`, `idea`, `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `deleted`, `eval_start_boundary`, `footprint_finalized`, `forked_from`, `generation`, `materialize_aborted_intent`, `model_arm`, `origin`, `parent_generations`, `research_origin`, `seed`, `speculative` |
 | `node_eval_started` | folded | A node's evaluation was dispatched — the promise `node_created`'s eval-start boundary made. | `generation`, `node_id` | `attempt` |
 | `node_evaluated` | folded | A node's terminal: its metric, the trials behind it, its secondary metrics and any trust violations. | `eval_seconds`, `extra_metrics`, `generation`, `metric`, `node_id`, `stdout_tail`, `trials`, `violations` | `attempt`, `extra_metrics_direction`, `extra_metrics_provenance`, `metric_provenance`, `resource_curve`, `self_metric`, `stderr_tail` |
-| `node_failed` | folded | A node's other terminal: why the evaluation produced no number, and who said so. | — | `attempt`, `card_id`, `engine_reason`, `error`, `error_evidence`, `eval_seconds`, `failed_stage`, `finish_data`, `finish_report_planned`, `generation`, `never_evaluated`, `node_id`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `scope`, `step`, `triage_rationale` |
+| `node_failed` | folded | A node's other terminal: why the evaluation produced no number, and who said so. | — | `attempt`, `card_id`, `engine_reason`, `error`, `error_evidence`, `eval_seconds`, `failed_stage`, `finish_data`, `finish_report_planned`, `generation`, `never_evaluated`, `node_id`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `scope`, `step`, `triage_action`, `triage_rationale` |
 | `node_repaired` | folded | One repair round on a failing node: what it changed, on what evidence, and the verdict on the change. | `attempt`, `changed`, `deleted`, `error_in`, `files`, `generation`, `node_id`, `rationale`, `stages_passed`, `triage_action` | `attribution`, `budget_exhausted`, `code`, `edit_calls`, `engine_reason`, `error_evidence`, `eval_seconds`, `footprint_finalized`, `idea_footprint`, `param_overrides`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `salvaged_metric`, `unmet`, `unparseable_repairs`, `verified` |
 | `node_reset` | folded | The operator re-ran an existing node in place from a named stage. | `node_id` | `attempt`, `from_stage`, `generation` |
 | `node_tombstoned` | folded | Nodes struck from selection without deleting their history. | `node_ids` | — |
+| `node_value_estimated` | folded | How much a model thinks expanding one node's branch still has left, in [0, 1]. | `generation`, `node_id`, `value` | `attempt`, `rationale` |
 | `node_verified` | folded | The selection verifier's score for one node, over a named evidence digest. | — | `attempt`, `evidence_digest`, `generation`, `node_id`, `score` |
 | `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `literature`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
 | `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |
@@ -128,11 +133,11 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
 | `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `endgame_start`, `phases`, `reason`, `reserve` |
 | `policy_decision` | folded | The search policy's pick among the legal actions, with the scores behind it. | `chosen`, `reason`, `scores` | — |
-| `prior_injected` | diagnostic | A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads. | — | `at_node`, `case`, `notes`, `phase`, `quarantined_useless`, `role`, `rows`, `source` |
+| `prior_injected` | diagnostic | A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads. | — | `at_node`, `case`, `notes`, `operator`, `operator_scoped`, `phase`, `quarantined_useless`, `role`, `rows`, `source` |
 | `promote` | folded · whole | The operator promoted one node to an alias (`champion` by default). | `node_id` | `alias`, `attempt`, `generation` |
 | `proxy_scored` | folded | The pre-eval proxy's score for a candidate, or its abstention when the nearest neighbour is too far. | `abstained`, `generation`, `nearest`, `node_id`, `score`, `skipped` | `attempt` |
 | `readmodel_skipped` | diagnostic | The SQLite read-model sidecar could not be updated. | `error` | — |
-| `reflection_note` | diagnostic | The run-end distillation: the causal note, the lessons and the auto-skills it proposed. | `at_nodes`, `coverage_digest`, `fingerprint`, `finish_seq`, `lessons`, `n_lessons`, `n_skill_candidates`, `n_skills`, `n_skills_demoted`, `note`, `prior_citations`, `skill_candidates`, `skills`, `skills_demoted`, `task_id` | — |
+| `reflection_note` | diagnostic | The run-end distillation: the causal note, the lessons and the auto-skills it proposed. | `at_nodes`, `coverage_digest`, `fingerprint`, `finish_seq`, `lessons`, `n_lessons`, `n_skill_candidates`, `n_skills`, `n_skills_demoted`, `n_skills_promoted_earlier`, `note`, `prior_citations`, `skill_candidates`, `skills`, `skills_demoted`, `task_id` | — |
 | `repair_critic_verdict` | diagnostic | The critic's judgement on one repair round, over the durable repairs it could see. | `after`, `attempt`, `durable_repairs`, `generation`, `judged`, `node_id`, `rationale`, `source`, `verdict` | — |
 | `report_generated` | folded | A run report was written, at a node and for a stated trigger. | `at_node`, `content`, `trigger` | `finalize_scope`, `generation`, `refresh_id` |
 | `report_refresh_failed` | diagnostic | A paid report refresh failed before anything was written — sanitized, retry-safe. | — | `error_kind`, `generation`, `refresh_id` |
@@ -159,6 +164,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `setup_finished` | folded | Workspace setup finished, with the manifest it produced. | `manifest`, `seconds` | — |
 | `setup_started` | diagnostic | Workspace setup started, for a goal and a repo. | `goal`, `phase`, `repo` | — |
 | `setup_step` | diagnostic | One workspace-setup step. | — | `sources`, `step` |
+| `skills_promoted` | diagnostic | The mid-run per-card skill promotion: which settled cards it judged, and what it wrote. | `at_node`, `cards`, `count`, `promoted`, `skill_candidates`, `skills`, `trigger` | — |
 | `spec_approval_requested` | folded | The proposed evaluation spec is waiting for a human. | `eval` | — |
 | `spec_approved` | folded | The evaluation spec was ratified; the optimization loop trusts it from here. | — | — |
 | `spec_drift` | folded · whole | One evaluation's spec drifted from the ratified one. | — | `attempt`, `generation`, `node_id`, `seed` |

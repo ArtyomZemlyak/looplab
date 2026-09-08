@@ -528,12 +528,23 @@ site that proves it is open.
    objective") — no algorithm, no selection. `ui/src/panels.jsx` still carries the real
    `paretoFront`. So the entry's claim is right and its "returns nothing" is now literally false;
    the fix is what a marker is for.
-   OPEN[pareto-never-reaches-champion-selection] the non-dominated front is computed in the BROWSER
-   and nothing in the search or the engine consumes it, so a run still elects one champion on one
-   scalar; retire this when a front is computed where selection can read it.
-   proof:absent:pareto_front@looplab/search/policy.py
-   *Mutated before it was written:* True as shipped, False the moment a `pareto_front` lands in the
-   policy.]
+   *Closed 2026-09-08 — the marker `pareto-never-reaches-champion-selection` stood here.*
+   `search/policy.py::pareto_front` is the front where a policy can consult it, with
+   `pareto_objectives` and `dominates` beside it. Its axes are the primary metric in the run's own
+   direction plus every extra metric that is AUTHENTICATED (`declared`/`engine` — an `auto` number
+   off the candidate's own stdout is not admitted as a selection objective, and an untagged one
+   reads `unknown` and is not either), ORIENTABLE (the recorded `min`/`max`; the browser's front
+   assumes every extra metric is cost-like, which inverts a declared nDCG silently) and RECORDED BY
+   EVERY NODE IN THE POOL — the three filters `core/models.py` already argued for, reused rather
+   than re-derived. Selection reads it at `engine/plan.py::endgame_actions`, the ONE gate
+   `_plan_gate` applies to every selected action set: the endgame ensemble's two parents now come
+   off the front, so the merge spends its reserved slot on two nodes that actually differ instead of
+   on an improve and its own parent separated by noise. With no admissible second axis the front is
+   the metric leader alone and the pick falls through to the byte-identical top-2 ranking — which is
+   every run in `runs/` today, which is why this needed no setting. `tests/test_pareto_front.py`
+   drives both halves (14 tests), including the two axes that must be REFUSED and the inertness.
+   The champion itself is still one node on one scale by design: a front reordering the champion
+   would be a selection change smuggled in as a diversity one.]
 13. **The feature-engineering CV gate is a sentence, not an enforcement (P1, M).**
     `engine/proposal_cues.py:231::_cue_feature_engineering` appends prose telling the model
     *"KEEP a feature only if it improves CV"*, gated by `core/config.py:643::feature_engineering =
@@ -545,13 +556,30 @@ site that proves it is open.
    still defaults to `False`; `search/operators.py` still has no FE operator; and the only `caafe`
    in the tree is the words "(CAAFE-style)" in a `core/config.py` COMMENT, which is prose and not a
    symbol, so that claim stands too.
-   OPEN[fe-cv-gate-is-prose-not-enforcement] the eval never drops an engineered feature that fails
-   CV — the only thing that says so is a sentence in the proposer's prompt, and there is no
-   feature-engineering operator to enforce it; retire this when one exists.
-   proof:absent:feature_engineering@looplab/search/operators.py
-   *The falsifier was mutated before it was written:* True as shipped, and False the moment a
-   `feature_engineering` operator lands in that file — checked, because the previous marker written
-   that day was vacuous and only a mutation found it.]
+   *Closed 2026-09-08 — the marker `fe-cv-gate-is-prose-not-enforcement` stood here.* The operator
+   exists and the rule is enforced, in three pieces. (1) `search/operators.py` gained the FE
+   operator beside `merge_idea`: `parse_feature_cv` reads the candidate's own per-feature ledger off
+   its stdout (`FEATURE_CV {"feature": …, "with": …, "without": …, "std": …, "n": …}`) and
+   `feature_engineering_verdicts` decides which features survive — by this repo's OWN >1-SE
+   acceptance test (`trust/gate.py::one_se_better`) when the row declares a spread, strictly when it
+   does not, direction-aware either way. It is a DECISION and not an `Idea` builder because the code
+   an FE step produces is the Developer's, not an arithmetic mean of two parents; the mechanical half
+   is the keep/drop rule, which is exactly the half the prompt was being trusted with. (2) The
+   deterministic rung `trust/cv.py::feature_cv_findings` emits a `findings.py`-shaped, already
+   namespaced `feature_cv:kept_feature_failed_cv` for a feature the ledger fails while the code still
+   builds it (`feature_is_kept` reads a name mentioned only on a dropping line as dropped — reading a
+   removal as a violation would punish the behaviour the gate asks for). (3) The engine runs it as a
+   registered detector (`trust/scan_receipt.py::TRUST_DETECTOR_FEATURE_CV`), gated on the SAME
+   `feature_engineering` flag that puts the directive in the prompt, so the receipt cannot claim a
+   detector that did not look. Whether the flag CHANGES anything stays `Settings.trust_gate`'s
+   decision: advisory under the default `audit`, and under `gate`/`block` the flagged node is out of
+   selection and breeding. Two stated recall gaps, both in the safe direction: a candidate that
+   declares NO ledger is not flagged (nothing claimed is not a claim broken, and inferring feature
+   construction from an AST would flag every honest column assignment), and an explicit drop clears
+   the gate. `tests/test_feature_cv_gate.py` drives all three, including two real runs — flag on, the
+   finding reaches the durable ledger and the `trust_scan` receipt names the detector; flag off,
+   neither happens — and the fold-level proof that under `gate` the flagged leader loses the
+   championship it wins under `audit`.]
 14. **The time-series adapter is a synthetic toy; tabular-AutoML and multimodal do not exist (P1, M
     each).** `adapters/timeseries.py`'s own docstring (line 9) says a real AutoGluon-TS/Darts backend
     "is a drop-in replacement for the templated forecaster" — i.e. it is the template, not the
@@ -565,14 +593,19 @@ site that proves it is open.
     repo_write_tools and tasks. Only the timeseries half gets a marker: the missing-adapter half has
     no falsifier that isn't a filename guess, and a proof that names a FILE THAT MIGHT ARRIVE UNDER
     ANOTHER NAME is the mechanism-not-property shape this file was corrected for nine times.
-    OPEN[timeseries-adapter-embeds-its-own-forecaster] the adapter generates its own exponential
-    forecaster inline, so the task validates LoopLab's plumbing rather than any forecasting
-    capability; retire this when a real backend is imported.
-    proof:present:_TS_TEMPLATE@looplab/adapters/timeseries.py
-    *Mutated before it was written:* True as shipped, False the moment that import lands. Re-pointed
-    2026-09-06 (doc 52 §2.2): `autogluon` was one backend of many; the deciding symbol is the inline
-    template the adapter hands the sandbox, which any real backend deletes (the forecaster's own
-    `def` line sits INSIDE that string, which the guard rightly refuses as prose).]
+    *CLOSED 2026-09-08 — `_TS_TEMPLATE` is gone, and NOT by importing a forecasting library.* The
+    marker's own falsifier named the deciding symbol correctly (the inline template the adapter hands
+    the sandbox), and what deletes it is the split the item's first sentence asks for: the adapter now
+    ships the DATA (`series.json`), the METRIC (`backtest.py`, a rolling-origin MASE whose origin set
+    is fixed by the series and `backtest_h` alone — the old template's `max(period + 1, n - h)` moved
+    with the candidate's own hyperparameter, so two nodes were not comparable) and a DECLARED BASELINE
+    (`baseline.py`, the seasonal blend that used to BE the solution), all three staged and protected
+    per eval. `llm_roles` hands the model an `LLMDeveloper` that writes the forecaster against that
+    contract, so the kind is a coding loop like `code_regression` rather than a two-float sweep; the
+    offline pair runs the declared baseline, which keeps `backend=toy` end-to-end. A real backend
+    (AutoGluon-TS/Darts) is now a candidate's import, not the adapter's — which is the half of this
+    entry that never needed LoopLab's permission. The missing tabular-AutoML/multimodal adapters
+    stay open, unmarked, for the reason stated above.]
 15. **Drift detection is absent (P2, M).** `trust/leakage.py` DID go past exact-match —
     `code_leakage_scan` (`:147`, self-described "static-dataflow-lite": preprocessor fit on full data
     before the split, `.fit()` on test data), plus `target_leakage` and `temporal_leakage`. But every
@@ -580,11 +613,21 @@ site that proves it is open.
     (`engine/confirm_phase.py:273`), never a distribution-shift detector.
    **[RE-DERIVED 2026-08-21 — HOLDS.** No population-stability index, no KS test, no
    `distribution_shift`/`drift_detect` symbol anywhere under `looplab/`.
-   OPEN[no-distribution-shift-detector] nothing compares the deployment distribution against the
-   training one, so a run cannot tell a shifted input from a worse model; retire this when a
-   detector exists.
-   proof:missing:looplab/trust/drift.py
-   *Mutated before it was written:* True as shipped, False the moment that module exists.]
+   *CLOSED 2026-09-08 — `trust/drift.py` exists, and it RECORDS.* Three classical statistics over
+   the pair the task already declares, no new reader and no second profiler: PSI over ten reference
+   quantiles and a two-sample KS D for a numeric column, total variation distance plus the unseen-
+   category share for a categorical one, with `core/profile.py` deciding which a column is so there
+   is still one answer to "is this numeric" across the profile, the leakage verdicts and this. The
+   pair comes from `shift_inputs()` (a `train*` table beside a `test*`/`valid*` one in a declared
+   mount, read by `adapters/perception.py::split_tables` + `tabular_columns` under the same bounds)
+   or, for the adapters that publish no tables, the `train_rows`/`test_rows` the leakage gate
+   already asks for. `engine/audit.py::_record_distribution_shift` appends it at setup as the
+   DIAGNOSTIC `data_shift` event and nothing reads it: shift is the normal case on a real task, so a
+   rung that could abort would be refusing the ordinary run — whether a deterministic flag ever
+   moves selection is `Settings.trust_gate`'s question and this one is not in it. One claim from the
+   first draft was measured and deleted rather than shipped: "KS catches a location shift PSI's bins
+   hide" is false at these thresholds (past ~0.6σ PSI is the larger of the two), and
+   `tests/test_distribution_shift.py` now carries the ladder that says so.]
 16. **MLflow is manual export, not autolog; there are no data connectors (P2, S–M).**
     `events/mlflow_export.py::export_run` + `cli/export_cmds.py:93` ship a per-run push; grep for
     `autolog` across `looplab/` is **empty**, and there is no `DataConnector`/`connector` symbol.
@@ -597,23 +640,59 @@ site that proves it is open.
     Nothing is broken by that; what would have been broken is the obvious falsifier. `absent:autolog`
     reads FALSE as shipped, which the guard would have reported as an item already fixed — an
     open item closed by an English word. The pin is bound to the CALL instead.
-    OPEN[mlflow-is-export-not-autolog] MLflow receives a run only when a human runs the export
-    command, so nothing is tracked while a run is in flight; retire this when autologging is wired.
-    proof:`absent:mlflow.autolog@looplab/events/mlflow_export.py`
-    *Mutated before it was written:* True as shipped, False the moment that call lands.]
+    *CLOSED 2026-09-08 — autologging is wired, and the falsifier's own call is NOT what landed.*
+    Read that as a correction to the marker rather than an evasion of it: `mlflow.autolog()`
+    monkeypatches training libraries in the process that calls it, and the process that would call
+    it — the engine — trains nothing. The candidate does, inside a sandbox subprocess the engine may
+    not reach into, so that call would patch nothing and log nothing. What the ITEM asks for is the
+    sentence that follows the slug ("nothing is tracked while a run is in flight"), and that is now
+    false: `Settings.mlflow_tracking_uri` (blank = off, because a tracking server is egress) starts
+    `events/mlflow_export.py::autolog` around the drive both `run` and `resume` go through
+    (`cli/run_cmds.py::_run_engine_guarded`), and a follower thread tails the run's own
+    `events.jsonl` and publishes each node terminal as it lands — a child MLflow run per node with
+    its params, metric and channel-tagged extras, plus `node_metric`/`best_metric` series on the
+    parent, and the champion's redacted code at close. Tailing the LOG rather than hooking the loop
+    is what makes it shippable: the mirror never appends, holds no lock, is idempotent by node id
+    (so it survives a resume), and gives up after three consecutive failures — a dead tracking
+    server costs the mirror and not the search, which `tests/test_mlflow_export.py` drives with the
+    dependency absent, the CI condition here.]
 17. **The MCTS tree has no LLM value estimate and no reflection (P2, M).**
     `search/policy.py:393::MCTSPolicy` is classic UCB1 (`:475-478`) with reward folded straight from
     the metric (`_mcts_reward`, `:374`). No `lats.py`, no LLM valuation, and it is not wired to
     `search/graded_novelty.py` / `novelty_recall.py` / `taxonomy_dedup.py`, which exist independently.
    **[RE-DERIVED 2026-08-21 — HOLDS.** `MCTSPolicy` is still the one class, `search/policy.py`
    imports no `graded_novelty`, and there is still no `lats.py`.
-   OPEN[mcts-has-no-llm-value-estimate] the tree values a node by its metric alone, so an unexplored
-   branch nobody has evaluated is indistinguishable from a bad one; retire this when a value
-   estimate exists.
-   proof:absent:value_estimate@looplab/search/policy.py
    *Mutated before it was written:* True as shipped, False the moment that module exists. Re-pointed
    2026-09-06 (doc 52 §2.2): `lats.py` was a file that might arrive under another name; the item's
-   own text names the fix — a value estimate in `policy.py` — so the proof is bound to that name.]
+   own text names the fix — a value estimate in `policy.py` — so the proof is bound to that name.
+   *CLOSED 2026-09-08 — the value estimate exists, and it is the HALF of the item the evidence
+   supports.* `search/policy.py::value_estimate` is the adjustment as a statable function:
+   `reward + weight × (2·prior − 1) / (1 + visits)`, ADDED to the UCB1 value term rather than
+   multiplied into the score for the reason `eval_cost_penalty` beside it is subtracted — the reward
+   is bounded in (0, 2) and `c ≈ 1.4` is calibrated against that scale, while the exploration term
+   counts visits and knows nothing about promise. Two properties decided the arithmetic and neither
+   is visible in a test where the priors differ: it is ZERO-CENTRED at an uninformative 0.5, so a
+   model that answers the same middling number for every branch moves nothing (the obvious spelling,
+   blending toward an absolute `2 × prior`, drags a run whose rewards sit at 1.47 downward and drags
+   the LEAST-VISITED candidate hardest — the exploration bonus running backwards, bought with paid
+   calls); and it DECAYS as `1/(1 + visits)`, the shape the exploration term already has, so the
+   estimate speaks loudest where the evidence is thinnest. `engine/value_estimate.py` is the paid
+   half — one bounded structured ask per unestimated MCTS candidate at the creation boundary
+   (≤ `VALUE_ESTIMATE_CADENCE_CAP` = 6, in the enrichment lane, under its own `value_estimate` span
+   so the money is attributable), asking how much the LINEAGE has left on what the branch TRIED and
+   what its children already got out of it, never on the metric the policy already reads exactly. The
+   answer is frozen as `node_value_estimated` → `Node.value_prior`, so the fold stays deterministic
+   (invariant #5) and a replay expands the same nodes; nothing is back-propagated across a merge
+   (ADR-5 §4) and nothing in champion selection reads it. Behind `Settings.mcts_value_weight`,
+   default `0.0`, where the score expression is byte-identical AND no call is bought — a run that
+   cannot use the number does not pay for it — and an UNESTIMATED node is likewise untouched, because
+   "nobody asked" is not "the model called it average". `tests/test_mcts_value_estimate.py` drives
+   the truth table, the byte-identity on a state that HAS priors, the pair the marker names (two
+   candidates tied on metric, one branch called spent and one wide open, the pick moving), the
+   fold's generation and range gates, and the cadence end to end against a stub client — including
+   that `BudgetExceeded` ends the run rather than the estimate. **The REFLECTION half of the entry
+   stays open and unmarked**: the tree still feeds no failed-branch self-reflection into the next
+   proposal, and `search/policy.py` still imports no `graded_novelty`.]
 18. **Parallel eval is in-process only (P2, L).** `engine/evaluate.py:1375` takes an
     `anyio.CapacityLimiter` and `orchestrator.py:1503,2383` open task groups; there is no `ray`,
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
@@ -3375,8 +3454,7 @@ surface resolves ids through it (`events/digest.py::_folded_axes`/`folded_concep
 **11 of its 16 nodes** are reported as being about. Withholding costs nothing that exists today: a
 run that never quiesces records no consolidation now either.
 
-**WHAT THIS DOES NOT FIX, and it is the more expensive finding.** ⬜ **`skeleton_for()` matches no
-  OPEN[concept-skeleton-matches-no-run] proof:`present:def skeleton_for(task_type: str)@looplab/search/concept_graph.py+absent:repo_task@looplab/search/concept_graph.py`
+**WHAT THIS DID NOT FIX, and it was the more expensive finding.** **`skeleton_for()` matched no
 run on this box.** The curated taxonomy (`search/concept_graph.py`: 26 leaves + 10 axis roots + 10
 `<axis>/*` placeholders = 46 ids) is resolved from `state.task_id` against ONE registered pack,
 `dense-retrieval`, plus seven substring aliases. Every run here answers `repo_task`,
@@ -3393,8 +3471,27 @@ ended, with the task type given explicitly. Turning the classifier on gives node
 own it needs; it does **not** unify the paths the operator asked about, and saying otherwise would
 be wrong.
 
+*Closed 2026-09-08 (`concept-skeleton-matches-no-run`): the id was never the only thing the resolver
+could ask. `skeleton_for(task_type, *, text="")` consults the task's own words when the id resolves
+nothing — the run's GOAL at all five live/CLI seeds — and a pack is selected only when the text names
+at least `_SKELETON_TEXT_MIN_CONCEPTS` (2) DISTINCT concepts of that pack's DOMAIN axes
+(`_SKELETON_SIGNATURE_AXES`: data, negatives, loss, distillation, architecture, pooling). The generic
+axes are excluded from that bar deliberately — `hyperparameter`, `regularization`,
+`training-schedule` and `eval` carry vocabulary every ML task uses, so a segmentation goal naming a
+batch size, a learning rate and dropout would otherwise import a 46-id retrieval taxonomy. Matching
+is word-ANCHORED (`ance` inside `balance` is refused, `mined negatives` still meets `mined
+negative`), and the two adapter DEFAULT ids — `repo_task`, `dataset_task`, which name the harness and
+never the subject — are excluded from the substring pass so that an alias can never select a domain
+for every repo run in existence. Measured on the e5 goal shape: `repo_task` + that goal resolves
+`dense-retrieval` (46 ids) on two hits (`loss/contrastive` via "InfoNCE",
+`negatives/hard-mining-inbatch` via "hard negative mining"), while `toy_quadratic` and an
+image-segmentation goal still resolve nothing. The consequence is deliberate and stated: the graded
+pre-gate, which returned None for want of any vocabulary on every run recorded here, now grades a
+dense-retrieval repo run exactly as it has always graded a task whose id IS `dense-retrieval`. Seven
+driven cases in `tests/test_concept_graph.py`, including the live precheck. Deleted per the index
+rule.*
+
 ⬜ **The classifier REWRITES, it does not add.** `_on_node_concepts` assigns
-  OPEN[classifier-rewrites-authored-membership] proof:`present:st.node_concepts[nid] = bounded@looplab/events/replay.py`
 (`st.node_concepts[nid] = bounded`), authored provenance has no protection (only OPERATOR does), and
 the authored ids survive only in the raw log — `events/digest.py` explicitly forbids readers from
 resurrecting `idea.concepts`. Measured on v8, which is the precedent: **2 of 24 authored ids survive
@@ -3405,6 +3502,23 @@ child's inherited set. This is the designed behaviour — the proposer must not 
 taxonomy, and §0.12 measured the authored regime as self-confirming — but it is a record-side effect
 and it is recorded here rather than discovered later. No live run is disturbed by this change: a
 running engine does not reload its source.
+
+*Closed 2026-09-08 — the REPLACEMENT stands; the record no longer loses what it replaced.* The fold
+keeps the proposer's own claim beside the membership in `RunState.node_concepts_authored`
+(`core/models.py::authored_node_concepts` is the read side), written by the authoring envelope alone
+and cleared only by the boundaries that abandon the IDEA — a propose reset, a subject change, a
+replacement that authors something else. It is FULL SETS ONLY, because a delta node's operands were
+never lost: `_on_node_concepts` does not clear `node_concept_deltas`, so a second copy would be a
+record that can drift from the one the materialization reads. Every effective-membership write now
+goes through one publisher (`replay.py::_publish_node_membership`), which is where the rule that a
+replacement may not touch the authored claim is stated, so a fourth producer inherits it instead of
+re-deriving it. Nothing about admission moved: the authored claim is not evidence,
+`classifier_verified_node_concepts` is still the one door, and `events/digest.py::_folded_axes` still
+forbids resurrecting `idea.concepts` into any axis. `looplab concept-authorship` is the instrument
+that turns the hand measurement above into a command — per node the authored set, the folded set,
+what survived and what was replaced, with both sides resolved through the run's consolidation renames
+so a RENAMED id is not reported as a classifier replacement. Driven by
+`tests/test_authored_concepts.py`'s authored-record section (nine cases, all folding real logs).
 
 **ALTERNATIVES REJECTED.**
 1. *A third pace under `cadence.py`* (§0.12's own proposal). Refused by `cadence.py`'s stated rule:
@@ -3543,8 +3657,8 @@ stripped, and the golden fixture moves by exactly eight `"repairs": 0` lines and
    `RunState` carried no repair count anywhere. The two integers ARE the "no new data" fix: they are
    derived, not carried, and they cost one `max()` per repair row.
 
-**STILL OPEN.** ⬜ **The node graph still cannot say which experiment is running.** `util.js::
-  OPEN[node-graph-cannot-name-running-experiment] proof:`present:eval_started: bool = Field(default=False, exclude=True)@looplab/core/models.py`
+**WAS STILL OPEN — closed 2026-09-08, see below.** ⬜ **The node graph still cannot say which
+experiment is running.** `util.js::
 workingId` returns the HIGHEST-ID pending node, and `Node.eval_started` — the folded durable proof
 that an evaluation was announced — is `exclude=True`, so it never reaches the wire
 (`narration.js::pendingWork` re-derives it from the raw event tail and says so in a comment). On v9
@@ -3553,6 +3667,32 @@ at the measured instant that made node **7** the "working" node, which had not b
 change to the state payload's field set and to a heuristic three surfaces read, it wants its own
 measurement of which runs evaluate in parallel, and it is a different defect from the one the chips
 had.
+
+*Closed 2026-09-08, in two halves, and the FIRST half is not the change this entry expected.* The
+wire half was never fixed by un-excluding the field: `Node.eval_started` and its three siblings are
+fold-internal on purpose (they were introduced for budget recovery, and the reader-defaulted
+`exclude=True` is what makes an old log fold byte-identically), so what shipped instead is a PUBLIC
+PROJECTION of the same receipts — `serve/node_activity.py::public_node_activity`, on every node as
+`activity: {status, generation, evidence, started_at?}` — with its own vocabulary (`building` /
+`queued` / `evaluating` / `pending`) and its own EVIDENCE field naming which durable row decided it.
+That is strictly more than the field would have carried: `queued` and `evaluating` are different
+answers, and the boundary promise is what makes the absence of a start row evidence rather than
+silence. `narration.js::pendingWork` now reads the projection and keeps its log scan only as
+compatibility for an older server.
+
+The second half — **which** experiment gets named — is what closed today, in
+`nodeActivity.js::primaryWorkingNode` (`workingId` is one line delegating to it, so the DAG's
+auto-collapse and any other single-subject consumer share one rule). `Math.max` is gone. The
+ordering is three clauses, each of them evidence: the EVALUATION lane outranks the build lane
+(a process of ours is running, against an LLM writing code for an experiment that does not exist
+yet — the opposite of the preference the old code had); within the lane the earliest
+`activity.started_at` wins, so the LONGEST-RUNNING experiment is the one named; a record carrying no
+usable timestamp never outranks one that does, because silence is not evidence. The highest id
+survives as the last tiebreak and only there — with no lane and no clock separating two nodes,
+moving which one is named would move a screen for no measured reason. On the v9 shape the rule
+names **5**, the longest-running of the two training nodes, where the entry's `Math.max` named 9 and
+then 7. Guard: `ui/test/nodeActivity.test.js` drives that exact shape plus the comparator's own
+truth table (`rankWork`, exported so the ordering is statable without a state object).
 
 ### §0.15 The engine asked the agent to choose a GPU footprint and told it the choice was free (2026-08-19)
 
@@ -3904,8 +4044,10 @@ the SERIAL half of a decision whose CONCURRENT half (`orchestrator._spawn_resear
 the three with zero quiescent prefixes. Opening the serial half mid-eval would put a main-task think
 and a background think at the same node count with only a read-then-write window between their shared
 `_cadence_research_marks` check and their receipts — a double-spend bought to reach work already being
-done. So four of five now call `at_creation_boundary` and the fifth is a stated refusal, pinned by
-`test_the_serial_deep_research_gate_is_deliberately_left_on_the_old_predicate`.
+done. So four of five call `at_creation_boundary` outright and the fifth calls it CONDITIONALLY —
+a refusal while `concurrent_research` is on, and the run's only research path when it is off — pinned
+by `test_the_serial_deep_research_gate_refuses_while_the_concurrent_half_is_live` and its twin
+`test_the_serial_gate_is_the_only_path_under_concurrent_research_false_and_now_fires` (F1i-b, below).
 
 **THE MONEY, and why these two need no memo.** §0.14's two consumers carry an in-process
 attempted-at-`n` memo because they record no `at_node` on their "nothing changed" path. These two
@@ -3925,15 +4067,21 @@ a status quo of never distilling at all.
 test reports `paid 0 distillations at one node count`. Each carries its kill-switch negative control
 in the same body, so `cadence_while_evaluating=false` still reproduces the historical predicate.
 
-**STILL OPEN — filed rather than patched.**
+**FILED RATHER THAN PATCHED HERE — AND SINCE CLOSED.**
 
-⬜ **F1i-b · the serial deep-research gate under `concurrent_research=false`.** Not the shipped default
-  OPEN[f1i-b-serial-deep-research-gate] proof:present:cadence_due@looplab/engine/cadence.py
-(`Settings.concurrent_research = True`), so no run on this box is affected, and every run in `runs/`
-carries `true`. Under `false` the concurrent half does not exist and the serial gate is the only path,
-which in a GPU-shaped run means deep research never fires at all. The fix is not the one-liner the
-other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
-under one claim rather than two reads. Do it when someone actually wants serial research.
+*F1i-b · the serial deep-research gate under `concurrent_research=false` — CLOSED 2026-09-08.* Under
+`false` the concurrent half does not exist (`_spawn_research` returns at its first line) and the
+serial gate is the only path, which in a GPU-shaped run meant deep research never fired at all. This
+entry asked for "the two paths to agree on a single spend, i.e. the mark check and the receipt under
+one claim rather than two reads" — and that is the fix for opening the gate GENERALLY, which is not
+what the hole needed. In the configuration the hole is about there is only ONE path, so there is
+nothing to agree with: `_maybe_deep_research` now reaches `cadence.at_creation_boundary` with
+`while_evaluating = cadence_while_evaluating AND NOT concurrent_research`, and with the shipped
+`concurrent_research=True` the predicate stays the historical one byte for byte. The money bound is
+the same one `lessons_distilled` and `report_generated` are held to and needs no in-process memo:
+`_record_research_attempt` writes its receipt BEFORE the provider call and `_cadence_research_marks`
+counts an ATTEMPT as a spent window, so one node-count buys exactly one think however many times the
+outer loop turns at it (`test_a_fixed_node_count_buys_exactly_one_serial_think`, 25 turns).
 
 **THIRTY DUPLICATE CARDS OF ONE IDEA HALVED A TWO-GPU BOX — measured live 2026-08-22.**
 
@@ -4158,9 +4306,24 @@ and the engine-side residue is that `resource_key` reaches the watchdog through 
 no Genesis prompt, so nothing an operator authors against ever mentions the one switch that arms the
 kill. That is what the marker above is pointed at.
 
-⬜ **Auto-skill promotion still runs only from the wrap-up pass — NARROWED 2026-08-19, see §0.18.**
-  OPEN[auto-skill-promotion-run-end-only] proof:`present:def write_reflection_note(self, final: RunState)@looplab/engine/lessons_distill.py+absent:write_auto_skill(@looplab/engine/lessons.py`
-  (the ONE promotion writer, `memory.write_auto_skill`, is called only from `write_reflection_note`, whose contract is the FINAL state; the proof reads shipped when that contract changes or the mid-run distill module gains the writer — re-point on landing if the promotion lands under a third shape)
+✅ **Auto-skill promotion runs per CARD on the `lessons_every` pace — landed 2026-09-08.**
+  *The named fix is what shipped: `lessons_distill.py::promote_settled_skills` is the ONE promotion
+  writer both passes now go through, and `lessons.py::maybe_promote_skills` is the trigger this row
+  was actually about. `settled_skill_cards` is the statable rule for which board rows are ripe —
+  `supported`, Δ>0, no pending evidence and a lane that is not `proposed`/`building`/`coded`/
+  `running` (both of the last two, because `Card.evidence` excludes the `node_building` marker the
+  `building` lane is derived from) — and it refuses a card already promoted at this exact statement,
+  keyed on `(card_id, source_sha256)` so an operator paraphrase is a claim that has not been
+  assessed. The `skills_promoted` diagnostic event is receipt AND gate (invariant 3): its `at_node`
+  is the cadence watermark and its `promoted` pairs are what stop a resume — and what stop the
+  run-end sweep from re-paying the classifier, which now records `n_skills_promoted_earlier` on the
+  `reflection_note` so "promoted nothing at the end" reads apart from "promoted nothing". NOT a new
+  knob and not new spend: the same money, one classifier call per card, moved earlier, on the pace
+  the operator already sets for mid-run cross-run writes — and `lessons_every: 0`, the
+  `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` value every resumed pre-field run carries, leaves promotion
+  exactly where it was. `tests/test_midrun_skill_promotion.py` drives the truth table, the mid-run
+  write, both idempotency gates (re-verified by mutation: the cadence stops the same node count, the
+  ledger stops the reopened window) and the run-end skip.*
 The TWIN question is settled and needed no new run: `n_skills: 0` on v7/v8 is not the classifier
 over-rejecting, because **zero cards reached it** (v7 has no evaluated node at all; all three of v8's
 `supported` cards are record setters with `best_delta = None`). That rung now writes its own
@@ -4171,7 +4334,9 @@ then finalized produced its `reflection_note` with 4 lessons and 14 candidate re
 in the engine prevents a stopped run from getting this pass. Nothing SURFACES it either: `looplab
 stop` says so once, in a terminal, and a KILLED run (v6, v9 — no `pause`, no finish) is never told
 anything at all. The named fix a future change would land is a per-card settled-promotion pass
-(`promote_settled_skills`); this marker's proof is its absence.
+(`promote_settled_skills`) — *which landed 2026-09-08; see the row above. What is unchanged is the
+SURFACING half: `looplab stop` still says so once in a terminal and a killed run is still told
+nothing, so the run-end sweep of whatever had not settled remains owed to a human who asks.*
 
 ### §0.18 Two receipts that never existed, and the audit question each of them decides (2026-08-19)
 
@@ -4280,7 +4445,8 @@ mid-flight (`looplab stop`: 38 `node_created`, one `pause`, no `run_finished`, n
 the exact shape of v2, v6 and v9 on disk) and then `looplab finalize`d produced its `reflection_note`
 with 4 lessons and 14 candidate receipts, 3 of them from the new rung. **The gap is the trigger.**
 
-**Mid-run promotion was NOT built, and the honest reason is that the corpus cannot yet justify it.**
+**Mid-run promotion was NOT built** *(when this was written; it landed 2026-09-08 — see the note at
+the end of this paragraph)*, **and the honest reason is that the corpus cannot yet justify it.**
 Replaying each log prefix-by-prefix at every terminal boundary and re-asking the promotion gate:
 across v6/v7/v8/v9/v2, exactly **2 cards ever qualified**, both on the final state, and **0 were
 retracted** — no card was promotable at one boundary and not at the end. So the obvious argument
@@ -4291,6 +4457,21 @@ SET and its IDENTITY — no pending evidence, no pending merge (a merged card's 
 rewritten by the fold, so a skill promoted early is filed under a title the run later replaces), and
 no route to `abandoned`, which overrides every verdict. That is a per-CARD settlement, not a run-level
 one, and it is the shape a `promote_settled_skills` pass would need.
+
+*Built 2026-09-08 in exactly that shape, and this paragraph is the specification it was written
+against.* `lessons_distill.py::settled_skill_cards` settles the EVIDENCE SET (no pending evidence
+node, and a lane that is not `proposed`/`building`/`coded`/`running` — both, because `Card.evidence`
+excludes the `node_building` marker the `building` lane is derived from) and takes `abandoned` for
+free, since it admits only `verdict == "supported"` and abandonment overrides every verdict. What it
+does NOT settle is IDENTITY, and the residue is priced rather than hidden: a card merged after
+promotion has its `statement` rewritten by the fold, and because the ledger key is
+`(card_id, source_sha256)` the run-end sweep then judges the consolidated statement as the new claim
+it is — one extra classifier call and a second card under the merged title, which is the right
+direction to fail (the alternative, keying on `card_id` alone, would leave the consolidated belief —
+the one the run actually settled on — with no card at all). The corpus argument above is unchanged
+and is why the pace is the existing `lessons_every` rather than a knob of its own: two candidates
+over five runs is not a population to design a second cadence against, and moving the same money
+earlier needs no new number.
 
 **What is left open** is therefore narrow and is not an engine defect: nothing SURFACES that a
 stopped or killed run holds unclaimed cross-run value. `looplab stop` says "`looplab finalize` to
@@ -4412,6 +4593,23 @@ OPEN[first-propose-runs-with-every-gpu-idle] the opening propose is the longest 
   NOT a cadence fix and not a prompt fix. The lever is overlap: `_ground_run_start` and the first
   propose both run before any node exists, serially, on the loop thread. Measure the split between
   them before choosing — the numbers above are the SUM.
+
+  **2026-09-08 — examined and deliberately left open, because the prescription's own precondition
+  cannot be met offline.** The split it asks for is a property of the run corpus (each run's
+  `propose` spans against its run-opening research rows), and no `spans.jsonl` from any of the seven
+  runs above exists on this box — there is nothing to measure, and the two candidate overlaps are
+  chosen differently depending on which half of those 138 minutes is which. Both were looked at:
+  (a) overlapping the run-opening think with the FIRST PROPOSE is not available at all — the
+  proposal consumes the memo, and proposing first is precisely the pre-2026-08-12 behaviour
+  `_ground_run_start` exists to reverse (measured then: no run of 22 had ever recorded research at
+  `at_node=0`); (b) overlapping it with the run's own SETUP (`_enter_run` -> `_setup_phase`, the
+  other phase that runs with every GPU idle) IS structurally available and would remove
+  `min(setup, think)` of dead time, but it moves a paid provider call — and the `research_attempted`
+  / `research_completed` rows with it — into the prologue whose own comment records that rows
+  appended there moved a PAID-work decision (finalize recovery minted a fresh paid scope where it
+  should have resumed one) and broke thirteen tests across four files. A change whose entire value
+  is a wall-clock saving nobody here can measure, made against the one block in the engine
+  documented as unsafe to append from, is not one to land blind.
 
 ### 2. Trust scans — the question is not "why not every node", it is "why only one run"
 
@@ -4553,14 +4751,29 @@ restored the entry for being invisible.
   second request. The measured cost of leaving it is one untested top-ranked hypothesis per run that
   seeds a card before its first metric lands.
 
-OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/core/context_budget.py
-
-  Both fixes are LOCAL: memos gained sections, the case record leads with its params. Neither
-  establishes the general rule, which is what this entry is for — every bounded surface in the tree
+  Both fixes were LOCAL: memos gained sections, the case record leads with its params. Neither
+  established the general rule, which is what this entry was for — every bounded surface in the tree
   should be checked for the same shape (does the FIRST thing the caller needs survive the bound?),
   and the module rule "a bounded answer names what it did not cover, beside the call that returns
   it" (`tools/log_tools.py`, rule 3) should be the ceiling everywhere rather than in the two places
   that happened to be measured.
+
+  *Closed 2026-09-08 — the marker `tail-truncation-drops-the-payload` stood here.* The rule is now
+  code in the canonical home of the cap it spends: `core/context_budget.py::bounded_page` returns ONE
+  page of a long text under a cap with a receipt charged INSIDE that cap (so the loop's own head-cut
+  in `agents/tool_loop.py::_cap_tool_result` cannot eat the one line saying the answer is partial),
+  naming the range covered, the total, and the exact call that continues (`{offset}` = the first
+  character not covered) — or saying plainly that no continuation exists, because a fabricated resume
+  pointer is worse than an admitted dead end. A text that fits whole at offset 0 comes back verbatim,
+  so a converted surface changes no short answer by a byte. Re-derived over the tree for the same
+  shape, ONE silent cut was left among the agent-facing readers and it is converted here:
+  `tools/knowledge_tools.py::read_note` was `read_file(...)[:4000]` — no marker, no continuation — so
+  an operator-authored note whose conclusion sat past char 4,000 came back looking WHOLE; it is now a
+  paged reader whose `offset` argument is declared in its own schema. `tests/test_bounded_tool_results.py`
+  drives both halves, including tiling the pages back into the original text (a source pin cannot see
+  that the pointer advances) and a cap too small for its own receipt, where the page still moves
+  forward — a continuation that points back at the offset it was issued from is a LOOP, the one
+  failure worse than the silent cut.
 
 ### §0.16 Two costs measured and deliberately NOT paid down (2026-08-19)
 
@@ -4788,15 +5001,23 @@ holds the line meanwhile is the same conjunct as everywhere else — through `--
 own false-stop rate is 1 decision / 1 of 49 productive attempts in BOTH arms, because all four
 `implementation` verdicts on productive runs are below the 0.8 bar.
 
-OPEN[monitor-fault-has-no-outcome-label] `TrainingVerdict.fault` routes a stop to REPAIR instead of
-a terminal, and nothing measures it. `recorded.fault` is `None` in 450 of 450 rows because the field
-postdates every preserved run — the extractor already reads it, so the corpus repairs itself the
-moment a run records one. What does NOT arrive with those rows is the LABEL: the outcome that says
-whether `implementation` was right is what the REPAIR then did, which is the same shape the triage
-bench needs (`node_repaired` + the next attempt's terminal) and is not the `wasted`/`productive`
-rule this dataset has. A run must also actually reach the branch — `train_monitor_kill` on, a
-`broken` at ≥ 0.8 confirmed twice, and `fault="implementation"` — which no preserved run did.
-proof:absent:LABEL_REPAIRED@looplab/judgebench/judge_corpus.py
+*Closed 2026-09-08 — the LABEL landed. `judge_corpus.py` now carries a SECOND, independent
+vocabulary beside `wasted`/`productive` (`FAULT_LABELS`: `repaired` / `unrepaired` / `unknown`),
+derived by `_fault_label` from facts the judge did not author — the `node_repaired` rows written
+AFTER the decision joined to the node's own terminal, which is the shape this entry asked for — and
+recomputable offline by `rederive_fault_label`, so a hand-edited label goes red with no `runs/`
+present. Four undecidable cases carry their own basis rather than one shared `unknown`
+(`no_fault_recorded`, `fault_not_routed:<fault>` for the `hypothesis`/`environment` attributions
+that are recorded and never repaired, `no_repair_after_decision`, `no_node_terminal`). One
+correction the work produced: this entry's "`None` in 450 of 450 rows" was wrong — 449 carry no
+fault and ONE does, `e5small-dr-unified-v3` n2, `broken` at confidence 0.95 over an uncaught
+`torch.OutOfMemoryError`, saying `environment`. It does not route, so the label still grades nothing.
+What is left is not a tree state a marker can hold: a run must actually REACH the branch
+(`train_monitor_kill` on, a `broken` at ≥ 0.8 confirmed twice, `fault="implementation"`). The
+tripwire for that is a test rather than a marker —
+`tests/test_judge_bench.py::test_every_fault_label_rederives_and_the_corpus_grades_none_of_them`
+pins the whole corpus at `unknown` with its exact basis counts, so the first run that records an
+`implementation` fault turns it red and the number becomes readable.*
 
 ### §0.20 A goal sentence nobody could check killed three nodes, and the prompt telling five roles to use every GPU outlived the correction (2026-08-20)
 
@@ -4847,19 +5068,60 @@ and refuses the `<mod>.py:NNN` form outright; it found 4 dead symbol citations a
 all fixed. `docs/guide/concepts.md`'s inline-repair list enumerated ELEVEN reasons under a sentence
 saying twelve, and the enumeration is now derived from `FAILURE_REASONS`.
 
-OPEN[claim-legacy-prompt-branches] Both pre-correction GPU paragraphs still ship as the
-`gpu_footprint_cue=false` branch AND as what an UNSTAMPED role gets — a bare `LLMResearcher` in a
-library caller reads "declaring MORE than the ceiling does not get this experiment more hardware",
-which the scheduler contradicts. The engine path always stamps, so no run gets it; the byte-for-byte
-restoration is deliberate. What is missing is a decision about whether a false sentence may be the
-off-switch's value at all. proof:present:SERIALISES@looplab/agents/roles.py
+**[CLOSED 2026-09-08 — the decision is NO, and the off-switch became SILENCE rather than a
+sentence.]** Both pre-correction GPU paragraphs shipped as the `gpu_footprint_cue=false` branch AND
+as what an UNSTAMPED role got — a bare `LLMResearcher` in a library caller read "declaring MORE than
+the ceiling does not get this experiment more hardware", which the scheduler contradicts. What was
+missing was a decision about whether a false sentence may be the off-switch's value at all.
 
-OPEN[claim-effective-batch-event] `auto_find_batch_size` is refused as the memory answer on a
-measurement (transformers 4.51.0 keeps the DECLARED `per_device_train_batch_size` on `args` and the
-reduced one only in `trainer_state.json` + a `logger.debug`), so a run would report a batch it never
-trained at. It becomes admissible the moment the EFFECTIVE batch is lifted into a durable LoopLab
-event — an `extra_metrics`-shaped problem, since the number comes off the candidate's own process.
-proof:absent:effective_train_batch@looplab/events/types.py
+**It may not, and the byte-for-byte argument does not reach this switch.** A byte-for-byte restoration
+is owed to a run ALREADY IN FLIGHT — that is what `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` is for — and
+`gpu_footprint_cue` deliberately has NO row there, because it buys no paid call and mounts no
+intervention. So nothing resumes onto that branch: what `false` actually reached was an operator
+asking for it today and a library caller who never asked for anything, i.e. two LIVE prompts. A knob
+may narrow a prompt; it may not be the value under which the prompt is wrong.
+
+Both branches now keep only what was never in dispute — the ceiling arithmetic, the ordinary
+declaration, and the rule that the training/eval command must target the count you declare — and say
+NOTHING about what a larger count buys (`agents/roles.py::_FOOTPRINT_BUDGET_QUIET`,
+`engine/proposal_cues.py::_gpu_budget_hint_text`'s quiet branch). `true` is unchanged, so no run's
+prompt bytes moved. `tests/test_gpu_footprint_choice.py` drives it: the two refuted clauses are gone
+from BOTH branches and from the unstamped role's real turn, and `false` is still strictly narrower
+than `true` (it keeps the numbers and the command rule, drops the trade, the memory clause and the
+probe invitation) rather than a second claim. The three surfaces that promised a byte-for-byte
+restoration — `docs/guide/configuration.md`, the settings catalogue and its curation note — say what
+`false` now is. doc 45 §2's "still open, stated rather than patched" paragraph is closed with it.
+
+**[CLOSED 2026-09-08 — the batch is lifted; the refusal's own condition is met.]**
+`auto_find_batch_size` was refused as the memory answer on a measurement (transformers 4.51.0 keeps
+the DECLARED `per_device_train_batch_size` on `args` and the reduced one only in `trainer_state.json`
++ a `logger.debug`), so a run would report a batch it never trained at. `runtime/effective_batch.py`
+reads `trainer_state.json::train_batch_size` off the node's own workdir at the METRIC READ — the same
+instant, the same freshness floor and the same `bind_one` identity/containment rule as
+`applied_params`' resolved tier, beside which it is bound in `eval_dispatch` — and
+`EV_EFFECTIVE_TRAIN_BATCH` records it after the terminal.
+
+**It is the fourth side of the metric record and it is what `applied_params` cannot be.** That module
+states its own bound out loud — *a statement about a DOCUMENT, not about an execution* — and the
+batch under `auto_find_batch_size` is exactly where the bound costs: every saved config keeps the
+declared number. Three refusals are built in rather than promised. Nothing is DERIVED: the record
+carries what the artifact holds and never multiplies by accumulation steps or world size to invent an
+"effective batch" the file cannot support. Two trainings in one pipeline are two facts: readings are
+deduplicated on the value and the scalar is published only when they AGREE, never tie-broken on
+`global_step`. And ABSENCE IS SILENCE: no artifact means no row at all, which is the permanent state
+of every task here that is not a transformers training — so the log does not fill with rows recording
+that this box does not use HuggingFace.
+
+Deliberately NOT an `extra_metrics` channel, which is how the marker framed it: the number comes off
+an artifact the CANDIDATE wrote, and nothing derivable from such an artifact can authenticate its
+author (CLAUDE.md), so it may not be spliced as an `engine`-channel metric — and it is not a
+secondary metric at all, it is a coordinate the process recorded about itself. Diagnostic, so it
+ranks nothing, gates nothing and can be appended by the eval worker thread (invariant 1).
+`tests/test_effective_train_batch.py` drives both halves over real workdirs and a real run.
+
+**What this does NOT do is adopt `auto_find_batch_size`.** The refusal's stated condition is met, so
+the option is admissible; whether the GPU cue should now recommend it is a PROMPT decision, made
+where prompts are decided and not as a side effect of building the record.
 
 **[CLOSED 2026-09-03 — located by SYMBOL, and there were SEVEN, not four.]** A `grep -rn '\.py:[0-9]'`
 over `ui/src/` (which is what the item asked `citation_defects()` to be widened to) found three more

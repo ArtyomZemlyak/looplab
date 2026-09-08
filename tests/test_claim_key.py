@@ -127,12 +127,15 @@ def test_null_effect_does_not_merge_with_negative_effect():
     assert helps["polarity"] == 1
 
 
-# --- EM-06: the three identity modes, and the overlay key each one uses --------------------------
+# --- EM-06: the identity modes, and the overlay key each one uses -------------------------------
 
-def test_the_three_modes_are_documented_where_a_reviewer_reads_them():
-    """doc 25 EM-06's concrete cost is "operator decisions must overlay correctly across all three
-    modes", and nothing stated which overlay key guards which mode. The table lives at
-    `claim_assessments` because that is the function whose two flags select between them."""
+def test_the_two_modes_are_documented_where_a_reviewer_reads_them():
+    """doc 25 EM-06's concrete cost is "operator decisions must overlay correctly across every mode",
+    and nothing stated which overlay key guards which mode. The table lives at `claim_assessments`
+    because that is the function whose flag selects between them. Three modes became two on
+    2026-09-08 when the fuzzy merge was deleted and structured became the default; the table is
+    checked for the count it claims, so deleting the lean row without deleting the lean branch —
+    or the reverse — is red."""
     import inspect
 
     from looplab.engine.claims_assessments import claim_assessments
@@ -140,30 +143,66 @@ def test_the_three_modes_are_documented_where_a_reviewer_reads_them():
     # Check the TABLE, not the function text: the first draft grepped the whole source, and every
     # needle also occurs in the body, so deleting a table row left it green.
     src = inspect.getsource(claim_assessments)
-    assert "THE THREE MODES" in src, "the mode table is gone"
+    assert "THE TWO MODES" in src, "the mode table is gone"
     table = [l for l in src.split("\n")
              if l.lstrip().startswith("#") and "  " in l
-             and ("normalize_statement grouping" in l or "token-Jaccard" in l
-                  or "claim_key.claim_signature" in l)]
-    assert len(table) == 3, (
-        f"the mode table lists {len(table)} of the 3 identity modes; a caller flag combination is "
+             and ("normalize_statement grouping" in l or "claim_key.claim_signature" in l)]
+    assert len(table) == 2, (
+        f"the mode table lists {len(table)} of the 2 identity modes; a caller flag value is "
         "now undocumented, which is exactly how an operator decision overlays the wrong claim")
-    assert any("_scoped_key" in l for l in src.split("\n") if "THE THREE MODES" in src), (
-        "the table must still name the legacy overlay key")
+    assert "_scoped_key" in src, "the table must still name the legacy overlay key"
 
 
-def test_structured_still_wins_over_fuzzy():
-    """The one precedence rule the table asserts. If these ever became independent, a caller passing
-    both would silently get whichever branch happened to be tested first."""
-    import inspect
+def test_structured_is_the_default_projection_and_lean_is_the_explicit_legacy_one():
+    """The DEFAULT is driven, not pinned. Two facts decide which projection a caller gets without
+    passing anything: the same words in two different TASKS are two claims under the structured key
+    and one merged claim under the lean one, and two opposite-polarity assertions in one task are a
+    CONTRADICTION rather than two unrelated rows.
 
-    from looplab.engine.claims_assessments import claim_assessments
+    This is the EM-06 flip, and the task boundary is the half that matters for governance: before
+    it, a caller that did not opt in merged task A's evidence into task B's claim and handed the
+    merged row an operator decision — while `record_claim_decision` validated that operator's
+    `evidence_digest` against the structured, task-precise projection only."""
+    from looplab.engine.claims import claim_assessments
 
-    src = inspect.getsource(claim_assessments)
-    assert "structured wins" in src
-    lessons = [{"statement": "dropout helps", "outcome": "supported", "node_ids": [1],
-                "run_id": "r", "task_id": "t", "direction": "min"}]
-    both = claim_assessments(lessons, fuzzy=True, structured=True)
-    only = claim_assessments(lessons, structured=True)
-    assert [c.get("claim_uid") for c in both] == [c.get("claim_uid") for c in only], (
-        "passing fuzzy alongside structured changed the projection; structured must win")
+    across_tasks = [{"statement": "dropout helps accuracy", "outcome": "supported",
+                     "evidence": [1], "run_id": "rA", "task_id": "A"},
+                    {"statement": "dropout helps accuracy", "outcome": "supported",
+                     "evidence": [2], "run_id": "rB", "task_id": "B"}]
+
+    default = claim_assessments(across_tasks)
+    assert len(default) == 2, "the default projection merged two tasks' claims into one"
+    assert sorted(c["scope"] for c in default) == ["A", "B"]
+    assert len({c["claim_uid"] for c in default}) == 2, "the default projection carries no scope-precise uid"
+
+    lean = claim_assessments(across_tasks, structured=False)
+    assert len(lean) == 1 and lean[0]["scopes"] == ["A", "B"], (
+        "the legacy lean read path is gone or no longer merges across the task boundary — it is "
+        "kept precisely because a caller may still be reading a projection built under it")
+    assert lean[0].get("claim_uid") is None, "the lean projection now emits structured identity"
+
+    opposed = [{"statement": "dropout helps accuracy", "outcome": "supported",
+                "evidence": [1], "run_id": "r", "task_id": "t"},
+               {"statement": "dropout never helps accuracy", "outcome": "supported",
+                "evidence": [2], "run_id": "r", "task_id": "t"}]
+    contested = claim_assessments(opposed)
+    assert all(c["contradicts"] for c in contested), "the default projection lost the contradiction"
+    assert not any(c["contradicts"] for c in claim_assessments(opposed, structured=False)), (
+        "the lean projection has no polarity contradiction to report — that is the whole finding")
+
+
+def test_the_fuzzy_paraphrase_merge_is_gone():
+    """`_fuzzy_merge_claims` was the third identity mode: an opt-in token-Jaccard merge whose own
+    docstring called the structured key its full CR. Deleting it is half of EM-06's close, so the
+    kwarg must REFUSE rather than be quietly ignored — a silently-accepted `fuzzy=True` would read
+    as "paraphrases still merge" to every caller that still passes it."""
+    import pytest
+
+    from looplab.engine import claims, claims_assessments
+    from looplab.engine.claims import claim_assessments
+
+    with pytest.raises(TypeError):
+        claim_assessments([], fuzzy=True)
+    for module in (claims, claims_assessments):
+        assert not hasattr(module, "_fuzzy_merge_claims"), (
+            f"{module.__name__} still exports the deleted fuzzy merge")

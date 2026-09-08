@@ -50,8 +50,16 @@ def test_the_developer_handler_re_raises_the_ceiling_before_the_blanket_catch():
     # pausing, and the circuit breaker a 403 blowout of 67 dead nodes was written for never
     # engages. The guard has to be a real test of `is_run_ending`, not a constant, so the assertion
     # is on the If's CONDITION rather than on the presence of the branch.
+    # EITHER SPELLING OF THE SAME QUESTION. `is_run_ending` is `isinstance(exc, BudgetExceeded)`;
+    # `budget_stop_leaf` walks `exceptions`/`__cause__`/`__context__` for the same class. The
+    # `except BudgetExceeded: raise` clause pinned above already takes every BARE ceiling, so the
+    # narrow predicate is unreachable in this handler and the wider one is the only thing that can
+    # still answer YES — pinning the narrow NAME would pin the dead branch. The property is that the
+    # handler ASKS, not which of the two it asks with.
     guards = [n for h in handlers for n in ast.walk(h)
-              if isinstance(n, ast.If) and "is_run_ending" in ast.dump(n.test)]
+              if isinstance(n, ast.If)
+              and ("is_run_ending" in ast.dump(n.test)
+                   or "budget_stop_leaf" in ast.dump(n.test))]
     assert guards, ("the handler no longer asks `is_run_ending`, so every operator refusal takes "
                     "the same path -- either all of them re-raise or none of them do")
     assert any(isinstance(stmt, ast.Return) for g in guards for stmt in ast.walk(g)), (
@@ -68,7 +76,8 @@ def test_the_repair_path_re_raises_it_too():
     import ast
     tree = ast.parse(src)
     guards = [n for n in ast.walk(tree) if isinstance(n, ast.If)
-              and ("BudgetExceeded" in ast.dump(n.test) or "is_run_ending" in ast.dump(n.test))]
+              and ("BudgetExceeded" in ast.dump(n.test) or "is_run_ending" in ast.dump(n.test)
+                   or "budget_stop_leaf" in ast.dump(n.test))]
     assert guards, "the repair path no longer asks whether the refusal is a run ENDING at all"
     assert any(isinstance(stmt, ast.Raise) for g in guards for stmt in g.body), (
         "the repair path still wraps a spend-ceiling refusal in the developer-crash sentinel")
@@ -118,10 +127,60 @@ def test_the_five_operator_refusals_are_not_alike():
         "an ordinary exception is neither a refusal nor an ending")
 
 
-def test_the_catch_sites_ask_the_predicate_rather_than_a_type():
-    """Both sites route on `is_run_ending`, so the distinction lives in one place. A second
-    `isinstance(..., BudgetExceeded)` spelled out at a call site is how two copies of a rule drift
-    (§204)."""
-    for rel in ("looplab/adapters/repo_developer.py", "looplab/engine/evaluate.py"):
-        src = (REPO / rel).read_text(encoding="utf-8")
-        assert "is_run_ending" in src, f"{rel} no longer asks the predicate"
+def test_a_wrapped_ceiling_is_what_the_two_catch_sites_have_left_to_decide():
+    """The property, driven — and it is the reason the predicate at those sites CHANGED.
+
+    Both handlers now stand behind an `except BudgetExceeded: raise`, so every BARE ceiling is
+    already gone by the time they run. `is_run_ending` is literally `isinstance(exc,
+    BudgetExceeded)`, so as the guard it could not fire at all: the only exception those clauses
+    can still see is a ceiling somebody WRAPPED — re-raised as an `LLMError`/`ConfigRefusal` from
+    inside the session, or carried out of a nested task group in an `ExceptionGroup`. Those are
+    exactly the ones that fell through to the developer-crash sentinel and paused a finished run.
+    """
+    from looplab.core.errors import BudgetExceeded as B, ConfigRefusal, LLMError, is_run_ending
+    from looplab.core.errors import budget_stop_leaf
+
+    ceiling = B("LLM spend ceiling reached: $1.0003 of the $1.0000")
+    wrapped: list[BaseException] = [LLMError("session failed"), ConfigRefusal("bad -s value")]
+    for w in wrapped:
+        w.__cause__ = ceiling
+    try:
+        raise ExceptionGroup("session", [RuntimeError("unrelated"), ceiling])
+    except ExceptionGroup as eg:
+        wrapped.append(eg)
+
+    for w in wrapped:
+        assert not is_run_ending(w), (
+            f"{type(w).__name__} carrying a ceiling answers False to the narrow isinstance — "
+            "that is why it cannot be the guard at these sites")
+        assert budget_stop_leaf(w) is ceiling, (
+            f"{type(w).__name__} must yield the ceiling it carries, or the run that spent its "
+            "allowance is filed as a dead provider and paused")
+
+
+def test_the_catch_sites_ask_the_leaf_walking_predicate_rather_than_a_type():
+    """Statable rule, AST-checked: each site CALLS `budget_stop_leaf` and neither spells out its
+    own `isinstance(..., BudgetExceeded)` behind the bare-ceiling clause. Two copies of a rule
+    drift (§204) — and the earlier version of this guard asserted `"is_run_ending" in src`, which
+    both files still satisfy IN COMMENTS ALONE after the predicate was swapped out. A word in
+    prose is not a call (CLAUDE.md: a guard test must not be satisfiable by a COMMENT).
+    """
+    import ast
+    # PER FUNCTION, not per file. A file-level scan is green while the guard itself is mutated
+    # back to `isinstance`, because `budget_stop_leaf` is also called by the OTHER site in
+    # `evaluate.py` (`_eval_settle_outcome`'s ending check). The rule is about these two clauses.
+    sites = (("looplab/adapters/repo_developer.py", "_run"),
+             ("looplab/engine/evaluate.py", "_eval_apply_repair"))
+    for rel, fn_name in sites:
+        tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
+        fns = [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name]
+        assert len(fns) == 1, f"{rel}::{fn_name} is not a single function any more: {len(fns)}"
+        called = {n.func.id for n in ast.walk(fns[0])
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "budget_stop_leaf" in called, (
+            f"{rel}::{fn_name} no longer CALLS the predicate — a mention in a comment is not a "
+            "guard, and that is exactly how the previous version of this test went vacuous")
+        assert "is_run_ending" not in called, (
+            f"{rel}::{fn_name} went back to the narrow isinstance, which cannot fire behind the "
+            "`except BudgetExceeded: raise` clause that already took every bare ceiling")

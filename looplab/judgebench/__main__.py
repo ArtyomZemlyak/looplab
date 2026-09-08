@@ -13,13 +13,24 @@ same two verbs with a `triage-` prefix, over its own dataset and its own labels:
     python -m looplab.judgebench score-triage --arm head   # `_failure_reason` replayed at HEAD
     python -m looplab.judgebench score-triage --answers cand.jsonl
 
+The AGENT TRAJECTORY ladder (doc 27 §4 rungs 2, 4 and 5) is the third verb, over a hand-written
+corpus rather than an extracted one — there is nothing to `extract`, because these cases are
+authored, not recorded:
+
+    python -m looplab.judgebench score-trajectory              # every case once (rungs 2 + 4)
+    python -m looplab.judgebench score-trajectory --case t4/   # cases whose id starts here
+    python -m looplab.judgebench score-trajectory --trials 20  # rung 5: repeated, with a CI
+    python -m looplab.judgebench score-trajectory --trials 20 --seed 7
+
 Deliberately not a `looplab` subcommand (see `looplab/judgebench/__init__.py`). `extract` reads `runs/`
-and writes ONLY the output file; `score` makes no network call at all.
+and writes ONLY the output file; `score` makes no network call at all, and so does
+`score-trajectory` — its agent is a scripted policy and its world is a temporary directory.
 """
 from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 from looplab.judgebench.judge_corpus import (
@@ -27,7 +38,7 @@ from looplab.judgebench.judge_corpus import (
 from looplab.judgebench.score import (
     Gate, attempt_totals, format_report, jsonl_candidate, per_attempt_report, recorded_candidate,
     score_dataset)
-from looplab.judgebench import triage_corpus, triage_score
+from looplab.judgebench import trajectory, trajectory_score, triage_corpus, triage_score
 
 
 def main(argv=None) -> int:
@@ -82,7 +93,49 @@ def main(argv=None) -> int:
     tri_score.add_argument("--high-confidence-only", action="store_true",
                            help="score only rows whose label rests on a high-confidence basis")
 
+    traj = sub.add_parser("score-trajectory",
+                          help="run the agent trajectory corpus (doc 27 §4 rungs 2, 4 and 5)")
+    traj.add_argument("--corpus", type=Path, default=trajectory.DEFAULT_CORPUS)
+    traj.add_argument("--case", default="", help="only cases whose id starts with this prefix")
+    traj.add_argument("--trials", type=int, default=0,
+                      help="rung 5: run each case this many times with a perturbed agent and "
+                           "report the rate with a Wilson interval (0 = one run per case)")
+    traj.add_argument("--seed", type=int, default=0, help="first trial seed (rung 5)")
+
     args = parser.parse_args(argv)
+    if args.cmd == "score-trajectory":
+        corpus = trajectory.read_corpus(args.corpus)
+        cases = [c for c in corpus["cases"]
+                 if not args.case or str(c.get("case_id", "")).startswith(args.case)]
+        if not cases:
+            sys.stderr.write("no cases match %r\n" % args.case)
+            return 1
+        failed = 0
+        # A TEMPORARY WORLD PER INVOCATION, deleted on the way out: every case materializes a
+        # workspace a tool then tries to write to, and a bench that leaves those behind in the
+        # operator's cwd is a bench that eventually gets one of them committed.
+        with tempfile.TemporaryDirectory(prefix="looplab-trajectory-") as tmp:
+            for case in cases:
+                problems = (trajectory.validate_case(case)
+                            + trajectory_score.validate_band(case))
+                if problems:
+                    sys.stderr.write("INVALID %s: %s\n" % (case.get("case_id"), problems))
+                    failed += 1
+                    continue
+                root = Path(tmp) / trajectory._slug(case.get("case_id"))
+                if args.trials > 0:
+                    report = trajectory_score.run_trials(case, root, trials=args.trials,
+                                                         seed=args.seed)
+                    gates = trajectory_score.check_band(report, trajectory_score.band_for(case))
+                    sys.stdout.write(trajectory_score.format_report(report, gates))
+                    failed += any(g.status == "fail" for g in gates)
+                else:
+                    report = trajectory.run_and_grade(case, root)
+                    sys.stdout.write(trajectory_score.format_case_report(report))
+                    failed += not report.passed
+        sys.stdout.write("\n%s\n" % corpus["header"].get("limits", ""))
+        return 1 if failed else 0
+
     if args.cmd == "extract-triage":
         dataset = triage_corpus.build_dataset(args.run_dirs)
         triage_corpus.write_dataset(dataset, args.out)

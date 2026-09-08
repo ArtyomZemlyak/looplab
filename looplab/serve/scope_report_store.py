@@ -36,7 +36,7 @@ from typing import Any
 
 from looplab.core.atomicio import atomic_write_text, strict_atomic_write_text
 from looplab.core.comparison import (finite_measurement)
-from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.serve.scope_report import (MAX_SCOPE_REPORT_RUNS)
 from looplab.serve.scope_sources import (MAX_SCOPE_EVENT_BYTES, MAX_SCOPE_TOTAL_EVENT_BYTES)
 from looplab.core.redact import redact_persisted_text
@@ -219,7 +219,7 @@ def _scope_store_lock(reports_dir: Path):
     if entry is not None and (not stat.S_ISREG(entry.st_mode) or _is_link_or_reparse(entry)):
         raise _ScopeReportStorageConflict("scope report lock is not a trusted regular file")
     try:
-        with _SCOPE_STORE_THREAD_LOCK, _interprocess_lock(lock_path, required=True):
+        with _SCOPE_STORE_THREAD_LOCK, interprocess_lock(lock_path, required=True):
             _validated_reports_dir(reports_dir)
             yield
     except EventStoreLockError as exc:

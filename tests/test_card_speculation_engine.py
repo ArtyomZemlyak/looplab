@@ -22,7 +22,7 @@ import looplab.engine.speculation as speculation_module
 import looplab.search.speculation_quality as speculation_quality
 from tests._source_scan import called_names, function_tree, names_read
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.config import Settings
 from looplab.core.models import (
     Card,
