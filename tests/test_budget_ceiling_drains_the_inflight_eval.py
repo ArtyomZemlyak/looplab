@@ -185,6 +185,15 @@ class _DispatchHost:
     research task's raise cancels it directly, one frame lower than the Card path."""
 
     _dispatch_evals = Engine._dispatch_evals
+    # THE ENGINE'S OWN TAIL GATE, borrowed the same way and for the same reason: this is a stub OF
+    # the Engine, not of the log. `_dispatch_evals` began calling `_fold_if_tail_moved` when the
+    # resource wait's re-fold was gated on the tail seq (doc 25 ES-12), and the three tests that
+    # drive the WAITING host through the real method died with `AttributeError` inside the task
+    # group — a stub that borrows the method under test has to follow it when that method grows a
+    # new call. `tests/test_gpu_resources.py` took the same step at the same commit; this file was
+    # the one it did not reach. The base stub's `store.read_all` answers `[]`, so the gate folds an
+    # empty log and the wait's own ticks are what the tests are about, unchanged.
+    _fold_if_tail_moved = Engine._fold_if_tail_moved
 
     def __init__(self, *, raise_ceiling: bool = True, width: int = 1, queued: int = 2):
         self._eval_parallel = width
