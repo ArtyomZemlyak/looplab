@@ -2,7 +2,7 @@
 
 `EV_TRUST_GATE_CHANGED` is folded LAST-WRITE-WINS and has two writers: the server's config PUT
 (`serve/routers/runs.py::_put_run_config_locked`) and the assistant's settings tool
-(`tools/machine_runs_tools.py::MachineRunsTools._tool_set_trust_gate`). They were two
+(`tools/run_control_tools.py::RunControlTools._tool_set_trust_gate`). They were two
 implementations of one write, and they had already drifted on every property that matters:
 
   * IDEMPOTENCE — the router refolds first and returns without appending when the gate is already

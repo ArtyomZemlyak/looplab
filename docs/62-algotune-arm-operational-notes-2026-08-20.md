@@ -346,7 +346,11 @@ What is left is a structural difference between the serial timing path and the p
 pool is used at all, the solver's measured time and the reference's stop being taken the same way.
 A ratio only cancels overhead when both halves carry it.
 
-**Operational rule until this is explained: leave `ALGOTUNE_EVAL_WORKERS` unset.**
+**Operational rule until this is explained: export `ALGOTUNE_EVAL_WORKERS=1`.** *(2026-09-08: this
+sentence read "leave `ALGOTUNE_EVAL_WORKERS` unset", and the CODE says otherwise —
+`campaign.sh::declare_baseline_ruler` exports `${ALGOTUNE_EVAL_WORKERS:-auto}`, so unset now selects
+the very regime this section disqualifies. The rule is the serial ruler; the spelling that gets it
+is `=1`. The measurement below is unchanged.)*
 
 **[2026-09-01 — the second sentence of this paragraph was "`campaign.sh` does not set it, so every
 campaign so far is serial and unaffected", and it stopped being true when

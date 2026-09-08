@@ -52,15 +52,16 @@ instances, because one rejection logs several checks. `instances_invalid` counts
 `is_solution_errors` gives reasons with occurrence counts and never pretends to be a per-instance
 list.
 
-    OPEN[is-solution-errors-rank-by-frequency] the three shown are the three most FREQUENT, and a
-    harness-internal error outnumbers task rejections. Measured on the real verification run
-    (2026-08-22): `get_fresh_solve_callable_with_module_reload: Class 'Solver' not found in solver
-    module` fired 100 times from `isolated_benchmark.py`'s daemonic fallback while the reference was
-    timed, against 8/5/4 for the real rejections — 4 distinct kinds into 3 slots, one real rejection
+    The three-slot cap that used to sit on this list is gone (2026-09-08). It ranked by frequency
+    into `_MAX_IS_SOLUTION_EXAMPLES = 3`, and on the real verification run (2026-08-22)
+    `get_fresh_solve_callable_with_module_reload: Class 'Solver' not found in solver module` fired
+    100 times from `isolated_benchmark.py`'s daemonic fallback while the REFERENCE was being timed,
+    against 8/5/4 for the three real rejections — 4 distinct kinds into 3 slots, one real rejection
     dropped. Nothing at this boundary can separate the two (both are one `logging.error` string on
-    the same accidental channel), so `is_solution_errors_distinct` keeps the omission VISIBLE
-    instead of hiding it, and the cap stays a one-constant operator decision.
-    proof:present:_MAX_IS_SOLUTION_EXAMPLES@benchmarks/algotune/looplab_eval.py
+    the same accidental channel, and the recorded run shows all 17 lines under `ERROR:root:`), so
+    the fix is not a discriminator: the cap is now a CHARACTER budget over the distinct kinds
+    (`_IS_SOLUTION_ERRORS_BUDGET_CHARS`), which is the unit that actually bounds the JSON line, and
+    `is_solution_errors_omitted` states what a cut by size left out.
 
 THE PER-INSTANCE ANALYSIS NOW ARRIVES TOO, and it took a patch to the checkout rather than a better
 parser here. `evaluate_code_on_dataset` attached AlgoTune's own `invalid_solution_analysis` — the
@@ -206,7 +207,7 @@ def test_the_real_recorded_run_reports_why_not_just_zero(tmp_path):
     # The reference's own rejections, which is the part that tells a proposer what to FIX.
     messages = [row["message"] for row in why["is_solution_errors"]]
     assert "Detected argmax over a contiguous k-column window (hard fail)." in messages
-    assert len(why["is_solution_errors"]) <= LE._MAX_IS_SOLUTION_EXAMPLES
+    assert sum(len(m) for m in messages) <= LE._IS_SOLUTION_ERRORS_BUDGET_CHARS
     assert [row["count"] for row in why["is_solution_errors"]] == \
         sorted((row["count"] for row in why["is_solution_errors"]), reverse=True)
     # 17 lines, 6 invalid instances: the keys must not let those two be read as each other.
@@ -350,6 +351,50 @@ def test_a_rejection_message_is_bounded():
     rows, lines, distinct = LE._is_solution_errors(huge)
     assert (lines, distinct) == (1, 1)
     assert len(rows[0]["message"]) == LE._MAX_IS_SOLUTION_CHARS
+
+
+def test_a_harness_internal_error_no_longer_pushes_out_a_real_rejection():
+    """THE 2026-08-22 INCIDENT, reconstructed at its measured counts.
+
+    100 harness-internal lines from `isolated_benchmark.py`'s fallback against 8/5/4 for the task's
+    own rejections. Under the old three-slot frequency cap the 4-count rejection was dropped — the
+    cheapest sentence a proposer could have been handed, lost to arithmetic. All four kinds fit in
+    the character budget, so all four are reported.
+    """
+    stderr = "\n".join(
+        ["ERROR:root:get_fresh_solve_callable_with_module_reload: Class 'Solver' not found in "
+         "solver module"] * 100
+        + ["ERROR:root:Detected argmax over a k-column subset (suspicious)."] * 8
+        + ["ERROR:root:Failed consensus of quality signals."] * 5
+        + ["ERROR:root:Detected argmax over a contiguous k-column window (hard fail)."] * 4)
+    rows, lines, distinct = LE._is_solution_errors(stderr)
+    assert (lines, distinct) == (117, 4)
+    assert len(rows) == 4, "the rarest real rejection is the one the old cap dropped"
+    assert rows[0]["count"] == 100 and rows[-1]["count"] == 4
+    assert "hard fail" in rows[-1]["message"]
+
+
+def test_many_distinct_kinds_are_cut_by_SIZE_and_the_cut_is_stated():
+    """`remPde4` on this box reported `is_solution_errors_distinct: 100` with lines like
+    `max abs err=0.131, max rel err=1.39e+06` — a per-instance number in every message, so every
+    instance is its own "kind". The list may not become the JSON line, and what it left out is a
+    fact about this line rather than about the run, so it is stated rather than subtracted."""
+    stderr = "\n".join(f"ERROR:root:max abs err=0.{i:03d}, max rel err=1.39e+06"
+                       for i in range(100))
+    rows, lines, distinct = LE._is_solution_errors(stderr)
+    assert (lines, distinct) == (100, 100)
+    assert sum(len(r["message"]) for r in rows) <= LE._IS_SOLUTION_ERRORS_BUDGET_CHARS
+    assert 0 < len(rows) < 100
+    block = LE._no_speedup("invalid_results", stderr=stderr)
+    assert block["is_solution_errors_omitted"] == 100 - len(rows)
+
+
+def test_nothing_is_omitted_when_everything_fits():
+    """The falsifier for the key above: a bridge that always reported an omission would teach a
+    reader to distrust a complete list."""
+    block = LE._no_speedup("invalid_results", stderr=REAL_STDERR)
+    assert block["is_solution_errors_distinct"] == 3
+    assert "is_solution_errors_omitted" not in block
 
 
 # ------------------------------------------------------------------------------------------------

@@ -554,7 +554,7 @@ def test_mixed_classifier_membership_stays_partial_through_portfolio_views(tmp_p
     assert card["source_concepts_complete"] is card["source_outcomes_complete"] is False
     assert portfolio_digest([capsule])["source_complete"] is False
     # The concept MAP surface used to carry this receipt inside the fold (`portfolio_concept_graph`
-    # merged `_capsule_source_summary` into its own payload). `concept_map` takes concept SETS and
+    # merged `capsule_source_summary` into its own payload). `concept_map` takes concept SETS and
     # cannot know how complete the rows behind them were, so the receipt now lives at the call site
     # that chose the population — and the property is driven where a reader actually meets it: the
     # rendered tool must still say the source is partial, or an agent reads a bounded map as exact.

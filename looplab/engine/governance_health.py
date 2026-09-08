@@ -746,12 +746,12 @@ def project_governed_sources(
     base.mkdir(parents=True, exist_ok=True)
 
     from looplab.engine.concept_registry import _concept_governance_transaction
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     concept_guard = (_concept_governance_transaction(base)
                      if include_concepts else nullcontext())
     claim_path = base / "claim_decisions.jsonl"
-    claim_guard = (nullcontext() if claim_locked else _interprocess_lock(
+    claim_guard = (nullcontext() if claim_locked else interprocess_lock(
         Path(str(claim_path) + ".lock"), required=True))
     sources = sorted(
         {*(base / name for name in requested_names), *requested_paths},
@@ -761,7 +761,7 @@ def project_governed_sources(
         with claim_guard:
             with ExitStack() as source_stack:
                 for source in sources:
-                    source_stack.enter_context(_interprocess_lock(
+                    source_stack.enter_context(interprocess_lock(
                         Path(str(source) + ".lock"), required=True))
                 governance = _read_governance_locked(
                     base, include_concepts=include_concepts)

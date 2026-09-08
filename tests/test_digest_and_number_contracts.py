@@ -21,9 +21,10 @@ import math
 import pytest
 
 from looplab.core import advisory_payloads, cards, fitness, models, parse, profile
-from looplab.core.jsonutil import (DIGEST_TEXT_CAP, canonical_json, canonical_json_digest,
-                                   valid_digest_ref)
-from looplab.core.receipts import bounded_receipt_count
+from looplab.core.jsonutil import (DIGEST_TEXT_CAP, bounded_int, canonical_json,
+                                   canonical_json_digest, valid_digest_ref)
+from looplab.core.receipts import (bounded_receipt_count, receipt_field_set, receipt_payload,
+                                   receipt_presence)
 
 
 # ------------------------------------------------------------------ CO-08: one dump/hash tail
@@ -288,6 +289,49 @@ def test_every_prefixed_call_site_reads_through_the_shared_predicate():
         f"genuinely not a 64-hex digest, exempt it here with the reason: {offenders}")
 
 
+# --- EV-04: one bounded-int rule, where replay.py had 21 hand-rolled bounds ----------------------
+#
+# The digest half of EV-04 shipped as `valid_digest_ref`; the SCALAR half stayed hand-rolled per
+# site — and in two spellings, `type(x) is int` at most sites and an `isinstance`/bool pair at
+# others. `bounded_int` is the survivor. The fold-side behaviour these decide is driven in
+# `tests/test_events_replay.py`; this pins the leaf's own truth table.
+
+def test_a_bool_is_never_a_bounded_int():
+    """The same trap as the receipt count: `isinstance(True, int)` is True, so an isinstance-built
+    bound accepts `{"priority": true}` and the value then sorts and arithmetics as 1."""
+    assert bounded_int(True, 0, 10) is False
+    assert bounded_int(False, 0, 10) is False
+
+
+def test_an_int_subclass_is_never_a_bounded_int():
+    """A subclass can override the very comparisons the bound is expressed in, so a bound it can
+    talk its way past is not a bound. JSON cannot produce one, which is why the two spellings this
+    replaced could disagree here for years without any log distinguishing them."""
+
+    class Sneaky(int):
+        def __le__(self, other):        # would answer "in range" for any range
+            return True
+
+    assert Sneaky(10 ** 9) <= 5, "the retired isinstance spelling would have accepted this"
+    assert bounded_int(Sneaky(10 ** 9), 0, 5) is False
+
+
+@pytest.mark.parametrize("value", [None, "5", 5.0, [], {}, object()])
+def test_a_non_integer_is_never_a_bounded_int(value):
+    assert bounded_int(value, 0, 10) is False
+
+
+@pytest.mark.parametrize("value,lo,hi,expected", [
+    (0, 0, 10, True), (10, 0, 10, True), (5, 0, 10, True),          # both ends INCLUSIVE
+    (-1, 0, 10, False), (11, 0, 10, False),
+    (0, 0, 0, True), (1, 0, 0, False),
+    (-5, -10, -1, True), (0, -10, -1, False),                       # a negative range is expressible
+    (255, 0, 255, True), (256, 0, 255, False),                      # the `< 256` site, restated
+])
+def test_the_bounded_int_range_is_inclusive_at_both_ends(value, lo, hi, expected):
+    assert bounded_int(value, lo, hi) is expected
+
+
 # --- EM-12: one bounded-receipt-count rule, where there had been two -----------------------------
 #
 # The ~8 receipt validators share a leaf guard on a single count field, and it had DIVERGED:
@@ -331,7 +375,7 @@ def test_the_bound_is_inclusive_and_non_negative(value, maximum, expected):
 # than silently leaving two of the four validators unguarded.
 _RECEIPT_VALIDATORS = {
     "claims_health.py": ("_safe_claim_read_segment",),
-    "concept_capsules.py": ("_capsule_concept_evidence_completeness", "_capsule_completeness"),
+    "concept_capsules.py": ("_capsule_concept_evidence_completeness", "capsule_completeness"),
     "concept_steward.py": ("_concept_source_receipt",),
 }
 
@@ -368,3 +412,135 @@ def test_the_receipt_validators_do_not_re_derive_the_count_guard():
     assert not offenders, (
         "a receipt validator re-derives the bounded-count guard instead of calling "
         f"`bounded_receipt_count`: {offenders}")
+
+
+# --- EM-12, the other half: the WRITER and the READER share one field-set declaration -----------
+#
+# EM-12's first pass shared the leaf and left this open in its own words: "Nothing yet forces a
+# receipt's WRITER and its READER to agree on the field set." Both ends spelled it out separately —
+# the writer as literal dict keys, the reader as a local `keys = (...)` tuple, one of them in
+# another module — so a field added at one end was invisible at the other, silently in the
+# optimistic direction. `receipt_field_set` is that declaration; `receipt_payload` and
+# `receipt_presence` are how each end is made to consume it.
+
+def test_a_receipt_declaration_refuses_a_shape_that_could_not_be_read():
+    """Refusals rather than coercion: a declaration is read once at import and then trusted."""
+    with pytest.raises(ValueError):
+        receipt_field_set()                                     # a receipt with no fields
+    with pytest.raises(ValueError):
+        receipt_field_set("a", "a")                             # writer emits one key, reader counts two
+    with pytest.raises(ValueError):
+        receipt_field_set("a", "")
+    with pytest.raises(ValueError):
+        receipt_field_set("a", 7)
+    assert receipt_field_set("b", "a") == ("b", "a"), "declaration order is preserved, not sorted"
+
+
+def test_a_writer_cannot_emit_a_field_it_did_not_declare():
+    """THE forcing property. A writer that grows a receipt without declaring the new field raises
+    where the row is built, instead of shipping a durable row its reader reads as absent."""
+    fields = receipt_field_set("rows_total", "rows_omitted")
+    assert receipt_payload(fields, {"rows_omitted": 1, "rows_total": 3}) == {
+        "rows_total": 3, "rows_omitted": 1}, "the row is built in DECLARATION order"
+
+    with pytest.raises(ValueError, match="undeclared"):
+        receipt_payload(fields, {"rows_total": 3, "rows_omitted": 1, "rows_quarantined": 0})
+    with pytest.raises(ValueError, match="missing"):
+        receipt_payload(fields, {"rows_total": 3})
+
+
+@pytest.mark.parametrize("row,expected", [
+    ({}, "absent"),                                   # predates the receipt: legacy default
+    ({"other": 1}, "absent"),
+    ({"a": 1}, "partial"),                            # no writer produces this: fail closed
+    ({"a": 1, "b": 2}, "complete"),
+    ({"a": None, "b": None}, "complete"),             # PRESENCE, not validity
+    (None, "absent"),
+    ([], "absent"),
+])
+def test_the_reader_side_presence_is_all_or_nothing(row, expected):
+    assert receipt_presence(row, receipt_field_set("a", "b")) == expected
+
+
+def _capsule():
+    from looplab.engine.concept_capsules import build_concept_capsule
+
+    return build_concept_capsule(run_id="r1", fingerprint=["t"], direction="min",
+                                 concepts=["c1"], concept_outcomes={"c1": 1.0}, task_id="t1")
+
+
+def test_the_capsule_writer_emits_exactly_what_its_reader_requires():
+    """Driven both ways over a REAL capsule: every declared field is emitted, the reader accepts
+    the row, and removing any ONE of them makes the reader fail closed rather than read the rest."""
+    from looplab.engine import concept_capsules
+
+    fields = concept_capsules.CAPSULE_EVIDENCE_RECEIPT
+    capsule = _capsule()
+    assert set(fields) <= set(capsule), "the writer skipped a declared field"
+    assert concept_capsules._capsule_concept_evidence_completeness(capsule) is not None
+
+    for name in fields:
+        broken = {key: value for key, value in capsule.items() if key != name}
+        assert concept_capsules._capsule_concept_evidence_completeness(broken) is None, (
+            f"dropping {name} left a TORN receipt readable — the three landed together")
+
+
+def test_the_later_observed_marker_is_declared_apart_because_it_is_additive():
+    """Why `concept_evidence_observed` is its OWN declaration rather than a fourth field: it was
+    added after the triple, so a v2 row that predates it must stay readable. It is still READ —
+    dropping it from a tombstone (observed=false, empty collections) changes the answer from
+    "the classifier observed zero memberships" to "unreadable", which are different facts."""
+    from looplab.engine import concept_capsules
+
+    tombstone = concept_capsules.build_concept_capsule(
+        run_id="r1", fingerprint=[], direction="min", concepts=[], task_id="t1",
+        concept_evidence_observed=False)
+    assert set(concept_capsules.CAPSULE_OBSERVED_RECEIPT) <= set(tombstone)
+    assert concept_capsules._capsule_concept_evidence_completeness(tombstone) == (0, 0, False, False)
+
+    without = {key: value for key, value in tombstone.items()
+               if key not in concept_capsules.CAPSULE_OBSERVED_RECEIPT}
+    assert concept_capsules._capsule_concept_evidence_completeness(without) is None
+
+
+@pytest.mark.parametrize("stem", ["fingerprint", "concepts", "concept_outcomes"])
+def test_each_bounded_collection_carries_its_declared_completeness_triple(stem):
+    from looplab.engine import concept_capsules
+
+    capsule = _capsule()
+    fields = concept_capsules.capsule_completeness_receipt(stem)
+    assert set(fields) <= set(capsule)
+    included = len(capsule[stem])
+    assert concept_capsules.capsule_completeness(capsule, stem, included) is not None
+    for name in fields:                                  # a torn triple is corrupt, never partial truth
+        broken = {key: value for key, value in capsule.items() if key != name}
+        assert concept_capsules.capsule_completeness(broken, stem, included) is None
+
+
+def test_the_source_receipt_declaration_is_the_same_object_at_both_ends():
+    """The widest gap of the three: the writer is `concept_capsules.capsule_source_summary` and the
+    reader is `concept_steward._concept_source_receipt`, in another module. Identity, not equality —
+    a second module-local copy that happened to be equal today is exactly the drift EM-12 named."""
+    from looplab.engine import concept_capsules, concept_steward
+
+    assert concept_steward.CAPSULE_SOURCE_COUNTS is concept_capsules.CAPSULE_SOURCE_COUNTS
+
+
+def test_the_cross_module_source_receipt_round_trips():
+    """Driven: the aggregate the writer really produces is read as KNOWN by the steward's validator,
+    and every declared count survives the crossing."""
+    from looplab.engine.concept_capsules import CAPSULE_SOURCE_COUNTS, capsule_source_summary
+    from looplab.engine.concept_steward import _concept_source_receipt
+
+    summary = capsule_source_summary([_capsule()])
+    assert set(CAPSULE_SOURCE_COUNTS) <= set(summary)
+
+    receipt = _concept_source_receipt(summary, [])
+    assert receipt["receipt_known"] is True, "the reader could not read what the writer wrote"
+    assert all(receipt[name] == summary[name] for name in CAPSULE_SOURCE_COUNTS)
+
+    # Drop one declared count from the aggregate: the reader must NOT go on calling the receipt
+    # known. This is the failure the shared declaration exists to make impossible.
+    for name in CAPSULE_SOURCE_COUNTS:
+        torn = {key: value for key, value in summary.items() if key != name}
+        assert _concept_source_receipt(torn, [])["receipt_known"] is False

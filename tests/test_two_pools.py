@@ -15,7 +15,7 @@ import looplab.engine.orchestrator as _orch
 import pytest
 from pydantic import ValidationError
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.agents.strategist import (
     StrategyContext, _StrategyOut, _assemble_strategy, _strategist_brief,
     canonicalize_strategy_parallelism, validate_strategy)
