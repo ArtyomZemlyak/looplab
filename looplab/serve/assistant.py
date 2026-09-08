@@ -1734,11 +1734,25 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         # MCP tools are arbitrary external side effects: never in read-only plan mode (which also keeps
         # connecting/spawning a configured stdio MCP server out of a read-only session), and always
         # behind the permission policy — CompositeTools dispatched them unpoliced before (P0-6).
+        #
+        # WHICH servers is a property of the PARTY, exactly like the portfolio decision above: the
+        # scope comes from `serve/principal.py::mcp_config_scope` and the configuration for it from
+        # `principal_mcp_config`, so a `review` or `anonymous` caller — or one that named no
+        # principal — connects nothing, and on a shared hub two parties no longer share one server
+        # set by default. The resolved config is handed to `cached()` so the connect-once map is
+        # keyed on THIS party's configuration and never re-reads a different one (doc 27).
         try:
-            from looplab.tools.mcp_tools import McpTools, GatedMcpTools
-            m = McpTools.cached()      # connect to MCP servers ONCE per process, not per turn
-            if m.specs():
-                providers.append(GatedMcpTools(m, mode=mode, approver=approver))
+            from looplab.serve.principal import mcp_config_scope
+            from looplab.tools.mcp_tools import McpTools, GatedMcpTools, principal_mcp_config
+            scope, _mcp_why = mcp_config_scope(principal)
+            cfg = principal_mcp_config(scope)
+            # No configuration for this party means nothing to connect, and returning HERE rather
+            # than relying on the empty-config early return inside `cached()` keeps a refused party
+            # off the connect path entirely — including out of the cache map it never may share.
+            if cfg:
+                m = McpTools.cached(cfg)  # connect ONCE per configuration, not per turn
+                if m.specs():
+                    providers.append(GatedMcpTools(m, mode=mode, approver=approver))
         except Exception:  # noqa: BLE001 - MCP is optional; never break the toolset
             pass
     return CompositeTools(providers)
