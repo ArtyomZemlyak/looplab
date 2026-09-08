@@ -2148,13 +2148,32 @@ def test_a_worker_written_eval_start_boundary_would_defeat_the_election(tmp_path
 
 
 def test_outer_spine_runs_freshness_gate_before_policy_scorer():
-    source = inspect.getsource(Engine._run_with_llm_broker)
-    scorer = source.index("actions = self._select_actions(state)")
-    # The call now carries `eval_inflight=self._eval_inflight` (backlog F1f: the outer loop
-    # turns while adopted evaluations run, so this drain must not terminalize a node whose
-    # sandbox is burning right now). Pin the CALL and its position, not the empty arg list.
-    freshness = source.rfind("await self._drop_stale_speculation(", 0, scorer)
-    assert freshness >= 0
+    """`called_names` is SOURCE-ORDERED, which is exactly the claim — and it is comment-proof.
+
+    This used to be two `str.index`/`rfind` lookups, and a comment satisfies both: replacing the
+    guarded `await self._drop_stale_speculation(...)` with `pass` and leaving the call text in a
+    comment kept this file at 71 passed and all four files that reference the drain green at 121,
+    while stale speculative prefetches were never terminalized and the outer spine had no freshness
+    gate at all. The drain carries `eval_inflight=self._eval_inflight` (backlog F1f: the outer loop
+    turns while adopted evaluations run, so it must not terminalize a node whose sandbox is burning)
+    — that keyword is checked below rather than pinned as text for the same reason.
+    """
+    from tests._source_scan import called_names
+
+    order = called_names(Engine._run_with_llm_broker)
+    assert "self._drop_stale_speculation" in order, "the outer spine lost its freshness gate"
+    assert "self._select_actions" in order, "the outer spine lost its policy scorer"
+    assert order.index("self._drop_stale_speculation") < order.index("self._select_actions"), (
+        "the policy scorer runs BEFORE the freshness gate, so it scores against speculation the "
+        "drain has not yet retired")
+
+    drains = [node for node in ast.walk(ast.parse(textwrap.dedent(
+        inspect.getsource(Engine._run_with_llm_broker))))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_drop_stale_speculation"]
+    assert drains and all("eval_inflight" in {kw.arg for kw in call.keywords} for call in drains), (
+        "the drain no longer sees the in-flight evaluations, so it can terminalize a node whose "
+        "sandbox is still running")
 
 
 def test_stage_prepared_card_id_lock_contains_only_the_tail_cas_append():
