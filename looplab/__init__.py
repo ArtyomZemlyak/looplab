@@ -376,6 +376,7 @@ _LAYOUT = {
     "speculation": "engine",  # durable speculative Card build queue and worker contracts
     "speculation_calibration": "search",
     "speculation_quality": "search",
+    "seed_distance": "search",   # displacement from the lineage root, over node_diff's edit vocabulary
     "source_identity": "core",    # provenance/source-identity primitives (stdlib-only, used by core)
     "strategist": "agents",
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)
