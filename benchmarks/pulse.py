@@ -281,7 +281,8 @@ def main(argv=None) -> int:
     now = args.now if args.now is not None else time.time()
 
     ledger = args.ledger or os.path.join(args.bench, "meter", "meter.jsonl")
-    newest = check_money.endpoint_health(ledger)["newest"]
+    health = check_money.endpoint_health(ledger)
+    newest = health["newest"]
     live = lanes.probes(args.bench)
     running = {r["probe"] for r in live if r["probe"]}
     # THE TIMER, ONCE, WITH ITS FORKS NAMED AS FORKS. Point 1 of the sweep asks whether the
@@ -326,26 +327,19 @@ def main(argv=None) -> int:
               f'{(f"{call_age:8.0f}s" if call_age is not None else "       -"):>9s}  '
               f'{wchan(row["pid"])}')
         if called and called[1] != "200":
-            print(f'      last call came back {called[1]}, not 200 -- check the endpoint before '
-                  "the probe")
-        if call_age is not None and age > args.stall / 4 and call_age < age / 4:
-            print(f'      CALLING BUT NOT PRODUCING: last call {call_age:.0f}s ago, log last grew '
-                  f'{age:.0f}s ago. Three consecutive 504s at exactly 300 s are the nginx ceiling, '
-                  "not a hang (§175); check the ledger's statuses before the process")
-        for z in got["bad"]:
-            # THE ZERO'S OWN SECONDS ARE THE DIAGNOSIS. A zero under five seconds means the harness
-            # declined to measure -- a regime mismatch, an unloadable solver -- and blaming the
-            # model for it sends the next hour in the wrong direction. All 12 corpus zeros are the
-            # other kind: 41-47 s of real evaluation that came back invalid.
-            # AND THE BRIDGE'S OWN NAME WHERE IT SAID ONE. The seconds are the fallback now, not
-            # the diagnosis: `evaluator_timeout` is a refusal that costs the FULL timeout, so the
-            # rule "a zero at 45 s is the solver's" gets that one exactly backwards.
-            what = (f'RULER REFUSAL ({z["reason"]}) -- the harness declined, the solver was never '
-                    "the question" if z.get("reason") else
-                    "RULER REFUSAL -- the harness declined, the solver was never the question"
-                    if z["refusal"] else "the evaluation ran and came back invalid")
-            print(f'      zero at node {z["node_id"]}: eval_seconds={z["eval_seconds"]}, '
-                  f'violations={z["violations"]} -- {what}')
+            # THE STREAK, NOT THE LAST SAMPLE. §333: this line said "last call came back 503" while
+            # the state was 60 consecutive 503s over 22 minutes -- the provider's own pool down
+            # (`litellm.ServiceUnavailableError: No available workers`). The list's rule for the
+            # other wall is a rule about a streak too ("three consecutive 504s at exactly 300 s =
+            # the nginx ceiling, not a hang"), and one sample cannot express either.
+            run = (health.get("streak") or {}).get(name)
+            if run and str(run["status"]) == str(called[1]):
+                mins = (now - run["since"]) / 60.0
+                print(f'      {run["count"]} consecutive {run["status"]}s over {mins:.0f} min '
+                      "-- the endpoint is refusing, not this probe stalling")
+            else:
+                print(f'      last call came back {called[1]}, not 200 -- check the endpoint before '
+                      "the probe")
         if age > args.stall:
             stalled += 1
             print(f'      STALLED: {age:.0f}s since the log last grew, past the {args.stall:.0f}s '

@@ -294,11 +294,18 @@ def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
     newest row is not a 200 — if that is EVERY live arm, the endpoint is down and the residue is
     not the interesting number.
     """
+    # AND THE STREAK, because the newest row is one sample of a thing that has a duration. §333:
+    # `remDL13` was reported as "last call came back 503" while the true state was 54 consecutive
+    # 503s over twenty-one minutes -- `litellm.ServiceUnavailableError: No available workers (all
+    # circuits open or unhealthy)`, the provider's own pool down. The list's own rule for the other
+    # wall ("three consecutive 504s at exactly 300 s = the nginx ceiling, not a hang") is a rule
+    # about a STREAK too; one sample cannot express either.
     newest: dict[str, tuple[float, str]] = {}
+    streak: dict[str, list] = {}          # arm -> [count, first_ts_of_the_streak, status]
     try:
         fh = open(ledger_path, encoding="utf-8", errors="replace")
     except OSError:
-        return {"newest": {}, "refusing": []}
+        return {"newest": {}, "refusing": [], "streak": {}}
     with fh:
         for line in fh:
             line = line.strip()
@@ -314,8 +321,21 @@ def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
             arm = str(row.get("arm") or "?")
             if arm not in newest or ts > newest[arm][0]:
                 newest[arm] = (ts, str(row.get("status") or "?"))
+            # THE LEDGER IS APPEND-ONLY AND IN ORDER, so the running streak is one comparison per
+            # row: a 200 clears it, a repeat of the same non-200 extends it, a DIFFERENT non-200
+            # starts a new one -- four 401s and four 503s are not one outage with eight rows.
+            st = str(row.get("status") or "?")
+            cur = streak.get(arm)
+            if st == "200":
+                streak[arm] = None
+            elif cur and cur[2] == st:
+                cur[0] += 1
+            else:
+                streak[arm] = [1, ts, st]
     refusing = sorted(a for a, (_t, st) in newest.items() if st not in ("200", ""))
-    return {"newest": newest, "refusing": refusing}
+    runs = {arm: {"count": v[0], "since": v[1], "status": v[2]}
+            for arm, v in streak.items() if v}
+    return {"newest": newest, "refusing": refusing, "streak": runs}
 
 
 def _failure_kind(row) -> str:
