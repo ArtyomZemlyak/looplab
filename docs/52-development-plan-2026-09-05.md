@@ -988,8 +988,10 @@ In the order they pay: (1) #11, the profile A/B with its three arms; (2) the hac
 (`developer-hack-rate-unmeasured`) — before the campaign; (3) the serial-build harm report beside #12
 (`serial-node-build-holds-the-loop`); (4) #23, the campaign; (5) the prior citation-rate audit
 (`prior-injection-hit-rate-unmeasured`); (6) the first-propose split
-(`first-propose-runs-with-every-gpu-idle`); (7) ASHA's promotion mask — the 2.08 starved hours are
-already in hand, the soundness question is not (`asha-promotion-mask-blocks-all-production`); (8)
+(`first-propose-runs-with-every-gpu-idle`); (7) ASHA's promotion mask left this queue on
+2026-09-08 — the soundness question was answerable offline after all, so the refusal became a
+RESERVATION over the one expansion the masked node is already doing rather than a veto over the
+whole lane, and the 2.08 starved hours it was holding are bought back without a box; (8)
 `TrainingVerdict.fault`'s outcome label (`monitor-fault-has-no-outcome-label`); (9) researcher
 questions (`researcher-questions-not-appended`); (10) the Landlock validation with the `EACCES`
 translation (#28); (11) the two caches' counts; (12) crash lead time

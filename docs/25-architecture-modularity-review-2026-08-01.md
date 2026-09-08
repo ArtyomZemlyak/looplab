@@ -5819,11 +5819,7 @@ Teeth-tested by re-inlining the Card lane's copy, by collapsing the live/failed 
 PENDING child counts as a failure, and by dropping the multi-parent fan-out so a failed merge is
 charged to only its first parent.
 
-#### SE-04 · MEDIUM · excessive-logic · effort: small — **PARTIALLY RESOLVED (2026-08-08)**
-
-> **OPEN[eligible-cards-recomputed-in-one-election]** the coverage-input hoist landed; `eligible_cards(selection_state, policy)` is still computed at two sites in one selection pass. proof:`line:card.id: card for card in eligible_cards(selection_state&&policy)@looplab/search/card_selection.py`
->
-> **Citation rot, re-derived 2026-08-19:** the symbol this remaining half names, `_speculative_selection`, exists nowhere under `looplab/` — only in three comments. The two live calls are `search/card_selection.py:1628` and `:1656`.
+#### SE-04 · MEDIUM · excessive-logic · effort: small — **RESOLVED (2026-09-08)**
 
 **card_score rebuilds the full concept projection per candidate; the code's own review comment says to hoist it but it never was**
 
@@ -5857,9 +5853,29 @@ due, so `card_selection_set` returned before scoring anything and the counter on
 election's own call. The fixture now asserts the election actually selected something, and the teeth
 break reddens four tests.
 
-The finding's smaller second half — `eligible_cards` computed once per `_speculative_selection` — is
-NOT done and stays noted here; the two calls sit on mutually exclusive control paths and never both
-execute in one election, which the finding itself records.
+*Resolution (2026-09-08, the second half): the finding's smaller half — `eligible_cards` computed
+once per `_speculative_selection` — is done. Both sites now ask
+`search/card_selection.py::_admissible_cards`, and the pass memoizes its answer, so one selection
+pass derives it once.*
+
+*What made it worth doing was NOT the work, and the marker that stood here said so: the two calls sit
+on mutually exclusive control paths and never both execute in one election. What they did share was
+the three admissibility clauses — not excluded, generation fences current, fits the resource envelope
+— copied out beside each call, in a function where the discretionary copy also carries a fourth
+clause (the ASHA reservation) the forced one must not have. A clause added to one copy is a lane
+admitting exactly what its sibling refuses, with nothing anywhere to say so. Hoisting the rule into a
+named function is what makes its truth table statable, and
+`tests/test_card_speculative_selection.py` now drives it per clause plus the routing: substituting an
+admissibility answer of `[]` must reach BOTH lanes (a lane keeping its own copy is untouched by that
+substitution and still answers), and each pass derives it exactly once.*
+
+*The derivation is MEMOIZED rather than hoisted to the top of the function on purpose: three of the
+forced lane's paths return without asking anything of it — a raw seed/debug lane, an empty lane, a
+malformed one — and `eligible_cards` re-derives `breedable_nodes` + `rank_by_metric` over the whole
+board. An unconditional call would have bought the single derivation with a new cost on the exact
+path that bootstraps a run. The third call the finding names, inside `_forced_card_actions`, is
+deliberately NOT folded in: it reads the UNFILTERED eligible Cards, because the forced prefix is the
+authority on its own durable receipts and must not start honouring a session's exclusions.*
 
 #### SE-05 · MEDIUM · dead-code · effort: small — **RESOLVED (2026-08-02)**
 

@@ -730,7 +730,7 @@ CLOSED into `errors`.
 | SE-16 | L | C | `concept_lens.py::project_hierarchy` (dead `graph`/`edges`), `concept_graph.py::Concept` (parent encoded twice; a DESIGN NOTE recording three reviews the drift caused); the prefix rule spelled in 8 places | Dead parameters and an untagged design question. | `parent_of_id()` once; a marker or a decline. |
 | SE-17 | L | P | `card_selection.py::_diversity_key`/`_default_select` | The one-per-niche pass keys on raw self-authored `concept_tags`, so with a lane width > 1 (SE-01) a card can claim a fresh niche by minting a slug; reorders preference only. | Key on the canonicalized membership or `(operator, parents)`. |
 
-Tracked: `asha-promotion-mask-blocks-all-production`, `calibration-corpus-revoked-by-unrelated-settings`,
+Tracked: `calibration-corpus-revoked-by-unrelated-settings`,
 `concept-skeleton-matches-no-run` (still true), `classifier-rewrites-authored-membership`, the
 declined `receiptless-work-reads-as-question`.
 
