@@ -7,7 +7,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +19,7 @@ from looplab.serve.http import json_object
 from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
 from looplab.serve.schemas import _GenesisSpec
 from looplab.serve.serve_prompts import RESEARCH_BRIEF_SYSTEM, genesis_system
-from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
+from looplab.core.run_proposal import RunProposal
 from looplab.serve.launch import _defaults_backend_llm
 from looplab.serve.scope_report_store import _prior_learnings_index
 from looplab.core.redact import bounded_redacted_tree, redact_persisted_text
@@ -119,24 +118,33 @@ def build_router(srv) -> APIRouter:
         against existing run dirs, keep only known non-secret setting overrides, and invent a name when
         the model didn't give one. A REFINE turn (an existing draft) merges: fields the model omitted
         are kept from the prior card — a partial emit like {settings:{max_nodes:50}} must tweak the
-        user's tuned spec, not wipe its task/name."""
-        draft = draft if isinstance(draft, dict) else {}
+        user's tuned spec, not wipe its task/name.
 
-        def _slug(s):
-            return re.sub(r"(^-|-$)", "", re.sub(r"[^a-z0-9]+", "-", str(s or "").lower()))[:40]
-
-        task = spec.task if isinstance(spec.task, dict) and spec.task else (draft.get("task") or {})
-        task_file = spec.task_file or draft.get("task_file") or ""
-        base = (_slug(spec.run_id) or _slug(draft.get("run_id")) or _slug(task.get("competition"))
-                or _slug(task.get("kind")) or _slug(Path(task_file).stem if task_file else "") or "run")
+        The SHAPE, the merge, the slug and the settings filter are
+        `core/run_proposal.py::RunProposal` since 2026-09-08 (doc 27,
+        `three-new-run-planners-no-shared-schema`) — this router had its own copy of each, and its
+        `_slug` had already drifted from the TUI's (it stripped one leading/trailing dash, the TUI
+        stripped all). What stays here is what needs the run ROOT: the de-dup walk and the
+        display-only backend hint."""
+        proposal = RunProposal.from_card(
+            {"run_id": spec.run_id, "task": spec.task, "task_file": spec.task_file,
+             "settings": spec.settings, "rationale": spec.rationale,
+             "setup_steps": spec.setup_steps},
+            draft=draft, planner="tui", normalize_settings=True)
+        task, task_file = proposal.task, proposal.task_file
+        # The draft's own name stays a SEPARATE fallback rather than folding into `proposal.run_id`:
+        # a model that emits a name which slugs to nothing (`"!!!"`) must fall back to the card the
+        # operator already has, not skip past it to the competition.
+        base = proposal.slug_name(
+            (draft or {}).get("run_id") if isinstance(draft, dict) else "",
+            task.get("competition"), task.get("kind"),
+            Path(task_file).stem if task_file else "") or "run"
         run_id, n = base, 2
         # A name is "taken" only when it holds a REAL run (events.jsonl) — matches /api/start's 409 — so
         # a leftover empty dir (e.g. a validation-failed materialization) doesn't force a -2 suffix.
         while (root / run_id / "events.jsonl").exists():
             run_id, n = f"{base}-{n}", n + 1
-        merged_settings = {**(draft.get("settings") or {}), **(spec.settings or {})}
-        settings = {k: v for k, v in merged_settings.items()
-                    if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None}
+        settings = dict(proposal.settings)
         # CLI parity (mega-review P10): show the backend this run WILL launch with. The AUTHORITATIVE
         # default is applied by /api/start (`serve/launch.py::_resolve_settings` — the one funnel
         # every launch goes through), so this card-level injection is DISPLAY-ONLY sugar: the
@@ -156,11 +164,7 @@ def build_router(srv) -> APIRouter:
                 settings["backend"] = "llm"
         except Exception:  # noqa: BLE001 - display-only sugar; /api/start re-applies the real rule
             pass
-        steps = [str(s).strip() for s in (spec.setup_steps or []) if str(s).strip()][:12] \
-            or list(draft.get("setup_steps") or [])
-        return {"run_id": run_id, "task": task, "task_file": task_file,
-                "settings": settings, "rationale": spec.rationale or draft.get("rationale") or "",
-                "setup_steps": steps}
+        return proposal.with_run_id(run_id).with_settings(settings).card()
 
     # Genesis runs an AGENTIC, multi-turn tool loop (the boss reads the repo before planning). Done
     # synchronously that can outlast a UI proxy's gateway timeout (it 504'd behind JupyterHub). So the

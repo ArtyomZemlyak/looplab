@@ -1362,6 +1362,7 @@ def test_resume_shutdown_hook_precedes_jupyter_reaper(tmp_path):
 def test_server_startup_recovers_pending_resume_without_runs_poll(tmp_path, monkeypatch):
     """A UI-server restart autonomously restores a durable intent; `/api/runs` is not required."""
     from looplab.events.eventstore import EventStore
+    from looplab.engine import run_lifecycle   # the grace's owning module (doc 25 XP-03)
     from looplab.serve import engine_proc as ep
 
     rd = tmp_path / "run"
@@ -1371,7 +1372,7 @@ def test_server_startup_recovers_pending_resume_without_runs_poll(tmp_path, monk
     store.append("run_started", {"run_id": "run", "task_id": "t", "direction": "min"})
     store.append("resume_requested", {})
     spawns = []
-    monkeypatch.setattr(ep, "_RESUME_RECONCILE_GRACE_S", 0.0)
+    monkeypatch.setattr(run_lifecycle, "RESUME_RECONCILE_GRACE_S", 0.0)
     monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
     monkeypatch.setattr(ep, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
 
@@ -1384,6 +1385,7 @@ def test_server_startup_recovers_restart_after_command_worker_loss(tmp_path, mon
     """The restart event itself is enough recovery truth; no browser or command thread must survive."""
     from looplab.events.eventstore import EventStore
     from looplab.events.replay import fold
+    from looplab.engine import run_lifecycle   # the grace's owning module (doc 25 XP-03)
     from looplab.serve import engine_proc as ep
 
     rd = tmp_path / "run"
@@ -1397,7 +1399,7 @@ def test_server_startup_recovers_restart_after_command_worker_loss(tmp_path, mon
     assert state.last_resume_request_seq == restart.seq
 
     spawns = []
-    monkeypatch.setattr(ep, "_RESUME_RECONCILE_GRACE_S", 0.0)
+    monkeypatch.setattr(run_lifecycle, "RESUME_RECONCILE_GRACE_S", 0.0)
     monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
     monkeypatch.setattr(ep, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
 
@@ -1440,6 +1442,7 @@ def test_server_startup_recovers_restart_record_lost_before_intent_append(tmp_pa
 
 def test_server_startup_does_not_create_waiter_for_unknown_liveness(tmp_path, monkeypatch):
     """Unknown/reparse runs stay quarantined without one 20 Hz polling thread per directory."""
+    from looplab.engine import run_lifecycle   # the grace's owning module (doc 25 XP-03)
     from looplab.serve import engine_proc as ep
 
     rd = tmp_path / "run"
@@ -1450,7 +1453,7 @@ def test_server_startup_does_not_create_waiter_for_unknown_liveness(tmp_path, mo
     store.append("resume_requested", {})
     spawns = []
     waiters = []
-    monkeypatch.setattr(ep, "_RESUME_RECONCILE_GRACE_S", 0.0)
+    monkeypatch.setattr(run_lifecycle, "RESUME_RECONCILE_GRACE_S", 0.0)
     monkeypatch.setattr(ep, "_engine_liveness", lambda _rd: None)
     monkeypatch.setattr(ep, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
     monkeypatch.setattr(

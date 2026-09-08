@@ -43,7 +43,7 @@ tmp root is keyed by OS USER, so two concurrent runs delete each other's fixture
 `LOOPLAB_LIVE_SCENARIOS=1`). There is no formatter and ONE lint rule, and that rule is a CENSUS, not a
 style: `[tool.ruff]` selects `BLE` only (doc 52 row 14), so `python -m ruff check looplab` lists every
 blind `except Exception`/`BaseException`/bare `except` that carries no `# noqa: BLE001 — <why this is
-safe to contain>`. Containment is the house posture (730 such handlers), so the rule is not "do not
+safe to contain>`. Containment is the house posture (735 such handlers), so the rule is not "do not
 write one" but "say why"; `tests/test_containment_census.py` re-derives the same census by AST with no
 `ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 103 pre-existing
 reason-less sites as a shrink-only backlog in `tests/data/containment_unreviewed.txt` (review one =
