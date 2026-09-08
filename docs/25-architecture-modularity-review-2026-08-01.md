@@ -2320,7 +2320,7 @@ guard (4 failures) and by narrowing the storage-fault translation to `TimeoutErr
 
 #### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[structured-claim-identity-not-default]** the DEFAULT is structured and the fuzzy path is deleted; what remains is the deprecated lean read path (`structured=False`) and the `_scoped_key`/`_global_key` shadow namespaces it is the last reader of, so a governance fix is still reasoned about twice. proof:present:_scoped_key@looplab/engine/claims.py
+> **OPEN[structured-claim-identity-not-default]** the lean read path and `_scoped_key` are DELETED and there is ONE claim identity, resolved once; what remains is the RETIRED `structured=` keyword itself — accepted and inert on five projection signatures, yet still passed `False` by a resumed pre-field run through `Settings.cross_run_structured_claims` and `EngineOptions.cross_run_structured_claims` (`engine/strategy.py`, `engine/proposal_cues.py`), so a live knob names a projection that no longer exists. proof:present:cross_run_structured_claims@looplab/engine/options.py
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**
 
@@ -2389,19 +2389,61 @@ collapses the same paraphrase pair — the structured key — and one that pins 
 reader SET per name instead of one module list, rather than an unused import kept alive to satisfy a
 test.
 
-**What is still open, exactly:** the lean read path itself (`structured=False`) and the
-`_scoped_key`/`_global_key` shadow namespaces. The recommendation asks for lean to stay a documented
-legacy read path until consumers migrate, and it is the only thing that can read a projection built
-under it — deleting it in the same change that flips the default would leave a store's existing lean
-review with no reader at all. Note also that `_global_key` cannot leave with it: `_decision_for` reads
-it as the structured path's explicitly-UNSCOPED fallback, so its deletion is a separate question about
-the fallback chain, not about the lean mode. The mode table at `claim_assessments` now lists TWO modes
-and `tests/test_claim_key.py` counts them.
+*Closure (2026-09-08), the third mode: THE LEAN READ PATH AND `_scoped_key` ARE DELETED. There is
+one claim identity, and the `_global_key` fallback that survives now says so at every row it
+resolves.*
+
+The previous pass kept lean for one stated reason — "deleting it in the same change that flips the
+default would leave a store's existing lean review with no reader at all". That is the migration
+question, and answering it took a look at the ledger READER rather than at the projections:
+`claims.py::_validate_claim_decision_row` calls a missing / empty / oversized / sanitizes-to-empty
+`statement` `invalid_record`, and `governance_health.py::read_governance_rows` RAISES on that instead
+of projecting the readable subset. So **every row `load_claim_decisions` can see carries a statement,
+hence a structured `claim_uid`, hence an index at it.** `_scoped_key` was only ever a SECOND index on
+a scoped row that already had its UID — never any row's only key — so deleting it costs no durable
+decision its reachability. A store's existing lean REVIEW loses only the cross-task merge, which is
+the finding's own complaint, and which was undecidable anyway: a lean row carried no `claim_uid` and
+no `evidence_digest`, and the write path validates against the structured projection.
+
+`_global_key` stays, and the code now says why rather than leaving it filed under "shadow namespace".
+It is the STRUCTURED projection's explicitly-UNSCOPED fallback, its one reader is `_decision_for`,
+and it is live for a caller-MERGED overlay: the durable loader never writes a scoped decision at the
+plain legacy key, but a caller that does would otherwise erase the portfolio-wide verdict for every
+other scope. Its retirement is a question about that fallback chain.
+
+The fallback also stopped being silent. `_decision_for` returns `(decision, resolved_via)` and every
+overlaid decision now carries that receipt — `claim_uid` when a structured candidate matched,
+`legacy_statement_key` / `unscoped_global_key` when the row was only reachable through the
+pre-structured statement namespace. Before this an operator could not tell a scope-precise verdict
+from a statement spelling that happens to normalize the same; that is the "reasoned about twice"
+residue arriving as data instead of as a comment. It is whitelisted through
+`_bounded_claim_projection`, so the bounded read-model an operator and the UI see carries it too, and
+it is deliberately not digest material (`claim_evidence_digest` excludes governance metadata, so no
+issued receipt goes stale for it).
+
+`--lean` is gone from `looplab claims`: an operator who scripted the undecidable projection gets a
+usage refusal rather than a receipt whose meaning changed underneath them. Four tests DRIVE the
+migration on a durable ledger written by the shipped writer — a scoped decision that governs its own
+task and not a same-worded claim in another, an unscoped one that still reaches every scope through
+its legacy keys, and both `resolved_via` routes — rather than pinning the source. The projection
+digest moved by exactly one key: the harness run against both trees is byte-identical once
+`resolved_via` is stripped, and the two halves of the retired flag are now equal.
 
 The digest tripwire moved and the answer is recorded where it asks for one: the `fuzzy` dimension left
 the CORPUS, not the projections. The harness passed every flag explicitly and the deleted branch was
 `rows = out` when `fuzzy=False`, so each surviving key's value is byte-identical and the whole payload
 change is eight vanished `:f=True` entries plus eight renamed keys.
+
+**What is still open, exactly:** the `structured=` keyword itself. Unlike `fuzzy=`, it cannot simply
+be removed here: `EngineOptions.cross_run_structured_claims` reaches `claim_context_pack` through
+`engine/proposal_cues.py` and `engine/strategy.py`, `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins that field
+`False`, and refusing the value the way `fuzzy=True` is refused would abort a resumed pre-field run
+over a read-model preference. Accepting it is safe only because both values now name the same
+projection — which `tests/test_claim_key.py` drives, byte for byte, rather than asserting. Removing
+it is a Settings-field retirement (config, options, the settings catalogue and its counts,
+`serve/routers/cross_run.py`, `tools/cross_run_tools.py`, `docs/guide/configuration.md`), not a
+claims change, which is why it did not travel with this one. The identity table at
+`claim_assessments` now lists ONE identity and `tests/test_claim_key.py` counts it.
 
 #### EM-07 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 

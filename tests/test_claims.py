@@ -33,10 +33,9 @@ def test_negative_verdicts_map_to_oppose():
 def test_explicit_claim_stance_separates_literal_truth_from_action_outcome():
     # The change is bad advice, but the evidence SUPPORTS the literal negative factual sentence.
     row = _lesson("raising LR regressed validation", "failed", [7], claim_stance="support")
-    for structured in (False, True):
-        claim = claim_assessments([row], structured=structured)[0]
-        assert claim["epistemic"] == "supported"
-        assert claim["support"] == ["r1:7"] and claim["oppose"] == []
+    claim = claim_assessments([row])[0]
+    assert claim["epistemic"] == "supported"
+    assert claim["support"] == ["r1:7"] and claim["oppose"] == []
 
 
 def test_explicit_oppose_and_neutral_override_outcome_while_invalid_stance_is_quarantined():
@@ -120,30 +119,27 @@ def test_lesson_and_research_claim_unify_on_the_same_statement():
     assert len(split) == 2 and sorted(row["scope"] for row in split) == ["", "t"]
 
 
-def test_lean_identity_matches_the_shipped_lesson_normalizer_whitespace_and_case_only():
-    # The LEGACY lean projection (`structured=False`, deprecated): identity is the shipped lesson
-    # `normalize_statement` (whitespace+case), so casing/spacing unify...
-    out = claim_assessments(
-        [_lesson("Distillation  helps", "refuted", [2])],
-        research_claims=[{"statement": "distillation helps", "node_ids": [8],
-                          "verification": {"verdict": "supported", "method": "llm"}}],
-        structured=False)
-    assert len(out) == 1                              # normalized statement collapses them
-    assert out[0]["epistemic"] == "mixed"
+def test_the_deleted_lean_identity_no_longer_merges_across_a_task_boundary():
+    # The LEGACY lean projection (`structured=False`) grouped by the shipped lesson
+    # `normalize_statement` (whitespace+case), so a lesson in task `t` and an UNSCOPED memo claim
+    # collapsed into one row. It is deleted (doc 25 EM-06, 2026-09-08) and the retired keyword now
+    # projects the structured key, under which an unscoped memo claim is not evidence about task `t`.
+    rows = [_lesson("Distillation  helps", "refuted", [2])]
+    research = [{"statement": "distillation helps", "node_ids": [8],
+                 "verification": {"verdict": "supported", "method": "llm"}}]
+    out = claim_assessments(rows, research_claims=research, structured=False)
+    assert len(out) == 2 and sorted(row["scope"] for row in out) == ["", "t"]
+    assert out == claim_assessments(rows, research_claims=research)
 
-    # ...but a trailing period is NOT stripped — that identity is deliberately the SAME as the lesson
-    # store's `normalize_statement` (we do not fork a divergent claim normalizer), so these stay two
-    # claims. The structured key stems the subject instead, which is why it collapses them.
-    lean = claim_assessments([
-        _lesson("distillation helps", "supported", [1]),
-        _lesson("distillation helps.", "supported", [2]),
-    ], structured=False)
-    assert len(lean) == 2
-    structured = claim_assessments([
-        _lesson("distillation helps", "supported", [1]),
-        _lesson("distillation helps.", "supported", [2]),
-    ])
+    # The lean key did not strip a trailing period — it was deliberately the SAME identity as the
+    # lesson store's `normalize_statement` (we do not fork a divergent claim normalizer), so these
+    # stayed two claims. The structured key stems the subject instead, which is why it collapses
+    # them, under either spelling of the retired keyword.
+    period = [_lesson("distillation helps", "supported", [1]),
+              _lesson("distillation helps.", "supported", [2])]
+    structured = claim_assessments(period)
     assert len(structured) == 1 and set(structured[0]["support"]) == {"r1:1", "r1:2"}
+    assert claim_assessments(period, structured=False) == structured
 
 
 def test_ranking_most_evidenced_and_contested_first():
@@ -386,6 +382,97 @@ def test_v1_decision_uid_is_migrated_from_durable_statement(tmp_path):
     loaded = load_claim_decisions(str(tmp_path))
     assert current_uid in loaded and "clm_old_collision" not in loaded
     assert loaded[current_uid]["claim_key_version"] == CLAIM_KEY_VERSION
+
+
+# --- doc 25 EM-06: the lean read path is deleted; what happens to a store written under it -------
+
+def test_a_scoped_decision_written_before_the_deletion_still_governs_its_task_only(tmp_path):
+    """The migration question, DRIVEN on a durable ledger rather than argued in a docstring.
+
+    A scoped decision used to be indexed twice: at its structured `claim_uid` and at the lean
+    `_scoped_key(normalize_statement(statement), scope)` that only the deleted projection read. The
+    lean index is gone. The row was written by the shipped writer, exactly as an existing store's
+    rows were, and it must still reach its own task's claim — and still not reach another task's
+    same-worded one, which is the whole reason the structured key exists."""
+    from looplab.engine.claims import claims_for_memory, load_claim_decisions, record_claim_decision
+    from looplab.engine.claim_key import claim_uid
+    from looplab.engine.memory import normalize_statement
+
+    statement = "hard-neg mining lifts recall"
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson(statement, "supported", [1], task_id="task-a"),
+        _lesson(statement, "supported", [2], task_id="task-b"),
+    ])
+    record_claim_decision(str(tmp_path), statement=statement, decision="ratified", scope="task-a")
+
+    loaded = load_claim_decisions(str(tmp_path))
+    scoped_uid = claim_uid(statement, scope="task-a", metric="")
+    assert list(loaded) == [scoped_uid], (
+        "a scoped row is indexed by its structured UID and nothing else; a second, lean-shaped key "
+        "here means the deleted namespace came back")
+    assert not [key for key in loaded if key.startswith("\x00")], "a shadow namespace is being written"
+
+    by_scope = {row["scope"]: row["maturity"] for row in claims_for_memory(str(tmp_path))}
+    assert by_scope == {"task-a": "operator-ratified", "task-b": "machine-proposed"}
+    # ...and it is reported as found by the identity the write path validates against, not by a
+    # statement spelling that happens to normalize the same.
+    governed = next(row for row in claims_for_memory(str(tmp_path)) if row["scope"] == "task-a")
+    assert governed["decision"]["resolved_via"] == "claim_uid"
+    assert normalize_statement(statement) not in loaded
+
+
+def test_an_unscoped_decision_written_before_the_deletion_still_reaches_every_scope(tmp_path):
+    """The other half of an existing store: an UNSCOPED row is the portfolio-wide fallback, and it
+    stays indexed at its legacy statement keys because `_decision_for` consults them after its five
+    UID candidates. `_global_key` is what makes that survivable, which is why it did NOT leave with
+    the lean projection."""
+    from looplab.engine.claims import claims_for_memory, load_claim_decisions, record_claim_decision
+    from looplab.engine.memory import normalize_statement
+
+    statement = "hard-neg mining lifts recall"
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson(statement, "supported", [1], task_id="task-a"),
+        _lesson(statement, "supported", [2], task_id="task-b"),
+    ])
+    record_claim_decision(str(tmp_path), statement=statement, decision="pinned")
+
+    loaded = load_claim_decisions(str(tmp_path))
+    legacy_key = normalize_statement(statement)
+    assert legacy_key in loaded, "the pre-structured statement index is gone; old rows are unreachable"
+    assert "\x00global\x00" + legacy_key in loaded, "the unscoped fallback index is gone"
+
+    rows = claims_for_memory(str(tmp_path))
+    assert {row["scope"]: row["maturity"] for row in rows} == {
+        "task-a": "operator-pinned", "task-b": "operator-pinned"}
+    # Reported as UID-resolved: this store's statement is spelled the same way the ledger spells it,
+    # so the structured candidate matches first. The legacy keys are the fallback, not the route.
+    assert {row["decision"]["resolved_via"] for row in rows} == {"claim_uid"}
+
+
+def test_a_decision_reachable_only_by_its_old_statement_key_says_so(tmp_path):
+    """A pre-structured overlay — the shape a caller that merged its own decisions has — reaches the
+    claim through `normalize_statement`, never through a `claim_uid`. Before 2026-09-08 that was
+    indistinguishable at the row from a scope-precise verdict; now the row says which it was, so an
+    operator reading a maturity can tell a task-precise decision from a statement collision."""
+    from looplab.engine.claims import _global_key, claim_assessments
+    from looplab.engine.memory import normalize_statement
+
+    lessons = [_lesson("augmentation improves recall", "supported", [1], task_id="task-a")]
+    legacy_key = normalize_statement("augmentation improves recall")
+
+    plain = claim_assessments(lessons, decisions={legacy_key: {"decision": "ratified"}})[0]
+    assert plain["maturity"] == "operator-ratified"
+    assert plain["decision"]["resolved_via"] == "legacy_statement_key"
+
+    # The `_global_key` route: a merged overlay put a SCOPED decision at the plain legacy key, which
+    # `_decision_for` refuses (it is not this claim's scope) — the portfolio-wide verdict behind it
+    # must still be found, and must name the route it came in by.
+    shadowed = claim_assessments(lessons, decisions={
+        legacy_key: {"decision": "rejected", "scope": "some-other-task"},
+        _global_key(legacy_key): {"decision": "pinned"},
+    })[0]
+    assert shadowed["maturity"] == "operator-pinned"
+    assert shadowed["decision"]["resolved_via"] == "unscoped_global_key"
 
 
 def test_maturity_overlay_on_assessments():
@@ -1138,21 +1225,25 @@ def test_paraphrases_collapse_by_structured_key_not_by_token_overlap():
     assert any("warmup" in c["statement"] for c in out)
 
 
-def test_the_cli_claims_command_has_no_fuzzy_flag_and_projects_structured_by_default(tmp_path):
+def test_the_cli_claims_command_has_no_fuzzy_or_lean_flag_and_projects_structured(tmp_path):
     from typer.testing import CliRunner
     from looplab.cli import app
     _write_lessons(tmp_path / "lessons.jsonl", [
         _lesson("distillation improves retrieval recall", "supported", [1]),
         _lesson("distillation improves retrieval recall a lot", "supported", [2])])
     assert CliRunner().invoke(app, ["claims", str(tmp_path), "--fuzzy"]).exit_code != 0
-    # Default = structured: the receipt says so, and it is the receipt `claim-decide` validates
-    # against, so a review that silently projected lean could never be decided on.
+    # `--lean` REFUSES rather than projecting something else. An operator who scripted the
+    # deprecated read path must find out at the command line, not from a receipt that silently
+    # changed meaning under them (doc 25 EM-06, 2026-09-08).
+    assert CliRunner().invoke(app, ["claims", str(tmp_path), "--lean"]).exit_code != 0
+    # Structured: the receipt says so, and it is the receipt `claim-decide` validates against, so a
+    # review that silently projected lean could never be decided on.
     import orjson
     r = CliRunner().invoke(app, ["claims", str(tmp_path), "--json", "--governance-receipt"])
     assert r.exit_code == 0 and orjson.loads(r.stdout)["structured"] is True
-    lean = CliRunner().invoke(app, ["claims", str(tmp_path), "--lean", "--json",
-                                    "--governance-receipt"])
-    assert lean.exit_code == 0 and orjson.loads(lean.stdout)["structured"] is False
+    explicit = CliRunner().invoke(app, ["claims", str(tmp_path), "--structured", "--json",
+                                        "--governance-receipt"])
+    assert explicit.exit_code == 0 and orjson.loads(explicit.stdout) == orjson.loads(r.stdout)
 
 
 # --------------------------------------------------------------------------- #
@@ -1887,7 +1978,16 @@ def test_the_three_shared_helpers_live_in_the_leaf_with_one_definition_each():
 # `rows = out` — so every surviving key's VALUE is byte-identical to its `:f=False` predecessor and
 # the whole change to the payload is that eight `:f=True` entries are gone and eight `:f=False` key
 # NAMES lost that segment. Nothing about what a proposing agent sees moved.
-_CLAIMS_PROJECTION_DIGEST = "edf2ec502193cf4c88ce7ba81182676a8feaaba13788cf902a678d1fd17c7ca4"
+# 2026-09-08 (doc 25 EM-06, the close): the `structured` dimension left the corpus the same way —
+# the lean branch is deleted, so `s=False` and `s=True` were the same rows under two key names. The
+# projections DID move this time, in one stated way: every overlaid `decision` now carries
+# `resolved_via`, the receipt saying whether it was found at the structured `claim_uid` or at one of
+# the pre-structured statement keys. This corpus's decisions are keyed by `normalize_statement`, so
+# every one of them reports `legacy_statement_key` — which is the point of recording it. VERIFIED,
+# not asserted: running this harness against both trees and stripping that one key from the new
+# payload reproduces the old `s=True` half byte for byte, and the new `s=False` half equals the new
+# `s=True` half. Digest before this change: edf2ec502193cf4c88ce7ba81182676a8feaaba13788cf902a678d1fd17c7ca4.
+_CLAIMS_PROJECTION_DIGEST = "8eabffa638e1796b4f17e24b17e97e0c08755480c618daf0f425c04f2479afc9"
 
 
 def _projection_corpus():
@@ -1924,16 +2024,15 @@ def _projection_outputs():
 
     lessons, research, decisions = _projection_corpus()
     out = {}
-    for structured in (False, True):
-        for bounded in (True, False):
-            key = f"assess:s={structured}:b={bounded}"
-            rows = claim_assessments(lessons, research_claims=research, decisions=decisions,
-                                     structured=structured, bounded=bounded)
-            out[key] = list(rows)
-            for cap in (1, 3, 5, 64, 500):
-                out[f"pack:{key}:{cap}"] = build_context_pack(rows, max_claims=cap)
-            out[f"render:{key}"] = render_context_pack(build_context_pack(rows, max_claims=5))
-            out[f"atlas:{key}"] = portfolio_atlas(rows, [])
+    for bounded in (True, False):
+        key = f"assess:b={bounded}"
+        rows = claim_assessments(lessons, research_claims=research, decisions=decisions,
+                                 bounded=bounded)
+        out[key] = list(rows)
+        for cap in (1, 3, 5, 64, 500):
+            out[f"pack:{key}:{cap}"] = build_context_pack(rows, max_claims=cap)
+        out[f"render:{key}"] = render_context_pack(build_context_pack(rows, max_claims=5))
+        out[f"atlas:{key}"] = portfolio_atlas(rows, [])
     return json.dumps(out, sort_keys=True, default=str)
 
 

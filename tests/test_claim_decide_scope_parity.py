@@ -217,14 +217,15 @@ def test_receipt_names_its_projection_and_scope_filters_every_joined_store(tmp_p
     assert [c["scope"] for c in scoped["claims"]] == ["task-a"]
 
 
-def test_the_default_governance_receipt_carries_structured_identity_and_lean_does_not(tmp_path):
+def test_the_governance_receipt_carries_structured_identity_and_lean_cannot_be_asked_for(tmp_path):
     """`--governance-receipt` is decidable BY DEFAULT since 2026-09-08 (doc 25 EM-06).
 
     Before the flip this command projected lean unless asked otherwise, and a lean row carries no
     `claim_uid`/`evidence_digest` at all — so the operator-facing review surface handed back a
     receipt that `claim-decide` (which validates against the structured projection, always) could
-    never accept, and `--scope` was inert. The deprecated `--lean` read path still emits the old
-    identity-free rows, which is exactly why it is not the default any more."""
+    never accept, and `--scope` was inert. Later the same day the lean read path was DELETED, and
+    `--lean` with it: an operator who scripted the undecidable projection now gets a usage refusal
+    rather than a receipt whose meaning changed underneath them."""
     md = _portfolio(tmp_path)
     result = CliRunner().invoke(app, [
         "claims", str(md), "--json", "--governance-receipt", "--scope", "task-a"])
@@ -235,11 +236,8 @@ def test_the_default_governance_receipt_carries_structured_identity_and_lean_doe
 
     lean = CliRunner().invoke(app, [
         "claims", str(md), "--lean", "--json", "--governance-receipt", "--scope", "task-a"])
-    assert lean.exit_code == 0
-    lean_payload = json.loads(lean.stdout)
-    assert lean_payload["structured"] is False and lean_payload["scope"] == "task-a"
-    assert "claim_uid" not in lean_payload["claims"][0]
-    assert "evidence_digest" not in lean_payload["claims"][0]
+    assert lean.exit_code != 0, "`--lean` still names a projection"
+    assert "lean" in (lean.output + str(lean.exception or "")).lower()
 
 
 def test_cli_and_http_review_projections_are_identical(tmp_path):

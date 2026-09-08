@@ -912,12 +912,14 @@ def claims_cmd(
     top: int = typer.Option(20, help="How many most-evidenced claims to show."),
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
     pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
-    structured: bool = typer.Option(True, "--structured/--lean", help="Claim identity: the scope+polarity-safe "
-                                    "structured claim key (§21.20.13, the DEFAULT) — opposite-polarity claims "
-                                    "contradict rather than merge and a decision in one task cannot reach "
-                                    "another's. `--lean` is the deprecated normalized-statement projection; its "
-                                    "`--governance-receipt` digest can never satisfy `claim-decide`, which "
-                                    "validates against the structured projection."),
+    structured: bool = typer.Option(True, "--structured", help="Accepted and INERT: claim identity is "
+                                    "always the scope+polarity-safe structured claim key (§21.20.13) — "
+                                    "opposite-polarity claims contradict rather than merge and a decision in "
+                                    "one task cannot reach another's. The `--lean` normalized-statement "
+                                    "projection was DELETED on 2026-09-08 (doc 25 EM-06); it emitted rows with "
+                                    "no `claim_uid` and no `evidence_digest`, so its `--governance-receipt` "
+                                    "could never satisfy `claim-decide`. An operator who scripted `--lean` gets "
+                                    "a usage refusal here rather than a silently different projection."),
     scope: str = typer.Option(
         "", "--scope", help="Project only this task's evidence (the CLI spelling of the HTTP "
         "`/api/cross-run/claims?scope_task=` read). REQUIRED to obtain a usable --governance-receipt "

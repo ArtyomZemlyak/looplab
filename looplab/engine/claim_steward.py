@@ -304,8 +304,9 @@ def curation_is_empty(curation: dict) -> bool:
 def steward_claims(memory_dir, client, *, lessons=None, apply: bool = False, by: str = "steward",
                    at: str = "", structured: bool = True, max_proposals: int = _MAX_PROPOSALS,
                    raise_on_failure: bool = False) -> dict:
-    """One-call agentic claim steward over a memory dir: load the claim assessments (structured key by
-    default, so decisions are scope-precise) and ask the LLM to propose decisions for review. The deprecated
+    """One-call agentic claim steward over a memory dir: load the claim assessments (always the
+    structured key, so decisions are scope-precise; `structured` is retired and inert since doc 25
+    EM-06, 2026-09-08) and ask the LLM to propose decisions for review. The deprecated
     ``apply`` argument is retained only for call compatibility and is rejected before memory reads or LLM work.
     Returns `{"proposals", "receipt"}` with a permanently-null receipt; never writes governance state."""
     if apply:
