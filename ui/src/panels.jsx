@@ -66,6 +66,12 @@ const AUTHORING_MAX_BYTES = 256 * 1024
 const AUTHORING_OPERATION_SCHEMA = 'looplab.authoring-operation-intent/v1'
 const AUTHORING_PANEL_DRAFT_SCOPE = 'panel:authoring'
 const AUTHORING_KINDS = new Set(['prompts', 'skills', 'knowledge'])
+// The TABS, which are not the same list as the writable kinds above and must not become one:
+// `memory_skills` is `<memory dir>/skills`, the cards the ENGINE distils, and the server
+// answers 405 to every write route for it. `AUTHORING_KINDS` gates operation identity (a save,
+// a recovery record), so admitting a read-only kind there would mint recovery scopes for
+// writes that can never be replayed.
+const AUTHORING_TABS = ['prompts', 'skills', 'knowledge', 'memory_skills']
 const AUTHORING_REVISION_RE = /^(?:missing|sha256:[0-9a-f]{64})$/
 const AUTHORING_OPERATION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const AUTHORING_OPERATION_KEYS = new Set([
@@ -97,7 +103,8 @@ function authoringPayload(value, kind) {
     if (!isRecord(file) || typeof file.text !== 'string' || typeof file.truncated !== 'boolean'
         || (file.read_only != null && typeof file.read_only !== 'boolean')
         || (readOnly
-          ? kind !== 'skills' || !validReadOnlySkillDisplayName(file.name)
+          ? !((kind === 'skills' && validReadOnlySkillDisplayName(file.name))
+            || (kind === 'memory_skills' && validAuthoringName(file.name)))
           : !validAuthoringName(file.name))) invalidPanelPayload()
     const truncated = file.truncated
     const revision = typeof file.revision === 'string' && AUTHORING_REVISION_RE.test(file.revision)
@@ -960,7 +967,7 @@ export { ConfigPanel, __testPublicConfigForm } from './ConfigPanel.jsx'
 // settings field is `prompt_dir`, singular, and `LOOPLAB_* ` env names map 1:1 onto flat field names
 // — so the derived `LOOPLAB_PROMPTS_DIR` this panel used to print is a variable nothing reads. An
 // operator who followed that hint set it, saw the tab stay empty, and concluded prompts do not exist.
-const AUTHORING_KIND_ENV = { prompts: 'LOOPLAB_PROMPT_DIR', skills: 'LOOPLAB_SKILLS_DIR', knowledge: 'LOOPLAB_KNOWLEDGE_DIR' }
+const AUTHORING_KIND_ENV = { prompts: 'LOOPLAB_PROMPT_DIR', skills: 'LOOPLAB_SKILLS_DIR', knowledge: 'LOOPLAB_KNOWLEDGE_DIR', memory_skills: 'LOOPLAB_MEMORY_DIR' }
 
 const AUTHORING_KIND_PURPOSE = {
   prompts: {
@@ -976,7 +983,17 @@ const AUTHORING_KIND_PURPOSE = {
     disclosure: <>Root <code>*.md</code>: writable. Nested{' '}
       <code>&lt;package&gt;/SKILL.md</code>: read-only; edit its package path. Flat Save/recovery API rejects
       slash paths. Auto-distilled <code>&lt;memory dir&gt;/skills/</code> candidates need cross-task
-      promotion for production; not reviewed here.</>,
+      promotion for production; review them under <b>memory_skills</b>.</>,
+  },
+  memory_skills: {
+    what: <><b>What your runs distilled</b>: <code>&lt;memory dir&gt;/skills/</code>, one card per
+      technique a run's own supported work item earned. Read-only here — the engine writes them.</>,
+    disclosure: <>The frontmatter is the lifecycle: <code>status: candidate</code> is a card one task
+      produced and <b>no run loads it</b>; a later run on a DIFFERENT task family that re-confirms the
+      same claim promotes it to <code>promoted</code>, which is the only status the production listing
+      shows. <code>demoted</code>/<code>retired</code> mean a later recorded outcome reversed it. Edits
+      belong in the store the engine owns, so this tab reviews and never writes; delete a bad card on
+      the host.</>,
   },
   knowledge: {
     what: <><b>Free-form notes</b> for the agents to retrieve with <code>kb_search</code> — anything
@@ -1863,9 +1880,9 @@ export function AuthoringPanel({
   return (
     <Panel title="Authoring — configure the scientist" sub="every run · hot-reloaded next run" onClose={requestClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
-        {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
+        {AUTHORING_TABS.map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
           onClick={() => chooseKind(k)}>{k}{dirtyByKind(k) ? ` (${dirtyByKind(k)} unsaved)` : ''}</button>)}
-        {sourceReady && <span className="muted">{data.dir || `no ${kind} dir configured (set ${AUTHORING_KIND_ENV[kind]}, or the ${kind === 'prompts' ? 'Prompt' : kind === 'skills' ? 'Skills' : 'Knowledge'} dir in Settings)`}</span>}
+        {sourceReady && <span className="muted">{data.dir || `no ${kind} dir configured (set ${AUTHORING_KIND_ENV[kind]}, or the ${kind === 'prompts' ? 'Prompt' : kind === 'skills' ? 'Skills' : kind === 'memory_skills' ? 'Memory' : 'Knowledge'} dir in Settings)`}</span>}
         {sourceReady && data.truncatedFiles > 0
           && <span className="muted">{data.truncatedFiles}+ files omitted (cap)</span>}
         {sourceReady && data.inventoryIncomplete
@@ -1877,7 +1894,9 @@ export function AuthoringPanel({
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         <b>You</b> write these Markdown files; agents read them during runs. Run-written lessons,
         cases and meta-notes live in <b>Memory</b>. <b>Prompts</b> and <b>skills</b> have no default
-        directory—configure one in Settings.
+        directory—configure one in Settings. The exception is <b>memory_skills</b>: those cards are
+        written by the runs and shown here read-only, because the party who has to judge a distilled
+        technique is you.
       </div>
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         {AUTHORING_KIND_PURPOSE[kind]?.what}{' '}{AUTHORING_KIND_PURPOSE[kind]?.disclosure}

@@ -22,6 +22,7 @@ from looplab.core.concepts import bounded_raw_concept_values
 from looplab.core.jsonutil import canonical_json_digest, valid_digest_ref
 from looplab.core.redact import (bounded_redacted_tree, is_secret_key_name,
                                  redact_persisted_text)
+from looplab.core.research_record import MAX_QUOTED_NUMBERS, NUMBER_FIDELITY_VERSION
 from looplab.core.source_identity import canonical_source_ref, valid_source_identity
 
 
@@ -791,6 +792,47 @@ def _provenance(value):
     # None, never 0.0 — a memo with nothing to measure has not failed the measurement.
     out["coverage"] = (bound_total / total) if total else None
     return out
+
+
+#: The memo's NUMBER-FIDELITY block (doc 52 row 32, second half): one row per retained claim
+#: counting where its quoted decimals landed against the metrics it cites. Computed by
+#: `trust/memo_verify.py::number_fidelity_report` over `core/research_record.py::number_fidelity`
+#: (deterministic, no model) and bounded here, where the sanitizer has to know its shape.
+_NUMBER_FIDELITY_CHANNELS = ("quoted", "matched", "elsewhere", "unmatched", "excluded")
+
+
+def _number_fidelity(value):
+    """Bound one number-fidelity block, or None when it is not one.
+
+    Same posture as `_provenance`: the per-claim rows are the record and every aggregate — the
+    totals AND `fidelity` — is RECOMPUTED from them rather than trusted, because a persisted share
+    that disagrees with the rows beside it is the one number a reader cannot check. The channels
+    are clamped so `matched + elsewhere + unmatched` can never exceed `quoted`: a hand-authored
+    payload claiming "9 of 3 decimals came from the cited experiments" is exactly the shape a
+    reader would quote without re-deriving it.
+    """
+    if not isinstance(value, dict) or value.get("v") != NUMBER_FIDELITY_VERSION:
+        return None
+    rows = []
+    for row in _items(value.get("claims"), MAX_RESEARCH_CLAIMS):
+        row = row if isinstance(row, dict) else {}
+        counts = {}
+        for channel in _NUMBER_FIDELITY_CHANNELS:
+            count = row.get(channel)
+            counts[channel] = (count if type(count) is int and 0 <= count <= MAX_QUOTED_NUMBERS
+                               else 0)
+        quoted = counts["quoted"]
+        landed = 0
+        for channel in ("matched", "elsewhere", "unmatched"):
+            counts[channel] = min(counts[channel], max(0, quoted - landed))
+            landed += counts[channel]
+        rows.append(counts)
+    out = {"v": NUMBER_FIDELITY_VERSION, "claims": rows}
+    for channel in _NUMBER_FIDELITY_CHANNELS:
+        out[channel] = sum(row[channel] for row in rows)
+    # None, never 0.0 — claims that quote no decimal have not failed the measurement.
+    out["fidelity"] = (out["matched"] / out["quoted"]) if out["quoted"] else None
+    return out
 #: How many node ids a snapshot-superseded receipt carries. It rides ONE prompt line beside a
 #: 300-character summary, so it takes the node-ref bound rather than the claim bound.
 MAX_SUPERSEDED_NODE_REFS = MAX_RESEARCH_NODE_REFS
@@ -883,6 +925,11 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     provenance = _provenance(src.get("provenance"))
     if provenance is not None:
         out["provenance"] = provenance
+    # THE MEMO'S OWN NUMBERS (doc 52 row 32, second half), on the same terms as the block above:
+    # counts only, never manufactured here, and absent from a memo written before it existed.
+    numbers = _number_fidelity(src.get("numbers"))
+    if numbers is not None:
+        out["numbers"] = numbers
     if "verification" in src:
         # Reserve a bounded slice for trust output before model narrative/proposals. The shared 64k
         # cap must not persist recommendations while silently erasing unsupported verdicts.

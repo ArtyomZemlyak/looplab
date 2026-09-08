@@ -45,6 +45,19 @@ export function assistantReplyCompletesTurn(messages, prior) {
   return userIndex >= 0 && messages[userIndex + 1]?.role === 'assistant'
 }
 
+// Recover a turn whose SSE stream dropped (a buffering proxy can kill a long-lived stream): the
+// background worker keeps running and persists the reply, so poll the session until the assistant
+// message lands, then surface it — instead of stranding the user on "could not reach".
+//
+// (Moved here from AssistantBar.jsx with the runLLM split, doc 25 UI-05: it is a pure function of the
+// transcript and the turn, it is the third reader of the two identity rules above, and all three of
+// its call sites — the recovery poll, the terminal frame and the retry check — must agree with them.)
+export const completedAssistantReply = (messages, prior) => {
+  if (!assistantReplyCompletesTurn(messages, prior)) return null
+  const userIndex = assistantTurnIndex(messages, prior)
+  return userIndex >= 0 ? messages[userIndex + 1] || null : null
+}
+
 export const unavailableAssistantRecovery = Object.freeze({
   blocked: true,
   message: '(saved turn recovery is blocked: its durable instruction or permission mode is unavailable. Start a new chat to continue safely.)',

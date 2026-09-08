@@ -166,6 +166,10 @@ export const NARR = {
   research_completed: { render: (d) => `deep research (${d.trigger || 'auto'})${note(d.memo?.summary)}` },
   report_generated: { render: (d) => `run report updated${note(d.content?.headline, 90)}` },
   reflection_note: { render: (d) => `memory: ${d.n_lessons || 0} lesson${(d.n_lessons || 0) === 1 ? '' : 's'}${d.n_skills ? `, ${d.n_skills} skill${d.n_skills === 1 ? '' : 's'}` : ''}${note(d.note)}` },
+  // The MID-RUN half of the same memory write (skills_promoted): a card that settled early is
+  // promoted while the run is still going, so the feed says so at the node it happened at
+  // rather than only in the run-end note.
+  skills_promoted: { render: (d) => `memory: ${d.count || 0} settled skill${(d.count || 0) === 1 ? '' : 's'} promoted` },
   proxy_scored: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'score'),
     render: (d) => `proxy scored #${d.node_id}: ${fmt(d.score)}${d.skipped ? ' (skipped full eval)' : ''}`,
@@ -504,7 +508,7 @@ export const GROUPS = [
   ['eval', 'results', 'node_eval_started node_evaluated node_failed node_repaired node_confirmed best_confirmed proxy_scored ablate deps_installed confirm_done confirm_eval agent_validated holdout_evaluated stage_finished'],
   ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot speculation_depth_settled run_width_settled'],
   ['research', 'research', 'research_completed research_attempted deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
-  ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
+  ['report', 'report', 'report_generated reflection_note skills_promoted report_refresh_failed'],
   ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank asha_verdict'],
   ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped card_reopened inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
   ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired card_auto_dropped phase_progress'],

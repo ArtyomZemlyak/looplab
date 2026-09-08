@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -69,6 +68,29 @@ def proposal_limiter():
         import anyio
         _PROPOSAL_LIMITER = anyio.CapacityLimiter(_PROPOSAL_THREADS)
     return _PROPOSAL_LIMITER
+
+
+# THE SPECULATIVE CARD BUILD'S OWN POOL, and it is ONE token by derivation rather than by taste:
+# `_request_card_build` admits only the HEAD request and refuses while its key is in
+# `_spec_build_inflight`, so at most one such producer is ever in flight. It is NOT the proposal
+# pool -- that size is argued from "three lanes, each bounded to one in flight, doubled", and a
+# fifth consumer would make the number false while making the starvation it prevents worse. It is
+# not anyio's default either, which is the whole point: `_produce_card_build` offloaded a PAID
+# Developer session (`_build_requested_card`) onto the shared 40-token pool the evals pin, so a
+# speculative build queued behind the evaluations it was meant to run beside -- invisible in every
+# span, because the wait happens before the work starts. Same argument as `proposal_limiter`, same
+# `evaluate.py::_watch_limiter` precedent, one lane over.
+_CARD_BUILD_THREADS = 1
+_CARD_BUILD_LIMITER = None
+
+
+def card_build_limiter():
+    """The dedicated pool the offloaded speculative CARD BUILD rides. One object per process."""
+    global _CARD_BUILD_LIMITER
+    if _CARD_BUILD_LIMITER is None:
+        import anyio
+        _CARD_BUILD_LIMITER = anyio.CapacityLimiter(_CARD_BUILD_THREADS)
+    return _CARD_BUILD_LIMITER
 
 
 def _idea_vec_key(text: str) -> tuple[int, str]:
@@ -447,21 +469,29 @@ class NoveltyGateMixin:
         """Return the finite per-node timeout override that the evaluator will actually honor."""
         return effective_researcher_eval_timeout(self, idea)
 
-    def _literature_note(self, state: RunState, idea) -> dict:
-        """`{"literature": [...]}` when this proposal overlaps a paper THIS RUN read, else `{}`.
+    def _literature_rows(self, state: RunState, idea) -> list:
+        """The retrieved papers this proposal overlaps — ONE derivation, two consumers.
 
-        Empty — and therefore byte-identical to the historical audit row — with the flag off, with
-        no retrieved literature, or with no overlap above the floor. Never raises into the proposal
-        path: an audit annotation may not be the reason a run stops proposing.
+        The audit-row annotation (`_literature_note`) and the graded rubric's prior-art terminal
+        (`search/graded_novelty.py::grade_novelty(literature=…)`) must be looking at the same rows:
+        a grade whose rationale names a paper the row beside it does not carry would be a receipt
+        about a different measurement. Empty with the flag off, with no retrieved literature, or
+        with no overlap above the floor. Never raises into the proposal path: neither an annotation
+        nor a rubric input may be the reason a run stops proposing.
         """
         if not getattr(self, "_novelty_literature", False):
-            return {}
+            return []
         try:
-            rows = literature_overlap(self._idea_text(idea), getattr(state, "literature", None))
+            return literature_overlap(self._idea_text(idea), getattr(state, "literature", None))
         except Exception as exc:  # noqa: BLE001 — an annotation, never a gate; contained and counted
             from looplab.core.containment import contain
             contain("literature overlap", exc)
-            return {}
+            return []
+
+    def _literature_note(self, state: RunState, idea) -> dict:
+        """`{"literature": [...]}` when this proposal overlaps a paper THIS RUN read, else `{}` —
+        byte-identical to the historical audit row whenever there is nothing to say."""
+        rows = self._literature_rows(state, idea)
         return {"literature": rows} if rows else {}
 
     def _proposal_binding(self, state: RunState, idea: Idea, prospective_node_id=None) -> dict:
@@ -859,7 +889,20 @@ class NoveltyGateMixin:
         THOSE ATTRIBUTE SETS ARE DISJOINT TODAY and that is the whole of the safety: this lane owns
         `_novelty_feedback` and the `_pending_batch_*` trio; the eval-task consumers own the repair
         and triage paths and touch neither. It is not enforced anywhere, so a new attribute shared
-        between the two is a real race and this paragraph is the only place that says so."""
+        between the two is a real race and this paragraph is the only place that says so.
+
+        THE ENUMERATION ABOVE WAS INCOMPLETE FROM 2026-09-07 TO 2026-09-08, and the correction is
+        the reason it is worth reading twice. `orchestrator.py::_steady_state_build_lane` removed
+        the barrier's join, and it leased pair 0 of `_build_role_pairs` — which IS
+        `(self.researcher, self.developer)` — to a BUILD lane. So a third concurrent driver of the
+        same object appeared, and unlike the eval task its attribute set is NOT disjoint from this
+        one: a build writes `last_hyp_priority`/`last_foresight` on its researcher and this
+        function nulls exactly those in its `finally`. Driven: a build's own `last_foresight` read
+        back as None, so `foresight_selected` was never written for that node. The lane now takes
+        only NON-PRIMARY pairs (it mints one extra pooled pair rather than running one lane
+        narrower), which restores the premise this paragraph rests on. A future lane that leases
+        the primary pair re-opens it, and `tests/test_steady_state_build.py::
+        test_no_lane_ever_holds_the_PRIMARY_role_pair` is what says so."""
         n = max(1, int(n))
         self._pending_batch_dropped = []
         # Keep the exact returned objects as a one-shot capability for the rare unreserved
@@ -1168,7 +1211,10 @@ class NoveltyGateMixin:
         from looplab.search.concept_graph import skeleton_for
         from looplab.search.concept_tagging import experiment_nodes, graph_from_node_concepts
         from looplab.search.graded_novelty import grade_novelty, tag_idea_llm
-        seed = skeleton_for(state.task_id or "")
+        # THE GOAL, NOT ONLY THE ID (docs/BACKLOG.md, `concept-skeleton-matches-no-run`): a repo run
+        # answers `repo_task` here, which named no curated pack, so this precheck returned None on
+        # every run this project has recorded. The task's own words decide when the id cannot.
+        seed = skeleton_for(state.task_id or "", text=getattr(state, "goal", "") or "")
         seed = seed if seed.concepts() else None
         all_node_concepts = getattr(state, "node_concepts", None) or {}
         concept_provenance = getattr(state, "node_concept_provenance", None) or {}
@@ -1255,7 +1301,15 @@ class NoveltyGateMixin:
             # §21.20 Step 2: the gating grade is computed WITHOUT cross-run priors, so enabling the flag is
             # byte-identical to cross-run-off for SELECTION (grade_novelty checks its level 3 before the
             # same-run level 4, so feeding priors here would flip an L4 allow into a defer — not audit-only).
-            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags)
+            #
+            # THE RETRIEVED PAPERS DO GO IN, and the asymmetry with the line above is the point (doc 52
+            # row 32). A cross-run prior is withheld because it fires BEFORE level 4 and would turn an
+            # ALLOW into a defer; the literature terminal fires AFTER every graded level, so it can only
+            # rename the level-0 fall-through — a grade the pre-gate already defers on — and no proposal's
+            # admission can move. With `novelty_literature` off (the default) `_literature_rows` answers
+            # `[]` and the grade is byte-identical to its pre-2026-09-08 self.
+            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags,
+                                  literature=self._literature_rows(state, idea))
         except Exception:  # noqa: BLE001 — a grader/tagger/reconstruction hiccup must never block proposing
             return None
         # §21.20 Step 2: cross-run priors are AUDIT-ONLY and computed SEPARATELY from the grade above — we
@@ -1336,7 +1390,7 @@ class NoveltyGateMixin:
                                                          load_concept_aliases, load_concept_splits)
             from looplab.engine.memory import (
                 ConceptCapsuleStore,
-                _capsule_completeness,
+                capsule_completeness,
                 _capsule_concept_evidence_completeness,
             )
             # NOTE (full-CR TODO, §21.20.13 CR2a): this reloads+scans the whole capsule JSONL per proposal;
@@ -1360,9 +1414,9 @@ class NoveltyGateMixin:
             for similarity, capsule in caps:
                 raw = [str(x) for x in (capsule.get("concepts") or []) if str(x)]
                 evidence_meta = _capsule_concept_evidence_completeness(capsule)
-                concept_meta = _capsule_completeness(capsule, "concepts", len(raw))
+                concept_meta = capsule_completeness(capsule, "concepts", len(raw))
                 raw_outcomes = capsule.get("concept_outcomes") or {}
-                outcome_meta = _capsule_completeness(
+                outcome_meta = capsule_completeness(
                     capsule, "concept_outcomes",
                     len(raw_outcomes) if isinstance(raw_outcomes, dict) else 0,
                 )

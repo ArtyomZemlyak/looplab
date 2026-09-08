@@ -68,6 +68,29 @@ def same_file_entry(info: os.stat_result) -> tuple[int, int]:
     return int(info.st_dev), int(info.st_ino)
 
 
+def same_file_kind(info: os.stat_result) -> tuple[int, ...]:
+    """The MIDDLE tier: "the same directory entry, and still the same KIND of entry?" (doc 25 SC-11).
+
+    `(st_dev, st_ino, st_mode, st_file_attributes)` — `same_file_entry` plus the two fields that say
+    what the entry IS. It is the question every TOCTOU re-validation in the tree asks: a probe that
+    lstat'd a directory (or a regular lock file), did something slow, and must now prove the name it
+    is about to act on is still the same entry AND still a directory (a regular file) rather than a
+    symlink, a FIFO or a reparse point swapped in underneath it. Content is deliberately outside it:
+    a run directory gains children and a lock file gains bytes on the normal path, so `file_identity`
+    would fail every one of these fences on ordinary activity.
+
+    `st_mode` is compared WHOLE, permission bits included: these are ownership/authority fences, and a
+    `chmod` under a probe is a change it should notice rather than one it should reason about.
+
+    Four sites spelled this by hand and two of them omitted `st_file_attributes`, so on Windows an
+    entry that gained a reparse point compared EQUAL to the entry that was validated — the same
+    omission `file_identity` was written to stop. Adding it here is fail-closed: a mutated attribute
+    now reads as "not the entry I checked", which is what each of those callers does with a mismatch.
+    """
+    return (int(info.st_dev), int(info.st_ino), int(info.st_mode),
+            int(getattr(info, "st_file_attributes", 0) or 0))
+
+
 def _fsync_timeout() -> float:
     try:
         value = float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)
@@ -616,6 +639,28 @@ def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
     # ERROR_ALREADY_EXISTS, where POSIX mkdir(exist_ok=True) tolerates the identical race; and a
     # crash between mkdtemp and the move leaves a permanent '.{name}.{rand}.tmp' directory no sweeper
     # removes. Both are Windows-only and neither is reachable from the POSIX CI this repo runs.
+    #
+    # NARROWED 2026-09-08 — both halves are now WRITTEN and deliberately NOT shipped. Commit 6060f23e
+    # (reverted by the commit after it) has them, with four Windows-skipped cases at the end of
+    # `tests/test_atomicio.py`; running THOSE on a Windows box is what would verify either.
+    #
+    # The RACE half did not ship because the obvious fix is not the parity it looks like. Accepting a
+    # racing DIRECTORY winner on ERROR_ALREADY_EXISTS is not what the POSIX branch does: POSIX follows
+    # its tolerant `mkdir(exist_ok=True)` with `strict_fsync_parent`, which re-establishes the
+    # durability receipt for a directory ANY process created, however weak that creator's own policy
+    # was. Windows has no portable directory-handle sync, so tolerating there accepts an UNCONFIRMED
+    # publication inside the one helper in this module whose entire contract is fail-closed — a
+    # weakening dressed as an alignment, and exactly what the `replace=False` refusal was written to
+    # prevent. Closing it properly needs a Windows-only way to re-publish a directory entry somebody
+    # else created (a write-through rename of a throwaway sibling in the same parent is the candidate),
+    # and whether NTFS actually flushes the parent's metadata that way is not something this box can
+    # measure. The spurious refusal it costs meanwhile is real but bounded: two racing STRICT writers
+    # of one missing parent, one of them told INDETERMINATE about a claim that was fine.
+    #
+    # The LEFTOVER half is smaller — an age-guarded `os.rmdir` sweep of `.{name}.{rand}.tmp`
+    # directories, which rmdir's own refusal to remove a non-empty directory already makes fairly
+    # safe — and it did not ship on its own because a garbage collector that deletes directories on a
+    # durability path, which nobody has ever executed, is not worth a stranded empty directory.
     p = Path(path)
     _ensure_strict_parent(p.parent)
     fd, tmpname = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")

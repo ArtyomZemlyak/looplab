@@ -302,7 +302,7 @@ def test_case_upsert_fails_closed_without_cross_process_lock(tmp_path, monkeypat
         required_values.append(required)
         raise EventStoreLockError(lock_path, OSError("locking unavailable"))
 
-    monkeypatch.setattr("looplab.events.eventstore._interprocess_lock", unavailable)
+    monkeypatch.setattr("looplab.events.eventstore.interprocess_lock", unavailable)
     library = JsonlCaseLibrary(path)
     with pytest.raises(EventStoreLockError, match="locking unavailable"):
         library.add({"task_id": "new", "goal": "must not land", "direction": "min",

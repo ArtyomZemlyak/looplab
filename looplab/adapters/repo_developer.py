@@ -27,7 +27,7 @@ import math as _math
 
 from typing import Optional
 
-from looplab.core.errors import BudgetExceeded, OperatorRefusal, is_run_ending
+from looplab.core.errors import BudgetExceeded, OperatorRefusal, budget_stop_leaf
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -1299,15 +1299,15 @@ class LLMRepoDeveloper:
         except Exception:  # noqa: BLE001 — an extra rung never breaks the build it is helping
             return ""
         text = str(getattr(result, "content", "") or "")
-        # OPEN[step-feedback-keeps-the-head-of-the-output] when the cap binds it keeps the START of
-        # a command's output and drops the END — the half this module everywhere else treats as the
-        # one a reader must not lose.
-        # proof:`present:text[:_STEP_FEEDBACK_CAP]@looplab/adapters/repo_developer.py`
-        # REVIEW 2026-08-30 (consistency): the measured corpus (median 782, max 2,614 chars) makes
-        # the 6,000 cap inert today; the day a runaway command hits it, the failure text at the
-        # tail is what vanishes. `_clip(keep="tail")` / `stream_tails` are the house rule and one
-        # import away.
-        return text[:_STEP_FEEDBACK_CAP]
+        # TAIL, and the cut SAYS SO -- the house rule for command output (`tools/_base.py::clip`,
+        # the same call `dev_commands`/`dev_probe`/`shell_tools` make). A head cut dropped the END,
+        # which for a command is where the failure and the final metric line are, and it dropped it
+        # SILENTLY: a clipped output was byte-indistinguishable from a complete one. The measured
+        # corpus (median 782, p90 2,541, max 2,614 chars) means the 6,000 cap binds on nothing that
+        # has actually been produced, so today this is byte-identical; it changes the day a runaway
+        # command hits the cap, which is the day it matters.
+        from looplab.tools._base import clip
+        return clip(text, _STEP_FEEDBACK_CAP, keep="tail", note="…(truncated)…\n")
 
     def _budget_note(self) -> str:
         """The run's remaining LLM spend, worded for the session that is spending it, or "".
@@ -2181,7 +2181,6 @@ class LLMRepoDeveloper:
              base: Optional[dict] = None, base_note: str = "",
              base_deleted: Optional[list] = None, co_parents=()) -> str:
         from looplab.agents.agent import run_phase
-        from looplab.core import tracing
         # Cleared per CALL, before anything can fail: this developer instance is SHARED across
         # concurrent `_evaluate` tasks (see the `repaired_files` snapshot note in evaluate.py), so a
         # stale value left by a sibling node's repair would make THIS node re-run an expensive stage
@@ -2319,49 +2318,14 @@ class LLMRepoDeveloper:
         # full evaluation before `INERT_REPAIR_LIMIT` abandons it (~2.7 h on the v4 node 6 link).
         repair_verdict = ""
         try:
-            operator_stages: list = []
-            declared: list = []
-            carried_over = False   # M7: declared came from a carried-over parent manifest, not this phase
-            manifest_protected = False
+            stage_note = ""
             if is_fresh_repo:
-                # Skip the STAGES phase when the OPERATOR already declared an `eval.stages` pipeline the
-                # engine will actually USE: _resolve_stages takes a VALID operator list verbatim (a
-                # Developer manifest would be IGNORED) but falls through to the Developer manifest on an
-                # invalid one — `_operator_stage_list` gates on that SAME shared validation, not
-                # truthiness. Protecting
-                # `looplab_stages.json` is the operator knob that disables Developer pipelines entirely:
-                # skip the phase (its manifest could never materialize) instead of burning a full LLM
-                # loop whose output workspace-materialization silently drops.
-                operator_stages = op_stages
-                manifest_protected = SurfacePolicy(
-                    None, self._protected, self._prefixes, protected_exact=True,
-                    check_escapes=False).check("looplab_stages.json") is not None
-                if operator_stages:
-                    declared = operator_stages
-                elif not manifest_protected:
-                    # STAGES is the Developer's own sub-phase (its own trace band, via the phase
-                    # stamped on its generations).
-                    with tracing.operation("stages"):
-                        declared = self._declare_stages_phase(idea, write, system) or []
-                    # M7: a DEGRADED stages phase (declared == []) leaves any PARENT manifest carried
-                    # over on an improve (base preload) still materialized in write.files, and the
-                    # eval's _resolve_stages WILL run it. Recompute `declared` from that materialized
-                    # manifest so the implement prompt matches the pipeline the eval actually uses —
-                    # otherwise the model is told "no stages, train a FRESH model" while the parent's
-                    # prep→train stages run (the model trains twice; the reported metric reflects the
-                    # entrypoint's own training, not the declared pipeline).
-                    if not declared:
-                        declared = self._materialized_stage_list(write)
-                        carried_over = bool(declared)
-                # Tell the implement sessions what pipeline ACTUALLY exists. The old prompt asserted
-                # "your STAGES phase already declared a train stage" unconditionally — after a failed/
-                # empty stages phase the model then wrote a score-only entrypoint that scored a stale
-                # checkpoint (or crashed on a missing one) instead of training.
-                # The binding stays: `_run_step` below is passed `stage_note=stage_note`, so
+                # The binding stays: `_run_fresh` below is passed `stage_note=stage_note`, so
                 # dropping it here would be an UnboundLocalError on the plan path (pyflakes caught
-                # exactly this on the first draft of the extraction).
-                stage_note = self._stage_note(operator_stages, declared, carried_over,
-                                              manifest_protected)
+                # exactly this on the first draft of the extraction). The `""` above makes that
+                # unrepresentable rather than merely absent — the name is bound on both paths and
+                # only the fresh one ever reads it.
+                stage_note = self._fresh_stage_note(idea, write, system, op_stages)
                 user += stage_note
             # LAST, because the block is a snapshot of what THIS workspace has established and the
             # `stages` phase above has just read the manifest and the config into it. Rendered where
@@ -2410,88 +2374,8 @@ class LLMRepoDeveloper:
                 return refusal
 
             if is_fresh_repo:
-                # PLAN is the Developer's second sub-phase (its own trace band). IMPLEMENT runs under
-                # the orchestrator's "implement" span (so its generations band there, and non-repo
-                # developers keep that band unchanged).
-                steps = []
-                if getattr(self, "_plan_decompose", False):
-                    with tracing.operation("plan"):
-                        steps = self._propose_plan(system, idea, write, baseline_note=base_note)
-                if len(steps) >= getattr(self, "_plan_min_steps", 2):
-                    # A step error deliberately can't abort the plan — later steps and the eval still
-                    # run on whatever got written. But it must not vanish either: discarded, a later
-                    # eval failure could never be attributed to the step that broke. Collect them and
-                    # stamp ONE span so the trace says which steps failed and why.
-                    #
-                    # The SAME argument applies to a step that does not error: the plan is a
-                    # proposal, the artefact is the truth, and until this loop diffed the working set
-                    # around each step nothing recorded which step actually produced which shipped
-                    # file (or that a step produced nothing at all). Each step now gets its own
-                    # `plan_step` trace band — which is what the phase list above has claimed since
-                    # it was written, and was not true: `_run_step` calls `run_phase`, which opens no
-                    # operation span, so all K sessions collapsed into one band with no ordinal — and
-                    # the reconciliation is stamped as `plan_steps` (see `plan_step_attribution`).
-                    step_errors: list = []
-                    observed: list = []
-                    # The measurement the NEXT step is handed. Empty for step 1 (nothing has been
-                    # edited yet) and re-emptied after every step, so a stale number from two steps
-                    # ago can never be presented as this step's result.
-                    feedback = ""
-                    for i, step in enumerate(steps, 1):
-                        before, before_deleted = dict(write.files), set(write.deleted)
-                        # Cleared per step, not per plan: `last_budget_exhausted` is sticky on the
-                        # developer, so without this a single cut step would mark every later one.
-                        self.last_budget_exhausted = ""
-                        self.last_budget_facts = {}
-                        with tracing.operation("plan_step", index=i, total=len(steps),
-                                               title=str(step.get("title") or "")[:120]):
-                            note = self._run_step(
-                                idea, step, i, len(steps), write, system, stage_note=stage_note,
-                                baseline_note=base_note, feedback=feedback,
-                                # The manifest-vs-script bounce belongs to the LAST step, which is
-                                # the one already told to make the entrypoint run end to end.
-                                validate=_validate_build if i == len(steps) else None)
-                        step_cutoff = str(getattr(self, "last_budget_exhausted", "") or "").strip()
-                        # Compare CONTENT, not just presence: `edit_file` patches in place, and a
-                        # step that rewrote a file byte-for-byte changed nothing and must not be
-                        # credited with authoring it.
-                        observed.append({
-                            "wrote": sorted(p for p, body in write.files.items()
-                                            if before.get(p) != body),
-                            "deleted": sorted(set(write.deleted) - before_deleted),
-                            "cutoff": step_cutoff,
-                            # What the cut step had spent and how long it ran. Empty for a step
-                            # that finished on its own terms, which is most of them.
-                            "cutoff_seconds": (getattr(self, "last_budget_facts", {}) or {}).get("seconds"),
-                            "cutoff_detail": (getattr(self, "last_budget_facts", {}) or {}).get("detail") or "",
-                            "error": note})
-                        if note:
-                            step_errors.append(note)
-                        # Measure only when this step actually CHANGED the working set, and never
-                        # after the last step: the final artefact goes straight to the engine's own
-                        # evaluation, so a run here would have no reader and would cost 40 s.
-                        feedback = ""
-                        if i < len(steps) and (observed[-1]["wrote"] or observed[-1]["deleted"]):
-                            feedback = self._step_feedback(write, index=i)
-                    with tracing.operation(
-                            "plan_steps",
-                            **plan_step_attribution(steps, observed, write.files)):
-                        pass
-                    if step_errors:
-                        with tracing.operation("plan_steps_failed", failed=len(step_errors),
-                                               total=len(steps),
-                                               detail="; ".join(step_errors)[:600]):
-                            pass
-                else:
-                    # single-session implement is TERMINAL (evaluation reads no brief) → consume the
-                    # briefs + read-cache, but no wasted summary call (handoff=False).
-                    run_phase(self.client, tools, messages, self._emit_spec(),
-                              label="Developer·implement", handoff=False,
-                              finalize=lambda a: (a or {}).get("summary", ""),
-                              validate=_validate_build,
-                              fallback=lambda m: "", on_budget=self._note_session_budget,
-                              on_tool_result=self._established_hook("implement"),
-                      **self._session_opts())
+                self._run_fresh(idea, write, system, messages, tools, stage_note=stage_note,
+                                base_note=base_note, validate_build=_validate_build)
             else:
                 # repair / toy single session — terminal, so no summary (and repair isn't in a scope
                 # anyway when it runs inline during eval; the debug-operator repair gets an empty ledger).
@@ -2573,16 +2457,18 @@ class LLMRepoDeveloper:
         except BudgetExceeded:
             raise
         except OperatorRefusal as e:
-            if not is_run_ending(e):
+            # `budget_stop_leaf`, not `is_run_ending`: the `except BudgetExceeded: raise` above
+            # already took every BARE ceiling, and `is_run_ending` is exactly that isinstance — so
+            # the only exception this test can still see is a WRAPPED one (a ceiling re-raised as a
+            # `ConfigRefusal`/`LLMError` from inside the session, or carried in an `ExceptionGroup`
+            # from a nested task group), which is the case the else-branch below exists for and the
+            # narrow predicate answered False for. Same fix as `engine/evaluate.py`'s repair guard.
+            if budget_stop_leaf(e) is None:
                 # A FAULT, not an ending: an outage, a bad key, a misconfiguration. These keep the
                 # crash sentinel on purpose -- the orchestrator pauses, and "resume once it's fixed"
                 # is the right sentence for them. Only the ceiling is re-raised. See
                 # `errors.is_run_ending` for why the five siblings are not alike.
-                self.last_files = dict(write.files)
-                self.last_deleted = list(write.deleted)
-                from looplab.core.models import developer_artifact_footprint
-                self.last_footprint = developer_artifact_footprint(
-                    idea.footprint, "", self.last_files)
+                self._record_result(write, idea)
                 return f"{DEVELOPER_ERROR_PREFIX} {e})"
             # THE CEILING IS NOT A CRASH, and dressing it as one cost more than a wrong word.
             # `BudgetExceeded` is an `Exception`, so the blanket handler below turned "this run has
@@ -2605,19 +2491,9 @@ class LLMRepoDeveloper:
             # propagation and adds the four siblings that are faults rather than endings.
             raise
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
-            self.last_files = dict(write.files)
-            self.last_edit_calls = int(getattr(write, "edit_calls", 0) or 0)
-            self.last_deleted = list(write.deleted)
-            from looplab.core.models import developer_artifact_footprint
-            self.last_footprint = developer_artifact_footprint(
-                idea.footprint, "", self.last_files)
+            self._record_result(write, idea)
             return f"{DEVELOPER_ERROR_PREFIX} {e})"
-        self.last_files = dict(write.files)
-        self.last_edit_calls = int(getattr(write, "edit_calls", 0) or 0)
-        self.last_deleted = list(write.deleted)
-        from looplab.core.models import developer_artifact_footprint
-        self.last_footprint = developer_artifact_footprint(
-            idea.footprint, "", self.last_files)
+        self._record_result(write, idea)
         # A REPAIR ONLY, and only the exact sentinel. The build-time `implement` path has nothing to
         # be stuck about and never carries the contract, so its summary stays discarded and a fresh
         # implement is byte-identical. Everything else a repair summary might say is prose about an
@@ -2656,6 +2532,180 @@ class LLMRepoDeveloper:
         if refusal:
             return refusal
         return ""
+
+    def _fresh_stage_note(self, idea: Idea, write, system: str, op_stages: list) -> str:
+        """The STAGES phase of a FRESH repo build, and the note it puts in the user message.
+
+        Extracted from `_run` (doc 25 RA-07): the tree below is the only reader of
+        `operator_stages` / `declared` / `carried_over` / `manifest_protected`, which were four
+        locals initialized twenty lines above their `if is_fresh_repo:` block and dead on the
+        repair path. They are method-local now, so the four-way precedence the note renders is
+        derived and consumed in one place instead of being threaded through `_run`'s spine.
+        Two of the four inits went with the guard: `operator_stages` and
+        `manifest_protected` were pre-set only so the repair path could fall past their
+        assignments, and both are assigned unconditionally here.
+
+        Returns the note, never None: `_run` concatenates it onto the user message AND hands
+        the same string to every plan step, so the two can never describe different pipelines.
+        """
+        from looplab.core import tracing
+        declared: list = []
+        carried_over = False   # M7: declared came from a carried-over parent manifest, not this phase
+        # Skip the STAGES phase when the OPERATOR already declared an `eval.stages` pipeline the
+        # engine will actually USE: _resolve_stages takes a VALID operator list verbatim (a
+        # Developer manifest would be IGNORED) but falls through to the Developer manifest on an
+        # invalid one — `_operator_stage_list` gates on that SAME shared validation, not
+        # truthiness. Protecting
+        # `looplab_stages.json` is the operator knob that disables Developer pipelines entirely:
+        # skip the phase (its manifest could never materialize) instead of burning a full LLM
+        # loop whose output workspace-materialization silently drops.
+        operator_stages = op_stages
+        manifest_protected = SurfacePolicy(
+            None, self._protected, self._prefixes, protected_exact=True,
+            check_escapes=False).check("looplab_stages.json") is not None
+        if operator_stages:
+            declared = operator_stages
+        elif not manifest_protected:
+            # STAGES is the Developer's own sub-phase (its own trace band, via the phase
+            # stamped on its generations).
+            with tracing.operation("stages"):
+                declared = self._declare_stages_phase(idea, write, system) or []
+            # M7: a DEGRADED stages phase (declared == []) leaves any PARENT manifest carried
+            # over on an improve (base preload) still materialized in write.files, and the
+            # eval's _resolve_stages WILL run it. Recompute `declared` from that materialized
+            # manifest so the implement prompt matches the pipeline the eval actually uses —
+            # otherwise the model is told "no stages, train a FRESH model" while the parent's
+            # prep→train stages run (the model trains twice; the reported metric reflects the
+            # entrypoint's own training, not the declared pipeline).
+            if not declared:
+                declared = self._materialized_stage_list(write)
+                carried_over = bool(declared)
+        # Tell the implement sessions what pipeline ACTUALLY exists. The old prompt asserted
+        # "your STAGES phase already declared a train stage" unconditionally — after a failed/
+        # empty stages phase the model then wrote a score-only entrypoint that scored a stale
+        # checkpoint (or crashed on a missing one) instead of training.
+        return self._stage_note(operator_stages, declared, carried_over,
+                                manifest_protected)
+
+    def _run_fresh(self, idea: Idea, write, system: str, messages: list, tools, *,
+                   stage_note: str, base_note: str, validate_build) -> None:
+        """PLAN + IMPLEMENT for a fresh repo build — the second half of the three-phase path.
+
+        Extracted from `_run` (doc 25 RA-07), which recommended exactly this cut. The artefact
+        travels on `write`, so this returns nothing: everything it produces is already in the
+        working set `_run`'s epilogue publishes. The seams it needs are PASSED rather than
+        recomputed — `messages`/`tools` because the repair path builds the identical pair and a
+        second construction here could silently drift from it, `stage_note` because every plan
+        step must be told the SAME pipeline the user message asserted, and `validate_build`
+        because the one-bounce budget is shared with the repair rule and cannot be per-phase.
+        """
+        from looplab.agents.agent import run_phase
+        from looplab.core import tracing
+        # PLAN is the Developer's second sub-phase (its own trace band). IMPLEMENT runs under
+        # the orchestrator's "implement" span (so its generations band there, and non-repo
+        # developers keep that band unchanged).
+        steps = []
+        if getattr(self, "_plan_decompose", False):
+            with tracing.operation("plan"):
+                steps = self._propose_plan(system, idea, write, baseline_note=base_note)
+        if len(steps) >= getattr(self, "_plan_min_steps", 2):
+            # A step error deliberately can't abort the plan — later steps and the eval still
+            # run on whatever got written. But it must not vanish either: discarded, a later
+            # eval failure could never be attributed to the step that broke. Collect them and
+            # stamp ONE span so the trace says which steps failed and why.
+            #
+            # The SAME argument applies to a step that does not error: the plan is a
+            # proposal, the artefact is the truth, and until this loop diffed the working set
+            # around each step nothing recorded which step actually produced which shipped
+            # file (or that a step produced nothing at all). Each step now gets its own
+            # `plan_step` trace band — which is what the phase list above has claimed since
+            # it was written, and was not true: `_run_step` calls `run_phase`, which opens no
+            # operation span, so all K sessions collapsed into one band with no ordinal — and
+            # the reconciliation is stamped as `plan_steps` (see `plan_step_attribution`).
+            step_errors: list = []
+            observed: list = []
+            # The measurement the NEXT step is handed. Empty for step 1 (nothing has been
+            # edited yet) and re-emptied after every step, so a stale number from two steps
+            # ago can never be presented as this step's result.
+            feedback = ""
+            for i, step in enumerate(steps, 1):
+                before, before_deleted = dict(write.files), set(write.deleted)
+                # Cleared per step, not per plan: `last_budget_exhausted` is sticky on the
+                # developer, so without this a single cut step would mark every later one.
+                self.last_budget_exhausted = ""
+                self.last_budget_facts = {}
+                with tracing.operation("plan_step", index=i, total=len(steps),
+                                       title=str(step.get("title") or "")[:120]):
+                    note = self._run_step(
+                        idea, step, i, len(steps), write, system, stage_note=stage_note,
+                        baseline_note=base_note, feedback=feedback,
+                        # The manifest-vs-script bounce belongs to the LAST step, which is
+                        # the one already told to make the entrypoint run end to end.
+                        validate=validate_build if i == len(steps) else None)
+                step_cutoff = str(getattr(self, "last_budget_exhausted", "") or "").strip()
+                # Compare CONTENT, not just presence: `edit_file` patches in place, and a
+                # step that rewrote a file byte-for-byte changed nothing and must not be
+                # credited with authoring it.
+                observed.append({
+                    "wrote": sorted(p for p, body in write.files.items()
+                                    if before.get(p) != body),
+                    "deleted": sorted(set(write.deleted) - before_deleted),
+                    "cutoff": step_cutoff,
+                    # What the cut step had spent and how long it ran. Empty for a step
+                    # that finished on its own terms, which is most of them.
+                    "cutoff_seconds": (getattr(self, "last_budget_facts", {}) or {}).get("seconds"),
+                    "cutoff_detail": (getattr(self, "last_budget_facts", {}) or {}).get("detail") or "",
+                    "error": note})
+                if note:
+                    step_errors.append(note)
+                # Measure only when this step actually CHANGED the working set, and never
+                # after the last step: the final artefact goes straight to the engine's own
+                # evaluation, so a run here would have no reader and would cost 40 s.
+                feedback = ""
+                if i < len(steps) and (observed[-1]["wrote"] or observed[-1]["deleted"]):
+                    feedback = self._step_feedback(write, index=i)
+            with tracing.operation(
+                    "plan_steps",
+                    **plan_step_attribution(steps, observed, write.files)):
+                pass
+            if step_errors:
+                with tracing.operation("plan_steps_failed", failed=len(step_errors),
+                                       total=len(steps),
+                                       detail="; ".join(step_errors)[:600]):
+                    pass
+        else:
+            # single-session implement is TERMINAL (evaluation reads no brief) → consume the
+            # briefs + read-cache, but no wasted summary call (handoff=False).
+            run_phase(self.client, tools, messages, self._emit_spec(),
+                      label="Developer·implement", handoff=False,
+                      finalize=lambda a: (a or {}).get("summary", ""),
+                      validate=validate_build,
+                      fallback=lambda m: "", on_budget=self._note_session_budget,
+                      on_tool_result=self._established_hook("implement"),
+              **self._session_opts())
+
+    def _record_result(self, write, idea: Idea) -> None:
+        """Publish this call's working set on the shared developer instance (doc 25 RA-07).
+
+        The ONE epilogue for all three exits of `_run` — the `OperatorRefusal` fault, the blanket
+        developer-hiccup trap, and the clean return. It was hand-copied at all three, and the copies
+        had already drifted: the fault path published `last_files`/`last_deleted`/`last_footprint`
+        but not `last_edit_calls`, so a build that edited ten files and then hit a provider outage
+        reported those files under ZERO edit attempts — a receipt whose two halves came from
+        different facts. There is no path on which that omission is right: `_run` clears
+        `last_edit_calls` at entry for the shared-instance reason, so the count published here can
+        only ever be THIS call's attempts.
+
+        The engine reads all four off the developer through the `DEVELOPER_OUTPUT_ATTRS` seam
+        (`agents/roles.py`), so `write.files` / `write.deleted` are COPIED: the write tools keep
+        mutating their own containers after this returns.
+        """
+        self.last_files = dict(write.files)
+        self.last_edit_calls = int(getattr(write, "edit_calls", 0) or 0)
+        self.last_deleted = list(write.deleted)
+        from looplab.core.models import developer_artifact_footprint
+        self.last_footprint = developer_artifact_footprint(
+            idea.footprint, "", self.last_files)
 
     def implement(self, idea: Idea) -> str:
         return self._run(idea)

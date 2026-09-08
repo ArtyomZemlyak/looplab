@@ -133,6 +133,7 @@ def test_the_developer_client_is_used_when_the_researcher_has_none():
 @pytest.mark.parametrize("module,holder,function", [
     ("looplab.engine.verifier_tiebreak", "VerifierTiebreakMixin", "_verifier_soundness"),
     ("looplab.engine.novelty", "NoveltyGateMixin", "_verified_failed_direction_reopen"),
+    ("looplab.engine.value_estimate", "ValueEstimateMixin", "_branch_headroom"),
 ])
 def test_no_engine_site_re_derives_the_parser_walk(module, holder, function):
     import importlib
