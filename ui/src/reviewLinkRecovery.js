@@ -1,10 +1,17 @@
+// The create-recovery DERIVATION and its storage/validation helpers live in
+// `capabilityRecovery.js` since 2026-09-08: the Assistant share links needed the same protocol, and
+// a second copy of these bytes would validate a receipt against a token that authenticates nothing
+// (doc 25 SC-10, the browser twin of `serve/capability_store.py`). What stays here is the review
+// link's own shapes and its route-query envelope.
+import {
+  REQUEST_ID_RE, TOKEN_SECRET_RE, asciiJsonString, assertRecoveryCrypto, createRecoveryIdentity,
+  onlyKeys, recoveryBearer, recoveryDigest, recoveryError, safeText, storageTarget,
+} from './capabilityRecovery.js'
 import { encodeRunRouteState, parseRunRouteState } from './runRouteState.js'
 
 const STORAGE_PREFIX = 'll.review-create.v1.'
 const VERSION = 1
 const GENERATION_RE = /^[0-9a-f]{64}$/
-const REQUEST_ID_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/
-const TOKEN_SECRET_RE = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/
 const LINK_ID_RE = /^rvl_[0-9a-f]{32}$/
 const ANY_LINK_ID_RE = /^rvl_(?:[0-9a-f]{12}|[0-9a-f]{32})$/
 const TOKEN_RE = /^rv_([0-9a-f]{32})_([A-Za-z0-9_-]{43})$/
@@ -15,78 +22,12 @@ const ENVELOPE_KEYS = new Set([
   'requestId', 'tokenSecret', 'routeQuery', 'phase', 'linkId', 'token', 'expiresAt', 'updatedAt',
 ])
 const TOMBSTONE_KEYS = new Set(['version', 'terminal'])
-const BASE64_URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
 
-const onlyKeys = (value, allowed) => Object.keys(value).every(key => allowed.has(key))
-const safeText = (value, max) => typeof value === 'string' && value.length > 0
-  && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value)
-const storageTarget = storage => {
-  if (storage !== undefined) return storage
-  try { return typeof sessionStorage === 'undefined' ? null : sessionStorage }
-  catch { return null }
-}
-const recoveryError = (code, message, cause = null) => Object.assign(
-  new Error(message, cause ? { cause } : undefined), { code },
-)
-
-const encodeBase64Url = bytes => {
-  let out = ''
-  for (let offset = 0; offset < bytes.length; offset += 3) {
-    const left = bytes[offset]
-    const middle = offset + 1 < bytes.length ? bytes[offset + 1] : null
-    const right = offset + 2 < bytes.length ? bytes[offset + 2] : null
-    out += BASE64_URL[left >> 2]
-    out += BASE64_URL[((left & 3) << 4) | (middle == null ? 0 : middle >> 4)]
-    if (middle != null) {
-      out += BASE64_URL[((middle & 15) << 2) | (right == null ? 0 : right >> 6)]
-    }
-    if (right != null) out += BASE64_URL[right & 63]
-  }
-  return out
-}
-
-const decodeBase64Url = value => {
-  if (!TOKEN_SECRET_RE.test(value || '')) return null
-  const output = []
-  let bits = 0
-  let buffer = 0
-  for (const character of value) {
-    const index = BASE64_URL.indexOf(character)
-    if (index < 0) return null
-    buffer = (buffer << 6) | index
-    bits += 6
-    if (bits >= 8) {
-      bits -= 8
-      output.push((buffer >> bits) & 0xff)
-      buffer &= (1 << bits) - 1
-    }
-  }
-  return output.length === 32 && buffer === 0 ? new Uint8Array(output) : null
-}
-
-const uuidFromBytes = bytes => {
-  const copy = new Uint8Array(bytes)
-  copy[6] = (copy[6] & 0x0f) | 0x40
-  copy[8] = (copy[8] & 0x3f) | 0x80
-  const hex = [...copy].map(value => value.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
-}
 
 export function assertReviewLinkCrypto(source = globalThis.crypto) {
-  if (!source || typeof source.getRandomValues !== 'function' || !source.subtle
-      || typeof source.subtle.digest !== 'function' || typeof source.subtle.importKey !== 'function'
-      || typeof source.subtle.sign !== 'function'
-      || typeof TextEncoder === 'undefined') {
-    throw recoveryError('REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
-      'Secure browser cryptography is unavailable; no review-link request was sent.')
-  }
-  return source
+  return assertRecoveryCrypto(source, 'REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
+    'Secure browser cryptography is unavailable; no review-link request was sent.')
 }
-
-const asciiJsonString = value => JSON.stringify(String(value)).replace(
-  /[\u0080-\uffff]/g,
-  character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
-)
 
 export async function deriveReviewLinkId(runId, requestId, source = globalThis.crypto) {
   if (!REQUEST_ID_RE.test(requestId || '') || !safeText(String(runId || ''), 255)) {
@@ -94,45 +35,16 @@ export async function deriveReviewLinkId(runId, requestId, source = globalThis.c
       'The saved review-link identity is malformed.')
   }
   assertReviewLinkCrypto(source)
-  try {
-    const identity = `{"request_id":${asciiJsonString(requestId)},"run_id":${asciiJsonString(runId)},"v":1}`
-    const material = new TextEncoder().encode(`looplab-review-create-id-v1\u0000${identity}`)
-    const digest = new Uint8Array(await source.subtle.digest('SHA-256', material))
-    const prefix = [...digest.slice(0, 16)]
-      .map(value => value.toString(16).padStart(2, '0')).join('')
-    return `rvl_${prefix}`
-  } catch (cause) {
-    if (cause?.code) throw cause
-    throw recoveryError('REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
-      'The saved review-link identity could not be verified.', cause)
-  }
+  const identity = `{"request_id":${asciiJsonString(requestId)},"run_id":${asciiJsonString(runId)},"v":1}`
+  const digest = await recoveryDigest('looplab-review-create-id-v1', identity, source,
+    'REVIEW_RECOVERY_CRYPTO_UNAVAILABLE', 'The saved review-link identity could not be verified.')
+  return `rvl_${digest.slice(0, 32)}`
 }
 
 export function createReviewLinkIdentity(source = globalThis.crypto) {
   assertReviewLinkCrypto(source)
-  const secret = new Uint8Array(32)
-  try { source.getRandomValues(secret) } catch (cause) {
-    throw recoveryError('REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
-      'Secure browser randomness failed; no review-link request was sent.', cause)
-  }
-  let requestId = ''
-  if (typeof source.randomUUID === 'function') {
-    try { requestId = String(source.randomUUID()).toLowerCase() } catch { /* CSPRNG fallback below */ }
-  }
-  if (!REQUEST_ID_RE.test(requestId)) {
-    const requestBytes = new Uint8Array(16)
-    try { source.getRandomValues(requestBytes) } catch (cause) {
-      throw recoveryError('REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
-        'Secure browser randomness failed; no review-link request was sent.', cause)
-    }
-    requestId = uuidFromBytes(requestBytes)
-  }
-  const tokenSecret = encodeBase64Url(secret)
-  if (!REQUEST_ID_RE.test(requestId) || !TOKEN_SECRET_RE.test(tokenSecret)) {
-    throw recoveryError('REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
-      'Secure review-link identity generation failed; no request was sent.')
-  }
-  return { requestId, tokenSecret }
+  return createRecoveryIdentity(source, 'REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
+    'Secure browser randomness failed; no review-link request was sent.')
 }
 
 export async function deriveReviewLinkToken(linkId, tokenSecret, source = globalThis.crypto) {
@@ -142,20 +54,12 @@ export async function deriveReviewLinkToken(linkId, tokenSecret, source = global
     throw recoveryError('REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
       'Secure browser cryptography is unavailable; the saved review link cannot be verified.')
   }
-  const secret = decodeBase64Url(tokenSecret)
-  if (!secret) throw recoveryError('REVIEW_RECOVERY_PROTOCOL_ERROR',
+  const bearer = await recoveryBearer('looplab-review-bearer-v1', tokenSecret, linkId, source,
+    'REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
+    'The saved review link could not be verified with secure browser cryptography.')
+  if (bearer === null) throw recoveryError('REVIEW_RECOVERY_PROTOCOL_ERROR',
     'The saved review-link secret is malformed.')
-  try {
-    const key = await source.subtle.importKey(
-      'raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
-    )
-    const message = new TextEncoder().encode(`looplab-review-bearer-v1\u0000${linkId}`)
-    const signature = await source.subtle.sign('HMAC', key, message)
-    return `rv_${linkId.slice(4)}_${encodeBase64Url(new Uint8Array(signature))}`
-  } catch (cause) {
-    throw recoveryError('REVIEW_RECOVERY_CRYPTO_UNAVAILABLE',
-      'The saved review link could not be verified with secure browser cryptography.', cause)
-  }
+  return `rv_${linkId.slice(4)}_${bearer}`
 }
 
 export const reviewRecoveryScope = (origin, prefix = '') => `${String(origin || '')}${String(prefix || '')}`

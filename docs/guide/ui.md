@@ -315,7 +315,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   the chat's id), an expiry, and a **⤫ unshare** that revokes every link for that chat while keeping
   the conversation. A link is **frozen** at the messages that existed when it was created, so
   continuing the chat never retroactively publishes what you say next; pass `live: true` to the share
-  API for a link that follows the conversation instead.
+  API for a link that follows the conversation instead. The button carries a **create-recovery
+  envelope** (`request_id` + `token_secret`, the same contract the review links use): the browser
+  owns the identity, so a response lost in flight is recovered by clicking again — the retry answers
+  `200` with `replayed: true` and the identical URL instead of publishing a second live link nobody
+  holds. `201` means the link was created; `410 assistant_share_replay_terminal` means the recovered
+  link was already revoked or expired, and a new one has to be created. Send both fields or neither;
+  half an envelope is refused (`400 assistant_share_recovery_invalid`), and reusing one `request_id`
+  with different terms is `409 assistant_share_recovery_conflict` rather than a silent replacement.
 - **Comment threads** — event-sourced operator discussion pinned to a run or a specific node, with an
   edit history and a resolve/reopen state. The view is served as authenticated current + history
   projections (`GET /api/runs/{run_id}/comments`, `…/comments/{id}/history`); the operator writes the
