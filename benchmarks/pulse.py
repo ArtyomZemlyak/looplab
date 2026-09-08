@@ -176,6 +176,36 @@ def tail_after_the_last_node(got: dict) -> float | None:
     return 100.0 * (spend - at) / spend
 
 
+def unscored_result(root: str, name: str, got: dict) -> str | None:
+    """A probe that ENDED holding evaluated nodes and no `final.json` -- money spent, nothing scored.
+
+    §351. `run_probe.sh` runs two steps after the engine: `extract_champion.py`, then a TEST
+    evaluation into `final.json`. `resume_paused` (§338) restarts the ENGINE and nothing else, and
+    the driver has long exited by then -- so a probe that pauses, is resumed and then finishes has
+    no one left to run either step. remDL13 is the case: its driver wrote "чемпион: НЕТ" at
+    06:21 and exited; two resumes carried it to $0.978 and a node scoring 5.3676 on TRAIN; and for
+    eleven hours nothing said the result was never scored. The champion was still extractable for
+    free -- node 1 with its Cython siblings -- and came back 5.1345 on TEST.
+
+    Detection, not repair: the two commands are printed rather than run, because scoring occupies a
+    22-cpu lane and that is the operator's call, not a monitor's.
+    """
+    if not got.get("nodes"):
+        return None
+    if glob.glob(f"{root}/{name}/final.json"):
+        return None
+    runs = sorted(glob.glob(f"{root}/{name}/runs/*/run"))
+    if not runs:
+        return None
+    return (f'{got["nodes"]} evaluated node(s) and NO final.json -- the run ended but nobody '
+            "extracted or scored its champion (a resume restarts the engine, not the driver). "
+            "Recoverable without new spend:\n"
+            f'        extract_champion.py --run-dir {runs[-1]} --all-files '
+            f'--out {root}/{name}/champion_solver.py\n'
+            f'        ALGOTUNE_EVAL_WORKERS=auto taskset -c <lane> looplab_eval.py --subset test '
+            "  # the corpus is __w22x1r3; unset means 1 worker and a number nothing compares to")
+
+
 def wchan(pid) -> str:
     try:
         return open(f"/proc/{pid}/wchan", encoding="utf-8").read().strip() or "-"
@@ -605,6 +635,9 @@ def main(argv=None) -> int:
         spend = pulse(found[0])["spend"] if found else 0.0
         if got["finished"]:
             print(f'{name:10s} {"(off the lanes)":12s} {spend:8.4f}      ended')
+            unscored = unscored_result(root, name, pulse(found[0]) if found else {})
+            if unscored:
+                print(f"      {unscored}")
         elif got["paused"]:
             print(f'{name:10s} {"(off the lanes)":12s} {spend:8.4f}      PAUSED and owed work -- '
                   "resume it or the batch is short a probe")
