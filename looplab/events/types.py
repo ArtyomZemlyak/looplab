@@ -399,6 +399,12 @@ EV_FORESIGHT_SELECTED = "foresight_selected"
 EV_LOG_REPAIRED = "log_repaired"                # operator `repair-log`: provenance of a mid-file
 #                                                 divergence recovery (backup + truncate boundary)
 EV_REFLECTION_NOTE = "reflection_note"          # run-end LLM distillation: causal note + lessons + auto-skills
+# The MID-RUN half of the M4 skill promotion (BACKLOG §0.17). Diagnostic like `reflection_note` and
+# for the same reason — nothing the fold decides reads it — but it is a GATE as well as a receipt:
+# `lessons.py::maybe_promote_skills` reads its `at_node` for the cadence and its `promoted` pairs
+# for "which cards this run has already paid for", so a resume promotes nothing twice (invariant 3).
+# Main-task only, like every other cadence write.
+EV_SKILLS_PROMOTED = "skills_promoted"
 EV_LESSONS_RECONCILED = "lessons_reconciled"    # a node re-eval changed an outcome → this run's lessons
 #                                                 citing it were retired + re-derived from the corrected state
 EV_COMMAND_ACK = "command_ack"                  # engine folded a server command intent (causal ack)
@@ -1108,7 +1114,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN, EV_EFFECTIVE_TRAIN_BATCH,
     EV_WORKSPACE_SEEDED,
-    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
+    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
     EV_TRAIN_MONITOR_ALERT,
@@ -1855,8 +1861,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The run-end distillation: the causal note, the lessons and the auto-skills it proposed.",
         required=(
             "at_nodes", "coverage_digest", "fingerprint", "finish_seq", "lessons", "n_lessons",
-            "n_skill_candidates", "n_skills", "n_skills_demoted", "note", "prior_citations",
-            "skill_candidates", "skills", "skills_demoted", "task_id"
+            "n_skill_candidates", "n_skills", "n_skills_demoted", "n_skills_promoted_earlier",
+            "note", "prior_citations", "skill_candidates", "skills", "skills_demoted", "task_id"
         ),
         optional=(),
     ),
@@ -2044,6 +2050,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "depth", "error", "eval_seconds", "evidence", "generation", "node_id", "previous"
         ),
+    ),
+    "skills_promoted": PayloadContract(
+        "The mid-run per-card skill promotion: which settled cards it judged, and what it wrote.",
+        required=("at_node", "cards", "count", "promoted", "skill_candidates", "skills", "trigger"),
+        optional=(),
     ),
     "stage_finished": PayloadContract(
         "One stage of a multi-stage eval pipeline finished: name, status, exit code, seconds.",

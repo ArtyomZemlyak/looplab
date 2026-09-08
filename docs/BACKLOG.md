@@ -4282,9 +4282,24 @@ and the engine-side residue is that `resource_key` reaches the watchdog through 
 no Genesis prompt, so nothing an operator authors against ever mentions the one switch that arms the
 kill. That is what the marker above is pointed at.
 
-⬜ **Auto-skill promotion still runs only from the wrap-up pass — NARROWED 2026-08-19, see §0.18.**
-  OPEN[auto-skill-promotion-run-end-only] proof:`present:def write_reflection_note(self, final: RunState)@looplab/engine/lessons_distill.py+absent:write_auto_skill(@looplab/engine/lessons.py`
-  (the ONE promotion writer, `memory.write_auto_skill`, is called only from `write_reflection_note`, whose contract is the FINAL state; the proof reads shipped when that contract changes or the mid-run distill module gains the writer — re-point on landing if the promotion lands under a third shape)
+✅ **Auto-skill promotion runs per CARD on the `lessons_every` pace — landed 2026-09-08.**
+  *The named fix is what shipped: `lessons_distill.py::promote_settled_skills` is the ONE promotion
+  writer both passes now go through, and `lessons.py::maybe_promote_skills` is the trigger this row
+  was actually about. `settled_skill_cards` is the statable rule for which board rows are ripe —
+  `supported`, Δ>0, no pending evidence and a lane that is not `proposed`/`building`/`coded`/
+  `running` (both of the last two, because `Card.evidence` excludes the `node_building` marker the
+  `building` lane is derived from) — and it refuses a card already promoted at this exact statement,
+  keyed on `(card_id, source_sha256)` so an operator paraphrase is a claim that has not been
+  assessed. The `skills_promoted` diagnostic event is receipt AND gate (invariant 3): its `at_node`
+  is the cadence watermark and its `promoted` pairs are what stop a resume — and what stop the
+  run-end sweep from re-paying the classifier, which now records `n_skills_promoted_earlier` on the
+  `reflection_note` so "promoted nothing at the end" reads apart from "promoted nothing". NOT a new
+  knob and not new spend: the same money, one classifier call per card, moved earlier, on the pace
+  the operator already sets for mid-run cross-run writes — and `lessons_every: 0`, the
+  `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` value every resumed pre-field run carries, leaves promotion
+  exactly where it was. `tests/test_midrun_skill_promotion.py` drives the truth table, the mid-run
+  write, both idempotency gates (re-verified by mutation: the cadence stops the same node count, the
+  ledger stops the reopened window) and the run-end skip.*
 The TWIN question is settled and needed no new run: `n_skills: 0` on v7/v8 is not the classifier
 over-rejecting, because **zero cards reached it** (v7 has no evaluated node at all; all three of v8's
 `supported` cards are record setters with `best_delta = None`). That rung now writes its own
@@ -4295,7 +4310,9 @@ then finalized produced its `reflection_note` with 4 lessons and 14 candidate re
 in the engine prevents a stopped run from getting this pass. Nothing SURFACES it either: `looplab
 stop` says so once, in a terminal, and a KILLED run (v6, v9 — no `pause`, no finish) is never told
 anything at all. The named fix a future change would land is a per-card settled-promotion pass
-(`promote_settled_skills`); this marker's proof is its absence.
+(`promote_settled_skills`) — *which landed 2026-09-08; see the row above. What is unchanged is the
+SURFACING half: `looplab stop` still says so once in a terminal and a killed run is still told
+nothing, so the run-end sweep of whatever had not settled remains owed to a human who asks.*
 
 ### §0.18 Two receipts that never existed, and the audit question each of them decides (2026-08-19)
 
@@ -4404,7 +4421,8 @@ mid-flight (`looplab stop`: 38 `node_created`, one `pause`, no `run_finished`, n
 the exact shape of v2, v6 and v9 on disk) and then `looplab finalize`d produced its `reflection_note`
 with 4 lessons and 14 candidate receipts, 3 of them from the new rung. **The gap is the trigger.**
 
-**Mid-run promotion was NOT built, and the honest reason is that the corpus cannot yet justify it.**
+**Mid-run promotion was NOT built** *(when this was written; it landed 2026-09-08 — see the note at
+the end of this paragraph)*, **and the honest reason is that the corpus cannot yet justify it.**
 Replaying each log prefix-by-prefix at every terminal boundary and re-asking the promotion gate:
 across v6/v7/v8/v9/v2, exactly **2 cards ever qualified**, both on the final state, and **0 were
 retracted** — no card was promotable at one boundary and not at the end. So the obvious argument
@@ -4415,6 +4433,21 @@ SET and its IDENTITY — no pending evidence, no pending merge (a merged card's 
 rewritten by the fold, so a skill promoted early is filed under a title the run later replaces), and
 no route to `abandoned`, which overrides every verdict. That is a per-CARD settlement, not a run-level
 one, and it is the shape a `promote_settled_skills` pass would need.
+
+*Built 2026-09-08 in exactly that shape, and this paragraph is the specification it was written
+against.* `lessons_distill.py::settled_skill_cards` settles the EVIDENCE SET (no pending evidence
+node, and a lane that is not `proposed`/`building`/`coded`/`running` — both, because `Card.evidence`
+excludes the `node_building` marker the `building` lane is derived from) and takes `abandoned` for
+free, since it admits only `verdict == "supported"` and abandonment overrides every verdict. What it
+does NOT settle is IDENTITY, and the residue is priced rather than hidden: a card merged after
+promotion has its `statement` rewritten by the fold, and because the ledger key is
+`(card_id, source_sha256)` the run-end sweep then judges the consolidated statement as the new claim
+it is — one extra classifier call and a second card under the merged title, which is the right
+direction to fail (the alternative, keying on `card_id` alone, would leave the consolidated belief —
+the one the run actually settled on — with no card at all). The corpus argument above is unchanged
+and is why the pace is the existing `lessons_every` rather than a knob of its own: two candidates
+over five runs is not a population to design a second cadence against, and moving the same money
+earlier needs no new number.
 
 **What is left open** is therefore narrow and is not an engine defect: nothing SURFACES that a
 stopped or killed run holds unclaimed cross-run value. `looplab stop` says "`looplab finalize` to

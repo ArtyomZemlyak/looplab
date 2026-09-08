@@ -5178,6 +5178,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         state = self._maybe_distill_lessons(state)
         state = self._maybe_refresh_lessons(state)
 
+        # M4 auto-skills, same shape and the same `lessons_every` pace: promote the technique of a
+        # card whose evidence has SETTLED into the shared skill store now, instead of holding every
+        # promotion for the run-end reflection — which a killed run never reaches. Replay-safe (the
+        # `skills_promoted` at_node gate), no-op when the cadence is 0, and the run-end pass skips
+        # what this one already wrote so the classifier is still paid once per card.
+        state = self._maybe_promote_skills(state)
+
         # Reconciliation (memory ↔ corrected outcomes): when a node_reset re-eval FLIPS a node's
         # outcome (a false-failure re-scored to evaluated, a demoted champion), this run's DISTILLED
         # lessons grounded in that node go stale — fold-derived memory self-corrects but the LLM-written
@@ -6049,6 +6056,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # this span is stamped with it (current_ids) → the UI scopes the event's trace to the distill.
         with self._op_span("lessons_distill"):
             return self.lessons.maybe_distill_lessons(state)
+
+    @in_llm_lane("enrichment")
+    def _maybe_promote_skills(self, state: RunState) -> RunState:
+        # Own op-trace for the same reason as the distill above: the classifier calls this pass makes
+        # are real money, and a beacon-only phase writes them with `trace_id=null` (CLAUDE.md's span
+        # rule). Not in `FORWARDED_SUBOBJECT_MEMBERS` — like every other `_maybe_*` here it opens a
+        # span and so is not a one-line delegator.
+        with self._op_span("skills_promote"):
+            return self.lessons.maybe_promote_skills(state)
 
     def _lessons_store_stamp(self):
         return self.lessons.lessons_store_stamp()

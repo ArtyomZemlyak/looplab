@@ -742,7 +742,7 @@ is about. Each panel now says so in its own header; the full per-kind reference 
 
 | Surface | Holds | Written by | Editable there |
 |---|---|---|---|
-| **Lab → Authoring** | `prompts` (role system-prompt overrides), `skills` (techniques the Researcher can load), `knowledge` (free-form notes) | **you** — plus the assistant's `remember` tool for `knowledge` | root Markdown uses a CAS/receipt editor; nested skill packages are review-only |
+| **Lab → Authoring** | `prompts` (role system-prompt overrides), `skills` (techniques the Researcher can load), `knowledge` (free-form notes), `memory_skills` (the cards the runs distilled, `<memory_dir>/skills/`) | **you** — plus the assistant's `remember` tool for `knowledge`, and the runs themselves for `memory_skills` | root Markdown uses a CAS/receipt editor; nested skill packages and every `memory_skills` card are review-only |
 | **Lab → Memory** | Lessons, Cases, Notes, and a read-only view of the same `knowledge` notes | the **runs**, at run end | no |
 | **Lab → Claims & Curation** | Claims across every run in the shared memory dir, plus the steward proposals and their outcomes | derived at read time from what the runs wrote, plus your governance decisions | no — governance is CLI/HTTP only |
 
@@ -760,8 +760,12 @@ Consequences that have repeatedly been reported as bugs and are not:
   and are read-only; bounded traversal skips symlinks and path escapes, and a capped scan is disclosed
   separately from the known lower bound of omitted files. Save and recovery identities remain flat
   basenames and cannot contain `/`. Run-distilled skills under `<memory_dir>/skills/` are a different,
-  memory-owned store outside configured Authoring: candidates are hidden from production agents until
-  cross-task promotion, and neither panel yet provides a first-party candidate review workflow.
+  memory-owned store, and since 2026-09-08 they have their own Authoring tab: **memory_skills** lists
+  every `auto-*.md` card read-only, frontmatter included, so a `candidate` (which no run loads until a
+  different task family re-confirms it) can be judged by the one party who can judge it. Every write
+  route for that kind answers 405 — the lifecycle frontmatter is what the writer and the visibility
+  gate both key on, so promotion is not a word you type. Deleting a bad card is a file deletion on the
+  host, as it is for every other kind.
 
 **Deleting a run leaves all three panels untouched by default.** The Delete dialog offers an opt-in
 *“Also delete this run’s own cross-run memory”* that removes only what is attributable to that run

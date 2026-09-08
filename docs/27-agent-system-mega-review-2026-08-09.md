@@ -333,11 +333,24 @@ Research only.
 >   the item below — so that key would spawn N identical subprocess sets and buy nothing. Nothing is
 >   evicted (a handle owns a thread, a loop and a subprocess and exposes no close), so the number of
 >   distinct configurations one process connects for is bounded instead.
->   `tests/test_mcp_cache_key.py`.]**
-> - **OPEN[mcp-config-has-no-per-principal-source]** the residue the cache key cannot supply: MCP
->   servers are resolved from `LOOPLAB_MCP_CONFIG` / `LOOPLAB_MCP_SERVERS` / `.mcp.json`, all
->   process-wide, so every session on a shared server gets the same server set whatever principal is
->   driving it. proof:absent:principal_mcp_config@looplab/tools/mcp_tools.py
+>   `tests/test_mcp_cache_key.py`. **2026-09-08: the per-principal source it said would key itself
+>   now exists — see the row below — and the key did not change, which was the claim.**]**
+> - **[closed 2026-09-08 — *the source exists, and it is the PARTY's, decided before the cache.*
+>   `serve/principal.py::mcp_config_scope` is the second decision in that module beside
+>   `portfolio_access`: the owner plane gets a scope NAME (`owner` / `local`), and a `review`
+>   capability, an anonymous caller or a caller that named no principal gets `None` — no
+>   configuration read, no server connected, nothing entered in the cache map. `tools/mcp_tools.py::
+>   principal_mcp_config` resolves that name: with `LOOPLAB_MCP_CONFIG_DIR` declared it is
+>   `<dir>/<scope>.json` and a scope with no file gets NO servers (falling back to the process-wide
+>   set would hand the one party the operator did not configure the servers configured for someone
+>   else); with nothing declared every owner-plane party keeps the historical process-wide sources
+>   byte-identical, so a single-user deployment does not move. The cache stays keyed on the resolved
+>   configuration and that is now the stronger statement: the authorization happened one call
+>   earlier, so two parties share handles exactly when they were told to talk to the same servers —
+>   a cache key that granted access would grant it by collision. `tests/test_mcp_principal_config.py`
+>   drives all four properties through the real `build_tools` with a connect accountant, including
+>   that a refused party reaches no connect at all; `docs/guide/deployment.md` states the table. The
+>   marker `mcp-config-has-no-per-principal-source` stood here; deleted per the index rule.]**
 > - **[closed 2026-09-08 — *the registry is typed, and the residue it does not cover is now
 >   countable.* `core/prompts.py::PromptDefinition` (frozen: key + family + one line about the JOB it
 >   governs) is the row shape, `PROMPT_REGISTRY` the 19 rows, and `PROMPT_KEYS` is DERIVED from it so
@@ -358,11 +371,21 @@ Research only.
 >   asymmetry `core/appconfig.py` already draws. The model half shipped in the same change
 >   (`strategist-developer-field`) — `_StrategyOut.developer` plus a durable receipt for the drop
 >   `validate_strategy` makes. `tests/test_strategist_developer_switch.py` drives both ends.]**
-> - **OPEN[auto-distilled-skills-outside-authoring]** the P2 remaining product gap: the Authoring
->   surface's roots are `prompts`/`skills`/`knowledge` off `Settings`, so auto-distilled
->   `<memory_dir>/skills/` candidates stay hidden until cross-task promotion with no first-party
->   review UI. The named close is a `memory_skills_dir` root on that surface.
->   proof:absent:memory_skills_dir@looplab/serve
+> - **[closed 2026-09-08 — *the fourth root exists and it is READ-ONLY on purpose.*
+>   `serve/routers/misc.py::memory_skills_dir` derives `<memory_dir>/skills` (not a `Settings` field:
+>   the engine writes `Path(memory_dir) / "skills"` and `tools/skills.py` reads that same path, so a
+>   field would be a second spelling of one place), `_AUTHOR_KINDS` lists `memory_skills` beside the
+>   three writable roots, and the UI has its own tab whose copy states the lifecycle a reviewer is
+>   actually asking about — `candidate` means no run loads it, `promoted` is the only status the
+>   production listing shows. Every write route answers 405 rather than "unknown kind": those files
+>   carry the `status`/`claim_sha256`/`fingerprints` frontmatter that `write_auto_skill`'s
+>   read-modify-write and the visibility gate both key on, so a hand edit here would promote a
+>   one-task candidate by typing a word. Driven by
+>   `tests/test_server.py::test_memory_skills_authoring_root_reviews_auto_cards_and_refuses_every_write`
+>   (the card is written by the REAL `write_auto_skill`, so the published row is the row the runtime
+>   reads) and by `ui/test/authoringSkillsReadOnly.test.js`, which mounts the panel and opens the
+>   card. The marker `auto-distilled-skills-outside-authoring` stood here; deleted per the index
+>   rule.]**
 >
 > **Not re-derived here, and saying so:** the `**Fixed:**` rows above (they were not this pass's
 > scope) and the Validation record's suite counts.

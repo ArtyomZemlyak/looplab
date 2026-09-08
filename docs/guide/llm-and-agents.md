@@ -961,7 +961,9 @@ When `memory_dir` is configured, the same skill tool also reads auto-distilled M
 promotion but is excluded from the production agent surface. Only `status: promoted` auto-skills
 are listed/loaded, and their bodies carry an `UNTRUSTED_MEMORY_AUTO_SKILL` provenance label. The
 library constructor's explicit `include_auto_candidates=True` seam is for review and tests; it is
-not a runtime setting. Hand-written and legacy skills keep their previous visibility and body.
+not a runtime setting — Lab → Authoring → **memory_skills** lists that same directory read-only,
+frontmatter included, so a candidate can be judged without one. Hand-written and legacy skills keep
+their previous visibility and body.
 
 ### Prompt override keys (`prompt_dir`)
 
