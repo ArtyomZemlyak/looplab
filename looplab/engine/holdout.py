@@ -219,6 +219,32 @@ class HoldoutGrader:
             e._assets_public = dict(e._assets or {})
         public = e._assets_public
         if not e._holdout_idx:
+            # AN EMPTY PARTITION WITH A FRACTION DECLARED IS UNDECIDABLE, NOT "LEGACY". This branch
+            # is the legitimate `holdout_fraction=0` protocol and it was ALSO the silent fall-through
+            # the docstring above says never happens: `carve()` — and therefore `SplitUndecidable`
+            # and the refusal below it — is only reached once `_holdout_idx` is non-empty, and
+            # `build_holdout_idx` answers `frozenset()` for the mlebench kind whenever
+            # `train_row_count` cannot read a train CSV (an image competition's `train/` directory, a
+            # parquet, any layout `_asset_named` does not match) or the file will not parse. So a
+            # real competition launched with `holdout_fraction=0.1` graded EVERY node on the private
+            # answers — the champion is again a max over N private draws, which is the exact defect
+            # this module exists to end — while recording `protocol = private_per_node` beside a
+            # snapshot saying 0.1, and no operator-facing refusal anywhere.
+            #
+            # `_holdout_indices` reserves `k = max(1, ...)` rows whenever `fraction > 0` and
+            # `n >= 2`, so with a fraction declared an empty partition means exactly "n < 2": the
+            # rows could not be counted. Same refusal and the same two ways out as the carve below,
+            # because it is the same question one step earlier.
+            if float(getattr(e, "_holdout_fraction", 0.0) or 0.0) > 0:
+                raise ConfigRefusal(
+                    f"MLE-bench competition {g.get('competition')!r}: `holdout_fraction=" 
+                    f"{float(e._holdout_fraction):g}` was declared but the search split cannot be "
+                    "drawn — the public train rows could not be counted, so the layout does not "
+                    "decide the split. The search may not be scored on the private answers (doc 52 "
+                    "row 3), so either set holdout_fraction=0 to run the explicit legacy protocol — "
+                    "every node graded on the private answers, recorded as `host_grading.protocol = "
+                    "private_per_node` — or run a competition whose train/test/sample_submission "
+                    "layout decides the answers' format.")
             e._assets = dict(public)
             e._search_answers = None
             e._search_hidden_ids = frozenset()
