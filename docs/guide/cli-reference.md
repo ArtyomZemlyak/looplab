@@ -21,6 +21,7 @@ looplab stage-dups      Duplicated stage work, and what a cross-node reuse key w
 looplab edit-types      What KIND of edit each experiment made, which kinds paid, and how much was already tried once (doc 52 row 31)
 looplab proxy-accuracy  Was the proxy that KILLED candidates any good? Pairwise ranking accuracy against the metrics that came back (doc 52 row 31)
 looplab seed-distance   How far each experiment moved from the SEED program it descends from, and how much of that movement is tuning (doc 52 row 31)
+looplab workspace-bytes What this run's node workspaces actually WEIGH on disk, beside the seed claim its log made about them — bounded, and it says so (doc 37 §8 R1)
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
@@ -1226,6 +1227,77 @@ whose file set is missing from the record is NOT measured and is counted separat
 unreadable record is not a node that never moved. And this is the distance from the seed **program**;
 the semantic distance from a seed **corpus** (§11/§17's Scoop-Check, an embedder over a versioned
 external corpus) is a different, unbuilt artifact.
+
+---
+
+## `workspace-bytes`
+
+Read-only, no model. What this run's node workspaces actually **weigh**, beside the only sentence
+its own log ever made about them.
+
+```bash
+looplab workspace-bytes RUN_DIR [--max-entries 200000] [--node 4] [--top 3]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (walks its `nodes/*` workspaces; reads its own `workspace_seeded` rows for the claim column) |
+| `--max-entries` | `200000` | The BOUND, in directory entries stat'ed across the whole run. Spent = the walk stops and every total becomes a floor |
+| `--node` | *(all)* | Spend the whole budget on ONE node (its id, or its directory name) |
+| `--top` | `3` | How many of a node's largest subtrees to name |
+
+**Why it exists.** `workspace_seeded` is the only workspace fact in the event log, and it says
+`.[auto]:75 tracked` — an accurate statement about 0.9 MB, and the sole thing a reader could see
+about a directory that measured **944,779,776 B**, 937,847,296 of it three intermediate checkpoints
+plus a final because that node's own trainer said `save_total_limit=3`. So the one visible number
+named the copy, the copy got blamed for 727 GB it never wrote, and a whole migration proposal was
+written against a mechanism responsible for 0.096 % of the bytes
+(doc 37 §6 — the measurement that DECLINED it — and §8's R1, which asked for
+exactly this receipt). The claim and the measurement now print on the same rows.
+
+```
+workspace bytes for runs/demo — apparent size (sum of file sizes, what doc 37 quotes), symlinks NOT followed
+entry budget: 1,204 of 200,000 directory entries spent; the walk COMPLETED
+
+where                                  bytes     files
+(the record)                       1,204,913         5
+nodes/                           944,779,776       168
+confirm/                                   0         0
+run total                        945,984,689       173
+  run total = 945,984,689 B (902.2 MiB). `(the record)` is the run directory's own top-level files: the event log, the snapshots, the lock.
+
+node workspaces, largest first (top 3 subtree(s) each):
+  node_4: 944,779,776 B (901.0 MiB) in 168 file(s)
+      checkpoint-1200/            312,615,765 B (298.1 MiB)  in 6 file(s)
+      checkpoint-800/             312,615,765 B (298.1 MiB)  in 6 file(s)
+      final/                      312,615,766 B (298.1 MiB)  in 6 file(s)
+      seeded (the log's only workspace fact): .[auto]:75 tracked, data:train->link
+```
+
+**The bound is stated, and crossing it is a floor rather than a smaller number.** A byte total over
+a tree is unbounded work — doc 37 §9 records that as R1's own open problem — so the walk spends one
+shared budget of directory entries. When it runs out the walk **stops**: every total prints with
+`>=`, the nodes and subtrees it never reached are named `NOT WALKED` (which is not the same claim as
+`0 B`), and the report ends with the call that continues past it, at a budget the caller has not
+already spent.
+
+```
+BUDGET SPENT after 200,000 entries: every number above is a FLOOR (>=), not a measurement.
+  continue:  looplab workspace-bytes runs/demo --max-entries 400000
+  or spend the whole budget on one node:  looplab workspace-bytes runs/demo --node <id>
+```
+
+**What the number is.** The **apparent** size — the sum of file sizes — not allocated blocks, so it
+is directly comparable with doc 37's figures and reads differently from `du` (which counts blocks:
+larger for many small files, smaller for a sparse one). **Symlinks are never followed**: a `data:`
+mount is a link into a dataset the node did not write (189 GiB on the v1 testbed), so it is counted
+as the link it is and its target is not walked — which is also what keeps the walk inside the run
+directory it claims to be measuring.
+
+**What it will not do.** It decides nothing and deletes nothing. Doc 37 §8's next two rungs — a
+workspace disk budget stated to the Developer (R2), and reclaiming non-champion checkpoints at run
+end (R3) — both need something this command deliberately is not: R3 deletes evidence
+`engine/metric_salvage.py` reads, and needs a written retention policy first.
 
 ---
 

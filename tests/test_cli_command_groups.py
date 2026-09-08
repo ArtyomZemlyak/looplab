@@ -84,8 +84,17 @@ GROUPS = {
                      # cross-run store. `edit-types` measures each STEP; this measures the whole
                      # walk against the lineage root, which is the question a per-step tally cannot
                      # answer — and nothing in the loop reads either.
+                     # `workspace-bytes` (doc 37 §8's R1) is this group's contract with the
+                     # subject read off the DISK instead of a sidecar, and that is the same
+                     # question rather than a new domain: it is one run's account of ITSELF — what
+                     # its own node workspaces weigh, printed beside the only sentence its own log
+                     # ever made about them (`workspace_seeded`'s file counts). It calls no model,
+                     # writes nothing and reads no cross-run store — the three clauses that keep
+                     # `stage-dups`, `landlock-check` and the rest here — so it is not `audit_cmds`
+                     # (which may spend money and writes a sidecar), not `maintenance_cmds` (which
+                     # appends events) and not `memory_cmds` (the cross-run stores).
                      "tokens", "repair-candidates", "edit-types", "proxy-accuracy",
-                     "seed-distance"},
+                     "seed-distance", "workspace-bytes"},
     # `concept-authorship` is this domain's READ side, on `prior-citations`' ground: a pure
     # projection over the fold that compares what each proposer AUTHORED as its node's concepts
     # against the membership the classifier left, calling no model and writing nothing. It is here
@@ -204,8 +213,16 @@ def test_no_group_is_a_god_module_again():
     the slack instead would have been a cap that stopped being consulted, the exact trade
     `test_agent_factory_split.py` refuses next door — and the cap coming down with the extraction is
     what keeps the next overrun a real question rather than a formality.
+
+    AND AGAIN, WHICH IS THE POINT: `workspace-bytes` (doc 37 §8's R1) arrived on 2026-09-08 against
+    a file with six lines of headroom, and the answer was the second extraction rather than the
+    first raise — `edit-types`' body moved VERBATIM to `run_report.py::echo_edit_types`, beside the
+    rendering already there, and the new command's own walk lives in `cli/workspace_bytes.py`. So
+    `inspect_cmds.py` keeps the contract (the decorator, the signature, the docstring the CLI
+    reference is written against) and none of the arithmetic: 1194 -> 1154 lines, and the cap comes
+    down with it a second time, to 1175.
     """
-    caps = {"inspect_cmds": 1200}
+    caps = {"inspect_cmds": 1175}
     for module_name in GROUPS:
         lines = len((_CLI / f"{module_name}.py").read_text(encoding="utf-8").splitlines())
         assert lines < caps.get(module_name, 1100), f"{module_name} is back to {lines} lines"

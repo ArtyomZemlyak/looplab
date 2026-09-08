@@ -45,8 +45,13 @@ from looplab.cli import (
 # The rendering half of `timings` and `tokens` (doc 25 CT-01's line cap, doc 52 row 31):
 # printing and the shared span vocabulary, extracted so a new diagnostic does not have to buy
 # its room by deleting why-comments.
+# The bounded workspace walk behind `workspace-bytes` (doc 37 §8 R1): the measurement and its
+# rendering, so this module keeps only the command's contract.
+from looplab.cli.workspace_bytes import (DEFAULT_ENTRY_BUDGET, EntryBudget, measure_run,
+                                         render_workspace_bytes, seed_claims)
 from looplab.cli.run_report import (echo_card_and_build_tables, echo_containments,
-                                    echo_reconciliation, echo_run_opening, echo_section, minutes,
+                                    echo_edit_types, echo_reconciliation, echo_run_opening,
+                                    echo_section, minutes,
                                     output_fingerprint, span_category, span_seconds,
                                     stage_identity_rows)
 
@@ -1065,83 +1070,7 @@ def edit_types(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
     """
     store = _require_run_dir(run_dir)
     _echo_log_integrity(store, run_dir)
-    from looplab.tools.node_diff import (EDIT_TYPES, classify_edits, node_record,
-                                         reintroduced_lines)
-
-    state = fold(store.read_all())
-    minimize = str(getattr(state, "direction", "min") or "min").lower() != "max"
-    pairs = []
-    unreadable = 0
-    for node_id in sorted(state.nodes):
-        node = state.nodes[node_id]
-        parents = [p for p in (getattr(node, "parent_ids", None) or ())
-                   if isinstance(p, int) and not isinstance(p, bool) and p in state.nodes]
-        if not parents:
-            continue
-        left, right = node_record(state, parents[0]), node_record(state, node_id)
-        if left is None or right is None:
-            continue
-        counts = classify_edits(left, right)
-        if not counts["recoverable"]:
-            unreadable += 1        # a missing file set is not a pair that made no edit
-            continue
-        if not counts["files"]:
-            continue
-        parent_metric, metric = state.nodes[parents[0]].metric, node.metric
-        gain = None
-        if isinstance(parent_metric, (int, float)) and isinstance(metric, (int, float)):
-            gain = (parent_metric - metric) if minimize else (metric - parent_metric)
-        pairs.append({"node": node_id, "parent": parents[0], "counts": counts, "gain": gain})
-    if not pairs:
-        typer.echo("no parent->child pair in this run carries two comparable file sets — "
-                   "nothing to classify. (A run of seeds only has no edits to measure.)")
-        return
-
-    scored = [p for p in pairs if p["gain"] is not None]
-    typer.echo(f"edit types over {len(pairs)} parent->child pair(s), {len(scored)} with both "
-               f"metrics (direction={'min' if minimize else 'max'})")
-    if unreadable:
-        typer.echo(f"  {unreadable} pair(s) NOT classified — a file set is missing from the "
-                   "record, which is not the same as a pair that changed nothing.")
-    typer.echo(f"{'type':<16}{'+lines':>8}{'-lines':>8}{'pairs':>7}{'improved':>10}{'mean gain':>13}")
-    for kind in EDIT_TYPES:
-        added = sum(p["counts"]["added"].get(kind, 0) for p in pairs)
-        removed = sum(p["counts"]["removed"].get(kind, 0) for p in pairs)
-        if not added and not removed:
-            continue
-        # A pair is COUNTED under every type it touches, and that is the honest reading: a diff that
-        # changes a hyperparameter and a control-flow line is evidence about both, and splitting the
-        # gain between them would invent an attribution the record cannot support.
-        touching = [p for p in scored
-                    if p["counts"]["added"].get(kind) or p["counts"]["removed"].get(kind)]
-        improved = sum(1 for p in touching if p["gain"] > 0)
-        mean = (sum(p["gain"] for p in touching) / len(touching)) if touching else None
-        typer.echo(f"{kind:<16}{added:>8}{removed:>8}{len(touching):>7}"
-                   f"{(str(improved) + '/' + str(len(touching))) if touching else '—':>10}"
-                   f"{(f'{mean:+.6g}' if mean is not None else '—'):>13}")
-    typer.echo("  a pair is counted under EVERY type its diff touches; the gain is the pair's, not "
-               "the type's share of it — this ranks kinds, it does not attribute a metric to one.")
-
-    total_added = total_back = 0
-    cycling = []
-    for pair in pairs:
-        cycle = reintroduced_lines(state, pair["node"])
-        total_added += cycle["added"]
-        total_back += cycle["count"]
-        if cycle["count"]:
-            cycling.append((pair["node"], cycle))
-    share = (100.0 * total_back / total_added) if total_added else 0.0
-    typer.echo(f"\nre-introduced lines: {total_back} of {total_added} substantive added lines "
-               f"({share:.0f}%) had already been deleted earlier in the same lineage")
-    for node_id, cycle in cycling[:8]:
-        node_share = 100.0 * cycle["count"] / max(cycle["added"], 1)
-        typer.echo(f"  node {node_id}: {cycle['count']}/{cycle['added']} ({node_share:.0f}%), "
-                   f"lineage depth {cycle['depth']}")
-        for example in cycle["examples"][:2]:
-            typer.echo(f"      {example['path']}: {example['line'][:100]}  "
-                       f"(deleted at {example['deleted_between']})")
-    if not cycling:
-        typer.echo("  none — no line this run added had been deleted by its own ancestry.")
+    echo_edit_types(fold(store.read_all()))
 
 
 @app.command(name="proxy-accuracy")
@@ -1194,4 +1123,36 @@ def seed_distance(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
     store = _require_run_dir(run_dir)
     _echo_log_integrity(store, run_dir)
     for line in render_seed_distances(run_seed_distances(fold(store.read_all()))):
+        typer.echo(line)
+
+
+@app.command(name="workspace-bytes")
+def workspace_bytes(
+        run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
+        max_entries: int = typer.Option(
+            DEFAULT_ENTRY_BUDGET, "--max-entries",
+            help="Bound on the WORK: directory entries stat'ed across the whole run."),
+        node: Optional[str] = typer.Option(
+            None, "--node", help="Spend the whole budget on ONE node (its id, or its dir name)."),
+        top: int = typer.Option(3, "--top", help="How many of a node's largest subtrees to name.")):
+    """What this run's node workspaces actually WEIGH, beside what the log CLAIMED (read-only).
+
+    `workspace_seeded` is the ONLY workspace fact in the event log and it says `.[auto]:75 tracked`
+    — a true sentence about 0.9 MB, printed here on the same row as the directory it describes,
+    which measured 944,779,776 B on the run whose size then got blamed on the seed (doc 37 §6 and
+    §8's R1: the seed was 0.096 % of those bytes and three retained checkpoints were ~99 %, so the
+    one visible number named the copy and the copy carried 727 GB it never wrote). No model, no
+    write, no cross-run store.
+
+    BOUNDED, and it says which bound: `--max-entries` is a budget in directory entries stat'ed
+    across the whole run. When it runs out the walk STOPS — every total becomes a FLOOR printed
+    with `>=`, the rows it never reached are named NOT WALKED rather than zero, and the report ends
+    with the larger call that continues past it. A number that silently truncated would be worse
+    than a refusal, and this walk is the one doc 37 §9 records as unbounded in general.
+    """
+    store = _require_run_dir(run_dir)
+    _echo_log_integrity(store, run_dir)
+    report = measure_run(run_dir, budget=EntryBudget(max_entries), only=node,
+                         seeded=seed_claims(store.read_all()))
+    for line in render_workspace_bytes(report, top=top):
         typer.echo(line)
