@@ -943,8 +943,12 @@ export const assistantRevert = (change, options) => {
 // A share link is its own capability: the response carries the token-bearing URL, when it expires,
 // and whether it follows the chat (`live`) or is frozen at the turns that existed when it was minted.
 // The session id is NOT a share link — unshare revokes every link without touching the conversation.
-export const assistantShare = (sid, live = false, options) =>
-  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, { live }, options)
+// `body` is the share terms: `{ live }` at minimum, and normally also the create-recovery envelope
+// `assistantShareRecovery.js::shareCreateBody` builds (`request_id` + `token_secret`, doc 25 SC-10).
+// The envelope is what makes a lost response RETRYABLE — without it the retry publishes a second
+// live capability nobody holds — so it is passed whole rather than reassembled here.
+export const assistantShare = (sid, body = { live: false }, options) =>
+  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, body, options)
 export const assistantUnshare = (sid, options) =>
   send(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, 'DELETE', null, options)
 // Pending human-in-the-loop confirm requests for a session, and resolving one.

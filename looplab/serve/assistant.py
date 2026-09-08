@@ -33,8 +33,13 @@ from looplab.core.jsonutil import valid_digest_ref
 from looplab.events.eventstore import iter_jsonl
 from looplab.serve.capability_store import (
     capability_store_lock,
+    exact_request_id,
+    exact_token_secret,
     publish_reserved,
+    recovery_bearer,
+    recovery_digest,
     reservation_state,
+    reserve_exact_id,
     reserve_unique_id,
     store_process_lock,
     token_digest,
@@ -938,6 +943,65 @@ SHARE_REVOKED_RETENTION_SECONDS = SHARE_MAX_TTL_SECONDS
 # write could still lose.
 _SHARE_ID_RESERVE_ATTEMPTS = 32
 
+# The version of the CREATE-RECOVERY envelope, stamped into every hash below and into the record. It
+# is what makes a future change to the derivation a mismatch (a refusal) rather than a silent second
+# capability with the same id.
+_SHARE_CREATE_CONTRACT = 1
+# The record keys that carry the create-recovery identity. Not part of the capability itself — a
+# revocation rewrites the record and must carry them across, or the identity is lost with it.
+_SHARE_CREATE_RECOVERY_KEYS = ("create_contract", "create_identity_hash", "create_intent_hash")
+
+
+# --- create recovery: reconstructing the exact bearer a lost response never delivered -------------
+#
+# `create` is not idempotent and cannot be: the client has nothing to name its request with, so a
+# response lost to a dropped connection leaves the owner holding NO token while a live capability
+# exists in the store — and their retry mints a SECOND one. That second link is the security defect:
+# an un-revoked bearer nobody holds, invisible in the "copy link" surface and removable only by
+# revoking the whole session. `ReviewStore.create_or_replay` already solved this by moving the
+# identity to the CLIENT, and these three derivations are that protocol at the share store's own
+# shapes (the primitives are `capability_store`'s, so the two can only agree — doc 25 SC-10).
+
+
+def _share_recovery_identity(sid: str, request_id: str) -> tuple[str, str]:
+    """The link id this (session, request id) always derives, plus the full identity hash.
+
+    The path takes only 128 bits so the id keeps the exact 32-hex shape `_path` and every share URL
+    already speak; the FULL hash is stored beside the record, so a truncated-prefix collision is a
+    conflict and can never be accepted as somebody else's replay.
+    """
+    identity_hash = recovery_digest("looplab-share-create-id-v1", {
+        "request_id": request_id,
+        "session": sid,
+        "v": _SHARE_CREATE_CONTRACT,
+    })
+    return identity_hash[:32], identity_hash
+
+
+def _share_recovery_token(link_id: str, token_secret: bytes) -> str:
+    """The bearer for a recovered create: the same `<id>.<43 chars>` shape `resolve` parses."""
+    return f"{link_id}.{recovery_bearer('looplab-share-bearer-v1', token_secret, link_id)}"
+
+
+def _share_recovery_intent(sid: str, ttl_seconds: int, live: bool) -> str:
+    """What the client asked FOR, hashed. Only the terms the client declares belong here: `upto` and
+    the title are read off the transcript at mint time and legitimately differ on a later retry —
+    replaying the original frozen snapshot is the whole point. A different TTL or a different `live`
+    under the same request id is a different capability, so it is refused rather than replayed."""
+    return recovery_digest("looplab-share-create-intent-v1", {
+        "live": live,
+        "session": sid,
+        "ttl_seconds": ttl_seconds,
+        "v": _SHARE_CREATE_CONTRACT,
+    })
+
+
+# The share spellings of the two client-field validators, exported for the route that parses the
+# envelope. Same functions as the review surface's: one canonical UUIDv4, one canonical 256-bit
+# base64url secret, both fail-closed on any other spelling.
+exact_share_request_id = exact_request_id
+exact_share_token_secret = exact_token_secret
+
 
 class ShareError(ValueError):
     """A share capability request failed before a token could be published."""
@@ -1245,15 +1309,14 @@ class ShareStore:
         if self._safe_dir_locked() != directory:
             raise self._store_unavailable()
 
-    def create(self, sid: str, *, message_count: int, title: str = "Shared chat",
-               ttl_seconds: int = SHARE_DEFAULT_TTL_SECONDS, live: bool = False,
-               now: Optional[float] = None) -> tuple[str, dict]:
-        """Mint a link for `sid` and return `(token, public_record)`.
+    @staticmethod
+    def _checked_link_terms(sid: str, ttl_seconds, live) -> int:
+        """Validate the terms a CLIENT declares about a link and return the exact TTL in seconds.
 
-        `live=False` (the default) FREEZES the share at the turns that exist right now: `upto` is the
-        transcript length at mint time and the reader never returns past it, so continuing the
-        conversation cannot retroactively publish what the owner says next. `live=True` is the
-        opt-in that keeps the link following the chat."""
+        Split out of `create` so `replay`/`create_or_replay` refuse an envelope by the same
+        sentences: two readings of "what did this caller ask for" is exactly how a retry stops
+        landing on the record its first attempt published.
+        """
         if isinstance(ttl_seconds, bool):
             raise ShareError("expiry must be a whole number of seconds")
         try:
@@ -1269,6 +1332,12 @@ class ShareStore:
             raise ShareError("unknown Assistant session", code="assistant_share_session_invalid")
         if not isinstance(live, bool):
             raise ShareError("live must be a boolean")
+        return ttl
+
+    @staticmethod
+    def _checked_snapshot_terms(message_count, title) -> None:
+        """Validate what the SERVER reads off the transcript at mint time. Deliberately not part of
+        the recovery identity: a replay hands back the snapshot the first attempt froze."""
         if (not isinstance(title, str) or not title.strip()
                 or len(title) > SHARE_TITLE_MAX_CHARS):
             raise ShareError("share title is invalid", code="assistant_share_title_invalid")
@@ -1277,6 +1346,18 @@ class ShareStore:
             raise ShareError(
                 "this transcript is too large to publish safely",
                 code="assistant_share_transcript_too_large", status_code=413)
+
+    def create(self, sid: str, *, message_count: int, title: str = "Shared chat",
+               ttl_seconds: int = SHARE_DEFAULT_TTL_SECONDS, live: bool = False,
+               now: Optional[float] = None) -> tuple[str, dict]:
+        """Mint a link for `sid` and return `(token, public_record)`.
+
+        `live=False` (the default) FREEZES the share at the turns that exist right now: `upto` is the
+        transcript length at mint time and the reader never returns past it, so continuing the
+        conversation cannot retroactively publish what the owner says next. `live=True` is the
+        opt-in that keeps the link following the chat."""
+        ttl = self._checked_link_terms(sid, ttl_seconds, live)
+        self._checked_snapshot_terms(message_count, title)
         ts = self._now(now)
         if ts is None or not math.isfinite(ts + ttl):
             raise ShareError("share expiry is unavailable", code="assistant_share_time_unavailable",
@@ -1292,51 +1373,224 @@ class ShareStore:
                 raise ShareError(
                     "share capability capacity is full; revoke or wait for existing links to expire",
                     code="assistant_share_capacity", status_code=503)
-            def _boundary_holds(path: Path) -> bool:
-                # Resolving the missing leaf confirms that its parent has not been redirected since
-                # the directory boundary check above. (This used to also spell `not path.exists()
-                # and not path.is_symlink()`; `O_EXCL | O_CREAT` refuses an existing file AND a
-                # symlink — a dangling one included — so the reservation itself is now that check,
-                # and unlike the old one it cannot be lost between the look and the write.)
-                try:
-                    if path.resolve(strict=False).parent == directory:
-                        return True
-                except (NotADirectoryError, OSError, RuntimeError):
-                    pass
-                if self._safe_dir_locked() is None:
-                    raise self._store_unavailable()
-                return False
-
             link_id, path = reserve_unique_id(
                 mint=lambda: secrets.token_hex(16),
                 path_for=lambda candidate: self._path(candidate, directory),
-                attempts=_SHARE_ID_RESERVE_ATTEMPTS, verify=_boundary_holds,
+                attempts=_SHARE_ID_RESERVE_ATTEMPTS,
+                verify=lambda candidate: self._boundary_holds_locked(candidate, directory),
                 # practically unreachable, but never overwrite an existing capability on collision
                 on_exhausted=lambda: ShareError(
                     "could not reserve a unique share capability",
                     code="assistant_share_capacity", status_code=503))
             # The secret is the whole capability; the id is only where the record lives.
             token = f"{link_id}.{secrets.token_urlsafe(32)}"
-            record = {"id": link_id, "session": sid, "token_hash": self._digest(token),
-                      "created_at": ts, "expires_at": ts + ttl, "revoked_at": None,
-                      "live": live, "upto": None if live else message_count, "title": title}
-            if self._safe_dir_locked() != directory:
-                raise self._store_unavailable()
-            # A publish that fails leaves this caller's own EMPTY reservation behind, and an empty
-            # file authorizes nothing (`_validated_record` refuses it) — so the shared publish heals
-            # it rather than leaving the id permanently claimed by a write that never landed.
-            publish_reserved(
-                path, record,
-                save=lambda target, value: atomic_write_text(
-                    target, json.dumps(value, indent=2, sort_keys=True)),
-                on_unavailable=self._store_unavailable)
+            record = self._new_record(link_id, sid, token, ts=ts, ttl=ttl, live=live,
+                                      message_count=message_count, title=title)
+            self._publish_locked(path, record, directory=directory)
         return token, self.public(record)
+
+    def _boundary_holds_locked(self, path: Path, directory: Path) -> bool:
+        # Resolving the missing leaf confirms that its parent has not been redirected since
+        # the directory boundary check above. (This used to also spell `not path.exists()
+        # and not path.is_symlink()`; `O_EXCL | O_CREAT` refuses an existing file AND a
+        # symlink — a dangling one included — so the reservation itself is now that check,
+        # and unlike the old one it cannot be lost between the look and the write.)
+        try:
+            if path.resolve(strict=False).parent == directory:
+                return True
+        except (NotADirectoryError, OSError, RuntimeError):
+            pass
+        if self._safe_dir_locked() is None:
+            raise self._store_unavailable()
+        return False
+
+    def _new_record(self, link_id: str, sid: str, token: str, *, ts: float, ttl: int, live: bool,
+                    message_count: int, title: str, **extra) -> dict:
+        """The one shape of a share record, whether its bearer was random or client-derived."""
+        return {"id": link_id, "session": sid, "token_hash": self._digest(token),
+                "created_at": ts, "expires_at": ts + ttl, "revoked_at": None,
+                "live": live, "upto": None if live else message_count, "title": title, **extra}
+
+    def _publish_locked(self, path: Path, record: dict, *, directory: Path) -> None:
+        if self._safe_dir_locked() != directory:
+            raise self._store_unavailable()
+        # A publish that fails leaves this caller's own EMPTY reservation behind, and an empty
+        # file authorizes nothing (`_validated_record` refuses it) — so the shared publish heals
+        # it rather than leaving the id permanently claimed by a write that never landed.
+        publish_reserved(
+            path, record,
+            save=lambda target, value: atomic_write_text(
+                target, json.dumps(value, indent=2, sort_keys=True)),
+            on_unavailable=self._store_unavailable)
+
+    def _recovery_state_locked(self, path: Path, *, sid: str, ttl: int, live: bool,
+                               identity_hash: str, intent_hash: str,
+                               token_hash: str) -> tuple[str, Optional[dict]]:
+        """Classify the derived path: `replay` with the public record, or a state this caller may
+        claim (`absent` / `abandoned_empty`). Anything else refuses.
+
+        Fail-closed in both directions. A record whose stored contract, identity, intent and token
+        hashes do not ALL match is a CONFLICT — never a fresh mint over somebody's live capability,
+        and never a token handed to a caller whose secret does not derive it. And a record that
+        matches but no longer reads as a valid capability for these exact terms is a storage failure,
+        because the only ways to get there are a hand-edited record and a changed derivation.
+        """
+        state, existing = reservation_state(path)
+        if state == "valid":
+            assert existing is not None
+            contract = existing.get("create_contract")
+            if not (type(contract) is int and contract == _SHARE_CREATE_CONTRACT
+                    and self._hash_matches(existing.get("create_identity_hash"), identity_hash)
+                    and self._hash_matches(existing.get("create_intent_hash"), intent_hash)
+                    and self._hash_matches(existing.get("token_hash"), token_hash)):
+                raise ShareError(
+                    "this share create identity is already bound to another request",
+                    code="assistant_share_recovery_conflict", status_code=409)
+            record = self._validated_record(path, existing, strict_io=True)
+            if (record is None or record["session"] != sid or record["live"] is not live
+                    or abs((record["expires_at"] - record["created_at"]) - ttl) > 1e-6):
+                raise self._store_unavailable()
+            return "replay", self.public(record)
+        if state in {"absent", "abandoned_empty"}:
+            return state, None
+        # `fresh_empty` is somebody's in-flight reservation of THIS id — which, since the id is
+        # derived, can only be this same envelope landing twice at once. `corrupt`/`unreadable` is
+        # durable state we cannot read. Both are a bounded, retryable refusal, never a second mint.
+        raise self._store_unavailable()
+
+    @staticmethod
+    def _hash_matches(stored: object, expected: str) -> bool:
+        return isinstance(stored, str) and secrets.compare_digest(stored, expected)
+
+    def _recovery_envelope(self, sid: str, request_id: str, token_secret: bytes | str,
+                           ttl_seconds, live) -> tuple[int, str, str, str, str]:
+        """Validate one client-held create-recovery envelope into everything the lookup needs."""
+        canonical_request = exact_share_request_id(request_id)
+        if isinstance(token_secret, bytes):
+            secret = token_secret if len(token_secret) == 32 else None
+        else:
+            secret = exact_share_token_secret(token_secret)
+        if canonical_request is None or secret is None:
+            raise ShareError("invalid share create request",
+                             code="assistant_share_recovery_invalid")
+        ttl = self._checked_link_terms(sid, ttl_seconds, live)
+        link_id, identity_hash = _share_recovery_identity(sid, canonical_request)
+        return (ttl, link_id, identity_hash, _share_recovery_intent(sid, ttl, live),
+                _share_recovery_token(link_id, secret))
+
+    def replay(self, sid: str, *, request_id: str, token_secret: bytes | str,
+               ttl_seconds: int = SHARE_DEFAULT_TTL_SECONDS,
+               live: bool = False) -> Optional[tuple[str, dict]]:
+        """The capability a previous `create_or_replay` already published for this exact envelope.
+
+        Read-only — it never mints, so it stays on the thread lock like every other reader. The route
+        calls it BEFORE it reads the transcript: a retry after a lost response has to recover the
+        link the owner already published even when the chat has since gained a turn that would refuse
+        a fresh snapshot, and a create that fenced on the CURRENT transcript first would answer 409
+        forever while the capability sat there un-copied.
+
+        Not a session-existence oracle: the answer is decided by the caller's own 256-bit secret, and
+        an envelope that does not derive the stored record's token hash is refused as a conflict
+        rather than confirmed as a miss.
+        """
+        ttl, link_id, identity_hash, intent_hash, token = self._recovery_envelope(
+            sid, request_id, token_secret, ttl_seconds, live)
+        with self._lock:
+            directory = self._safe_dir_locked()
+            path = self._path(link_id, directory) if directory is not None else None
+            if path is None:
+                return None
+            state, record = self._recovery_state_locked(
+                path, sid=sid, ttl=ttl, live=live, identity_hash=identity_hash,
+                intent_hash=intent_hash, token_hash=self._digest(token))
+        return (token, record) if state == "replay" else None
+
+    def create_or_replay(self, sid: str, *, request_id: str, token_secret: bytes | str,
+                         message_count: int, title: str = "Shared chat",
+                         ttl_seconds: int = SHARE_DEFAULT_TTL_SECONDS, live: bool = False,
+                         now: Optional[float] = None) -> tuple[str, dict, bool]:
+        """Create once, or reconstruct the EXACT original bearer from the client's own envelope.
+
+        This is `ReviewStore.create_or_replay` at the share store's shapes, and the reason both
+        exist is the same: without it a lost response leaves the owner with no token while a live
+        link exists, and their retry publishes a SECOND capability nobody holds and nobody can see
+        to revoke. The id is derived from (session, request id) and the bearer is an HMAC of the
+        client's secret over that id, so the retry lands on the same record and rebuilds the same
+        token — which this store still never persists, exactly as for a random one.
+
+        The trailing bool is `replayed`. A replayed record is returned whatever its lifecycle: this
+        is the store, and whether a revoked or expired link may be presented as a URL is the route's
+        decision (`assistant_share_replay_terminal`), not a fact about the record.
+        """
+        ttl, link_id, identity_hash, intent_hash, token = self._recovery_envelope(
+            sid, request_id, token_secret, ttl_seconds, live)
+        self._checked_snapshot_terms(message_count, title)
+        ts = self._now(now)
+        if ts is None or not math.isfinite(ts + ttl):
+            raise ShareError("share expiry is unavailable", code="assistant_share_time_unavailable",
+                             status_code=503)
+        with self._store_lock():
+            directory = self._safe_dir_locked(create=True)
+            if directory is None:
+                raise self._store_unavailable()
+            path = self._path(link_id, directory)
+            if path is None:
+                # A SHA-256 prefix is always 32 lowercase hex characters, so this is unreachable —
+                # and it stays a refusal rather than a fallback to a random id, because minting one
+                # here is precisely the second live capability this method exists to prevent.
+                raise self._store_unavailable()
+            state, record = self._recovery_state_locked(
+                path, sid=sid, ttl=ttl, live=live, identity_hash=identity_hash,
+                intent_hash=intent_hash, token_hash=self._digest(token))
+            if state == "replay":
+                assert record is not None
+                return token, record, True
+            if state == "abandoned_empty":
+                # A worker died between reserving this id and publishing its record. Only this
+                # envelope can ever derive this id, so the footprint is this client's own unfinished
+                # create and clearing it is what lets the retry finish what the first attempt began.
+                if not self._remove(path):
+                    raise self._store_unavailable()
+            # Pruning runs only on the CREATE branch: a replay must win over a sweep that would
+            # otherwise remove the very record being recovered and turn the retry into a new mint.
+            self._prune_locked(ts, directory=directory)
+            if len(self._paths_locked(expected_directory=directory)) >= SHARE_MAX_RECORDS:
+                self._prune_locked(ts, directory=directory, aggressive=True)
+            if len(self._paths_locked(expected_directory=directory)) >= SHARE_MAX_RECORDS:
+                raise ShareError(
+                    "share capability capacity is full; revoke or wait for existing links to expire",
+                    code="assistant_share_capacity", status_code=503)
+            if not self._boundary_holds_locked(path, directory) or not reserve_exact_id(path):
+                # Under the store lock only an uncoordinated writer can occupy a derived id between
+                # the classification above and here. Never infer that the new occupant is ours.
+                raise self._store_unavailable()
+            record = self._new_record(
+                link_id, sid, token, ts=ts, ttl=ttl, live=live, message_count=message_count,
+                title=title, create_contract=_SHARE_CREATE_CONTRACT,
+                create_identity_hash=identity_hash, create_intent_hash=intent_hash)
+            self._publish_locked(path, record, directory=directory)
+        return token, self.public(record), False
 
     @staticmethod
     def public(record: dict) -> dict:
         """The exact owner-facing capability projection; never reflect unknown stored fields."""
         return {key: record.get(key) for key in (
             "id", "session", "created_at", "expires_at", "revoked_at", "live", "upto")}
+
+    def _tombstoned(self, path: Path, record: dict) -> str:
+        """The bytes a revocation writes: the validated record, plus the create-recovery identity.
+
+        `_validated_record` is an EXACT projection — it drops every key it does not name, which is
+        what stops a hand-edited field from ever becoming authorization — and revocation writes that
+        projection back. Named keys only, and named for a measured reason: without carrying them the
+        tombstone LOSES its `create_*` hashes, so the owner retrying their own saved envelope reads
+        as somebody else's request (409 conflict) instead of "this link was revoked" (410), and the
+        recovery contract has no way left to tell them their link is dead.
+        """
+        raw = self._read(path)
+        carried = ({key: raw[key] for key in _SHARE_CREATE_RECOVERY_KEYS if key in raw}
+                   if isinstance(raw, dict) else {})
+        return json.dumps({**record, **carried}, indent=2, sort_keys=True)
 
     def resolve(self, token: str, *, now: Optional[float] = None) -> Optional[dict]:
         """The record this token grants, or None for unknown / expired / revoked / mismatched.
@@ -1385,7 +1639,7 @@ class ShareStore:
             record["revoked_at"] = max(ts, record["created_at"])
             if self._safe_record_path_locked(path) is None:
                 return False
-            atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
+            atomic_write_text(path, self._tombstoned(path, record))
             return True
 
     def revoke_session(self, sid: str, *, now: Optional[float] = None) -> int:
@@ -1416,7 +1670,7 @@ class ShareStore:
                 record["revoked_at"] = max(ts, record["created_at"])
                 if self._safe_record_path_locked(path) is None:
                     raise self._store_unavailable()
-                atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
+                atomic_write_text(path, self._tombstoned(path, record))
                 revoked += 1
             if self._safe_dir_locked() != directory:
                 raise self._store_unavailable()
