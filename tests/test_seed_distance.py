@@ -11,6 +11,8 @@ would be satisfied by summing the per-step tallies, which is the implementation 
 """
 from __future__ import annotations
 
+import ast
+
 import pytest
 from typer.testing import CliRunner
 
@@ -20,6 +22,8 @@ from looplab.search.seed_distance import (COSMETIC_TYPES, RESIDUE_TYPES, STRUCTU
                                           TUNING_TYPES, render_seed_distances, run_seed_distances,
                                           seed_distance)
 from looplab.tools.node_diff import EDIT_TYPES
+
+from tests._source_scan import PKG, iter_trees
 
 
 class _N:
@@ -190,21 +194,45 @@ def test_the_instrument_reads_a_real_run_and_states_what_it_measured(tmp_path):
     assert not (rd / "seed_distance.json").exists(), "a read-only instrument wrote a sidecar"
 
 
+def _seed_distance_importers(pkg=PKG) -> set[str]:
+    """Files under *pkg* holding a real IMPORT edge to `search/seed_distance.py`.
+
+    *pkg* is a parameter so the guard's own teeth can be checked by running it over a COPY of the
+    tree with an import injected — never over the real one.
+
+    Every shape that creates the edge, at module scope or function-local (the CLI's is the latter):
+    `import looplab.search.seed_distance`, `from looplab.search.seed_distance import ...`,
+    `from looplab.search import seed_distance`, and the relative spellings of the last two — which
+    is why the alias NAMES are read beside the module, and why a relative `from . import x` (whose
+    `node.module` is None) still answers.
+    """
+    found: set[str] = set()
+    for path, tree in iter_trees(pkg):
+        edges: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                edges.add(node.module or "")
+                edges.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Import):
+                edges.update(alias.name for alias in node.names)
+        if any("seed_distance" in edge.split(".") for edge in edges):
+            found.add(path.name)
+    return found
+
+
 def test_nothing_in_the_loop_reads_the_signal():
     """It is an INSTRUMENT, and doc 17 §11's own warning ("novel != good") is why.
 
     A distance maximised is a run rewarded for churn. The one importer is the CLI; a selection,
     gate or proposal path importing this module is the change that needs the measurement first.
-    """
-    import subprocess
-    import sys
-    from pathlib import Path
 
-    root = Path(__file__).resolve().parents[1] / "looplab"
-    found = subprocess.run(
-        [sys.executable, "-c",
-         "import pathlib,sys;print('\\n'.join(str(p) for p in "
-         "pathlib.Path(sys.argv[1]).rglob('*.py') "
-         "if 'seed_distance' in p.read_text(encoding='utf-8')))", str(root)],
-        capture_output=True, text=True, check=True).stdout.split()
-    assert {Path(p).name for p in found} == {"seed_distance.py", "inspect_cmds.py"}, found
+    AST over the import statements, and not the substring scan this replaced (2026-09-08): that one
+    answered `looplab/__init__.py`, which imports nothing here — it carries the `_LAYOUT`
+    back-compat map, a table of module-name STRINGS in which EVERY module of the package appears by
+    construction. Excluding that one file by name was the alternative and it is the weaker guard:
+    the map is not the only place a name can be written without an import (a docstring, a
+    `render(prompts, ...)` key, a comment naming the instrument), so the scan kind was wrong rather
+    than the file. Reading the `import` / `from ... import` nodes themselves keeps the teeth exactly
+    where they belong — a genuine reader in the loop, however deferred, is still an import.
+    """
+    assert _seed_distance_importers() == {"inspect_cmds.py"}, sorted(_seed_distance_importers())

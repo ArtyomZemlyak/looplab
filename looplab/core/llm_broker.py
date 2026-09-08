@@ -158,6 +158,12 @@ BACKGROUND_LANE_PRODUCERS: dict[str, tuple[str, ...]] = {
         "concept_cadence.py::_maybe_snapshot_concept_coverage",
         "verifier_tiebreak.py::_maybe_verify_ties",
         "strategy.py::_maybe_consult_strategist",
+        # The MCTS value estimate: one bounded structured question per unestimated candidate at the
+        # creation boundary, on the MAIN task and two lines from `_maybe_verify_ties` in the same
+        # cadence block. Nothing on the eval or build path waits on it — the tree reads the frozen
+        # `node_value_estimated` prior, never a live call — and its width is
+        # `VALUE_ESTIMATE_CADENCE_CAP` per boundary rather than the eval width.
+        "value_estimate.py::_maybe_estimate_node_values",
     ),
 }
 

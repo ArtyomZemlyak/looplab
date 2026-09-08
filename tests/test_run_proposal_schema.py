@@ -107,7 +107,7 @@ def test_a_catalogue_task_file_wins_over_an_inline_task_in_the_body():
 # ------------------------------------------------- the three planners emit the one shape, driven
 
 def test_the_web_assistant_proposes_through_the_shared_schema():
-    from looplab.tools.machine_runs_tools import RunLauncherTools
+    from looplab.tools.run_launcher_tools import RunLauncherTools
 
     tools = RunLauncherTools()
     out = tools.execute("propose_run", {
