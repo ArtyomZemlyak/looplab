@@ -110,18 +110,50 @@ def test_a_declared_failure_reason_travels_on_the_staged_path_too():
     assert triage._failure_reason(staged) not in REPAIRABLE_REASONS
 
 
-def test_a_producer_that_already_stated_a_reason_keeps_it():
-    """The funnel fills a GAP; it never overwrites. A stage that declared its own word must not
-    have it re-derived from a tail that may name a different one."""
+def test_a_reason_a_PASSING_stage_declared_is_not_stamped_on_a_later_failure():
+    """The funnel may only read the FAILING stage's own words.
+
+    `_EvalRun.out` is overwritten when a stage's command runs, and three early returns fire BEFORE
+    that — the host-scorer subject expansion, the `needs` input contract, and the declared-environment
+    refusal. At those, `out` still holds the stdout of the stage that PASSED, so a funnel keyed on
+    `early.stdout` stamped that stage's declared reason onto a later stage's unrelated failure.
+
+    That is worse than the missing reason it replaced. `triage._failure_reason` reads
+    `declared_reason` ABOVE the exit code and above the stage row, so an engine-MEASURED,
+    REPAIRABLE `needs_failed` was reclassified as a non-repairable `rules_violation`: the node was
+    abandoned instead of repaired, and `failure_diagnosis` recorded the terminal as `declared` when
+    the engine had measured it. It also widens the forgeable surface — the stdout in `out` there
+    belongs to an AGENT-declared stage, where the pre-funnel read took the last stage's, which for a
+    repo task is the engine's own host `score` stage.
+
+    MUTATION: drop the `out_is_this_stage` test from the funnel -> this is red.
+    """
+    from looplab.engine import triage
     from looplab.runtime.command_eval import run_command_eval
 
     with tempfile.TemporaryDirectory() as tmp:
         wd = Path(tmp)
-        (wd / "ok.py").write_text("print('fine')\n", encoding="utf-8")
-        res = run_command_eval([sys.executable, "ok.py"], str(wd), 60.0,
-                               {"source": "stdout_json", "key": "score"},
-                               stages=[{"name": "score", "command": [sys.executable, "ok.py"]}])
-    assert res.declared_reason is None      # nothing was declared, and nothing was invented
+        (wd / "prep.py").write_text(
+            "import json\n"
+            'print("prep ok")\n'
+            'print(json.dumps({"looplab_failure_reason": "rules_violation"}))\n', encoding="utf-8")
+        (wd / "train.py").write_text('print("train ran")\n', encoding="utf-8")
+        res = run_command_eval(
+            [sys.executable, "prep.py"], str(wd), 60.0, {"source": "stdout_json", "key": "score"},
+            stages=[{"name": "prep", "command": [sys.executable, "prep.py"]},
+                    # fails its INPUT CONTRACT, so its command never runs and `out` is still prep's
+                    {"name": "train", "command": [sys.executable, "train.py"],
+                     "needs": ["data/ready.pt"]}])
+
+    assert res.failed_stage == "train"
+    assert "rules_violation" in res.stdout, (
+        "fixture: the passing stage's declaration must still be in the carried stdout, or this "
+        "test would pass for the wrong reason")
+    assert res.declared_reason is None, "a passing stage's reason was stamped on another's failure"
+    assert triage._failure_reason(res) == "needs_failed"
+    from looplab.core.models import REPAIRABLE_REASONS
+    assert triage._failure_reason(res) in REPAIRABLE_REASONS, (
+        "an engine-measured input-contract failure must stay repairable")
 
 
 # --------------------------------------------------------------------- the run's own crash text
