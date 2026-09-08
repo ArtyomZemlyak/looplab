@@ -1372,8 +1372,9 @@ def main() -> int:
     # ONE KEY, FIXED BEFORE THE RUN, and a glob that matches what the patch really writes.
     #
     # `patch_baseline_cache.py` names a per-instance cache `<task>__<subset>[__<regime>].json`, and
-    # its regime segment is the EMPTY string whenever workers <= 1 — which docs/51 SS10 mandates and
-    # `campaign.sh` never overrides, so on every campaign run to date the file is the bare
+    # its regime segment is the EMPTY string whenever workers <= 1 — which docs/62 §10 mandates and
+    # `campaign.sh` did not override until it began declaring `ALGOTUNE_EVAL_WORKERS=auto`
+    # (`declare_baseline_ruler`), so on every campaign run to THAT date the file was the bare
     # `<task>__<subset>.json`. The old pattern demanded a literal `__` plus a third segment, so it
     # matched NOTHING in the serial regime: both fingerprints were `{}`, compared equal, and the
     # reference-timed-in-pass refusal — the whole point of this block — could not fire on the one

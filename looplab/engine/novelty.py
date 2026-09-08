@@ -469,21 +469,29 @@ class NoveltyGateMixin:
         """Return the finite per-node timeout override that the evaluator will actually honor."""
         return effective_researcher_eval_timeout(self, idea)
 
-    def _literature_note(self, state: RunState, idea) -> dict:
-        """`{"literature": [...]}` when this proposal overlaps a paper THIS RUN read, else `{}`.
+    def _literature_rows(self, state: RunState, idea) -> list:
+        """The retrieved papers this proposal overlaps — ONE derivation, two consumers.
 
-        Empty — and therefore byte-identical to the historical audit row — with the flag off, with
-        no retrieved literature, or with no overlap above the floor. Never raises into the proposal
-        path: an audit annotation may not be the reason a run stops proposing.
+        The audit-row annotation (`_literature_note`) and the graded rubric's prior-art terminal
+        (`search/graded_novelty.py::grade_novelty(literature=…)`) must be looking at the same rows:
+        a grade whose rationale names a paper the row beside it does not carry would be a receipt
+        about a different measurement. Empty with the flag off, with no retrieved literature, or
+        with no overlap above the floor. Never raises into the proposal path: neither an annotation
+        nor a rubric input may be the reason a run stops proposing.
         """
         if not getattr(self, "_novelty_literature", False):
-            return {}
+            return []
         try:
-            rows = literature_overlap(self._idea_text(idea), getattr(state, "literature", None))
+            return literature_overlap(self._idea_text(idea), getattr(state, "literature", None))
         except Exception as exc:  # noqa: BLE001 — an annotation, never a gate; contained and counted
             from looplab.core.containment import contain
             contain("literature overlap", exc)
-            return {}
+            return []
+
+    def _literature_note(self, state: RunState, idea) -> dict:
+        """`{"literature": [...]}` when this proposal overlaps a paper THIS RUN read, else `{}` —
+        byte-identical to the historical audit row whenever there is nothing to say."""
+        rows = self._literature_rows(state, idea)
         return {"literature": rows} if rows else {}
 
     def _proposal_binding(self, state: RunState, idea: Idea, prospective_node_id=None) -> dict:
@@ -1190,7 +1198,10 @@ class NoveltyGateMixin:
         from looplab.search.concept_graph import skeleton_for
         from looplab.search.concept_tagging import experiment_nodes, graph_from_node_concepts
         from looplab.search.graded_novelty import grade_novelty, tag_idea_llm
-        seed = skeleton_for(state.task_id or "")
+        # THE GOAL, NOT ONLY THE ID (docs/BACKLOG.md, `concept-skeleton-matches-no-run`): a repo run
+        # answers `repo_task` here, which named no curated pack, so this precheck returned None on
+        # every run this project has recorded. The task's own words decide when the id cannot.
+        seed = skeleton_for(state.task_id or "", text=getattr(state, "goal", "") or "")
         seed = seed if seed.concepts() else None
         all_node_concepts = getattr(state, "node_concepts", None) or {}
         concept_provenance = getattr(state, "node_concept_provenance", None) or {}
@@ -1277,7 +1288,15 @@ class NoveltyGateMixin:
             # §21.20 Step 2: the gating grade is computed WITHOUT cross-run priors, so enabling the flag is
             # byte-identical to cross-run-off for SELECTION (grade_novelty checks its level 3 before the
             # same-run level 4, so feeding priors here would flip an L4 allow into a defer — not audit-only).
-            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags)
+            #
+            # THE RETRIEVED PAPERS DO GO IN, and the asymmetry with the line above is the point (doc 52
+            # row 32). A cross-run prior is withheld because it fires BEFORE level 4 and would turn an
+            # ALLOW into a defer; the literature terminal fires AFTER every graded level, so it can only
+            # rename the level-0 fall-through — a grade the pre-gate already defers on — and no proposal's
+            # admission can move. With `novelty_literature` off (the default) `_literature_rows` answers
+            # `[]` and the grade is byte-identical to its pre-2026-09-08 self.
+            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags,
+                                  literature=self._literature_rows(state, idea))
         except Exception:  # noqa: BLE001 — a grader/tagger/reconstruction hiccup must never block proposing
             return None
         # §21.20 Step 2: cross-run priors are AUDIT-ONLY and computed SEPARATELY from the grade above — we

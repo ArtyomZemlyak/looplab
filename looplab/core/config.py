@@ -1503,9 +1503,13 @@ class Settings(BaseSettings):
     # an idea reads as new because nothing here tried it while the run's own reading describes it —
     # the form RQ-Bench measured. On, the deterministic overlap (`engine/novelty.py::
     # literature_overlap`, lexical, no model, no call) rides on the novelty audit rows AND is named
-    # in the re-proposal the gate was already buying. It NEVER rejects: running an experiment a
-    # paper describes is often exactly right, so the overlap is evidence, not a verdict. Off by
-    # default because the second half changes a prompt.
+    # in the re-proposal the gate was already buying, AND is the `literature=` input of
+    # `search/graded_novelty.py::grade_novelty` (2026-09-08), where it renames the ONE terminal
+    # whose claim it can falsify: "a new region of the space" becomes level 3
+    # `described_in_retrieved_literature`, a grade the live pre-gate already defers on, so no
+    # proposal's admission moves. It NEVER rejects: running an experiment a paper describes is
+    # often exactly right, so the overlap is evidence, not a verdict — and because its recall is a
+    # stated FLOOR, only a PRESENT overlap ever moves anything. Off by default: the prompt half.
     novelty_literature: bool = False
     # THE BUILD FAN-OUT AS A LANE, NOT A BARRIER (doc 52 row 33). The parallel build joins a whole
     # chunk before anything moves, so the loop pays the SLOWEST build of every chunk and a fast

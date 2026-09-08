@@ -197,7 +197,10 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
     from looplab.search.concept_graph import skeleton_for
     from looplab.search.concept_map import build_concept_map
     from looplab.search.concept_tagging import tag_nodes_heuristic
-    seed = skeleton_for(resolved_type)
+    # The run's GOAL is consulted when the id names no curated pack (docs/BACKLOG.md,
+    # `concept-skeleton-matches-no-run`): an explicit --task-type still wins, and a run whose id is
+    # the adapter's own (`repo_task`) is no longer left with no vocabulary at all.
+    seed = skeleton_for(resolved_type, text=getattr(state, "goal", "") or "")
     seed = seed if seed.concepts() else None
 
     # Agentic-BY-DEFAULT (the agentic-first concept, §21.13/§21.15): the map is LLM-built unless the caller
@@ -226,7 +229,7 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
                                      prompts=_prompt_store_for(settings))
             cmap["brief"] = brief
             return cmap
-    graph = seed or skeleton_for(resolved_type)
+    graph = seed or skeleton_for(resolved_type, text=getattr(state, "goal", "") or "")
     return {"graph": graph, "tags": tag_nodes_heuristic(state, graph), "important_uncovered": [],
             "mode": "offline-heuristic", "brief": ""}
 
@@ -291,8 +294,9 @@ def concept_coverage(
             raise typer.Exit(code=2) from exc
     resolved_type = task_type or state.task_id or ""
     # A curated pack is only a SEED / starting vocabulary the agent expands (like agentic_asset_brief's
-    # seed_scan); None => the LLM builds the graph from scratch (works on any task).
-    seed = skeleton_for(resolved_type)
+    # seed_scan); None => the LLM builds the graph from scratch (works on any task). The run's GOAL
+    # decides when the id cannot (docs/BACKLOG.md, `concept-skeleton-matches-no-run`).
+    seed = skeleton_for(resolved_type, text=getattr(state, "goal", "") or "")
     seed = seed if seed.concepts() else None
 
     def _persist_exact(raw_tags, mode: str, vocab_size: int,
@@ -344,7 +348,7 @@ def concept_coverage(
 
     if client is None:
         # Deterministic FALLBACK. Needs a curated seed to localize anything.
-        graph = seed or skeleton_for(resolved_type)
+        graph = seed or skeleton_for(resolved_type, text=getattr(state, "goal", "") or "")
         if not graph.concepts():
             typer.echo(f"note: no curated concept pack for task-type '{resolved_type or 'unknown'}', so the "
                        "offline heuristic can't tag experiments. Drop --offline to let the agent build the "
@@ -571,7 +575,7 @@ def lesson_guard_cmd(
     graph = None
     try:
         from looplab.search.concept_graph import skeleton_for
-        sk = skeleton_for(state.task_id or "")
+        sk = skeleton_for(state.task_id or "", text=getattr(state, "goal", "") or "")
         graph = sk if sk.concepts() else None
     except Exception:  # noqa: BLE001 — taxonomy attach is best-effort enrichment, never blocks the guard
         graph = None

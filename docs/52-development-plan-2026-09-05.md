@@ -556,11 +556,31 @@ before the measure existed still folds to exactly what it folded to. Selection-n
 nothing that decides — the instrument first, as the row asked (`tests/test_memo_provenance.py`).
 Deleted per the index rule.*
 
-OPEN[memo-quoted-numbers-unmatched-against-cited-metrics] the deterministic verifier declines to
-match numbers (a regex cannot tell an arXiv id from a metric) and leaves numeric correctness to the
-LLM verifier; MLReplicate's 59 % says fabricated numbers are what survives review, and matching a
-decimal against the CITED nodes' recorded metrics needs no classifier. Measure the match rate over
-the corpus first. proof:missing:docs/audit/memo-number-fidelity.md
+*Closed 2026-09-08 (row 32's fourth part shipped): the marker
+`memo-quoted-numbers-unmatched-against-cited-metrics` stood here. The verifier's refusal to
+CLASSIFY a decimal stands unchanged — a regex still cannot tell an arXiv id from a metric, and
+`check_claims` still moves no verdict on a number — but classifying was never the only way to ask:
+`core/research_record.py::number_fidelity` MATCHES each decimal a claim quotes against the metrics
+of the experiments it CITES, at the precision the memo quoted (`0.88` IS a recorded 0.87764 to two
+places), with URL and arXiv-id spans excluded LEXICALLY and counted, integers left out (a memo
+quotes `bs 8192` by the dozen), and the sign part of the number. Three channels, and the middle one
+is the finding: `cited`, `run` (a real metric of an experiment the claim does NOT cite — a
+mis-attribution no reader could see from the statement and the verdict together) and `none`, which
+is deliberately not called `fabricated`. `trust/memo_verify.py::number_fidelity_report` aggregates
+it per claim onto every memo with claims, free of `research_verify`, read by nothing that decides;
+`core/advisory_payloads.py::_number_fidelity` bounds the block and RECOMPUTES its aggregates, and a
+memo written before the measure existed stays without it (`tests/test_memo_number_fidelity.py`).
+Measured on the one real memo in the tree — 21 decimals over 8 claims, all unmatched and correctly
+so (the run held zero nodes and every result number came from a sibling), and **13 of the 21 are
+hyperparameter values**, which is why the recorded share is an instrument reading and not a grade
+(`docs/audit/memo-number-fidelity.md`). Deleted per the index rule.*
+
+OPEN[memo-number-fidelity-corpus-rate-unmeasured] the instrument above shipped 2026-09-08 and the
+NUMBER the row asked for first has not: this checkout holds one real memo, and the corpus is the
+~119 completed memos across the thirty run dirs on the bench box. The pass is offline and free
+(fold each run, `number_fidelity_report` per `research_completed`, pool the rows) — what it needs
+is the box that holds `runs/`. Columns and the dated result line are in
+`docs/audit/memo-number-fidelity.md` §4. proof:`absent:RESULT 2026-@docs/audit/memo-number-fidelity.md`
 
 *Closed 2026-09-07 (row 32 shipped): the marker `novelty-gates-never-consult-literature` stood here.
 `engine/novelty.py::literature_overlap` is the deterministic, model-free overlap between a proposal
@@ -575,13 +595,22 @@ novelty, which is precisely why nothing may act on it. `tests/test_novelty_liter
 including the paraphrase it misses. What is NOT done here and is now its own item: the graded gate's
 LEVEL still comes from the run's history alone. Deleted per the index rule.*
 
-OPEN[graded-novelty-level-ignores-the-literature-overlap] `_literature_note` records the overlap and
-`search/graded_novelty.py::grade_novelty` still grades levels 0-5 from the concept graph and this
-run's nodes alone, so a proposal the run's own reading describes can still be graded `novel` and
-short-circuit the flat gate at level 4/5. The overlap is on the row beside the grade and is read by
-nothing that decides. Needs the level rubric to take prior art as an input, which is a prompt change
-and a grade-semantics change — measure the overlap rate on real runs first.
-proof:absent:literature@looplab/search/graded_novelty.py
+*Closed 2026-09-08: the marker `graded-novelty-level-ignores-the-literature-overlap` stood here.
+`grade_novelty(literature=…)` takes prior art as an input at EXACTLY ONE terminal and in EXACTLY ONE
+direction, and both halves are the whole design. One terminal: levels 1-5 each assert something
+about THIS RUN's history, which a paper neither strengthens nor weakens, while level 0 asserts "a
+new region of the space" — the one sentence the run's own reading can falsify. Such a grade becomes
+level 3 `described_in_retrieved_literature` with level 3's own recommendation (`surface_prior`), and
+`_graded_novelty_precheck` returns None for 3 exactly as it does for 0 — **no proposal's admission
+moves, nothing is rejected, the flat dedup gate decides as it always did**. One direction: only a
+PRESENT overlap moves a grade, because `literature_overlap`'s recall is a stated FLOOR (the driven
+paraphrase it misses is fed through the whole rubric and the grade is byte-identical to the
+literature-free one) — reading silence as novelty would spend a floor as if it were a ceiling. The
+engine hands the rubric the SAME rows the audit row carries (`_literature_rows`, one derivation),
+and with `novelty_literature` off (the default) that is `[]` and the grade is byte-identical to its
+pre-2026-09-08 self. Six driven cases in `tests/test_novelty_literature.py`. What is still owed is
+the RATE — how often a graded-novel proposal overlaps a retrieved paper on a real run — which needs
+runs with `novelty_literature` on. Deleted per the index rule.*
 
 *Closed 2026-09-07 (row 30 shipped): the marker `prov-export-carries-no-claims` stood here. The
 export now carries the claims half: one activity per deep-research memo (its trigger, summary,
@@ -1021,7 +1050,7 @@ marker(s) it retires**, so the list re-derives from `grep -rn 'OPEN\['`.
 | 29 | **Retire the legacy `/control` route**; the per-POST rescan shrinks with it; the SSE state stream as deltas; the cross-run flag per principal. *Status 2026-09-07: the principal (a) and the delta stream (b) shipped; the retirement (c) is open — 62 call sites in 9 test files, each a property to re-verify under `/commands`, counted at the marker.* | a lost-response retry re-appends paid intents; O(events × state) bytes per tab; a shared-hub gap | M | `legacy-control-route-is-not-retired`, `eventstore-rescans-the-log-per-control-post`, `sse-retransmits-the-whole-folded-state`, `cross-run-tools-are-a-process-wide-flag` |
 | 30 | **The event payload contract**, the PROV export carrying claims with verdicts, the GenAI semconv bridge when the spec ships | invariant #5 unverifiable; `/prov` exports no claim | M, S, deferred | **Shipped 2026-09-07** (both code parts): `events/types.py::EVENT_PAYLOAD_KEYS` is one contract row per registered type — description, `required`/`optional` payload vocabulary, `stored_whole` — with `tests/test_event_payload_contract.py` re-deriving BOTH sides from source (the fold's 437 reads through the helper chain; every writer's keys) and DRIVING invariant #5 by folding every type with an empty payload and re-folding the golden run with undeclared keys stripped; `docs/guide/event-reference.md` is generated from it. `/prov` now carries claims as individuals with their evidence spans and D8 verdicts (`tests/test_prov_claims.py`). The GenAI semconv bridge SHIPPED 2026-09-08 (§4.1's closure note): `core/tracing.py::genai_semconv` mirrors `gen_ai.*` onto the OTLP span BESIDE LoopLab's own names, leaving `spans.jsonl` byte-identical — additive, so the conventions still being Development-status costs one table if a key is renamed. |
 | 31 | **Search diagnostics**: edit-type and re-introduction annotation over `node_diff.py`; a cost term in MCTS; the proxy's pairwise accuracy, foresight's selective accuracy and smoke→full rank fidelity measured on the box; the seed-distance scalar when a run pays for it | the field measures its judges; LoopLab's kill and prioritise on unmeasured ones | S, M, box × 3, S | **Shipped 2026-09-07** (every code part): `tools/node_diff.py::EDIT_TYPES` + `reintroduced_lines` with the `edits` section and `looplab edit-types`; `search/policy.py::eval_cost_penalty` behind `Settings.mcts_cost_weight` (0.0 = the historical score, byte for byte); `search/proxy.py::pairwise_accuracy` with `looplab proxy-accuracy`, which prints the number AND the bias it carries. Still open, all three MEASUREMENTS on the box: `proxy-accuracy-never-run-on-the-corpus` (the instrument now exists), `foresight-selective-accuracy-unmeasured`, `smoke-full-rank-fidelity-unmeasured`; `search/seed_distance.py` + `looplab seed-distance` landed 2026-09-08 as the displacement half of the same vocabulary (`no-distance-from-seed-signal` closed): the seed-relative distance the per-step tally cannot state, recorded and read by nothing that decides. |
-| 32 | **The memo's own measures**: provenance coverage per section; a number-fidelity audit against cited metrics; literature in the novelty gates (after #16); competing hypotheses in failure diagnosis | 57.9 % synthesis accuracy is the field's number for the unchecked fields; 59 % fabricated among accepted | S, S, M, M | **Shipped 2026-09-07** (three of four): `trust/memo_verify.py::provenance_coverage` on every memo it writes; `engine/novelty.py::literature_overlap` on the novelty audit rows and, under `Settings.novelty_literature`, in the re-proposal; `engine/failure_diagnosis.py::coerce_hypotheses` under `Settings.diagnosis_hypotheses`, recorded and read by nothing that decides. Still open: `memo-quoted-numbers-unmatched-against-cited-metrics` (the row asks for the corpus match rate FIRST, which is a box measurement) and the new `graded-novelty-level-ignores-the-literature-overlap`. |
+| 32 | **The memo's own measures**: provenance coverage per section; a number-fidelity audit against cited metrics; literature in the novelty gates (after #16); competing hypotheses in failure diagnosis | 57.9 % synthesis accuracy is the field's number for the unchecked fields; 59 % fabricated among accepted | S, S, M, M | **Shipped 2026-09-07** (three of four): `trust/memo_verify.py::provenance_coverage` on every memo it writes; `engine/novelty.py::literature_overlap` on the novelty audit rows and, under `Settings.novelty_literature`, in the re-proposal; `engine/failure_diagnosis.py::coerce_hypotheses` under `Settings.diagnosis_hypotheses`, recorded and read by nothing that decides. **Completed 2026-09-08** (the remaining two): `core/research_record.py::number_fidelity` + `trust/memo_verify.py::number_fidelity_report` MATCH every decimal a claim quotes against the metrics it cites (the verifier still classifies nothing and no verdict moves — `docs/audit/memo-number-fidelity.md`), and `search/graded_novelty.py::grade_novelty(literature=…)` takes prior art at the one terminal it can falsify, deferring exactly where level 0 deferred. Still open: `memo-number-fidelity-corpus-rate-unmeasured`, the box measurement the row asked for first. |
 | 33 | **Throughput beyond the box and the noun's own benchmark**: the build barrier into a steady-state lane; a cross-machine pool with static per-worker GPU pinning and remote execution once it can reach four workers; the trace export for operator training; an experiment-level benchmark adapter | rank saturates at 4 GPUs; the best full-set number ran on ≤2; Frontis trained on exactly this corpus | M, L, S, box | **Partly shipped 2026-09-07**: `looplab export-sft` (the S item, closed) and the steady-state lane behind `Settings.steady_state_build` — the lane is driven and off, and its marker stays open for the DEFAULT flip, which needs a box run comparing wall clock and proposal quality. `eval-parallelism-is-in-process-only` (the cross-machine pool, L) and `no-research-lifecycle-benchmark-number` (box) are untouched. |
 | 34 | The remaining product rows and ledgers when their trigger fires or the file is open: MLflow autolog, Pareto in selection under `select`, a drift detector, the MCTS value estimate, the FE operator, a forecasting backend; CODE_REVIEW's Windows job object and categorical leakage; doc 29's F3 byte total; the doc 25 / 27 / 34 ledgers | real gaps with driven falsifiers, lower leverage | — | **One shipped 2026-09-07**: `target-leakage-misses-non-monotone-and-categorical` — `trust/leakage.py::categorical_leak` sees both shapes and REPORTS them beside the verdict; arming it is `categorical-leak-rung-never-measured`, which needs a false-positive rate over real tasks. `windows-tree-kill-is-not-atomic` needs a Windows box; `f3-workspace-byte-total` is a measurement; the six BACKLOG product markers and the 48 ledger markers stay as the row says — when their trigger fires or the file is open. |
 
