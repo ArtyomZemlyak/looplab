@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-152 event types — 109 folded into `RunState`, 43 diagnostic; 863 declared payload keys; 26 types whose whole payload is stored by the fold.
+152 event types — 109 folded into `RunState`, 43 diagnostic; 873 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -50,7 +50,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_build_requested` | folded | The durable selection-and-compute gate for one Card's build. | `card_id`, `generation` | — |
 | `card_dropped` | folded | The operator stopped a Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_edited` | folded | The operator rewrote a Card's statement. | `id` | `source`, `statement` |
-| `card_enriched` | folded · whole | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `generation`, `id`, `node_id`, `proposal_ref` |
+| `card_enriched` | folded · whole | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `claim_refs`, `concept_tags`, `confidence`, `cross_run_prior`, `footprint`, `foresight_rank`, `generation`, `id`, `lesson_refs`, `node_id`, `novelty_verdict`, `proposal_ref`, `research_origin`, `steering_context` |
 | `card_merged` | folded | Alias Cards folded into a canonical one, with the seq that decided the edge. | `aliases`, `canonical`, `merged_by`, `source_event_seq` | `statement` |
 | `card_ranked` | folded | The board's priority order over the Cards, with per-Card confidence and reason. | — | `at_node`, `confidence`, `order`, `ranked`, `reason` |
 | `card_reopened` | folded | The operator resumed a dropped Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |

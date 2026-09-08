@@ -1346,7 +1346,19 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "card_enriched": PayloadContract(
         "A Card's novelty / cross-run / footprint delta (last write by seq wins).",
         required=(),
-        optional=("generation", "id", "node_id", "proposal_ref"),
+        # THE FOUR FENCE KEYS AND THE TEN THE FOLD ACTUALLY READS. Until 2026-09-08 this row
+        # declared the fence alone, while `replay.py::_on_card_enriched` copied a ten-name
+        # allow-list out of the payload — so the contract, and the generated
+        # `docs/guide/event-reference.md` page built from it, published a four-key event whose
+        # handler reads fourteen. That is the dead-reader class this table exists to convict,
+        # inverted: the reader was alive and the declaration was short. It survived because
+        # `tests/test_event_payload_contract.py` can only enumerate LITERAL `store.append(EV_X,
+        # {...})` payloads, and every writer of this one builds its dict in a variable or a splat
+        # (`engine/research_cadence.py` appends it with `**delta`), which the module's own comment
+        # already concedes is the scan's blind spot.
+        optional=("claim_refs", "concept_tags", "confidence", "cross_run_prior", "footprint",
+                  "foresight_rank", "generation", "id", "lesson_refs", "node_id",
+                  "novelty_verdict", "proposal_ref", "research_origin", "steering_context"),
         stored_whole=True,
     ),
     "card_merged": PayloadContract(
