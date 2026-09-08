@@ -27,7 +27,7 @@ from looplab.core.concepts import (
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, finite_metric,
                                   is_usable_metric,
                                   verifier_evidence_digest)
-from looplab.core.jsonutil import valid_digest_ref
+from looplab.core.jsonutil import bounded_int, valid_digest_ref
 from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_STATEMENT_MAX_BYTES,
                      NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
@@ -421,7 +421,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # `_on_speculation_depth_settled` may land in either order (invariant #5).
     _spec_depth = d.get("speculation_depth", 0)
     st.speculation_depth_pinned = (
-        _spec_depth if type(_spec_depth) is int and 0 <= _spec_depth <= 64 else 0)
+        _spec_depth if bounded_int(_spec_depth, 0, 64) else 0)
     # Whether that pin RESOLVED the AUTO sentinel or was SPELLED. `is True` rather than `bool(...)`:
     # only the literal the writer emits may enable the one-way ratchet, so a truthy string or a 1 in
     # a hand-edited log cannot turn someone's spelled treatment into a self-narrowing one. Absent
@@ -462,7 +462,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _calibration_seed = d.get("speculation_calibration_seed")
     st.speculation_calibration_seed = (
         _calibration_seed
-        if type(_calibration_seed) is int and 0 <= _calibration_seed <= (1 << 63) - 1
+        if bounded_int(_calibration_seed, 0, (1 << 63) - 1)
         else None
     )
     _policy_scope = d.get("speculation_policy_scope", "")
@@ -473,11 +473,9 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # treatment. Absent (old logs) or malformed -> 0 -> "not recorded" -> the engine keeps its own
     # startup resolution, which is byte-identical to the pre-pin behaviour.
     _eval_parallel = d.get("eval_parallel", 0)
-    st.eval_parallel = (_eval_parallel if type(_eval_parallel) is int
-                        and 0 <= _eval_parallel <= 1024 else 0)
+    st.eval_parallel = (_eval_parallel if bounded_int(_eval_parallel, 0, 1024) else 0)
     _llm_parallel = d.get("llm_parallel", 0)
-    st.llm_parallel = (_llm_parallel if type(_llm_parallel) is int
-                       and 0 <= _llm_parallel <= 64 else 0)
+    st.llm_parallel = (_llm_parallel if bounded_int(_llm_parallel, 0, 64) else 0)
     # D1: recorded at start so replay applies the same selection rule. Absent in old
     # logs -> False -> byte-identical legacy selection.
     st.holdout_select = bool(d.get("holdout_select", False))
@@ -530,8 +528,7 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         marker["card_id"] = card_id
     if d.get("speculative") is True:
         card_build_generation = d.get("card_build_generation")
-        if (type(card_build_generation) is int
-                and 0 <= card_build_generation <= _CARD_REPLAY_NODE_ID_MAX):
+        if bounded_int(card_build_generation, 0, _CARD_REPLAY_NODE_ID_MAX):
             # This is the speculative request epoch, distinct from the Node lifecycle generation
             # below. Keeping both names prevents a reopened-run request from impersonating another
             # request merely because every newly-created Node starts at lifecycle generation zero.
@@ -612,8 +609,8 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     raw_card_build_generation = d.get("card_build_generation")
     card_build_generation = (
         raw_card_build_generation
-        if (speculative and type(raw_card_build_generation) is int
-            and 0 <= raw_card_build_generation <= _CARD_REPLAY_NODE_ID_MAX)
+        if (speculative
+            and bounded_int(raw_card_build_generation, 0, _CARD_REPLAY_NODE_ID_MAX))
         else None
     )
     try:
@@ -2119,9 +2116,11 @@ _MAX_LLM_COST = 1.7976931348623157e308
 
 
 def _llm_counter(value) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    return value if 0 <= value <= _MAX_LLM_COUNTER else 0
+    # The bool rejection this used to spell separately is inside `bounded_int` — `type(x) is int` is
+    # False for `True`, so a hand-edited `{"tokens": true}` still folds to 0 rather than arithmeticing
+    # as 1. Keeping the two-step form here was what let this site and its siblings drift into two
+    # spellings of one rule (doc 25 EV-04).
+    return value if bounded_int(value, 0, _MAX_LLM_COUNTER) else 0
 
 
 def _llm_cost_value(value) -> float:
@@ -3066,7 +3065,7 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
             if isinstance(value, str) and value.strip() and len(value.strip()) <= limit:
                 receipt[key] = value.strip()
         at_node = d.get("at_node")
-        if type(at_node) is int and 0 <= at_node <= (1 << 31) - 1:
+        if bounded_int(at_node, 0, (1 << 31) - 1):
             receipt["at_node"] = at_node
         # THE CONCEPTS THE QUESTION IS ABOUT, and until now this handler dropped them on the floor.
         # A question registered here becomes a board row that owns no action, and it carried NO
@@ -3174,7 +3173,7 @@ def _on_card_reprioritized(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     card_id = _card_replay_id(d.get("id"))
     priority = d.get("priority")
     if (card_id is not None and d.get("source") == "operator" and d.get("pinned") is True
-            and type(priority) is int and 0 <= priority < 256):
+            and bounded_int(priority, 0, 255)):
         # Reinsert so dict iteration preserves GLOBAL last-event order even when aliases later merge
         # several raw ids onto one canonical Card. Plain assignment would retain first-insertion order.
         st.card_priority_pins.pop(card_id, None)
@@ -3204,7 +3203,7 @@ def _on_card_resource_pinned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
     pin: dict[str, int | str] = {"pinned_by": "operator"}
     for key in ("gpus", "gpu_mem_mib"):
         value = d.get(key)
-        if type(value) is int and 0 <= value <= _CARD_REPLAY_NODE_ID_MAX:
+        if bounded_int(value, 0, _CARD_REPLAY_NODE_ID_MAX):
             pin[key] = value
         elif key in d:
             return
@@ -3228,8 +3227,8 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             generation = d.get("generation")
             proposal_ref = d.get("proposal_ref")
             digest = proposal_ref.get("digest") if isinstance(proposal_ref, dict) else None
-            if (type(node_id) is not int or not 0 <= node_id <= (1 << 31) - 1
-                    or type(generation) is not int or not 0 <= generation <= (1 << 31) - 1
+            if (not bounded_int(node_id, 0, (1 << 31) - 1)
+                    or not bounded_int(generation, 0, (1 << 31) - 1)
                     or not isinstance(proposal_ref, dict)
                     or set(proposal_ref) != {"v", "digest"} or proposal_ref.get("v") != 1
                     or not valid_digest_ref(digest, prefix="idea:v1:")):
@@ -3372,7 +3371,7 @@ def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # that can brick replay. Preserve metadata while replacing only the bounded, deduplicated order.
     metadata: dict = {"order": order}
     raw_at_node = d.get("at_node")
-    if type(raw_at_node) is int and 0 <= raw_at_node <= (1 << 31) - 1:
+    if bounded_int(raw_at_node, 0, (1 << 31) - 1):
         metadata["at_node"] = raw_at_node
     raw_confidence = d.get("confidence")
     try:
@@ -3984,8 +3983,7 @@ def _on_card_build_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
     """
     card_id = _card_replay_id(d.get("card_id"))
     generation = d.get("generation")
-    if (card_id is None or type(generation) is not int
-            or not 0 <= generation <= _CARD_REPLAY_NODE_ID_MAX
+    if (card_id is None or not bounded_int(generation, 0, _CARD_REPLAY_NODE_ID_MAX)
             or generation != st.search_epoch):
         return
     st.card_build_requests.append({"card_id": card_id, "generation": generation})
@@ -4009,8 +4007,7 @@ def _on_card_build_attempted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
     card_id = _card_replay_id(d.get("card_id"))
     generation = d.get("generation")
     index = d.get("index")
-    if (card_id is None or type(generation) is not int
-            or not 0 <= generation <= _CARD_REPLAY_NODE_ID_MAX
+    if (card_id is None or not bounded_int(generation, 0, _CARD_REPLAY_NODE_ID_MAX)
             or type(index) is not int or index < 0):
         return
     st.card_build_attempts.append(
@@ -4047,7 +4044,7 @@ def _on_speculation_depth_settled(st: RunState, e: Event, d: dict, ctx: "_FoldCt
     (depth above the pinned one) is simply inert, because the derivation caps the floor at the pin.
     """
     depth = d.get("depth")
-    if type(depth) is not int or not 0 <= depth <= 64:
+    if not bounded_int(depth, 0, 64):
         return
     floor = st.speculation_depth_settled
     st.speculation_depth_settled = depth if floor is None else min(floor, depth)

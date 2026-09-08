@@ -1,5 +1,5 @@
-"""The two rules every health RECEIPT shares: what counts as a receipt COUNT, and how a receipt
-SURVIVES a projection of the rows it describes.
+"""The three rules every health RECEIPT shares: what counts as a receipt COUNT, what FIELDS a given
+receipt is made of, and how a receipt SURVIVES a projection of the rows it describes.
 
 Doc 25 EM-12 found ~8 hand-rolled receipt validators repeating the same idioms. Most of what they
 repeat is not shareable: each receipt's consistency predicate (``total == retained + omitted``,
@@ -40,6 +40,88 @@ def bounded_receipt_count(value: object, maximum: int) -> bool:
     ``receipt_known=False``. That decision belongs to the receipt, not to its leaf guard.
     """
     return type(value) is int and 0 <= value <= maximum
+
+
+def receipt_field_set(*fields: str) -> tuple[str, ...]:
+    """Declare, ONCE, the exact field names one receipt is made of (doc 25 EM-12).
+
+    EM-12's resolution shared the LEAF (`bounded_receipt_count`) and deliberately left each
+    receipt's consistency predicate with its receipt, because those are domain logic carrying
+    load-bearing comments. What it explicitly left open is the other half of the finding's last
+    sentence: **nothing forced a receipt's WRITER and its READER to agree on the FIELD SET.** Both
+    ends spelled it out independently — the writer as literal keys in the dict it returns, the
+    reader as a local ``keys = (...)`` tuple it checks presence against — so a field added to one
+    end is invisible at the other, and the failure is silent in the worst direction: a reader that
+    still finds every field it knows about reports a receipt as complete while the writer has
+    started emitting something it never reads.
+
+    That is a registry problem, the shape the other duck-typed seams in this repo solve, so the
+    answer is a registry: this returns the declaration both ends then CONSUME —
+    `receipt_payload` refuses to build a row that is not exactly these fields, and
+    `receipt_presence` answers the reader's all-or-nothing presence question from the same tuple.
+    Neither end can be changed alone without the other going red.
+
+    Refusals rather than coercion, because a declaration is read once at import and then trusted:
+    an empty declaration (a receipt with no fields is not a receipt), a duplicate name (the writer
+    would emit one key and the reader would count two), and a non-string or empty name.
+    """
+    if not fields:
+        raise ValueError("a receipt declares at least one field")
+    for name in fields:
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"receipt field names are non-empty strings: {name!r}")
+    if len(set(fields)) != len(fields):
+        raise ValueError(f"receipt field names are unique: {fields!r}")
+    return tuple(fields)
+
+
+def receipt_payload(fields: tuple[str, ...], values: dict) -> dict:
+    """The WRITER's half: *values* as a receipt row, refusing anything but exactly *fields*.
+
+    This is what makes the declaration binding rather than decorative. A writer that grows a field
+    without declaring it, or declares one without emitting it, raises HERE — at the moment the row
+    is built, in the writer's own process — instead of shipping a durable row whose reader silently
+    ignores the new field or reads it as absent.
+
+    Raises ``ValueError`` (not an `OperatorRefusal`): a mismatch is a defect in the code, never a
+    fact about the operator's input, and the receipt's callers already fail closed on ValueError
+    from their own consistency checks.
+
+    Values are NOT validated here — what a given field may hold is the receipt's own rule
+    (`bounded_receipt_count`, a bool, a nested count bounded by another field). Only the SHAPE is.
+    """
+    missing = [name for name in fields if name not in values]
+    extra = [name for name in values if name not in fields]
+    if missing or extra:
+        raise ValueError(
+            "receipt payload does not match its declared field set"
+            + (f"; missing {missing}" if missing else "")
+            + (f"; undeclared {extra}" if extra else ""))
+    return {name: values[name] for name in fields}
+
+
+def receipt_presence(row: object, fields: tuple[str, ...]) -> str:
+    """The READER's half: ``"absent"`` / ``"partial"`` / ``"complete"`` for *fields* in *row*.
+
+    Every additive receipt in this repo reads its presence the same way and for the same reason,
+    and each one had written the three-line ``any``/``all`` dance out by hand:
+
+    * ``absent`` — a row written BEFORE the receipt existed. Its observations are still valid; only
+      the receipt's question is unanswerable, so callers return their legacy "unknown" default.
+    * ``partial`` — some fields but not all. No writer ever produced that, so the row is corrupt or
+      forged and the caller fails closed. Accepting it would let a truncated receipt claim
+      completeness on the fields that survived.
+    * ``complete`` — every declared field is present, and the caller may read them.
+
+    Presence, not validity: ``key in row`` only. Whether the VALUES are sane is the receipt's own
+    predicate, which stays at the receipt.
+    """
+    if not isinstance(row, dict):
+        return "absent"
+    present = sum(1 for name in fields if name in row)
+    if present == 0:
+        return "absent"
+    return "complete" if present == len(fields) else "partial"
 
 
 class ReceiptRows(list):

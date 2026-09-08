@@ -27,6 +27,7 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
+from looplab.core.pathsafe import is_reparse, run_child_name_defect, validate_run_child
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
@@ -238,8 +239,12 @@ class AppState:
             RunDeletionStorageError, load_run_deletion_fence)
 
         root = self.root.resolve()
-        if (not isinstance(run_id, str) or not run_id or Path(run_id).name != run_id
-                or run_id in {".", ".."} or "/" in run_id or "\\" in run_id):
+        # The LEXICAL rule first and on its own, because the two fences below must be answered
+        # BEFORE the directory is inspected: a run whose directory is already gone mid-deletion has
+        # to keep reading as 410 "being deleted", not 404. `core/pathsafe.py` owns both halves
+        # (doc 25 SC-03); the read path deliberately takes the non-strict name tier, so a directory
+        # the CLI created out of band with an unusual-but-legal name stays openable.
+        if run_child_name_defect(run_id) is not None:
             raise HTTPException(404, "no such run")
         requested = root / run_id
         lowered = requested.name.lower()
@@ -260,15 +265,6 @@ class AppState:
                 "operation_id": fence["operation_id"],
                 "message": "This run is being deleted.",
             })
-        try:
-            entry = requested.lstat()
-            rd = requested.resolve(strict=True)
-            junction_fn = getattr(requested, "is_junction", None)
-            junction = bool(callable(junction_fn) and junction_fn())
-        except (FileNotFoundError, OSError) as exc:
-            raise HTTPException(404, "no such run") from exc
-        attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
-        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
         # A run is a DIRECT CHILD of the root, and nothing else. Accepting any DESCENDANT (root is in
         # the parents of root/a/b/c) let a run_id like "run1/nodes/n3_ws" resolve to a sandbox-WRITABLE
         # node workspace: any events.jsonl the evaluated candidate wrote there became addressable as a
@@ -278,20 +274,21 @@ class AppState:
         # HTTP route params largely masked it, but the command service had already had to re-restrict
         # to `canonical.parent == root`; this is the base helper, so it enforces the same rule (and
         # rejects the root itself EXPLICITLY, rather than relying on root never having an events.jsonl).
-        if (rd.parent != root or rd != requested.resolve(strict=False)
-                or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode)
-                or bool(attributes & reparse_flag) or junction):
+        # That whole rule — reparse, junction, directory, resolved-identity, direct child — is
+        # `pathsafe.validate_run_child` now. This site used to re-spell `is_reparse` INLINE out of the
+        # attribute and the mode bit, which is exactly the copy `core/pathsafe.py` exists to end.
+        child = validate_run_child(root, run_id)
+        if child.defect is not None:
             raise HTTPException(404, "no such run")
+        rd = child.path
         events = rd / "events.jsonl"
         try:
             event_entry = events.lstat()
             event_target = events.resolve(strict=True)
         except (FileNotFoundError, OSError) as exc:
             raise HTTPException(404, "no such run") from exc
-        event_attributes = int(getattr(event_entry, "st_file_attributes", 0) or 0)
-        if (stat.S_ISLNK(event_entry.st_mode) or not stat.S_ISREG(event_entry.st_mode)
-                or bool(event_attributes & reparse_flag) or event_target != events
-                or event_target.parent != rd):
+        if (is_reparse(event_entry) or not stat.S_ISREG(event_entry.st_mode)
+                or event_target != events or event_target.parent != rd):
             raise HTTPException(404, "no such run")
         return rd
 

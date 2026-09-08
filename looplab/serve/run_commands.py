@@ -36,8 +36,8 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 import orjson
 
-from looplab.core.atomicio import atomic_write_text
-from looplab.core.pathsafe import filesystem_identity
+from looplab.core.atomicio import atomic_write_text, same_file_entry
+from looplab.core.pathsafe import filesystem_identity, is_reparse, validate_run_child
 from looplab.core.models import Event
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
@@ -531,18 +531,14 @@ class RunCommandService:
         its completion poll needs a missing-safe read without relaxing direct-child or reparse checks.
         """
         root = self.srv.root.resolve()
-        requested = Path(rd)
-        try:
-            run_info = requested.lstat()
-            canonical = requested.resolve()
-        except (FileNotFoundError, OSError) as exc:
-            raise HTTPException(404, "no such run") from exc
-        run_attributes = int(getattr(run_info, "st_file_attributes", 0) or 0)
-        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-        if (canonical == root or canonical.parent != root or not stat.S_ISDIR(run_info.st_mode)
-                or requested.is_symlink()
-                or bool(run_attributes & reparse_flag)):
+        # The same direct-child rule its three siblings apply, through the one spelling
+        # (doc 25 SC-03). This copy had lost the Windows JUNCTION probe the others make, so a
+        # junction was admitted here and refused everywhere else — the drift a shared predicate is
+        # for. The events.jsonl half stays below because only THIS reader tolerates its absence.
+        child = validate_run_child(root, rd, must_exist=True)
+        if child.defect is not None:
             raise HTTPException(404, "no such run")
+        canonical = child.path
 
         events = canonical / "events.jsonl"
         try:
@@ -551,10 +547,11 @@ class RunCommandService:
             return ""
         except OSError as exc:
             raise HTTPException(409, "run event path cannot be validated") from exc
-        attributes = int(getattr(info, "st_file_attributes", 0) or 0)
         try:
-            invalid = (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
-                       or bool(attributes & reparse_flag) or events.resolve().parent != canonical)
+            # `is_reparse` is the shared spelling of the symlink/reparse pair (doc 25 SC-03); this
+            # site used to rebuild it from the mode bit and the Windows attribute by hand.
+            invalid = (is_reparse(info) or not stat.S_ISREG(info.st_mode)
+                       or events.resolve().parent != canonical)
         except OSError as exc:
             raise HTTPException(409, "run event path cannot be validated") from exc
         if invalid:
@@ -562,7 +559,7 @@ class RunCommandService:
         try:
             with open(events, "rb") as stream:
                 opened = os.fstat(stream.fileno())
-                if ((info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)
+                if (same_file_entry(info) != same_file_entry(opened)
                         or not stat.S_ISREG(opened.st_mode)):
                     raise HTTPException(503, "run event identity changed during observation")
                 raw = stream.readline(MAX_EVENT_BATCH_BYTES + 1)
@@ -1276,9 +1273,14 @@ class RunCommandService:
         permit indirection.
         """
         root = self.srv.root.resolve()
-        canonical = rd.resolve()
-        if canonical == root or canonical.parent != root:
+        # `must_exist=False`: this is the CONTAINMENT half only, which is what this method has
+        # always asked of the directory (`AppState.run_dir` already judged the entry itself, and a
+        # caller reaching here with a bare path gets the same answer it used to). The service-file
+        # rules below are this method's own and stay here — a run may legitimately be mid-creation.
+        child = validate_run_child(root, rd, must_exist=False)
+        if child.defect is not None:
             raise HTTPException(404, "no such run")
+        canonical = child.path
         events = canonical / "events.jsonl"
         if not events.exists():
             raise HTTPException(404, "no such run")

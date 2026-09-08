@@ -20,6 +20,7 @@ from typing import BinaryIO, Optional
 
 import anyio
 
+from looplab.core.atomicio import same_file_entry
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
 from looplab.runtime import landlock, read_allowlist, read_fence, seccomp
@@ -73,8 +74,11 @@ def _try_acquire_gpu_host_lease(path: Path) -> Optional[BinaryIO]:
     try:
         opened = os.fstat(descriptor)
         entry = path.lstat()
+        # `same_file_entry` is the REPLACEMENT tier (doc 25 SC-11): the question here is only
+        # whether the name we lstat'd is the inode we now hold open, and the lease file's CONTENT
+        # legitimately changes under us. A hand-spelled pair is how that vocabulary drifted.
         if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(entry.st_mode)
-                or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)):
+                or same_file_entry(entry) != same_file_entry(opened)):
             raise GpuPinUnenforceable(
                 "host GPU allocation lease is not a stable regular file")
         if opened.st_size == 0:

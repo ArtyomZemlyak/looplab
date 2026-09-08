@@ -19,6 +19,7 @@ from looplab.adapters.tasks import load_task
 from looplab.core.atomicio import (
     durable_no_replace_rename, strict_atomic_write_bytes, strict_fsync_parent)
 from looplab.core.config import settings_from_snapshot
+from looplab.core.pathsafe import run_child_name_defect, validate_run_child
 from looplab.core.run_reset import (
     RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RunResetFenceError,
     RunResetStorageError, load_run_reset_marker, publish_run_reset_marker)
@@ -1184,30 +1185,21 @@ async def durable_reset_run(
         raise HTTPException(400, "operation_id must be a lowercase UUID")
 
     root = srv.root.resolve()
-    requested = root / run_id
-    try:
-        entry = requested.lstat()
-        rd = requested.resolve()
-        is_junction = getattr(requested, "is_junction", None)
-        junction = bool(callable(is_junction) and is_junction())
-        attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
-        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    except (FileNotFoundError, OSError) as exc:
-        raise HTTPException(404, "no such run") from exc
-    requested_identity = os.path.normcase(os.path.abspath(requested))
-    resolved_identity = os.path.normcase(os.path.abspath(rd))
-    if (Path(run_id).name != run_id or run_id in {".", ".."}
-            or requested.name.lower() in _RESERVED_RUN_IDS
-            or requested.name.lower().startswith((
+    # The service-name reservation is this route's own (those entries are root-side files, not
+    # runs); everything else — plain name, lstat, reparse, junction, directory, resolved identity,
+    # direct child — is `pathsafe.validate_run_child`, the one spelling (doc 25 SC-03). This site
+    # compared `normcase(abspath(...))` by hand, which is `filesystem_identity` minus its macOS
+    # half: an NFC-typed name for an NFD-stored directory compared unequal and 404'd a real run.
+    if (run_child_name_defect(run_id) is not None
+            or run_id.lower() in _RESERVED_RUN_IDS
+            or run_id.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
-                _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))
-            or requested.parent != root or rd.parent != root
-            or requested_identity != resolved_identity
-            or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode)
-            or bool(attributes & reparse_flag)
-            or junction
-            or not rd.is_dir()):
+                _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))):
         raise HTTPException(404, "no such run")
+    child = validate_run_child(root, run_id)
+    if child.defect is not None:
+        raise HTTPException(404, "no such run")
+    rd = child.path
 
     if expected_generation is None:
         # The non-browser opt-out, resolved ONCE here so everything downstream keeps working on a real

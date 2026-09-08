@@ -238,7 +238,7 @@ def _hand_rolled_signature_lines() -> list[str]:
 # The sites SC-11 named are converted. An AST sweep then found the pattern is far more widespread
 # than the finding's "six different ways" — measured below — so the rest is a LEDGER rather than a
 # silent backlog: the number cannot grow without this test going red, and shrinking it is the work.
-UNCONVERTED_SIGNATURE_SITES = 21
+UNCONVERTED_SIGNATURE_SITES = 17
 
 
 def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
@@ -254,7 +254,9 @@ def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
     is the intended direction of travel.
 
     The cross-run state cache was the first follow-up conversion: its hand-rolled tuple omitted
-    `st_file_attributes`, so it could not see a file that gained a reparse point.
+    `st_file_attributes`, so it could not see a file that gained a reparse point. The 2026-09-08
+    pass converted the four sites that spelled `(st_dev, st_ino)` by hand — exactly
+    `same_file_entry`, the replacement tier — and took the ledger from 21 to 17.
     """
     offenders = sorted(set(_hand_rolled_signature_lines()))
     undeclared = [o for o in offenders if o.split(":")[0] not in DOCUMENTED_VARIANTS]
@@ -265,7 +267,14 @@ def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
 
 def test_the_sites_this_change_converted_stay_converted():
     """The SC-11 conversions and follow-up. These must not reappear in the sweep."""
-    converted = {"serve/routers/attention.py", "serve/appstate.py", "tools/_runcache.py"}
+    # File-granular on purpose: a file belongs here once NOTHING in it spells a signature by hand.
+    # 2026-09-08 converted the four hand-spelled `(st_dev, st_ino)` pairs — each asked the
+    # replacement question and nothing else, which IS `same_file_entry`, the tier whose whole point
+    # is that growth keeps the answer. Two of the four files still carry other signatures
+    # (`eventstore`'s trusted-growth tuple, `engine_proc`'s dev/ino/MODE triples), so only the two
+    # that came out clean can be pinned here; the other two stay in the ledger count above.
+    converted = {"serve/routers/attention.py", "serve/appstate.py", "tools/_runcache.py",
+                 "engine/resources.py", "serve/run_commands.py"}
     offenders = {o.split(":")[0] for o in _hand_rolled_signature_lines()}
     assert not (converted & offenders), (
         f"a converted site went back to a hand-rolled signature: {sorted(converted & offenders)}")

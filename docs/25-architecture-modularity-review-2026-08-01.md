@@ -2538,8 +2538,6 @@ a real construction.
 
 #### EM-12 · MEDIUM · excessive-logic · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
-> **OPEN[receipt-builder-reader-field-set-unguarded]** nothing forces a receipt's WRITER and its READER to agree on the field set; the shared leaf (`bounded_receipt_count`) landed, the registry did not. proof:absent:receipt_field_set@looplab/core/receipts.py
-
 **Ad-hoc hand-written receipt validators repeated ~8 times with no shared schema helper**
 
 *Locations:* `looplab/engine/claims.py:102`, `looplab/engine/claims.py:652`, `looplab/engine/claims.py:767`, `looplab/engine/claims.py:542`, `looplab/engine/memory.py:684`, `looplab/engine/memory.py:726`, `looplab/engine/concept_steward.py:75`, `looplab/engine/claims.py:2537`
@@ -2580,10 +2578,39 @@ receipt counts, matched `int)` inside `fingerprint)`, and reported its own expla
 guard that cries wolf collects exemptions until it guards nothing — the same trap EV-04's first draft
 fell into one finding earlier.
 
-Still open under this finding: the builder/validator drift the recommendation's last sentence is
-really about. Nothing yet forces a receipt's WRITER and its READER to agree on the field set; that is
-a registry problem (the shape CLAUDE.md's other duck-typed seams solve) rather than a helper problem,
-and it is not addressed here.
+Not addressed in that pass: the builder/validator drift the recommendation's last sentence is really
+about. Nothing forced a receipt's WRITER and its READER to agree on the field set; that is a registry
+problem (the shape CLAUDE.md's other duck-typed seams solve) rather than a helper problem.
+
+*Closure (2026-09-08) — the field-set registry.* `core/receipts.py` now carries the declaration and
+the two ends that consume it: `receipt_field_set(*fields)` (refusing an empty, duplicated or
+non-string declaration, since it is read once at import and then trusted), `receipt_payload(fields,
+values)` for the WRITER, and `receipt_presence(row, fields)` -> `absent`/`partial`/`complete` for the
+READER. `receipt_payload` is what makes the declaration binding: a payload that is not EXACTLY the
+declared fields raises where the row is built, so a writer cannot grow a receipt the reader will read
+as absent, and cannot declare a field it never emits.
+
+Adopted on the three capsule receipts, which is where the gap was widest: `build_concept_capsule`
+emits the evidence triple, the later `concept_evidence_observed` marker (its own declaration, because
+it is separately additive over v2) and the three `{stem}_total/_omitted/_complete` triples through
+`receipt_payload`, and `_capsule_concept_evidence_completeness` / `_capsule_completeness` gate on
+`receipt_presence` over the same tuples. The widest gap of all was `CAPSULE_SOURCE_COUNTS`: written by
+`concept_capsules._capsule_source_summary` and read by `concept_steward._concept_source_receipt` in
+ANOTHER module, which had kept a local copy of the four literals — so a count added to the writer
+would have been read there as absent, i.e. as zero, the optimistic direction, while the validator went
+on reporting `receipt_known`. The steward now imports the declaration.
+
+What did NOT change, deliberately: the consistency predicates. `_concept_source_receipt`'s two-axis
+rule and its ten-line comment stay exactly where they are — this registry is about the field SET, not
+about folding domain logic into a spec table, which the 2026-08-04 resolution above refused for
+reasons that still hold.
+
+Driven in `tests/test_digest_and_number_contracts.py`: a real capsule is built and each declared field
+removed one at a time, with the reader required to fail closed on the torn triple and to change its
+answer (tombstone -> unreadable) when the observed marker goes; the cross-module receipt is
+round-tripped through the real writer and the real validator, with each declared count dropped in turn
+and `receipt_known` required to go False; and the two modules' declarations are asserted to be the
+SAME OBJECT, not merely equal — an equal-today copy being precisely the drift this closes.
 
 #### EM-13 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
@@ -2836,8 +2863,6 @@ new-candidate site: each fails exactly its own case with `assert 2 == 1`.
 
 #### EV-04 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
-> **OPEN[replay-scalar-guards-hand-rolled]** the digest half shipped (`valid_digest_ref`); the scalar guards are still hand-rolled per site (21 `0 <= ` bound expressions in `replay.py` alone) and no new handler is required to use the `_coverage_snapshot_row` table style. proof:absent:bounded_int@looplab/core/jsonutil.py
-
 **Event-data admission is implemented three different ways; hex-digest validation alone is copy-pasted 4x within one handler and ~20x repo-wide**
 
 *Locations:* `looplab/events/replay.py:277-312`, `looplab/events/replay.py:1984-2019`, `looplab/events/replay.py:4070-4107`, `looplab/events/replay.py:2820-2827`, `looplab/events/replay.py:4117-4120`
@@ -2880,8 +2905,28 @@ into `costs.py` confirms it is caught.
 
 The finding's OTHER two halves — the scalar guards (`type(x) is int and 0 <= x <= (1 << 31) - 1`,
 `isinstance(v, bool) or not isinstance(v, int)`) and adopting the `_coverage_snapshot_row` table style
-for new handlers — are NOT done here and stay open. They are a larger change with real semantic risk
-per site, unlike the digest predicate, which is one exact shape with a differential check available.
+for new handlers — were NOT done there. They are a larger change with real semantic risk per site,
+unlike the digest predicate, which is one exact shape with a differential check available.
+
+*Closure (2026-09-08) — the scalar half.* `core/jsonutil.bounded_int(value, lo, hi)` is now the one
+rule, beside `valid_digest_ref` because both are read by the FOLD over untrusted event data. It makes
+the two decisions each site was re-making by hand: `type(value) is int` (so `{"depth": true}` folds
+to the default instead of arithmeticing as 1, and an `int` subclass cannot override the comparisons
+the bound is expressed in — the same argument `bounded_receipt_count` was given under EM-12), and an
+INCLUSIVE range with both ends stated, so the one site that spelled an EXCLUSIVE upper end
+(`0 <= priority < 256`) now reads `bounded_int(priority, 0, 255)` and a reader never has to check
+which end a given call meant. Sixteen `replay.py` sites converted; the 21 `0 <= ` bound expressions
+the marker counted are down to 5, all of them float or non-int comparisons this predicate does not
+answer. `_llm_counter` lost the separate `isinstance`/bool pair it spelled above its bound, which was
+the second of the module's two spellings for one concept.
+
+Driven, not pinned: `tests/test_events_replay.py` folds a real `card_reprioritized` log across the
+inclusive boundary (255 lands, 256 and `True` do not) — the exclusive-bound site, where an off-by-one
+conversion would silently widen the accepted range — and a `{"total_tokens": true}` usage row must
+fold to 0, not 1. `tests/test_digest_and_number_contracts.py` pins the leaf's truth table with an
+`int` subclass whose `__le__` answers True for every range, so a loosened type test fails there.
+The `_coverage_snapshot_row` table style for new handlers remains a style recommendation, not a rule,
+and is not tracked as an open item.
 
 #### EV-05 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
@@ -3968,8 +4013,6 @@ lines) — naming 35 rules costs more lines than one chain that names none — b
 
 #### SC-03 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
-> **OPEN[run-path-validators-not-unified]** the micro-helpers are single-sourced in `core/pathsafe.py`; the six full canonical run-child validators with their per-caller HTTP vocabularies are not. proof:absent:validate_run_child@looplab/core/pathsafe.py
-
 **Canonical run-path / run-id validation is implemented at least six different ways**
 
 *Resolution (micro-helpers):* `core/pathsafe.py` now owns `is_reparse`, `WINDOWS_RESERVED` and
@@ -3978,8 +4021,55 @@ lines) — naming 35 rules costs more lines than one chain that names none — b
 case/Unicode-identity copies now call it. `grep 'def _is_reparse\|def _author_is_reparse'
 looplab/` returns nothing. Two of those copies were attribute-only and dropped the `S_ISLNK`
 half — the drift the finding predicted; their callers happened to OR it in separately, so
-converging removed a redundant double-check rather than fixing a live hole. **Still open:** the
-six full `validate_run_child`-shaped validators, which carry per-caller HTTP error vocabularies.
+converging removed a redundant double-check rather than fixing a live hole. **Not done in that
+pass:** the six full `validate_run_child`-shaped validators, which carry per-caller HTTP error
+vocabularies.
+
+*Closure (2026-09-08) — the composition.* `core/pathsafe.py::validate_run_child(root, child, *,
+must_exist, strict_name)` is the whole rule now, returning a `RunChild(path, defect)` VERDICT and
+phrasing nothing — the shape `events/trust_gate.py::apply_trust_gate` uses, and for the same reason:
+one physical defect is a 404 on the read path, a 400/409 pair at launch, and a `run_not_found`
+envelope mid-deletion, so the vocabulary is what could never be shared. `run_child_name_defect` is
+its lexical half in two declared tiers — the DEFAULT one every caller already enforced (a plain path
+component, never `.`/`..`, never a separator or NUL) and a `strict` one adding the
+filesystem-ambiguity rule that only the paths which CREATE or DESTROY a run spelled (length,
+whitespace, trailing dot, drive/stream colon, control characters, reserved DOS device names). Keeping
+the tiers apart is deliberate: tightening the read path would have made a run the CLI created out of
+band unopenable, and the reverse (creating a name the reader cannot address) is the actual bug.
+
+Three drifts the copies had already accumulated, all fixed by converging:
+
+* `appstate.run_dir` and `reset_route.durable_reset_run` re-spelled `is_reparse` INLINE, out of
+  `S_ISLNK` and the Windows attribute — i.e. the two loudest callers of this module were not calling
+  it, so the hardening the helper receives would have missed them.
+* `run_commands.run_generation_if_present` had no JUNCTION probe where its three siblings do: a
+  Windows junction was admitted there and refused everywhere else.
+* `reset_route` compared `normcase(abspath(requested))` against the resolved path, which is
+  `filesystem_identity` minus its macOS half — an NFC-typed name for an NFD-stored directory
+  compared unequal and 404'd a run that exists.
+
+Converted: `appstate.run_dir`, `run_commands.validate_paths` and `.run_generation_if_present`,
+`reset_route.durable_reset_run`, `deletion_service._plain_run_path`/`_strict_existing_run`, and
+`launch.safe_run_dir`. Each caller's ordering and refusal codes are preserved verbatim, including the
+two orderings that are load-bearing: `run_dir` still answers the deletion fence (410/503) BEFORE it
+inspects the directory, because a run whose directory is already gone must read as "being deleted"
+rather than "no such run"; and `safe_run_dir` still answers `reserved_run_id` before its symlink
+conflict. `must_exist=False` exists for exactly one of them — `launch` is about a run that does not
+exist yet, so it gets the lexical and containment halves and keeps its own three-way conflict policy
+(symlink / existing file / existing directory) rather than having one of those folded away.
+
+`scope_sources._run_path` is deliberately NOT converted: it admits a third name set (`:` and a
+trailing-dot strip, but no length, control-character or device-name rule), keeps `absolute()` rather
+than `resolve()`, and returns the `lstat` its caller reuses. Converting it would change which report
+sources are readable, which is not a refactor.
+
+Driven in `tests/test_shared_identity_rules.py`: the two name tiers as a truth table with the strict
+tier proven a superset; the `must_exist` split proven by the case that separates it (a symlink is
+accepted by the containment half and refused by the full one); and — the finding's actual claim — ONE
+symlinked run id put through five of the real validators, each required to refuse it in its own
+vocabulary, with `launch` answering 409 `run_path_conflict` where the read paths answer 404. A
+negative source pin keeps the two retired spellings (the inline reparse flag, the hand-rolled
+junction probe) out of all five modules.
 
 *Locations:* `looplab/serve/appstate.py:142-202`, `looplab/serve/run_commands.py:1416-1451`, `looplab/serve/run_commands.py:2071-2097`, `looplab/serve/reset_route.py:924-949`, `looplab/serve/deletion_service.py:67-117`, `looplab/serve/launch.py:63-110`, `looplab/serve/scope_sources.py:242-260`
 
@@ -4397,7 +4487,7 @@ and a recovery/replay contract that `ShareStore` has no analogue for.
 
 #### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
-> **OPEN[unconverted-stat-signature-ledger]** the two tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 21 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 21@tests/test_file_identity_tiers.py`
+> **OPEN[unconverted-stat-signature-ledger]** the two tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 17 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 17@tests/test_file_identity_tiers.py`
 
 **Event-log rewrite/race detection implemented six different ways across serve/**
 
@@ -4438,6 +4528,18 @@ Its cross-run state cache spelled `file_identity`'s fields reordered and without
 folded `RunState`. It now calls the canonical `file_identity`; a driven regression test rewrites the
 log and makes the reparse attribute the only metadata difference, proving the cache re-folds the new
 goal. The measured unconverted-signature ledger falls from 22 to 21.
+
+*Follow-up (2026-09-08):* the four sites that spelled `(st_dev, st_ino)` by hand now call
+`same_file_entry` — `engine/resources.py`'s GPU-lease lstat/fstat check, `events/eventstore.py`'s
+cache identity, `serve/engine_proc.py`'s lifecycle-lock open and `serve/run_commands.py`'s
+generation observation. All four asked the REPLACEMENT question and nothing else, which is exactly
+what that tier is, so the conversion is byte-identical behaviour and the value is that a fix to the
+tier now reaches them. The ledger falls from 21 to 17. Two of the four files still carry a different
+hand-rolled signature (`eventstore`'s trusted-growth tuple, which is `file_identity` minus
+`st_file_attributes` and compared against an `fstat` where the Windows attribute may not agree;
+`engine_proc`'s `(dev, ino, mode)` triples), so only the two files that came out clean joined the
+stay-converted pin — a file-granular set that would otherwise go green while a sibling site in the
+same file was still hand-spelled.
 
 `tests/test_file_identity_tiers.py` therefore pins the two tiers as BEHAVIOUR (growth keeps
 `same_file_entry`; a same-size in-place rewrite defeats it but not `file_identity`), pins all three

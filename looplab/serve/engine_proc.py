@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from looplab.core.atomicio import same_file_entry
 from looplab.core.pathsafe import is_reparse
 
 
@@ -92,7 +93,7 @@ def _engine_liveness(rd: Path) -> Optional[bool]:
         flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(lock, flags)
         opened = os.fstat(fd)
-        if ((entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
+        if (same_file_entry(entry) != same_file_entry(opened)
                 or not stat.S_ISREG(opened.st_mode)):
             os.close(fd)
             fd = None
