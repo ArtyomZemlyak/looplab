@@ -219,9 +219,25 @@ def _log(rd: Path) -> None:
     (rd / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
-def test_the_state_payload_carries_the_servers_own_code_identity(client):
+def test_the_state_payload_carries_the_servers_own_code_identity(client, monkeypatch):
+    """What this test owns is the WIRING: the receipt reaches both carriers.
+
+    PINNED, not read off the live tree. `code_freshness.BOOT_SNAPSHOT` is a module global captured
+    at import of the REAL package, so asserting `stale is False` against it asserts that nobody
+    wrote to `looplab/` between this pytest process importing the package and this request — which
+    is false under the four concurrent shards CLAUDE.md prescribes, under a `git checkout`, or
+    under an editor save. Observed: this failed in a 50-minute shard while a sibling session
+    rewrote three engine modules inside the window, and `code_freshness()` was RIGHT — the
+    assertion was wrong. Its neighbour below already monkeypatches for exactly this reason, and
+    the real `snapshot`/`code_freshness` logic is driven above against `tmp_path` roots, so
+    nothing is lost by pinning here.
+    """
     api, root = client
     _log(root / "demo")
+    from looplab.serve import appstate
+    monkeypatch.setattr(appstate, "cached_code_freshness", lambda: {
+        "stale": False, "changed_count": 0, "changed": [], "changed_truncated": False,
+        "files_at_boot": 3, "files_now": 3, "complete": True})
     body = api.get("/api/runs/demo/state").json()
     assert body["server_code"]["stale"] is False
     # Mirrored into `state` as well: `useRunState` publishes the folded snapshot, not the frame
@@ -244,3 +260,53 @@ def test_the_stamp_survives_the_state_payload_cache(client, monkeypatch):
     body = api.get("/api/runs/demo/state").json()         # cache hit: same file identity
     assert body["server_code"]["stale"] is True
     assert body["state"]["server_code"]["changed_count"] == 3
+
+
+def test_the_review_surface_never_carries_the_servers_code_identity(tmp_path, monkeypatch):
+    """A review link is a capability over ONE RUN, and `server_code` is about the DEPLOYMENT.
+
+    It names which of the operator's `.py` modules moved under a running `looplab ui`, by relative
+    path, plus the package's file counts. A one-run, read-only bearer was granted the run, not the
+    server — and "restart the UI server", which the UI's own tooltip tells them to do, is not a
+    remedy they have. The sibling handler in the same package already refuses this exact line:
+    `review_config` answers 404 rather than "disclose present-day deployment configuration to a
+    legacy review link".
+
+    Both carriers, because `state_payload` stamps the receipt onto the envelope AND mirrors it into
+    `state` — a check on one alone would pass while the other leaked.
+
+    MUTATION: remove `"server_code"` from `_SUMMARY_OMIT_KEYS` -> this is red.
+    """
+    from fastapi.testclient import TestClient
+
+    from looplab.serve import appstate
+    from looplab.serve.server import make_app
+
+    # A REAL OWNER PLANE: minting a review link refuses when the control plane is anonymous
+    # ("read-only sharing requires LOOPLAB_UI_TOKEN so the owner control plane is not anonymous"),
+    # which is the fail-closed rule `owner_token.py` owns.
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    api, root = TestClient(make_app(tmp_path)), tmp_path
+    owner_h = {"X-LoopLab-Token": "owner-secret"}
+    _log(root / "demo")
+    monkeypatch.setattr(appstate, "cached_code_freshness", lambda: {
+        "stale": True, "changed_count": 3, "changed_truncated": False, "complete": True,
+        "changed": ["core/redact.py", "engine/orchestrator.py", "serve/principal.py"],
+        "files_at_boot": 394, "files_now": 394})
+
+    owner = api.get("/api/runs/demo/state", headers=owner_h).json()
+    assert owner["server_code"]["stale"] is True, "the OWNER keeps the receipt — it is theirs"
+
+    created = api.post("/api/runs/demo/reviews", headers=owner_h,
+                       json={"ttl_seconds": 3600, "include_evidence": False})
+    assert created.status_code == 200, created.text
+    review = api.get("/api/review/state",
+                     headers={"X-LoopLab-Review": created.json()["token"]})
+    assert review.status_code == 200, review.text
+    body = review.json()
+    assert "server_code" not in body, body.keys()
+    assert "server_code" not in (body.get("state") or {}), (body.get("state") or {}).keys()
+    # …and not anywhere deeper either: `_scrub_json`'s omit is recursive, and the filename list is
+    # the part that matters — a reviewer must not learn the operator's source-tree layout.
+    assert "serve/principal.py" not in json.dumps(body), (
+        "the operator's changed module paths reached a one-run review bearer")

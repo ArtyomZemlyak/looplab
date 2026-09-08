@@ -206,3 +206,71 @@ def test_every_REGISTERED_channel_survives_the_wrapper_too():
         f"{lost} are registered side channels that do not survive the facade — under the shipped "
         "`unified_agent` default the engine's developer IS this wrapper, so each reads as its own "
         "falsy default on every node")
+
+
+def test_the_validating_wrapper_mirrors_every_channel_off_the_developer_that_SHIPPED():
+    """`ValidatingDeveloper._record`'s registry loop, driven — it had no test at all.
+
+    The loop exists because this wrapper set three of the eleven channels and never called
+    `_sync_audit`, so on its SHIPPING path the engine's envelope read `last_rollback_stage`,
+    `last_budget_exhausted`, `last_edit_calls`, `last_seed`, `last_run`, `last_patch` and
+    `last_budget_facts` as their FALSY defaults — "no rollback was requested", "the session
+    finished on its own terms", "zero edits". Two properties are asserted here:
+
+    1. on the AGENT path every registered channel arrives from the inner developer;
+    2. on the FALLBACK path they come from the FALLBACK, and `last_report` still describes the
+       external AGENT — the one exclusion the loop makes, and the whole point of the split.
+
+    And the loop's blanket `except Exception: pass` is why this needs driving rather than reading:
+    a registry member that is a setter-less property on this class would make the mirror silently
+    inert, which is exactly how `best_of_n`'s `last_report` disarmed `_discard_node_build_telemetry`
+    on 2026-09-08. The third assertion refuses that shape structurally.
+    """
+    from looplab.agents.role_wrappers import ValidatingDeveloper
+    from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS
+
+    channels = {"last_seed": "seed-A", "last_run": "run-A", "last_patch": "patch-A",
+                "last_rollback_stage": "score", "last_budget_exhausted": True,
+                "last_budget_facts": {"spent": 1.5}, "last_edit_calls": 7}
+    # `last_patch` is the edit-surface gate's own dict, read by `core/validate.py`; a string there
+    # is not a channel value, it is a different type.
+    channels["last_patch"] = {"ok": True}
+
+    class _Run:                       # `last_run` is the launcher receipt `core/validate.py` reads
+        launched, exit_code, tag, timed_out = True, 0, "agent", False
+
+    channels["last_run"] = _Run()
+
+    class _Dev:
+        def __init__(self, tag, ok):
+            self.tag, self.ok = tag, ok
+            self.last_files, self.last_deleted, self.last_footprint = {}, [], f"fp-{tag}"
+            for k, v in channels.items():
+                setattr(self, k, v if tag == "agent" else f"{v}-fb")
+
+        def implement(self, _idea):
+            return "def solve():\n    return 1\n" if self.ok else "!!"
+
+    inner, fallback = _Dev("agent", True), _Dev("fb", True)
+    dev = ValidatingDeveloper(inner, fallback=fallback, max_retries=0)
+    dev.implement(_Idea())
+
+    lost = sorted(a for a in channels if getattr(dev, a, None) != getattr(inner, a, None))
+    assert lost == [], f"{lost} did not survive the shipping path of the validating wrapper"
+
+    # 3. NON-VACUITY, and the shape the blanket handler would hide: every channel the loop assigns
+    # must actually be assignable on this class, or the mirror is a no-op the handler swallows.
+    for attr in DEVELOPER_OUTPUT_ATTRS:
+        if attr in ("last_files", "last_deleted", "last_footprint", "last_report"):
+            continue
+        descriptor = getattr(ValidatingDeveloper, attr, None)
+        assert not (isinstance(descriptor, property) and descriptor.fset is None), (
+            f"{attr} is a setter-less property, so `_record`'s `setattr` raises into the blanket "
+            "handler and the channel silently keeps its default")
+
+
+class _Idea:
+    rationale = ""
+
+    def model_copy(self, deep=False):
+        return self

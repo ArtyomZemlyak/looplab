@@ -16,7 +16,12 @@ the ONE channel that skipped the screen the rest of the codebase applies. It no 
 
 * **always, at every tail** — the known credential SHAPES in `_PATTERNS` (negligible false-positive
   risk, which is why they were already documented "always redacted") and the operator's own secret
-  ENV VALUES (`redact_env_values`, below).
+  ENV VALUES (`redact_env_values`, below). "Every tail" means every one: `redact_output_tail`,
+  `redact_persisted_text` / `_redact_persisted` (the ~76 durable sites), `redact_persisted_identity`
+  and `bounded_redacted_tree`. It said this before it was true — the env screen had ONE caller until
+  2026-09-08, so a SHAPELESS secret reached spans, the trace sidecar and a memo — which is why
+  `tests/test_env_values_are_masked_at_every_persisted_boundary.py` now checks the word rather than
+  the sentence carrying it.
 * **`redact_output` only** — the ENTROPY pass, the half that once had a real false-positive cost,
   which is why it is separable at all. It is **ON by default since 2026-08-15**, on the owner's
   ruling over the measurement in `_entropy_candidate` and `_ENTROPY_TOKEN_CHARS`: those false
@@ -399,7 +404,25 @@ def _redact_persisted(value, *, max_chars: int, entropy: bool = True,
     # newline only for multi-line prose; replace every other Unicode control/format character before
     # redaction, hashing, or truncation so ANSI/bidi/NUL payloads cannot survive in any representation.
     text = _without_controls(text, keep_newlines=not single_line)
-    text = redact_secrets(text, entropy=entropy)
+    # ENV VALUES FIRST, then shapes — the same composition and the same reason as
+    # `redact_output_tail`: a secret masked by IDENTITY can no longer be half-eaten by a shape rule
+    # and re-emerge as a recognisable fragment.
+    #
+    # THIS PASS WAS MISSING HERE UNTIL 2026-09-08, while this module's docstring, `redact_output_tail`'s
+    # ("masked ALWAYS"), `core/config.py`'s ("masked either way, at every tail") and CLAUDE.md all said
+    # it ran. `redact_env_values` had exactly ONE production caller — `redact_output_tail` — so the
+    # ~76 sites that persist through `redact_persisted_text` / `_redact_persisted` /
+    # `bounded_redacted_tree` got shapes and entropy only. Driven: with `LOOPLAB_LLM_API_KEY` set to a
+    # SHAPELESS value, `redact_output_tail` masked it and `redact_persisted_text` returned it intact,
+    # and it reached `spans.jsonl`, the trace sidecar and a research memo in a real offline run. The
+    # shapeless case is exactly what this screen exists for — `secret_env_values`' own docstring names
+    # it ("cannot recognise `hunter2hunter2` as this box's `POSTGRES_PASSWORD`").
+    #
+    # COST, measured: 212 us of the 213 is `secret_env_values` walking 137 variables; the replaces are
+    # 0.6 us. NOT cached on purpose — the env is mutable (every `monkeypatch.setenv` in the suite), and
+    # there is no cheap sound signal that it changed, so a cache keyed on a proxy would mask a secret
+    # set after the first call. A persistence boundary writes to disk; 0.2 ms belongs to it.
+    text = redact_secrets(redact_env_values(text), entropy=entropy)
     if single_line:
         text = " ".join(text.split())
     return _bounded_redacted_text(text, max_chars)
@@ -424,10 +447,12 @@ def redact_persisted_identity(value, *, max_chars: int) -> str:
 
     Run, task and action ids are equality keys, not display prose: NFKC would make distinct values such
     as ``"Ａ"`` and ``"A"`` alias.  Controls still become spaces and every known credential shape is
-    masked.  If compatibility folding itself reveals a credential spelling that the original codepoints
+    masked -- as is every value of THIS operator's own secret environment, which is the half a
+    shape rule cannot see and which an identity carries as readily as prose does.  If
+    compatibility folding itself reveals a credential spelling that the original codepoints
     concealed, fail closed by masking the whole identity rather than retaining a confusable secret.
     """
-    text = _without_controls(_persisted_input(value), keep_newlines=False)
+    text = redact_env_values(_without_controls(_persisted_input(value), keep_newlines=False))
     normalized = unicodedata.normalize("NFKC", text)
     if normalized != text and redact_secrets(normalized, entropy=False) != normalized:
         text = "***"

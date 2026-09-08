@@ -648,6 +648,40 @@ def timing_clause(root: Path, unteachable: bool = True) -> str:
 # session rather than the 50 % the model's own 600 s cap allowed.
 DEV_EVAL_TIMEOUT_S = 450.0
 
+# The bridge's OWN build ceiling: `looplab_eval.py` runs `setup.py build_ext --inplace` with
+# `timeout=1800` BEFORE it starts the evaluator clock, so those seconds are spent inside the outer
+# ceiling and outside the inner one. Named here because it is what the reserve below is made of.
+BRIDGE_BUILD_CEILING_S = 1800.0
+# What is left for copying the submission, writing the summary and printing the JSON line once the
+# evaluator has returned. Small, because everything expensive is already named.
+BRIDGE_EMIT_MARGIN_S = 30.0
+
+
+def bridge_timeout(outer_timeout: float) -> int:
+    """The `--timeout` to hand `looplab_eval.py` so ITS verdict, not a SIGKILL, ends a hung eval.
+
+    THE DEFECT THIS CLOSES (2026-09-08). The stage and the dev command both invoked the bridge with
+    no `--timeout`, so it ran its DEFAULT 7200 s evaluator clock inside a stage whose own ceiling is
+    the same 7200 s -- and the pinned `eval_train` ran that same default inside 450 s. Whenever the
+    evaluator would have hit the bridge's deadline the outer kill landed first: SIGKILL, no stdout,
+    engine reason `timeout`, which is in `metric_salvage.NEVER_SALVAGED_REASONS` -- exactly the
+    no-metric DISCARD the bridge's own timeout branch was written to abolish ("a timed-out solver is
+    a wrong solver, not a missing measurement"). The branch existed and was unreachable through the
+    operator pipeline, which is the only pipeline the campaign runs.
+
+    THE RESERVE IS THE SMALLER OF TWO NUMBERS, on purpose. The bridge spends up to
+    `BRIDGE_BUILD_CEILING_S` compiling before the evaluator clock starts, so reserving the whole
+    build ceiling is what makes the inner clock fire first in the WORST case; but a quarter is the
+    most that may be taken off a SHORT ceiling, or the 450 s dev command would be left with nothing
+    to evaluate in. A build that really eats the whole reserve on a short ceiling still ends in the
+    outer kill -- that is the pre-existing behaviour and no worse -- while every other hang now
+    reaches the bridge, which prints a scored zero with `evaluator_timeout` and the stderr tail.
+
+    Returned as an int because it becomes an argv word; floored at 60 s so a hand-set tiny ceiling
+    cannot produce a deadline that expires before the arena has imported anything.
+    """
+    reserve = min(BRIDGE_BUILD_CEILING_S, outer_timeout / 4.0) + BRIDGE_EMIT_MARGIN_S
+    return max(60, int(outer_timeout - reserve))
 
 def session_budget_s() -> float | None:
     """The Developer session's wall-clock ceiling, from the engine that enforces it.
@@ -1483,6 +1517,12 @@ def main() -> int:
                 "--model", "DevEvalTrain",
                 "--solver", "solver.py",
                 "--subset", "train",
+                # ITS OWN DEADLINE, UNDER THIS COMMAND'S. Without it the bridge runs its default
+                # 7200 s evaluator clock inside a 450 s command, so a hung evaluation is always a
+                # SIGKILL with no output rather than the bridge's `evaluator_timeout` line, which
+                # names the split, the elapsed seconds and the evaluator's own stderr tail. See
+                # `bridge_timeout`.
+                "--timeout", str(bridge_timeout(DEV_EVAL_TIMEOUT_S)),
             ] + (["--enforce-rules"] if args.enforce_rules else []),
             "description": ("Run the REAL evaluator on the train split with your staged files and "
                             "print its JSON: speedup, eval_seconds, and whether every instance was "
@@ -1637,22 +1677,14 @@ def main() -> int:
                     # would let this arm optimise against the set it is graded on while the reference
                     # arm does not -- the champion is scored on test once, after the run.
                     "--subset", "train",
+                    # THE BRIDGE'S DEADLINE IS UNDER THE STAGE'S, and that is what makes its
+                    # `evaluator_timeout` verdict reachable at all. Both were `args.timeout` until
+                    # 2026-09-08, so the stage's SIGKILL always landed first: no stdout, engine
+                    # reason `timeout`, which `metric_salvage.NEVER_SALVAGED_REASONS` DISCARDS
+                    # rather than counting as the scored zero a timed-out solver has earned. See
+                    # `bridge_timeout` for how the reserve is sized.
+                    "--timeout", str(bridge_timeout(args.timeout)),
                 ] + (["--enforce-rules"] if args.enforce_rules else []),
-                # OPEN[bridge-deadline-equals-stage-deadline] the stage timeout and the bridge's
-                # internal evaluator deadline are the same number, so the engine's SIGKILL always
-                # fires first and the bridge's `evaluator_timeout` scored-zero verdict is
-                # unreachable through the operator pipeline.
-                # proof:absent:bridge_timeout@benchmarks/algotune/make_task.py
-                # REVIEW 2026-08-30 (correctness): the command above passes no `--timeout`, so the
-                # bridge runs its default 7200 s evaluator clock — started AFTER copy plus up to
-                # 1800 s of build_ext — inside a stage whose own ceiling is the same `args.timeout`
-                # (default 7200). Whenever the evaluator would hit the bridge's deadline, the stage
-                # kill lands first: SIGKILL, no stdout, engine reason `timeout`, which is in
-                # `metric_salvage.NEVER_SALVAGED_REASONS` — exactly the no-metric discard the
-                # bridge's timeout branch was written to abolish ("a timed-out solver is a wrong
-                # solver, not a missing measurement"). Same shape for the pinned dev command's
-                # outer 450 s vs the inner default. Hand the bridge a deadline sized under the
-                # stage's (stage ceiling minus copy/build margin) so the verdict path can ever run.
                 "timeout": args.timeout,
             }],
             "metric": {"kind": "stdout_json", "key": "speedup"},
