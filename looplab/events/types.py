@@ -1270,7 +1270,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "intermediate", "kill_comparable", "node_id", "population", "quantile",
             "resource_underperforming", "underperforming"
         ),
-        optional=(),
+        # The conditional `.update()` in `asha_monitor.py`, invisible to a target-only scan.
+        optional=("resource", "resource_key"),
     ),
     "asha_verdict": PayloadContract(
         "The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence.",
@@ -1278,7 +1279,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "comparable_population", "confidence", "direction", "generation", "intermediate",
             "kill", "node_id", "quantile", "reason", "status", "stop_decided", "under_streak"
         ),
-        optional=("confidence_valid", "kill_superseded_by", "train_monitor_status"),
+        optional=("confidence_valid", "kill_superseded_by", "resource", "resource_key",
+                  "train_monitor_status"),
     ),
     "belief_admission": PayloadContract(
         "How many researcher-proposed beliefs one proposal turn offered and how many the board admitted.",
@@ -1332,8 +1334,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     ),
     "card_build_done": PayloadContract(
         "A Card's build finished: the node it produced, or the reason it was skipped.",
-        required=("error", "eval_seconds", "generation", "node_id", "reason"),
-        optional=("card_id", "skipped", "speculative"),
+        # REQUIRED NAMED `error` / `eval_seconds` / `reason` — three of `node_failed`'s columns
+        # that this type's ONE writer (`engine/speculation.py`'s card-build lane) has never
+        # written. A fabricated `required` could not fail: `test_required_keys_are_written_by_
+        # every_literal_writer` skips a type with no writer row, and this payload is a `Name` the
+        # scan could not resolve. What IS always written is the pair below; `skipped_reason` is
+        # written on the skip branch, is named in this row's own prose, and had no declaration.
+        required=("card_id", "generation"),
+        optional=("node_id", "skipped", "skipped_reason", "speculative"),
     ),
     "card_build_requested": PayloadContract(
         "The durable selection-and-compute gate for one Card's build.",
@@ -1711,7 +1719,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "llm_usage": PayloadContract(
         "One sanitized provider-call delta, folded cumulatively into the run's durable ledger.",
         required=(),
-        optional=("priced_calls", "usage_id"),
+        # EVERY COLUMN `sanitize_usage_delta` EMITS, not two of them. The row declared
+        # `priced_calls` and `usage_id` alone while the writer (`engine/costs.py::_payload`) spreads
+        # the whole sanitized delta and the fold (`replay.py::_clean_llm_totals`) reads all five
+        # missing ones — so `docs/guide/event-reference.md` described the run's cost ledger as
+        # carrying no cost and no tokens. Optional rather than required: `_row_priced_calls` already
+        # establishes that a log written before a counter existed omits it.
+        optional=("calls", "completion_tokens", "cost", "priced_calls", "prompt_tokens",
+                  "total_tokens", "usage_id"),
         stored_whole=True,
     ),
     "log_repaired": PayloadContract(
@@ -1853,7 +1868,13 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "plan": PayloadContract(
         "The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve.",
         required=(),
-        optional=("at_node", "endgame_start", "phases", "reason", "reserve"),
+        # `max_nodes` IS LOAD-BEARING: `engine/plan.py::replan` reads it back off the folded
+        # `state.plan` as `planned_budget` and it is the budget-changed re-plan trigger. The row was
+        # authored from the fold-read side alone, so the three keys `build_plan` returns and nothing
+        # folds were simply absent — and `stored_whole` is True, which makes them undocumented
+        # fields of `RunState.plan`.
+        optional=("at_node", "endgame_start", "max_nodes", "phases", "reason", "reserve",
+                  "reserve_frac", "source"),
         stored_whole=True,
     ),
     "policy_decision": PayloadContract(
@@ -2111,19 +2132,35 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "trace_export_health": PayloadContract(
         "The span exporter is unhealthy — one row per distinct state, never on a healthy run.",
         required=(),
+        # THE WHOLE `metrics()` DICT, which is what the writer publishes and what
+        # `core/tracing.py::AsyncJsonlSpanExporter.metrics` says it publishes. Eleven keys were
+        # declared against twenty-five written; the missing fifteen include the `dropped_*` family
+        # (per `_TRACE_EXPORT_DROP_REASONS`), the `stopped_*` family (per
+        # `TRACE_WORKER_STOP_REASONS`) and `last_export_error` / `worker_stop_detail`, the two
+        # fields tracing.py's own comments name as what a human debugging a stalled exporter needs.
+        # `buffered_spans` was declared while NOTHING writes it.
         optional=(
-            "accepted_spans", "buffered_bytes", "buffered_spans", "dropped_spans",
-            "export_failures", "exported_spans", "loss_receipt_failures", "queued_spans",
-            "shutdown", "worker_alive", "worker_stop_reason"
+            "accepted_spans", "buffered_bytes", "dropped_queue_bytes", "dropped_queue_full",
+            "dropped_serialization_error", "dropped_shutdown", "dropped_shutdown_timeout",
+            "dropped_spans", "dropped_worker_start", "export_failures", "exported_spans",
+            "last_export_error", "loss_receipt_failures", "loss_receipts", "queued_spans",
+            "shutdown", "stopped_abandoned", "stopped_crashed", "stopped_idle",
+            "stopped_receipt_failed", "stopped_retired", "stopped_shutdown", "worker_alive",
+            "worker_stop_detail", "worker_stop_reason"
         ),
     ),
     "train_monitor_alert": PayloadContract(
         "The live training-log judge's verdict about one running stage, and the log role it judged.",
         required=("confidence", "generation", "log_role", "node_id", "reason", "status"),
+        # …AND THE FIVE OVERRUN COLUMNS `train_monitor.py::stamp_projected_overrun` fills and the
+        # alert then `.update()`s in. A `.update()` is never an assignment TARGET, so the writer
+        # scan could not see them and reported this type fully covered; two of the five
+        # (`projected_overrun_s`, `stage_wall_s`) are read live by `serve/attention.py`.
         optional=(
             "citation_resolved", "confidence_valid", "evidence_locator", "evidence_source", "fault",
-            "kill", "kill_role_withheld", "kill_superseded_by", "repair_decided", "stage",
-            "stop_decided", "trajectory", "trajectory_veto"
+            "kill", "kill_role_withheld", "kill_superseded_by", "overrun_alert_floor_s",
+            "overrun_beyond_noise_s", "projected_overrun_s", "repair_decided", "stage",
+            "stage_grace_s", "stage_wall_s", "stop_decided", "trajectory", "trajectory_veto"
         ),
     ),
     "trust_gate_changed": PayloadContract(
