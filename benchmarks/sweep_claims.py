@@ -583,6 +583,18 @@ def check_money_cue_reaches_the_choosers(bench: str):
     return blind_named == named, detail
 
 
+# The median share of a probe's spend that lands BEFORE its first evaluated node, per task, measured
+# 2026-09-08 over 141 probes. Pinned for §330's reason: a band computed from the probes it judges
+# cannot be failed by them. `pde_heat1d` sits where it does because four of the corpus's five worst
+# probes are on it -- 78.9 to 90.6 % -- and that is a fact about the task, not an accident of one run.
+BEFORE_FIRST_NODE_BANDS = {
+    "edge_expansion": (20.0, 45.0),
+    "discrete_log": (15.0, 55.0),
+    "pde_heat1d": (40.0, 95.0),
+    "pagerank": (20.0, 60.0),
+}
+
+
 def check_waste_after_the_last_node(bench: str):
     """"$3.6067 of $100.2691 corpus spend (3.6 %) lands AFTER the last evaluated node ... 16 of 69
     runs end holding one" (`engine/proposal_cues.py`)
@@ -770,6 +782,56 @@ def check_test_tracks_train(bench: str):
     return not loud and not unpinned, detail
 
 
+def check_waste_before_the_first_node(bench: str):
+    """§72: "трата ПОСЛЕ последнего узла" читается только рядом с тратой ДО первого -- и проверялась
+    половина пары.
+
+    Driven from `probe_summary --json` over the 141 probes that reached a node. Measured 2026-09-08:
+
+        median 34 %, p25 28, p75 39, max 91
+
+    and the four worst are the SAME TASK: `remPde` 90.6 %, `remPde4` 85.2 %, `remPde5` 83.3 %,
+    `remPde2` 78.9 % -- every one of them `pde_heat1d`, every one ending with a single node. On that
+    task a dollar buys almost no search: the budget goes on getting to the first evaluation.
+
+    The verdict is the per-task median against a pinned band, for §330's reason: a band computed
+    from the probes it judges cannot be failed by them.
+    """
+    import collections
+    import subprocess
+    tool = Path(bench) / "looplab" / "benchmarks" / "probe_summary.py"
+    if not tool.is_file():
+        return False, "probe_summary.py is not on this box, so the pair cannot be driven"
+    got = subprocess.run([sys.executable, str(tool), "--json"], capture_output=True, text=True,
+                         timeout=900)
+    try:
+        rows = json.loads(got.stdout)
+    except ValueError:
+        return False, f"probe_summary produced no json ({got.stdout[-160:]!r})"
+    reached = [r for r in rows
+               if r.get("reached_a_node") and isinstance(r.get("before_pct"), (int, float))]
+    if not reached:
+        return False, "no probe on this box reached an evaluated node"
+    by_task = collections.defaultdict(list)
+    for r in reached:
+        by_task[r.get("task") or "?"].append(float(r["before_pct"]))
+    said, loud = [], []
+    for task, vals in sorted(by_task.items(), key=lambda kv: -len(kv[1])):
+        v = sorted(vals)
+        med = v[len(v) // 2]
+        said.append(f"{task} {med:.0f} % (n={len(v)}, max {max(v):.0f})")
+        band = BEFORE_FIRST_NODE_BANDS.get(task)
+        if band and not band[0] <= med <= band[1]:
+            loud.append(f"{task} median {med:.0f} % outside {band[0]:.0f}-{band[1]:.0f}")
+    everyone = sorted(float(r["before_pct"]) for r in reached)
+    detail = (f"{len(reached)} probe(s): median {everyone[len(everyone) // 2]:.0f} % of spend goes "
+              f"BEFORE the first evaluated node (max {max(everyone):.0f} %); by task: "
+              + "; ".join(said))
+    if loud:
+        detail += "; OUTSIDE the pinned band: " + ", ".join(loud)
+    return not loud, detail
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -790,6 +852,8 @@ CLAIMS = [
      check_money_cue_reaches_the_choosers),
     ("point 9: 3.6 % of spend lands after the last evaluated node, 16 of 69 runs",
      check_waste_after_the_last_node),
+    ("point 9: the other half of the pair -- spend BEFORE the first node",
+     check_waste_before_the_first_node),
     ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),
     ("point 9: TEST against TRAIN, per task", check_test_tracks_train),
 ]
