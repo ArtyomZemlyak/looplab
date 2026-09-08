@@ -4,7 +4,6 @@ looplab/adapters/repo_write_tools.py::_xlsx_to_markdown#0
 looplab/adapters/repo_write_tools.py::_xlsx_to_markdown#1
 looplab/agents/agent.py::ToolUsingResearcher._validate_emit#0
 looplab/agents/factory.py::_set_role_client#0
-looplab/agents/roles.py::_attention_points#0
 looplab/agents/tool_loop.py::drive_tool_loop._cancelled#0
 looplab/core/llm.py::LiteLLMClient._cost#0
 looplab/core/llm.py::OpenAICompatibleClient._bounded_create#0

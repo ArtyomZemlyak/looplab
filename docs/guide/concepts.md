@@ -1483,7 +1483,7 @@ proposal the run has already paid for, which is the hazard invariant #1 records 
 `train_monitor_alert`.
 
 **A DIRECTION IS NEVER A CLAIM, and since 2026-08-26 that is enforced rather than only asked for.**
-`agents/roles.py::bind_idea_to_board_card` resolves two independent edges against the same visible
+`agents/state_brief.py::bind_idea_to_board_card` resolves two independent edges against the same visible
 board — `card_id` (a claim on a work item) and `parent_card_id` (a filing under a question) — and
 until then a direction could become either one. Both resolution paths reached it: a proposal naming a
 `DIRECTION_ID` in `card_id` bound to it (and had its own `hypothesis` overwritten by the direction's
@@ -1524,7 +1524,7 @@ provider rather than by granting `RunTools` wholesale, which would also hand ove
 rest. It records nothing: every field is already on the Card, and the fold is untouched.
 
 **So does the deep-research memo prompt**, which is the stage that fills the board: both halves render
-from one shared block (`agents/roles.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
+from one shared block (`agents/state_brief.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
 `SEED_STATEMENT_JSON` spelling, without the claim contract (a memo has no `card_id` field). Until
 2026-08-12 it saw none of it — four memos in one 90-minute evaluation registered 18 belief rows for
 about five ideas, three of them re-wordings of the question whose experiment was running while they
@@ -2069,7 +2069,7 @@ Where each concept lives in the code:
 | Append-only log / pure fold / SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Derived Card ledger (fold-time receipt bounds + the `derive_cards` post-pass) | `events/card_ledger.py` |
 | Sandbox seam + subprocess/Docker bodies | `runtime/sandbox.py` |
-| Researcher/Developer roles (toy + LLM) | `agents/roles.py`, `agents/unified_agent.py` |
+| Researcher/Developer roles (LLM; the toy pair is `agents/toy_roles.py`, the prompts `agents/role_prompts.py`, the state brief `agents/state_brief.py`, the wrappers `agents/role_wrappers.py`) | `agents/roles.py`, `agents/toy_roles.py`, `agents/unified_agent.py` |
 | Structured output + LLM client + cost accountant | `core/parse.py`, `core/llm.py` |
 | Durable per-run observed-usage ledger | `engine/costs.py` |
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |

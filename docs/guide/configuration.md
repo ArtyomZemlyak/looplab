@@ -283,7 +283,7 @@ declare, not a clamp: a declared footprint remains authoritative at admission.
 
 **It is a DEFAULT share, not a wall, and the prompt said otherwise until `gpu_footprint_cue`.** Both
 paragraphs the Researcher reads about `footprint.gpus` — this cue and the code-owned contract in
-`agents/roles.py` — used to close on the claim that declaring more "does NOT get this experiment more
+`agents/role_prompts.py` — used to close on the claim that declaring more "does NOT get this experiment more
 hardware" and that the run then "serialises at the same per-experiment cost". The scheduler
 contradicts both halves: `_resource_request_for_node` takes a declared count over AUTO, `_acquire_gpus`
 reserves exactly that many devices all-or-nothing, `_resource_eval_env` writes them into the child's

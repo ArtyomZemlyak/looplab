@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.llm import CostAccountant, LiteLLMClient, OpenAICompatibleClient
 from looplab.core.llm_broker import (BACKGROUND_LANE_PRODUCERS, LLMConcurrencyBroker,
                                      current_llm_lane, default_llm_lane_limits, llm_broker_scope,
