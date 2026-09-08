@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import glob
+import hashlib
 import json
 import os
 import re
@@ -155,19 +156,36 @@ def _cached_median_ms(task: str, subset: str, key: str = "w22x1r3"):
     return times[len(times) // 2] if times else None
 
 
+def reference_module(task: str, probe_root: str = f"{BENCH}/model-probes") -> tuple[str, str]:
+    """`(path, sha256[:12])` of the delivered reference this self-check will inline.
+
+    §346. Every OTHER input to a reading is now on the row -- the lane (§266), the cpus busy outside
+    it (§295), the regime (§329), both halves of the denominator (§319) -- and the one input that is
+    the thing being measured was not. The self-check calls itself "the reference against itself",
+    and the reference it uses is whatever `sorted(glob)[0]` returns out of a probe's workspace: a
+    candidate that rewrites its staged copy would move the constant with nothing on the row to say
+    so. Measured 2026-09-08, so the record starts from a known state: 11 staged copies for
+    pde_heat1d, 13 for discrete_log, 119 for edge_expansion, 1 for pagerank -- and ONE distinct
+    version of each. Today it changes nothing; that is what makes it worth recording now.
+    """
+    found = sorted(glob.glob(f"{probe_root}/*/ws/{task}/reference_{task}.py"))
+    if not found:
+        raise FileNotFoundError(f"no delivered reference module for {task} under {probe_root}")
+    sha = hashlib.sha256(Path(found[0]).read_bytes()).hexdigest()[:12]
+    return found[0], sha
+
+
 def build_solver(task: str, out_dir: str, probe_root: str = f"{BENCH}/model-probes") -> str:
     """Write a SELF-CONTAINED `solver.py` whose `solve()` is the reference's own.
 
     Inlined rather than imported: `--solver-file-only` copies one file, and an import of the
     reference module comes back `solver_unloadable` with `eval_seconds` 1.7.
     """
-    found = sorted(glob.glob(f"{probe_root}/*/ws/{task}/reference_{task}.py"))
-    if not found:
-        raise FileNotFoundError(f"no delivered reference module for {task} under {probe_root}")
-    body = Path(found[0]).read_text(encoding="utf-8")
+    found, _sha = reference_module(task, probe_root)
+    body = Path(found).read_text(encoding="utf-8")
     got = re.search(r"^class (\w+)\(Task\)", body, re.M)
     if not got:
-        raise ValueError(f"{found[0]} has no `class X(Task)` to delegate to")
+        raise ValueError(f"{found} has no `class X(Task)` to delegate to")
     cls = got.group(1)
     path = os.path.join(out_dir, "solver.py")
     Path(path).write_text(
@@ -319,7 +337,8 @@ def busy_cpus_outside_lane() -> int | None:
 def append_reading(path, task: str, subset: str, values, median: float, stamp=None,
                    lane: str | None = None, busy: int | None = None,
                    regime: str | None = None, solver_ms: float | None = None,
-                   cached_ms: float | None = None) -> dict:
+                   cached_ms: float | None = None, reference_sha: str | None = None,
+                   reference_from: str | None = None) -> dict:
     """Append one dated reading, so the drift becomes a SERIES rather than a single number.
 
     §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
@@ -358,6 +377,11 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
            # to quoting the number from a comment.
            "cached_ms": (round(float(cached_ms), 4) if isinstance(cached_ms, (int, float)) else None),
            "solver_ms": (round(float(solver_ms), 4) if isinstance(solver_ms, (int, float)) else None),
+           # AND WHICH REFERENCE IT WAS MEASURED AGAINST (§346) -- the last unrecorded input, and
+           # the one the reading is named after. `reference_from` is the probe whose workspace the
+           # module came out of, so a reading can be traced without re-globbing a tree that may be
+           # gone by then.
+           "reference_sha": reference_sha, "reference_from": reference_from,
            "values": [round(float(v), 6) for v in values],
            "median": round(float(median), 6)}
     path = Path(path)
@@ -549,9 +573,19 @@ def main(argv=None) -> int:
               f"`eval_seconds` cannot see this drift at all)")
     if args.record:
         seen = [b for b in busy_seen if b is not None]
+        # THE REFERENCE IS LOOKED UP AGAIN, not carried down from `build_solver` -- the run may
+        # have taken minutes and a probe can restage its workspace in that time. Re-reading here
+        # records what is on disk NOW; a mismatch with what was inlined would mean the reading is
+        # already unattributable, and a stale carried value would hide that.
+        try:
+            ref_from, ref_sha = reference_module(args.task)
+            ref_from = ref_from.split("/model-probes/", 1)[-1].split("/")[0]
+        except (FileNotFoundError, OSError):
+            ref_from = ref_sha = None
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
                        args.lane, max(seen) if seen else None,
-                       observed_regime(args.task, args.subset), direct, cached)
+                       observed_regime(args.task, args.subset), direct, cached,
+                       reference_sha=ref_sha, reference_from=ref_from)
         print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "

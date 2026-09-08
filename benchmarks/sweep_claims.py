@@ -216,6 +216,7 @@ def check_ruler_constants(bench: str):
     pool: dict = {}
     inferred: dict = {}
     unattributed: dict = {}
+    refs: dict = {}
     # THE EARLIEST EVIDENCE THAT THE SERIAL REGIME EXISTED HERE, from two independent places: a
     # cache file's mtime and the log's own first regime-tagged row. The earlier of the two is the
     # cutoff, so a copied file or a late-added field can only make the rule STRICTER, never let an
@@ -282,6 +283,12 @@ def check_ruler_constants(bench: str):
                 pool.setdefault((task, reg), []).extend(
                     float(v) for v in (row.get("values") or [med])
                     if isinstance(v, (int, float)))
+                # AND WHICH REFERENCE EACH READING WAS TAKEN AGAINST (§346). "The reference against
+                # itself" is one series only while the reference is one file. Readings that used
+                # different ones are two series pooled into a mean measured nowhere -- the §317
+                # mistake with a different key. Rows written before the field exists carry None and
+                # are counted separately, because "not recorded" is not "the same as the others".
+                refs.setdefault((task, reg), set()).add(row.get("reference_sha"))
     except OSError as exc:
         return False, f"cannot read the drift log: {type(exc).__name__}"
 
@@ -351,8 +358,15 @@ def check_ruler_constants(bench: str):
             # a reader who sees `4 quiet wide read(s)` and a tight error bar has no way to tell
             # that number came from rows that never named a regime.
             how = ""
+            seen_refs = refs.get((task, ruler_check.CAMPAIGN_REGIME)) or set()
+            named = {r for r in seen_refs if r}
+            if len(named) > 1:
+                how += (f" [{len(named)} DIFFERENT reference module(s) across these readings: "
+                        + ", ".join(sorted(named)) + " -- not one series]")
+            elif seen_refs and not named:
+                how += " [no reading names the reference it used]"
             if inferred.get(task):
-                how = f" ({inferred[task]} of them INFERRED, taken before {serial_first[:16]})"
+                how += f" ({inferred[task]} of them INFERRED, taken before {serial_first[:16]})"
             if unattributed.get(task):
                 how += (f" [{unattributed[task]} later reading(s) DROPPED: no regime recorded and "
                         "both regimes existed by then]")
