@@ -234,7 +234,8 @@ class AblationMixin:
                 error="ablation node creation was rejected during replay", reason="superseded")
             self._discard_node_build_telemetry()
             return
-        self._emit_agent_report(node_id, report=built.last_report)
+        self._emit_agent_report(node_id, report=built.last_report,
+                                audit_extra=built.audit_extra)
         # consume predictive telemetry for THIS node (propose/implement above set it) so it can't leak
         # onto the next created node — same rule as _create_node / _rerun_node.
         self._emit_hypothesis_ranked(node_id, 0)

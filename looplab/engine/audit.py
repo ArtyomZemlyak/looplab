@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from looplab.agents.role_wrappers import audit_extra_of
 from looplab.core.containment import contain
 from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
                                   EV_DATA_SHIFT, EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
@@ -31,7 +32,7 @@ class AuditMixin:
     _REPORT_OMITTED = object()
 
     def _emit_agent_report(self, node_id: int, generation: int = 0, developer=None,
-                           report=_REPORT_OMITTED) -> None:
+                           report=_REPORT_OMITTED, audit_extra=_REPORT_OMITTED) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
         `ValidatingDeveloper`), record the verdict as an `agent_validated` event so each
         node carries a trail of how the external coding agent performed. No-op for
@@ -57,17 +58,26 @@ class AuditMixin:
         `_REPORT_OMITTED` rather than None that selects it, because a build whose Developer genuinely
         reported nothing must not silently fall back to whatever the instance is carrying.
 
-        `audit_extra()` below is still an instance read and still has this race. It is a
-        wrapper-specific ANNOTATION (`ValidatingDeveloper`'s attempts / fell_back / shipped_ok) with
-        no envelope field to carry it; naming it here rather than fixing it silently."""
+        `audit_extra=` IS THE SAME RULE, since 2026-09-08. It is a wrapper-specific ANNOTATION
+        (`ValidatingDeveloper`'s attempts / fell_back / shipped_ok) built from the wrapper's own
+        instance state, so CALLING it here — after the lock — read whatever a sibling build's
+        `_record` had most recently written: this node's `agent_validated` row carried another
+        node's attempt count and fallback flag, and neither row was wrong in any way something
+        could see. It has no registry membership (`DEVELOPER_OUTPUT_ATTRS` holds attributes; this
+        is a method), so it rides `DeveloperResult.audit_extra`, captured under
+        `developer_call_lock` by the same `_capture_developer_result` that captures the report and
+        selected by the same `_REPORT_OMITTED` sentinel — for the same reason, too: a build whose
+        wrapper genuinely annotated nothing must not fall back to whatever the instance carries."""
         if report is self._REPORT_OMITTED:
             report = getattr(developer if developer is not None else self.developer,
                              "last_report", None)
         if report is not None:
             data = {"node_id": node_id, **report.summary()}
-            extra = getattr(developer if developer is not None else self.developer, "audit_extra", None)
-            if callable(extra):
-                data.update(extra())
+            if audit_extra is self._REPORT_OMITTED:
+                audit_extra = audit_extra_of(
+                    developer if developer is not None else self.developer)
+            if isinstance(audit_extra, dict):
+                data.update(audit_extra)
             data["generation"] = generation
             self.store.append(EV_AGENT_VALIDATED, data)
 

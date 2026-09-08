@@ -172,14 +172,21 @@ def test_the_run_level_stop_detail_is_redacted_before_it_is_published():
     from looplab.serve.projects import ProjectStore
     from looplab.serve.settings_store import SettingsStore
 
-    secret = "sk-" + "A7b9Qx2Lm4Zp8Rt6Vw1Ky3Nc5Hd0Jf" * 2
+    # AN ENTROPY-ONLY SECRET, and a LONG one — both deliberate. The first version of this guard
+    # used an `sk-…` fixture in a 38-char detail and stayed GREEN with the fix entirely deleted:
+    # `sk-` is a KNOWN SHAPE, which `_public_state_value` masks on its own, and 38 chars never
+    # reaches the cap. The two things the fix adds over that boundary are the ENTROPY pass and
+    # the 160-char cap, so the fixture has to need both.
+    secret = "gAAAAABn7Qx2Lm4Zp8Rt6Vw1Ky3Nc5Hd0JfW9eR4tY7uI1oP3aS6dF8gH"
     with tempfile.TemporaryDirectory() as tmp:
         run = Path(tmp) / "run"
         run.mkdir()
         rows = [
             {"v": 1, "seq": 0, "ts": 1.0, "type": "run_started", "data": {"run_id": "r"}},
             {"v": 1, "seq": 1, "ts": 2.0, "type": "run_finished",
-             "data": {"reason": "error", "error": f"RuntimeError: provider rejected {secret}"}},
+             "data": {"reason": "error",
+                      "error": ("RuntimeError: the provider rejected the request; " + "detail " * 30
+                                + f"token {secret}")}},
         ]
         (run / "events.jsonl").write_text(
             "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
@@ -191,7 +198,15 @@ def test_the_run_level_stop_detail_is_redacted_before_it_is_published():
     detail = (payload.get("state") or {}).get("stop_detail") or ""
     assert detail, "the stop detail must still be published — this is a redaction, not a removal"
     assert secret not in detail, detail
-    assert len(detail) <= 160, len(detail)
+    assert len(detail) <= 160, (len(detail), detail)
+
+    # AND THE ORDER: redact BEFORE truncating. A cap applied first would leave the secret's tail
+    # in the published prefix whenever the secret STRADDLES the 160th character, which is the
+    # reason the node-level twin two lines away records the same rule.
+    straddle = ("xx " * 50) + secret  # the secret begins at char 150 and runs past 160
+    from looplab.core.redact import redact_secrets
+    assert secret[:20] not in redact_secrets(straddle)[:160], (
+        "the secret must be masked before the cap, not after it")
 
 
 # ------------------------------------------------------------------------- the hard budget stop

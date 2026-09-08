@@ -16,6 +16,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Optional
 
+from looplab.agents.role_wrappers import audit_extra_of
 from looplab.agents.roles import DeveloperResult, developer_call_lock
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (Idea, NodeStatus, RunState, normalize_researcher_footprint,
@@ -371,6 +372,11 @@ class NodeBuildMixin:
                                if isinstance(getattr(developer, "last_budget_facts", None), dict)
                                else None),
             last_edit_calls=edit_calls,
+            # NOT A REGISTRY MEMBER but the same call's output, so it is captured under the same
+            # lock — see `DeveloperResult.audit_extra` for the race this closes. That is also why
+            # it is not one of the literal per-member `getattr`s above: those mirror the registry,
+            # and this is a method the registry cannot hold.
+            audit_extra=audit_extra_of(developer),
         )
 
     @staticmethod

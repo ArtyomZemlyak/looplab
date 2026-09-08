@@ -95,6 +95,7 @@ from looplab.agents.role_wrappers import (  # noqa: F401
     ValidatingDeveloper,
     WrapsDeveloper,
     WrapsResearcher,
+    audit_extra_of,
     bind_state_on,
 )
 
@@ -197,12 +198,17 @@ class DeveloperResult:
     last_budget_exhausted: str = ""
     last_budget_facts: Any = None
     last_edit_calls: int = 0
+    # THE ONE FIELD THAT IS NOT A REGISTRY MEMBER, and the exception is stated rather than assumed:
+    # `DEVELOPER_OUTPUT_ATTRS` registers ATTRIBUTES a Developer assigns, and `audit_extra()` is a
+    # METHOD a wrapper offers, so it can never be a member. It is captured because it annotates
+    # exactly the call this envelope IS, and because it was the last channel read off the SHARED
+    # instance after the lock — see `engine/audit.py::_emit_agent_report`, the site that decides
+    # it, for the race and its measurement. Filled by `role_wrappers.py::audit_extra_of`.
+    audit_extra: Optional[dict] = None
 
     @classmethod
     def failed(cls, code: str) -> "DeveloperResult":
         return cls(code=code)
-
-
 # One `RLock` per Developer INSTANCE, so a call and the capture of its outputs are one atomic
 # step: two repairs offloaded to two worker threads on the SAME shared instance now queue on it
 # instead of interleaving their `last_*` writes. Keyed weakly so a pooled per-build Developer is

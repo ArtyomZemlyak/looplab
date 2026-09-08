@@ -196,6 +196,39 @@ SOLVERS_FAULT = frozenset({
 })
 
 
+# THE WORDS A BUILD FAILURE LEAVES BEHIND, in one place because two instruments read for them
+# (§342). `pulse` watches a probe live and `compare_arms` scores it afterwards, and on 2026-09-08
+# they said different things about the SAME zero: remDL13's node 0 came back `evaluator_error`,
+# which `compare_arms` re-read as "the candidate's own code would not build or import -- a real
+# zero", while `pulse` printed "RULER REFUSAL -- the harness declined, the solver was never the
+# question". The evidence in the record is a numba `nopython` typing failure inside the candidate's
+# own solver.py: the solver WAS the question and it lost.
+BUILD_FAILURE_WORDS = ("nopython", "numba", "compil", "importerror", "modulenotfound", "syntaxerror")
+
+
+def looks_like_the_candidates_own_build(text) -> bool:
+    """Does this evidence say the candidate's own code would not build or import?"""
+    return any(word in str(text or "").lower() for word in BUILD_FAILURE_WORDS)
+
+
+def whose_zero(reason: str, evidence: str) -> str:
+    """`"candidate"`, `"arena"` or `"unclassified"` for a non-positive result.
+
+    The reason word is the bridge's summary and the evidence beside it is what actually happened;
+    where they disagree the evidence wins, which is the whole of §324 and §338. A reason in neither
+    half of the partition is NOT quietly filed under one of them -- that default is the defect this
+    module's partition test exists to catch, and a live instrument should say "unclassified" rather
+    than pick a side for the reader.
+    """
+    if not reason:
+        return "unclassified"
+    if reason in SOLVERS_FAULT:
+        return "candidate"
+    if reason in NOT_SOLVERS_FAULT:
+        return "candidate" if looks_like_the_candidates_own_build(evidence) else "arena"
+    return "unclassified"
+
+
 def _arm_b_final(final_json: Path) -> tuple[float | None, str]:
     """`(arm B's TEST score, the reason it is not a number)` — the champion on the graded split.
 
@@ -227,7 +260,18 @@ def _arm_b_final(final_json: Path) -> tuple[float | None, str]:
         # EXCEPT WHEN THE EVIDENCE SAYS THE CANDIDATE ANSWERED AND ANSWERED WRONGLY. The reason word
         # is the bridge's summary; `is_solution_errors` beside it is what actually happened.
         if validation_failed(block):
-            return value, f"{reason} (every instance failed is_solution -- a real zero)"
+            # WHAT THE EVIDENCE ACTUALLY SAYS. §338: `remDL13`'s zero came back
+            # `evaluator_error … Failed in nopython mode pipeline (step: nopython frontend)` --
+            # the candidate's own `@njit` code would not compile, and the row was described as
+            # "every instance failed is_solution", which sends a reader looking for validation
+            # failures that do not exist. Both are the candidate's fault and both are real zeros;
+            # only the sentence differs, and the sentence is what gets read.
+            errs = " ".join(str(e.get("message", e)) for e in (block.get("is_solution_errors") or [])
+                            if isinstance(e, (dict, str)))
+            why = ("the candidate's own code would not build or import"
+                   if looks_like_the_candidates_own_build(errs) else
+                   "every instance failed is_solution")
+            return value, f"{reason} ({why} -- a real zero)"
         return None, reason
     return value, reason
 

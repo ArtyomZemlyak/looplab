@@ -70,3 +70,43 @@ def test_the_arm_readout_admits_an_earned_zero(tmp_path, monkeypatch):
     assert arm_readout.score("earned") == (0.0, None)
     got, why = arm_readout.score("arena")
     assert got is None and "speedup is 0.0" in why, (got, why)
+
+
+BUILT_WRONG = {"subset": "test", "speedup": 0.0,
+               "no_speedup": {"reason": "evaluator_error",
+                              "evaluator_verdict": "Agent-compatible evaluation error: Failed in "
+                                                   "nopython mode pipeline (step: nopython frontend)",
+                              "is_solution_errors": [
+                                  {"message": "discrete_log/LoopLab-3095249: Failed in nopython "
+                                              "mode pipeline (step: nopython frontend)",
+                                   "count": 1}]}}
+
+
+def test_the_sentence_says_which_kind_of_earned_zero_it_is():
+    """§338. `remDL13`'s zero came back `evaluator_error … nopython frontend` -- the candidate's own
+    @njit would not compile. Both kinds are the candidate's fault and both are real zeros; calling a
+    compile failure "every instance failed is_solution" sends the reader after validation failures
+    that do not exist."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        got, why = compare_arms._arm_b_final(_final(tmp, BUILT_WRONG))
+        assert got == 0.0, (got, why)
+        assert "the candidate's own code would not build or import" in why, why
+    with tempfile.TemporaryDirectory() as tmp:
+        got2, why2 = compare_arms._arm_b_final(_final(tmp, EARNED))
+        assert got2 == 0.0 and "every instance failed is_solution" in why2, why2
+
+
+def test_a_build_failure_is_named_whatever_reason_it_arrives_under():
+    """Фикстура, расходящаяся с дефектом: тот же провал сборки приходит под `no_valid_speedups`, а не
+    под `evaluator_error`. Слово в ПРИЧИНЕ ничего не решает — решает свидетельство: имя причины это
+    сводка моста, а `is_solution_errors` рядом с ней — то, что произошло."""
+    import tempfile
+    block = {"subset": "test", "speedup": 0.0,
+             "no_speedup": {"reason": "no_valid_speedups",
+                            "is_solution_errors": [
+                                {"message": "LoopLab-1: Failed in nopython mode pipeline", "count": 3}]}}
+    with tempfile.TemporaryDirectory() as tmp:
+        got, why = compare_arms._arm_b_final(_final(tmp, block))
+        assert got == 0.0, (got, why)
+        assert "the candidate's own code would not build or import" in why, why

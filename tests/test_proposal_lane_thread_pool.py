@@ -115,19 +115,29 @@ def test_the_pool_admits_every_lane_that_can_be_in_flight_at_once():
 
 
 def test_every_offloaded_proposal_passes_the_limiter():
-    """The rule, over the tree. A lane that forgets the kwarg silently returns to the shared pool."""
+    """The rule, over the tree. A lane that forgets the kwarg silently returns to the shared pool.
+
+    NO TARGET FILTER, and that is the 2026-09-08 widening. The rule used to ask only about the ONE
+    name in each `PROPOSAL_TARGETS` row, so after the row was re-pointed to the hoisted helper's
+    `worker` a NEW lane in the same module — offloading anything else, onto anyio's default —
+    passed unseen, because the helper's own crossing still satisfied `found`. The name of the
+    callable was never the property. In these two modules EVERY crossing onto a thread must name a
+    pool; `PROPOSAL_TARGETS` now only says which modules are lanes (and
+    `test_the_lane_set_still_matches_the_sink_installers` keeps that set honest), while the
+    per-module `found` check stays as the escape hatch for a lane that moves out entirely.
+    """
     offenders = []
     for target, rel in PROPOSAL_TARGETS.items():
         path = ROOT / rel
         tree = ast.parse(path.read_text())
         found = False
         for call in _offload_calls(tree):
-            if _partial_target(call) != target:
-                continue
-            found = True
+            name = _partial_target(call)
+            if name == target:
+                found = True
             if _binds_the_limiter(call, tree):
                 continue
-            offenders.append(f"{rel}:{call.lineno} offloads {target} onto the DEFAULT pool")
+            offenders.append(f"{rel}:{call.lineno} offloads {name} onto the DEFAULT pool")
         if not found:
             offenders.append(f"{rel}: no offload of {target} found — re-point this rule")
     assert not offenders, "\n  " + "\n  ".join(offenders)
