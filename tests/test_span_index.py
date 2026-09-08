@@ -7,6 +7,7 @@ that equivalence plus the cache/persistence/invalidation contract (append-only t
 from the persisted index, rebuild on replace/shrink/corruption, graceful degrade)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -434,51 +435,10 @@ def test_malformed_complete_span_is_quarantined_without_hiding_following_rows(tm
     assert (idx.full_span("tail") or {}).get("span_id") == "tail"
 
 
-# OPEN[harness-failure-mimics-the-defect] this test proves the projection TERMINATES by running it
-# in a subprocess and reading the timeout exception as the answer — the SAME signal a slow or
-# starved box produces — so the guard cannot fail as ITSELF.
-# proof:absent:TimeoutExpired@tests/test_span_index.py
-#
-# POLARITY, stated because the easy reading is the other one: the falsifier is `absent:`, not
-# `present:timeout=10`, because a correct fix may well KEEP the ten-second budget and add
-# ATTRIBUTION around it — a `present:` proof would then stay true forever and leave the marker
-# stuck open, which is the noise that teaches readers to ignore the index. Any real fix has to
-# name the exception in order to tell the two causes apart, so `absent:` flips exactly when the
-# work is done.
-#
-# MEASURED (2026-08-20): the work itself costs 0.16 s against the 10 s budget below — a 60x
-# margin — and 30 forced runs under 12-way interpreter churn timed out ZERO times, max 0.64 s, so
-# CPU contention is excluded. It has failed inside a 130-file pytest chunk and is unreproducible
-# alone (2/2 green) and in the 70-file `test_s*` subset (16 alternating runs, 0 failures). What it
-# needs is accumulated session state, which is precisely what this shape hides.
-#
-# THE SECOND INSTANCE IS WORSE AND TAKES THE SAME FIX. `tests/test_setup_completion.py` builds
-# THREE `_git` helpers (lines 170, 206, 230); not one passes a timeout and not one asserts
-# `returncode` — the file contains zero occurrences of that word — so a git call that fails
-# returns an EMPTY RESULT which the test reads as product behaviour. A timeout at least announces
-# itself; an empty list does not. Both of that file's observed failures were exactly that shape,
-# on two different tests.
-#
-# THE FIX IS ALREADY WRITTEN ONE FILE OVER, so this is adoption and not invention:
-# `tests/test_merge_history_integrity.py::_git` passes an explicit `_GIT_TIMEOUT_S` (line 45) and
-# asserts `result.returncode == 0` with the stderr in the message (line 229). Take that shape in
-# both places, and make this subprocess announce its progress so a slow start is distinguishable
-# from a hang in `build_conversation`.
-#
-# ONE SLUG, TWO INSTANCES: the fix is the same rule applied twice — a guard must assert the
-# OUTCOME it is testing, never read the absence of a completion signal as the product's answer.
-# The predicate above pins the FIRST instance only, because no single literal spans two files; when
-# it flips red, re-read this body and delete the marker only once the `_git` half is done as well.
-# It is the THIRD instance of this family recorded today — a harness whose own failure mimics the
-# defect it guards — so recognise the family rather than re-deriving it.
-def test_conversation_parent_cycles_degrade_without_hanging():
-    script = r'''
-import json
-from types import SimpleNamespace
-from looplab.events.traceview import build_conversation
-
-state = SimpleNamespace(run_id="demo", task_id="t")
-cases = {
+# THE TWO CYCLIC CORPORA, once: a span that is its own parent, and a two-span parent cycle. Both are
+# reachable only from a corrupt or crafted `spans.jsonl`, and both used to be the shape that made the
+# conversation projection walk forever.
+_CYCLE_CASES = {
     "self": [
         {"name": "self", "kind": "generation", "trace_id": "self-trace", "span_id": "self",
          "parent_id": "self", "start": 1, "attributes": {"node_id": 0, "input": []}},
@@ -490,6 +450,101 @@ cases = {
          "parent_id": "a", "start": 2, "attributes": {"node_id": 0}},
     ],
 }
+_CYCLE_TURNS = {
+    "self": [["request", "generation"]],
+    "two": [["request", "generation", "tool"]],
+}
+# The child's budget, unchanged from the shape this replaced: the work measured 0.16 s against it.
+# What changed is that a timeout is now ATTRIBUTED instead of being read as the product's answer.
+_CYCLE_SUBPROCESS_TIMEOUT_S = 10
+
+
+def _parent_walk_accountant(monkeypatch, *, call_budget: int, yield_budget: int) -> dict:
+    """Count the parent walk's work, and BLOW A FUSE rather than let it run away.
+
+    This is what makes the property below statable. `build_conversation` reaches a parent cycle
+    through `_iter_parent_spans` and nowhere else (`_seg_label` and `_conversation_bands` are its two
+    callers), and that walk is bounded twice over — `_MAX_PARENT_HOPS` and its own `seen` set. So the
+    question "does the projection terminate on a cycle?" has a finite ANSWER: how many times the walk
+    was entered and how many parents it yielded. An unbounded walk trips the fuse and the test fails
+    naming the walk, in milliseconds, instead of hanging until something else kills it — which is the
+    whole difference between a guard that fails as itself and one that fails like a slow box.
+    """
+    from looplab.events import traceview
+
+    stats = {"calls": 0, "yields": 0}
+    real = traceview._iter_parent_spans
+
+    def counted(span, by_id, *, stop_id=None):
+        stats["calls"] += 1
+        assert stats["calls"] <= call_budget, (
+            f"the parent walk was entered {stats['calls']} times over a cyclic corpus — "
+            "a caller is re-walking without making progress")
+        for parent in real(span, by_id, stop_id=stop_id):
+            stats["yields"] += 1
+            assert stats["yields"] <= yield_budget, (
+                f"the parent walk yielded {stats['yields']} parents over a cyclic corpus — "
+                "the cycle stop (`seen`) or the hop bound is gone")
+            yield parent
+
+    monkeypatch.setattr(traceview, "_iter_parent_spans", counted)
+    return stats
+
+
+@pytest.mark.parametrize("case", sorted(_CYCLE_CASES))
+def test_conversation_parent_cycles_degrade_within_a_bounded_walk(case, monkeypatch):
+    """A parent cycle degrades to the spans it can read, having done BOUNDED work to get there.
+
+    This test used to prove termination by running the projection in a subprocess and reading a
+    `TimeoutExpired` as the answer — the same signal a slow or starved box produces, so it could not
+    fail as itself, and it failed inside a 130-file chunk while being unreproducible alone (measured
+    2026-08-20: 0.16 s of work against a 10 s budget, 30 forced runs under 12-way interpreter churn,
+    zero timeouts, max 0.64 s). The rule it was really asserting is hoisted into
+    `_parent_walk_accountant`: the walk is entered a bounded number of times and yields a bounded
+    number of parents. That is checkable in-process, in milliseconds, and its failure names the
+    defect. Measured budgets here: `self` = 2 calls / 0 yields, `two` = 3 calls / 3 yields.
+    """
+    spans = _CYCLE_CASES[case]
+    stats = _parent_walk_accountant(monkeypatch, call_budget=8 * len(spans) + 16,
+                                    yield_budget=4 * len(spans) + 16)
+
+    projection = build_conversation(ST, spans, 0)
+
+    assert [[turn["type"] for turn in stage["turns"]]
+            for stage in projection["stages"]] == _CYCLE_TURNS[case]
+    # The counts are ASSERTED, not merely collected: a fuse that is never read is a fuse that can be
+    # removed without anything going red.
+    assert 0 < stats["calls"] <= 8 * len(spans) + 16
+    assert stats["yields"] <= 4 * len(spans) + 16
+
+
+def test_a_fresh_interpreter_also_completes_the_cyclic_projection():
+    """The same corpora in a clean process — and a timeout that says WHOSE fault it was.
+
+    The in-process test above owns the product property. What this adds is the one thing it cannot
+    see: accumulated session state (imports, caches, monkeypatches) hiding a hang that only a fresh
+    interpreter shows. That value is only worth having if a slow box is distinguishable from a hung
+    projection, so the child announces itself: `READY` is printed and flushed once the import is done
+    and the corpora are built, i.e. immediately before the work under test.
+
+      * `subprocess.TimeoutExpired` with no `READY` — the interpreter never reached the work. That is
+        the harness, not the product, and it is reported as a SKIP that names what was captured.
+      * `subprocess.TimeoutExpired` after `READY` — `build_conversation` did not return. That is the
+        defect, and it fails saying so.
+
+    The third outcome the old shape also read as an answer — a child that exited non-zero — is an
+    explicit `returncode` assertion carrying the stderr, the same shape
+    `tests/test_merge_history_integrity.py::_git` uses.
+    """
+    script = r'''
+import json
+import sys
+from types import SimpleNamespace
+from looplab.events.traceview import build_conversation
+
+state = SimpleNamespace(run_id="demo", task_id="t")
+cases = json.loads(sys.argv[1])
+print("READY", flush=True)
 out = {}
 for name, spans in cases.items():
     projection = build_conversation(state, spans, 0)
@@ -497,18 +552,26 @@ for name, spans in cases.items():
                  for stage in projection["stages"]]
 print(json.dumps(out, sort_keys=True))
 '''
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=True,
-    )
-    assert json.loads(completed.stdout) == {
-        "self": [["request", "generation"]],
-        "two": [["request", "generation", "tool"]],
-    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script, json.dumps(_CYCLE_CASES)],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            timeout=_CYCLE_SUBPROCESS_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as expired:
+        captured = (expired.stdout or "")
+        captured = captured.decode() if isinstance(captured, bytes) else captured
+        if "READY" not in captured:
+            pytest.skip(
+                f"the child did not reach the projection within {_CYCLE_SUBPROCESS_TIMEOUT_S}s "
+                f"(no READY marker) — a starved box, not a product answer; captured: {captured!r}")
+        raise AssertionError(
+            "build_conversation did not return on a cyclic corpus: the child printed READY and then "
+            f"produced nothing for {_CYCLE_SUBPROCESS_TIMEOUT_S}s") from expired
+    assert completed.returncode == 0, f"the child failed: {completed.stderr}"
+    assert json.loads(completed.stdout.split("READY\n", 1)[-1]) == _CYCLE_TURNS
 
 
 def test_parent_walk_has_a_hard_depth_limit():
@@ -790,13 +853,19 @@ def test_persisted_last_row_digest_mismatch_falls_back_to_source_rebuild(run):
     index_path = rd / "spans.index.jsonl"
     lines = [line for line in index_path.read_bytes().splitlines() if line]
     last = orjson.loads(lines[-1])
-    last["_h"] = "0" * 64
+    # A VALID-SHAPED digest with false content, so what rejects it is the spotcheck comparing it
+    # against the real source bytes — not `_decode_row_digest` refusing the width. A 64-hex value
+    # here (the pre-`_SCHEMA`-13 full-bytes width) would be thrown out structurally by `_append`,
+    # and this test would pass while proving nothing about the read-time verification.
+    false_digest = "0" * span_index._ROW_DIGEST_HEX
+    assert span_index._decode_row_digest(false_digest) == false_digest
+    last["_h"] = false_digest
     lines[-1] = orjson.dumps(last)
     index_path.write_bytes(b"\n".join(lines) + b"\n")
 
     rebuilt = get_index(source)
 
-    assert rebuilt.row_digests[-1] != "0" * 64
+    assert rebuilt.row_digests[-1] != false_digest
     assert rebuilt.full_span(rebuilt.light[-1]["span_id"]) is not None
 
 
@@ -2438,6 +2507,133 @@ def test_persisted_index_offset_drift_fails_unavailable_not_wrong_span(run):
     with pytest.raises(OSError, match="source digest"):
         idx.full_span("g0_1")
     assert (idx.full_span("g1_0") or {}).get("span_id") == "g1_0"   # the intact row still resolves
+
+
+# ------------------------------------------------------- the bounded row digest (docs/34 D-04)
+def test_row_digest_preimage_is_bounded_and_binds_length_and_edges():
+    """The preimage rule as a TRUTH TABLE, not a timing claim (docs/34 D-04, decided 2026-09-08).
+
+    `_row_digest` is the only producer and `_read_full` the only verifier, so what this pins is the
+    whole contract: what the digest covers, what it deliberately does not, and that the bytes it
+    covers are bounded for a row of ANY size.
+    """
+    bound = span_index._ROW_DIGEST_BOUND_BYTES
+    small = b'{"span_id":"s","pad":"' + b"a" * 512 + b'"}'
+    huge = b'{"span_id":"s","pad":"' + b"a" * (40 * bound) + b'"}'
+
+    # BOUNDED. The framing is the domain prefix plus the decimal length and its separator; the point
+    # is that the preimage does not grow with the row, so a 100 KB generation span costs the same
+    # hash as a 16 KiB one. `+ 64` is framing headroom, not a second rule.
+    assert span_index._row_digest_preimage(small).endswith(small)      # small rows: hashed in FULL
+    assert len(span_index._row_digest_preimage(huge)) <= bound + 64
+    assert len(span_index._row_digest_preimage(b"x" * (1 << 20))) <= bound + 64
+
+    # A memoryview slice must never be copied whole to be hashed — that is the allocation the
+    # coalesced `_read_full` batch exists to avoid.
+    assert span_index._row_digest(memoryview(huge)) == span_index._row_digest(huge)
+
+    # LENGTH is bound in: identical edges, different length must not collide. This is the offset
+    # drift that lands on a longer/shorter neighbour, and it is caught HERE, before the JSON parse.
+    edge = span_index._ROW_DIGEST_EDGE_BYTES
+    longer = huge[:edge] + b"b" * (len(huge) - 2 * edge + 1) + huge[len(huge) - edge:]
+    assert len(longer) != len(huge)
+    assert span_index._row_digest(longer) != span_index._row_digest(huge)
+
+    # EDGES are bound in: a same-length flip in either edge of an oversize row is caught.
+    for cut in (0, len(huge) - 1):
+        flipped = bytearray(huge)
+        flipped[cut] ^= 0x20
+        assert span_index._row_digest(bytes(flipped)) != span_index._row_digest(huge)
+
+    # A same-length flip in the MIDDLE of a row larger than the bound is NOT caught, and that is the
+    # decided class, stated at `_ROW_DIGEST_PREFIX`: the no-index reader returns those same mutated
+    # bytes, so the index owes "this offset still holds THIS row", not "spans.jsonl is untampered".
+    middle = bytearray(huge)
+    middle[len(huge) // 2] ^= 0x20
+    assert span_index._row_digest(bytes(middle)) == span_index._row_digest(huge)
+    # …while a row at or under the bound keeps full-bytes strength, middle included.
+    inner = bytearray(small)
+    inner[len(small) // 2] ^= 0x20
+    assert span_index._row_digest(bytes(inner)) != span_index._row_digest(small)
+
+    # DOMAIN SEPARATION + width. A v12 index's full-bytes digest can never be mistaken for one of
+    # these by value, and `_decode_row_digest` refuses it structurally at the trust boundary.
+    digest = span_index._row_digest(small)
+    assert len(digest) == span_index._ROW_DIGEST_HEX
+    assert not hashlib.sha256(small).hexdigest().startswith(digest)
+    assert span_index._decode_row_digest(hashlib.sha256(small).hexdigest()) is None
+    assert span_index._decode_row_digest(digest) == digest
+
+
+def test_read_full_hashes_bounded_bytes_per_row_not_whole_rows(tmp_path, monkeypatch):
+    """THE ACCOUNTANT for docs/34 D-04: a detail read hashes O(rows), never O(row bytes).
+
+    Counts the bytes actually fed to the hash — `_row_digest_preimage` IS the rule, so spying on it
+    measures the property rather than the clock. The old full-bytes digest hashed every selected
+    row whole, which is what made a node window of 100 KB+ generation spans re-hash tens of MB on
+    the request path.
+    """
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    heavy = "H" * 200_000                       # one real repo-developer turn's re-sent history
+    spans = [{"name": "create_node", "kind": "operation", "trace_id": "tr0", "span_id": "root0",
+              "parent_id": None, "run_id": "demo", "attributes": {"node_id": 0},
+              "events": [], "status": "OK", "start": 0.0, "duration_s": 9.0}]
+    for turn in range(6):
+        spans.append({"name": "llm.generate", "kind": "generation", "trace_id": "tr0",
+                      "span_id": f"g{turn}", "parent_id": "root0", "run_id": "demo",
+                      "attributes": {"node_id": 0, "phase": "implement", "model": "m",
+                                     "input": [{"role": "user", "content": heavy}],
+                                     "output": heavy, "thinking": heavy,
+                                     "usage": {"prompt": 1, "completion": 1, "total": 2},
+                                     "cost": 0.01},
+                      "events": [], "status": "OK", "start": float(turn), "duration_s": 1.0})
+    source = _write_spans(rd, spans)
+    idx = get_index(source)
+    row_bytes = sum(length for _off, length in idx.meta)
+    assert row_bytes > 3_000_000, "the corpus must be dominated by rows larger than the bound"
+
+    hashed: list[int] = []
+    real = span_index._row_digest_preimage
+
+    def preimage_spy(data):
+        pre = real(data)
+        hashed.append(len(pre))
+        return pre
+
+    monkeypatch.setattr(span_index, "_row_digest_preimage", preimage_spy)
+    full = idx.full_spans_for_node(0)
+
+    assert len(full) == len(spans)                      # every row still verified, none skipped
+    assert len(hashed) == len(spans)                    # one digest per selected row, no re-hashing
+    ceiling = len(spans) * (span_index._ROW_DIGEST_BOUND_BYTES + 64)
+    assert max(hashed) <= span_index._ROW_DIGEST_BOUND_BYTES + 64
+    assert sum(hashed) <= ceiling
+    # The whole point, stated as the comparison the old code failed: the hashed volume is set by the
+    # ROW COUNT, not by the bytes those rows carry.
+    assert sum(hashed) < row_bytes / 10
+
+    # …and the read is still exact: identical to a from-scratch parse of the same file.
+    assert _canon(full) == _canon(load_spans(source))
+
+
+def test_read_full_still_refuses_a_same_length_edge_rewrite(run):
+    """The bound is a reduction in COVERAGE, not in enforcement: an in-place same-length rewrite of a
+    row's head is still an availability failure, never a wrong span handed to the caller."""
+    _rd, source, _spans = run
+    idx = get_index(source)
+    row = idx.by_sid["g0_1"]
+    off, _length = idx.meta[row]
+    with open(source, "r+b") as f:
+        f.seek(off)
+        head = bytearray(f.read(16))
+        head[9] ^= 0x20                     # inside the first edge, same length, same file size
+        f.seek(off)
+        f.write(bytes(head))
+    # Call the index DIRECTLY: `get_index` would notice the mutation by mtime/size/token and rebuild,
+    # which is the other fence. What is under test is the read-time digest gate itself.
+    with pytest.raises(OSError, match="source digest"):
+        idx.full_span("g0_1")
 
 
 def test_a_cold_rebuild_never_materializes_the_whole_source(tmp_path):

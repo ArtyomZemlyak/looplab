@@ -827,17 +827,21 @@ class AppState:
                 # opens is the one that is live now.
                 trace_ids[str(node_id)] = event.trace_id
         idx = get_index(rd / "spans.jsonl")
-        # KNOWN COST, deliberately not narrowed here — see docs/34 (CARD-TRACE-SCAN). This copies the
-        # WHOLE run's light span list (a 1 GB run's index is ~220 MB of dicts) and `project_card_trace`
-        # then rescans it once per owned node, so a card owning 5 nodes on a 200k-span run does ~1M
-        # predicate evaluations on the request thread. It cannot simply be given the owned traces:
-        # research is matched TWO ways and the first is "a `propose` span carrying this card_id",
-        # which may live in any trace, so a trace-scoped selection would silently drop the research
-        # section for the draft/debug/improve paths. Narrowing it properly needs a card_id (or span
-        # name) dimension on `SpanIndex`, which is an index-schema change, not a call-site one.
-        spans = idx.light_spans() if idx is not None else []
+        # NARROWED AT THE INDEX (docs/34 D-03, closed 2026-09-08 by the `card_propose_tids`
+        # dimension). This used to copy the WHOLE run's light span list — a 1 GB run's index is
+        # ~220 MB of dicts — which `project_card_trace` then rescanned once per owned node: ~1M
+        # predicate evaluations for a card owning 5 nodes on a 200k-span run, on the request thread.
+        # `card_trace_spans` serves BOTH research rules by lookup (the stamped-card_id rule reaches
+        # traces this card does not own, which is why a trace-scoped selection was never the answer)
+        # and returns the run-global claim map with them, so the projection re-applies its rules
+        # unchanged over the card's own rows and answers exactly what it answered before.
+        if idx is None:
+            return project_card_trace([], card_id=str(card_id), node_ids=node_ids,
+                                      node_trace_ids=trace_ids)
+        spans, claimed = idx.card_trace_spans(
+            card_id, node_ids=node_ids, node_trace_ids=trace_ids)
         return project_card_trace(spans, card_id=str(card_id), node_ids=node_ids,
-                                  node_trace_ids=trace_ids, _normalized=idx is not None)
+                                  node_trace_ids=trace_ids, claimed=claimed, _normalized=True)
 
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write
