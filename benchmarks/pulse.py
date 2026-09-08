@@ -42,8 +42,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "algotune"))
 import arm_fidelity  # noqa: E402  (score-free by its own test; used only for finished/paused)
 import check_money  # noqa: E402  (for the ledger's newest row per arm; reads money, never a score)
+# WHOSE ZERO IT IS, from the one place that classifies it (§342). Importing the vocabulary rather
+# than re-typing it is what stops the live instrument and the scoring one from saying different
+# things about the same node -- which they did, in opposite directions, about remDL13's node 0.
+import compare_arms  # noqa: E402
 import events_read  # noqa: E402
 import lanes  # noqa: E402
 
@@ -98,8 +103,14 @@ def pulse(events_path: str) -> dict:
                 zeros += 1
                 secs = data.get("eval_seconds")
                 why = refusal_reason(data)
+                # The whole tail is the evidence here, not just `is_solution_errors`: the bridge's
+                # JSON line is truncated to 4,000 chars, which is why the reason is read by regex
+                # in the first place, and the numba traceback lands in the `stderr_tail` inside it.
+                evidence = " ".join(str(data.get(f) or "") for f in
+                                    ("stdout_tail", "stderr_tail", "error_evidence"))
                 bad.append({"node_id": data.get("node_id"), "eval_seconds": secs,
                             "violations": data.get("violations"), "reason": why,
+                            "whose": compare_arms.whose_zero(why or "", evidence),
                             # The stopwatch stays as the FALLBACK, for a node whose stdout the
                             # record did not keep; a reason that was said outranks it either way.
                             "refusal": bool(why) if why else
@@ -107,6 +118,33 @@ def pulse(events_path: str) -> dict:
         elif kind in ("error", "developer_crash", "build_interrupted"):
             errors += 1
     return {"spend": spend, "nodes": nodes, "zeros": zeros, "errors": errors, "bad": bad}
+
+
+def zero_sentence(z: dict) -> str:
+    """The sentence an operator reads for one zero -- a function, so the WORDING is testable.
+
+    §342 was a disagreement in wording, not in data: `pulse` and `compare_arms` classified the same
+    node differently and only the printed sentence showed it. A test that reads the classification
+    out of a dict would have passed through the whole defect.
+    """
+    # WHOSE ZERO IT IS. §342: the reason word alone said "harness declined" for a node whose own
+    # `@njit` code would not compile -- the solver WAS the question and it lost. The partition lives
+    # in `compare_arms`; a reason in neither half is called unclassified rather than filed under
+    # whichever side reads more calmly.
+    whose = z.get("whose")
+    if whose == "candidate":
+        return (f'the candidate EARNED this zero ({z["reason"]}: its own code would not build, '
+                "import or validate) -- a real zero, and arm A pays for the same")
+    if whose == "arena":
+        return (f'RULER REFUSAL ({z["reason"]}) -- the harness declined, the solver was never '
+                "the question")
+    if z.get("reason"):
+        return (f'zero with reason {z["reason"]}, which is in NEITHER half of compare_arms\' '
+                "partition -- classify it before averaging it")
+    # NO REASON AT ALL is the pre-§323 world: the record kept no bridge line, so the stopwatch is
+    # all there is. It stays the fallback and says so.
+    return ("RULER REFUSAL -- the harness declined, the solver was never the question"
+            if z.get("refusal") else "the evaluation ran and came back invalid")
 
 
 def wchan(pid) -> str:
@@ -524,10 +562,7 @@ def main(argv=None) -> int:
             # AND THE BRIDGE'S OWN NAME WHERE IT SAID ONE. The seconds are the fallback now, not
             # the diagnosis: `evaluator_timeout` is a refusal that costs the FULL timeout, so the
             # rule "a zero at 45 s is the solver's" gets that one exactly backwards.
-            what = (f'RULER REFUSAL ({z["reason"]}) -- the harness declined, the solver was never '
-                    "the question" if z.get("reason") else
-                    "RULER REFUSAL -- the harness declined, the solver was never the question"
-                    if z["refusal"] else "the evaluation ran and came back invalid")
+            what = zero_sentence(z)
             print(f'      zero at node {z["node_id"]}: eval_seconds={z["eval_seconds"]}, '
                   f'violations={z["violations"]} -- {what}')
         if age > args.stall:
