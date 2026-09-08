@@ -121,7 +121,7 @@ def tag_text(text: str, graph: ConceptGraph, *, allow_plural: bool = False) -> f
 #     always-on sanitizer the durable boundaries use, and it strips terminal/bidi controls too, so a
 #     rationale carrying ANSI or an RTL override cannot rewrite how the rest of the turn renders.
 #   * AN EXPLICIT DATA ENVELOPE — JSON-serialized under one key, so the item cannot terminate its own
-#     block and continue as prompt text. This is the shape `roles.py::UNTRUSTED_RECORDED_CONCEPT_DATA`
+#     block and continue as prompt text. This is the shape `state_brief.py::UNTRUSTED_RECORDED_CONCEPT_DATA`
 #     and `serve/llm_context.py::BOSS_EVIDENCE_LABEL` already use; a bare `ITEM:\n{text}` is the one
 #     place in this repo that did not.
 #

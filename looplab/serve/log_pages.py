@@ -29,6 +29,7 @@ from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, decode_event_record, is_event_batch_record,
     prefix_anchor_from_handle)
 from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
+from looplab.serve.http import generation_conflict
 from looplab.serve.run_commands import run_generation_token
 
 
@@ -273,13 +274,16 @@ def _normalize_generation(value: object) -> Optional[str]:
 
 
 def _generation_changed(expected: Optional[str], actual: Optional[str]) -> HTTPException:
-    return HTTPException(409, {
-        "code": "run_generation_changed",
-        "message": "The event log was reset or replaced; discard timeline cursors and load a new tail.",
-        "expected_generation": expected,
-        "actual_generation": actual,
-        "remediation": "Request direction=tail without a cursor, then replace the local timeline.",
-    })
+    # `actual_generation`, not the `current_generation` the other twenty-five fences send. That is a
+    # WIRE DRIFT this helper inherits rather than a choice: `ui/src/useTimeline.js` matches on the
+    # code and this surface has published the key since it shipped, so renaming it here would be an
+    # HTTP-contract change wearing a refactor's clothes. Carried through `extra` so the drift is
+    # visible at the one site that has it instead of becoming a parameter every caller can reach.
+    return generation_conflict(
+        "The event log was reset or replaced; discard timeline cursors and load a new tail.",
+        expected=expected,
+        remediation="Request direction=tail without a cursor, then replace the local timeline.",
+        actual_generation=actual)
 
 
 def _placeholder(row: _Row) -> dict:

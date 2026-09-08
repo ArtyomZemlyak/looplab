@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from looplab.serve.principal import coerce as _coerce_principal, request_principal
@@ -33,6 +33,7 @@ from looplab.serve.assistant import (
     ForkActionConflictError, ForkActionDeletedError, ForkActionDeletingError,
     REPO_ROOT as _ASSISTANT_REPO_ROOT, SHARE_DEFAULT_TTL_SECONDS, SHARE_MAX_RECORDS,
     SessionStore, ShareError, SHARE_TITLE_MAX_CHARS, ShareStore,
+    exact_share_request_id, exact_share_token_secret,
     run_turn as _assistant_run_turn,
     safe_assistant_failure as _safe_assistant_failure,
     sanitize_assistant_message as _sanitize_assistant_message)
@@ -1066,8 +1067,53 @@ def build_router(srv) -> APIRouter:
         return {"ok": True, "watches_removed": sum(1 for w in watch_receipt if w["removed"]),
                 "watches": watch_receipt}
 
+    def _share_recovery_envelope(body: dict) -> Optional[dict]:
+        """The client-held create-recovery envelope, or None for the legacy random-create path.
+
+        PRESENCE, not value, selects the contract: two explicit JSON nulls are refused here and can
+        never silently downgrade into a create that would mint a second live capability. The secret
+        is parsed by hand, never through a validation layer that can echo its offending input back.
+        """
+        names = ("request_id", "token_secret")
+        supplied = tuple(name in body for name in names)
+        if not any(supplied):
+            return None
+        if not all(supplied):
+            raise _share_http_error(
+                400, "assistant_share_recovery_invalid",
+                "Share recovery fields must be supplied together.",
+                remediation="Send request_id and token_secret together, or neither.")
+        request_id = exact_share_request_id(body.get("request_id"))
+        token_secret = exact_share_token_secret(body.get("token_secret"))
+        # An exact int under the recovery contract: the TTL is hashed into the create identity, so a
+        # `true` or a `"604800"` that coerced to a different number would derive a different link.
+        ttl = body.get("ttl_seconds", SHARE_DEFAULT_TTL_SECONDS)
+        if request_id is None or token_secret is None or type(ttl) is not int:
+            raise _share_http_error(
+                400, "assistant_share_recovery_invalid", "Share recovery fields are invalid.",
+                remediation="Start a new share request rather than editing a saved one.")
+        return {"request_id": request_id, "token_secret": token_secret, "ttl_seconds": ttl}
+
+    def _share_replay_payload(sid: str, token: str, record: dict, *, replayed: bool) -> dict:
+        """The recovery contract's answer. Same fields as the legacy one plus `replayed`, so a
+        client can tell "your link was created" from "your earlier link was recovered"."""
+        if record["revoked_at"] is not None or record["expires_at"] <= time.time():
+            # The exact operation is immutable: expiry and revocation never mint a fresh bearer, and
+            # a generic success handler must not be able to copy a dead URL. The token is dropped
+            # here and the client is told to start a new identity.
+            raise _share_http_error(
+                410, "assistant_share_replay_terminal",
+                "The original public link is no longer active.",
+                remediation="Create a new public link.",
+                kind="revoked" if record["revoked_at"] is not None else "expired",
+                share_id=record["id"], expires_at=record["expires_at"],
+                revoked_at=record["revoked_at"])
+        return {"ok": True, "url": f"#/assistant/shared/{token}", "session": sid,
+                "share_id": record["id"], "expires_at": record["expires_at"],
+                "live": record["live"], "replayed": replayed}
+
     @router.post("/api/assistant/sessions/{sid}/share")
-    async def assistant_share(sid: str, request: Request):
+    async def assistant_share(sid: str, request: Request, response: Response):
         """Mint a read-only share link.
 
         The link is its own capability — a high-entropy secret kept only as a digest, with an expiry
@@ -1077,12 +1123,36 @@ def build_router(srv) -> APIRouter:
 
         Body: `ttl_seconds` (default one week) and `live`. `live` is the explicit answer to "does the
         link follow the conversation?": the default false FREEZES it at the turns that exist now, so
-        continuing to talk cannot retroactively publish what comes next."""
+        continuing to talk cannot retroactively publish what comes next.
+
+        `request_id` + `token_secret` (together, or neither) opt into the CREATE-RECOVERY contract
+        shared with the review links (doc 25 SC-10): the client owns the identity, so a response lost
+        in flight is recovered by retrying the same envelope instead of publishing a second live
+        capability nobody holds. That path answers 201 for a create, 200 with `replayed: true` for a
+        recovery, and 410 `assistant_share_replay_terminal` when the recovered link is already dead.
+        Without the envelope the legacy 200 body is returned unchanged."""
         # An ABSENT body means "no options": every field on this route has a default.
         body = await json_object(request, absent_is_empty=True)
         live = body.get("live", False)
         if not isinstance(live, bool):
             raise _share_http_error(400, "assistant_share_invalid", "live must be a boolean")
+        recovery = _share_recovery_envelope(body)
+        if recovery is not None:
+            # Resolve an already-published capability BEFORE anything reads the transcript or the
+            # turn registry. A retry is entitled to the link it already paid for, and the checks
+            # below are about minting a NEW snapshot: fencing a recovery on them would answer 409
+            # (turn in progress) or 413 (the chat grew) forever while the token stayed unrecoverable.
+            try:
+                recovered = _shares.replay(sid, live=live, **recovery)
+            except ShareError as exc:
+                raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+            except OSError as exc:
+                raise _share_http_error(
+                    503, "assistant_share_unavailable",
+                    "The public link store is unavailable. No link was published.",
+                    remediation="Try sharing again.") from exc
+            if recovered is not None:
+                return _share_replay_payload(sid, *recovered, replayed=True)
         with _session_lifecycle_lock:
             # Install a per-session fence in one short registry transaction. It prevents a turn from
             # staging its user message between our active-turn check and frozen ``upto`` while leaving
@@ -1136,9 +1206,18 @@ def build_router(srv) -> APIRouter:
                             "This chat is too large for a complete frozen public snapshot.",
                             remediation="Create an explicitly live link or share a shorter chat.")
                 try:
-                    token, record = _shares.create(
-                        sid, message_count=len(complete), title=share_title, live=live,
-                        ttl_seconds=body.get("ttl_seconds", SHARE_DEFAULT_TTL_SECONDS))
+                    if recovery is None:
+                        token, record = _shares.create(
+                            sid, message_count=len(complete), title=share_title, live=live,
+                            ttl_seconds=body.get("ttl_seconds", SHARE_DEFAULT_TTL_SECONDS))
+                        replayed = False
+                    else:
+                        # The replay above missed, but this call still classifies the derived id
+                        # under the store lock: a second attempt that raced the first here recovers
+                        # rather than creating, so exactly one capability exists either way.
+                        token, record, replayed = _shares.create_or_replay(
+                            sid, message_count=len(complete), title=share_title, live=live,
+                            **recovery)
                 except ShareError as exc:
                     raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
                 except OSError as exc:
@@ -1162,9 +1241,14 @@ def build_router(srv) -> APIRouter:
             finally:
                 with _perm_lock:
                     _share_fenced_sessions.discard(sid)
-        return {"ok": True, "url": f"#/assistant/shared/{token}", "session": sid,
-                "share_id": record["id"],
-                "expires_at": record["expires_at"], "live": record["live"]}
+        if recovery is None:
+            # The legacy body and its 200, unchanged for every caller that sends no envelope.
+            return {"ok": True, "url": f"#/assistant/shared/{token}", "session": sid,
+                    "share_id": record["id"],
+                    "expires_at": record["expires_at"], "live": record["live"]}
+        payload = _share_replay_payload(sid, token, record, replayed=replayed)
+        response.status_code = 200 if replayed else 201
+        return payload
 
     @router.delete("/api/assistant/sessions/{sid}/share")
     def assistant_unshare(sid: str):

@@ -91,9 +91,12 @@ def test_refusing_a_skill_does_not_refuse_the_LESSON():
 
     source = inspect.getsource(lessons_distill)
     assert _gate_call_line(source) is not None, (
-        "the skill gate is no longer a CALL to promotable_skill_statement inside the "
-        "research_cards loop — if it moved, re-point this check at where it now lives")
-    # …and the gate sits AFTER the lessons are appended, so the append is not inside it.
+        "the skill gate is no longer a CALL to promotable_skill_statement inside "
+        "`promote_settled_skills`' loop — if it moved, re-point this check at where it now lives")
+    # …and the gate sits AFTER the lessons are appended, so the append is not inside it. Since the
+    # 2026-09-08 extraction they are not even in the same method — `_append_lessons` in
+    # `write_reflection_note`, the gate in `promote_settled_skills` — which is the same property
+    # stated more strongly; the line order still holds and is what is checked.
     #
     # BY AST LINE, NOT `source.index`. Until 2026-08-20 this read
     # `source.index("self._e._append_lessons") < source.index("promotable_skill_statement")`, and
@@ -513,23 +516,32 @@ def _calls_named(source: str, name: str):
 
 
 def _gate_call_line(source: str):
-    """The gate's line: a call to `promotable_skill_statement` lexically inside a `for` loop whose
-    iterator is `final.research_cards()`. Returns None when no such call exists at all."""
+    """The gate's line: a call to `promotable_skill_statement` lexically inside the promotion loop.
+
+    RE-POINTED 2026-09-08, and the anchor got stronger rather than weaker. The loop used to iterate
+    `final.research_cards()` inline in `write_reflection_note`, and that iterator WAS this check's
+    anchor; the loop now lives in `promote_settled_skills`, the one writer both the run-end pass and
+    the mid-run cadence go through, and takes its cards as an argument. So the anchor is the
+    FUNCTION — which is what "the promotion loop" always meant — and a `for` inside it. Deleting
+    that function is the only way to make this read None by accident, and deleting it deletes
+    promotion.
+
+    Returns None when no such call exists at all.
+    """
     import ast
 
     tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.For):
+    for func in ast.walk(tree):
+        if not (isinstance(func, ast.FunctionDef) and func.name == "promote_settled_skills"):
             continue
-        it = node.iter
-        if not (isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute)
-                and it.func.attr == "research_cards"):
-            continue
-        inner = [c for sub in node.body for c in ast.walk(sub)
-                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                 and c.func.id == "promotable_skill_statement"]
-        if inner:
-            return min(c.lineno for c in inner)
+        for node in ast.walk(func):
+            if not isinstance(node, ast.For):
+                continue
+            inner = [c for sub in node.body for c in ast.walk(sub)
+                     if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                     and c.func.id == "promotable_skill_statement"]
+            if inner:
+                return min(c.lineno for c in inner)
     return None
 
 
@@ -565,3 +577,8 @@ def test_the_gate_check_can_actually_fail():
     # 2. The import alone must NOT read as a gate, which is the exact confusion `source.index` made.
     assert _gate_call_line(
         "from looplab.engine.lessons import promotable_skill_statement\n") is None
+    # 3. …and neither does the call sitting OUTSIDE the promotion loop: the anchor is the loop
+    #    inside `promote_settled_skills`, not the module holding the name somewhere.
+    assert _gate_call_line(
+        "def promote_settled_skills(self, state, cards, fp):\n"
+        "    promotable_skill_statement(cards[0].statement)\n") is None
