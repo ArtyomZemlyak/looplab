@@ -377,6 +377,11 @@ class NodeBuildMixin:
             # it is not one of the literal per-member `getattr`s above: those mirror the registry,
             # and this is a method the registry cannot hold.
             audit_extra=audit_extra_of(developer),
+            # …and the predictive pick, for the reason `DeveloperResult.last_foresight_pick`
+            # records: a repair on the shared developer clears it between this call and the emit.
+            last_foresight_pick=(dict(getattr(developer, "last_foresight_pick", None))
+                                 if isinstance(getattr(developer, "last_foresight_pick", None),
+                                               dict) else None),
         )
 
     @staticmethod
