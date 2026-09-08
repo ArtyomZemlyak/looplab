@@ -277,18 +277,16 @@ class NodeBuildMixin:
         lineage is an improve with a longer rationale. A Developer without the keyword is called
         exactly as before."""
         developer = developer or self.developer
-        bind_state = getattr(developer, "bind_state", None)
-        if callable(bind_state):
-            bind_state(state)
         impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
             if co_parents and accepts_co_parents(impl_from):
                 return self._run_developer(developer, impl_from, idea, parent,
-                                           co_parents=tuple(co_parents))
-            return self._run_developer(developer, impl_from, idea, parent)
-        return self._run_developer(developer, developer.implement, idea)
+                                           co_parents=tuple(co_parents), bind_state_to=state)
+            return self._run_developer(developer, impl_from, idea, parent, bind_state_to=state)
+        return self._run_developer(developer, developer.implement, idea, bind_state_to=state)
 
-    def _run_developer(self, developer, fn, *args, **kwargs) -> DeveloperResult:
+    def _run_developer(self, developer, fn, *args, bind_state_to=_OMIT,
+                       **kwargs) -> DeveloperResult:
         """ONE Developer call — CLEAR, call, capture — as one atomic step under the instance's lock
         (`developer_call_lock`). The lock is what makes two offloaded calls on a SHARED instance
         safe: they queue here, in a worker, instead of on the event loop.
@@ -314,6 +312,10 @@ class NodeBuildMixin:
         LOCKED one at the site would not fix it either, since the gap between that lock and this one
         is all an intervening call needs (`tests/test_developer_result.py`)."""
         with developer_call_lock(developer):
+            if bind_state_to is not _OMIT:
+                bind = getattr(developer, "bind_state", None)
+                if callable(bind):
+                    bind(bind_state_to)
             self._reset_developer_footprint(developer)
             code = fn(*args, **kwargs)
             return self._capture_developer_result(developer, code)
@@ -461,13 +463,11 @@ class NodeBuildMixin:
         """`_repair`, returning the whole `DeveloperResult` envelope — see `_implement_result`."""
         idea = self._directed_idea(node.idea, state) if state is not None else node.idea
         developer = developer or self.developer
-        bind_state = getattr(developer, "bind_state", None)
-        if callable(bind_state):
-            bind_state(state)
         rf = getattr(developer, "repair_from", None)
         if callable(rf):
-            return self._run_developer(developer, rf, idea, node, err)
-        return self._run_developer(developer, developer.repair, idea, node.code, err)
+            return self._run_developer(developer, rf, idea, node, err, bind_state_to=state)
+        return self._run_developer(developer, developer.repair, idea, node.code, err,
+                                   bind_state_to=state)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
