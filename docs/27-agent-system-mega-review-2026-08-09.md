@@ -112,7 +112,7 @@ Research only.
 | P1 | `Idea.eval_profile` drove dispatch, but an LLM Researcher was not told a repo task's valid profile names or semantics | models guessed names or left a valuable cost/quality control unused | **Fixed:** exact task profiles and effective timeouts are included in the task-specific hint and exercised through real command selection; fresh malformed profiles fail loudly while historical snapshots retain their recorded dispatch semantics |
 | P1 | Auto-memory wrote `status: candidate`, but the skill loader ignored lifecycle metadata and exposed every file immediately; its lifecycle key was also a truncated readable slug | one-run model-authored procedure could masquerade as promoted reusable knowledge, including through a same-prefix slug collision | **Fixed:** manual skills remain compatible; auto candidates are hidden by default, promoted skills are visible and labeled untrusted, explicit inspection can include candidates, lifecycle frontmatter cannot be forged through the model body or a multiline/Unicode task id, and promotion evidence is keyed by the full normalized-claim SHA-256 with exact-match legacy reuse |
 | P1 | `CompositeTools` silently kept the first provider on duplicate function names | capability loss was deterministic but invisible; routing mistakes looked like model failure | **Fixed:** legacy first-wins behavior remains, collisions are recorded and warned, and opt-in strict composition fails immediately |
-| P1 | CLI, TUI and Web had three New-run planners while README implied one shared Genesis | product parity claims exceeded implementation parity; proposal schemas can drift | **Documented truthfully now;** canonical planner/service remains a follow-up rather than a risky launch rewrite |
+| P1 | CLI, TUI and Web had three New-run planners while README implied one shared Genesis | product parity claims exceeded implementation parity; proposal schemas can drift | **Fixed 2026-09-08:** `core/run_proposal.py::RunProposal` is the shared schema (shape, `/api/start` body, run-id slug, settings filter, refine merge, provenance); the three planners are compatibility adapters over it and readiness stays the one `serve/launch.py` funnel. The two run-id slugs had already drifted, which is the drift this row predicted |
 | P1 | Task-facet stewards spend finalize-time model calls and have a ledger plus operator CLI, but facets do not affect retrieval/ranking and are not fetched by the UI | paid product surface has no behavioral consumer | **Fixed without inventing behavior:** fresh `task_facets_finalize=false` stops scheduling the third paid call while concept+claim curation remains enabled; explicit opt-in, manual/on-demand APIs and ledgers remain. Snapshot schema v2 pins the new paid-treatment bit, while v1/missing-field snapshots preserve the historical all-three treatment behind `cross_run_curation`; facets still never authorize or rank |
 | P1 | Prompt files hot-reload without a run/phase-pinned revision; UI prompts have a separate store | identical event inputs can receive different treatment mid-run and cannot be reproduced exactly | **Open architecture item:** pin a prompt bundle/context/tool-schema manifest per run or phase while retaining hot reload for future phases/runs |
 | P1 | Outer event sourcing stops at the inner agent loop | crash recovery reconstructs state but loses unfinished expensive work and trajectory evidence | **Open architecture item:** additive phase/checkpoint/tool-receipt events and safe-boundary resume |
@@ -259,9 +259,25 @@ Research only.
 >   what order), nothing exercises prompt injection or cross-run scope, and nothing repeats a
 >   stochastic trial — the corpus holds one sample per decision, so it carries no confidence
 >   interval and cannot support one.
-> - **OPEN[three-new-run-planners-no-shared-schema]** CLI, TUI and Web still plan a new run three
->   ways; no `RunProposal` service or shared schema exists anywhere in `serve/`, and
->   `engine/genesis.py` says so in production source. proof:absent:RunProposal@looplab/serve
+> - **[closed 2026-09-08 — *the schema landed; three planners is not the defect and did not need
+>   fixing.* `core/run_proposal.py::RunProposal` owns what the row asked a canonical service to own:
+>   the proposal shape, the `/api/start` body (`start_body`), the run-id slug, the launch-settings
+>   filter, the refine merge, the operator-facing rendering and the `planner` provenance. All three
+>   planners are compatibility adapters over it, as the row prescribed —
+>   `tools/machine_runs_tools.py::RunLauncherTools` (Web),
+>   `serve/routers/genesis.py::_normalize_genesis` (TUI) and `looplab run --goal`, which now
+>   announces its plan in the same words the TUI renders. `core/` and not `serve/` because those
+>   three sit in three packages and `tools/` may not import `serve` (doc 25 XP-03);
+>   `serve/launch.py` imports it and adds `validate_proposal`, the readiness QUESTION asked about a
+>   proposal rather than a hand-built body. Validation is deliberately NOT here:
+>   `serve/launch.py::preflight_start` is still the one authority, reached as a verdict through
+>   `/api/validate` and as a refusal through `/api/start`. Two duplications died with measurable
+>   consequences — the two run-id slugs had already drifted (`"--a--"` slugged to `"a"` on the TUI
+>   and `"-a-"` in the router, which is a run name the launch funnel refuses), and the CLI's
+>   hand-copied submit warnings are now `adapters/tasks.py::submit_warnings`, one rule both surfaces
+>   print. `tests/test_run_proposal_schema.py` drives all of it: cards round-trip between planners,
+>   the two slugs agree, and a launch bound to the schema's own body is accepted by a real
+>   `/api/start`.]**
 > - **[closed 2026-09-03 — `McpTools.cached()` is keyed on a digest of the config `load_config`
 >   resolves, which is what actually determines the server set: an operator who edits `.mcp.json` no
 >   longer keeps talking to the old servers, and a per-principal config source would key itself.
@@ -350,10 +366,9 @@ Research only.
 > - **Agent eval corpus — STILL OPEN.** No trajectory/handoff/prompt-injection eval ladder exists
 >   under `tests/`; the closest artifacts are the opt-in live smokes
 >   (`tests/test_live_scenarios.py`, `LOOPLAB_LIVE_SCENARIOS=1`) and the replay/outcome unit suites.
-> - **Canonical `RunProposal` service — STILL OPEN.** No such symbol exists; the three planning
->   stacks below remain separate. The launch boundary itself hardened since
->   (`serve/launch.py::_confine_task_file` + `task_file_roots`), which narrows the risk but is not
->   the shared planner/schema.
+> - **Canonical `RunProposal` service — SHIPPED 2026-09-08.** `core/run_proposal.py::RunProposal`.
+>   The three planning stacks below stay separate as PLANNERS and share one schema, one `/api/start`
+>   body, one slug, one settings filter and one readiness rule; see the resolution on the row above.
 
 ## Duplication and taxonomy debt
 
@@ -399,6 +414,29 @@ whose server validates before spawn but issues no reviewed receipt; CLI validate
 canonical `RunProposal` service should own task validation, normalized settings, provenance,
 editable-field policy and launch fingerprint. Existing callers should be compatibility adapters so
 saved cards and CLI behavior do not disappear.
+
+*Resolution (2026-09-08) — the schema shipped; the three planners stayed, and that was the right
+half to keep.* `core/run_proposal.py::RunProposal` owns the proposal shape, `start_body` (the one
+`/api/start` payload), `slug_run_id`, `normalize_launch_settings`, the refine merge, `lines` (the
+operator-facing rendering) and a `planner` provenance stamp. Every planner is now a compatibility
+adapter over it exactly as this paragraph prescribed, and no saved card or CLI behaviour changed: a
+card that never carried `proposal_id`/`planner` still does not grow them.
+
+Two things this paragraph asked for are deliberately NOT in it. **Task validation** is not, because
+it already had one home and a second would be a second answer: `serve/launch.py::preflight_start`
+validates, and `validate_launch` (`POST /api/validate`, doc 52 row 8) is that same funnel asked as a
+question — `validate_proposal` beside it takes a `RunProposal` so a client never hand-builds the
+body it asks about. **A launch fingerprint** is not, because the server issues one
+(`_launch_token`), and a client-side second one that disagreed would be worse than none.
+
+The measured payoff was not the schema but the two copies it retired. The run-id slug existed twice
+with a comment on each saying they must stay in step, and they had already drifted: `"--a--"` slugged
+to `"a"` in the TUI and `"-a-"` in the genesis router, i.e. the router could name a run something the
+launch funnel refuses. And the CLI's submit-time warnings were hand-copied from the server's two
+calls, so a third would have landed on whichever surface its author was editing; both now read
+`adapters/tasks.py::submit_warnings`. The missing-input-path warning deliberately did NOT join it —
+the launch API fails closed on a path it cannot stat, so that condition is a refusal there and a
+warning on the CLI, and a rule that means two things is not one rule.
 
 ### Paid but inert task facets
 

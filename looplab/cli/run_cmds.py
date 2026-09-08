@@ -28,9 +28,9 @@ from looplab.engine.orchestrator import (
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope, is_guarded_abort
 from looplab.events.replay import fold
-from looplab.adapters.repo_task import (eval_entrypoint_unprotected, eval_reader_path_errors,
-                                        eval_source_tree_command_paths, eval_workspace_conflicts)
-from looplab.adapters.tasks import kinds_for, validate_task
+from looplab.adapters.repo_task import eval_reader_path_errors, eval_workspace_conflicts
+from looplab.adapters.tasks import kinds_for, submit_warnings, validate_task
+from looplab.core.run_proposal import proposal_for_run_dir
 from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
@@ -644,22 +644,47 @@ def _report_task_warnings(task, task_dict: dict) -> None:
     The counterpart of `_assert_run_startable` (the refusals) and its natural neighbour: both are
     "say it while the operator can still edit the spec", and both are one call in `run()` rather
     than a loop-per-diagnosis, which is what `test_cli_lifecycle_triage.py`'s length guard exists to
-    push back on. The launch API prints the same two through `LaunchPreflight.warnings`.
+    push back on.
 
       * a task input path that isn't on disk (esp. Genesis-authored): a mistyped/invented data/repo
         path caught HERE, not as a cryptic mid-run 'No such file or directory'. A warning, not a
-        stop, because a repo's setup step may create some paths and the user may know better.
-      * an eval `cmd` whose scorer LoopLab cannot protect. The Developer's prompt tells it the
-        scoring cannot be rewritten; when the argv names no in-repo file, nothing enforces that,
-        and the same gap cost `runs/rubertlite-dr-unified-v6` 2x GPU per node before anyone looked.
-        See `repo_task.eval_entrypoint_unprotected` for why it is a warning and not a refusal.
+        stop, because a repo's setup step may create some paths and the user may know better. This
+        one is the CLI's alone, and deliberately: the launch API FAILS CLOSED on a path it cannot
+        stat, so the same condition is a refusal there, not a warning.
+      * everything a validated task earns at submit, from the ONE rule the launch API prints on
+        `LaunchPreflight.warnings` — `adapters/tasks.py::submit_warnings`. The CLI used to spell
+        those two calls itself, copied by hand from the server's, which is how a third warning gets
+        added on one surface only (doc 27, `three-new-run-planners-no-shared-schema`).
     """
     for field, p in _missing_task_paths(task_dict):
         typer.echo(f"⚠ task {field} does not exist on disk: {p}", err=True)
-    for warning in eval_entrypoint_unprotected(task):
+    for warning in submit_warnings(task):
         typer.echo(f"⚠ {warning}", err=True)
-    for warning in eval_source_tree_command_paths(task):
-        typer.echo(f"⚠ {warning}", err=True)
+
+
+def _report_submit_notes(task, task_dict: dict, out: Path, settings, *, planned: bool) -> None:
+    """Everything the operator is TOLD at submit, in one call: the plan, then the warnings.
+
+    The plan half is new with doc 27's `three-new-run-planners-no-shared-schema` row (closed
+    2026-09-08). `looplab run --goal` is a planner in the same sense the TUI's `/api/genesis` card
+    and the Web Assistant's `propose_run` card are, so it now states what it is about to spend
+    tokens on in the same words: `core/run_proposal.py::RunProposal.lines`, the exact renderer
+    `serve/tui_format.py::spec_lines` draws the TUI's proposal panel with. `planned` is the Genesis
+    path and nothing else — a complete task file is not a proposal, it is the operator's own
+    document, and narrating it back at them would be noise. The rationale is deliberately NOT
+    carried in: the `Genesis -> kind=…` line printed just above already says it, and `lines()` omits
+    the `why` row when there is none. The run DIRECTORY is the run's name here, because the CLI
+    resolves `--out` rather than a run id.
+
+    Both halves are one call in `run()` rather than a line each, which is what
+    `test_cli_lifecycle_triage.py`'s length guard exists to push back on — and they belong together:
+    both are "say it while the operator can still edit the spec", and the plan reads first because a
+    warning about a task is easier to act on after seeing the task.
+    """
+    if planned:
+        for line in proposal_for_run_dir(out, task_dict, settings).lines():
+            typer.echo(line)
+    _report_task_warnings(task, task_dict)
 
 
 def _assert_run_startable(task, out) -> None:
@@ -828,9 +853,10 @@ def run(
         apply_llm_model_override(settings, str(effective_model_override))
     _pin_offline_speculation_profile(settings, calibration=speculation_gate_calibration,
                                      genesis=genesis, goal=goal, task_kind=task_dict.get("kind"))
-    # 3b. CLI Genesis: this is the historical CLI task author, separate from Web New run's owner
-    # Assistant and the TUI's server /api/genesis planner. An explicit --goal fires it; --kind pins
-    # the kind while Genesis fills the rest. Opt out with --no-genesis, or use a complete file.
+    # 3b. CLI Genesis: the historical CLI task author, separate from Web New run's owner Assistant
+    # and the TUI's /api/genesis planner — three AUTHORS, one plan SHAPE since doc 27's
+    # `core/run_proposal.py::RunProposal`. An explicit --goal fires it; --kind pins the kind while
+    # Genesis fills the rest. Opt out with --no-genesis, or use a complete file.
     backend_chosen = (backend is not None or "backend" in file_settings or "backend" in sets
                       or "LOOPLAB_BACKEND" in os.environ
                       # also covers a backend set via the .env file (env vars alone miss it), so
@@ -900,8 +926,8 @@ def run(
             mode="json", by_alias=True, exclude_none=True)
     else:
         task_dict.pop("comparison_contract", None)
-    _report_task_warnings(task, task_dict)
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
+    _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)
     _assert_run_startable(task, out)
     out.mkdir(parents=True, exist_ok=True)
     store = EventStore(out / "events.jsonl")

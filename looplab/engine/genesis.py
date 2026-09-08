@@ -3,9 +3,14 @@ and authors the inline spec, so the user never has to name a task type.
 
 This is the CLI's historical Genesis planner. The TUI calls
 `serve/routers/genesis.py` (`/api/genesis`), while Web New run uses the owner Assistant's
-`RunLauncherTools.propose_run`; they are separate planners/schemas. They share task-adapter and
-`default_backend` authority (over `GENERATIVE_KINDS`) so an authored task that needs a code-writing
-agent defaults to `backend=llm` when the operator did not choose one explicitly.
+`RunLauncherTools.propose_run`. Three separate PLANNERS on purpose — a single CLI model call, an
+agentic server job and an assistant tool call are three different ways to author a plan — but since
+2026-09-08 ONE schema for what they produce: `core/run_proposal.py::RunProposal` owns the proposal
+shape, the `/api/start` body, the run-id slug and the launch-settings filter, which all three used
+to spell for themselves (doc 27, `three-new-run-planners-no-shared-schema`). They also share
+task-adapter and `default_backend` authority (over `GENERATIVE_KINDS`) so an authored task that
+needs a code-writing agent defaults to `backend=llm` when the operator did not choose one
+explicitly, and one readiness rule: `serve/launch.py::validate_launch`.
 
 On `kind` itself: it is **not** removed. It is the dispatch key that selects one of nine
 ``TaskAdapter`` semantics (each a different eval / grader / trust / data model — e.g. a self-reported

@@ -157,11 +157,14 @@ A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys)
 
 **Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task. This is
 the CLI planning surface; the Web **New run** flow uses the owner Assistant's `propose_run` tool and
-the TUI uses `/api/genesis`. They share task-adapter validation and backend-default authority, but
-not one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token; the TUI
-asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
+the TUI uses `/api/genesis`. Three ways to AUTHOR a plan; one shape for the plan itself since
+2026-09-08 — `core/run_proposal.py::RunProposal` owns the proposal fields, the `/api/start` body,
+the run-id slug and the launch-settings filter, and all three surfaces share task-adapter validation
+and backend-default authority. Web additionally submits a reviewed `/api/start/preflight` token; the
+TUI asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
 `/api/start` to the token it returns; CLI validates directly. The CLI announces its choice
-(`Genesis -> kind=…`) before launching, and:
+(`Genesis -> kind=…`) and then the PLAN itself — run name, task, goal, the settings knobs and the
+rationale, in the same lines the TUI's proposal panel renders — before launching, and:
 
 - picks the `kind` from your words — *or* stays within the kind you **pin** with `--kind` (it doesn't
   skip Genesis, it constrains it; what the run does within a kind depends on the model);

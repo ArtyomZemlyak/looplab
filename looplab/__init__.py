@@ -338,6 +338,8 @@ _LAYOUT = {
     "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
     "run_lifecycle": "engine",  # the run dir's lifecycle fences + config-write lock, moved DOWN out
                                 # of `serve/` so `tools/` takes its defaults downward (doc 25 XP-03)
+    "run_proposal": "core",   # the ONE launch-proposal schema the CLI, TUI and Web planners share
+                              # (doc 27); `core` because those three sit in three packages
     "run_reset": "core",
     "node_diff": "tools",   # what actually differs between two nodes: code, params proposed vs applied
     "run_tools": "tools",
