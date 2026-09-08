@@ -10,7 +10,11 @@ raise refused.
 
 What lives here is the printing and the span vocabulary the two commands SHARE — nothing decides
 anything. The folds stay where they were (`events/token_spend.py`, `engine/*`), the commands stay in
-`inspect_cmds.py`, and every function here takes what it prints as an argument.
+`inspect_cmds.py`, and every function here takes what it prints as an argument. The two exceptions
+are pure DERIVATIONS a single run's own record answers and no other caller wants — `stage-dups`'
+stage-identity rows (moved here 2026-09-07, its reason stated at the block) and the run-opening
+split — which live beside the echo that renders them for the same cap argument this header opens
+with; each is testable without the command, and neither decides anything either.
 
 ONE rendering module, not two. Both sides of the 2026-09-07 merge extracted one for this same cap,
 citing this same guard docstring — master this file, the branch a `cli/token_report.py` holding
@@ -174,6 +178,263 @@ def echo_reconciliation(*, wall, intervals: list, attributed: float, durable_eve
                 typer.echo(f"  {occ['open_intervals']} evaluation(s) still open at the last event — "
                            f"counted busy to there, which is true of a live run and is the most a "
                            f"killed one can prove")
+
+# ------------------------------------------------------ the head of the run (`looplab timings`)
+# WHY THIS EXISTS AND WHY IT IS AN INSTRUMENT AND NOT A FIX
+# (`first-propose-runs-with-every-gpu-idle`). The opening `propose` is systemically the longest
+# phase of a run — over the seven runs measured on 2026-08-25 it is the run's MAXIMUM in four of
+# them, at 1.6-6.4x that run's own median, and
+# `e5small-dr-unified-v3` spent 2 h 18 min there before dying with three nodes and no metric. What
+# makes it expensive is WHEN: at `n == 0` no node exists, so nothing is evaluating and every GPU the
+# box has is idle for the whole phase. The prescription attached to that item says to MEASURE THE
+# SPLIT between the run-opening think (`engine/research_cadence.py::_ground_run_start`) and the first
+# propose before choosing an overlap, because those minutes were only ever recorded as their SUM —
+# and the split could not be reconstructed afterwards: it is a property of each run's own
+# `spans.jsonl`, a sidecar `fold` never rebuilds, and not one of the seven runs' span files survives.
+# So the split is made a number a run PRODUCES, at the boundaries the engine already writes, rather
+# than one somebody reconstructs from a corpus that may not be there when the question is asked.
+#
+# THE BOUNDARIES COME FROM THE DURABLE LOG WHEREVER THE LOG CAN SAY, for the reason
+# `events/eval_occupancy.py` records: a span sidecar can be cleared, torn or switched off, and a
+# question about the RUN must still have an answer. Only the propose itself has no durable boundary
+# pair of its own (a node id is reserved AFTER the proposal is final — see
+# `orchestrator.py::_prepare_node_idea` — so `node_building` bounds it from above but does not say
+# when the model finished), and that one row is read from the `propose` span: the same population the
+# 2026-08-25 table was built from.
+
+
+def _row_field(row, name):
+    """One field of an event row, whichever shape the caller holds.
+
+    BOTH SHAPES ARE LEGITIMATE, and `events/eval_occupancy.py::_field` carries the measurement for
+    why this is not an `isinstance(row, dict)` filter: `EventStore.read_all()` yields Event OBJECTS
+    while a reader that walked `events.jsonl` with `json.loads` holds dicts, and a fold that accepts
+    only one of them returns a clean, empty, WRONG answer — a report that silently declines to print
+    about a run that has plenty to say.
+    """
+    if isinstance(row, dict):
+        return row.get(name)
+    return getattr(row, name, None)
+
+
+def _row_stamp(row):
+    """A row's usable wall-clock timestamp as a float, or None.
+
+    `events/replay.py::event_timestamp` is the ONE spelling of "is this timestamp usable" — it
+    rejects `0.0` (the `Event.ts` default, i.e. "no timestamp", not 1970), a JSON `true`, a string
+    and a date past 9999 — and this must not grow a second, drifting copy of that rule, so a dict row
+    is handed to it in the attribute shape it reads rather than re-tested here.
+    """
+    from types import SimpleNamespace
+
+    from looplab.events.replay import event_timestamp
+    return event_timestamp(row if not isinstance(row, dict)
+                           else SimpleNamespace(ts=row.get("ts")))
+
+
+def _first_row(rows, kind, where=None):
+    """The EARLIEST row of one type (optionally matching a payload predicate), as `(ts, data)`.
+
+    Earliest by TIMESTAMP, not by position: every other reader of the log is order-tolerant
+    (invariant #5) and a head-of-run measurement that trusted iteration order would be the one place
+    a spliced background row could move a published number.
+    """
+    best = None
+    for row in rows:
+        if _row_field(row, "type") != kind:
+            continue
+        stamp = _row_stamp(row)
+        if stamp is None:
+            continue
+        data = _row_field(row, "data")
+        data = data if isinstance(data, dict) else {}
+        if where is not None and not where(data):
+            continue
+        if best is None or stamp < best[0]:
+            best = (stamp, data)
+    return best
+
+
+def _operation_spans(spans, name):
+    """Every `operation` span of one name, as `(start, end)` absolute wall clock, earliest first.
+
+    A span with no usable `start` cannot be PLACED, only counted, so it is skipped here exactly as
+    `timings`' own union skips it (and says how many it skipped). `span_seconds` on both fields for
+    the reason it exists: `spans.jsonl` is written by a tracer that promises never to raise into the
+    operation it observes, so a junk `duration_s` must cost this row, not the report.
+    """
+    out = []
+    for span in spans or ():
+        if not isinstance(span, dict):
+            continue
+        if span.get("kind") != "operation" or span.get("name") != name:
+            continue
+        start = span_seconds(span.get("start"))
+        if not start:
+            continue
+        out.append((start, start + span_seconds(span.get("duration_s"))))
+    return sorted(out)
+
+
+def run_opening_split(events, spans) -> dict:
+    """Where the head of the run went, split at the boundaries it already writes.
+
+    The window is the run's first event to its first `node_eval_started` — by construction the
+    stretch in which NO evaluation of this run was running, so a GPU-shaped run holds its lease and
+    burns nothing for the whole of it (`engine/resources.py`; an offline adapter takes no lease at
+    all, which is why the report says "no evaluation was running" — what the log can prove — rather
+    than naming a device it cannot see).
+
+    Returns ``{available, opening_seconds, open, phases, unattributed_seconds, to_think_seconds,
+    to_propose_seconds, think_to_propose_seconds, propose_outside_opening, notes}``. `phases` is an
+    ORDERED list of disjoint `{name, seconds, boundary, source}` rows; `unattributed_seconds` is
+    the rest of the window, SIGNED like every other residual this command prints, so a negative
+    value is shown as an overlap rather than clamped into a false zero.
+
+    THE TWO HEADLINES ARE THE ITEM'S OWN QUESTION: `to_think_seconds` is run start -> the run-opening
+    think complete, `to_propose_seconds` is run start -> the first propose complete, and their
+    difference is the half of the sum that the 2026-08-25 propose table could not separate.
+
+    ABSENCE IS REPORTED, NEVER RENDERED AS ZERO — the discipline `trust/scan_receipt.py` states for
+    the same class of question. A run with no run-opening think (deep research off, no researcher
+    wired, or a log written before 2026-08-12) yields `to_think_seconds=None` and a note saying so;
+    a run whose trace was cleared yields `to_propose_seconds=None` and a different one; a run whose
+    first node was built on a path that opens no `propose` span at all yields the same None and a
+    THIRD note, because "this run cannot answer" is not "turn tracing on".
+    """
+    rows = list(events or ())
+    stamps = [t for t in (_row_stamp(row) for row in rows) if t is not None]
+    if not stamps:
+        return {"available": False, "opening_seconds": None, "open": False, "phases": [],
+                "unattributed_seconds": 0.0, "to_think_seconds": None, "to_propose_seconds": None,
+                "think_to_propose_seconds": None, "propose_outside_opening": False,
+                "notes": ["no row carries a usable timestamp"]}
+    t0, last = min(stamps), max(stamps)
+    setup_started = _first_row(rows, "setup_started")
+    setup_finished = _first_row(rows, "setup_finished")
+    # By the trigger the DECIDING site writes, imported rather than spelled here: see
+    # `engine/research_cadence.py::RUN_START_TRIGGER`.
+    from looplab.engine.research_cadence import RUN_START_TRIGGER
+    attempted = _first_row(rows, "research_attempted",
+                           lambda d: d.get("trigger") == RUN_START_TRIGGER)
+    thought = _first_row(rows, "research_completed",
+                         lambda d: d.get("trigger") == RUN_START_TRIGGER)
+    building = _first_row(rows, "node_building")
+    created = _first_row(rows, "node_created")
+    dispatched = _first_row(rows, "node_eval_started")
+
+    close = dispatched[0] if dispatched is not None else last
+    # THE OPENING'S propose, not the run's first traced one — measured on a real offline run, which
+    # is why this is a window and not a `min()`. The seed/batch path that mints node 0 there opens no
+    # `propose` span at all, so the earliest one in the file belongs to a LATER node and starts after
+    # the first evaluation was already burning: charging it here would have published a number for
+    # this phase that was measured somewhere else entirely. A span that does not fit the window is
+    # not the opening's, and the absence is then stated (see the notes below) rather than filled in.
+    candidates = _operation_spans(spans, "propose")
+    inside = [pair for pair in candidates if pair[1] <= close]
+    propose = inside[0] if inside else None
+    notes: list[str] = []
+    phases: list[dict] = []
+
+    def _phase(name: str, begin, end, boundary: str, source: str) -> None:
+        if begin is None or end is None or end < begin:
+            return
+        phases.append({"name": name, "seconds": end - begin, "boundary": boundary,
+                       "source": source})
+
+    _phase("setup", (setup_started or (t0, {}))[0],
+           setup_finished[0] if setup_finished else None,
+           "setup_started -> setup_finished", "events.jsonl")
+    _phase("run-start think", attempted[0] if attempted else None,
+           thought[0] if thought else None,
+           f"research_attempted -> research_completed, trigger={RUN_START_TRIGGER}", "events.jsonl")
+    if propose is not None:
+        _phase("first propose", propose[0], propose[1],
+               "the first `propose` span inside the window", "spans.jsonl")
+    # The build that CONSUMES that proposal. From the propose's own end when the span placed it, and
+    # otherwise from the reservation the log does carry — `node_building` is appended once the Idea is
+    # final, so on a spans-less run it is the closest durable stand-in for "the model stopped talking".
+    _phase("first build",
+           propose[1] if propose is not None else (building[0] if building else None),
+           created[0] if created else None,
+           ("propose end -> node_created" if propose is not None
+            else "node_building -> node_created"), "events.jsonl")
+    _phase("dispatch", created[0] if created else None,
+           dispatched[0] if dispatched else None,
+           "node_created -> node_eval_started", "events.jsonl")
+
+    if thought is None:
+        notes.append("no run-opening think in this log — deep research is off, no researcher was "
+                     "wired, or the run predates `_ground_run_start` (2026-08-12). NOT zero.")
+    if propose is None and not candidates:
+        notes.append("no `propose` span in spans.jsonl — tracing was off or the trace was cleared, "
+                     "so the propose cannot be separated from the build it fed.")
+    if propose is None and candidates:
+        notes.append(f"{len(candidates)} `propose` span(s) in this run, none of them inside the "
+                     "opening window — the first node was built on a path that opens none (the seed "
+                     "batch does not), so this run cannot price its opening propose.")
+    if dispatched is None:
+        notes.append("this run never dispatched an evaluation, so the opening window is the whole "
+                     "log: every number below is a lower bound on a run that got no further.")
+
+    opening = close - t0
+    named = sum(p["seconds"] for p in phases)
+    to_propose = (propose[1] - t0) if propose is not None else None
+    to_think = (thought[0] - t0) if thought is not None else None
+    return {
+        "available": True,
+        "opening_seconds": opening,
+        "open": dispatched is None,
+        "phases": phases,
+        "unattributed_seconds": opening - named,
+        "to_think_seconds": to_think,
+        "to_propose_seconds": to_propose,
+        "think_to_propose_seconds": (None if (to_think is None or to_propose is None)
+                                     else to_propose - to_think),
+        # The run traced a propose, and none of them is this phase's. Reported as its own fact
+        # because it is NOT "tracing was off" and must not read as it: the propose that fed node 0
+        # happened, it was simply made on a path that opens no span. Which of the two absences a run
+        # has is the difference between "turn tracing on" and "this run cannot answer".
+        "propose_outside_opening": bool(propose is None and candidates),
+        "notes": notes,
+    }
+
+
+def echo_run_opening(events, spans, *, wall=None) -> None:
+    """WHERE THE BOOTSTRAP WENT: the run-opening split, printed under `timings`' occupancy block.
+
+    Reads best directly below `eval occupancy`, which names the bootstrap — the stretch before the
+    first evaluation could start — and until now could not say what was IN it. Prints nothing at all
+    when the log carries no usable timestamp, so a spans-only directory keeps its historical report.
+    """
+    if events is None:
+        return
+    split = run_opening_split(events, spans)
+    if not split["available"] or (split["opening_seconds"] or 0) <= 0:
+        return
+    share = f", {round(100 * split['opening_seconds'] / wall)}% of the run" if wall else ""
+    # UNCONDITIONAL, because the window makes it true rather than the phases inside it: it ends at
+    # the run's FIRST `node_eval_started`, so there is no earlier evaluation for it to contain.
+    idle = " — no evaluation was running for any of it"
+    typer.echo(f"\nrun opening — {minutes(split['opening_seconds'])} min{share}{idle}:")
+    for phase in split["phases"]:
+        typer.echo(f"  {phase['name']:<16} {minutes(phase['seconds']):>6} min  "
+                   f"{phase['boundary']} ({phase['source']})")
+    residual = split["unattributed_seconds"]
+    label = "unattributed" if residual >= 0 else "overlap"
+    typer.echo(f"  {label:<16} {minutes(abs(residual)):>6} min  "
+               f"{'covered by no boundary above' if residual >= 0 else 'the rows above overlap'}")
+    if split["to_think_seconds"] is not None:
+        typer.echo(f"  run start -> the run-opening think complete: "
+                   f"{minutes(split['to_think_seconds'])} min")
+    if split["to_propose_seconds"] is not None:
+        after = (f" ({minutes(split['think_to_propose_seconds'])} min of it after the think)"
+                 if split["think_to_propose_seconds"] is not None else "")
+        typer.echo(f"  run start -> the first propose complete:     "
+                   f"{minutes(split['to_propose_seconds'])} min{after}")
+    for note in split["notes"]:
+        typer.echo(f"  ({note})")
+
 
 # The two pure derivations `stage-dups` reports from, moved here 2026-09-07 for the reason
 # `echo_reconciliation` above was: `inspect_cmds` is the run-diagnostics COMMAND group, and a

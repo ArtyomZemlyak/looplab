@@ -46,7 +46,7 @@ from looplab.cli import (
 # printing and the shared span vocabulary, extracted so a new diagnostic does not have to buy
 # its room by deleting why-comments.
 from looplab.cli.run_report import (echo_card_and_build_tables, echo_containments,
-                                    echo_reconciliation, echo_section, minutes,
+                                    echo_reconciliation, echo_run_opening, echo_section, minutes,
                                     output_fingerprint, span_category, span_seconds,
                                     stage_identity_rows)
 
@@ -439,6 +439,9 @@ def timings(run_dir: Path = typer.Argument(...),
     echo_containments(spans)
     echo_reconciliation(wall=wall, intervals=intervals, attributed=attributed,
                        durable_events=durable_events)
+    # WHERE THE BOOTSTRAP WENT (`first-propose-runs-with-every-gpu-idle`): the occupancy block one
+    # line up names the stretch before the first evaluation could start; this one splits it.
+    echo_run_opening(durable_events, spans, wall=wall)
 
 
 @app.command()

@@ -749,7 +749,7 @@ reconciliation vs 27.9 min wall clock:
   untraced     18.0 min  (65%)  no span open — not attributable from spans.jsonl
 ```
 
-**Three sections, and why.**
+**The sections, and why.**
 
 * **Per node** — unchanged: each node's `create_node` / `evaluate` / `repair` work. An operation
   span's recorded duration includes every nested span, so each row is charged its **self** time
@@ -766,6 +766,22 @@ reconciliation vs 27.9 min wall clock:
   remainder — work with no span at all, engine bookkeeping, provider waits, and the idle gap while a
   stopped run waits for someone to finalize it. It is reported rather than hidden: a residual you
   can see is a residual you can go and instrument.
+* **Run opening** — the head of the run: its first event to its first `node_eval_started`, which
+  is by construction the window in which no evaluation of this run was running. Split at the
+  boundaries the run already writes — `setup_started -> setup_finished`, the run-opening think
+  (`research_attempted -> research_completed`, `trigger=run_start`), the first `propose` span,
+  `-> node_created`, `-> node_eval_started` — with the rest of the window named as `unattributed`
+  and the two headline numbers stated: *run start -> the run-opening think complete* and *run start
+  -> the first propose complete*. This is the phase that is systemically the longest in a run
+  (`docs/BACKLOG.md`: the run's own maximum in four of seven measured runs) and the only one that
+  cannot overlap an evaluation, so what it costs and how it divides is now a number a run produces
+  rather than one someone reconstructs. Everything but the propose row comes from the durable log,
+  so a run whose trace was cleared still gets the rest. The propose row is the earliest `propose`
+  span that FITS the window, never simply the earliest in the file — the seed path that mints node 0
+  opens none, so on such a run the first traced propose belongs to a later node and is already
+  running beside an evaluation. Every absence is printed as a NOTE and never as a zero, and the two
+  are kept apart: "no `propose` span at all" (turn tracing on) reads differently from "spans, but
+  none inside the opening window" (this run cannot answer).
 * **Contained failures** — printed only when a span carries one. `core/containment.py::contain`
   stamps the span it ran under with a `contained` count and a `contained` event (the reason and the
   exception type), so a run whose watchdog ticks or agentic calls degraded to their fallbacks says
