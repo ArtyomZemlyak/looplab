@@ -1223,7 +1223,7 @@ looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--mo
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
-| `--task-type NAME` | inferred from the run's `task_id` | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches |
+| `--task-type NAME` | inferred from the run's `task_id`, then from its GOAL | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches. Since 2026-09-08 an id that names no pack (every run answers `repo_task` or a run name) falls back to the run's own goal, which selects a pack only when it names ≥2 distinct concepts of that pack's DOMAIN axes — so a goal naming only a batch size and a learning rate still selects nothing |
 | `--offline` | off (**default is the agentic build**) | Skip the LLM/network and use only the deterministic alias heuristic over the curated seed pack — a fast local fallback (needs a pack; no per-task importance) |
 | `--model ID` | configured model | Override the model for the agentic build |
 | `-j, --jobs N` | `8` | Concurrent node-tagging calls in the agentic build |
@@ -1269,7 +1269,7 @@ looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5] [--offline] [--model 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton (e.g. `dense-retrieval`) |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (e.g. `dense-retrieval`). Since 2026-09-08 an id that names no curated pack falls back to the run’s own goal, which selects one only when the goal names ≥2 distinct concepts of that pack’s domain axes |
 | `--threshold N` | `5` | Consecutive same-lever experiments that trip the alarm |
 | `--offline` | off | Do not call the LLM; build tags with the deterministic heuristic |
 | `--model ID` | configured model | Override the model used for the agentic tag build |
@@ -1290,7 +1290,7 @@ looplab board-dedup RUN_DIR [--task-type NAME] [--offline] [--model ID]
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory whose Card belief board to analyze |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (an id naming no curated pack falls back to the goal — see `concept-coverage`) |
 | `--offline` | off | Do not call the LLM; use deterministic graph and hypothesis tags |
 | `--model ID` | configured model | Override the model used for the agentic build/tag pass |
 
@@ -1311,7 +1311,7 @@ looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH] [--offli
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory whose coverage to target |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (an id naming no curated pack falls back to the goal — see `concept-coverage`) |
 | `--asset-repo PATH` | — | Task repo used to ground the derived importance and queries in a D1 asset brief |
 | `--offline` | off | Do not call the LLM; use the deterministic graph and axis targets only |
 | `--model ID` | configured model | Override the model used for the agentic build |

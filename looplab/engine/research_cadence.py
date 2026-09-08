@@ -1058,10 +1058,19 @@ class ResearchCadenceMixin:
         # Deterministic layer always (refs exist? quoted numbers match?); LLM rubric pass when a
         # client is wired. Verdicts ride INSIDE the folded memo and cannot change this run's champion;
         # finalize later uses their aligned support as the gate for positive D8 evidence.
-        if self._research_verify and memo_d.get("claims"):
+        # ONE FOLD FOR BOTH DETERMINISTIC PASSES OVER THE CLAIMS. The verifier needs the run's
+        # nodes and so does the number-fidelity instrument below; folding the whole log twice per
+        # memo would buy nothing, and an unreadable log must not block the memo either way.
+        state = None
+        if memo_d.get("claims"):
+            try:
+                state = fold(self.store.read_all())
+            except Exception as exc:  # noqa: BLE001 — a memo is recorded even off an unreadable log
+                from looplab.core.containment import contain
+                contain("research memo state fold", exc)
+        if self._research_verify and state is not None:
             try:
                 from looplab.trust.memo_verify import verify_memo
-                state = fold(self.store.read_all())
                 ver = verify_memo(memo_d, state,
                                   client=getattr(self.deep_researcher, "client", None),
                                   parser=getattr(self.deep_researcher, "parser", "tool_call"))
@@ -1078,6 +1087,19 @@ class ResearchCadenceMixin:
         # recorded, and nothing reads it to decide anything (AAR's measure is an instrument first).
         from looplab.trust.memo_verify import provenance_coverage
         memo_d["provenance"] = provenance_coverage(memo_d)
+        # AND WHERE ITS QUOTED NUMBERS CAME FROM (doc 52 row 32, second half). Same terms: no
+        # model, no call, recorded and read by nothing that decides — and independent of
+        # `research_verify`, because a run that buys no verdicts still deserves the free
+        # measurement. `None` (no claims to measure) leaves the memo without the block entirely.
+        if state is not None:
+            try:
+                from looplab.trust.memo_verify import number_fidelity_report
+                numbers = number_fidelity_report(memo_d, state)
+                if numbers is not None:
+                    memo_d["numbers"] = numbers
+            except Exception as exc:  # noqa: BLE001 — an instrument never blocks the memo it measures
+                from looplab.core.containment import contain
+                contain("memo number fidelity", exc)
         # The model, tool ledger, and verifier are all untrusted text producers. This
         # writer-side pass is the invariant: custom researchers cannot bypass redaction, control
         # stripping, list caps, or the aggregate text budget before any durable derivative.

@@ -580,6 +580,21 @@ declare_baseline_ruler() {
   # run in the lane's whole cpuset, keyed `__lane<N>r3`.
   ALGOTUNE_BASELINE_CACHE_DIR="${ALGOTUNE_BASELINE_CACHE_DIR:-$(baseline_cache_dir "$AT")}"
   export ALGOTUNE_BASELINE_CACHE_DIR
+  # AN INHERITED WIDTH IS SAID OUT LOUD, and specifically a width above one (docs/62 s10, and the
+  # remedy docs/63 s8's item prescribed). `1` is a deliberate side experiment naming the serial
+  # ruler and needs no notice; `auto` is this campaign's own declaration, already in the banner
+  # below. Anything else arrived from the environment -- `set -a; . .env; set +a` two hundred lines
+  # up is a live channel -- and it is a DIFFERENT INSTRUMENT: an inherited 2 keys the arena
+  # `__w2x1r3`, a cache this box has never written, so the reference is re-measured in the same
+  # pass and the evaluator reports it against ITSELF at ~1.0. The value is honoured rather than
+  # pinned (a side experiment may mean it) and the banner still refuses to let it pass unnamed.
+  case "${ALGOTUNE_EVAL_WORKERS:-}" in
+    ""|1|auto) ;;
+    *) echo "  NOTE: ALGOTUNE_EVAL_WORKERS=$ALGOTUNE_EVAL_WORKERS was INHERITED from the" \
+            "environment (this campaign's own ruler is 'auto'). The regime is part of the" \
+            "measurement: this arm's numbers are comparable only to numbers measured at the same" \
+            "width. Export ALGOTUNE_EVAL_WORKERS=1 for the serial ruler docs/62 s10 mandates." ;;
+  esac
   export ALGOTUNE_EVAL_WORKERS="${ALGOTUNE_EVAL_WORKERS:-auto}"
   # PINNED, not defaulted -- `${VAR:-1}` is exactly the inheritance the sentence above says it is
   # refusing, and `set -a; . .env; set +a` two hundred lines up is a live channel for setting it.
@@ -1608,20 +1623,29 @@ echo "model $ALGOTUNE_MODEL_KEY | llm ${METER_BASE:-$LOOPLAB_LLM_BASE_URL}${METE
 # same two values.
 echo "baseline cache $ALGOTUNE_BASELINE_CACHE_DIR | eval workers $ALGOTUNE_EVAL_WORKERS x $ALGOTUNE_EVAL_CORES_PER_WORKER core(s) | min timeout ${ALGOTUNE_MIN_TIMEOUT_S}s"
 # AND SAY WHICH INSTRUMENT THAT IS, because this driver used to run serial and now does not.
-# docs/51 s10 measures the PARALLEL evaluation regime inflating the metric ~75 % on a solver that
+# docs/62 s10 measures the PARALLEL evaluation regime inflating the metric ~75 % on a solver that
 # IS the reference (1.0011 serial vs 1.7795 at two workers, ~75x the measured noise floor) and
-# states the operational rule "leave ALGOTUNE_EVAL_WORKERS unset"; docs/58 s58.4 records a campaign
+# mandates the SERIAL ruler until that is explained; docs/58 s58.4 records a campaign
 # measured that way whose numbers "must be discarded rather than rescaled". Setting it here is a
 # real change of instrument and the driver's own header says "THE REGIME IS PART OF THE
 # MEASUREMENT", so it is named in the log rather than left to be inferred from an export. This is
-# the warn half of the remedy docs/52 s8's OPEN item prescribes.
+# the warn half of the remedy docs/63 s8's item prescribed.
+#
+# THE SECTION NUMBERS WERE WRONG UNTIL 2026-09-08 and this is what it cost to say so: every
+# "docs/51 sN" in this tree means today's docs/62 (the arm operational notes) and every "docs/52 sN"
+# means docs/63 (this box) -- the two documents were renumbered and the pointers here were not, so
+# an operator reading the NOTE below was sent to "51. External works synergy" s10, "What must not
+# change", which says nothing about any of this. A pointer nobody re-derives is wrong in exactly the
+# way the open-item index exists to make impossible.
 case "${ALGOTUNE_EVAL_WORKERS:-1}" in
   1|"") ;;
-  *) echo "  NOTE: this is the PARALLEL evaluation regime. docs/51 s10 measures it inflating the"
+  *) echo "  NOTE: this is the PARALLEL evaluation regime. docs/62 s10 measures it inflating the"
      echo "        metric ~75 % (reference-equivalent solver: 1.0011 serial, 1.7795 at 2 workers)"
-     echo "        and mandates leaving ALGOTUNE_EVAL_WORKERS unset until that is explained;"
-     echo "        docs/58 s58.4 discards a campaign measured under it. Numbers from this arm are"
-     echo "        NOT comparable to the serial ones. Set ALGOTUNE_EVAL_WORKERS=1 for that ruler." ;;
+     echo "        and mandates the serial ruler until that is explained -- and note that LEAVING"
+     echo "        ALGOTUNE_EVAL_WORKERS UNSET no longer gets you it: this driver defaults it to"
+     echo "        'auto' (declare_baseline_ruler). docs/58 s58.4 discards a campaign measured"
+     echo "        under this regime. Numbers from this arm are NOT comparable to the serial ones."
+     echo "        Set ALGOTUNE_EVAL_WORKERS=1 for that ruler." ;;
 esac
 echo "card $CARD_ARGS ${MAKE_TASK_ARGS:-}"
 reap_orphan_workers

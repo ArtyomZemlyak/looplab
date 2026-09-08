@@ -3375,8 +3375,7 @@ surface resolves ids through it (`events/digest.py::_folded_axes`/`folded_concep
 **11 of its 16 nodes** are reported as being about. Withholding costs nothing that exists today: a
 run that never quiesces records no consolidation now either.
 
-**WHAT THIS DOES NOT FIX, and it is the more expensive finding.** ⬜ **`skeleton_for()` matches no
-  OPEN[concept-skeleton-matches-no-run] proof:`present:def skeleton_for(task_type: str)@looplab/search/concept_graph.py+absent:repo_task@looplab/search/concept_graph.py`
+**WHAT THIS DID NOT FIX, and it was the more expensive finding.** **`skeleton_for()` matched no
 run on this box.** The curated taxonomy (`search/concept_graph.py`: 26 leaves + 10 axis roots + 10
 `<axis>/*` placeholders = 46 ids) is resolved from `state.task_id` against ONE registered pack,
 `dense-retrieval`, plus seven substring aliases. Every run here answers `repo_task`,
@@ -3392,6 +3391,26 @@ curated `negatives/*` ids, in one run. The only 100 %-curated population on the 
 ended, with the task type given explicitly. Turning the classifier on gives node 0 the tag of its
 own it needs; it does **not** unify the paths the operator asked about, and saying otherwise would
 be wrong.
+
+*Closed 2026-09-08 (`concept-skeleton-matches-no-run`): the id was never the only thing the resolver
+could ask. `skeleton_for(task_type, *, text="")` consults the task's own words when the id resolves
+nothing — the run's GOAL at all five live/CLI seeds — and a pack is selected only when the text names
+at least `_SKELETON_TEXT_MIN_CONCEPTS` (2) DISTINCT concepts of that pack's DOMAIN axes
+(`_SKELETON_SIGNATURE_AXES`: data, negatives, loss, distillation, architecture, pooling). The generic
+axes are excluded from that bar deliberately — `hyperparameter`, `regularization`,
+`training-schedule` and `eval` carry vocabulary every ML task uses, so a segmentation goal naming a
+batch size, a learning rate and dropout would otherwise import a 46-id retrieval taxonomy. Matching
+is word-ANCHORED (`ance` inside `balance` is refused, `mined negatives` still meets `mined
+negative`), and the two adapter DEFAULT ids — `repo_task`, `dataset_task`, which name the harness and
+never the subject — are excluded from the substring pass so that an alias can never select a domain
+for every repo run in existence. Measured on the e5 goal shape: `repo_task` + that goal resolves
+`dense-retrieval` (46 ids) on two hits (`loss/contrastive` via "InfoNCE",
+`negatives/hard-mining-inbatch` via "hard negative mining"), while `toy_quadratic` and an
+image-segmentation goal still resolve nothing. The consequence is deliberate and stated: the graded
+pre-gate, which returned None for want of any vocabulary on every run recorded here, now grades a
+dense-retrieval repo run exactly as it has always graded a task whose id IS `dense-retrieval`. Seven
+driven cases in `tests/test_concept_graph.py`, including the live precheck. Deleted per the index
+rule.*
 
 ⬜ **The classifier REWRITES, it does not add.** `_on_node_concepts` assigns
   OPEN[classifier-rewrites-authored-membership] proof:`present:st.node_concepts[nid] = bounded@looplab/events/replay.py`
