@@ -5081,9 +5081,36 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 - Bounded caches done right: attention projection cache, concept core/replay LRUs, summary cache, and scope revision caches all have explicit size ceilings, stat-identity invalidation, and documented race handling instead of unbounded dicts.
 - The build_router(srv) convention with documented registration-order constraints (misc.py's catch-all ordering, __init__.py) keeps the app composition explicit and testable.
 
-#### SR-01 · HIGH · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-14)**
+#### SR-01 · HIGH · inconsistency · effort: large — **RESOLVED (2026-09-08)**
 
-> **OPEN[control-start-record-not-a-paid-ledger-spec]** variant (5), `routers/control.py`'s start-record reconciliation, is still two `build_router` closures rather than a `PaidLedgerSpec`. proof:present:_inspect_keyed_start@looplab/serve/routers/control.py
+> *Closed 2026-09-08: variant (5) landed and the finding has no arms left. `serve/start_record.py`
+> owns the durable start record's protocol — the seven `build_router` closures
+> (`_reconcile_start`, `_inspect_keyed_start`, `_start_public`, `_start_meta_id`,
+> `_has_first_run_started`, `_release_unspawned_start_namespace`, `_raise_existing_start`) are free
+> functions taking `srv` explicitly, exactly the move `serve/trace_clear.py` made for variant (4),
+> and `routers/control.py` is 256 lines shorter.*
+>
+> *It is stated as a spec, and the spec is a `StartRecordSpec` rather than a `PaidLedgerSpec` — a
+> correction to this finding's own follow-up, made deliberately and not by omission.
+> `paid_ledger.py`'s docstring draws the line: it owns the ledger folded out of the run's own EVENT
+> LOG, and "the other three are FILE-ledger protocols … they share the vocabulary but not the
+> storage, and deliberately stay separate". The start record is a JSON sidecar written through
+> `commands.save_start_record`; expressing it as a `PaidLedgerSpec` would mean moving a run's start
+> into the event log, which is a change to how a start is made durable rather than a
+> de-duplication of how it is described. So the VOCABULARY is shared for real — `conflict_policy`
+> IS `paid_ledger.FAIL_CLOSED`, the same constant with the same meaning — and `StartRecordSpec`
+> adds only what this protocol has and that one does not: which fields carry the request identity,
+> which phases mean "Popen may already have happened", and which statuses are established /
+> started / retryable. Every one of those sets was a brace literal repeated across the closures.*
+>
+> *The spec is READ, not decorative: `start_public` projects the three status families off it,
+> `reconcile_start` branches on the two phase families, `inspect_keyed_start` refuses a re-used key
+> only because `request_digest_field` is not None, and `raise_existing_start` refuses an uncertain
+> startup because the policy `fails_closed`. `tests/test_start_record_protocol.py` is the
+> instrument the extraction buys — 33 tests driving the crash-window branches against a stub `srv`
+> and real files, with no `make_app` and no `TestClient`, plus the spec's own truth table (a
+> started status that is not established, and an established status that is also retryable, are
+> both refused at construction).*
 
 > **Status update (2026-08-14).** The §6.4 target design shipped. `serve/paid_ledger.py`
 > (`tests/test_paid_ledger.py`, 17 tests) now owns the claim→terminal event-ledger protocol —
@@ -5515,9 +5542,32 @@ asserting the invocation is never reached, not merely that the response is an er
 
 *Status (post-baseline):* Fixed on `master` by commit `c92b89f` (2026-08-01, immediately after this review's baseline): all flagged handlers now offload their blocking sections via `anyio.to_thread.run_sync` (the assistant SSE drain was inverted to a no-pool-hop loop drain), the span_io fallback scan is bounded to the index's coverage boundary, and every `CLAUDE REVIEW: [PERF]` marker was removed. Behavioural tests pin the fix. The finding is retained as accurate at the baseline.
 
-#### SR-09 · MEDIUM · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-02)**
+#### SR-09 · MEDIUM · duplication · effort: small — **RESOLVED (2026-09-08)**
 
-> **OPEN[generation-conflict-envelopes-hand-built]** the ~26 hand-built `run_generation_changed` 409 envelopes are still hand-built; re-derived 2026-08-19 the literal occurs at **35** sites under `serve/`; the proof is bound to the helper's stated name because the literal itself survives every correct fix — re-point on landing. proof:absent:generation_conflict(@looplab/serve
+> *Closed 2026-09-08: the sweep landed. `serve/http.py::generation_conflict(message, *, expected,
+> current, remediation, **extra)` is the one builder, and all **26** hand-assembled envelopes now
+> go through it — 9 in `routers/runs.py`, 6 in `concept_lens_service.py`, 2 each in
+> `run_commands.py`, `trace_clear.py` and `reset_route.py`, 1 each in `log_pages.py`,
+> `routers/boss.py`, `routers/org.py`, `routers/reviews.py` and `routers/collaboration.py`.*
+>
+> *Three things the sweep had to decide rather than flatten. The MESSAGE and the REMEDIATION are
+> arguments, because they name which read or write the run outran and which view the operator
+> reloads — the same rule `http.py`'s JSON parser already applies to its subject noun. The two
+> fence fields are OMITTED, not sent as null, at the three sites that genuinely have no generation
+> to name (the two comment surfaces and the background-activity claim), because a client cannot
+> tell a null it must ignore from a null it should have received. And `log_pages.py` publishes the
+> same fact under `actual_generation` — a wire drift `ui/src/useTimeline.js` already matches on, so
+> it is carried through `**extra` at the one site that has it instead of becoming a parameter every
+> caller can reach.*
+>
+> *The literal survives in four kinds of place and none is a copy of this envelope, which is why the
+> marker's proof was bound to the helper's NAME: `run_commands.py::_generation_changed_error`
+> builds a durable command RECORD's error object; `deletion_service.py` raises the code through
+> that module's own shared `_detail(...)`, one of ~20 codes in a receipt envelope that always
+> carries `retryable` and `operation_id` — already shared from one place, and folding it in would
+> change that surface's wire shape; `routers/boss.py` and `serve/assistant.py` READ the code to
+> classify a caught exception; `trace_clear.py` writes `run_generation_changed_after_pending` as a
+> receipt reason. `http.py` names all four beside the helper.*
 
 **Generation-fence 409 envelopes hand-built ~26 times; comment-cursor error duplicated between reviews and collaboration**
 
@@ -5536,8 +5586,10 @@ paginate more loosely than the owner surfaces comments the owner's own view excl
 The cursor split is contract, not cosmetics — 400 says the cursor was never valid, 409 says it was
 valid for a run state that has since moved, and only the second is worth re-fetching page one for.
 
-**Still open:** the `generation_conflict` sweep over the ~26 hand-built `run_generation_changed`
-409s. Three of them were already collapsed by SR-04's `_assert_lens_generation`.
+*Resolution (2026-09-08, the generation half):* the `generation_conflict` sweep over the 26
+hand-built `run_generation_changed` 409s, described in the closure note at the top of this finding.
+Three of them had already been collapsed by SR-04's `_assert_lens_generation`, which is why the
+count moved rather than the files.
 
 #### SR-10 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
