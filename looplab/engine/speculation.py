@@ -146,6 +146,12 @@ def _proposal_limiter():
     return proposal_limiter()
 
 
+def _card_build_limiter():
+    """Lazy hop to `novelty.card_build_limiter`, for the reason `_proposal_limiter` gives."""
+    from looplab.engine.novelty import card_build_limiter
+    return card_build_limiter()
+
+
 def producer_error_text(exc: BaseException, prefix: str = "") -> str:
     return f"{prefix}{type(exc).__name__}: {exc}"[:_PRODUCER_ERROR_CAP]
 
@@ -2037,6 +2043,9 @@ class SpeculationMixin:
             release=lambda: self._spec_build_inflight.discard(key),
             notify=notify,
             notify_key=("producer", key),
+            # Its OWN pool, not anyio's shared default -- see `novelty.card_build_limiter` for why
+            # one token is the derivation and why it is not the proposal pool.
+            limiter=_card_build_limiter(),
         )
 
     @in_llm_lane("build")

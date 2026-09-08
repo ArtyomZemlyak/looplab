@@ -692,6 +692,9 @@ def test_serial_cadence_needs_a_wired_researcher_but_a_request_does_not():
             _cadence_research_marks=lambda _state: set(),
             _cadence_due=Engine._cadence_due,
             _outstanding_manual_research=lambda _state: 0,
+            # See the note in `tests/test_research_run_start.py`: the question sweep runs ahead of
+            # every trigger and is not what this test is about.
+            _register_idea_questions=lambda state: state,
             _run_deep_research=lambda state, *, trigger, manual: (
                 ran.append(trigger) or state),
         )
