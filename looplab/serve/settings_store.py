@@ -14,12 +14,16 @@ from pydantic import SecretStr
 
 from looplab.core.atomicio import atomic_write_text, best_effort_fsync
 from looplab.core.config import Settings
+from looplab.core.run_proposal import LAUNCH_SECRET_FIELDS, LAUNCH_SETTING_FIELDS
 
 # Both fields are runtime-only and must never enter UI settings or run snapshots. Only the key is an
 # HTTP-writeable secret; the server derives and persists its endpoint binding in the same JSON file.
-_SECRET_FIELDS = {"llm_api_key", "llm_api_key_base_url"}
+# The two sets are DEFINED in `core/run_proposal.py` and re-exported here under their historical
+# private names: a launch card built in `tools/` (the Web assistant's `propose_run`) filters by the
+# same policy, and `tools/` may not import `serve` (doc 25 XP-03). One definition, two spellings.
+_SECRET_FIELDS = set(LAUNCH_SECRET_FIELDS)
 _SECRET_API_FIELDS = {"llm_api_key"}
-_ALLOWED_FIELDS = set(Settings.model_fields)
+_ALLOWED_FIELDS = set(LAUNCH_SETTING_FIELDS)
 
 _REVISION_KEY = "__looplab_revision__"
 _INITIAL_UI_REVISION = "gUoF2YQlVSLWCEg3hWJOCxJ2YFDKfZ2D"
@@ -58,27 +62,27 @@ class SettingsStore:
     @contextmanager
     def ui_settings_transaction(self):
         """Serialize one UI settings transaction locally and across server workers."""
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
 
         lock_path = Path(str(self._ui_settings_path) + ".lock")
-        with self._ui_settings_lock, _interprocess_lock(lock_path, required=True):
+        with self._ui_settings_lock, interprocess_lock(lock_path, required=True):
             yield
 
     @contextmanager
     def secret_transaction(self):
         """Serialize one credential transaction locally and across server workers."""
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
 
         lock_path = Path(str(self._secrets_path) + ".lock")
-        with self._secrets_lock, _interprocess_lock(lock_path, required=True):
+        with self._secrets_lock, interprocess_lock(lock_path, required=True):
             yield
 
     @contextmanager
     def launch_transaction(self):
         """Fence settings publication against the credential snapshot-to-Popen boundary."""
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
 
-        with self._launch_lock, _interprocess_lock(self._launch_lock_path, required=True):
+        with self._launch_lock, interprocess_lock(self._launch_lock_path, required=True):
             yield
 
     @contextmanager

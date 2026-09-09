@@ -19,6 +19,7 @@ import contextvars
 import os
 import stat
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
@@ -27,11 +28,13 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
+from looplab.core.pathsafe import is_reparse, run_child_name_defect, validate_run_child
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.events.authoring_projection import card_authoring
-from looplab.events.eventstore import integrity_wire, iter_event_jsonl, log_integrity
+from looplab.events.eventstore import (
+    EventStore, integrity_wire, iter_event_jsonl, log_integrity)
 from looplab.events.replay import fold
 from looplab.events.types import EV_NODE_CREATED
 from looplab.serve.deletion_transaction import (
@@ -135,6 +138,10 @@ _REQUEST_FOLD_MEMO: "contextvars.ContextVar[Optional[dict]]" = contextvars.Conte
 #: state per run; past this the memo stops answering, degrading to the previous behaviour.
 _REQUEST_FOLD_MEMO_MAX = 8
 
+#: How many runs' append-incremental event readers one server holds (`AppState.event_store`). Well
+#: above the runs a single session touches, far below "every run this server has ever served".
+_EVENT_STORE_CACHE_MAX = 64
+
 
 @contextmanager
 def request_fold_scope():
@@ -208,6 +215,10 @@ class AppState:
         # "dictionary changed size during iteration". Held only around the cheap dict ops, never the
         # (slow) span read + build below.
         self._trace_view_lock = threading.Lock()
+        # Per-run append-incremental `EventStore` readers — see `event_store` for the whole argument
+        # about why THIS one is safe to hold across requests when a folded `RunState` is not.
+        self._event_stores: "OrderedDict[str, EventStore]" = OrderedDict()
+        self._event_store_lock = threading.Lock()
         self.reports_dir = root / "reports"
         # Late-bound route callables (set by their owning router's build_router; see module docstring
         # and the `serve/router_wiring.py` registry that enumerates producer + consumers).
@@ -238,8 +249,12 @@ class AppState:
             RunDeletionStorageError, load_run_deletion_fence)
 
         root = self.root.resolve()
-        if (not isinstance(run_id, str) or not run_id or Path(run_id).name != run_id
-                or run_id in {".", ".."} or "/" in run_id or "\\" in run_id):
+        # The LEXICAL rule first and on its own, because the two fences below must be answered
+        # BEFORE the directory is inspected: a run whose directory is already gone mid-deletion has
+        # to keep reading as 410 "being deleted", not 404. `core/pathsafe.py` owns both halves
+        # (doc 25 SC-03); the read path deliberately takes the non-strict name tier, so a directory
+        # the CLI created out of band with an unusual-but-legal name stays openable.
+        if run_child_name_defect(run_id) is not None:
             raise HTTPException(404, "no such run")
         requested = root / run_id
         lowered = requested.name.lower()
@@ -260,15 +275,6 @@ class AppState:
                 "operation_id": fence["operation_id"],
                 "message": "This run is being deleted.",
             })
-        try:
-            entry = requested.lstat()
-            rd = requested.resolve(strict=True)
-            junction_fn = getattr(requested, "is_junction", None)
-            junction = bool(callable(junction_fn) and junction_fn())
-        except (FileNotFoundError, OSError) as exc:
-            raise HTTPException(404, "no such run") from exc
-        attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
-        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
         # A run is a DIRECT CHILD of the root, and nothing else. Accepting any DESCENDANT (root is in
         # the parents of root/a/b/c) let a run_id like "run1/nodes/n3_ws" resolve to a sandbox-WRITABLE
         # node workspace: any events.jsonl the evaluated candidate wrote there became addressable as a
@@ -278,20 +284,21 @@ class AppState:
         # HTTP route params largely masked it, but the command service had already had to re-restrict
         # to `canonical.parent == root`; this is the base helper, so it enforces the same rule (and
         # rejects the root itself EXPLICITLY, rather than relying on root never having an events.jsonl).
-        if (rd.parent != root or rd != requested.resolve(strict=False)
-                or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode)
-                or bool(attributes & reparse_flag) or junction):
+        # That whole rule — reparse, junction, directory, resolved-identity, direct child — is
+        # `pathsafe.validate_run_child` now. This site used to re-spell `is_reparse` INLINE out of the
+        # attribute and the mode bit, which is exactly the copy `core/pathsafe.py` exists to end.
+        child = validate_run_child(root, run_id)
+        if child.defect is not None:
             raise HTTPException(404, "no such run")
+        rd = child.path
         events = rd / "events.jsonl"
         try:
             event_entry = events.lstat()
             event_target = events.resolve(strict=True)
         except (FileNotFoundError, OSError) as exc:
             raise HTTPException(404, "no such run") from exc
-        event_attributes = int(getattr(event_entry, "st_file_attributes", 0) or 0)
-        if (stat.S_ISLNK(event_entry.st_mode) or not stat.S_ISREG(event_entry.st_mode)
-                or bool(event_attributes & reparse_flag) or event_target != events
-                or event_target.parent != rd):
+        if (is_reparse(event_entry) or not stat.S_ISREG(event_entry.st_mode)
+                or event_target != events or event_target.parent != rd):
             raise HTTPException(404, "no such run")
         return rd
 
@@ -301,11 +308,60 @@ class AppState:
             evs = [e for e in evs if e.seq <= upto_seq]
         return evs
 
+    def event_store(self, rd: Path) -> EventStore:
+        """The run's `EventStore`, REUSED across requests (CODE_REVIEW, `eventstore.py::_scan_last_seq`).
+
+        `EventStore.__init__` walks the log once to learn its tail seq, and `routers/control.py`
+        built a fresh one per `POST /control` — so a session of N control appends paid N full scans
+        of a log that only ever grew by one record each time, which is the quadratic the finding
+        names. The store is exactly the object built to avoid that: its read cache keeps parsed
+        Events and reads only the bytes appended since the previous call.
+
+        **THIS IS NOT THE THING INVARIANT #4 FORBIDS, and the difference is the point.**
+        `request_fold_scope` memoizes a folded `RunState` for ONE request and never across, because
+        a `RunState` is MUTABLE — a second request handed the same object could observe another
+        request's edits. An `EventStore` holds no derived state a caller can mutate: it holds the
+        file's own bytes, and every `read_all()` re-stats the log and re-validates the cached prefix
+        against disk before extending it (replacement by inode, shrink, same-size rewrite and a
+        prefix rewrite each invalidate the cache and rebase `_seq`). A reset that archives
+        `events.jsonl` and starts a new one is therefore observed by the store itself, not papered
+        over by this map — which is why the engine has always held ONE store for a whole run.
+
+        What a REUSED store may not be asked without reading first is `divergence` and `_seq`: both
+        describe the bytes the store has consumed, so they are as fresh as the last `read_all()`.
+        Every caller here either reads or appends (`append` calls `read_all()` under the write lock
+        before deriving a seq), so neither is answered from a stale snapshot.
+
+        Bounded and LRU, because a server that has served a thousand runs must not hold a thousand
+        parsed logs. Eviction only drops the cache: the next caller builds a fresh store and pays the
+        one scan it would have paid anyway.
+        """
+        key = str(Path(rd))
+        with self._event_store_lock:
+            store = self._event_stores.get(key)
+            if store is not None:
+                self._event_stores.move_to_end(key)
+                return store
+        # Built OUTSIDE the lock: construction reads the whole log, and holding a process-wide lock
+        # across that would serialize every run's first control append behind the largest one. A
+        # concurrent builder for the same run simply loses the race and discards its own store.
+        built = EventStore(Path(rd) / "events.jsonl")
+        with self._event_store_lock:
+            existing = self._event_stores.get(key)
+            if existing is not None:
+                self._event_stores.move_to_end(key)
+                return existing
+            self._event_stores[key] = built
+            while len(self._event_stores) > _EVENT_STORE_CACHE_MAX:
+                self._event_stores.popitem(last=False)
+        return built
+
     def log_integrity(self, rd: Path) -> dict:
         """Is the prefix `events()` just returned the WHOLE log? — cached per file identity.
 
         `events()` reads through `iter_event_jsonl`, which STOPS at the first corrupt or non-dense
-        record and reports nothing, and this class never builds an `EventStore` — so until 2026-08-14
+        record and reports nothing, and no READ path here builds an `EventStore` (`event_store`
+        above serves the control-plane WRITERS and is not on this receipt's path) — so until 2026-08-14
         the divergence receipt was structurally unreachable from every HTTP surface: `/api/runs`,
         `/state`, the SSE stream, `/lifecycle`, `/nodes`, `/prov`, `/cost`, the review payload, the
         assistant's run context and the whole TUI. `runs/rubertlite-dense-retrieval` is what that
@@ -465,6 +521,18 @@ class AppState:
         # Card projection has declared them exact, leaving a completeness receipt that describes data
         # no longer present on the wire.
         d = _public_state_value(d)
+        # THE RUN-LEVEL CRASH TEXT gets the pass its node-level twin gets below. `stop_detail` folds
+        # `run_finished.error`, which `cli/run_cmds.py` writes as a raw `str(exc)[:500]` — it never
+        # goes through `Engine._redact`, the funnel every other persisted tail passes — so a
+        # `FileNotFoundError` naming a host path, a bucket URI or a provider body reached this
+        # payload verbatim. `_public_state_value` only DROPS the keys in `_PUBLIC_STATE_RAW_KEYS`
+        # and gives everything else `entropy=False`, and this payload feeds the token-less /state
+        # GET, the headerless SSE stream and a `review` share link (see the note above
+        # `_public_state_value`). Redact BEFORE truncating, for the straddling-secret reason the
+        # node-level line records, and to the same 160 chars: this is a status line, not a report.
+        if d.get("stop_detail"):
+            from looplab.core.redact import redact_secrets
+            d["stop_detail"] = redact_secrets(str(d["stop_detail"]))[:160]
         # `cards` and its completeness receipt must come from one projection invocation.
         # Re-projecting the two halves separately would let mutable caller input or a later selector
         # change publish counts that do not describe the actual mapping in this SSE/state frame.
@@ -514,14 +582,14 @@ class AppState:
             # …and the SCORED node's own stderr tail beside it, for the identical reason: it is
             # captured program output on the same untoken-gated projection, and a node that
             # scored is exactly as able to have printed a secret as one that crashed.
-            # OPEN[stderr-tail-scrub-untested-at-the-boundary] the stdout drop one line up is
-            # regression-tested; this new sibling pop has no test, on a DENY-LIST projection where
-            # a dropped pop leaks captured output with nothing red.
-            # proof:absent:stderr_tail@tests/test_server.py
-            # REVIEW 2026-08-30 (security-guard): `tests/test_server.py` asserts the stdout tail is
-            # absent from /state and still behind the token-gated detail; per CLAUDE.md's contract
-            # rule, drive the same pair for this field (the reviews router is safe by construction
-            # — its allow-list excludes both tails; /state is the one deny-style surface).
+            # Driven by `test_public_state_drops_the_stderr_tail_of_a_scored_node` — and note what
+            # that test showed: this pop is the SECOND rung, not the only one. `stderr_tail` is also
+            # in `_PUBLIC_STATE_RAW_KEYS`, so `_public_state_value` strips it recursively and
+            # deleting this line alone leaks nothing (measured 2026-09-08: the same is true of the
+            # `stdout_tail` pop above, whose own regression test survives its deletion). The test is
+            # therefore written against the PROPERTY — the tail is absent from /state and present
+            # behind the token-gated detail — which is what a reader of a deny-style surface needs
+            # guarded, rather than against either rung.
             n.pop("stderr_tail", None)
             # Redact BEFORE truncating: a secret straddling byte 160 would otherwise lose its tail,
             # leaving a prefix too short for the pattern/entropy rules to catch (fragment leak).
@@ -827,17 +895,21 @@ class AppState:
                 # opens is the one that is live now.
                 trace_ids[str(node_id)] = event.trace_id
         idx = get_index(rd / "spans.jsonl")
-        # KNOWN COST, deliberately not narrowed here — see docs/34 (CARD-TRACE-SCAN). This copies the
-        # WHOLE run's light span list (a 1 GB run's index is ~220 MB of dicts) and `project_card_trace`
-        # then rescans it once per owned node, so a card owning 5 nodes on a 200k-span run does ~1M
-        # predicate evaluations on the request thread. It cannot simply be given the owned traces:
-        # research is matched TWO ways and the first is "a `propose` span carrying this card_id",
-        # which may live in any trace, so a trace-scoped selection would silently drop the research
-        # section for the draft/debug/improve paths. Narrowing it properly needs a card_id (or span
-        # name) dimension on `SpanIndex`, which is an index-schema change, not a call-site one.
-        spans = idx.light_spans() if idx is not None else []
+        # NARROWED AT THE INDEX (docs/34 D-03, closed 2026-09-08 by the `card_propose_tids`
+        # dimension). This used to copy the WHOLE run's light span list — a 1 GB run's index is
+        # ~220 MB of dicts — which `project_card_trace` then rescanned once per owned node: ~1M
+        # predicate evaluations for a card owning 5 nodes on a 200k-span run, on the request thread.
+        # `card_trace_spans` serves BOTH research rules by lookup (the stamped-card_id rule reaches
+        # traces this card does not own, which is why a trace-scoped selection was never the answer)
+        # and returns the run-global claim map with them, so the projection re-applies its rules
+        # unchanged over the card's own rows and answers exactly what it answered before.
+        if idx is None:
+            return project_card_trace([], card_id=str(card_id), node_ids=node_ids,
+                                      node_trace_ids=trace_ids)
+        spans, claimed = idx.card_trace_spans(
+            card_id, node_ids=node_ids, node_trace_ids=trace_ids)
         return project_card_trace(spans, card_id=str(card_id), node_ids=node_ids,
-                                  node_trace_ids=trace_ids, _normalized=idx is not None)
+                                  node_trace_ids=trace_ids, claimed=claimed, _normalized=True)
 
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write

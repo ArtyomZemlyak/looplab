@@ -219,14 +219,14 @@ class ConceptGovernanceTools:
             return "(concept governance unavailable: internal failure)"
 
     def _taxonomy(self) -> str:
-        from looplab.engine.concept_registry import (
-            _TOMBSTONE, concept_governance_snapshot)
+        from looplab.engine.concept_registry import concept_governance_snapshot
+        from looplab.engine.knowledge_views import CONCEPT_TOMBSTONE
         snapshot = concept_governance_snapshot(self.dir)
         aliases = snapshot["aliases"]
         splits = snapshot["splits"]
-        # A purge is stored as the _TOMBSTONE sentinel target (a truthy string), NOT "" — classify by it.
-        merges = sorted((f, t) for f, t in aliases.items() if t and t != _TOMBSTONE)
-        purges = sorted(f for f, t in aliases.items() if t == _TOMBSTONE)
+        # A purge is stored as the CONCEPT_TOMBSTONE sentinel target (a truthy string), NOT "" — classify by it.
+        merges = sorted((f, t) for f, t in aliases.items() if t and t != CONCEPT_TOMBSTONE)
+        purges = sorted(f for f, t in aliases.items() if t == CONCEPT_TOMBSTONE)
         # taxonomy rows are durable, cross-run, and historically model-authored. Treat each
         # field as data, show enough split semantics for audit, and retain a fixed aggregate budget with
         # exact omission counts. Revisions are a consistent receipt from the same governance lock.

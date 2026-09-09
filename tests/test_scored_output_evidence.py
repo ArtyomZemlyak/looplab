@@ -292,27 +292,83 @@ def test_an_eval_that_says_nothing_leaves_the_row_exactly_as_it_was(tmp_path):
     assert state.nodes[0].stderr_tail == ""
 
 
+def _fold_pairs(pairs):
+    from looplab.core.models import Event
+    from looplab.events.replay import fold
+
+    return fold([Event(type=t, data=d) for t, d in pairs])
+
+
+_SCORED = [
+    ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+    ("node_created", {"node_id": 1, "operator": "draft",
+                      "idea": {"operator": "draft", "hypothesis": "a baseline"}}),
+    ("node_created", {"node_id": 2, "operator": "draft",
+                      "idea": {"operator": "draft", "hypothesis": "another"}}),
+    # Both nodes scored, and both said WHY on their own two channels. These are the two columns the
+    # reset sweeps must clear together; a stale one narrates a metric that no longer exists.
+    ("node_evaluated", {"node_id": 1, "metric": 0.80, "status": "ok",
+                        "stdout_tail": '{"speedup": 0.0}',
+                        "stderr_tail": "Valid Solutions: 95%"}),
+    ("node_evaluated", {"node_id": 2, "metric": 0.70, "status": "ok",
+                        "stdout_tail": '{"speedup": 0.1}',
+                        "stderr_tail": "Invalid Example #1"}),
+]
+
+
 def test_a_reset_does_not_carry_the_previous_attempts_reason_onto_the_new_one():
     """A re-evaluated node that kept the PREVIOUS attempt's stderr would show the loop a reason for
     a metric that no longer exists — the sharper version of the stale-record defect
-    `engine/evaluate.py` resets `reason_summary` for."""
-    from looplab.events import replay
+    `engine/evaluate.py` resets `reason_summary` for.
 
-    src = inspect.getsource(replay)
-    # Both reset sites (node_reset and the abandoned-lifecycle sweep) clear the sibling tail; this
-    # column must be cleared by the same statement blocks or it outlives its own metric.
-    # OPEN[scored-evidence-reset-count-pin] a positive substring COUNT pin -- satisfiable by one
-    # comment. proof:`present:src.count('n.stderr_tail = ""')@tests/test_scored_output_evidence.py`
-    # REVIEW 2026-08-25 (guard-test): the cheapest mutation -- delete one real clear in a reset
-    # handler and leave a commented-out copy in its place -- keeps both counts at 2 and this green
-    # while a reset now carries a stale stderr reason onto the new attempt. That is the exact
-    # residue class CLAUDE.md's ladder sends to tier 3, and the SAME diff already contains the
-    # correct pattern for the IDENTICAL property one file over:
-    # tests/test_stop_account.py::test_pause_reason_is_cleared_wherever_the_pause_is_lifted counts
-    # real `ast.Assign` targets, and comments are not AST nodes. Rewrite this assert the same way
-    # (or better, drive both reset sites behaviourally, as that file's lift-parametrized sibling
-    # test does through the real fold).
-    assert src.count('n.stdout_tail = ""') == src.count('n.stderr_tail = ""') == 2
+    DRIVEN THROUGH THE REAL FOLD AT BOTH SITES, since 2026-09-08. This was
+    `src.count('n.stderr_tail = ""') == 2`: a positive substring count over `replay.py`'s source,
+    and the cheapest mutation against it — delete one real clear in a reset handler and leave a
+    commented-out copy where it was — keeps the count at 2 and the assertion green while a reset
+    carries a stale reason onto the new attempt. Comments cannot satisfy a fold.
+
+    THE TWO SITES ARE DIFFERENT EVENTS and neither implies the other, which is why both are driven:
+
+      * `_on_node_reset` clears the node the reset NAMES;
+      * `_requeue_partition_bound_results` clears every OTHER evaluated incumbent, when an
+        epoch-aware holdout disclosure is invalidated by a candidate change. That sweep re-opens a
+        node nothing appended an event about, so its columns are the ones most easily forgotten.
+
+    MUTATION, either site: delete the `n.stderr_tail = ""` line (commented out or not) and the
+    matching half below goes red with the stale text in the message.
+    """
+    # SITE 1 — the reset's own target.
+    named = _fold_pairs(_SCORED + [
+        ("node_reset", {"node_id": 1, "generation": 0, "from_stage": "eval"})])
+    assert named.nodes[1].attempt == 1, "the fixture must really open a new lifecycle"
+    assert named.nodes[1].stdout_tail == "" and named.nodes[1].stderr_tail == "", (
+        f"the reset's own target kept its previous attempt's account: "
+        f"stdout={named.nodes[1].stdout_tail!r} stderr={named.nodes[1].stderr_tail!r}")
+
+    # SITE 2 — the requeue sweep. An epoch-aware holdout disclosure on node 1, then a reset of
+    # node 2, re-opens node 1 on the newly hidden complement: its metric is wiped, so the account
+    # of that metric must go with it. Nothing in the log names node 1.
+    swept = _fold_pairs(_SCORED + [
+        ("holdout_evaluated", {"node_id": 1, "metric": 0.9, "generation": 0, "search_epoch": 0}),
+        ("node_reset", {"node_id": 2, "generation": 0, "from_stage": "eval"}),
+    ])
+    assert swept.nodes[1].metric is None and swept.nodes[1].attempt == 1, (
+        "the fixture must really requeue the untouched incumbent — otherwise the sweep never ran "
+        "and the assertion below is vacuous")
+    assert swept.nodes[1].stdout_tail == "" and swept.nodes[1].stderr_tail == "", (
+        f"the requeue sweep wiped the metric and kept the account of it: "
+        f"stdout={swept.nodes[1].stdout_tail!r} stderr={swept.nodes[1].stderr_tail!r}")
+
+
+def test_a_node_that_was_not_reset_keeps_its_own_account():
+    """The other direction, so "clear them everywhere, always" cannot pass the test above. A fold
+    that blanked every tail on every reset would satisfy both halves there and destroy the record
+    this whole module exists to create."""
+    kept = _fold_pairs(_SCORED + [
+        ("node_reset", {"node_id": 2, "generation": 0, "from_stage": "eval"})])
+    assert kept.nodes[1].stderr_tail == "Valid Solutions: 95%", (
+        "an untouched incumbent's own account must survive a sibling's reset")
+    assert kept.nodes[1].stdout_tail == '{"speedup": 0.0}'
 
 
 # ------------------------------------------------------------------ THE guard: record, not verdict
