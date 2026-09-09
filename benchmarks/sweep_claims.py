@@ -931,12 +931,24 @@ def check_reference_use_band(bench: str):
     inside = sum(1 for x in pcts if 4.9 <= x <= 8.3)
     split = sum(1 for r in have
                 if (r.get("ref_imports") or 0) > 0 and float(r["ref_pct"]) == 0.0)
+    # THE OTHER HALF, DRIVEN (§375). The docstring above records `ref_call_pct`'s distribution as a
+    # measurement from 2026-09-08 and the check never re-read it: half this claim was quoted from a
+    # comment every sweep while the other half was measured, which is the exact shape this file
+    # exists to end. They are not the same number -- they disagree on 37 of 152 probes -- so a drift
+    # in the calls half would have been invisible.
+    calls = sorted(float(r["ref_call_pct"]) for r in rows
+                   if isinstance(r.get("ref_call_pct"), (int, float)))
+    other = ""
+    if calls:
+        other = (f"; by CALLS rather than imports: median {calls[len(calls) // 2]:.1f} % "
+                 f"(p25 {calls[len(calls) // 4]:.1f}, p75 {calls[3 * len(calls) // 4]:.1f}, "
+                 f"max {calls[-1]:.1f}) over {len(calls)} probe(s)")
     detail = (f"{len(have)} probe(s): reference reached in {med:.1f} % of run_probe spans "
               f"(p25 {lo:.1f}, p75 {hi:.1f}); {inside} of {len(have)} inside the quoted 4.9-8.3 %; "
               f"{split} import it in written code and never from a probe, so the question has two "
               "answers per probe")
     # The band HOLDS only if it describes the corpus -- most of it inside, not a third.
-    return inside >= 0.5 * len(have), detail
+    return inside >= 0.5 * len(have), detail + other
 
 
 # TEST divided by the best TRAIN, per task, measured 2026-09-08 over the 141 probes that have both.
