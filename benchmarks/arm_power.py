@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import json
 import random
 import statistics
@@ -33,22 +34,55 @@ from itertools import combinations, product
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import events_read  # noqa: E402
+import events_read
+import lanes  # noqa: E402
 
 DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 
 
-def champions(root: str, task: str = "edge_expansion") -> list[float]:
-    """The final champion of every run of `task` -- the arm's own primary outcome (§146)."""
+def champions(root: str, task: str = "edge_expansion", min_spend: float = 0.9,
+              live=None) -> list[float]:
+    """The final champion of every FINISHED run of `task` -- the arm's own primary outcome (§146).
+
+    §373. This used to take `max(metric)` from every run with any evaluated node, running ones
+    included. Measured 2026-09-09 with four pagerank probes in flight: the tool reported "10
+    pagerank champions" over six finished runs and four still working, whose champion is whatever
+    their FIRST node happened to score. The spread it hands the simulation was sd **11.8** with them
+    and **9.8** without -- a fifth more variance, and variance is what the power divides by. A
+    partial quantity pooled with complete ones, deciding money: §360 in the tool that sizes the
+    arm.
+
+    Two filters, because they answer different questions and this box has both kinds of run. A live
+    process is the reading §360 settled on -- `arm_fidelity.is_finished` calls `freeB3` and `remDL`
+    unfinished though they stopped weeks ago. `min_spend` is `outlier_check.corpus`'s rule, and
+    using the same number is the point: two tools reading one corpus should not disagree about
+    which runs are in it.
+    """
+    live = {p.get("probe") for p in (lanes.probes() if live is None else live) if p.get("probe")}
     out = []
     for path in sorted(glob.glob(f"{root}/*/runs/*/run/events.jsonl")):
         if f"/runs/{task}/" not in path:
             continue
-        metrics = [(e.get("data") or {}).get("metric")
-                   for e in events_read.iter_events(path) if e.get("type") == "node_evaluated"]
-        metrics = [m for m in metrics if isinstance(m, (int, float))]
-        if metrics:
-            out.append(float(max(metrics)))
+        # THE NAME RELATIVE TO `root`, not a split on a magic path segment. Splitting on
+        # "/model-probes/" silently matched nothing for any root not called that -- including every
+        # test fixture, which is how the mutation that removes this filter first came back green.
+        if os.path.relpath(path, root).split(os.sep)[0] in live:
+            continue
+        spend, metrics = 0.0, []
+        for event in events_read.iter_events(path):
+            kind = event.get("type")
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            if kind == "llm_usage":
+                try:
+                    spend += max(0.0, float(data.get("cost") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+            elif kind == "node_evaluated":
+                got = data.get("metric")
+                if isinstance(got, (int, float)):
+                    metrics.append(float(got))
+        if metrics and spend >= min_spend:
+            out.append(max(metrics))
     return out
 
 
