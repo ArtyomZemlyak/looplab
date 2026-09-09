@@ -139,6 +139,24 @@ class LLMError(OperatorRefusal, RuntimeError):
     """
 
 
+class LLMCancelled(LLMError):
+    """The caller's cancel token fired around a provider request (`core/llm.py::cancel_check_scope`).
+
+    WHY IT IS AN `LLMError` AND NOT A NEW FAMILY. A cancel has to STOP a request, and it must not
+    end the process the way a bug does. `LLMError` is the family the whole role layer already
+    degrades around (`except LLMError` -> retry, then fall back), so a cancel surfacing here can only
+    do what a transport failure does: no partial answer is invented, and any fallback client the
+    role reaches for re-checks the same token at its own first attempt and refuses before sending —
+    so a cancelled context makes no further provider request while the scope is up, however many
+    layers of retry sit above it. The loop's own `cancel_check` then ends the turn at the next
+    boundary, exactly as it did before.
+
+    Deliberately NOT a `BaseException` sibling of `CancelledError`: every blind `except Exception` in
+    the run path would have to learn about it, and the tree's rule for "stop everything now" is
+    already spelled `BudgetExceeded`, which the operator sets and this is not.
+    """
+
+
 class LLMCredentialError(LLMError):
     """A credential refusal that carries its ROOT CAUSE, not just the role that tripped over it.
 

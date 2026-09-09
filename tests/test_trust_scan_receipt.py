@@ -25,7 +25,7 @@ import anyio
 import pytest
 
 from factories import make_engine
-from looplab.agents.roles import ToyObjectiveDeveloper
+from looplab.agents.toy_roles import ToyObjectiveDeveloper
 from looplab.core.models import Idea, developer_artifact_footprint
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
