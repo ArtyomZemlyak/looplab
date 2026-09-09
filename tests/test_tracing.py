@@ -420,22 +420,22 @@ def test_finalizer_flushes_the_local_queue_before_building_trace_json(tmp_path):
     """A queued row must be present in derived trace artifacts before Engine.run returns."""
     engine = _engine(tmp_path)
     exporter = engine.tracer.exporter
-    real_export_line = exporter._writer._export_line
+    real_export_line = exporter._writer._export_lines
     real_force_flush = engine.tracer.force_flush
     started = threading.Event()
     release = threading.Event()
     guard_tripped = []
     flush_calls = 0
 
-    def blocked_export(line, **kwargs):
+    def blocked_export(lines, **kwargs):
         started.set()
         if not release.wait(_HOSTAGE_DEADLOCK_GUARD_S):
             # Raise rather than fall through: returning would claim a row was written that never
             # reached the writer. The exporter's containment swallows this, which is why the main
             # thread — not this one — is what turns it into a verdict.
-            guard_tripped.append(line[:80])
+            guard_tripped.append(b"".join(lines)[:80])
             raise RuntimeError("test harness deadlock guard tripped, not a product failure")
-        return real_export_line(line, **kwargs)
+        return real_export_line(lines, **kwargs)
 
     def releasing_flush(*, timeout_millis):
         nonlocal flush_calls
@@ -443,7 +443,7 @@ def test_finalizer_flushes_the_local_queue_before_building_trace_json(tmp_path):
         release.set()
         return real_force_flush(timeout_millis=timeout_millis)
 
-    exporter._writer._export_line = blocked_export
+    exporter._writer._export_lines = blocked_export
     engine.tracer.force_flush = releasing_flush
     with engine.tracer.span("queued-before-finalize", new_trace=True):
         pass
@@ -471,21 +471,21 @@ def test_force_flush_waits_for_a_row_already_handed_to_the_writer(tmp_path):
     clock the box owns.
     """
     exporter = AsyncJsonlSpanExporter(tmp_path / "spans.jsonl")
-    real_export_line = exporter._writer._export_line
+    real_export_line = exporter._writer._export_lines
     in_writer = threading.Event()
     proceed = threading.Event()
     guard_tripped = []
 
-    def held_export(line, **kwargs):
+    def held_export(lines, **kwargs):
         in_writer.set()
         # Same rule as `_HOSTAGE_DEADLOCK_GUARD_S`: never decide anything in a thread whose
         # exceptions the exporter's containment swallows. Here the release is the MAIN thread's own
         # `proceed.set()` a few lines down, so this bound can only be reached by a real deadlock.
         if not proceed.wait(_HOSTAGE_DEADLOCK_GUARD_S):
             guard_tripped.append("proceed never arrived")
-        return real_export_line(line, **kwargs)
+        return real_export_line(lines, **kwargs)
 
-    exporter._writer._export_line = held_export
+    exporter._writer._export_lines = held_export
     assert exporter.export(_barrier_span("queued-before-barrier")) is True
     assert in_writer.wait(30)             # the worker owns the row and is inside the delegate
 
@@ -527,16 +527,16 @@ def test_force_flush_returns_true_for_a_row_whose_one_attempt_failed(tmp_path):
     reading a promise this barrier does not make.
     """
     exporter = AsyncJsonlSpanExporter(tmp_path / "spans.jsonl")
-    real_export_line = exporter._writer._export_line
+    real_export_line = exporter._writer._export_lines
     refused = []
 
-    def refuse_once(line, **kwargs):
-        if not refused and b"doomed" in line:
-            refused.append(line)
+    def refuse_once(lines, **kwargs):
+        if not refused and any(b"doomed" in row for row in lines):
+            refused.append(lines)
             raise OSError("the delegate attempt failed after the row was accepted")
-        return real_export_line(line, **kwargs)
+        return real_export_line(lines, **kwargs)
 
-    exporter._writer._export_line = refuse_once
+    exporter._writer._export_lines = refuse_once
     assert exporter.export(_barrier_span("doomed")) is True
     assert exporter.force_flush(timeout_millis=60_000) is True
 

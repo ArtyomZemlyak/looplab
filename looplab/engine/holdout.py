@@ -201,7 +201,7 @@ class HoldoutGrader:
             return _holdout_indices(len(yt), float(fraction), epoch)
         return frozenset()
 
-    def apply_search_split(self) -> None:
+    def apply_search_split(self, *, refuse: bool = True) -> None:
         """Carve the pinned partition out of the PUBLIC assets for a real MLE-bench run: what every
         node is materialized from becomes the carved files, and the engine keeps the hidden slice's
         answers (`_search_answers`) and ids (`_search_hidden_ids`) in memory. Called wherever
@@ -219,6 +219,44 @@ class HoldoutGrader:
             e._assets_public = dict(e._assets or {})
         public = e._assets_public
         if not e._holdout_idx:
+            # AN EMPTY PARTITION WITH A FRACTION DECLARED IS UNDECIDABLE, NOT "LEGACY". This branch
+            # is the legitimate `holdout_fraction=0` protocol and it was ALSO the silent fall-through
+            # the docstring above says never happens: `carve()` — and therefore `SplitUndecidable`
+            # and the refusal below it — is only reached once `_holdout_idx` is non-empty, and
+            # `build_holdout_idx` answers `frozenset()` for the mlebench kind whenever
+            # `train_row_count` cannot read a train CSV (an image competition's `train/` directory, a
+            # parquet, any layout `_asset_named` does not match) or the file will not parse. So a
+            # real competition launched with `holdout_fraction=0.1` graded EVERY node on the private
+            # answers — the champion is again a max over N private draws, which is the exact defect
+            # this module exists to end — while recording `protocol = private_per_node` beside a
+            # snapshot saying 0.1, and no operator-facing refusal anywhere.
+            #
+            # `_holdout_indices` reserves `k = max(1, ...)` rows whenever `fraction > 0` and
+            # `n >= 2`, so with a fraction declared an empty partition means exactly "n < 2": the
+            # rows could not be counted. Same refusal and the same two ways out as the carve below,
+            # because it is the same question one step earlier.
+            # `refuse=False` DEFERS the decision, and invariant #6 is why. `Engine.__init__` builds
+            # the split from the LIVE `holdout_fraction`, and `_reentry_repin` then overwrites it
+            # with the value `run_started` recorded — the log wins, so that pre-pin construction is
+            # not the moment to refuse a run. Driven: a competition whose train is not a readable
+            # CSV, launched once with the explicit legacy protocol (`run_started
+            # {holdout_fraction: 0.0}`) and resumed in an environment whose live setting is the
+            # 0.25 default, was refused at `__init__` before the pin could restore 0.0 — a
+            # permanently unresumable run, told to set the very value its own log already carries.
+            # `_reentry_repin` re-applies the split against the PINNED fraction and refuses there,
+            # which is correct for a resume AND for a fresh run (whose `run_started` is appended by
+            # `_setup_phase` a few lines earlier, so the re-pin sees the live value as the pinned
+            # one). The epoch rebuild keeps the default: by then the fraction is already pinned.
+            if refuse and float(getattr(e, "_holdout_fraction", 0.0) or 0.0) > 0:
+                raise ConfigRefusal(
+                    f"MLE-bench competition {g.get('competition')!r}: `holdout_fraction=" 
+                    f"{float(e._holdout_fraction):g}` was declared but the search split cannot be "
+                    "drawn — the public train rows could not be counted, so the layout does not "
+                    "decide the split. The search may not be scored on the private answers (doc 52 "
+                    "row 3), so either set holdout_fraction=0 to run the explicit legacy protocol — "
+                    "every node graded on the private answers, recorded as `host_grading.protocol = "
+                    "private_per_node` — or run a competition whose train/test/sample_submission "
+                    "layout decides the answers' format.")
             e._assets = dict(public)
             e._search_answers = None
             e._search_hidden_ids = frozenset()
@@ -227,6 +265,15 @@ class HoldoutGrader:
         try:
             carved = mlebench_split.carve(public, e._holdout_idx)
         except mlebench_split.SplitUndecidable as exc:
+            if not refuse:
+                # Deferred for the same invariant-6 reason as the sibling refusal above: this may be
+                # the pre-pin construction, and the fraction the log recorded is what decides.
+                # Leaving the split UNCARVED here is safe — the re-pin re-enters and either carves
+                # or refuses against the pinned value, and nothing dispatches in between.
+                e._assets = dict(public)
+                e._search_answers = None
+                e._search_hidden_ids = frozenset()
+                return
             raise ConfigRefusal(
                 f"MLE-bench competition {g.get('competition')!r}: the search split cannot be carved "
                 f"from the public files ({exc}). The search may not be scored on the private answers "
@@ -263,8 +310,27 @@ class HoldoutGrader:
             return [n.id for n in pool[:1]]
         return [n.id for n in pool[: self._e._holdout_top_k]]
 
+    def holdout_scorer(self) -> Optional[dict]:
+        """The task's WITHHELD scorer (`adapters/repo_task.py::HoldoutScorerSpec`), or None.
+
+        Read off `self._e._eval_spec` at use time rather than copied onto the Engine at
+        construction: the eval spec is itself replaced when an onboarding proposal is ratified
+        (`_adopt_proposed_spec`), and a copy taken in `__init__` would be the pre-ratification
+        one — a withheld scorer that silently never runs, which is the failure mode this whole
+        slice exists to end. A declaration with no `command` is no declaration.
+        """
+        spec = getattr(self._e, "_eval_spec", None)
+        hs = spec.get("holdout_scorer") if isinstance(spec, dict) else None
+        return hs if isinstance(hs, dict) and hs.get("command") else None
+
     def holdout_pending(self, state: RunState) -> bool:
-        if not (self._e._holdout_idx and self._e._host_grader is not None):
+        # TWO SOURCES OF AN UNSEEN NUMBER, and they are alternatives rather than layers: the engine's
+        # own reserved partition (a host-graded task, where the engine holds the labels) or the
+        # operator's withheld scorer (a repo task, where the operator holds the split and the engine
+        # holds nothing). The grader wins when both are present — it is the one the engine can
+        # account for row by row — and `holdout_phase` branches the same way for the same reason.
+        if not ((self._e._holdout_idx and self._e._host_grader is not None)
+                or self.holdout_scorer() is not None):
             return False
         return any(nid not in state.holdout_evaluated_ids for nid in self._e._holdout_topk(state))
 
@@ -277,10 +343,38 @@ class HoldoutGrader:
         when the predictions file is gone (metric None) so the gate always closes."""
         import json as _json
         g = self._e._host_grader
+        scorer = self.holdout_scorer() if g is None else None
+        if g is None and scorer is None:
+            return          # neither source of an unseen number; `holdout_pending` already says so
         for nid in self._e._holdout_topk(state):
             if nid in state.holdout_evaluated_ids:
                 continue
             n = state.nodes[nid]
+            if scorer is not None:
+                # THE WITHHELD REPO SCORER (doc 52 row 10a slice (b)): the operator's own program
+                # over the split it holds, run ONCE here and never during the search, against the
+                # node's existing artifacts. Its number is the node's `holdout_metric` — the fold
+                # derives `generalization_gap` from it and, under `holdout_select`, elects the
+                # champion by it among these leaders. An event is emitted even when the program
+                # fails (metric None), exactly as the partition branch does, so the gate closes and
+                # a resume does not re-run a paid scorer.
+                m, program_sha256 = self._run_holdout_scorer(n, scorer)
+                gap = None
+                if m is not None and n.metric is not None:
+                    gap = (n.metric - m) if state.direction == "max" else (m - n.metric)
+                row = {"node_id": nid, "generation": n.attempt,
+                       "search_epoch": state.search_epoch,
+                       "metric": m, "gap": gap,
+                       # The engine does not hold this split — the operator's program does — so
+                       # there is no partition it can count. `protocol` is what tells a reader
+                       # which kind of holdout row this is; the count is not a claim about size.
+                       "n_holdout": 0,
+                       "protocol": "holdout_scorer"}
+                if program_sha256:
+                    row["program_sha256"] = program_sha256
+                async with self._e._write_lock:
+                    self._e.store.append(EV_HOLDOUT_EVALUATED, row)
+                continue
             if g.get("kind") == "mlebench":
                 # THE ONE PRIVATE GRADE (doc 52 §5.1 row 3): the search champion's public-test rows
                 # against the private answers, once, at finish — its medal report beside it.
@@ -319,6 +413,51 @@ class HoldoutGrader:
                     "search_epoch": state.search_epoch,
                     "metric": m, "gap": gap,
                     "n_holdout": len(self._e._holdout_idx)})
+
+    def _run_holdout_scorer(self, n, scorer: dict) -> tuple:
+        """Run the withheld scorer over ONE node's workdir. `(metric, program_sha256)`.
+
+        Where it runs: the node's own workdir, so the artifacts the node produced are found exactly
+        where its eval left them, under the eval's DECLARED environment plus the scorer's own — the
+        same composition every stage gets (`core/envsafe.py::merge_env` through
+        `_declared_eval_env`), which is how the operator points the program at the split it holds
+        without that path ever being mounted for a candidate. `%params%` expands as it does in every
+        stage; `%subject%` deliberately does NOT — that token is bound by the runtime at the score
+        stage's start from the pipeline that just ran, and there is no such binding at finish.
+
+        What it is NOT allowed to do is fail quietly INTO a number: an unreadable stdout, a non-zero
+        exit, a timeout and a missing workdir all give `None`, which reaches the event as a null
+        `metric` and simply leaves that leader without an unseen number. The alternative — falling
+        back to the search metric — would put the number the search optimised into the field
+        selection reads as unseen, which is the defect this half exists to remove.
+        """
+        import hashlib
+
+        from looplab.runtime.command_eval import expand_params, host_program_token, read_metric
+        from looplab.runtime.sandbox import run_argv
+        workdir = self._e.run_dir / "nodes" / f"node_{n.id}"
+        if not workdir.is_dir():
+            return None, None
+        argv = expand_params([str(a) for a in (scorer.get("command") or [])],
+                             dict(getattr(n.idea, "params", {}) or {}))
+        program = host_program_token(argv)
+        digest = None
+        if program:
+            try:
+                digest = hashlib.sha256(Path(program).read_bytes()).hexdigest()
+            except OSError:
+                digest = None          # the program vanished between submit and finish; say nothing
+        env = self._e._declared_eval_env(None, self._e._eval_spec)
+        if isinstance(scorer.get("env"), dict) and scorer["env"]:
+            env = {**(env or {}), **{str(k): str(v) for k, v in scorer["env"].items()}}
+        rc, out, _err, timed_out = run_argv(
+            argv, str(workdir), float(scorer.get("timeout") or 1800.0), env, 256_000)
+        if rc != 0 or timed_out:
+            return None, digest
+        reader = scorer.get("metric")
+        if not isinstance(reader, dict):
+            reader = (self._e._eval_spec or {}).get("metric") or {}
+        return read_metric(out, str(workdir), reader), digest
 
     def _private_grade(self, n, state: RunState) -> tuple:
         """Grade ONE node's submission, restricted to the public test ids, against the private

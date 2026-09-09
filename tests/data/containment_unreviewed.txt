@@ -4,7 +4,6 @@ looplab/adapters/repo_write_tools.py::_xlsx_to_markdown#0
 looplab/adapters/repo_write_tools.py::_xlsx_to_markdown#1
 looplab/agents/agent.py::ToolUsingResearcher._validate_emit#0
 looplab/agents/factory.py::_set_role_client#0
-looplab/agents/roles.py::_attention_points#0
 looplab/agents/tool_loop.py::drive_tool_loop._cancelled#0
 looplab/core/llm.py::LiteLLMClient._cost#0
 looplab/core/llm.py::OpenAICompatibleClient._bounded_create#0
@@ -95,9 +94,9 @@ looplab/tools/env_inspect.py::EnvInspectTools._pkg_info#1
 looplab/tools/env_inspect.py::EnvInspectTools._py_api#0
 looplab/tools/env_inspect.py::_installed_names#0
 looplab/tools/env_inspect.py::_installed_names#1
-looplab/tools/machine_runs_tools.py::RunControlTools._live#0
-looplab/tools/machine_runs_tools.py::RunControlTools._live#1
-looplab/tools/machine_runs_tools.py::RunLauncherTools.execute#1
+looplab/tools/run_control_tools.py::RunControlTools._live#0
+looplab/tools/run_control_tools.py::RunControlTools._live#1
+looplab/tools/run_launcher_tools.py::RunLauncherTools.execute#1
 looplab/tools/memory_tools.py::MemoryTools.execute#0
 looplab/tools/node_diff.py::known_nodes#0
 looplab/tools/skills.py::SkillTools.execute#0

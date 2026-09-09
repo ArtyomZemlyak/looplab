@@ -225,7 +225,10 @@ class ConceptCadenceMixin:
         # client -> deterministic fallback, unchanged behaviour. Real engines get the agentic path.
         _rc = getattr(self, "_reflect_client", None)
         client = _rc() if callable(_rc) else None
-        seed = skeleton_for(state.task_id or "")
+        # The task's GOAL decides when the adapter's id cannot (docs/BACKLOG.md,
+        # `concept-skeleton-matches-no-run`): `repo_task` names no curated pack, so the deterministic
+        # fallback here had no vocabulary on any run this project has recorded.
+        seed = skeleton_for(state.task_id or "", text=getattr(state, "goal", "") or "")
         seed = seed if seed.concepts() else None
         # guard the whole producer so a failed snapshot cannot perturb the run. A successfully
         # recorded snapshot is deliberately behavioral: its uncovered-region cue can steer later proposals.

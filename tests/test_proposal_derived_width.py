@@ -24,7 +24,7 @@ import pytest
 
 import looplab.engine.orchestrator as _orch
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.models import Idea, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.engine.widths import per_experiment_gpu_budget, proposal_derived_width
