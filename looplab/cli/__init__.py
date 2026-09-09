@@ -384,7 +384,8 @@ def _echo_log_integrity(store: EventStore, run_dir: Path) -> None:
 
 def log_integrity_from(store: EventStore) -> dict:
     """The shared receipt shape, from a store that has ALREADY scanned (no second read of the file).
-    `EventStore.__init__` calls `log_divergence`, so this is free at every CLI call site."""
+    `EventStore.__init__` seeds `divergence` from the one walk it does anyway, so this is free at
+    every CLI call site (it used to name a separate `log_divergence` pass; that pass is gone)."""
     div = store.divergence
     if div is None:
         return dict(INTEGRITY_COMPLETE)
@@ -966,6 +967,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                            debug_depth=settings.debug_depth,
                            operator_bandit=settings.operator_bandit,
                            cost_weight=settings.mcts_cost_weight,   # doc 52 row 31: MCTS only
+                           # docs/BACKLOG.md §0.1 row 17: also MCTS only, and also the
+                           # gate on the paid estimate — 0 buys nothing.
+                           value_weight=settings.mcts_value_weight,
                            # doc 52 row 19: the arms' relative costs; the engine holds the models
                            model_arms={arm: cost for arm, (_m, cost)
                                        in parse_model_arms(settings.model_arms).items()}),
@@ -1075,8 +1079,8 @@ def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: b
 # against the `app` above. This block MUST stay at the bottom — the groups import the shared
 # builders back from this (still-initializing) package, which is safe only because everything they
 # need is already defined by this point.
-from looplab.cli import (audit_cmds, concept_cmds, export_cmds, governance_cmds,  # noqa: E402,F401
-                         maintenance_cmds, memory_cmds,
+from looplab.cli import (audit_cmds, concept_cmds, corpus_cmds, export_cmds,  # noqa: E402,F401
+                         governance_cmds, maintenance_cmds, memory_cmds,
                          inspect_cmds, run_cmds, ui_cmds)
 
 # Back-compat re-exports: when `looplab/cli.py` was one flat module, every command was an attribute

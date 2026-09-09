@@ -26,7 +26,11 @@ by re-typing, and so the words cannot drift between roles:
   as the loop. It is idempotent on text it already fenced (`is_fenced`), which is what lets a tool
   that stamps its own result (`tools/literature.py`, `tools/web.py`) sit inside a loop that stamps
   every result (`agents/tool_loop.py::drive_tool_loop(tool_result_label=…)`) without the inner
-  marker being folded into `‹…›` on the way through.
+  marker being folded into `‹…›` on the way through — WHEN THE INNER INTERIOR HELD NO MARKER.
+  `_neutralize_fences` is not a fixpoint, so an interior that DID contain one re-derives to a
+  second marking and `is_fenced` answers False on the outer block; the double stamp then nests.
+  That is safe (the result stays fenced) but it is not the no-op this bullet used to promise, and
+  `judgebench/trajectory.py::_fence_defects` records the measurement it was caught by.
 
 WHERE THE FLAG IS. Prompt strings are contracts (CLAUDE.md), so every consumer takes the envelope
 as a constructor argument that defaults OFF and reproduces the historical bytes; `agents/factory.py`
@@ -115,12 +119,20 @@ def fence_untrusted(text: str, label: str) -> str:
 
     Applied AFTER `_cap_tool_result`, so truncation can never remove the closing fence.
 
-    IDEMPOTENT on its own output, and only on its own output: `is_fenced` re-derives the fence
-    from the interior and accepts the text only if that reproduces it byte for byte, so a result
-    that merely LOOKS fenced — the marker at both ends with a raw closing marker somewhere in the
-    middle — is fenced again and the inner marker neutralized. A tool that stamps its own result
-    (`tools/literature.py`, `tools/web.py` with `envelope=True`) therefore composes with a loop that
-    stamps every result, and a forged block does not.
+    IDEMPOTENT ON ITS OWN OUTPUT ONLY WHILE THAT INTERIOR MENTIONED NO MARKER, and the narrower
+    claim is the measured one. `is_fenced` re-derives the fence from the interior and accepts the
+    text only if that reproduces it byte for byte, so a result that merely LOOKS fenced — the
+    marker at both ends with a raw closing marker somewhere in the middle — is fenced again and the
+    inner marker neutralized. But `_neutralize_fences` is not a fixpoint: it folds `END LABEL` to
+    `‹end ‹label››`, and a SECOND pass finds the label inside those guillemets and folds it again.
+    So `is_fenced(fence_untrusted(x, L), L)` is False for every `x` that contained a marker —
+    exactly the adversarial case — and a tool that stamps its own result
+    (`tools/literature.py`, `tools/web.py` with `envelope=True`) inside a loop that stamps every
+    result gets a NESTED block there rather than the pass-through it gets for honest text.
+    Nesting is not a hole (the content stays fenced and the forged marker stays inert) and making
+    the marking a fixpoint would change the bytes every fenced prompt already delivers, which is a
+    contract (CLAUDE.md). `judgebench/trajectory.py::_fence_defects` grades containment against
+    `fence_untrusted` for this reason and says so; it is the site that measured this.
 
     OPT-IN, and the empty default is what keeps it so: `drive_tool_loop` drives every persona in the
     product, and a prompt is a contract (CLAUDE.md), so the Developer's and Researcher's tool results

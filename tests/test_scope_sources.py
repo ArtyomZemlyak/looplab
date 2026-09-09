@@ -412,28 +412,62 @@ def test_scope_event_size_rejects_non_child_run_id(tmp_path):
         scope_event_size(tmp_path, "../run-a")
 
 
-def test_a_bad_snapshot_cannot_clobber_a_runs_measured_event_size():
-    """`_scope_source_sizes` wrapped the event-size read AND the task/config snapshot checks in ONE
-    try. A present-but-unreadable or untrusted snapshot therefore raised ScopeSourceError after
-    `scope_event_size` had already produced the real byte count, degrading it to 0 — which
-    undercounted the MAX_SCOPE_TOTAL_EVENT_BYTES budget (a 30 MB log counting as nothing) and, if the
-    snapshot error cleared before `_compute`'s capture, fired a spurious `scope_report_inputs_changed`
-    on `event_bytes != expected_bytes(0)`.
+def test_a_bad_snapshot_cannot_clobber_a_runs_measured_event_size(tmp_path):
+    """The event-size read owns its own scope, and only IT may yield 0.
 
-    The helper is a router closure, so this pins the SHAPE: the event-size read owns its own scope,
-    and only it may yield 0. (The snapshots' trust decision is unaffected — `capture_scope_source` is
-    the authority boundary and re-lstats/re-validates each one, failing closed.)"""
-    import inspect
-    import re
+    One `try` used to wrap the event-size read AND the task/config snapshot checks, so a
+    present-but-unreadable or untrusted snapshot raised `ScopeSourceError` after `scope_event_size`
+    had already produced the real byte count, degrading it to 0 — which undercounted the
+    `MAX_SCOPE_TOTAL_EVENT_BYTES` budget (a 30 MB log counting as nothing) and, if the snapshot
+    error cleared before `_compute`'s capture, fired a spurious `scope_report_inputs_changed` on
+    `event_bytes != expected_bytes(0)`.
 
-    from looplab.serve.routers import reports as reports_module
+    DRIVEN, since `scope_source_sizes` became a module-level function (doc 25 SR-02 lifted the paid
+    generation protocol out of the router). While it was a router CLOSURE this could only be a text
+    pin over `inspect.getsource`, and that pin is what the extraction broke — it split the module
+    source on a name that no longer existed and died with `IndexError`, i.e. the property went
+    unverified rather than red-for-a-reason. The rule is the same; it is now asked of the function.
+    """
+    from types import SimpleNamespace
 
-    body = inspect.getsource(reports_module)
-    helper = body.split("def _scope_source_sizes(", 1)[1].split("\n    def ", 1)[0]
-    event_read = helper.split("size = scope_event_size(", 1)[1].split("total += size", 1)[0]
-    assert "ScopeSourceError:\n                size = 0" in event_read, event_read
-    # ...and the snapshot loop that follows must not be able to reach that `size = 0`.
-    snapshot_loop = helper.split("run_dir = Path(", 1)[1].split("total += size", 1)[0]
-    assert "size = 0" not in snapshot_loop, snapshot_loop
-    assert re.search(r"raise ScopeSourceCapacityError", snapshot_loop), (
-        "an OVERSIZED snapshot must still be a hard capacity refusal")
+    from looplab.serve.scope_generate import scope_source_sizes
+    from looplab.serve.scope_sources import MAX_SCOPE_CONFIG_BYTES, ScopeSourceCapacityError
+
+    def _run(name: str, *, events: bytes) -> pathlib.Path:
+        run_dir = tmp_path / name
+        run_dir.mkdir()
+        (run_dir / "events.jsonl").write_bytes(events)
+        return run_dir
+
+    srv = SimpleNamespace(root=tmp_path)
+    payload = b'{"seq": 0}\n' * 400
+    run_dir = _run("r1", events=payload)
+
+    # The baseline the two hazards below are measured against.
+    assert scope_source_sizes(srv, ["r1"]) == {"r1": len(payload)}
+
+    # (1) A snapshot that is NOT a regular file — the untrusted shape `_is_link_or_reparse` and the
+    #     `S_ISREG` test refuse — must be skipped, and must not take the event count with it.
+    (run_dir / "config.snapshot.json").symlink_to(tmp_path / "nowhere.json")
+    assert scope_source_sizes(srv, ["r1"]) == {"r1": len(payload)}, (
+        "an untrusted snapshot clobbered the run's measured event size to 0")
+    (run_dir / "config.snapshot.json").unlink()
+
+    # (2) A snapshot the OS will not stat cleanly is a snapshot problem, not evidence that the run
+    #     has no events. A directory in its place raises no OSError but is not regular; a dangling
+    #     path under an unsearchable parent is the OSError branch.
+    (run_dir / "task.snapshot.json").mkdir()
+    assert scope_source_sizes(srv, ["r1"]) == {"r1": len(payload)}
+    (run_dir / "task.snapshot.json").rmdir()
+
+    # (3) …and an OVERSIZED snapshot is still a hard capacity refusal, not a silent skip.
+    (run_dir / "config.snapshot.json").write_bytes(b"x" * (MAX_SCOPE_CONFIG_BYTES + 1))
+    with pytest.raises(ScopeSourceCapacityError):
+        scope_source_sizes(srv, ["r1"])
+    (run_dir / "config.snapshot.json").unlink()
+
+    # (4) Only the EVENT read may yield 0, and it does so for an unreadable log — the one case the
+    #     shared `try` was ever meant to cover.
+    (run_dir / "events.jsonl").unlink()
+    (run_dir / "events.jsonl").symlink_to(tmp_path / "gone.jsonl")
+    assert scope_source_sizes(srv, ["r1"]) == {"r1": 0}

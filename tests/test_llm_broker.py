@@ -9,12 +9,15 @@ from pathlib import Path
 import pytest
 
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.llm import CostAccountant, LiteLLMClient, OpenAICompatibleClient
+from looplab.core.errors import BudgetExceeded
 from looplab.core.llm_broker import (BACKGROUND_LANE_PRODUCERS, LLMConcurrencyBroker,
-                                     current_llm_lane, default_llm_lane_limits, llm_broker_scope,
-                                     llm_lane_scope, llm_request_permit,
-                                     normalize_llm_lane_limits)
+                                     ProviderCallMeter, current_llm_lane, current_provider_call_meter,
+                                     default_llm_lane_limits, llm_broker_scope, llm_lane_scope,
+                                     llm_request_permit, normalize_llm_lane_limits,
+                                     provider_call_meter)
+from looplab.core.llm_budget import RunBudget
 import looplab.engine.orchestrator as _orch
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
@@ -583,3 +586,62 @@ def test_a_capped_lane_serializes_what_an_uncapped_one_overlaps():
 
     assert peak_for("enrichment") == 1
     assert peak_for("engine") == 4
+
+
+# --------------------------------------------------------- the per-window provider-call meter
+
+def test_the_call_meter_counts_one_per_request_with_and_without_a_broker():
+    """The meter is debited in `llm_request_permit`, which is the seam BOTH branches pass through —
+    an engine scoped to no broker still makes real provider requests, and a per-window ceiling that
+    counted only brokered ones would read zero on exactly the configuration (`llm_parallel` unset)
+    that runs unbounded."""
+    meter = ProviderCallMeter()
+    with provider_call_meter(meter):
+        assert current_provider_call_meter() is meter
+        with llm_request_permit():                        # no broker scoped: the None branch
+            pass
+        with llm_broker_scope(LLMConcurrencyBroker(total=2)), llm_lane_scope("deep_research"):
+            with llm_request_permit():
+                pass
+            with llm_request_permit():
+                pass
+    assert meter.calls == 3
+    with llm_request_permit():                            # outside the scope: nothing to debit
+        pass
+    assert meter.calls == 3
+
+
+def test_a_request_the_run_budget_refused_spends_no_window_call():
+    """Debited AFTER admission, on purpose. `borrow()` reserves against `RunBudget` before the
+    request is queued, so a refusal here is a call that never reached the provider and never cost
+    anything — charging a per-window ceiling for it would spend the window on the budget's stop."""
+    budget = RunBudget(cost_limit=0.5)
+    budget.commit({"cost": 0.6, "calls": 1, "priced_calls": 1, "total_tokens": 10})
+    broker = LLMConcurrencyBroker(total=1, budget=budget)
+    meter = ProviderCallMeter()
+    with provider_call_meter(meter), llm_broker_scope(broker), llm_lane_scope("build"):
+        with pytest.raises(BudgetExceeded):
+            with llm_request_permit():
+                pass
+    assert meter.calls == 0
+
+
+def test_the_call_meter_counts_requests_made_on_worker_threads():
+    """A research pass runs on a worker thread (`anyio.to_thread.run_sync`) and may fan out below
+    it, so the meter is thread-safe and rides the copied context rather than the calling frame."""
+    meter = ProviderCallMeter()
+    threads: list[threading.Thread] = []
+
+    def _borrow():
+        for _ in range(20):
+            with llm_request_permit():
+                pass
+
+    with provider_call_meter(meter), llm_broker_scope(LLMConcurrencyBroker(total=4)):
+        import contextvars
+        for _ in range(5):
+            thread = threading.Thread(target=contextvars.copy_context().run, args=(_borrow,))
+            thread.start()
+            threads.append(thread)
+        _join(threads)
+    assert meter.calls == 100

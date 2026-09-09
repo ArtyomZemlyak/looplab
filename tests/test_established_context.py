@@ -558,3 +558,62 @@ def test_the_note_registry_covers_every_note_the_loop_can_append():
         store.record("read_file", {"path": "solver.py"}, body + rendered)
         carried = store.items()[0]["content"]
         assert carried in (body, None), f"{name} survived into the carried page: {carried!r}"
+
+
+def test_two_concurrent_builds_do_not_share_one_workspace_pointer():
+    """The store is per RUN and every build now runs in its OWN worker thread.
+
+    `enter_workspace` named the working set on a per-store SCALAR, so node 7 entering its
+    workspace moved node 3's pointer too: node 3's `record` stamped node 7's token onto its pages
+    and node 3's `render` compared against node 7's token — carrying another experiment's bytes
+    into node 3's chain root under the header that says the content is carried VERBATIM and need
+    not be re-fetched. That is the cross-node bleed the field exists to prevent, one level up from
+    where it was fixed.
+
+    Driven with a real barrier, so the interleaving is the one the fix is about rather than a
+    lucky ordering: both threads enter their workspace, then both read, then both render.
+    """
+    import threading
+
+    from looplab.agents.established import EstablishedContext
+
+    store = EstablishedContext(budget_bytes=4096, item_bytes=2048)
+    gate = threading.Barrier(2)
+    rendered: dict[str, str] = {}
+
+    def _build(node: str, body: str):
+        store.enter_workspace(node)
+        gate.wait(5)                      # …only after BOTH have named their working set
+        store.record("read_file", {"path": f"solver_{node}.py"}, body, phase="plan")
+        gate.wait(5)                      # …and only after both have recorded
+        rendered[node] = store.render()
+
+    threads = [threading.Thread(target=_build, args=(n, f"# node {n}\nX = {n!r}\n"))
+               for n in ("3", "7")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert not any(t.is_alive() for t in threads), "the build threads did not finish"
+
+    assert set(rendered) == {"3", "7"}
+    for node, other in (("3", "7"), ("7", "3")):
+        assert f"X = {node!r}" in rendered[node], (
+            f"node {node} lost its own carried page:\n{rendered[node]}")
+        assert f"X = {other!r}" not in rendered[node], (
+            f"node {node}'s chain root carries node {other}'s bytes under 'carried verbatim':\n"
+            f"{rendered[node]}")
+
+    # …and the pointer itself is per caller, which is the rule the render above depends on.
+    seen: dict[str, object] = {}
+
+    def _peek(name):
+        store.enter_workspace(name)
+        seen[name] = store._workspace
+
+    peekers = [threading.Thread(target=_peek, args=(n,)) for n in ("a", "b")]
+    for t in peekers:
+        t.start()
+    for t in peekers:
+        t.join(5)
+    assert seen == {"a": "a", "b": "b"}, seen

@@ -267,6 +267,26 @@ authentication, reviewer identity, or tenant separation.
 reverse proxy/network boundary — rather than a shared `…/proxy/<port>/` path. Treat
 `LOOPLAB_UI_TOKEN` as the deployment owner's static control credential, not a wall between co-tenants.
 
+### MCP servers are configured per principal
+
+An MCP server is an arbitrary external side effect — a subprocess, or a remote endpoint holding its
+own credentials — so *which* servers a session may reach is a property of the **party** driving it,
+not of the process. `serve/principal.py::mcp_config_scope` decides that, and
+`tools/mcp_tools.py::principal_mcp_config` resolves what it decided:
+
+| Declared | The `owner` / `local` planes get | A `review` link, an anonymous caller, or a caller with no principal gets |
+|---|---|---|
+| nothing | the process-wide `LOOPLAB_MCP_CONFIG` / `LOOPLAB_MCP_SERVERS` / `<repo>/.mcp.json` — unchanged | nothing; no server is connected on their behalf |
+| `LOOPLAB_MCP_CONFIG_DIR=<dir>` | `<dir>/owner.json` and `<dir>/local.json` respectively | nothing |
+
+With a directory declared, a scope with **no file gets no servers** — it does not fall back to the
+process-wide configuration. That is deliberate: falling back would hand the one party you did not
+configure the servers you configured for someone else. Each file has the ordinary `.mcp.json` shape.
+
+This is per-*plane*, not per-user: `LOOPLAB_UI_TOKEN` is a per-deployment credential (see above), so
+two people sharing one token share one `owner` scope. Real per-user separation still needs a private
+origin per user.
+
 ## Observability export
 
 Spans are always written to `spans.jsonl` (files-as-truth, zero-dep). To forward the *same* spans to
