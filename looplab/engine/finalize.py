@@ -17,7 +17,7 @@ import time
 from typing import TYPE_CHECKING
 
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
-from looplab.core.models import RunState, is_error_stop
+from looplab.core.models import RunState
 from looplab.core.tracing import TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS
 from looplab.engine.costs import in_memory_cost_total, reconcile_cost_accountants
 from looplab.events.eventstore import EventStoreConcurrencyError

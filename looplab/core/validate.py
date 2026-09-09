@@ -58,6 +58,17 @@ class AgentRun:
     timed_out: bool = False
     stdout_tail: str = ""
     stderr_tail: str = ""
+    # The three columns doc 27's row asked this record to carry beside the tails: how long the
+    # invocation ran, HOW it ended, and what it cost.
+    duration_s: float = 0.0        # wall clock of the launch, whatever ended it
+    cancelled: bool = False        # a cancel token stopped it (distinct from `timed_out`)
+    # `None` means UNPRICED, and unpriced is not free — the same distinction the ledger draws with
+    # `priced_calls` below `calls`. The tokens an external coding agent spends are spent inside its
+    # own process against the endpoint we handed it, and nothing it prints on stdout is a receipt
+    # LoopLab can authenticate, so the honest record is "one invocation, amount unknown" rather than
+    # a parsed number. A future transport that CAN report (a metering proxy in front of the agent's
+    # endpoint) fills this in without moving anything else.
+    usage: Optional[dict] = None
 
     def __post_init__(self) -> None:
         from looplab.core.redact import redact_output_tail

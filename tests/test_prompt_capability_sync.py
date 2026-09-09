@@ -282,7 +282,11 @@ def test_make_roles_does_not_offer_a_sweep_to_a_templated_developer():
     from looplab.core.config import Settings
     from looplab.adapters.tasks import load_task, make_roles
 
-    for name in ("classification_task.json", "regression_task.json", "timeseries_task.json"):
+    # `timeseries_task.json` left this list on 2026-09-08 (docs/BACKLOG.md §14): its `llm_roles` now
+    # hands the model an `LLMDeveloper` that WRITES the forecaster against the shipped backtest
+    # harness, so it is no longer a templated-Developer adapter and `honors_idea_space` is correctly
+    # True there. The two that remain are the ones whose Developer still fills a fixed template.
+    for name in ("classification_task.json", "regression_task.json"):
         task = load_task(_ROOT / "examples" / name)
         r, d = make_roles(task, Settings(backend="llm", unified_agent=False))
         assert not getattr(d, "honors_idea_space", False), \

@@ -27,7 +27,15 @@ NUMERIC_OPS: tuple[str, ...] = ("<", "<=", ">", ">=", "==", "!=")
 MAX_STAGE_NUMERIC_RELATIONS = 8
 MAX_NUMERIC_KEY_CHARS = 64
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.@/\-]*$")
-_NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
+# `nan`/`inf` ARE RECOGNISED HERE, and that is the whole of "fails closed" for a diverged stage.
+# The alternation was dropped when this pattern was hoisted from `tools/log_tools.py` (whose own
+# `_NUMBER` carries it "so a role asking 'what is grad_norm doing' can see `nan` where it is"), and
+# the consequence is not that a non-finite reading is ignored — it is that it is INVISIBLE: the last
+# FINITE value stays the last value, so `val_ndcg: 0.75` at epoch 1 followed by `nan` for every
+# epoch after satisfies `val_ndcg >= 0.71` and the diverged stage is admitted as having met its
+# declarer's bound. A recognised non-finite reading is an unmet relation (`_holds` below); an
+# unrecognised one is a stale finite number wearing the last epoch's name.
+_NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[-+]?nan|[-+]?inf(?:inity)?"
 
 
 def validate_numeric(nm: str, relations) -> tuple[Optional[list], Optional[str]]:
@@ -61,13 +69,31 @@ def validate_numeric(nm: str, relations) -> tuple[Optional[list], Optional[str]]
     return clean, None
 
 
+# THE LEFT BOUNDARY EXCLUDES EVERY CHARACTER `_KEY_RE` ADMITS, not just the word ones. A key may
+# carry `.`, `-`, `/` and `@`, so `(?<![A-Za-z0-9_])` let a declared `loss` bind the `train.loss:
+# 9.5` a trainer prints in its summary, and `acc` bind `val-acc:` or `top5/acc:` — and since the LAST
+# occurrence wins, a per-step `loss: 0.12` followed by one prefixed summary line fails a contract the
+# stage satisfied (and the mirror case acquits one it did not). In `log_tools` a wrong reading
+# mis-answered a question; here it decides `expect_failed`, the early return and the repair loop.
+_KEY_BOUNDARY = r"(?<![A-Za-z0-9_.@/\-])"
+
+
 def _value_re(key: str) -> re.Pattern:
-    return re.compile(r"(?<![A-Za-z0-9_])['\"]?" + re.escape(key) + r"['\"]?\s*[:=]\s*(" + _NUMBER + ")",
+    return re.compile(_KEY_BOUNDARY + r"['\"]?" + re.escape(key) + r"['\"]?\s*[:=]\s*(" + _NUMBER + ")",
                       re.IGNORECASE)
 
 
 def last_values(text: str, keys) -> dict:
-    """`{key: last finite value the text reports for it}`; a key never reported is absent."""
+    """`{key: last FINITE value the text reports for it}`; a key never reported is absent.
+
+    The finite filter is what makes this safe to record on `stage_finished.numeric_values` (a `nan`
+    has no JSON spelling). It is NOT the contract: `numeric_contract_defects` reads
+    `last_readings` below, where a non-finite value is the last value it plainly is."""
+    return {k: v for k, v in last_readings(text, keys).items() if math.isfinite(v)}
+
+
+def last_readings(text: str, keys) -> dict:
+    """`{key: the last value the text reports for it}`, non-finite readings INCLUDED."""
     out: dict = {}
     if not text:
         return out
@@ -84,8 +110,7 @@ def last_values(text: str, keys) -> dict:
             if isinstance(doc, dict):
                 for k, v in doc.items():
                     key = lowered.get(str(k).lower())
-                    if key is not None and isinstance(v, (int, float)) and not isinstance(v, bool) \
-                            and math.isfinite(float(v)):
+                    if key is not None and isinstance(v, (int, float)) and not isinstance(v, bool):
                         out[key] = float(v)
                 continue
         for key, rx in patterns.items():
@@ -94,12 +119,17 @@ def last_values(text: str, keys) -> dict:
                     v = float(m.group(1))
                 except ValueError:
                     continue
-                if math.isfinite(v):
-                    out[key] = v
+                out[key] = v
     return out
 
 
 def _holds(observed: float, op: str, bound: float) -> bool:
+    # A NON-FINITE OBSERVATION MEETS NOTHING, stated rather than inherited from IEEE: every
+    # comparison against `nan` is False already EXCEPT `!=`, which is True — so a diverged stage
+    # would satisfy a declared `!=` by diverging, which is the one relation where the default is
+    # exactly backwards.
+    if not math.isfinite(observed):
+        return False
     return {"<": observed < bound, "<=": observed <= bound, ">": observed > bound,
             ">=": observed >= bound, "==": observed == bound, "!=": observed != bound}[op]
 
@@ -108,12 +138,15 @@ def numeric_contract_defects(text: str, relations) -> tuple[list[str], dict]:
     """The unmet relations, in declaration order, as sentences that name the value and the bound,
     beside the values that were read. A key the stage never printed is a defect."""
     keys = [r["key"] for r in relations]
-    values = last_values(text, keys)
+    # READINGS decide, VALUES are recorded: the durable `stage_finished.numeric_values` row must
+    # stay JSON, and a `nan` the stage printed must still fail the relation it was printed under.
+    readings = last_readings(text, keys)
+    values = {k: v for k, v in readings.items() if math.isfinite(v)}
     defects = []
     for rel in relations:
         key, op, bound = rel["key"], rel["op"], float(rel["value"])
-        if key not in values:
+        if key not in readings:
             defects.append(f"{key} {op} {bound:g} — the stage never printed {key!r}")
-        elif not _holds(values[key], op, bound):
-            defects.append(f"{key} {op} {bound:g} — the stage printed {key} = {values[key]:g}")
+        elif not _holds(readings[key], op, bound):
+            defects.append(f"{key} {op} {bound:g} — the stage printed {key} = {readings[key]:g}")
     return defects, values

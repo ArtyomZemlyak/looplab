@@ -68,20 +68,24 @@ def at_creation_boundary(pending: int, *, while_evaluating: bool) -> bool:
     `research_cadence.py::_maybe_deep_research` ("Auto triggers only at a creation decision point")
     and `_maybe_refresh_report`, which states no reason at all.
 
-    FOUR OF THE FIVE now call this, and the fifth is a REFUSAL rather than an oversight — say so
-    here, because the first cut of this fix converted two and left the reader of this paragraph to
-    assume the family was done. The 2026-08-19 corpus audit is what closed the other two:
-    `lessons_distilled` and `report_generated (trigger=cadence)` are 19/1/0/1/0/0 and 26/1/0/1/0/0
-    over dense-retrieval / v6 / v7 / v8 / v9 / the live `e5small-dr-unified-v2` — zero in exactly
-    the three runs with no quiescent prefix, on the same configuration as the runs where they fire.
-    `_maybe_deep_research` keeps the old predicate, and the evidence for that is in the same table:
-    `research_completed (trigger=cadence)` is 27/5/2/14/6/9, alive in ALL SIX runs, because the
-    CONCURRENT half of that one decision (`orchestrator._spawn_research` -> `_due_research_trigger`)
-    never carried the guard. Moving the serial half would put a main-task think and a background
-    think at the same node count with only a read-then-write window between their shared
-    `_cadence_research_marks` check and their receipts — buying a double-spend to reach work that is
-    already being done. The residual hole is `concurrent_research=false`, which is not the shipped
-    default; it is filed as `docs/BACKLOG.md` F1i-b rather than patched here.
+    ALL FIVE now call this, and the fifth calls it CONDITIONALLY — which is a refusal in one
+    configuration and a fix in the other, so say so here rather than let the next reader assume
+    either. The 2026-08-19 corpus audit is what closed the middle two: `lessons_distilled` and
+    `report_generated (trigger=cadence)` are 19/1/0/1/0/0 and 26/1/0/1/0/0 over dense-retrieval /
+    v6 / v7 / v8 / v9 / the live `e5small-dr-unified-v2` — zero in exactly the three runs with no
+    quiescent prefix, on the same configuration as the runs where they fire.
+    `research_cadence.py::_maybe_deep_research` is the conditional one, and the evidence for BOTH
+    of its halves is in the same table: `research_completed (trigger=cadence)` is 27/5/2/14/6/9,
+    alive in ALL SIX runs, because the CONCURRENT half of that one decision
+    (`orchestrator._spawn_research` -> `_due_research_trigger`) never carried the guard. So while
+    `concurrent_research` is ON the serial gate keeps the historical predicate: moving it would put
+    a main-task think and a background think at the same node count with only a read-then-write
+    window between their shared `_cadence_research_marks` check and their receipts — a double-spend
+    bought to reach work already being done. Under `concurrent_research=false` that half does not
+    exist at all (`_spawn_research` returns at its first line), the serial gate is the run's ONLY
+    research path, and the same table's zero-quiescent-prefix column says what that meant: no
+    scheduled think, ever. One path needs no agreement between two, so the gate reaches this
+    boundary there — `docs/BACKLOG.md` F1i-b, closed 2026-09-08.
 
     The parenthesis is the tell: "no pending evals" was never the requirement, it was the
     OBSERVABLE that used to coincide with the requirement. Under serial evaluation the loop could
