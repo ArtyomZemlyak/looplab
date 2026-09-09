@@ -29,8 +29,12 @@ import arm_power  # noqa: E402
 
 
 def _run(root, probe, task, metrics, spend):
+    """Каждая проба здесь несёт ОТГРУЖЕННУЮ карточку: §374 исключает из нуля всё остальное, и без
+    этой строки фикстуры про живость и трату проверяли бы совсем другой фильтр."""
     d = root / probe / "runs" / task / "run"
     d.mkdir(parents=True)
+    (root / probe / "INSTRUMENT.txt").write_text(
+        f"task:           {task}\ncard_args:      {arm_power.SHIPPED_CARD}\n", encoding="utf-8")
     rows = [{"v": 1, "seq": 0, "ts": 0.0, "type": "llm_usage", "data": {"cost": spend}}]
     rows += [{"v": 1, "seq": i + 1, "ts": float(i + 1), "type": "node_evaluated",
               "data": {"node_id": i, "metric": m}} for i, m in enumerate(metrics)]

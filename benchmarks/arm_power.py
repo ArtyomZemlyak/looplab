@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import json
 import random
 import statistics
@@ -40,8 +41,36 @@ import lanes  # noqa: E402
 DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 
 
+SHIPPED_CARD = "(none -- the shipped card)"
+
+
+def probe_card_args(root: str, name: str):
+    """What `card_args` this probe was launched with, or None when it predates the instrument.
+
+    §374. The population an arm draws from is the CONTROL population -- the shipped card with no
+    flags. Simulating the null from every run of the task mixes in the deliberate arms, and measured
+    2026-09-09 that is not conservative, it is optimistic:
+
+        all edge_expansion champions   n=118  median 216.44  sd 68.28
+        shipped card only              n= 70  median 216.66  sd 78.11
+
+    Every treatment arm is TIGHTER than the control (sd 29-52 against 78), so pooling them shrinks
+    the spread the power divides by and the table asks for fewer probes than the arm needs.
+
+    `card_sha256` cannot answer this on its own: `--checker …` leaves the card identical and changes
+    what grades it, so twelve runs share the control's sha with a different treatment. The flags are
+    what name the population.
+    """
+    try:
+        body = Path(f"{root}/{name}/INSTRUMENT.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    got = re.search(r"^card_args:\s*(.*)$", body, re.M)
+    return got.group(1).strip() if got else None
+
+
 def champions(root: str, task: str = "edge_expansion", min_spend: float = 0.9,
-              live=None) -> list[float]:
+              live=None, control_only: bool = True) -> list[float]:
     """The final champion of every FINISHED run of `task` -- the arm's own primary outcome (§146).
 
     §373. This used to take `max(metric)` from every run with any evaluated node, running ones
@@ -66,7 +95,13 @@ def champions(root: str, task: str = "edge_expansion", min_spend: float = 0.9,
         # THE NAME RELATIVE TO `root`, not a split on a magic path segment. Splitting on
         # "/model-probes/" silently matched nothing for any root not called that -- including every
         # test fixture, which is how the mutation that removes this filter first came back green.
-        if os.path.relpath(path, root).split(os.sep)[0] in live:
+        probe = os.path.relpath(path, root).split(os.sep)[0]
+        if probe in live:
+            continue
+        # THE CONTROL POPULATION, NOT EVERY RUN (§374). A probe with no instrument predates the
+        # field and its card is unknown -- unknown is not "the shipped one", so it is left out
+        # rather than assumed in.
+        if control_only and probe_card_args(root, probe) != SHIPPED_CARD:
             continue
         spend, metrics = 0.0, []
         for event in events_read.iter_events(path):
