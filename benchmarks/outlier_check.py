@@ -63,6 +63,11 @@ def phase_series(spans_path: str) -> list:
     return out
 
 
+# The corpus size at which a percentile stops being a rank in disguise: below it, 5 % of the sample
+# is less than one point, so p5 IS the minimum and p95 IS the maximum. 1/0.05 = 20.
+RANK_NOT_PERCENTILE = 20
+
+
 def measure(events_path: str, spans_path: str, cap: float | None = None) -> dict:
     """Process variables for one probe. No scores: counts, money and shares only.
 
@@ -271,7 +276,17 @@ def main(argv=None) -> int:
                 continue
             pct = percentile(dist[key], value)
             if pct <= args.low or pct >= args.high:
-                said.append(f"{key}={value:.4g} at the {pct:.0f}th pct "
+                # A PERCENTILE OVER SIX POINTS IS A RANK (§372). With `n` small, p5..p95 is very
+                # nearly the whole range, so "outside" means "the min or the max" and nothing
+                # finer; printing "at the 0th pct" claims a resolution the sample does not have.
+                # Measured on the first real use of this tool: `pgr10` flagged at the 0th
+                # percentile of SIX finished pagerank runs. The threshold below is not invented --
+                # it is the count at which p5 and p95 stop being the extremes themselves, i.e. the
+                # smallest `n` for which 5 % of the sample is more than one point.
+                where = (f"the {pct:.0f}th pct" if len(dist[key]) >= RANK_NOT_PERCENTILE
+                         else f"the {'lowest' if pct <= args.low else 'highest'} of "
+                              f"{len(dist[key])}")
+                said.append(f"{key}={value:.4g} at {where} "
                             f"(corpus median {statistics.median(dist[key]):.4g})")
         # THE ONE QUESTION A NODE COUNT CANNOT ANSWER MID-RUN, ASKED AS A THRESHOLD INSTEAD.
         if got["nodes"] == 0:
@@ -290,6 +305,14 @@ def main(argv=None) -> int:
         # examination is the same sentence a healthy bench produces -- which is how it goes unread.
         print(f"  NOTHING WAS COMPARED: no running probe is on {args.task}")
         return 2
+    # HOW MUCH THE CORPUS CAN SAY AT ALL (§372). Outside p5..p95 over a small corpus means "the
+    # minimum or the maximum", and every sample has two of those: with six finished runs, being
+    # flagged is the ordinary fate of a third of any group. Saying it here stops the reader taking
+    # a rank for a finding -- and stops it stopping them, when the corpus is large enough to mean
+    # something.
+    if n < RANK_NOT_PERCENTILE:
+        print(f"  the {args.task} corpus is {n} run(s): p{args.low:g}..p{args.high:g} excludes only "
+              "the extremes, so being flagged here is a RANK, not a rarity -- 2 of any n land there")
     if not flagged:
         print(f"  no probe is outside the corpus on any process variable "
               f"({examined} of {len(live)} compared)")
