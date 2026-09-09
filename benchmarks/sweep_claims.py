@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime
 import glob
 import json
@@ -1289,6 +1290,55 @@ def check_a_dollar_probe_costs_a_dollar(bench: str):
 DEFAULT_NODE_FLOOR = 0.10
 
 
+def check_which_lever_the_loop_reaches_for(bench: str):
+    """Which kernel the loop actually reaches for, per task -- the lever §377 measured at eightfold.
+
+    §378. `kernel_kind` (§377) separates Cython from numba, and the first thing it shows is an
+    asymmetry nobody had put on a page: over eleven `pde_heat1d` probes the loop wrote **not one**
+    `.pyx`, while on the other tasks it does so most of the time.
+
+    The obvious explanation -- "the pde probes are the oldest" -- is REFUTED by the corpus. In the
+    same early era (through 2026-09-01) edge_expansion wrote a `.pyx` in 26 of 27 runs and
+    discrete_log in 5 of 8, against pde_heat1d's 0 of 11. It is the task, not the era.
+
+    This does not fail on a task that never reaches for Cython. `pde_heat1d`'s numba champions carry
+    the highest numba median of any task (117.74), so declining a lever that has nothing to bite on
+    -- its reference is `scipy.integrate.solve_ivp`, where the work is inside SciPy rather than in a
+    Python loop -- is a defensible answer rather than a miss. What would be wrong is not knowing.
+    """
+    import subprocess
+    tool = Path(bench) / "looplab" / "benchmarks" / "probe_summary.py"
+    if not tool.is_file():
+        return False, "probe_summary.py is not on this box, so the claim cannot be driven"
+    got = subprocess.run([sys.executable, str(tool), "--json"], capture_output=True, text=True,
+                         timeout=1200)
+    try:
+        rows = json.loads(got.stdout)
+    except ValueError:
+        return False, f"probe_summary produced no json ({got.stdout[-160:]!r})"
+    per: dict = {}
+    for row in rows:
+        kind = row.get("kernel_kind")
+        if not kind:
+            continue
+        per.setdefault(row.get("task") or "?", collections.Counter())[kind] += 1
+    if not per:
+        return False, ("no probe reports `kernel_kind` -- the field §377 added is missing, so which "
+                       "lever the loop reached for cannot be read at all")
+    said, never = [], []
+    for task, counts in sorted(per.items()):
+        total = sum(counts.values())
+        said.append(f"{task} " + "/".join(f"{k} {counts[k]}" for k in sorted(counts)))
+        if not counts.get("cython"):
+            never.append(f"{task} (0 of {total})")
+    detail = "; ".join(said)
+    if never:
+        detail += ("; NEVER reached for Cython: " + ", ".join(never)
+                   + " -- §377 measured that lever at eightfold on edge_expansion, so a task that "
+                     "never pulls it is worth knowing about, not necessarily worth fixing")
+    return True, detail
+
+
 def check_waste_before_the_first_node(bench: str):
     """§72: "трата ПОСЛЕ последнего узла" читается только рядом с тратой ДО первого -- и проверялась
     половина пары.
@@ -1375,6 +1425,8 @@ CLAIMS = [
     ("point 9: the probe submits the node the loop judged best",
      check_the_champion_is_the_best_evaluated_node),
     ("point 3: a $1 probe costs $1", check_a_dollar_probe_costs_a_dollar),
+    ("point 8: which kernel the loop reaches for, per task",
+     check_which_lever_the_loop_reaches_for),
     ("point 9: the other half of the pair -- spend BEFORE the first node",
      check_waste_before_the_first_node),
     ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),
