@@ -75,6 +75,13 @@ def _suggest(name: str) -> str:
     return f" — did you mean: {', '.join(hits)}?" if hits else ""
 
 
+# The argument slots through which a tool can NAME a package or module, and therefore the slots
+# the grader fence must screen. THE REGISTRY, not a convenience: `execute` screens exactly these and
+# `tests/test_grader_package_fence.py` re-derives its coverage from this tuple, so a tool added with
+# a new naming slot fails that guard instead of quietly opening the route the fence exists to close.
+PACKAGE_NAMING_SLOTS = ("name", "target", "module", "package")
+
+
 class EnvInspectTools:
     """ToolProvider (specs()/execute()) giving the Developer read-only visibility into the ACTUAL
     installed Python environment, so it grounds generated code in the real API instead of guessing.
@@ -186,16 +193,12 @@ class EnvInspectTools:
             # The grader fence runs BEFORE dispatch, on every tool that names a package or module.
             # Applying it inside each private method instead would need four correct copies, and the
             # one that got missed would be the whole hole (see the class docstring).
-            # OPEN[grader-fence-slot-set-is-shared-with-its-guard] the fence and the test that
-            # polices it hardcode the SAME four slot names, so a future tool naming a package in a
-            # fifth slot passes dispatch AND the guard silently.
-            # proof:absent:_named_slots@looplab/tools/env_inspect.py
-            # REVIEW 2026-08-30 (guard-coverage): `test_grader_package_fence.py`'s coverage test
-            # intersects each spec's properties with this same set and `continue`s on empty — the
-            # exact miss its docstring claims to catch. Derive the slot set once (a helper here the
-            # test re-derives), and make the guard fail on a spec property that plausibly names a
-            # package but is not in the checked set.
-            for slot in ("name", "target", "module", "package"):
+            # ONE spelling of the slot set, imported by the guard rather than re-typed there:
+            # while the fence and `test_grader_package_fence.py` each held their own copy of these
+            # four names, a tool naming a package in a FIFTH slot passed dispatch and the coverage
+            # test alike (that test intersects each spec's properties with its copy and `continue`s
+            # on an empty intersection — the exact miss its docstring claims to catch).
+            for slot in PACKAGE_NAMING_SLOTS:
                 if slot in args:
                     refusal = self._fenced(args.get(slot))
                     if refusal:

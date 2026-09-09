@@ -7,6 +7,15 @@ experiment more hardware" and that "the run serialises at the SAME per-experimen
 * `engine/proposal_cues.py::_gpu_budget_hint_text` — the engine-stamped GPU BUDGET cue.
 * `agents/roles.py::_FOOTPRINT_GUIDANCE` — the code-owned capability suffix both variants append.
 
+THE OFF SWITCH NO LONGER SHIPS THAT CLAIM EITHER (2026-09-08). It used to restore both paragraphs
+byte for byte, which also made them what an UNSTAMPED role got — a bare `LLMResearcher` in a library
+caller. A byte-for-byte off-switch is owed to a run already in flight, and `gpu_footprint_cue` has no
+`LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row (it buys no paid call), so nothing resumes onto that branch:
+`false` was reaching only live prompts. It is now the QUIET branch — the ordinary share and the count
+the command must target, and silence about what a larger count buys. The two `off` tests below drive
+that: the false clauses are gone from BOTH branches, and `false` is still strictly narrower than
+`true` rather than a paraphrase of it.
+
 The scheduler contradicts both halves, and `test_the_scheduler_honours_the_declaration_the_old_text
 _denied` is the proof rather than an appeal to the docstrings: a declared `{"gpus": 2}` is taken
 over AUTO (`resources.py::_resource_request_for_node`), reserved all-or-nothing
@@ -36,8 +45,8 @@ import pytest
 
 import looplab.engine.orchestrator as _orch
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import (RESEARCHER_HINT_ATTRS, LLMResearcher, ToyObjectiveDeveloper,
-                                  ToyResearcher, footprint_guidance)
+from looplab.agents.roles import RESEARCHER_HINT_ATTRS, LLMResearcher, footprint_guidance
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.models import Idea, Node, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.runtime.sandbox import SubprocessSandbox
@@ -84,16 +93,20 @@ def _stamp(engine, researcher) -> str:
     return getattr(researcher, "_gpu_budget_hint", "<UNSET>")
 
 
-# The historical paragraph, verbatim, as the `false` path must still produce it. Kept as a literal
-# here rather than imported from the module: importing whatever the module happens to build is a
-# pin that moves with the code it is pinning.
-_LEGACY_TAIL = (
+# The whole `false` paragraph, verbatim, as the off path must produce it. Kept as a literal here
+# rather than imported from the module: importing whatever the module happens to build is a pin that
+# moves with the code it is pinning. Every clause of it is either arithmetic (`up to 2`, `pool of 2`,
+# `= 1`) or a rule the scheduler keeps (the command targets the count you declare).
+_QUIET_TAIL = (
     "\nGPU BUDGET — this run evaluates up to 2 experiment(s) concurrently on a pool of 2 GPU(s), "
-    "so ONE experiment may declare at most `footprint.gpus = 1`. That is a CEILING, and declaring "
-    "more does NOT get this experiment more hardware: the extra devices are taken from the sibling "
-    "experiments that would otherwise run at the same time, so the run serialises at the same "
-    "per-experiment cost. Declaring `gpus: 1` is the ordinary case, not an escalation. Whatever "
-    "you declare, the training/eval command must target that SAME count.")
+    "so `footprint.gpus = 1` is the ORDINARY declaration. Whatever you declare, the training/eval "
+    "command must target that SAME count.")
+
+# The two claims the scheduler contradicts. NEGATIVE pins stay substrings on purpose (CLAUDE.md):
+# what must not come back is the TEXT.
+_REFUTED = ("does NOT get this experiment more hardware",
+            "serialises at the same per-experiment cost",
+            "the run SERIALISES at the same per-experiment cost")
 
 
 # --------------------------------------------------------------------------- the claim vs the code
@@ -183,26 +196,51 @@ def test_a_partial_memory_inventory_says_nothing_rather_than_guessing(
 
 
 # --------------------------------------------------------------------------- the off path
-def test_off_restores_the_historical_paragraph_byte_for_byte(tmp_path, monkeypatch):
-    engine = _two_gpu_engine(tmp_path, monkeypatch, "legacy", gpu_footprint_cue=False)
-    assert _stamp(engine, LLMResearcher(_ToolEmitClient())) == _LEGACY_TAIL
+def test_off_says_the_ordinary_share_and_nothing_the_scheduler_contradicts(tmp_path, monkeypatch):
+    """The engine-side half of the off switch. It is a whole-string pin because what `false` must be
+    is decidable: the arithmetic, the ordinary declaration, the command rule — and nothing else."""
+    engine = _two_gpu_engine(tmp_path, monkeypatch, "quiet", gpu_footprint_cue=False)
+    hint = _stamp(engine, LLMResearcher(_ToolEmitClient()))
+    assert hint == _QUIET_TAIL
+    for refuted in _REFUTED:
+        assert refuted not in hint
 
 
-def test_off_restores_the_historical_capability_suffix_byte_for_byte():
-    """The role-side half. Both alternatives are spliced at the SAME position, so `false` is the old
-    clause and not a shorter paragraph — the head and tail are byte-identical either way."""
-    legacy, choice = footprint_guidance(False), footprint_guidance(True)
-    assert "the run SERIALISES at the same per-experiment cost" in legacy
-    assert "the run SERIALISES at the same per-experiment cost" not in choice
-    assert "a LARGER count IS honoured" in choice
+def test_off_is_strictly_narrower_than_on_rather_than_a_second_claim(tmp_path, monkeypatch):
+    """The switch must still MOVE prose, or it is not a switch. `false` keeps the numbers and the
+    command rule `true` also states, and drops the trade, the memory clause and the probe invitation
+    — it never states an alternative to them."""
+    engine = _two_gpu_engine(tmp_path, monkeypatch, "narrower", gpu_footprint_cue=False)
+    off = _stamp(engine, LLMResearcher(_ToolEmitClient()))
+    on = _stamp(_two_gpu_engine(tmp_path, monkeypatch, "narrower-on", gpu_footprint_cue=True),
+                LLMResearcher(_ToolEmitClient()))
+    assert len(off) < len(on) / 4
+    for shared in ("up to 2 experiment(s)", "pool of 2 GPU(s)",
+                   "the training/eval command must target that SAME count"):
+        assert shared in off and shared in on
+    for only_on in ("a LARGER count is HONOURED", "SAME per-device batch", "fixed-step probe",
+                    "The MEMORY ceiling"):
+        assert only_on in on and only_on not in off
+
+
+def test_off_drops_the_refuted_clause_from_the_capability_suffix_too(tmp_path):
+    """The role-side half, and the reason it is not a paraphrase: both alternatives are spliced at
+    the SAME position, so `false` is the shared head plus one short true clause — the surrounding
+    contract is byte-identical either way."""
+    quiet, choice = footprint_guidance(False), footprint_guidance(True)
+    for refuted in _REFUTED:
+        assert refuted not in quiet and refuted not in choice
+    assert "the ORDINARY per-experiment share" in quiet and "the ORDINARY per-experiment share" in choice
+    assert "one-device share is the default rather than a rule. " in quiet
+    assert "a LARGER count IS honoured" in choice and "a LARGER count IS honoured" not in quiet
     for shared in ("Optionally set `footprint` to a JSON object",
                    "unspecified is distinct from `gpus=1`",
                    "Size the training/eval command to the count you declare.",
                    "the engine/operator own authority fields. "):
-        assert shared in legacy and shared in choice
+        assert shared in quiet and shared in choice
     head = "Optionally set `footprint`"
-    assert legacy.index(head) == choice.index(head) == 0
-    assert legacy.split("When the user turn states")[0] == choice.split(
+    assert quiet.index(head) == choice.index(head) == 0
+    assert quiet.split("When the user turn states")[0] == choice.split(
         "When the user turn states")[0]
 
 
@@ -252,11 +290,16 @@ def test_both_researcher_prompts_ask_the_corrected_question(tmp_path, monkeypatc
         assert "the run SERIALISES at the same per-experiment cost" not in turn
         assert "Say WHY in your rationale" in turn
 
-    # …and an UNSTAMPED role is byte-identical to the historical prompt.
+    # …and an UNSTAMPED role — the library caller nobody threaded a knob onto — asks the quiet
+    # question. It is the one delivery path that never had an engine to correct it, which is why it
+    # is pinned here beside the two that do.
     bare_client = _ToolEmitClient()
     LLMResearcher(bare_client).propose(state, None)
     bare_turn = "".join(m["content"] for m in bare_client.messages)
-    assert "the run SERIALISES at the same per-experiment cost" in bare_turn
+    for refuted in _REFUTED:
+        assert refuted not in bare_turn
+    assert "one-device share is the default rather than a rule. " in bare_turn
+    assert "a LARGER count IS honoured" not in bare_turn
 
 
 def test_the_engine_stamps_the_flag_onto_its_own_researcher(tmp_path, monkeypatch):
@@ -293,7 +336,9 @@ def test_a_POOLED_researcher_asks_the_same_question_as_the_primary(tmp_path, mon
         researcher.propose(RunState(goal="g", direction="min"), None)
         turn = "".join(m["content"] for m in researcher.client.messages)
         assert ("a LARGER count IS honoured" in turn) is on
-        assert ("the run SERIALISES at the same per-experiment cost" in turn) is not on
+        assert ("one-device share is the default rather than a rule. " in turn) is not on
+        for refuted in _REFUTED:
+            assert refuted not in turn
 
 
 # --------------------------------------------------------------------------- speculation keeps up

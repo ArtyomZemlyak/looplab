@@ -140,6 +140,8 @@
   "drifts": [],
   "env": null,
   "env_changed": false,
+  "eval_noise_floor": null,
+  "eval_noise_seed_results": {},
   "eval_seconds_by_kind": {
     "node": 0.273
   },
@@ -292,6 +294,7 @@
   "node_concepts": {},
   "node_concepts_at_pending": {},
   "node_concepts_at_vocab": {},
+  "node_concepts_authored": {},
   "nodes": {
     "0": {
       "agent_report": null,
@@ -356,6 +359,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "value_prior": null,
       "verifier_score": null,
       "violations": []
     },
@@ -422,6 +426,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "value_prior": null,
       "verifier_score": null,
       "violations": []
     },
@@ -491,6 +496,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "value_prior": null,
       "verifier_score": null,
       "violations": []
     },
@@ -562,6 +568,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "value_prior": null,
       "verifier_score": null,
       "violations": []
     },
@@ -630,6 +637,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "value_prior": null,
       "verifier_score": null,
       "violations": []
     },
@@ -701,6 +709,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "value_prior": null,
       "verifier_score": null,
       "violations": []
     },
@@ -773,6 +782,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "value_prior": null,
       "verifier_score": null,
       "violations": []
     },
@@ -841,6 +851,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "value_prior": null,
       "verifier_score": null,
       "violations": []
     }

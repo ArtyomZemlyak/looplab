@@ -12,7 +12,7 @@ from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.runtime.sandbox import GpuPinUnenforceable, RunResult, SubprocessSandbox
 from looplab.adapters.toytask import ToyTask

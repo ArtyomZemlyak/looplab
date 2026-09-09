@@ -45,6 +45,7 @@ from looplab.serve.appstate import _TRACE_CLEAR_RECEIPT_PREFIX
 from looplab.serve.engine_proc import (
     _engine_alive, _engine_liveness, _fresh_resume_launch_pending, engine_write_lock_http,
     run_lifecycle_lock_http)
+from looplab.serve.http import generation_conflict
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 
 
@@ -889,13 +890,10 @@ def durable_clear_node_trace(
             if recovering:
                 _supersede_trace_clear(
                     receipt_path, receipt, "run_generation_changed_after_pending")
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation,
-                "current_generation": current_generation or None,
-                "message": "The run was reset or replaced before the trace clear was submitted.",
-                "remediation": "Reload the run before clearing trace diagnostics.",
-            })
+            raise generation_conflict(
+                "The run was reset or replaced before the trace clear was submitted.",
+                expected=expected_generation, current=current_generation or None,
+                remediation="Reload the run before clearing trace diagnostics.")
 
         # A new operation can fail definitively before mutation. A pending operation cannot:
         # while any writer may be alive its historical outcome remains unknown, so retain its
@@ -927,13 +925,10 @@ def durable_clear_node_trace(
                         _supersede_trace_clear(
                             receipt_path, receipt,
                             "run_generation_changed_after_writer_lock")
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "expected_generation": expected_generation,
-                        "current_generation": current_generation or None,
-                        "message": "The run changed before exclusive trace access was acquired.",
-                        "remediation": "Reload the run before clearing trace diagnostics.",
-                    })
+                    raise generation_conflict(
+                        "The run changed before exclusive trace access was acquired.",
+                        expected=expected_generation, current=current_generation or None,
+                        remediation="Reload the run before clearing trace diagnostics.")
                 current_state = srv.state(rd)
                 if current_state.resume_pending():
                     if recovering:

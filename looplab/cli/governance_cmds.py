@@ -320,8 +320,8 @@ def cross_run_index_cmd(
         # wasted folds and stale receipts rather than wrong answers — a plain interprocess lock around
         # the whole transaction is the proportionate fix (it degrades to a no-op where locking is
         # unavailable, leaving today's behavior).
-        from looplab.events.eventstore import _interprocess_lock
-        with _interprocess_lock(run_root / ".cross_run_index.lock"):
+        from looplab.events.eventstore import interprocess_lock
+        with interprocess_lock(run_root / ".cross_run_index.lock"):
             res = build_index_incremental(run_root, prior=load_index(cache))
             idx = res["index"]
             if idx:
@@ -912,9 +912,14 @@ def claims_cmd(
     top: int = typer.Option(20, help="How many most-evidenced claims to show."),
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
     pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
-    fuzzy: bool = typer.Option(False, "--fuzzy", help="Merge paraphrased claims (CR1b, suggestion-grade)."),
-    structured: bool = typer.Option(False, "--structured", help="Use the scope+polarity-safe structured "
-                                    "claim key (§21.20.13): opposite-polarity claims contradict, not merge."),
+    structured: bool = typer.Option(True, "--structured", help="Accepted and INERT: claim identity is "
+                                    "always the scope+polarity-safe structured claim key (§21.20.13) — "
+                                    "opposite-polarity claims contradict rather than merge and a decision in "
+                                    "one task cannot reach another's. The `--lean` normalized-statement "
+                                    "projection was DELETED on 2026-09-08 (doc 25 EM-06); it emitted rows with "
+                                    "no `claim_uid` and no `evidence_digest`, so its `--governance-receipt` "
+                                    "could never satisfy `claim-decide`. An operator who scripted `--lean` gets "
+                                    "a usage refusal here rather than a silently different projection."),
     scope: str = typer.Option(
         "", "--scope", help="Project only this task's evidence (the CLI spelling of the HTTP "
         "`/api/cross-run/claims?scope_task=` read). REQUIRED to obtain a usable --governance-receipt "
@@ -936,13 +941,15 @@ def claims_cmd(
     concept capsules, aliases, and splits. ``--scope`` narrows every joined source to one task, which is
     what makes the emitted ``evidence_digest`` usable by ``claim-decide --scope``. No LLM/endpoint."""
     from looplab.engine.claims import (
-        _load_claim_source_path, _safe_claim_source_summary,
-        _safe_research_source_summary, build_context_pack, claims_for_memory,
-        load_research_claims, render_context_pack,
+        build_context_pack, claims_for_memory, load_research_claims, render_context_pack,
+    )
+    from looplab.engine.knowledge_views import (
+        load_claim_source_path, portfolio_concept_overview_data, safe_claim_source_summary,
+        safe_research_source_summary,
     )
     from looplab.engine.claims_health import scope_cross_run_sources
     from looplab.engine.governance_health import observed_path_missing, project_governed_sources
-    from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
+    from looplab.engine.memory import ConceptCapsuleStore
 
     p = Path(memory_dir)
 
@@ -958,7 +965,7 @@ def claims_cmd(
             source_names.append("concept_capsules.jsonl")
 
         def _project(governance):
-            lessons = _load_claim_source_path(path, research=False)
+            lessons = load_claim_source_path(path, research=False)
             research = load_research_claims(base)
             # `scope_task` is load-bearing, not a convenience filter. `claim_evidence_digest` commits
             # the projection's WHOLE-SOURCE health receipt (snapshot digest, producer-run counts,
@@ -971,10 +978,10 @@ def claims_cmd(
             # HTTP pair (`/api/cross-run/claims?scope_task=` + POST claim-decide `scope`) already did.
             claims = claims_for_memory(
                 base, lessons=lessons, research_claims=research, scope_task=scope,
-                decisions=governance["decisions"], fuzzy=fuzzy, structured=structured)
-            research_source = _safe_research_source_summary(
+                decisions=governance["decisions"], structured=structured)
+            research_source = safe_research_source_summary(
                 getattr(claims, "research_source", None)) or {}
-            claim_source = _safe_claim_source_summary(
+            claim_source = safe_claim_source_summary(
                 getattr(claims, "claim_source", None)) or {}
             context_pack = None
             if pack:
@@ -990,7 +997,7 @@ def claims_cmd(
                     # reason.
                     _lessons, capsules, _research = scope_cross_run_sources(
                         task_id=scope, capsules=ConceptCapsuleStore(caps_path).all())
-                    overview, concept_rows = _portfolio_concept_overview_data(
+                    overview, concept_rows = portfolio_concept_overview_data(
                         capsules, aliases=governance["aliases"],
                         splits=governance["splits"])
                 # build the pack before releasing any policy/source lock. Its claims,

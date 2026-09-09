@@ -9,16 +9,19 @@ which a mixin preserves.
 The cluster: the per-node audit-event emitters (`_emit_agent_report` / `_emit_role_telemetry` /
 `_emit_hypothesis_ranked` / `_emit_foresight_selected`), the protected-file tamper audit
 (`_audit_workdir_writes`), output redaction (`_redact`), the crash-injection test hook
-(`_maybe_crash`), and the leakage detector set (`_leakage_blocks`)."""
+(`_maybe_crash`), the leakage detector set (`_leakage_blocks`) and the advisory distribution-shift
+record beside it (`_record_distribution_shift`)."""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
+from looplab.agents.role_wrappers import audit_extra_of
 from looplab.core.containment import contain
 from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
-                                  EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
+                                  EV_DATA_SHIFT, EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
                                   EV_NODE_EVALUATED)
+from looplab.trust.drift import distribution_shift, rows_to_columns
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 
 
@@ -26,7 +29,10 @@ class AuditMixin:
     """The engine's audit/trust-emitter cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
 
-    def _emit_agent_report(self, node_id: int, generation: int = 0, developer=None) -> None:
+    _REPORT_OMITTED = object()
+
+    def _emit_agent_report(self, node_id: int, generation: int = 0, developer=None,
+                           report=_REPORT_OMITTED, audit_extra=_REPORT_OMITTED) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
         `ValidatingDeveloper`), record the verdict as an `agent_validated` event so each
         node carries a trail of how the external coding agent performed. No-op for
@@ -34,25 +40,65 @@ class AuditMixin:
 
         Serial node creation stamps the shared `self.developer.last_report` against `node_id`.
         Under Variant-1 parallel build the caller passes `developer=` THIS build's pooled developer
-        so a concurrent sibling build's `last_report` is never mis-attributed to this node."""
-        report = getattr(developer if developer is not None else self.developer, "last_report", None)
+        so a concurrent sibling build's `last_report` is never mis-attributed to this node.
+
+        `report=` IS THE ENVELOPE'S COPY, and it is what a caller that made the call should pass.
+        Pooling the developer per build was only half the fix: every build now runs in a worker
+        (`orchestrator.py::_offload_build`), and `last_report` is read HERE, after
+        `developer_call_lock` has been released. Between a worker returning from `_run_developer`
+        and reaching this line, a sibling's `_discard_node_build_telemetry` can `setattr(current,
+        'last_report', None)` — also unlocked — so this node emits no `agent_validated` row at all;
+        with the opposite interleaving it emits the sibling's report against this node's id. Both
+        are silent: the ADR-7 audit trail is wrong or missing with nothing red. `DeveloperResult`
+        captures `last_report` UNDER the lock, so a caller holding the envelope is holding the
+        report this node's own call produced.
+
+        The instance read stays as the fallback for the paths that made no fresh Developer call
+        (`speculation.py::_create_precoded_node` commits a producer's pre-built code), and it is
+        `_REPORT_OMITTED` rather than None that selects it, because a build whose Developer genuinely
+        reported nothing must not silently fall back to whatever the instance is carrying.
+
+        `audit_extra=` IS THE SAME RULE, since 2026-09-08. It is a wrapper-specific ANNOTATION
+        (`ValidatingDeveloper`'s attempts / fell_back / shipped_ok) built from the wrapper's own
+        instance state, so CALLING it here — after the lock — read whatever a sibling build's
+        `_record` had most recently written: this node's `agent_validated` row carried another
+        node's attempt count and fallback flag, and neither row was wrong in any way something
+        could see. It has no registry membership (`DEVELOPER_OUTPUT_ATTRS` holds attributes; this
+        is a method), so it rides `DeveloperResult.audit_extra`, captured under
+        `developer_call_lock` by the same `_capture_developer_result` that captures the report and
+        selected by the same `_REPORT_OMITTED` sentinel — for the same reason, too: a build whose
+        wrapper genuinely annotated nothing must not fall back to whatever the instance carries."""
+        if report is self._REPORT_OMITTED:
+            report = getattr(developer if developer is not None else self.developer,
+                             "last_report", None)
         if report is not None:
             data = {"node_id": node_id, **report.summary()}
-            extra = getattr(developer if developer is not None else self.developer, "audit_extra", None)
-            if callable(extra):
-                data.update(extra())
+            if audit_extra is self._REPORT_OMITTED:
+                audit_extra = audit_extra_of(
+                    developer if developer is not None else self.developer)
+            if isinstance(audit_extra, dict):
+                data.update(audit_extra)
             data["generation"] = generation
             self.store.append(EV_AGENT_VALIDATED, data)
 
     def _emit_role_telemetry(self, role, attr: str, event_type: str, node_id: int,
-                             generation: int | None = None) -> None:
+                             generation: int | None = None, value=_REPORT_OMITTED) -> None:
         """Append `event_type` from a role's predictive-telemetry attr (a dict set during
         propose/implement), stamped with `node_id`, then CONSUME it (reset to None). Like
         `_emit_agent_report` this relies on sequential node creation for correctness; the consume adds
         a further guard specific to these predictive channels — a following non-propose action (merge /
         debug-repair, which never re-predicts) then finds None and can't re-emit a stale pick for the
-        wrong node. No-op when the attr is absent/None (the role didn't predict for this node)."""
-        pick = getattr(role, attr, None)
+        wrong node. No-op when the attr is absent/None (the role didn't predict for this node).
+
+        `value=` IS THE CALLER'S OWN COPY, on the same `_REPORT_OMITTED` rule as `report=` and
+        `audit_extra=`: what to EMIT comes from the call that produced it, while what to CONSUME
+        stays the role object. The two are not the same thing here — a repair on the shared
+        developer nulls `last_foresight_pick` between the build's call and this emit, so reading it
+        back off the instance publishes nothing (or a sibling's pick against this node's id), while
+        the consume must still clear whatever the role is holding so it cannot leak to the next
+        node. Omitted (not None) selects the instance read, because a build that genuinely
+        predicted nothing must not fall back to whatever the instance carries."""
+        pick = getattr(role, attr, None) if value is self._REPORT_OMITTED else value
         if isinstance(pick, dict):
             pick = dict(pick)   # copy before consuming; strip the captured op-trace ids out of the data
             tid, sid = pick.pop("_trace_id", None), pick.pop("_span_id", None)
@@ -62,6 +108,11 @@ class AuditMixin:
             if generation is not None:
                 data["generation"] = generation
             self.store.append(event_type, data, trace_id=tid, span_id=sid)
+        # CONSUMED UNCONDITIONALLY, and outside the `isinstance` above since 2026-09-08: with
+        # `value=` supplied, the instance can hold a DIFFERENT dict (a sibling's) or None while
+        # this call emits its own — and leaving a sibling's pick standing is exactly the leak this
+        # consume exists to stop.
+        if getattr(role, attr, None) is not None:
             setattr(role, attr, None)
 
     def _emit_hypothesis_ranked(self, node_id: int, generation: int | None = None,
@@ -174,16 +225,24 @@ class AuditMixin:
             setattr(role, "last_hyp_priority", None)
 
     def _emit_foresight_selected(self, node_id: int, generation: int | None = None,
-                                 researcher=None, developer=None) -> None:
+                                 researcher=None, developer=None,
+                                 foresight_pick=_REPORT_OMITTED) -> None:
         """FOREAGENT predict-before-execute receipt: when the world model picked WHICH candidate becomes
         this node — the best of K generated ideas (the researcher panel) or of N code implementations
         (best-of-N) — record the ranking + confidence + the model's reasoning as a `foresight_selected`
         event. Without it the choice and its discarded alternatives vanish (only the winner survives in
         `node_created`). `researcher=`/`developer=` (Variant-1): read THIS build's pooled roles so a
         concurrent sibling's pick is not cross-wired onto this node."""
+        # `pick=` IS THE ENVELOPE'S COPY, on the same rule as `report=`/`audit_extra=` one method
+        # up. `last_foresight_pick` is written by `best_of_n.implement` and CLEARED by its
+        # `repair`/`repair_from`, so a repair on the SHARED developer running in another worker
+        # nulls the pick this build made — driven: `foresight_selected` silently never written for
+        # that node, and in the mirror order emitted against another node's id. The CONSUME still
+        # happens on the role object, which is this build's pooled developer where there is one.
         self._emit_role_telemetry(
             developer if developer is not None else self.developer,
-            "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, generation)
+            "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, generation,
+            value=foresight_pick)
         self._emit_role_telemetry(
             researcher if researcher is not None else self.researcher,
             "last_foresight", EV_FORESIGHT_SELECTED, node_id, generation)
@@ -363,3 +422,40 @@ class AuditMixin:
         leak = any(v.get("leak") for v in verdicts)
         self.store.append(EV_DATA_LEAKAGE, {"leak": leak, "verdicts": verdicts})
         return leak
+
+    def _record_distribution_shift(self) -> None:
+        """Distribution-shift RECORD (docs/BACKLOG.md §15): how far the deployment sample the task
+        declares is from the training one, appended once at setup as a `data_shift` event.
+
+        Two sources, in this order, and neither is a new read of anything on disk that the run was
+        not already reading: `shift_inputs()` (the declared train/test TABLES, read by
+        `adapters/perception.py` under its own row/column bounds) and, for the adapters that publish
+        no such pair, the `train_rows`/`test_rows` the leakage gate already asks for — positionally,
+        which is all a row list carries.
+
+        It RECORDS and returns nothing. Shift is not misconduct: on a real task the deployment sample
+        is SUPPOSED to differ from the training one, so a rung that could abort would be refusing the
+        normal case, and the number an operator actually wants is "how far, on which columns" beside
+        a worse metric. A task that declares no comparable pair appends nothing at all rather than an
+        empty verdict, because "not compared" and "compared, no shift" are different facts and only
+        the second one is evidence."""
+        inp: dict = {}
+        fn = getattr(self.task, "shift_inputs", None)
+        if callable(fn):
+            inp = fn() or {}
+        reference, current = inp.get("reference"), inp.get("current")
+        source = str(inp.get("source") or "shift_inputs")
+        if not (isinstance(reference, dict) and isinstance(current, dict)
+                and reference and current):
+            leak_fn = getattr(self.task, "leakage_inputs", None)
+            if not callable(leak_fn):
+                return
+            rows = leak_fn() or {}
+            if "train_rows" not in rows or "test_rows" not in rows:
+                return
+            reference = rows_to_columns(rows["train_rows"])
+            current = rows_to_columns(rows["test_rows"])
+            source = "leakage_inputs: train_rows vs test_rows"
+            if not reference or not current:
+                return
+        self.store.append(EV_DATA_SHIFT, distribution_shift(reference, current, source=source))

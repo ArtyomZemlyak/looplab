@@ -27,6 +27,7 @@ from typing import Literal, Optional, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from looplab.agents.answered_by_context import answered_by_context
 from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.loop_options import LoopOptions
 from looplab.agents.roles import _attention_points
@@ -1050,15 +1051,21 @@ class ToolUsingStrategist:
             self.tools.bind_state(state)        # let the run-aware tools read the current search
         messages = [
             # P8: hardware attention points, after the render() like the plain LLMStrategist above.
-            # OPEN[strategist-carries-the-rule-not-the-data] this role got the prompt-RULE spelling
-            # of answer-from-context, which the A/B measured inert, and not the inventory DATA
-            # block that measured 41.3 -> 17.7 calls.
-            # proof:absent:answered_by_context@looplab/agents/strategist.py+present:_CONTEXT_BEFORE_TOOLS_RULE@looplab/agents/strategist.py
             # REVIEW 2026-08-30 (consistency): the inventory-block module's header and roles.py
             # both record the measurement, and the same evidence took the rule OFF the repo
             # Developer — so this pays the rule's tokens with none of the measured benefit. Wire
             # the inventory block into `_strategist_brief`'s user turn (its providers implement
             # `inventory()`), or drop the rule here too.
+            #
+            # DONE 2026-09-08 by the FIRST of those two, and deliberately not the second. The rule
+            # (`_CONTEXT_BEFORE_TOOLS_RULE`, below) was measured INERT and the DATA block measured
+            # 41.3 -> 17.7 tool calls — but "inert" is not "harmful", and deleting a shipped clause
+            # from a paid role's system prompt is a prompt-BYTES change that needs its own A/B,
+            # while ADDING the data is the move the measurement already licenses. This role now
+            # carries exactly what the two roles the block was measured on carry: the rule on the
+            # system turn and `answered_by_context` on the user turn beside the snapshot it
+            # describes (`agents/agent.py::ToolUsingResearcher.propose`,
+            # `agents/deep_research.py::DeepResearcher.research`).
             {"role": "system",
              "content": render(self.prompts, "tool_strategist_system", _TOOL_STRATEGIST_SYSTEM)
                         + "\n\n" + _LLM_LANE_ALLOCATION_CONTRACT
@@ -1066,7 +1073,15 @@ class ToolUsingStrategist:
                         + _CONTEXT_BEFORE_TOOLS_RULE
                         # The evidence guard LAST, or "" — see STRATEGIST_EVIDENCE_GUARD.
                         + (STRATEGIST_EVIDENCE_GUARD if self.evidence_envelope else "")},
+            # The tool-surface join goes in the USER turn, beside the brief it describes, and is
+            # built from the BOUND provider (`bind_state` above has already run, so a run-aware
+            # provider counts THIS run) rather than re-derived from `ctx` — see
+            # `agents/answered_by_context.py` for why this is data and not another prompt rule, and
+            # for why a provider that declines the hook yields "" rather than a fabricated row.
+            # An emit-only Strategist (`tools=None`, which is `make_strategist`'s fallback when no
+            # toolset is wired) therefore keeps its historical user turn byte for byte.
             {"role": "user", "content": _strategist_brief(state, ctx)
+                + answered_by_context(self.tools)
                 + "\nInvestigate with the tools if useful, then emit the strategy."},
         ]
 

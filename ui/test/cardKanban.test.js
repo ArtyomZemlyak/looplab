@@ -215,9 +215,12 @@ test('Card belief, retry, and research identities are visible instead of wire-on
 })
 
 test('Card controls use only generation-fenced command helpers and never client provenance', async () => {
-  const source = await readFile(new URL('../src/api.js', import.meta.url), 'utf8')
+  // The CONTROL map left api.js for `controlActions.js` (doc 25 UI-02's declined half, 2026-09-08);
+  // this pin follows the code rather than passing vacuously over a file that no longer holds it.
+  const source = await readFile(new URL('../src/controlActions.js', import.meta.url), 'utf8')
   const runView = await readFile(new URL('../src/RunView.jsx', import.meta.url), 'utf8')
   const controls = source.slice(source.indexOf('reprioritizeCard:'), source.indexOf('refreshReport:'))
+  assert.ok(controls.length > 200, 'the card controls must still be found where this pin now reads')
   for (const eventType of [
     'card_reprioritized', 'card_edited', 'card_resource_pinned', 'card_dropped',
   ]) assert.match(controls, new RegExp(`runCommand\\([^)]*['"]${eventType}['"]`, 's'))
