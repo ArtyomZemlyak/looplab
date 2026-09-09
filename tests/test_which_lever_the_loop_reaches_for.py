@@ -54,7 +54,11 @@ def test_the_counts_are_reported_per_task(tmp_path):
 def test_a_task_that_never_reaches_for_cython_is_named(tmp_path):
     bench = _bench(tmp_path, [_row("pde_heat1d", "numba"), _row("edge_expansion", "cython")])
     _, said = sweep_claims.check_which_lever_the_loop_reaches_for(bench)
-    assert "NEVER reached for Cython: pde_heat1d (0 of 1)" in said, said
+    # §399: "reached for" became "SHIPPED", because on the live corpus the loop NAMES Cython in
+    # its own reasoning on 11 of 12 pde_heat1d probes and ships numba anyway. This fixture writes no
+    # reasoning at all, so it takes the other half of the sentence.
+    assert "NEVER SHIPPED Cython: pde_heat1d (0 of 1)" in said, said
+    assert "never named in the loop's reasoning either" in said, said
 
 
 def test_naming_it_is_not_failing_it(tmp_path):
@@ -62,7 +66,7 @@ def test_naming_it_is_not_failing_it(tmp_path):
     bench = _bench(tmp_path, [_row("pde_heat1d", "numba")])
     ok, said = sweep_claims.check_which_lever_the_loop_reaches_for(bench)
     assert ok, said
-    assert "NEVER reached for Cython" in said, said
+    assert "NEVER SHIPPED Cython" in said, said
 
 
 def test_a_corpus_without_the_field_is_a_failure_not_a_silence(tmp_path):

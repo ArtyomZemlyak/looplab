@@ -1445,6 +1445,62 @@ def check_a_dollar_probe_costs_a_dollar(bench: str):
 DEFAULT_NODE_FLOOR = 0.10
 
 
+# The loop's own words, as opposed to boilerplate: a package list in `run_started` and the card
+# mention every library the box has installed, so counting those would make "considered" meaningless.
+_REASONING_EVENTS = ("research_completed", "hypothesis_added", "reflection_note",
+                     "novelty_rejected", "hint")
+_CYTHON = re.compile(r"cython|\.pyx|cimport", re.I)
+
+
+def cython_named_in_reasoning(bench: str, task: str):
+    """`(probes_that_named_it, probes_total)` -- did the loop CONSIDER Cython on this task?
+
+    §399. "NEVER reached for Cython: pde_heat1d (0 of 12)" reads as blindness, and the measurement
+    says the opposite: Cython is named in the loop's own reasoning in **11 of those 12 probes**, and
+    at least one says why it was dropped -- `remPde`'s research note reads "@njit or a .pyx extension
+    would add nothing because the FFT is already native code and the Python overhead per instance
+    is" negligible. The task is FFT-bound, the loop worked that out, and shipped numba twelve times.
+
+    Considered-and-rejected and never-considered call for opposite responses -- one is a finding
+    about the task, the other about the loop -- so the sentence has to tell them apart. Boilerplate
+    is excluded: the package list in `run_started` names every library installed on the box.
+    """
+    named = total = 0
+    for run in sorted(glob.glob(f"{bench}/model-probes/*/runs/{task}/run/events.jsonl")):
+        total += 1
+        for row in events_read.iter_events(run):
+            if row.get("type") not in _REASONING_EVENTS:
+                continue
+            if _CYTHON.search(json.dumps(row.get("data") or {}, ensure_ascii=False)):
+                named += 1
+                break
+    return named, total
+
+
+def never_shipped_sentence(bench: str, never) -> str:
+    """The sentence for tasks that ship no Cython -- weighed-and-dropped or never named at all.
+
+    A function because the WORDING is the fix (§342) and because the check around it shells out to
+    `probe_summary.py`, so the sentence could otherwise only be driven on a full bench tree.
+
+    §399: "NEVER reached for Cython" reads as blindness. On `pde_heat1d` the loop NAMES Cython in
+    its own reasoning in 11 of 12 probes and ships numba every time, with `remPde` recording why --
+    "@njit or a .pyx extension would add nothing because the FFT is already native code". A task
+    that weighs the lever and drops it is a finding about the task; one that never names it is a
+    finding about the loop, and the two want opposite responses.
+    """
+    weighed = []
+    for entry in never:
+        task_name = entry.split(" (")[0]
+        said_it, seen = cython_named_in_reasoning(bench, task_name)
+        weighed.append(f"{entry}, though it is NAMED in the loop's own reasoning in "
+                       f"{said_it} of {seen}" if said_it else
+                       f"{entry}, and never named in the loop's reasoning either")
+    return ("; NEVER SHIPPED Cython: " + ", ".join(weighed)
+            + " -- §377 measured that lever at eightfold on edge_expansion, so a task that weighs "
+              "it and drops it every time is a finding about the TASK, not blindness")
+
+
 def check_which_lever_the_loop_reaches_for(bench: str):
     """Which kernel the loop actually reaches for, per task -- the lever §377 measured at eightfold.
 
@@ -1488,9 +1544,7 @@ def check_which_lever_the_loop_reaches_for(bench: str):
             never.append(f"{task} (0 of {total})")
     detail = "; ".join(said)
     if never:
-        detail += ("; NEVER reached for Cython: " + ", ".join(never)
-                   + " -- §377 measured that lever at eightfold on edge_expansion, so a task that "
-                     "never pulls it is worth knowing about, not necessarily worth fixing")
+        detail += never_shipped_sentence(bench, never)
     return True, detail
 
 
