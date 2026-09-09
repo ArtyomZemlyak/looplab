@@ -35,6 +35,10 @@ cache/
 *.jsonl
 # checked-in fixture: the golden-log replay gate (docs/15 §P5.1)
 !tests/data/golden_run_events.jsonl
+# checked-in CORPUS, not an output: the agent trajectory ladder's hand-written cases (doc 27 §4
+# rungs 2/4). It is plain JSONL rather than the gzip the two judge benches use precisely so the
+# injection strings are readable in a review — which only helps if the file is in the repository.
+!tests/data/agent_trajectory/*.jsonl
 *.db
 *.sqlite
 

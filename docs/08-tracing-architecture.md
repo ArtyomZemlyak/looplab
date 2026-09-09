@@ -221,9 +221,16 @@ generation I/O (prompt/output/reasoning), so a long run's file is large and pars
 UI's first trace click stall ~15 s. The index keeps a
 ~25×-smaller, versioned and bounded/redacted projection of every span plus
 the byte `(offset,length)` of the full span in `spans.jsonl` — so the timeline reads only the tiny
-index and per-node/-span detail views seek to exact offsets. Each index row also carries the digest of
-its exact full source bytes; every full-row seek rehashes those bytes and reports a mismatch as
-unavailable rather than silently returning altered/incomplete evidence. A persisted source epoch is
+index and per-node/-span detail views seek to exact offsets. Each index row also carries an identity
+digest of its source line; every full-row seek recomputes it and reports a mismatch as unavailable
+rather than silently returning altered/incomplete evidence. Since `_SCHEMA` 13 (2026-09-08, doc 34
+D-04) the digest runs over a BOUNDED preimage — the row's length plus its first and last 8 KiB, under
+a domain-separated prefix, truncated to 32 hex — so a 100 KB generation span costs one 16 KiB hash on
+the request path instead of a full re-hash. It answers "this offset still holds THIS row" (any change
+to the length or either edge fails closed), and the read additionally compares the complete normalized
+light record, so every attribution field is verified at every size. It does not authenticate the heavy
+middle of an oversize row, which the un-indexed reader does not either; `span_index.py::
+_ROW_DIGEST_PREFIX` states that class in full. A persisted source epoch is
 bound to POSIX `st_ctime_ns` or Windows `FILE_BASIC_INFO.ChangeTime` read from the already-open source
 descriptor. It rotates on replacement/rewrite but remains stable across a receipt-proven append
 chain, so a node/window revision can be computed from selected-row membership and digests without
@@ -246,7 +253,7 @@ rest of the store already guards for.)
 Full-row windows coalesce selected rows separated by at most 256 KiB into continuous reads capped at
 8 MiB. This targets the S3/FUSE cost boundary: the previous reader issued one seek/read (normally one
 range GET) per selected span, while S3 cannot return disjoint ranges in one GET. Gap bytes are never
-parsed or returned, and every selected slice still passes its exact row digest plus normalized-light
+parsed or returned, and every selected slice still passes its row digest plus normalized-light
 comparison. `tools/bench_trace_s3_reads.py` drives the production planner across dense, 4-way and
 32-way-interleaved layouts; the 256 KiB threshold captures the large request-count win in a moderately
 interleaved trace without the ~30× byte amplification a 1 MiB/single-cover strategy creates in a
@@ -331,7 +338,7 @@ on the slow path repeats both comparisons after projection; if the source moved,
 usable but has no cursor/ETag and cannot validate a later poll.
 
 A cold-loaded persisted index is not eligible to authorize that 304 by itself. The first conditional
-read in a process is forced through a 200 source-row read; exact row digests and normalized light metadata
+read in a process is forced through a 200 source-row read; row digests and normalized light metadata
 must verify before that node/window revision is promoted for later bodyless polls. The persisted index is
 a private same-user accelerator, not an authenticated manifest: deliberate standalone edits that remove
 otherwise valid index membership without changing `spans.jsonl` are outside this cache-integrity boundary
@@ -445,6 +452,12 @@ and `project_card_trace`. Three rules hold it honest: a claim only ever fills a 
 node of its own, a span may not claim its own trace, and a trace two nodes claim is awarded to
 neither. The claim carries the *claiming* span's lifecycle, so a `node_reset` that rebuilds reaches
 its own build and not the abandoned one.
+
+The index also carries the CARD dimension the card trace is served from (`card_propose_tids`, doc 34
+D-03, 2026-09-08): stamped `card_id` -> the traces of the root `propose` spans naming it, so
+`SpanIndex.card_trace_spans` resolves both of the card trace's research rules by lookup and hands
+`project_card_trace` the card's own rows plus the run-global claim map, instead of the whole run's
+light span list rescanned once per owned node.
 
 `propose` deliberately keeps NO such claim: a card's research belongs to every node the card carries,
 not to whichever one was prepared first (`orchestrator.stamp_proposal_span`), and it is reachable

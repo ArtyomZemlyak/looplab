@@ -200,7 +200,35 @@ class EstablishedContext:
         # this a page read while building node 3 was seeded into node 7's chain root under "carried
         # verbatim … do not re-fetch". `invalidate` cannot cover it: "this file changed" and "this
         # is a different experiment's file" are different events, and the second one writes nothing.
-        self._workspace = None
+        #
+        # PER THREAD, because the pointer it replaces was a per-STORE scalar and the store is
+        # shared across CONCURRENT builds. Every build now runs in a worker
+        # (`orchestrator.py::_offload_build`), and `enter_workspace` is called on that worker at
+        # the node's own build boundary — so with one scalar, node 7 entering its workspace moved
+        # node 3's pointer too: node 3's `record` stamped node 7's token onto its pages and node
+        # 3's `render` read `here = <node 7's token>` and carried node 7's bytes into node 3's
+        # chain root, under the header that says the content is carried verbatim and need not be
+        # re-fetched. That is precisely the cross-node bleed this field exists to prevent, one
+        # level up from where it was fixed. `threading.local` restores the invariant the scalar
+        # assumed (one working set per caller) without changing anything for the serial path,
+        # where there is exactly one thread and the default is the same `None`.
+        #
+        # The ITEM stamp stays shared, and that is the safe direction: two threads re-reading one
+        # path re-stamp it, so a node whose page a sibling re-stamped falls to `render`'s
+        # comparison and gets an INDEX ROW naming the call that re-reads it — the remedy a caller
+        # has not already spent — instead of another experiment's bytes.
+        self._ws = threading.local()
+
+    @property
+    def _workspace(self):
+        """This CALLER's working set, or `None` before it named one.
+
+        A property rather than an attribute so every existing read site — `record`'s stamp,
+        `record`'s `stale_here` comparison and `render`'s `here` — keeps its spelling and cannot
+        drift back onto shared state by being written directly. See `__init__` for why it is
+        per-thread.
+        """
+        return getattr(self._ws, "token", None)
 
     # ---- recording -------------------------------------------------------------------------
     def record(self, tool: str, args: dict, result: str, *, phase: str = "") -> bool:
@@ -293,8 +321,10 @@ class EstablishedContext:
         this file 9 times in this run" stays true across nodes and is half of what the block is for.
         It is the CONTENT — the claim "here is what it says" — that belongs to one workspace.
         """
-        with self._lock:
-            self._workspace = token
+        # No lock: `threading.local` gives each caller its own slot, so there is nothing to
+        # serialize — and taking `self._lock` here would be claiming a mutual exclusion that the
+        # per-thread storage has already made unnecessary.
+        self._ws.token = token
 
     def hook(self, phase: str, inner: Optional[Callable] = None) -> Callable:
         """An `on_tool_result(name, args, result)` for `drive_tool_loop`, composed over an

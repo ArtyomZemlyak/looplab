@@ -20,7 +20,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from benchmarks.algotune.looplab_check import check, find_task
+import pytest
+
+from benchmarks.algotune.looplab_check import check, find_task, solver_binding_error
 
 # A whole task in miniature: the answer is the MINIMUM of the list, and `is_solution` demands
 # optimality exactly as kcenters does -- which is the property the probes never checked.
@@ -88,6 +90,77 @@ def test_a_solver_without_a_Solver_class_is_reported_not_raised(tmp_path):
     ref, sol = _files(tmp_path, _NO_CLASS)
     out = check(ref, sol, n=1, size=6, seed=1)
     assert out["ok"] is False and "no `Solver` class" in out["error"]
+
+
+# ------------------------------------------------------------------------------------------------
+# WHAT COUNTS AS "HAS A SOLVER": the grader's rule, not a `class` statement (2026-09-08)
+# ------------------------------------------------------------------------------------------------
+# The gate used to be `re.search(r"^\s*class\s+Solver\b", ...)`, so a submission that BINDS the
+# attribute any other way was refused with "defines no `Solver` class" while the arena — which
+# imports the module and reads `getattr(mod, "Solver", None)`, exactly as `_run_isolated` does one
+# function up — scores it. `edit_surface` grants `*.pyx`/`*.pxd` and helper modules precisely so a
+# candidate CAN keep its class next door, so this was steering rewrites the grader never required.
+
+# The BINDING FORMS a real submission uses, each driven end-to-end through `check` below.
+_IMPORTED_SOLVER = ("from impl import Solver\n", "class Solver:\n"
+                                                 "    def solve(self, problem):\n"
+                                                 "        return min(problem)\n")
+_ASSIGNED_SOLVER = ("def make():\n"
+                    "    class _S:\n"
+                    "        def solve(self, problem):\n"
+                    "            return min(problem)\n"
+                    "    return _S\n"
+                    "\n"
+                    "Solver = make()\n", None)
+_GUARDED_SOLVER = ("try:\n"
+                   "    from fast_impl import Solver          # never built here\n"
+                   "except ImportError:\n"
+                   "    class Solver:\n"
+                   "        def solve(self, problem):\n"
+                   "            return min(problem)\n", None)
+
+
+@pytest.mark.parametrize("solver_src,helper_src", [_IMPORTED_SOLVER, _ASSIGNED_SOLVER,
+                                                   _GUARDED_SOLVER],
+                         ids=["imported", "assigned", "guarded-import-fallback"])
+def test_a_solver_that_binds_Solver_without_a_class_statement_is_checked_not_refused(
+        tmp_path, solver_src, helper_src):
+    """The three shapes the old regex convicted. Each must be RUN, and each must validate.
+
+    Driven rather than asserted about the source: the property is that the instances happen at all,
+    which a check that returned the refusal would skip entirely.
+    """
+    ref, sol = _files(tmp_path, solver_src)
+    if helper_src:
+        (tmp_path / "impl.py").write_text(helper_src, encoding="utf-8")
+    out = check(ref, sol, n=2, size=6, seed=1)
+    assert "error" not in out, out
+    assert out["ok"] and out["valid"] == 2, out
+
+
+def test_the_binding_rule_convicts_only_a_file_the_name_is_absent_from():
+    """The truth table of the rule itself, including the direction it may NEVER get wrong.
+
+    A dynamic binding (`globals()["Solver"] = ...`) cannot be settled by any reader of the text, so
+    it ACQUITS and the per-instance rows answer it for real — a checker that convicts a working
+    candidate is worse than one that answers a row later.
+    """
+    assert solver_binding_error("class Solver:\n    pass\n", "solver.py") is None
+    assert solver_binding_error("from impl import Solver\n", "solver.py") is None
+    assert solver_binding_error("import impl as Solver\n", "solver.py") is None
+    assert solver_binding_error("Solver = make()\n", "solver.py") is None
+    assert solver_binding_error("globals()['Solver'] = make()\n", "solver.py") is None
+    refused = solver_binding_error("def solve(problem):\n    return 1\n", "solver.py")
+    assert refused and "no `Solver` class" in refused
+    assert "module attribute" in refused, "it must say what the grader actually resolves"
+
+
+def test_a_file_that_does_not_parse_says_so(tmp_path):
+    """The grader imports this file before it resolves anything in it, so a SyntaxError is the
+    first fact — not "defines no `Solver` class", which sends the model looking in the wrong place."""
+    ref, sol = _files(tmp_path, "class Solver:\n    def solve(self, problem)\n        return 1\n")
+    out = check(ref, sol, n=1, size=6, seed=1)
+    assert out["ok"] is False and "does not parse" in out["error"], out
 
 
 def test_the_reference_task_is_found_by_its_three_methods(tmp_path):

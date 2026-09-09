@@ -3,9 +3,9 @@
 THE DEFECT, found 2026-08-25 by re-timing a champion by hand and not believing the harness.
 
 When AlgoTune has no cached per-instance reference timing for a (task, subset, lane), it measures
-one during the evaluation — and in that pass THE CANDIDATE IS NEVER TIMED. The evaluator reports
-the reference against itself: `final_speedup` comes back at ~1.0 and every instance validates,
-whatever was submitted. The proof was a solver whose `solve()` returns `[]` for every instance:
+one during the evaluation — and in that pass THE CANDIDATE IS NEVER TIMED. The evaluator reports the
+reference against itself: `final_speedup` comes back at ~1.0 and every instance validates, whatever
+was submitted. The proof was a solver whose `solve()` returns `[]` for every instance:
 
     fresh timings : speedup 1.0009, 100/100 valid, 326 s
     warm timings  : the real champion scored 0.0 (98/100 valid), 120 s
@@ -20,15 +20,99 @@ pass itself.
 So the bridge fingerprints the timings directory before the evaluator runs and again after. A file
 that appears or changes means the reference was measured here, and the number is refused with
 `no_speedup.reason = "baseline_measured_in_pass"` rather than printed.
+
+HOW THIS IS TESTED, and what changed on 2026-09-08. The decision used to "run" here as a hand-copied
+`python -c` re-spelling of fingerprint → mutate → compare → emit, so `looplab_eval.py`'s actual
+`_baseline_fingerprint` and refusal block were traversed by nothing in the suite. That simulation
+had already diverged from production in both directions that matter: it asserted the refused number
+back as the FLOAT `12.5` while `_no_speedup(..., reported=...)` stringifies it, and its fixture
+invented three-segment cache names (`t__test__w22x1r3.json`) that `patch_baseline_cache.py` never
+produces in the serial regime — which is exactly how the LIVE glob defect (a pattern that could not
+match a serial-regime name) stayed green under this file.
+
+What runs now is the bridge itself, against a stub evaluator that writes a bare `<task>__test.json`
+mid-run — the shape the campaign really produces — with the bridge's own `--baseline-times-dir`
+pointed at a tmp directory. That single test nails the glob, the str-vs-float shape and the ORDER at
+once: a fingerprint taken after the evaluator would see the same directory twice and let the number
+through, which is the falsifier test below in reverse.
 """
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 BRIDGE = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "looplab_eval.py"
-SRC = BRIDGE.read_text(encoding="utf-8")
+TASK = "spectral_clustering"
+# What the arena would report for the reference timed against ITSELF: plausible, near 1.0, and about
+# nothing. The refusal has to survive being handed a number, not just a missing one.
+REPORTED = "12.5"
+
+# The evaluator, as far as the bridge can observe it: an argv contract, a summary file, and — when
+# `ALGOTUNE_TEST_TIMINGS_DIR` is set — the per-instance reference timings written DURING the pass,
+# which is the entire fact under test. The name is the serial-regime one `patch_baseline_cache.py`
+# really writes when workers <= 1 (`<task>__<subset>.json`, no regime segment), which docs/51 §10
+# mandates and `campaign.sh` never overrides.
+_STUB = '''\
+import argparse, json, os, sys
+from pathlib import Path
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--models", nargs="+")
+ap.add_argument("--tasks", nargs="+")
+ap.add_argument("--output", type=Path)
+args = ap.parse_args()
+
+timings = os.environ.get("ALGOTUNE_TEST_TIMINGS_DIR")
+if timings:
+    d = Path(timings)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / (args.tasks[0] + "__test.json")).write_text('{{"0": 1.0}}', encoding="utf-8")
+
+sys.stderr.write("WARNING - Evaluation complete\\n")
+args.output.parent.mkdir(parents=True, exist_ok=True)
+args.output.write_text(json.dumps({{args.tasks[0]: {{args.models[0]:
+                       {{"final_speedup": "{reported}"}}}}}}), encoding="utf-8")
+sys.exit(0)
+'''
+
+
+def _checkout(tmp_path: Path) -> Path:
+    root = tmp_path / "AlgoTune"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "evaluate_results.py").write_text(_STUB.format(reported=REPORTED), encoding="utf-8")
+    return root
+
+
+def _score(tmp_path: Path, *, timings_written: bool) -> dict:
+    """Run the REAL bridge on the graded split and parse its one JSON line."""
+    root = _checkout(tmp_path)
+    # The solver gets its own directory: everything beside it is its SUBMISSION, and a stray
+    # `cache.json` in the same tree would be copied into the scored directory.
+    work = tmp_path / "candidate"
+    work.mkdir()
+    (work / "solver.py").write_text("class Solver:\n    def solve(self, problem):\n"
+                                    "        return []\n", encoding="utf-8")
+    times = tmp_path / "times"
+    times.mkdir()
+    env = dict(os.environ)
+    env.pop("ALGOTUNE_TEST_TIMINGS_DIR", None)
+    if timings_written:
+        env["ALGOTUNE_TEST_TIMINGS_DIR"] = str(times)
+    proc = subprocess.run(
+        [sys.executable, str(BRIDGE), "--algotune-root", str(root), "--task", TASK,
+         "--solver", str(work / "solver.py"), "--subset", "test",
+         # The bridge's own flag, which nothing in this suite used to pass — so the directory it
+         # watches was never the directory a test wrote to.
+         "--baseline-times-dir", str(times),
+         # NEVER the default: that path is the campaign's real, shared parity cache.
+         "--baseline-cache", str(tmp_path / "cache.json")],
+        capture_output=True, text=True, timeout=300, env=env)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("{")]
+    assert lines, f"the bridge printed no JSON line\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    return json.loads(lines[-1])
 
 
 def test_the_reason_is_registered_so_emit_cannot_downgrade_it():
@@ -45,78 +129,28 @@ def test_the_reason_is_registered_so_emit_cannot_downgrade_it():
     assert "baseline_measured_in_pass" in mod.NO_SPEEDUP_REASONS
 
 
-def test_the_fingerprint_is_taken_before_the_evaluator_and_compared_after():
-    """Order is the whole mechanism: a snapshot taken after the run can prove nothing."""
-    before = SRC.index("_baseline_before = _baseline_fingerprint()")
-    run = SRC.index("proc = subprocess.run(argv", before)
-    after = SRC.index("_baseline_after = _baseline_fingerprint()", run)
-    assert before < run < after, "the fingerprint no longer brackets the evaluator call"
-
-
-# OPEN[baseline-refusal-tested-as-simulation] the decision that "runs" here is a hand-copied
-# re-spelling; the bridge's real fingerprint/refusal code is executed by no test in the suite.
-# proof:`line:speedup_reported&&== 12.5@tests/test_algotune_refuses_baseline_measured_in_pass.py`
-# REVIEW 2026-08-25 (guard-test): `_run_refusal_branch` re-implements fingerprint -> mutate ->
-# compare -> emit as an inline `python -c` script, so `looplab_eval.py`'s actual `_baseline_
-# fingerprint` and refusal block are traversed by nothing (`grep -rl` over tests/: only this file
-# names the reason, and nothing anywhere passes `--baseline-times-dir`). The simulation has already
-# diverged from production in both directions that matter: it asserts the refused number back as
-# the FLOAT `12.5`, while the real `_no_speedup(..., reported=...)` stringifies (`str(reported)`,
-# so production writes `"12.5"`); and its fixture invents three-segment cache names
-# (`t__test__w22x1r3.json`) that the repo's own `patch_baseline_cache.py` never produces in the
-# serial regime -- which is exactly how the LIVE defect (the glob that cannot match a serial-regime
-# name; see the annotation at `_baseline_fingerprint` in the bridge) stayed green under this file.
-# The ordering companion above is a `SRC.index` positive substring pin -- the tier CLAUDE.md's
-# guard-test ladder documents as satisfiable by a comment carrying the pinned calls in order.
-# Fix direction: drive the real bridge the way this suite already drives it elsewhere (a stub
-# evaluator + the bridge's own `--baseline-times-dir` flag), write a bare `<task>__train.json`
-# mid-run from the stub, and assert on the bridge's actual emitted JSON line -- that one test nails
-# the glob defect, the str-vs-float shape and the ordering at once; then the `SRC.index` pin can go.
-def _run_refusal_branch(tmp_path: Path, timings_change: bool) -> dict:
-    """Drive the refusal in isolation, with the same shape the bridge builds.
-
-    The evaluator itself is not invoked — it needs the arena, a dataset and ~2 minutes. What is
-    under test is the decision, so the decision is what runs: fingerprint, mutate (or not),
-    fingerprint, compare.
-    """
-    d = tmp_path / "timings"
-    d.mkdir()
-    (d / "t__test__w22x1r3.json").write_text('{"0": 1.0}', encoding="utf-8")
-    code = f'''
-import json
-from pathlib import Path
-D = Path({str(d)!r})
-def fp():
-    return {{f.name: (f.stat().st_mtime_ns, f.stat().st_size)
-             for f in D.glob("t__test__*.json")}}
-before = fp()
-if {timings_change!r}:
-    (D / "t__test__lane22r3.json").write_text('{{"0": 2.0}}')
-after = fp()
-out = {{"speedup": 12.5}}
-if after != before:
-    out = {{"speedup": None, "no_speedup": {{"reason": "baseline_measured_in_pass",
-            "speedup_reported": 12.5,
-            "timings_written": sorted(set(after) - set(before))}}}}
-print(json.dumps(out))
-'''
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0, r.stderr
-    return json.loads(r.stdout)
-
-
 def test_a_number_is_refused_when_the_timings_were_written_during_the_run(tmp_path):
-    out = _run_refusal_branch(tmp_path, timings_change=True)
+    """The bridge's own refusal block, executed: reference timed here, so the number is not
+    about the candidate and is not printed as one."""
+    out = _score(tmp_path, timings_written=True)
     assert out["speedup"] is None
-    assert out["no_speedup"]["reason"] == "baseline_measured_in_pass"
+    why = out["no_speedup"]
+    assert why["reason"] == "baseline_measured_in_pass"
     # The refused number is kept, not thrown away: it is what the arena said, and an operator
-    # comparing runs needs to see that it was ~1.0 and not something else.
-    assert out["no_speedup"]["speedup_reported"] == 12.5
-    assert out["no_speedup"]["timings_written"] == ["t__test__lane22r3.json"]
+    # comparing runs needs to see that it was ~1.0 and not something else. A STRING, because
+    # `_no_speedup` stringifies — "N/A" and "0.0000" are different facts that `float()` merges.
+    assert why["speedup_reported"] == REPORTED and isinstance(why["speedup_reported"], str)
+    # THE SERIAL-REGIME NAME, which the old hand-written fixture could not produce and which the
+    # live glob could therefore not match: `<task>__<subset>.json`, no regime segment.
+    assert why["timings_written"] == [f"{TASK}__test.json"], why
+    assert "cached" in why["remedy"], "an operator has to be told the second pass is now cheap"
+    assert "NOT A MEASUREMENT" in out["baseline_source"]
 
 
 def test_an_untouched_timings_directory_lets_the_number_through(tmp_path):
-    """The falsifier. A check that refused everything would also pass the test above."""
-    out = _run_refusal_branch(tmp_path, timings_change=False)
+    """The falsifier — and the ORDER pin. A check that refused everything would pass the test
+    above; a fingerprint taken AFTER the evaluator instead of before would pass this one and fail
+    that one, since both snapshots would then see the same directory."""
+    out = _score(tmp_path, timings_written=False)
     assert out["speedup"] == 12.5
     assert "no_speedup" not in out

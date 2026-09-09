@@ -62,10 +62,19 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import textwrap
 from pathlib import Path
 
+import anyio
 import pytest
+
+from looplab.adapters.toytask import ToyTask
+from looplab.core.models import Idea
+from looplab.engine.orchestrator import Engine
+from looplab.events.eventstore import EventStore
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.search.policy import GreedyTree
 
 from looplab.core.models import FAILURE_REASONS
 from looplab.engine import crash_repair as cr
@@ -78,16 +87,18 @@ from looplab.engine.failure_diagnosis import (DIAGNOSABLE_ENGINE_REASONS,
                                               DIAGNOSIS_UNAVAILABLE_KEY, ENGINE_FINAL_REASONS,
                                               EVIDENCE_SOURCE_CODE, EVIDENCE_SOURCE_LOG,
                                               EVIDENCE_SOURCE_NONE, OVERRIDE_EVIDENCE_REQUIRED,
+                                              NON_DIAGNOSIS_SOURCES, REASON_SOURCE_DECLARED,
                                               REASON_SOURCE_ENGINE,
                                               REASON_SOURCE_TRIAGE, REASON_SOURCE_UNDIAGNOSED,
                                               REASON_SOURCES, UNCLASSIFIED_REASON, cited_sources,
                                               coerce_evidence,
                                               coerce_failure_kind, diagnosed_failure_reason,
+                                              diagnosis_repair_lead,
                                               evidence_citation_resolves,
-                                              reason_override_refused)
+                                              reason_override_refused, reason_source_for)
 from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS, salvage_condition
-from looplab.engine.triage import (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
-                                   _failure_reason, _rule_triage)
+from looplab.engine.triage import (DECLARABLE_REASONS, UNANSWERABLE_TRIAGE_ACTION,
+                                   UNREADABLE_TRIAGE_ACTION, _failure_reason, _rule_triage)
 from looplab.engine.train_monitor import MONITOR_REPAIR_REASON
 from looplab.runtime.sandbox import RunResult
 
@@ -343,10 +354,17 @@ def test_no_diagnosis_can_move_an_engine_final_classification(fact):
     """The one property that keeps this feature from re-creating the v6 node 5 incident from the
     other side. The engine already KNOWS, out of band; so it does not ask. Note this holds for
     `not_learning` too — the registered overlap is about what the diagnostician may ANSWER, never
-    about what it may OVERRIDE."""
+    about what it may OVERRIDE.
+
+    THE ANSWER IS THE PROPERTY; THE SOURCE IS NOT ALWAYS `engine` (2026-09-08). One member of this
+    tuple is a fact the engine was TOLD rather than one it measured, and its row now says so — see
+    `test_a_declared_reason_is_recorded_as_declared_and_not_as_measured`. Which member that is comes
+    from `DECLARABLE_REASONS` rather than from a literal here, so a second declarable reason moves
+    this assertion with it instead of leaving it green and wrong."""
     reason, source = diagnosed_failure_reason(fact, _OOM)
     assert reason == fact
-    assert source == REASON_SOURCE_ENGINE
+    assert source == (REASON_SOURCE_DECLARED if fact in DECLARABLE_REASONS
+                      else REASON_SOURCE_ENGINE)
 
 
 def test_the_three_watchdog_verdicts_specifically_are_engine_final():
@@ -666,9 +684,10 @@ def test_unclassified_has_the_four_properties_that_make_it_safe_to_route():
     assert _rule_triage("crash", "", attempt=_RULE_BLIND_CRASH_ATTEMPTS + 1,
                         max_attempts=50)["action"] == "abandon"
     # 4. it is countable: its own reason_source, distinct from both the engine's and the judge's.
-    assert REASON_SOURCE_UNDIAGNOSED not in (REASON_SOURCE_ENGINE, REASON_SOURCE_TRIAGE)
+    assert REASON_SOURCE_UNDIAGNOSED not in (REASON_SOURCE_ENGINE, REASON_SOURCE_TRIAGE,
+                                             REASON_SOURCE_DECLARED)
     assert set(REASON_SOURCES) == {REASON_SOURCE_ENGINE, REASON_SOURCE_TRIAGE,
-                                   REASON_SOURCE_UNDIAGNOSED}
+                                   REASON_SOURCE_UNDIAGNOSED, REASON_SOURCE_DECLARED}
 
 
 def test_no_diagnostician_wired_is_a_configuration_and_not_a_failure():
@@ -859,6 +878,149 @@ def test_a_declared_reason_cannot_re_open_the_salvage_gate(engine_fact):
     # assertion that survives the ordering being moved back.
     assert salvage_condition(res, "rules_violation") is None, (
         "the salvage gate must refuse on the engine's own flag, not on whichever label reached it")
+
+
+class _AbandoningResearcher:
+    """The minimum a node needs to be seeded and, if it ever got that far, triaged."""
+
+    def propose(self, state, parent):
+        return Idea(operator="x", params={"x": 1.0, "y": 1.0})
+
+    def triage_crash(self, node, error, attempt, **kw):   # pragma: no cover - must never be reached
+        raise AssertionError("a rules_violation is NON_REPAIRABLE: the triage judge is not consulted")
+
+
+class _NeverRepairs:
+    def implement(self, idea):
+        return "print('unused')\n"
+
+    def repair(self, idea, code, error):   # pragma: no cover - same reason as above
+        raise AssertionError("a rules_violation must never reach the Developer")
+
+
+def _drive_declaring_eval(tmp_path, declared: str, *, inline_repair: bool = True):
+    """Run the REAL `_evaluate` over one node whose eval PRINTS a `looplab_failure_reason` line.
+
+    A command eval, because that is the only path that fills `RunResult.declared_reason` at all
+    (`runtime/command_eval.py::declared_failure_reason`, read out of the last JSON line of the
+    command's own stdout). The command exits 0 and prints no metric, so the engine's own answer is
+    the `no_metric` RESIDUAL — exactly the position the declared branch is allowed to rename, and
+    the position the whole containment argument rests on.
+    """
+    run_dir = tmp_path / ("declared-%s" % (declared or "none"))
+    eng = Engine(run_dir, task=ToyTask.load(Path(__file__).resolve().parents[1]
+                                            / "examples" / "toy_task.json"),
+                 researcher=_AbandoningResearcher(), developer=_NeverRepairs(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False, inline_repair=inline_repair)
+    eng._eval_spec = {
+        "command": ["python", "-c",
+                    "print(%r)" % json.dumps({"looplab_failure_reason": declared})],
+        "cwd": ".", "metric": {"reader": "stdout_json", "key": "metric"}, "timeout": 120.0}
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": "print('unused')\n"})
+
+    async def _bounded() -> bool:
+        with anyio.move_on_after(300) as scope:
+            await eng._evaluate(0, anyio.CapacityLimiter(1), None)
+        return scope.cancelled_caught
+
+    assert not anyio.run(_bounded), "the eval did not terminate"
+    return list(EventStore(run_dir / "events.jsonl").read_all())
+
+
+def test_a_declared_reason_is_recorded_as_declared_and_not_as_measured(tmp_path):
+    """THE ROW HAS TO SAY WHICH IT WAS, and this drives it end to end rather than asserting the
+    pure rule.
+
+    `rules_violation` is the one ENGINE-FINAL reason the engine did not itself observe: the eval
+    STATED it, on the stdout channel the candidate's own code shares. Being engine-final it also
+    suppresses the diagnostician's look — it is `NON_REPAIRABLE`, so `_eval_decide_repair` settles
+    the node before the triage call — so the terminal it writes is one nothing else examines. Until
+    2026-09-08 that terminal read `reason_source: "engine"`, i.e. the record asserted the engine had
+    authenticated a sentence a candidate can print, and it travels into every digest and in front of
+    the Researcher proposing the next idea.
+
+    Driven through the REAL `_evaluate` because the defect was never in the pure rule: it was in the
+    per-attempt stamp inside the loop, three hundred lines from any function whose truth table could
+    be checked, on a path `diagnosed_failure_reason` is never reached on.
+    """
+    evs = _drive_declaring_eval(tmp_path, "rules_violation")
+    terminals = [e for e in evs if e.type in ("node_evaluated", "node_failed")
+                 and e.data.get("node_id") == 0]
+    assert len(terminals) == 1 and terminals[0].type == "node_failed"   # invariant #2
+    row = terminals[0].data
+    assert row["reason"] == "rules_violation"
+    assert row["reason_source"] == REASON_SOURCE_DECLARED, (
+        "the eval SAID this; recording `engine` claims the engine measured it")
+    # …and the structural column the engine really did compute survives beside it, unchanged: the
+    # declared branch renames a RESIDUAL, and `engine_reason` is what an audit reads to see which.
+    assert row["engine_reason"] == "rules_violation"
+    # The rest of the shape the source tag must not have moved: nothing was repaired, and no
+    # diagnosis was recorded, because no diagnostician was consulted about an engine-final reason.
+    assert [e for e in evs if e.type == "node_repaired"] == []
+    assert "reason_summary" not in row and "reason_evidence" not in row
+
+
+def test_a_measured_residual_on_the_same_path_still_records_the_engine(tmp_path):
+    """THE CONTROL ARM, and without it the test above passes just as well against a stamp that
+    answers `declared` for everything.
+
+    Same driver, same command shape, one thing different: the eval prints a JSON line that declares
+    NOTHING. The engine's own `no_metric` residual then stands, and it really is the engine's — it
+    read the command's stdout with the operator's own reader and found no number.
+
+    `inline_repair=False` is the other half of the contrast rather than a convenience: `no_metric`
+    IS repairable, so with the loop on this node would go to the Developer — which is exactly what
+    the declared arm above shows a printed line buying its way out of. Off, the residual reaches the
+    terminal through the same per-attempt stamp, which is the line under test.
+    """
+    evs = _drive_declaring_eval(tmp_path, "", inline_repair=False)
+    terminals = [e for e in evs if e.type in ("node_evaluated", "node_failed")
+                 and e.data.get("node_id") == 0]
+    assert len(terminals) == 1 and terminals[0].type == "node_failed"
+    assert terminals[0].data["reason"] == "no_metric"
+    assert terminals[0].data["reason_source"] == REASON_SOURCE_ENGINE
+
+
+def test_the_source_of_an_engine_answer_has_exactly_one_derivation():
+    """`reason_source_for` is the rule, and it is keyed on the REGISTRY rather than on a literal.
+
+    Both halves are asserted because either alone is one edit from silent: a rule that hard-codes
+    `"rules_violation"` goes stale the moment a second reason becomes declarable, and a rule that
+    answers `declared` for a reason no eval may declare would put a stated tag on a measured fact.
+    """
+    for reason in DECLARABLE_REASONS:
+        assert reason_source_for(reason) == REASON_SOURCE_DECLARED
+    for reason in FAILURE_REASONS:
+        if reason not in DECLARABLE_REASONS:
+            assert reason_source_for(reason) == REASON_SOURCE_ENGINE
+    # Junk is an ANSWER and never a raise: this runs on the failure path, where the terminal being
+    # written is what a raise would cost.
+    assert reason_source_for(None) == REASON_SOURCE_ENGINE
+    assert reason_source_for(object()) == REASON_SOURCE_ENGINE
+
+
+def test_a_declared_reason_is_not_a_diagnosticians_account_to_lead_a_repair_with():
+    """The second reader of the column, and the reason `NON_DIAGNOSIS_SOURCES` is spelled once.
+
+    `diagnosis_repair_lead` prepends a diagnostician's summary to the text a Developer repairs from,
+    and refuses to do so for an ENGINE-final classification — leading with it would dress an engine
+    fact as a model's opinion. A DECLARED reason is not a diagnostician's reading either (nobody was
+    asked), so it takes the same refusal; a source-by-source `== REASON_SOURCE_ENGINE` test would
+    have let the new value through the moment it existed.
+    """
+    summary = "the arena's validator refused this solver"
+    assert diagnosis_repair_lead(summary, REASON_SOURCE_DECLARED, "err") == ""
+    assert diagnosis_repair_lead(summary, REASON_SOURCE_ENGINE, "err") == ""
+    assert set(NON_DIAGNOSIS_SOURCES) == {REASON_SOURCE_ENGINE, REASON_SOURCE_DECLARED}
+    # …and the diagnostician's own source still leads, or the rule would be a refusal of everything.
+    assert diagnosis_repair_lead(summary, REASON_SOURCE_TRIAGE, "err").startswith(
+        "The failure diagnostician read this run's logs")
 
 
 def test_an_allocator_that_raises_is_now_a_question_and_not_an_answer():

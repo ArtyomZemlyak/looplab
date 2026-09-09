@@ -153,7 +153,7 @@ class _ClaimSourceRows(ReceiptRows):
         self.read_health = _safe_claim_read_health(read_health) or _empty_claim_read_health()
 
 
-def _claim_source_rows(rows, *, research: bool) -> _ClaimSourceRows:
+def claim_source_rows(rows, *, research: bool) -> _ClaimSourceRows:
     source = rows if isinstance(rows, (list, tuple)) else []
     valid = [row for row in source if _valid_claim_source_row(row, research=research)]
     inherited = _safe_claim_read_health(getattr(source, "read_health", None))
@@ -191,10 +191,10 @@ def _claim_source_rows(rows, *, research: bool) -> _ClaimSourceRows:
     return _ClaimSourceRows(valid, read_health=health)
 
 
-def _filter_claim_source_rows(rows, predicate, *, research: bool) -> _ClaimSourceRows:
+def filter_claim_source_rows(rows, predicate, *, research: bool) -> _ClaimSourceRows:
     # Validate/inherit FIRST (that is where a carried receipt is escalated), then narrow through the
     # shared receipt-preserving projection rather than a comprehension that would drop it (EM-09).
-    return _claim_source_rows(rows, research=research).filter(predicate)
+    return claim_source_rows(rows, research=research).filter(predicate)
 
 
 def scope_cross_run_sources(*, task_id: str, lessons=None, capsules=None, research=None):
@@ -218,15 +218,15 @@ def scope_cross_run_sources(*, task_id: str, lessons=None, capsules=None, resear
         return lessons, capsules, research
     wanted = str(task_id)
 
-    from looplab.engine.memory import _filter_capsule_rows
+    from looplab.engine.memory import filter_capsule_rows
 
     def _same_task(row) -> bool:
         return str(row.get("task_id") or "") == wanted
 
     return (
-        None if lessons is None else _filter_claim_source_rows(lessons, _same_task, research=False),
-        None if capsules is None else _filter_capsule_rows(capsules, _same_task),
-        None if research is None else _filter_claim_source_rows(research, _same_task, research=True),
+        None if lessons is None else filter_claim_source_rows(lessons, _same_task, research=False),
+        None if capsules is None else filter_capsule_rows(capsules, _same_task),
+        None if research is None else filter_claim_source_rows(research, _same_task, research=True),
     )
 
 
@@ -284,7 +284,7 @@ def _claim_rows_snapshot_digest(rows, *, read_segment: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _load_claim_source_path(path, *, research: bool) -> _ClaimSourceRows:
+def load_claim_source_path(path, *, research: bool) -> _ClaimSourceRows:
     """Read one durable evidence store without laundering malformed/schema-invalid rows into absence."""
     from pathlib import Path
 
@@ -521,7 +521,7 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
 
 
 def _valid_claim_source_rows(rows, *, research: bool) -> list[dict]:
-    return _claim_source_rows(rows, research=research)
+    return claim_source_rows(rows, research=research)
 
 
 # Token regex shared by the fuzzy-merge projection and the retrieval planner's intent
@@ -670,7 +670,7 @@ def _research_source_summary(rows) -> dict:
     unversioned rows are tagged ``v=0`` by ``load_research_claims`` and therefore remain UNKNOWN, just like
     durable v1/v2 rows whose former writer did not record its input cardinality.
     """
-    validated = _claim_source_rows(rows, research=True)
+    validated = claim_source_rows(rows, research=True)
     source = [row for row in validated if isinstance(row, dict)]
     read_health = validated.read_health["research"]
     groups: dict[str, list[dict]] = {}
@@ -741,7 +741,7 @@ def _research_source_summary(rows) -> dict:
     }
 
 
-def _safe_research_source_summary(raw) -> Optional[dict]:
+def safe_research_source_summary(raw) -> Optional[dict]:
     """Bound and validate a projected aggregate receipt before forwarding it to another boundary."""
     if not isinstance(raw, dict):
         return None
@@ -819,11 +819,11 @@ def _safe_research_source_summary(raw) -> Optional[dict]:
 
 def _claim_source_summary(lessons, research, *, research_source: Optional[dict] = None) -> dict:
     """Combine both physical/schema snapshots with the D8 producer-cap receipt."""
-    lesson_rows = _claim_source_rows(lessons, research=False)
-    research_rows = _claim_source_rows(research, research=True)
+    lesson_rows = claim_source_rows(lessons, research=False)
+    research_rows = claim_source_rows(research, research=True)
     lesson_read = lesson_rows.read_health["lessons"]
     research_read = research_rows.read_health["research"]
-    research_source = (_safe_research_source_summary(research_source)
+    research_source = (safe_research_source_summary(research_source)
                        if research_source is not None else _research_source_summary(research_rows))
     if research_source is None:
         research_source = {
@@ -855,7 +855,7 @@ def _claim_source_summary(lessons, research, *, research_source: Optional[dict] 
     }
 
 
-def _safe_claim_source_summary(raw) -> Optional[dict]:
+def safe_claim_source_summary(raw) -> Optional[dict]:
     if (not isinstance(raw, dict) or raw.get("v") != _CLAIM_READ_HEALTH_VERSION
             or type(raw.get("receipt_known")) is not bool
             or type(raw.get("source_complete")) is not bool
@@ -943,8 +943,8 @@ class _ClaimAssessmentRows(ReceiptRows):
                  research_source: Optional[dict] = None,
                  evidence_sources: Optional[ClaimEvidenceSources] = None):
         super().__init__(rows)
-        self.claim_source = _safe_claim_source_summary(claim_source)
-        self.research_source = _safe_research_source_summary(research_source)
+        self.claim_source = safe_claim_source_summary(claim_source)
+        self.research_source = safe_research_source_summary(research_source)
         # None means "nothing was attached", and every reader dereferences it without a guard on
         # purpose: an unattached snapshot must raise here rather than fall through to a re-read of
         # the durable files, which is what a `None`-tolerant caller would silently do.
@@ -960,7 +960,7 @@ class _ClaimAssessmentRows(ReceiptRows):
         })
 
 
-def _filter_claim_assessments(rows, predicate) -> _ClaimAssessmentRows:
+def filter_claim_assessments(rows, predicate) -> _ClaimAssessmentRows:
     source = rows if isinstance(rows, (list, tuple)) else []
     if not isinstance(source, _ClaimAssessmentRows):
         # A plain list carries no aggregate. `None` is the honest answer, NOT a synthesized
@@ -1035,7 +1035,7 @@ def claim_evidence_digest(claim: dict) -> str:
     # uid-qualified `support`/`oppose`/`unverified` refs — adding it would re-stale every decision
     # on every box once for a field that changes nothing an operator reviewed.
     payload = {key: claim.get(key) for key in fields}
-    research_source = _safe_research_source_summary(payload.get("research_source"))
+    research_source = safe_research_source_summary(payload.get("research_source"))
     if research_source is not None:
         payload["research_source"] = {key: research_source[key] for key in (
             "source_complete", "producer_receipt_known", "producer_complete", "producer_runs",
@@ -1043,7 +1043,7 @@ def claim_evidence_digest(claim: dict) -> str:
             "producer_claims_retained", "producer_claims_omitted", "read_health_v", "read_complete",
             "rows_quarantined", "malformed_rows", "invalid_rows", "snapshot_digest",
         )}
-    claim_source = _safe_claim_source_summary(payload.get("claim_source"))
+    claim_source = safe_claim_source_summary(payload.get("claim_source"))
     if claim_source is not None:
         payload["claim_source"] = {key: claim_source[key] for key in (
             "v", "receipt_known", "source_complete", "read_complete",
@@ -1089,6 +1089,11 @@ def _bounded_claim_projection(row: dict) -> dict:
             "statement": _MAX_SOURCE_STATEMENT, "scope": _MAX_SOURCE_ID, "metric": 200,
             "decision": 20, "note": 4000, "by": 120, "at": 120, "action_id": 160,
             "evidence_digest": 80, "claim_uid": 80, "key": 160,
+            # The projection's own receipt about HOW it found this decision (`claim_uid` vs one of
+            # the pre-structured statement keys). Whitelisted like the rest so the bounded read-model
+            # an operator/UI sees carries it too — a maturity overlay matched by statement spelling
+            # rather than by scope-precise identity must be visible AT the row (doc 25 EM-06).
+            "resolved_via": 40,
         }
         safe_decision = {key: value[:maximum] for key, maximum in text_fields.items()
                          if isinstance((value := decision.get(key)), str)}
@@ -1097,12 +1102,12 @@ def _bounded_claim_projection(row: dict) -> dict:
         out["decision"] = safe_decision
     else:
         out["decision"] = None
-    research_source = _safe_research_source_summary(row.get("research_source"))
+    research_source = safe_research_source_summary(row.get("research_source"))
     if research_source is None:
         out.pop("research_source", None)
     else:
         out["research_source"] = research_source
-    claim_source = _safe_claim_source_summary(row.get("claim_source"))
+    claim_source = safe_claim_source_summary(row.get("claim_source"))
     if claim_source is None:
         out.pop("claim_source", None)
     else:

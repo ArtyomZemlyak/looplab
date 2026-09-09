@@ -217,3 +217,144 @@ def test_every_provider_budget_is_still_derived_from_the_loop_cap():
 
 def test_the_shared_helpers_default_to_the_loop_cap():
     assert inspect.signature(fit_rows).parameters["cap"].default == RESULT_CAP
+
+
+# --------------------------------------------------------------------------------------------
+# bounded_page — the rule itself (docs/BACKLOG.md §0.17: the truncation cuts the END and the
+# payload is at the END). `clip` and `fit_rows` bound ONE string and a row listing; the third shape
+# is a reader whose content is longer than any cap and whose payload may be anywhere in it, and for
+# that shape the honest bound is a PAGE plus the call that returns the next one.
+# --------------------------------------------------------------------------------------------
+
+def test_a_page_that_covers_everything_is_returned_verbatim():
+    """A converted surface must keep producing byte-identical short answers, or every existing
+    receipt/digest over one moves — and a bound that marks an answer it did not cut teaches the
+    reader to distrust the marker."""
+    from looplab.core.context_budget import bounded_page
+
+    assert bounded_page("short note", 600, more_call="read_note(offset={offset})") == "short note"
+
+
+def test_a_cut_page_names_the_range_the_total_and_the_call_that_continues():
+    from looplab.core.context_budget import bounded_page
+
+    out = bounded_page("x" * 5000, 600, more_call="read_note(name='a.md', offset={offset})",
+                       what="note a.md:")
+    assert len(out) <= 600
+    covered = len(out.split("\n…[")[0])
+    assert f"chars 0-{covered} of 5000" in out
+    assert f"call read_note(name='a.md', offset={covered}) for the rest" in out
+
+
+def test_the_pages_tile_the_text_and_the_last_one_says_it_is_the_last():
+    """THE property the two measured defects lacked: the payload at the tail is REACHABLE, and the
+    caller can tell it has reached it. Driven by actually following the pointer to the end."""
+    from looplab.core.context_budget import bounded_page
+
+    text = "".join(chr(97 + i % 26) for i in range(4000)) + "PAYLOAD-AT-THE-TAIL"
+    seen, offset, pages = "", 0, 0
+    while True:
+        page = bounded_page(text, 600, offset=offset, more_call="read(offset={offset})", what="t:")
+        body, _, receipt = page.partition("\n…[")
+        seen += body
+        pages += 1
+        assert pages < 100, "the continuation pointer stopped advancing"
+        if "end of text" in receipt:
+            break
+        offset = int(receipt.split("for the rest")[0].rsplit("offset=", 1)[1].rstrip(") "))
+    assert seen == text, "tiling the pages did not reproduce the text"
+    assert "PAYLOAD-AT-THE-TAIL" in seen and pages > 1
+
+
+def test_a_page_past_the_first_states_its_range_even_when_it_is_the_last():
+    """A caller reading page 2 is owed the range: without it the second page of a two-page note is
+    byte-indistinguishable from a whole short note."""
+    from looplab.core.context_budget import bounded_page
+
+    out = bounded_page("x" * 900, 600, offset=800, more_call="read(offset={offset})")
+    assert out.endswith("…[chars 800-900 of 900; end of text]")
+
+
+def test_a_surface_with_no_continuation_says_so_instead_of_naming_one():
+    from looplab.core.context_budget import bounded_page
+
+    out = bounded_page("x" * 5000, 600, what="thing:")
+    assert "not addressable from this call" in out and "call " not in out.split("…[")[1]
+
+
+def test_a_cap_too_small_for_the_receipt_still_advances():
+    """A continuation that points back at the offset it was issued from is a LOOP — the one failure
+    worse than the silent cut, because the caller spends every remaining call on it."""
+    from looplab.core.context_budget import bounded_page
+
+    out = bounded_page("x" * 5000, 10, more_call="read(offset={offset})")
+    nxt = int(out.split("for the rest")[0].rsplit("offset=", 1)[1].rstrip(") "))
+    assert nxt >= 1
+
+
+def test_a_junk_offset_clamps_instead_of_raising():
+    from looplab.core.context_budget import bounded_page
+
+    assert bounded_page("abc", 600, offset=-5) == "abc"
+    assert bounded_page("abc", 600, offset=99).startswith("\n…[chars 3-3 of 3")
+
+
+# --------------------------------------------------------------------------------------------
+# …and the last silent cut among the agent-facing readers, converted to it.
+# --------------------------------------------------------------------------------------------
+
+def test_read_note_pages_instead_of_amputating_the_tail(tmp_path):
+    """`read_note` was `read_file(...)[:4000]`: no marker, no continuation, so a note whose payload
+    sits past char 4,000 came back looking WHOLE. Driven end to end through `execute` — the reply
+    the model actually receives — and the tail is then FETCHED, which a source pin cannot check."""
+    from looplab.tools._base import RESULT_CAP
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    body = "intro\n" + "x" * 9000 + "\nCONCLUSION: use params lr=3e-4"
+    (tmp_path / "a.md").write_text(body, encoding="utf-8")
+    kb = KnowledgeTools(knowledge_dir=str(tmp_path))
+
+    first = kb.execute("read_note", {"name": "a.md"})
+    assert len(first) <= RESULT_CAP
+    assert "CONCLUSION" not in first, "the fixture no longer exercises a tail payload"
+    assert "note a.md: chars 0-" in first and f"of {len(body)}" in first
+
+    seen, offset, guard = "", 0, 0
+    while True:
+        page = kb.execute("read_note", {"name": "a.md", "offset": offset})
+        body_part, _, receipt = page.partition("\n…[")
+        seen += body_part
+        guard += 1
+        assert guard < 50
+        if "end of text" in receipt:
+            break
+        offset = int(receipt.split("for the rest")[0].rsplit("offset=", 1)[1].rstrip(") "))
+    assert seen == body, "the pages did not reproduce the note"
+    assert "CONCLUSION: use params lr=3e-4" in seen
+
+
+def test_read_note_still_answers_a_short_note_verbatim(tmp_path):
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    (tmp_path / "b.md").write_text("just a line", encoding="utf-8")
+    assert KnowledgeTools(knowledge_dir=str(tmp_path)).execute(
+        "read_note", {"name": "b.md"}) == "just a line"
+
+
+def test_read_note_declares_the_offset_it_accepts():
+    """The continuation the receipt names has to be a call the schema admits — a resume pointer the
+    model cannot spell is the same dead end as no pointer at all."""
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    spec = next(s for s in KnowledgeTools(knowledge_dir=None).specs()
+                if s["function"]["name"] == "read_note")
+    assert "offset" in spec["function"]["parameters"]["properties"]
+    assert spec["function"]["parameters"]["required"] == ["name"]
+
+
+def test_a_junk_offset_from_the_model_reads_as_the_first_page(tmp_path):
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    (tmp_path / "c.md").write_text("hello", encoding="utf-8")
+    kb = KnowledgeTools(knowledge_dir=str(tmp_path))
+    assert kb.execute("read_note", {"name": "c.md", "offset": "not-a-number"}) == "hello"

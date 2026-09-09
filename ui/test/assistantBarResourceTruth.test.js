@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 import { sessionReadSuperseded } from '../src/assistantSessionModel.js'
 import { newChatGate } from '../src/assistantChromeModel.js'
+import { sendAbandonReason, terminalTurnOutcome } from '../src/assistantTurnModel.js'
 
 const assistantSource = () => readFile(new URL('../src/AssistantBar.jsx', import.meta.url), 'utf8')
 const section = (source, start, end) => source.slice(source.indexOf(start), source.indexOf(end))
@@ -102,8 +103,17 @@ test('session creation and send are single-flight while a failed create preserve
   assert.match(run, /finally[\s\S]*?turnCaptureRef\.current = false/)
   assert.ok(run.indexOf('await cancelReqRef.current') < run.indexOf("setInput('')"),
     'Stop handoff must settle before consuming the draft')
-  assert.match(run, /await cancelReqRef\.current[\s\S]*?const accessBecameReadOnly = historicalRef\.current[\s\S]*?\|\| accessBecameReadOnly/,
-    'a route that becomes read-only during Stop handoff must preserve the draft and prevent the POST')
+  // Doc 25 UI-05: the second gate is `assistantTurnModel.js::sendAbandonReason` now, so the property
+  // splits the way the code did. The ORDER stays a source pin — the cancel is awaited, and only then
+  // is read-only re-read — while what a read-only route MEANS is driven over the rule itself, which
+  // a regex over a longhand conjunction never checked.
+  assert.match(run, /await cancelReqRef\.current[\s\S]*?sendAbandonReason\(\{[\s\S]*?readOnly: historicalRef\.current/,
+    'a route that becomes read-only during Stop handoff must be re-read after the handoff settles')
+  assert.ok(run.indexOf('sendAbandonReason({') < run.indexOf("setInput('')"),
+    'and it must be re-read BEFORE the draft is consumed or anything is POSTed')
+  assert.deepEqual(sendAbandonReason({ readOnly: true }),
+    { code: 'read_only', message: 'Draft not sent · run access became read-only' })
+  assert.equal(sendAbandonReason({}), null, 'an unchanged route sends')
   assert.match(send, /turnCaptureRef\.current \|\| directCaptureRef\.current[\s\S]*?Another action is already starting/,
     'the shared Send surface must gate both mutation preflights synchronously')
   // Additional guards may be added (a pending run-command confirmation now blocks it too); these
@@ -230,7 +240,9 @@ test('public-link verification fences authority while unknown truth preserves lo
 test('Assistant reply completion is owned by one exact attempt and one exact user turn', async () => {
   const source = await assistantSource()
   const open = section(source, 'const openSession =', 'openSessionRef.current = openSession')
-  const completion = section(source, 'const completedAssistantReply =', 'const recoverReply =')
+  // `completedAssistantReply` moved to assistantRecovery.js beside the two identity rules it is the
+  // third reader of (doc 25 UI-05); the pin follows it rather than reading an empty slice.
+  const completion = await readFile(new URL('../src/assistantRecovery.js', import.meta.url), 'utf8')
   const recovery = section(source, 'const recoverReply =', '// Stream one instruction')
   const run = section(source, 'const runLLM =', 'const requestNewRun =')
   const retry = section(source, 'const retryTurn =', 'const openAssistantSettings =')
@@ -269,10 +281,20 @@ test('Assistant reply completion is owned by one exact attempt and one exact use
     < run.indexOf('await boundedRequest(signal => assistantCreate('),
   'session creation itself must belong to the attempt that captured the composer')
   assert.match(run, /const safeAttempt = \(fn\)[\s\S]*?replyAttemptCurrent\(localAttempt, id\)/)
-  assert.match(run, /completedAssistantReply\(durableMessages, localUserTurn\)/,
-    'terminal reconciliation must bind the reply to the optimistic user identity')
-  assert.match(run, /exactTurnIndex >= 0 && exactTurnIndex === durableMessages\.length - 1/,
-    'terminal failure recovery must not attach itself to another tab\'s trailing user turn')
+  // Both halves of the terminal frame are `assistantTurnModel.js::terminalTurnOutcome` now, so the
+  // binding is DRIVEN over real transcripts instead of matched as text: a reply must belong to this
+  // tab's optimistic user turn, and a staged turn must be the LAST message — otherwise another tab's
+  // trailing user turn would be adopted as ours.
+  assert.match(run, /terminalTurnOutcome\(durableMessages, localUserTurn, priorLen\)/)
+  const mine = { role: 'user', content: 'hi', turn_id: 't1' }
+  const theirs = { role: 'user', content: 'theirs', turn_id: 't2' }
+  assert.equal(terminalTurnOutcome([mine, { role: 'assistant', content: 'done' }], mine, 2).kind,
+    'reply')
+  assert.equal(terminalTurnOutcome([mine], mine, 2).kind, 'staged')
+  assert.equal(terminalTurnOutcome([mine, theirs], mine, 2).kind, 'unknown',
+    'a trailing user turn that is not ours is never adopted as our staged turn')
+  assert.equal(terminalTurnOutcome([theirs, { role: 'assistant', content: 'x' }], mine, 2).kind,
+    'unknown', 'and neither is another turn\'s reply')
   assert.match(run, /activeReplyAttemptRef\.current === localAttempt[\s\S]*?turnCaptureRef\.current = false/,
     'only the owning attempt may release the shared send capture')
   assert.match(retry, /const retrySessionSeq = \+\+openSessionSeqRef\.current[\s\S]*?replyAttemptOwned\(retryCheckAttempt, id\)[\s\S]*?retrySessionSeq !== openSessionSeqRef\.current/,
