@@ -1025,6 +1025,18 @@ class DevProbeTools:
         # module: not a fence, a broken interpreter — `_too_broad`'s failure arriving through the
         # grant list. Say so, and name the shape that works, rather than run a probe that dies on
         # its first import with nothing to say why.
+        # OPEN[punched-dir-is-not-listable]
+        # proof:`present:_grant_expansion@looplab/runtime/read_fence.py`
+        # A tier punched around a fenced grader grants each
+        # CHILD and not the directory itself, so the directory cannot be listed and no package in
+        # it imports by NAME -- the finder sees an empty directory. Measured 2026-09-09 with a
+        # grader under `~/.cache`: `sibling-open` by path OK, `ordinary-import` and `grader-import`
+        # both ModuleNotFoundError, `grader-open` by path refused by the hook with its own sentence.
+        # Consequence: in this rung the grader fence's NAMED refusal is reachable by path only, and
+        # a task whose grader lives in a venv's site-packages makes every package there
+        # unimportable by name for the probe. Landlock has a separate `READ_DIR` right, so the punch
+        # could grant listing on the punched directory while still withholding the grader's files.
+        # Not done here: it widens the kernel ruleset and wants its own measurement.
         stdlib = read_fence._norm_root(__import__("sysconfig").get_paths().get("stdlib") or "")
         if stdlib:
             inside = sorted(f"{package} ({d})" for package, dirs in self.protect_roots.items()

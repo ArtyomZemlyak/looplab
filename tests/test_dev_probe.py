@@ -1315,13 +1315,34 @@ def test_the_probe_refuses_the_grader_in_the_hook_rung_and_names_the_package(fak
 
 def test_the_probe_refuses_the_grader_under_full_default_confinement(fake_grader, monkeypatch):
     """BOTH rungs, on a kernel that has the second one (skipped by the autouse gate otherwise).
-    This is the review's own reproduction — "under full default confinement" — driven verbatim."""
+    This is the review's own reproduction — "under full default confinement" — driven verbatim.
+
+    §383 corrects what the IMPORT half may claim. The read is refused, which is the security
+    statement and is asserted below unchanged. It is NOT refused by the grader fence naming the
+    package: under the kernel rung the containing directory is granted per-CHILD, so it cannot be
+    LISTED, the finder sees an empty directory and the import dies as `ModuleNotFoundError` before
+    either rung is consulted. Measured, not inferred — with the same confinement:
+
+        ordinary-import (a sibling package by NAME)  FAIL ModuleNotFoundError
+        grader-import   (the fenced package by NAME) FAIL ModuleNotFoundError
+        sibling-open    (that same sibling by PATH)  OK
+        grader-open     (the fenced file by PATH)    refused by the hook
+
+    So the named refusal is reachable by PATH (asserted below and by the hook-rung test above) and
+    unreachable by NAME in this rung. Asserting it here made the test red permanently while both
+    fences were doing their job. The open item `punched-dir-is-not-listable` in
+    `tools/dev_probe.py` is the product side of it (declared once, there).
+    """
     site, name = fake_grader
     monkeypatch.syspath_prepend(str(site))
     tools = _grader_probe(site, name)
     out = tools.execute("run_probe", {"code": (
         f"import sys; sys.path.insert(0, {str(site)!r})\n"
         f"import inspect, {name}.checker as m; print(inspect.getsource(m))")})
+    assert "def is_solution" not in out and "exit=0" not in out
+    # The NAMED refusal, by the path the hook can see — the claim the review actually made.
+    out = tools.execute("run_probe", {
+        "code": f"print(open({str(site / name / 'checker.py')!r}).read())"})
     assert "def is_solution" not in out and "exit=0" not in out
     assert f"`{name}`" in out and "fenced" in out, out
     # …the kernel half too, where the audit hook cannot look.
@@ -1334,6 +1355,27 @@ def test_the_probe_refuses_the_grader_under_full_default_confinement(fake_grader
     assert "DENIED" in out and "HOW SOLUTIONS ARE CHECKED" not in out
     out = tools.execute("run_probe", {"code": f"print(open({str(site / 'otherpkg' / '__init__.py')!r}).read())"})
     assert "exit=0" in out and "AN ORDINARY DEPENDENCY" in out, out
+
+
+@pytest.mark.landlock_refusal
+def test_a_punched_directory_keeps_its_files_readable_and_loses_only_its_listing(fake_grader):
+    """§383's mechanism, pinned so it cannot change quietly in either direction.
+
+    A tier containing a fenced grader is PUNCHED: each child is granted, the directory itself is
+    not. That is why a sibling opens by path and no package in it imports by name. If the rung ever
+    grants `READ_DIR` on the punched directory — which would restore import-by-name and let the
+    fence answer with its own sentence — this goes red and the test above should be tightened back.
+    """
+    site, name = fake_grader
+    tools = _grader_probe(site, name)
+    out = tools.execute("run_probe", {"code": (
+        f"import os\n"
+        f"try: print('LIST', sorted(os.listdir({str(site)!r})))\n"
+        f"except OSError as e: print('LIST DENIED', e.__class__.__name__)\n"
+        f"print('FILE', open({str(site / 'otherpkg' / '__init__.py')!r}).read().strip())\n")})
+    assert "LIST DENIED" in out, out
+    assert "AN ORDINARY DEPENDENCY" in out, out
+    assert "exit=0" in out, out
 
 
 @pytest.mark.parametrize("confine", [True, False])

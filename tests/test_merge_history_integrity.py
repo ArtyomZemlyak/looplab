@@ -50,18 +50,26 @@ _DELIBERATE_TRAILER = "Discards-Parent-Commits:"
 
 # The two instances already in this repo's permanent history, with the commit that repaired each.
 # A merge cannot be un-made, so these are a frozen baseline: anything NOT in this map is a new one.
+# Which LINE a baselined merge lives on. `HERE` means reachable from this checkout's HEAD, so the
+# scan sees it and the entry is what stops it being reported again. `MASTER_LINE` means the merge was
+# made by the push route in another clone (`/var/tmp/integrate`) and never came back to the bench
+# line: this checkout does not have the object at all, the scan cannot see it, and the entry is inert
+# HERE but load-bearing for anyone running this suite on master. §382.
+HERE = "here"
+MASTER_LINE = "master-line"
+
 _KNOWN = {
-    "9943819195311b4e1042bf2de09431a1f7f542f7": "repaired by 1ee13e14 (2026-08-05)",
-    "6982c9cd636daf9ad43efbd3c9d0ed1b4eb860f8": "repaired by 33b1aefa (2026-07-19)",
+    "9943819195311b4e1042bf2de09431a1f7f542f7": (HERE, "repaired by 1ee13e14 (2026-08-05)"),
+    "6982c9cd636daf9ad43efbd3c9d0ed1b4eb860f8": (HERE, "repaired by 33b1aefa (2026-07-19)"),
     # §344. Both surfaced when the bench line merged origin/master on 2026-09-08, and both were
     # CHECKED rather than waved through: `git apply --check --reverse` of each dropped commit's own
     # diff succeeds against the merged tree, i.e. the content is present and only the history's
     # shape is wrong. An entry added without that check is an ignore-list, which is what the test
     # below exists to stop this becoming.
-    "e87d5d608660cd4af5b2f5e8269d19bfc64c2a5a":
-        "dropped 90eced07 (CLAUDE.md census line); content present in the tree, re-checked 2026-09-08",
-    "4d25c834d52a6c83016aae3d1772edbc9f0eaf8b":
-        "dropped 81edd219 (toy-role import in test_feature_cv_gate.py); content present in the tree",
+    "e87d5d608660cd4af5b2f5e8269d19bfc64c2a5a": (MASTER_LINE,
+        "dropped 90eced07 (CLAUDE.md census line); content present in the tree, re-checked 2026-09-08"),
+    "4d25c834d52a6c83016aae3d1772edbc9f0eaf8b": (MASTER_LINE,
+        "dropped 81edd219 (toy-role import in test_feature_cv_gate.py); content present in the tree"),
 }
 
 # The near-miss the "changed something" filter exists for: `aabe2bda`'s other parent is a merge whose
@@ -185,11 +193,67 @@ def test_no_merge_silently_discards_the_other_parents_commits(history):
           "message. Otherwise re-apply the commits above.")
 
 
+def _object_is_in_this_clone(sha: str) -> bool:
+    """True if this repository holds the commit at all -- reachable or not."""
+    result = subprocess.run(
+        ["git", "-C", str(REPO), "cat-file", "-e", sha + "^{commit}"],
+        capture_output=True, text=True, timeout=_GIT_TIMEOUT_S)
+    return result.returncode == 0
+
+
+def baseline_verdict(sha: str, line: str, in_history: bool, object_present: bool) -> str | None:
+    """`None` if this entry is fine here, else the sentence saying what is wrong.
+
+    A function, and not four asserts inline, because one of the four cases cannot be staged in this
+    checkout at all: "the object is present and HEAD cannot reach it" needs a rebase to have
+    happened. Mutating that branch away left the repo-pinned test GREEN -- it was pinned to data
+    that never exercises it (§342 again: test the rule, not the row that happens to be there).
+    """
+    if in_history:
+        return None
+    if line != MASTER_LINE:
+        return (f"baselined merge {sha[:8]} is on this line but no longer reachable from HEAD -- "
+                "stale, remove it rather than carrying it")
+    if object_present:
+        return (f"baselined merge {sha[:8]} is filed under {MASTER_LINE}, but this clone HOLDS the "
+                "object and HEAD cannot reach it. That is a rebase on this line, not a foreign line.")
+    return None
+
+
 def test_every_baselined_merge_is_still_in_the_history(history):
-    """The baseline is not an ignore-list to grow. If a sha here is gone — a rebase, a fresh clone
-    with different ids — it is stale and must be removed, not carried."""
-    for sha in _KNOWN:
-        assert sha in history, f"baselined merge {sha[:8]} is no longer reachable from HEAD"
+    """The baseline is not an ignore-list to grow. If a sha here is gone it is stale — but "gone"
+    has two meanings and §382 is the record of them being confused.
+
+    A merge REACHABLE from HEAD is the ordinary case. A merge whose object this clone does not hold
+    at all lives on another line: §344's two entries were made by the push route in
+    `/var/tmp/integrate`, on master, and the bench line never merges master back. The scan here
+    cannot see them, so the entry is inert here and needed on master — and the first version of this
+    test failed permanently in the only checkout that runs it, because the baseline was harvested in
+    one repository and pinned into a test that runs in another.
+
+    What is NOT tolerated, and is the rebase case the rule was written for: the object is present
+    and HEAD still cannot reach it. And an entry must SAY which line it is on, so adding a sha this
+    clone has never heard of still costs a claim that can be wrong.
+    """
+    for sha, (line, _reason) in _KNOWN.items():
+        problem = baseline_verdict(sha, line,
+                                   in_history=sha in history,
+                                   object_present=_object_is_in_this_clone(sha))
+        assert problem is None, problem
+
+
+def test_the_baseline_is_not_vacuous_and_each_line_means_what_it_says(history):
+    """Non-vacuity for the rule above. Without this, filing every entry as `MASTER_LINE` would make
+    the check pass by describing nothing -- the ignore-list the module docstring refuses to become.
+    """
+    here = [sha for sha, (line, _r) in _KNOWN.items() if line == HERE]
+    foreign = [sha for sha, (line, _r) in _KNOWN.items() if line == MASTER_LINE]
+    assert here, "no entry is claimed on this line: the baseline describes nothing here"
+    assert all(sha in history for sha in here), \
+        [sha[:8] for sha in here if sha not in history]
+    # A foreign entry that this clone can reach is not foreign; it would mean the label is decorative.
+    assert not [sha for sha in foreign if sha in history] or \
+        all(sha in history for sha in foreign), "mixed: some foreign entries reachable, some not"
 
 
 @pytest.mark.parametrize("sha,expected", [
@@ -312,3 +376,17 @@ def test_a_re_merge_of_an_already_merged_branch_is_not_caught(diverged):
     _git(repo, "checkout", "-q", head)
     _git(repo, "merge", "-q", "--no-ff", side, "-m", "Merge branch 'side' again")
     assert discarding_merges(_walk(repo)) == {}
+
+
+@pytest.mark.parametrize("line,in_history,object_present,complains", [
+    (HERE, True, True, False),            # the ordinary baselined merge
+    (MASTER_LINE, True, True, False),     # run on master, where the foreign entry is at home
+    (HERE, False, True, True),            # rebased away on this line -- stale, must be removed
+    (HERE, False, False, True),           # gone entirely and still claimed here
+    (MASTER_LINE, False, False, False),   # §344's two, seen from the bench line
+    (MASTER_LINE, False, True, True),     # the case no checkout of this repo can stage today
+])
+def test_the_baseline_rule_over_every_case_including_one_this_repo_cannot_stage(
+        line, in_history, object_present, complains):
+    verdict = baseline_verdict("dead" * 10, line, in_history, object_present)
+    assert (verdict is not None) is complains, verdict
