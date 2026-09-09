@@ -185,20 +185,37 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=DEFAULT_ROOT)
-    ap.add_argument("--task", default="edge_expansion")
+    ap.add_argument("--task", default=None)
     ap.add_argument("--low", type=float, default=5.0)
     ap.add_argument("--high", type=float, default=95.0)
     args = ap.parse_args(argv)
 
+    live = [r["probe"] for r in lanes.probes(BENCH) if r["probe"]]
+    if not live:
+        print("no bench probe running")
+        return 0
+    # THE TASK COMES FROM THE PROBES, NOT FROM A DEFAULT THAT AGED (§371). `--task` defaulted to
+    # `edge_expansion`, which was right when the corpus was 118 of them and silently wrong the day
+    # every running probe was `pagerank`: the tool refused every probe with "re-run with --task
+    # pagerank" and the operator had to know. It already knows -- `probe_task` reads each probe's
+    # own tree, and the loop below uses it to explain the refusal. Using it to pick the task is the
+    # same reading, one step earlier. An explicit `--task` still wins; probes on two tasks at once
+    # are named and refused rather than silently compared against one of them.
+    if args.task is None:
+        theirs = {t for t in (probe_task(args.root, n) for n in live) if t}
+        if len(theirs) > 1:
+            print("running probes are on more than one task (" + ", ".join(sorted(theirs))
+                  + ") -- name one with --task; a corpus is per task", file=sys.stderr)
+            return 2
+        if not theirs:
+            print("no running probe has a task tree yet", file=sys.stderr)
+            return 2
+        args.task = theirs.pop()
     whole_dist = corpus(args.root, args.task)
     dist = whole_dist
     if not dist:
         print(f"no finished {args.task} runs to compare against", file=sys.stderr)
         return 2
-    live = [r["probe"] for r in lanes.probes(BENCH) if r["probe"]]
-    if not live:
-        print("no bench probe running")
-        return 0
     n = len(next(iter(dist.values())))
     firsts = corpus_first_nodes(args.root, args.task)
     print(f"{len(live)} running probe(s) against {n} finished {args.task} runs")

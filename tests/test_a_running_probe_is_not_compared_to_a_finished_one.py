@@ -239,13 +239,19 @@ def test_a_probe_on_another_task_is_named_not_skipped(tmp_path, monkeypatch, cap
     """The probe's path is built from `--task`, so a run on a different task matched nothing and the
     loop skipped it in silence -- while the header said "1 running probe(s)" and the footer said "no
     probe is outside the corpus". Seen live with `pgr1` (pagerank) against the default
-    edge_expansion corpus: a reassuring all-clear over zero probes examined."""
+    edge_expansion corpus: a reassuring all-clear over zero probes examined.
+
+    §371 re-pointed this: `--task` no longer DEFAULTS to edge_expansion, so the situation is
+    reached by naming the task explicitly rather than by the default aging into it. The property is
+    unchanged and is the one that matters -- an operator who names a task must be told which probes
+    that leaves unexamined, not given an all-clear over zero of them.
+    """
     for i in range(6):
         _run_task(tmp_path, f"done{i}", "edge_expansion", [0.1] * 10, node_after=0.3)
     _run_task(tmp_path, "elsewhere", "pagerank", [0.1] * 3)
     monkeypatch.setattr(outlier_check.lanes, "probes",
                         lambda root: [{"probe": "elsewhere", "lane": "0-10", "pid": 1}])
-    rc = outlier_check.main(["--root", str(tmp_path)])
+    rc = outlier_check.main(["--root", str(tmp_path), "--task", "edge_expansion"])
     out = capsys.readouterr().out
     assert "runs pagerank, not edge_expansion -- NOT COMPARED" in out, out
     assert "--task pagerank" in out, out
@@ -258,7 +264,8 @@ def test_an_empty_examination_is_not_an_all_clear(tmp_path, monkeypatch, capsys)
     _run_task(tmp_path, "elsewhere", "pagerank", [0.1] * 3)
     monkeypatch.setattr(outlier_check.lanes, "probes",
                         lambda root: [{"probe": "elsewhere", "lane": "0-10", "pid": 1}])
-    outlier_check.main(["--root", str(tmp_path)])
+    # §371: the task is named explicitly now -- the default no longer supplies it.
+    outlier_check.main(["--root", str(tmp_path), "--task", "edge_expansion"])
     out = capsys.readouterr().out
     assert "NOTHING WAS COMPARED" in out, out
     assert "no probe is outside the corpus" not in out, out
