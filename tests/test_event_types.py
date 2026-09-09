@@ -47,8 +47,23 @@ def _emitted_string_literals(tree: ast.AST) -> list[tuple[int, str]]:
     like `es = EventStore(p); es.append(...)` that the name heuristic would miss)."""
     out = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "append" and node.args):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args):
+            continue
+        # `append_many([(TYPE, payload), …])` is the OTHER emission API, and this scanner was blind
+        # to it: measured 2026-09-08, typing `("inject_faild", …)` into an `append_many` tuple left
+        # this whole file at 6 passed, while the same typo through `.append(` correctly reddened it
+        # naming the site. Eight `append_many` call sites live in `looplab/engine/` alone, and a
+        # typo'd literal there silently no-ops in the fold — invariant #7's exact failure.
+        if node.func.attr == "append_many":
+            rows = node.args[0]
+            if isinstance(rows, (ast.List, ast.Tuple)):
+                for row in rows.elts:
+                    if isinstance(row, (ast.Tuple, ast.List)) and row.elts:
+                        head = row.elts[0]
+                        if isinstance(head, ast.Constant) and isinstance(head.value, str):
+                            out.append((getattr(head, "lineno", node.lineno), head.value))
+            continue
+        if node.func.attr != "append":
             continue
         first = node.args[0]
         if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):

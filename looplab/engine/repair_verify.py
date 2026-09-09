@@ -145,7 +145,9 @@ token can still ACQUIT (if the diff contains it the row is `verified` exactly as
 longer CONVICT alone. Measured over all 137 model-authored rationales in `runs/`, the rule moves two
 rows and only two: v8 node 3 attempt 2 `unmet` -> `unstated`, and `rubertlite-dr-unified-v6` node 1
 attempt 1 keeps its `unmet` with `train.py` dropped from the reported list (it sits in "node 1 passed
-three CLI args the harness's train.py argparse does not define"). No `unmet` became `verified`, no
+three CLI args the harness's train.py argparse does not define" — and that row has since left
+`unmet` altogether, because the clause SCANNER was stopping at the dot inside `train.py`; see the
+2026-09-08 correction below). No `unmet` became `verified`, no
 `inert` moved, and v8 node 3 attempt 1 — the one TRUE positive on the live run, "Fix mine_stage.py …"
 against a diff that edited `vectorsearch/data/mine_negatives.py` — is untouched, because its token is
 in the next sentence and not in the citation's clause.
@@ -168,19 +170,134 @@ vocabulary this module carries. Measured over all 137 model-authored rationales:
 row in the corpus, the one above, and `mine_stage` against that same run's `mine_negatives.py` diff
 does NOT match it.
 
-OPEN[repair-unmet-five-unpatched-shapes] five of the 14 surviving `unmet` shapes are left
-deliberately unpatched, and `verified` is a FLOOR (at least one claimed token in the diff), not a
-guarantee. proof:present:changed_region@looplab/engine/repair_verify.py
+AN EXCEPTION CLASS NAME IS THE CRASH'S OWN VOCABULARY, and it is the third false-positive shape,
+withdrawn 2026-09-08. `sim-nosignal` node 5's rationale names `IndentationError`; the repair that
+fixes an indentation error writes that word nowhere, so a literal-token extractor convicted a repair
+for reporting what the dead process called itself. `names_an_exception_class` recognises the shape —
+Python's own `…Error` / `…Exception` / `…Warning` / `…Interrupt` suffixes, whole-token — and routes
+it through the SAME gate as a citation: it may still ACQUIT (a diff that really contains the name
+verifies the row exactly as before) and it may no longer CONVICT alone, so the demotion target is
+`unstated`. Deliberately NOT a `_NOT_A_CLAIM` row, which is where the 2026-08-15 text filed it: that
+set DROPS a token, and dropping takes the acquittal with the conviction — a row whose only met token
+was the exception name would move `verified` -> `unmet`, i.e. a weak signal would start convicting,
+which is the direction this rung refuses. See the comment on `_EXCEPTION_CLASS_RE`.
+
+A CLAUSE DOES NOT END INSIDE A FILENAME, and the fourth row was a defect in the clause SCANNER
+rather than a shape the rules could not reach — corrected 2026-09-08. `_clause_end_at` exempted a
+`.` between two DIGITS and nothing else, so the citation window closed on the first dot of
+`train.py` or `loss.temperature` and every cited token after it fell outside the span the citation
+rule meant to cover. `rubertlite-dr-unified-v6` node 1 attempt 1 is that row and BOTH of its
+concrete lists sit inside a clause about another node — "node 1 passed three CLI args the harness's
+train.py argparse does not define (gradient_accumulation_steps, max_grad_norm, weight_decay)" and
+"keep the supported set node 0 used (loss.temperature, batch_size, learning_rate, n_epochs,
+warmup_ratio)" — while the scanner cut the first at `train.` and the second at `loss.`, so seven
+tokens the shipped rule already excused convicted anyway. The exemption is now stated on the SHAPE
+of a sentence end (a `.` between two word characters is inside a token, whatever the token is)
+rather than on a list of the tokens one can be mistaken for; both bounds the digit rule stated are
+unchanged and are now consequences of it. See `_clause_end_at`.
+
+WHAT THAT ROW IS AND IS NOT EVIDENCE OF, because it was filed as the NEGATED claim and the negation
+is exactly as unread as it was. The verdict moves `unmet` -> `unstated`, which is the honest answer
+for it: the only sentence that promises anything — "The fix is to drop those unsupported args" —
+names nothing a diff could contain, so "I could not check this" is the fact and the seven-token
+accusation never was. What has NOT happened is a rung that understands the indirection. The same
+promise written OUTSIDE a citation clause ("Fix: drop the `--weight_decay` flag", kept by deleting
+the `"%params%"` placeholder that passed it) still convicts, because the args appear nowhere in the
+diff precisely BECAUSE the promise was kept — and reading that needs the manifest, not the text.
+Stated here rather than marked, like the `verified`-side residue below.
+
+MEASURED, and the measurement is smaller than every other one on this page because the corpus that
+argued them is GONE: as of 2026-09-08 no `runs/` tree survives on this box, so the 2,480-row replay
+behind the
+citation, abbreviation and exception rules cannot be re-run and this change does not claim one.
+What can be replayed is the eleven verbatim corpus rows `tests/test_repair_verification.py` carries
+as fixtures — the three live v8 verdicts, `rubertlite-dense-retrieval` nodes 11 and 40,
+`rubert-dr-0807` node 8 attempt 4, v6 node 1 attempt 1, the `sim-nosignal` exception row and the
+two controls.
+**Exactly one moves**, and it is the row above. The true positive, the node 11 family, the mixed row
+and both controls are untouched. The direction is bounded by construction and not only by that
+sample: a longer clause can only ever REMOVE a token from the convicting set, the demotion is
+consulted only where nothing was met at all, and its one landing place is `unstated` — so no
+`verified` and no `inert` is reachable from this change, which is why the test for it is a truth
+table rather than a fixture count.
+
+AND THE OBVIOUS RULE FOR THE THREE THAT REMAIN IS REFUSED RATHER THAN UNCONSIDERED. They cite the
+CRASH, and the engine HOLDS the crash text — the failing attempt's own error is in scope at this
+call site in `engine/evaluate.py`, one line above the change set — so "a token the failure output
+itself contains is the crash's own vocabulary" is a rule over BYTES and not a reading, and it is
+the honest generalisation of `_EXCEPTION_CLASS_RE`, which is a SHAPE proxy for exactly that fact.
+It is refused on the direction of its error. A traceback names
+the FILE it died in, and this rung's one live true positive convicts on a file claim about the very
+stage that crashed (v8 node 3 attempt 1, `mine_stage.py` against a diff that edited
+`mine_negatives.py`), so the rule must exempt file claims to keep it — and then two of the three
+rows it exists for are untouched anyway, the 0-byte stub parquet being a file claim itself. What is
+left is a widening that costs the rung its clearest catch, closes one row of three, and cannot be
+sized because the corpus is gone. `unmet` stops nothing, so leaving them costs three noisy lines in
+a judge's history; the rule costs the accusation the rung was built to make.
+
+AND ON 2026-09-08 THAT REFUSAL WAS MEASURED INSTEAD OF REASONED, which moved it off DIRECTION and
+onto REACH — a bigger fact, and one the file exemption does not contain. The corpus that argued
+every other rule here is gone, but `bench-out/cand.durable.jsonl` (the triage bench's durable arm
+over these same runs) still holds both halves such a rule needs: 95 verbatim triage rationales — the
+repair rationale IS the triage rationale, which is what `engine/evaluate.py` hands `verify_repair` —
+and, on 78 of them, the slice of the FAILURE OUTPUT the triage quoted back at it
+(`evidence.source == "error"`, a transcription of the very stderr the engine had handed it). 71 of
+the 95 name something concrete at all and 64 rows carry BOTH halves, which is the denominator below.
+Replaying `claimed_tokens` over that pair: four candidate rules, four ways of failing.
+
+  * "A TOKEN THE FAILURE OUTPUT CONTAINS MAY NOT CONVICT" reaches 38 of those 64 rows, and 35 of the
+    38 through a token that is NOT a file — so the exemption the true positive forces saves three
+    rows in thirty-eight and leaves the reach essentially where it was. And one quoted LINE is the
+    floor of that measurement rather than the measure: the window the engine actually holds is
+    64,000 bytes (`judgebench/triage_corpus.py::LOG_TAIL_BYTES`).
+  * WHAT IT EXCUSES IS THE PROMISE, which no direction argument had said out loud.
+    `e5small-dr-unified-v2` node 0 promises "rename the offending flags to the `adapter.training`
+    namespace" — and the flags it names are the ones argparse printed as it died (`train.py: error:
+    unrecognized arguments: --train.training.gradient_accumulation_steps=2 …`).
+    `rubertlite-dense-retrieval` node 0 promises to import `UniqueSparseContainer`; the
+    `AttributeError` names that class. A crash message quotes the offending flag, the failing line's
+    own variables, the file that was missing — and a repair worth the name promises to change
+    exactly that thing. "In the failure output" is therefore a proxy for THE SUBJECT OF THE REPAIR
+    and not for "the crash's own vocabulary": on this evidence the two are the same bytes.
+  * A CRASH-CLAUSE WHITELIST ("the crash is in X"), the variant that needs no new input at all,
+    excuses EVERY concrete token in 4 of the 71 rationales that name anything and some token in 9 —
+    and on the one such row this tree carries verbatim it withdraws `rubertlite-dense-retrieval`
+    node 11, where the repair edited a different file and saying so is the rung working. It does not
+    even reach the true positive, whose promise sits in the sentence AFTER the crash clause, so the
+    trade is the genuine accusations for none of the three; widen the phrasing list the way such a
+    list always gets widened (bare `failed`, `exited`, `OOM`) and it is 8 rows and 20.
+  * AND THE SHAPE CHANNEL IS SPENT. n32's two tokens survive in that row's own quoted crash line
+    (`dd_mask = (s_dd_local <= pos_scores_broadcast + thr_val) …`) and both come out of `_IDENT_RE`'s
+    underscore branch, exactly like `rdrop_alpha` and `gradient_accumulation_steps`. No predicate
+    over the TOKEN separates the crash's variable from the promise's parameter, which is why
+    `_EXCEPTION_CLASS_RE` could close the fourth shape and nothing of that kind closes these three.
+
+All four are DRIVEN in `tests/test_repair_verification.py` as throwaway candidate rules over the
+verbatim rows, not argued here, because a refusal nobody can re-run is the thing this module keeps
+having to correct.
+
+DECLINED[repair-unmet-five-unpatched-shapes] measured: 38 of the 64 durable-arm rows whose triage
+quoted the failure output name a claimed token inside that ONE quoted line, 35 of them a non-file
+token, so the file exemption the live true positive forces saves 3 of the 38 — docs/BACKLOG.md §0.2
+The three crash-citation rows keep their `unmet`. What separates "the crash is in X" from "I will
+fix X" is the sentence's verb over the same token about the same crash — a READING, and
+`REPAIR_VERDICTS` is disjoint from `TRIAGE_ACTIONS` precisely so that no model may emit one of
+these. Leaving them costs three noisy lines in a judge's history and `unmet` stops nothing; the rule
+costs the accusation the rung was built to make. The other half the old marker carried — that
+`verified` is a FLOOR (at least one claimed token in the diff) and not a guarantee — is NOT closed
+by this and was never an item to close: it is the section below, pinned by the `verified`-floor row
+in `tests/test_repair_verification.py`.
 
 WHAT IS STILL OPEN, having been measured rather than assumed. The 14 surviving `unmet` verdicts split
-7 / 2 / 5: SEVEN are genuine discrepancies, i.e. the rung working; TWO are withdrawn by the rules
-above (v8 node 3 attempts 2 and 4) and one further row keeps its verdict with a shortened list; and
-FIVE are shapes left deliberately unpatched. Three of those five are the crash-citation rows named
-above. `rubertlite-dr-unified-v6` node 1 attempt 1 is the fourth, a NEGATED claim — "drop those
-unsupported args" — satisfied by deleting the `"%params%"` placeholder that passed them, so the args
-it named appear nowhere in the diff precisely BECAUSE the promise was kept; a rule for that would
-have to understand the indirection, not the text.
-HOW OFTEN THAT UNDERLYING COLLISION ACTUALLY FIRES, measured 2026-08-29 so the next reader does not
+7 / 4 / 3: SEVEN are genuine discrepancies, i.e. the rung working; FOUR are withdrawn by the rules
+above (v8 node 3 attempts 2 and 4, `sim-nosignal` node 5 since 2026-09-08, and — since the
+clause-scanner correction of that same day — `rubertlite-dr-unified-v6` node 1 attempt 1, which had
+until then kept its verdict with a shortened list); and THREE are the crash-citation rows named
+above, DECLINED on the measurement above rather than pending — they stay `unmet` and are noise the
+judge is asked to read past.
+
+HOW OFTEN THE `%params%` COLLISION UNDER THE v6 ROW ACTUALLY FIRES — the substitution that made its
+promise unreadable, whoever reads it — measured 2026-08-29 so the next reader does not
 have to: over all 139 `node_repaired` rows preserved on this box, **32 carry a `reason_summary`**
 (the field only exists since 2026-08-21, so the other 107 predate it and cannot be classified) and
 **TWO of those 32 are the params-substitution shape** — `e5small-dr-unified-v11` node 0 and
@@ -192,9 +309,9 @@ params match the target's accepted flags is DECLINED on that number: it would pu
 business of parsing a candidate's own CLI, which docs/36 keeps it out of, to save an amount of time
 the loop already recovers. The measurement is stated here rather than in the Developer prompt that
 documents `%params%` (`adapters/repo_developer.py`), because prompt strings are contracts and this
-is a fact about outcomes, not an instruction. The fifth is `sim-nosignal` node 5, which names
-`IndentationError`, an exception class read as a claim — the `_NOT_A_CLAIM` frontier, not a new
-mechanism. Four of the seven genuine ones are also arguable — `rubertlite-dense-retrieval` node 11's family names the
+is a fact about outcomes, not an instruction. What used to be the fifth — `sim-nosignal` node 5,
+which names `IndentationError`, an exception class read as a claim — is the row the shape rule above
+now demotes to `unstated`. Four of the seven genuine ones are also arguable — `rubertlite-dense-retrieval` node 11's family names the
 BROKEN component ("the bug is in NegLogLikelihoodCos_S") and then edits a different file, which is a
 useful thing to flag but is a diagnosis rather than a promise. They are left `unmet` on purpose: a
 claim-clause whitelist would demote all four, and turning a repair that touched the wrong file into
@@ -419,7 +536,57 @@ _CITATION_RE = re.compile(
 # used lr 0.5 and nll_cos throughout its training", over a diff that touches no `nll_cos`, was
 # demoted to REPAIR_UNMET('nll_cos') — exactly the citation false positive this rung shipped to
 # remove — while the same sentence without the decimal answered `unstated`.
+#
+# AND A DECIMAL IS ONE TOKEN OF THREE THAT A CITATION QUOTES, which is what the digit-only spelling
+# of that rule missed until 2026-09-08: the same sentence names FILES (`train.py`) and dotted
+# CONFIGURATION PATHS (`loss.temperature`), and their dots closed the window just as wrongly. The
+# exemption is now stated on the shape of a SENTENCE END rather than on a list of the tokens one can
+# be mistaken for — see `_clause_end_at`, which is where the measurement lives.
 _CLAUSE_ENDS = ";.\n"
+
+# --- A token that may CONVICT, second shape: an EXCEPTION CLASS is the crash's own vocabulary ----
+# `IndentationError`, `KeyError`, `torch.OutOfMemoryError`. A rationale that names one is reporting
+# what the dead process CALLED ITSELF — "the crash is an IndentationError in mine_stage.py" — which
+# is a diagnosis and not a promise, and the diff of the repair that fixes an indentation error
+# contains the word nowhere. Measured: this is `sim-nosignal` node 5, the fifth of the five unpatched
+# `unmet` shapes, and it is the only one of the five whose token is recognisable by SHAPE rather
+# than by understanding what the sentence meant.
+#
+# WHY IT IS A DEMOTION AND NOT A `_NOT_A_CLAIM` ROW, which is where the 2026-08-15 text filed it.
+# That set DROPS a token, and dropping removes the token's ACQUITTAL along with its conviction: a
+# rationale whose only met token was the exception name would move `verified` -> `unmet`, i.e. a
+# weak signal would start CONVICTING, which is the one direction this rung refuses. Routing it
+# through the same gate as a citation keeps both halves right — a diff that really does contain the
+# name still acquits the row exactly as before, and the name alone can no longer convict. The
+# demotion target is `unstated`, which is reported, so a model gains nothing by steering into it.
+#
+# By SHAPE and not by a list, because the list is unbounded: every library defines its own
+# exceptions and `_NOT_A_CLAIM` would have to grow one row per traceback anyone ever sees. The
+# suffixes are Python's own naming convention and are the same family
+# `engine/failure_diagnosis.py::_HEADLINE_RE` anchors a traceback's last line on — spelled here
+# rather than imported because this module is a LEAF (pure functions over bytes the loop already
+# holds) and a language fact is not a registry that can drift.
+#
+# ANCHORED at both ends, so it recognises a token that IS an exception name and never one that
+# merely ends in those letters mid-identifier: `_claim_met` still matches `ValueErrorHandler`
+# literally, and only a whole-token match is excused from convicting. The optional dotted prefix is
+# for the quoted spelling (`"torch.OutOfMemoryError"`), which `_QUOTED_RE` yields intact while
+# `_IDENT_RE` yields its last part.
+_EXCEPTION_CLASS_RE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*\.)?[A-Z][A-Za-z0-9]*(?:Error|Exception|Warning|Interrupt)$")
+
+
+def names_an_exception_class(token: str) -> bool:
+    """Is this token the NAME OF AN EXCEPTION — the crash's vocabulary rather than a promise?
+
+    Pure and total; a truth table, so it is drivable on its own (`tests/test_repair_verification.py`
+    does exactly that). It answers only about the token's SHAPE and deliberately not about the
+    sentence it sits in: a rationale really can promise `raise a ConfigError here`, and such a claim
+    is still reported — it simply cannot be the sole thing this rung convicts on, which is the
+    trade the module docstring argues.
+    """
+    return bool(_EXCEPTION_CLASS_RE.match((token or "").strip()))
+
 
 # --- An abbreviated identifier -------------------------------------------------------------------
 # `grad_accum` for `gradient_accumulation_steps`. Both bounds are load-bearing and both exist to keep
@@ -611,16 +778,33 @@ def _claim_met(token: str, changed_paths, region: str, identifiers=None) -> bool
 def _clause_end_at(text: str, k: int) -> bool:
     """Is `text[k]` the END of a clause?
 
-    `.` is the whole subtlety: it ends a sentence AND separates the halves of a decimal. Only the
-    digit-dot-digit shape is exempted — a trailing `2.` or a leading `.5` still ends the clause,
-    because neither is how a rationale writes a value, and widening the exemption would let a
-    sentence ending in a version number swallow the rest of the paragraph into the citation.
+    `.` is the whole subtlety: it ends a sentence AND sits INSIDE tokens a rationale is full of —
+    the halves of a decimal (`0.5`), a file extension (`train.py`), a dotted configuration path
+    (`loss.temperature`). Until 2026-09-08 only the digit-dot-digit shape was exempted, which cut
+    the citation window at the first FILENAME in the sentence and convicted a repair on tokens the
+    citation rule one layer up had already excused (`rubertlite-dr-unified-v6` node 1 attempt 1 —
+    the module docstring holds the row).
+
+    THE RULE IS THE SHAPE OF A SENTENCE END, not a list of the tokens one can be mistaken for. Prose
+    puts a space (or a line break, or nothing at all) after the period that ends a sentence, so a
+    `.` WEDGED BETWEEN TWO WORD CHARACTERS is inside a token whatever the token turns out to be — no
+    extension list to hand-sync with `_FILE_RE`, and no second regex over adversarially-authorable
+    text. Both bounds the digit rule stated are unchanged and are now consequences rather than
+    special cases: a trailing `2.` and a leading `.5` still end the clause, so a sentence ending in
+    a version number still cannot swallow the paragraph after it into the citation.
+
+    The direction of error is bounded and it is the safe one: a longer clause can only ever move a
+    token OUT of the convicting set, `_is_citation_only` is consulted only where nothing was met at
+    all, and its single landing place is `unstated` — so nothing here can reach `verified` or
+    `inert`. `tests/test_repair_verification.py` drives that as a truth table, not as a sample.
     """
     ch = text[k]
     if ch not in _CLAUSE_ENDS:
         return False
-    if ch == "." and 0 < k < len(text) - 1 and text[k - 1].isdigit() and text[k + 1].isdigit():
-        return False
+    if ch == "." and 0 < k < len(text) - 1:
+        prev_ch, next_ch = text[k - 1], text[k + 1]
+        if (prev_ch.isalnum() or prev_ch == "_") and (next_ch.isalnum() or next_ch == "_"):
+            return False
     return True
 
 
@@ -684,8 +868,14 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
     # really contains it; it may not CONVICT here. Demoting rather than dropping is the point: the
     # token stays in `claims`, and `unstated` says "I could not check this", which is a fact the
     # judge is already shown and which a model gains nothing by steering into.
+    # …and an EXCEPTION CLASS NAME is the same kind of thing one rung over: the crash's own word for
+    # itself, not a change the repair promised. Both filters are ORs into one decision rather than
+    # two passes, because they answer the same question — may this token, alone, convict? — and a
+    # token excused by either is still reported in `claims`.
     clauses = _citation_clauses(rationale if isinstance(rationale, str) else "")
-    convicting = tuple(t for t in unmet if not _is_citation_only(t, rationale, clauses))
+    convicting = tuple(t for t in unmet
+                       if not _is_citation_only(t, rationale, clauses)
+                       and not names_an_exception_class(t))
     if not convicting:
         return RepairVerification(REPAIR_UNSTATED, claims)
     return RepairVerification(REPAIR_UNMET, claims, convicting)
@@ -838,9 +1028,13 @@ def repair_claimed_without_writing(summary, *, wrote: bool) -> str:
 #: (`autojunk` off, see `_kept_ratio`) a 20 kB character-wise ratio measures **37 seconds** on this
 #: box against 0.02 s for the same file line-wise — unaffordable inside the attempt loop, which runs
 #: this once per changed file. The second is that "how much of the file is still standing" is a
-#: question about lines anyway. 1 500 lines per side bounds the worst case near 0.2 s; over it both
-#: sides are truncated, which can only move `kept` toward 0 (under-crediting retention) and never
-#: invent a similarity that is not there.
+#: question about lines anyway. 1 500 lines per side bounds the worst case near 0.2 s. Over it both
+#: sides are truncated to the same HEAD, and that does NOT only under-credit -- this comment claimed
+#: it did until 2026-09-08: a 2 000-line file whose repair rewrites lines 1 501-2 000 completely
+#: compares as identical and reports kept=1.0 against a true 0.75. The number cannot say what it did
+#: not look at, so the ROW says so instead -- `_kept_row` stamps `kept_truncated` whenever either
+#: side ran past this bound, which keeps the module's under-report-never-mis-report rule with a fact
+#: rather than with a promise.
 _ATTRIBUTION_DIFF_LINES = 1_500
 #: Path-list bounds for a durable event column, same rule as `PARAM_OVERRIDE_CAP`: under-report,
 #: never mis-report.
@@ -859,21 +1053,33 @@ def _kept_ratio(before: str, after: str) -> float:
     the opposite of what this measures. See `_ATTRIBUTION_DIFF_LINES` for the bound and for why the
     comparison is over lines.
     """
-    # OPEN[kept-ratio-overcredits-past-the-cap] truncating BOTH sides to the same head means a file
-    # rewritten entirely past the cap compares as identical, and the bound's own comment claims the
-    # error can only run the other way.
-    # proof:`line:toward 0&&under-crediting@looplab/engine/repair_verify.py`
-    # REVIEW 2026-08-30 (record-honesty): reproduced — a 2,000-line file whose repair rewrites
-    # lines 1,501-2,000 completely returns kept=1.0 against a true 0.75, so the durable
-    # `node_repaired.attribution.wrote` row says "nothing of this file changed" beside a `changed`
-    # entry saying it did, for exactly the whole-file-replacement case the field exists to make
-    # legible — against this module's own under-report-never-mis-report rule. When either side
-    # exceeds the cap, either stamp `truncated: true` on the entry or compare head+tail windows.
+    # Over the first `_ATTRIBUTION_DIFF_LINES` of each side and SILENT about the rest, which is why
+    # a caller building a durable row goes through `_kept_row` and not through this. See the bound.
     a = (before or "").splitlines()[:_ATTRIBUTION_DIFF_LINES]
     b = (after or "").splitlines()[:_ATTRIBUTION_DIFF_LINES]
     if not a and not b:
         return 1.0
     return round(difflib.SequenceMatcher(None, a, b, autojunk=False).ratio(), 3)
+
+
+def _kept_row(path: str, before: str, after: str) -> dict:
+    """One `wrote` entry: the retention ratio, and whether the comparison saw the whole file.
+
+    `kept` alone MIS-REPORTS a file rewritten past `_ATTRIBUTION_DIFF_LINES` -- both sides truncate
+    to the same head, so a 2 000-line file whose repair replaced lines 1 501-2 000 reads kept=1.0
+    against a true 0.75, i.e. "nothing of this file changed" beside a `changed` entry saying it did,
+    for exactly the whole-file-replacement case the field exists to make legible. The bound itself
+    cannot go (it is what keeps `SequenceMatcher`'s quadratic cost inside the attempt loop) and a
+    head+tail window would only move which slice goes unread, so the ROW carries the fact instead:
+    `kept_truncated` present means the number was measured over the first `_ATTRIBUTION_DIFF_LINES`
+    lines only. Stamped from the two line COUNTS, never from a flag a caller passes, so the key
+    cannot claim a bound that did not bind.
+    """
+    row = {"path": path, "kept": _kept_ratio(before, after)}
+    if (len((before or "").splitlines()) > _ATTRIBUTION_DIFF_LINES
+            or len((after or "").splitlines()) > _ATTRIBUTION_DIFF_LINES):
+        row["kept_truncated"] = True
+    return row
 
 
 def named_files(*texts) -> tuple:
@@ -943,12 +1149,12 @@ def repair_attribution(*, prose, prev_files, prev_code, files, code, changed, de
             # what it is rather than compared against nothing.
             rows.append({"path": path, "removed": True})
         else:
-            rows.append({"path": path, "kept": _kept_ratio(before, after)})
+            rows.append(_kept_row(path, before, after))
     # The whole-file artifact has no path and is reported under the one spelling `changed_region`
     # already uses, so a reader meets a single name for the source that has none.
     if (code or "") != (prev_code or ""):
         rows.append({"path": _WHOLE_FILE, "new": True} if not (prev_code or "")
-                    else {"path": _WHOLE_FILE, "kept": _kept_ratio(prev_code, code)})
+                    else _kept_row(_WHOLE_FILE, prev_code, code))
     touched = set(changed_paths)
     named = named_files(*(prose or ()))
     return {
