@@ -453,7 +453,7 @@ predominantly behaviour-driven.
 | EM-17 | L | C | `research_cadence.py`/`strategy.py` module headers | Layering claims stale ("only core, events and stdlib" — imports `agents`; "…search, agents" — also `trust`, `governance_health`). Permitted edges, wrong sentences. | Replace prose with the AST guard used for the search/agents edge. |
 | EM-18 | L | C | `test_watchdog_stage_scope.py`, `test_monitor_log_tools_wiring.py`, `test_ablation.py` | Three positive text pins guarding properties other tests drive. | Convert or delete. |
 
-Tracked: `asha-inert-on-this-task-family`, `f1i-b-serial-deep-research-gate`,
+Tracked: `asha-inert-on-this-task-family`,
 `first-propose-runs-with-every-gpu-idle`, `monitor-fault-has-no-outcome-label`,
 `judge-bench-covers-two-judges-of-four`, `strategist-developer-field`,
 `concept-skeleton-matches-no-run`, `classifier-rewrites-authored-membership`, `overrun-grace-bar`,
@@ -650,8 +650,12 @@ hook). The `mcp` SDK is absent here, so `_mcp_transport.py` could not be importe
 | TO-16 | L | C | `tools/agents_md.py`, `retrieval.py`, `edit_match.py`, `log_tools.py`'s 262-line measurement docstring | Non-provider helpers with one consumer each in a package whose name promises providers. | Move beside their consumers; move the ledger to a doc it can cite by symbol. |
 
 Tracked: `run-lifecycle-primitives-cannot-move-down` (the injected `lifecycle=` has zero
-production callers), `machine-runs-tools-not-split`, `agent-node-purge-has-no-durable-receipt`,
-`cross-run-read-model-still-private`, `run-path-validators-not-unified`, two CODEX notes.
+production callers), `cross-run-read-model-still-private`, `run-path-validators-not-unified`, two
+CODEX notes. *(2026-09-08: `machine-runs-tools-not-split` and
+`agent-node-purge-has-no-durable-receipt` closed — doc 25 TO-02 and doc 34 D-01. The TO-03/TO-09
+rows above still describe the tools layer's dual write and the hand-copied generation preimage;
+those moved file, not state, and now live in `tools/run_control_tools.py` and
+`tools/run_command_adapter.py`.)*
 
 **Top moves.** (1) One contract scan for the whole package (names unique, `bind_state` arity,
 never-raise, every `(kind, tool)` in `_ACTION_RISK`, every capability name a spec name). (2) A
@@ -690,8 +694,9 @@ contracts (exit codes, groups, documented set) are each measurably contradicted.
 | AG-16 | L | C | `agents/reachability.py::task_onboarder_llm_roles` (bare `ValueError`), `strategist.py::make_strategist` (bare `ValueError`), `unified_agent.py::UnifiedAgent.last_budget_exhausted` (one slot, two producers) | Residual bare refusals; a facade slot whose correctness rests on documented call ordering. | `ConfigRefusal`; two named slots with the registry updated. |
 | AG-17 | L | P | `tool_loop.py::drive_tool_loop` (the `(emit_after or emit_force) and (tools is not None or self_plan)` gate) | With tools=None, `self_plan=False`, both budgets 0, a model hallucinating varying tool calls gets a fresh observation each turn and the `emit_force` ceiling is off — each turn a paid call. Shipped defaults close it. | Count `call_turns` toward `emit_force` whenever anything was CALLED. |
 
-Tracked: `roles-module-still-a-god-module`, `make-roles-backend-wirings-not-split`,
-`strategist-developer-field`, `temporal-leakage-flags-the-boundary`, `target-leakage-is-linear-only`.
+Tracked: `strategist-developer-field`, `temporal-leakage-flags-the-boundary`,
+`target-leakage-is-linear-only`. (`roles-module-still-a-god-module` and
+`make-roles-backend-wirings-not-split` closed 2026-09-08 — doc 25 AG-02 / RA-01.)
 
 **Top moves.** (1) AG-01 + the containment-polarity AST funnel. (2) One prompt assembler. (3) A
 CLI contract registry (`cli/registry.py` rows: name, group, side-effects, exit codes) from which
@@ -730,7 +735,7 @@ CLOSED into `errors`.
 | SE-16 | L | C | `concept_lens.py::project_hierarchy` (dead `graph`/`edges`), `concept_graph.py::Concept` (parent encoded twice; a DESIGN NOTE recording three reviews the drift caused); the prefix rule spelled in 8 places | Dead parameters and an untagged design question. | `parent_of_id()` once; a marker or a decline. |
 | SE-17 | L | P | `card_selection.py::_diversity_key`/`_default_select` | The one-per-niche pass keys on raw self-authored `concept_tags`, so with a lane width > 1 (SE-01) a card can claim a fresh niche by minting a slug; reorders preference only. | Key on the canonicalized membership or `(operator, parents)`. |
 
-Tracked: `asha-promotion-mask-blocks-all-production`, `calibration-corpus-revoked-by-unrelated-settings`,
+Tracked: `calibration-corpus-revoked-by-unrelated-settings`,
 `concept-skeleton-matches-no-run` (still true), `classifier-rewrites-authored-membership`, the
 declined `receiptless-work-reads-as-question`.
 

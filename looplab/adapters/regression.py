@@ -11,12 +11,9 @@ from __future__ import annotations
 
 import json
 import random
-from typing import Optional
 
-from pydantic import BaseModel, field_validator
-
-from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState, validate_direction
+from looplab.adapters.synthetic import IntWalk, PerturbResearcher, ScaledChoice, SyntheticTaskBase
+from looplab.core.models import Idea
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
 
@@ -106,25 +103,19 @@ print(json.dumps({{"metric": cv_mse(X, Y, DEGREE, LAM, K)}}))
 '''
 
 
-class RegressionResearcher:
-    """Blind hyperparameter optimizer over (degree, lambda)."""
+def regression_researcher(max_degree: int = 6, seed: int = 0) -> PerturbResearcher:
+    """Blind hyperparameter optimizer over (degree, lambda).
 
-    def __init__(self, max_degree: int = 6, seed: int = 0):
-        self.max_degree = max_degree
-        self.rng = random.Random(seed)
-
-    def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
-        if parent is None:
-            degree = self.rng.randint(0, self.max_degree)
-            lam = self.rng.choice([0.0, 0.001, 0.01, 0.1, 1.0])
-            return Idea(operator="draft", params={"degree": float(degree), "lam": lam},
-                        rationale="random hyperparameters")
-        pd = int(round(parent.idea.params.get("degree", 1)))
-        degree = max(0, min(self.max_degree, pd + self.rng.choice([-1, 0, 1])))
-        pl = parent.idea.params.get("lam", 0.0)
-        lam = max(0.0, round(pl * self.rng.choice([0.5, 1.0, 2.0]), 6))
-        return Idea(operator="improve", params={"degree": float(degree), "lam": lam},
-                    rationale=f"perturb node {parent.id} (degree={pd})")
+    The `degree` walk is the STRUCTURAL lever (it decides which polynomial family the fit can
+    represent at all) and `lam` is a scale, which is why the two knobs move differently: +/-1 whole
+    steps versus halve/keep/double. Collapsed onto `PerturbResearcher` (doc 25 RA-06) with the draw
+    order — degree, then lam, in both branches — preserved, so this consumes the same random stream
+    the hand-written class did and a seeded run proposes the same nodes it always has.
+    """
+    return PerturbResearcher(
+        (IntWalk("degree", 0, max_degree, default=1.0),
+         ScaledChoice("lam", (0.0, 0.001, 0.01, 0.1, 1.0), lo=0.0, ndigits=6, default=0.0)),
+        seed=seed, draft_rationale="random hyperparameters")
 
 
 class RegressionDeveloper:
@@ -142,17 +133,16 @@ class RegressionDeveloper:
         )
 
 
-class RegressionTask(BaseModel):
-    kind: str = "regression"
-    id: str = "poly_regression"
-    goal: str = "select polynomial degree + ridge lambda minimizing K-fold CV MSE"
-    direction: str = "min"
+class _PolyDataTask(SyntheticTaskBase):
+    """The polynomial dataset the two regression tasks share — every field and both readers.
 
-    @field_validator("direction")
-    @classmethod
-    def _direction_valid(cls, v):
-        return validate_direction(v)
-    comparison_contract: ComparisonContract | None = None
+    `RegressionTask` and `CodeRegressionTask` differ ONLY in who writes the solution (a fixed
+    template vs. an LLM reading `data.json`); they were two copies of the same six data fields,
+    `_data()` and `columns()` (doc 25 RA-06). The field ORDER here reproduces both models exactly,
+    which is what keeps `core/setup_identity.py::setup_config_hash` — and therefore every recorded
+    run's `run_started.config_hash` — unchanged.
+    """
+
     n: int = 40
     true_degree: int = 2
     noise: float = 1.0
@@ -168,10 +158,16 @@ class RegressionTask(BaseModel):
         X, Y = self._data()
         return {"x": X, "y": Y}
 
-    def build_roles(self) -> tuple[RegressionResearcher, RegressionDeveloper]:
+
+class RegressionTask(_PolyDataTask):
+    kind: str = "regression"
+    id: str = "poly_regression"
+    goal: str = "select polynomial degree + ridge lambda minimizing K-fold CV MSE"
+
+    def build_roles(self) -> tuple[PerturbResearcher, RegressionDeveloper]:
         X, Y = self._data()
         return (
-            RegressionResearcher(max_degree=self.max_degree, seed=self.seed),
+            regression_researcher(max_degree=self.max_degree, seed=self.seed),
             RegressionDeveloper(X, Y, k=self.cv_k),
         )
 
@@ -185,9 +181,6 @@ class RegressionTask(BaseModel):
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 RegressionDeveloper(X, Y, k=self.cv_k))
 
-    def external_fallback_uses_llm(self) -> bool:
-        return False  # the fallback fills a deterministic local template
-
     def gpu_capable(self) -> bool:
         """Both role pairs end in `RegressionDeveloper`, a fixed numpy template — the roles only pick
         `degree`/`lam`, never code. Keeps this task out of the host GPU pool lease (see
@@ -195,7 +188,7 @@ class RegressionTask(BaseModel):
         return False
 
 
-class CodeRegressionTask(BaseModel):
+class CodeRegressionTask(_PolyDataTask):
     """Like RegressionTask, but the LLM *writes the solution code* (reading the dataset
     from a `data.json` asset) instead of filling a fixed template — a real coding loop.
     Offline (`backend=toy`) it falls back to the templated regression roles so the
@@ -210,26 +203,6 @@ class CodeRegressionTask(BaseModel):
     kind: str = "code_regression"
     id: str = "code_poly_regression"
     goal: str = "write code that fits a polynomial+ridge model minimizing K-fold CV MSE"
-    direction: str = "min"
-
-    @field_validator("direction")
-    @classmethod
-    def _direction_valid(cls, v):
-        return validate_direction(v)
-    comparison_contract: ComparisonContract | None = None
-    n: int = 40
-    true_degree: int = 2
-    noise: float = 1.0
-    seed: int = 0
-    max_degree: int = 6
-    cv_k: int = 5
-
-    def _data(self) -> tuple[list[float], list[float]]:
-        return make_poly_dataset(self.seed, self.n, self.true_degree, self.noise)
-
-    def columns(self) -> dict[str, list]:
-        X, Y = self._data()
-        return {"x": X, "y": Y}
 
     def assets(self) -> dict[str, str]:
         """Materialized into each node's sandbox workdir before the solution runs."""
@@ -238,7 +211,7 @@ class CodeRegressionTask(BaseModel):
 
     def build_roles(self):  # offline fallback (templated, embeds its own data)
         X, Y = self._data()
-        return (RegressionResearcher(max_degree=self.max_degree, seed=self.seed),
+        return (regression_researcher(max_degree=self.max_degree, seed=self.seed),
                 RegressionDeveloper(X, Y, k=self.cv_k))
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):

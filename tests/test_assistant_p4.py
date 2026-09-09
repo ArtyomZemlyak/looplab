@@ -118,13 +118,27 @@ def test_gated_mcp_enforces_permission_policy():
 
 
 def test_plan_mode_excludes_mcp(tmp_path, monkeypatch):
-    """MCP is dropped entirely in read-only plan mode (so no stdio server is connected either)."""
+    """MCP is dropped entirely in read-only plan mode (so no stdio server is connected either).
+
+    The PRINCIPAL is passed since 2026-09-08: `build_tools` now asks
+    `serve/principal.py::mcp_config_scope` which server set this party may connect, so the mode
+    question this test is about is only reachable on the owner plane. The party half is driven in
+    `tests/test_mcp_principal_config.py`.
+    """
     import looplab.tools.mcp_tools as mcp_mod
     from looplab.serve.assistant import build_tools
-    monkeypatch.setattr(mcp_mod.McpTools, "cached", classmethod(lambda cls: McpTools([_FakeServer()])))
-    plan_tools = build_tools(tmp_path, mode="plan", mcp=True)
+    from looplab.serve.principal import OWNER_PRINCIPAL
+    # A configuration this party actually resolves: `build_tools` asks for the party's own servers
+    # before it consults the cache, so a patched `cached` alone no longer decides the toolset.
+    monkeypatch.delenv("LOOPLAB_MCP_CONFIG", raising=False)
+    monkeypatch.setenv("LOOPLAB_MCP_SERVERS",
+                       json.dumps({"mcpServers": {"fs": {"url": "https://h/mcp"}}}))
+    monkeypatch.setattr(mcp_mod.McpTools, "cached",
+                        classmethod(lambda cls, cfg=None: McpTools([_FakeServer()])))
+    plan_tools = build_tools(tmp_path, mode="plan", mcp=True, principal=OWNER_PRINCIPAL)
     assert not any(n.startswith("mcp__") for n in [s["function"]["name"] for s in plan_tools.specs()])
-    default_tools = build_tools(tmp_path, mode="default", mcp=True, approver=lambda a: "allow_once")
+    default_tools = build_tools(tmp_path, mode="default", mcp=True, approver=lambda a: "allow_once",
+                                principal=OWNER_PRINCIPAL)
     assert any(n.startswith("mcp__") for n in [s["function"]["name"] for s in default_tools.specs()])
 
 

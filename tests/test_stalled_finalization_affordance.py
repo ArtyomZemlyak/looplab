@@ -38,7 +38,7 @@ from looplab.serve.server import make_app  # noqa: E402
 from tests.test_finalization_stall_deletion import _half_finalized_run  # noqa: E402
 
 # The exact intent the Reattach control submits — `ui/src/Dock.jsx::TRANSPORT_INTENTS.finalize`
-# and `ui/src/api.js::CONTROL.finalize`. Both spellings are pinned here because the whole defect is
+# and `ui/src/controlActions.js::CONTROL.finalize`. Both spellings are pinned here because the whole defect is
 # about what THIS payload does to THIS state.
 _UI_FINALIZE_INTENT = {"type": "run_abort", "data": {"reason": "finalized"}}
 

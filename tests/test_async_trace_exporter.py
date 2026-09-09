@@ -33,17 +33,20 @@ def test_queue_backpressure_is_nonblocking_bounded_and_durably_counted(tmp_path)
     exporter = AsyncJsonlSpanExporter(
         path, run_id="run", max_queue_spans=1, max_queue_bytes=64_000,
         loss_receipt_interval_s=0.01)
-    real_export = exporter._writer._export_line
+    # THE WORKER'S SEAM IS THE BATCH ONE (doc 34 D-02): it drains the queue and hands the writer
+    # every row it took in ONE hardened append, so a double that intercepts single rows would let
+    # the real filesystem work through and stop blocking anything.
+    real_export = exporter._writer._export_lines
     started = threading.Event()
     release = threading.Event()
 
-    def slow_first(line, **kwargs):
+    def slow_first(lines, **kwargs):
         if not started.is_set():
             started.set()
             assert release.wait(2)
-        return real_export(line, **kwargs)
+        return real_export(lines, **kwargs)
 
-    exporter._writer._export_line = slow_first
+    exporter._writer._export_lines = slow_first
     try:
         assert exporter.export({"name": "active"}) is True
         assert started.wait(1)
@@ -92,17 +95,17 @@ def test_byte_budget_charges_the_worker_owned_row_not_only_the_deque(tmp_path):
     exporter = AsyncJsonlSpanExporter(
         path, max_queue_spans=100, max_queue_bytes=budget,
         loss_receipt_interval_s=0.01)
-    real_export = exporter._writer._export_line
+    real_export = exporter._writer._export_lines
     started = threading.Event()
     release = threading.Event()
 
-    def blocked(line, **kwargs):
+    def blocked(lines, **kwargs):
         if not started.is_set():
             started.set()
             assert release.wait(2)
-        return real_export(line, **kwargs)
+        return real_export(lines, **kwargs)
 
-    exporter._writer._export_line = blocked
+    exporter._writer._export_lines = blocked
     try:
         assert exporter.export(first)
         assert started.wait(1)
@@ -116,6 +119,117 @@ def test_byte_budget_charges_the_worker_owned_row_not_only_the_deque(tmp_path):
     finally:
         release.set()
         exporter.shutdown(timeout_millis=2_000)
+
+
+def test_one_drain_pays_the_hardened_ladder_once_for_the_whole_batch(tmp_path, monkeypatch):
+    """doc 34 D-02, closed 2026-09-08: the ladder is amortized per FLUSH, not per span.
+
+    Each exported row used to run the whole thing for itself — a guarded open (~12 `stat` calls),
+    a torn-tail heal read, the before/after identity stats and a 4 KiB receipt-journal write —
+    which on the 14,507-span node this codebase measures elsewhere is ~43k opens on the ONE
+    exporter worker thread whose queue is bounded and drop-newest, i.e. a throughput number that
+    turns into lost spans on a slow mount.
+
+    Driven, not asserted about: the worker is held inside its first delegate attempt while five more
+    rows queue up behind it, and on release it must take all five in ONE append — one guarded open,
+    one receipt — with every row on disk exactly once.
+    """
+    import looplab.core.tracing as tracing_mod
+
+    path = tmp_path / "spans.jsonl"
+    exporter = AsyncJsonlSpanExporter(path, max_queue_spans=16)
+    opens = []
+    real_open = tracing_mod._open_export_append
+    monkeypatch.setattr(tracing_mod, "_open_export_append",
+                        lambda p, **kw: opens.append(p) or real_open(p, **kw))
+
+    drains: list[int] = []
+    real_export = exporter._writer._export_lines
+    started = threading.Event()
+    release = threading.Event()
+
+    def gated(lines, **kwargs):
+        rows = list(lines)
+        drains.append(len(rows))
+        if not started.is_set():
+            started.set()
+            assert release.wait(2)
+        return real_export(rows, **kwargs)
+
+    exporter._writer._export_lines = gated
+    try:
+        assert exporter.export({"name": "first"})
+        assert started.wait(1)                     # the worker owns row 1 and is inside the ladder
+        for i in range(5):
+            assert exporter.export({"name": f"queued-{i}"})
+        assert _wait(lambda: exporter.metrics()["queued_spans"] == 5)
+        release.set()
+        assert exporter.force_flush(timeout_millis=5_000) is True
+
+        assert drains == [1, 5], (
+            f"the worker must take the whole queue per drain, took {drains}")
+        # Two guarded opens per drain — the source and its receipt journal — so the whole ladder
+        # is four opens for six spans where it used to be twelve.
+        assert opens.count(path) == 2, (
+            f"one hardened open of the source per DRAIN, not one per span: {opens.count(path)}")
+        assert len(opens) == 4, f"and one receipt journal open per drain: {opens}"
+        assert exporter.metrics()["exported_spans"] == 6
+        names = [row["name"] for row in _rows(path)]
+        assert names == ["first"] + [f"queued-{i}" for i in range(5)]
+    finally:
+        release.set()
+        exporter.shutdown(timeout_millis=2_000)
+
+
+def test_a_batched_drain_writes_ONE_receipt_binding_the_whole_appended_range(tmp_path):
+    """The receipt is what makes a torn append detectable, so amortizing it must not weaken it.
+
+    A drain writes one receipt whose `[before_size, after_size)` region is the bytes it appended and
+    whose `append_sha256` is over exactly those bytes — the same proof the reader
+    (`events/span_index.py::_validated_append_transition`) has always checked, at flush granularity.
+    """
+    import hashlib
+
+    from looplab.core.trace_append import (
+        SPAN_APPEND_JOURNAL_NAME, SPAN_APPEND_RECEIPT_SCHEMA)
+
+    path = tmp_path / "spans.jsonl"
+    writer = JsonlSpanExporter(path)
+    writer.export({"name": "before-the-batch"})
+    before_size = path.stat().st_size
+
+    rows = [_span_jsonl_line({"name": f"batched-{i}"}) for i in range(4)]
+    writer._export_lines(rows)
+
+    receipts = _rows(tmp_path / SPAN_APPEND_JOURNAL_NAME)
+    assert len(receipts) == 2, "one receipt for the single row, one for the four-row drain"
+    receipt = receipts[-1]
+    assert receipt["schema"] == SPAN_APPEND_RECEIPT_SCHEMA
+    assert receipt["before_size"] == before_size
+    assert receipt["after_size"] == path.stat().st_size
+    appended = path.read_bytes()[receipt["before_size"]:receipt["after_size"]]
+    assert appended == b"".join(rows)
+    assert receipt["append_sha256"] == hashlib.sha256(appended).hexdigest()
+
+
+def test_an_empty_drain_appends_nothing_and_writes_no_receipt(tmp_path):
+    """A batch of nothing is not a zero-length append: it must not enter the receipt chain."""
+    from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
+
+    path = tmp_path / "spans.jsonl"
+    JsonlSpanExporter(path)._export_lines([])
+    assert not path.exists() and not (tmp_path / SPAN_APPEND_JOURNAL_NAME).exists()
+
+
+def test_a_row_that_violates_the_physical_contract_is_refused_before_the_lock(tmp_path):
+    """The per-row contract is still per ROW, and one bad row refuses the whole drain untouched."""
+    path = tmp_path / "spans.jsonl"
+    writer = JsonlSpanExporter(path)
+    good = _span_jsonl_line({"name": "good"})
+    for bad in (b'{"name":"no-newline"}', b'{"a":1}\n{"b":2}\n', "not-bytes\n"):
+        with pytest.raises(ValueError):
+            writer._export_lines([good, bad])
+    assert not path.exists(), "a refused drain must not have appended its good rows first"
 
 
 def test_sporadic_submits_reuse_one_worker_until_a_flush_barrier(tmp_path):
@@ -232,17 +346,17 @@ def test_live_index_lock_does_not_block_the_hot_export_queue(tmp_path):
 def test_delegate_failure_is_attempted_once_and_reported_without_recursion(tmp_path):
     path = tmp_path / "spans.jsonl"
     exporter = AsyncJsonlSpanExporter(path, loss_receipt_interval_s=0.01)
-    real_export = exporter._writer._export_line
+    real_export = exporter._writer._export_lines
     attempts = 0
 
-    def fail_target_once(line, **kwargs):
+    def fail_target_once(lines, **kwargs):
         nonlocal attempts
-        if b'"unstable"' in line:
+        if any(b'"unstable"' in row for row in lines):
             attempts += 1
             raise OSError("storage rejected the row")
-        return real_export(line, **kwargs)
+        return real_export(lines, **kwargs)
 
-    exporter._writer._export_line = fail_target_once
+    exporter._writer._export_lines = fail_target_once
     assert exporter.export({"name": "unstable"})
     assert exporter.force_flush(timeout_millis=2_000)
     assert attempts == 1, "retry could double-export after an ambiguous post-write failure"
@@ -262,6 +376,8 @@ def test_ambiguous_loss_receipt_failure_never_retries_or_double_counts(tmp_path)
     path = tmp_path / "spans.jsonl"
     exporter = AsyncJsonlSpanExporter(
         path, max_queue_bytes=1, loss_receipt_interval_s=0.01)
+    # STILL THE SINGLE-ROW SEAM, on purpose: a loss receipt is written through `_export_line` so it
+    # cannot be evicted by — or batched behind — the queue whose loss it reports.
     real_export = exporter._writer._export_line
     receipt_attempts = 0
 
@@ -292,16 +408,16 @@ def test_ambiguous_loss_receipt_failure_never_retries_or_double_counts(tmp_path)
 def test_force_flush_is_a_no_late_append_barrier_for_a_trace_rewrite(tmp_path):
     path = tmp_path / "spans.jsonl"
     exporter = AsyncJsonlSpanExporter(path, lifecycle_fence=True)
-    real_export = exporter._writer._export_line
+    real_export = exporter._writer._export_lines
     started = threading.Event()
     release = threading.Event()
 
-    def blocked(line, **kwargs):
+    def blocked(lines, **kwargs):
         started.set()
         assert release.wait(2)
-        return real_export(line, **kwargs)
+        return real_export(lines, **kwargs)
 
-    exporter._writer._export_line = blocked
+    exporter._writer._export_lines = blocked
     try:
         assert exporter.export({"name": "old-one"})
         assert started.wait(1)
@@ -369,17 +485,17 @@ def test_writer_past_precommit_finishes_before_destructive_rewrite(tmp_path):
 
     path = tmp_path / "spans.jsonl"
     exporter = AsyncJsonlSpanExporter(path, lifecycle_fence=True)
-    real_guarded = exporter._writer._export_line_guarded
+    real_guarded = exporter._writer._export_lines_guarded
     past_precommit = threading.Event()
     release = threading.Event()
     clear_finished = threading.Event()
 
-    def pause_inside_guard(line):
+    def pause_inside_guard(lines):
         past_precommit.set()
         assert release.wait(2)
-        return real_guarded(line)
+        return real_guarded(lines)
 
-    exporter._writer._export_line_guarded = pause_inside_guard
+    exporter._writer._export_lines_guarded = pause_inside_guard
     assert exporter.export({"name": "old-but-guarded"})
     assert past_precommit.wait(1)
     assert exporter.force_flush(timeout_millis=10) is False

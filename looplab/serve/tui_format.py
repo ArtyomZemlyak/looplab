@@ -1,8 +1,10 @@
-"""The TUI's pure helpers + server autostart, split verbatim out of `serve/tui.py` (docs/15 §P5.2):
-metric/age formatting, phase glyphs, genesis-spec rendering/gating, chat-history shaping, input
-parsing and redraw signatures (all side-effect-free, so tests/test_tui.py exercises them without a
-live server or a terminal), plus the `ensure_server`/`_free_port`/`_stop_child` autostart trio the
-REPL's `main` uses. `serve/tui.py` re-exports every name, so the old import paths keep working."""
+"""The TUI's pure helpers + rendering + server autostart, split verbatim out of `serve/tui.py`
+(docs/15 §P5.2): metric/age formatting, phase glyphs, genesis-spec rendering/gating, chat-history
+shaping, input parsing and redraw signatures (all side-effect-free, so tests/test_tui.py exercises
+them without a live server or a terminal), the five screen renderers that used to be `Tui` methods
+(doc 25 SC-15 — they take the Console they write to, so they still need no server and no terminal),
+plus the `ensure_server`/`_free_port`/`_stop_child` autostart trio the REPL's `main` uses.
+`serve/tui.py` re-exports every name, so the old import paths keep working."""
 from __future__ import annotations
 
 import os
@@ -15,10 +17,12 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Optional
 
-# The two looplab imports this module allows itself: the wire-protocol vocabulary it shares with the
-# server (phase names), and the shared metric formatter (doc 25 XP-09 — a dependency-free `core`
-# function, so the TUI still adds no dependencies).
+# The three looplab imports this module allows itself: the wire-protocol vocabulary it shares with the
+# server (phase names), the shared metric formatter (doc 25 XP-09 — a dependency-free `core`
+# function, so the TUI still adds no dependencies), and the shared launch-proposal schema (doc 27 —
+# also `core`, so the TUI still adds no dependencies and still cannot see `looplab.adapters`).
 from looplab.core.fitness import format_metric
+from looplab.core.run_proposal import RunProposal, slug_run_id
 from looplab.serve.protocol import (PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING,
                                     PHASE_ONBOARDING, PHASE_PAUSED, PHASE_SEARCH,
                                     PHASE_SPEC_APPROVAL)
@@ -97,44 +101,15 @@ def sort_runs(runs: list) -> list:
 def spec_lines(spec: Optional[dict]) -> list[str]:
     """Flatten a genesis spec ({run_id, task|task_file, settings, rationale, setup_steps}) into the plain
     lines the proposal panel renders — also the exact thing the launch summary echoes. Pure, so a test
-    can assert the boss's plan is shown faithfully."""
+    can assert the boss's plan is shown faithfully.
+
+    The flattening itself is `core/run_proposal.py::RunProposal.lines` (doc 27's shared-schema row,
+    closed 2026-09-08): `looplab run --goal` prints the same lines under its `Genesis -> kind=…`
+    announcement, so the CLI and the TUI describe a plan in one vocabulary instead of two. Only the
+    empty case is the TUI's own — it is this panel's copy, not a property of a proposal."""
     if not spec:
         return ["(no plan yet — describe a goal and the boss will propose one)"]
-    out: list[str] = []
-    out.append(f"run name : {spec.get('run_id') or '—'}")
-    task = spec.get("task") or {}
-    if spec.get("task_file"):
-        out.append(f"task     : {str(spec['task_file']).split('/')[-1]}  (from the catalogue)")
-    elif task.get("kind"):
-        label = task["kind"]
-        if task.get("kind") == "mlebench_real" and task.get("competition"):
-            label += f" · {task['competition']}"
-        out.append(f"task     : {label}")
-        if task.get("goal"):
-            out.append(f"goal     : {task['goal']}")
-        if task.get("editable_path"):
-            out.append(f"repo     : {task['editable_path']}")
-    elif task:
-        # A COMPOSABLE (kind-less) genesis task — Genesis proposes these with NO `kind`, so the
-        # branches above skip them; still surface the substance of the run (goal + capabilities), not
-        # just the run-name/settings, so the operator sees what they're about to spend tokens on.
-        if task.get("goal"):
-            out.append(f"goal     : {task['goal']}")
-        if task.get("direction"):
-            out.append(f"direction: {task['direction']}")
-        for lbl, key in (("repo", "editable_path"), ("repo", "repo"), ("data", "data_path"),
-                         ("dataset", "dataset"), ("cmd", "cmd"), ("competition", "competition")):
-            if task.get(key):
-                out.append(f"{lbl:<9}: {task[key]}")
-    settings = spec.get("settings") or {}
-    knobs = [(k, settings[k]) for k in ("llm_model", "max_nodes", "n_seeds", "policy") if settings.get(k) is not None]
-    if knobs:
-        out.append("settings : " + ", ".join(f"{k}={v}" for k, v in knobs))
-    if spec.get("rationale"):
-        out.append(f"why      : {spec['rationale']}")
-    for i, step in enumerate(spec.get("setup_steps") or [], 1):
-        out.append(f"  step {i}. {step}")
-    return out
+    return RunProposal.from_card(spec).lines()
 
 
 def launch_body(spec: dict, msgs: Optional[list] = None) -> dict:
@@ -147,15 +122,13 @@ def launch_body(spec: dict, msgs: Optional[list] = None) -> dict:
     `/api/validate` — and every move of the task schema had to be repaired in both (doc 52 row 8).
     This module may not import `looplab.adapters` (pinned in `tests/test_tui.py`), which is what
     keeps the copy from coming back.
+
+    The body SHAPE is `RunProposal.start_body` since 2026-09-08 (doc 27,
+    `three-new-run-planners-no-shared-schema`): the TUI, the Web launch card and any other caller
+    now spell the `/api/start` payload once. This function stays because the TUI's spec is a card
+    and its chat is a message list — reading those INTO the shared shape is the TUI's own job.
     """
-    body: dict = {"run_id": slug(spec.get("run_id") or ""), "settings": spec.get("settings") or {}}
-    if spec.get("task_file"):
-        body["task_file"] = spec["task_file"]
-    else:
-        body["task"] = spec.get("task") or {}
-    if msgs:                                            # carry the planning chat into the run's history
-        body["chat"] = [{"role": m["role"], "content": m["content"]} for m in msgs]
-    return body
+    return RunProposal.from_card(spec).start_body(msgs)
 
 
 def readiness_reason(verdict: Any) -> Optional[str]:
@@ -172,13 +145,15 @@ def readiness_reason(verdict: Any) -> Optional[str]:
     return message + (f" ({'; '.join(named)})" if named else "")
 
 
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-
 def slug(s: str) -> str:
-    """run-id normaliser (lowercase kebab, ≤40) — must stay in step with the server's own
-    slugify+de-dup in serve/routers/genesis.py::_normalize_genesis."""
-    return _SLUG_RE.sub("-", str(s or "").lower()).strip("-")[:40]
+    """run-id normaliser (lowercase kebab, ≤40).
+
+    It no longer has to "stay in step with the server's own slugify" — that instruction was here
+    because `serve/routers/genesis.py::_normalize_genesis` kept a second copy, and the two had
+    already drifted (its `re.sub(r"(^-|-$)", …)` stripped one leading and one trailing dash where
+    this one stripped all of them). Both are now `core/run_proposal.py::slug_run_id`; this name
+    stays because the TUI's own callers and tests use it."""
+    return slug_run_id(s)
 
 
 # Destructive verbs worth a louder confirm marker — the Python twin of the web Dock's isCritical.
@@ -254,6 +229,140 @@ def run_sig(state: dict) -> tuple:
     scored = sum(1 for n in nodes.values() if n.get("metric") is not None and not n.get("error"))
     return (state.get("phase"), state.get("finished"), state.get("engine_running"),
             len(nodes), scored, in_flight, state.get("best_node_id"), state.get("stop_reason"))
+
+
+# ----------------------------------------------------------------------------- rich rendering
+# (doc 25 SC-15's remaining half: the five render helpers used to be METHODS on `serve/tui.py::Tui`,
+# where the only way to see what a surface draws was to construct the whole REPL — an Api client, a
+# run root and a Console — and the only way to change a line was to touch the file that also holds
+# the wizards, the chat persistence and the durable command-recovery state machine. They are pure
+# functions of (console, data): every one takes the Console it writes to as its first argument
+# instead of reaching for `self.console`, and the two that used to consult `self._interactive()` or
+# `self.api.base` take those as keyword arguments — so the CALLER keeps every decision that needs a
+# live server or a real terminal, and the rendering keeps none. Bodies moved verbatim; the only
+# edits are `self.console` -> `console`, `self._runs_table`/`self._status_panel`/`self._render_chat`
+# -> the module functions, and the two injected values above.)
+
+def _esc(value) -> str:
+    """Escape one server/LLM/user-supplied value before it enters a rich markup f-string. A stray
+    ``[/tag]`` in a command label, error, run id, or chat line otherwise raises rich ``MarkupError``
+    and aborts the TUI; for a PERSISTED row (``_reconcile_pending``) that re-crashes on every reopen."""
+    from rich.markup import escape
+    return escape(str(value))
+
+
+def runs_table(runs: list):
+    from rich.table import Table
+    from rich import box
+    t = Table(box=box.SIMPLE_HEAD, expand=True, pad_edge=False)
+    t.add_column("#", justify="right", style="dim", width=3)
+    t.add_column("run", style="bold", no_wrap=True)
+    t.add_column("status", no_wrap=True)
+    t.add_column("nodes", justify="right", width=6)
+    t.add_column("best", justify="right", width=12)
+    t.add_column("task", no_wrap=True, style="dim")
+    t.add_column("updated", justify="right", style="dim", no_wrap=True)
+    for i, r in enumerate(runs, 1):
+        glyph, colour, label = phase_meta(r)
+        best = r.get("best_confirmed")
+        best = r.get("best_metric") if best is None else best
+        t.add_row(str(i), _esc(r.get("run_id", "?")), f"[{colour}]{glyph} {_esc(label)}[/{colour}]",
+                  str(r.get("nodes", 0)), fmt_metric(best),
+                  _esc((r.get("task_id") or r.get("goal") or "—")[:28]), fmt_ago(r.get("mtime")))
+    return t
+
+
+def status_panel(run_id: str, state: dict):
+    from rich.panel import Panel
+    glyph, colour, label = phase_meta(state)
+    nodes = state.get("nodes") or {}
+    best_id = state.get("best_node_id")
+    best = None
+    if best_id is not None and str(best_id) in {str(k) for k in nodes}:
+        bn = nodes.get(str(best_id)) or nodes.get(best_id) or {}
+        best = bn.get("confirmed_mean")
+        best = bn.get("metric") if best is None else best
+    running = sum(1 for n in nodes.values() if n.get("status") == "pending")
+    ok = sum(1 for n in nodes.values() if n.get("metric") is not None and not n.get("error"))
+    lines = [
+        f"[{colour}]{glyph} {_esc(label)}[/{colour}]"
+        + (f"   direction={state.get('direction')}" if state.get("direction") else ""),
+        f"nodes: [bold]{len(nodes)}[/bold] total · {ok} scored · {running} in flight",
+        f"best:  [bold]{fmt_metric(best)}[/bold]" + (f"  (node {best_id})" if best_id is not None else ""),
+    ]
+    if state.get("goal"):
+        lines.append(f"goal:  {_esc(state['goal'])}")
+    if state.get("stop_reason"):
+        lines.append(f"[dim]stopped: {_esc(state['stop_reason'])}[/dim]")
+    return Panel("\n".join(lines), title=f"[bold]{_esc(run_id)}[/bold]", border_style=colour, expand=True)
+
+
+def draw_dashboard(console, runs: list, *, base: str, live: bool) -> None:
+    """The dashboard screen. `base` is the server the TUI is talking to and `live` says whether this
+    is a real terminal that auto-refreshes — both decided by the caller (the Api client and
+    `Tui._interactive()` respectively), because neither is a question about the drawing."""
+    console.clear()
+    live_mark = "[green]● live[/green]" if live else ""
+    console.print("[bold cyan]LoopLab[/bold cyan] [dim]· terminal control plane[/dim]   "
+                  f"[dim]{_esc(base)}[/dim]  {live_mark}")
+    if runs:
+        console.print(runs_table(runs))
+    else:
+        console.print("[dim]no runs yet — type a goal below to start your first one.[/dim]\n")
+    console.print("[dim]Pick a run by number · type a goal to start one · "
+                  "[bold]n[/bold]ew · [bold]r[/bold]efresh · [bold]q[/bold]uit[/dim]")
+
+
+def render_spec(console, spec: Optional[dict], reason: Optional[str]) -> None:
+    """The proposed-run panel. `reason` is the SERVER's readiness verdict (None = launchable), asked
+    by `Tui._validate` over `/api/validate` — the TUI carries no launch-readiness rule of its own
+    (doc 52 row 8), and this module may not grow one: it renders the verdict it is handed."""
+    from rich.panel import Panel
+    body = "\n".join(spec_lines(spec))
+    foot = "[green]ready — type [bold]launch[/bold] to start[/green]" if reason is None else f"[yellow]{_esc(reason)}[/yellow]"
+    console.print(Panel(_esc(body) + "\n\n" + foot, title="proposed run", border_style="green", expand=True))
+
+
+def draw_run(console, run_id: str, state: Optional[dict], history: list, *, live: bool) -> None:
+    console.clear()
+    if state is None:
+        console.print(f"[red]could not load {_esc(run_id)} — is the server still up?[/red]")
+    else:
+        console.print(status_panel(run_id, state))
+    render_chat(console, history)
+    live_mark = "[green]● live[/green] · " if live else ""
+    console.print(f"[dim]{live_mark}Chat with the boss · [bold]s[/bold]tatus · "
+                  "[bold]stop/finalize/resume[/bold] · [bold]?[/bold] help · "
+                  "[bold]back[/bold] · [bold]q[/bold]uit[/dim]")
+
+
+def render_chat(console, history: list, tail: int = 8) -> None:
+    from rich.markdown import Markdown
+    shown = [m for m in history if m.get("role") in ("user", "assistant", "action", "summary")]
+    if not shown:
+        console.print("[dim](no chat yet — ask the boss anything, or tell it what to change)[/dim]")
+        return
+    for m in shown[-tail:]:
+        role = m.get("role")
+        if role == "user":
+            console.print(f"[bold green]you ›[/bold green] {_esc(m.get('content', ''))}")
+        elif role == "action":
+            act = m.get("action") or {}
+            mark = {"done": "[green]✓[/green]", "pending": "[yellow]…[/yellow]",
+                    "failed": "[red]✗[/red]"}.get(m.get("status"), "[cyan]·[/cyan]")
+            console.print(f"  {mark} [cyan]{_esc(act.get('label') or act.get('type', 'action'))}[/cyan]")
+        elif role == "summary":
+            console.print(f"[dim]— recap: {_esc(m.get('content', ''))}[/dim]")
+        else:
+            console.print("[bold cyan]boss ›[/bold cyan]")
+            console.print(Markdown(m.get("content", "")))
+
+
+def _command_failure_line(label, error) -> str:
+    """Escape server/LLM-supplied text before it enters a rich markup string: a stray ``[/tag]`` in a
+    label or error message otherwise raises rich ``MarkupError`` and aborts the TUI — and, because
+    ``_reconcile_pending`` re-prints the persisted row, it re-crashes on every reopen of the run."""
+    return f"  [red]✗[/red] {_esc(label)} — {_esc(error)}"
 
 
 # ----------------------------------------------------------------------------- server autostart

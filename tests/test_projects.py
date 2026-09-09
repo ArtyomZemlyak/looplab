@@ -149,7 +149,7 @@ def test_project_mutation_fails_closed_when_required_lock_is_unavailable(tmp_pat
         raise EventStoreLockError(path, OSError("locking unsupported"))
         yield  # pragma: no cover - contextmanager syntax only
 
-    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    monkeypatch.setattr(eventstore, "interprocess_lock", unavailable)
     with pytest.raises(ProjectStoreLockError, match="project metadata lock is unavailable"):
         project_store.set_label("new", "must-not-land")
     assert project_store.path.read_bytes() == before
@@ -171,7 +171,7 @@ def test_project_lock_failure_maps_to_http_503(tmp_path, monkeypatch):
         raise EventStoreLockError(path, OSError("locking unsupported"))
         yield  # pragma: no cover - contextmanager syntax only
 
-    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    monkeypatch.setattr(eventstore, "interprocess_lock", unavailable)
     response = TestClient(make_app(tmp_path)).post("/api/projects", json={"name": "blocked"})
     assert response.status_code == 503
     assert "project metadata lock is unavailable" in response.json()["detail"]
@@ -195,7 +195,7 @@ def test_delete_run_acquires_project_lock_before_removing_run_bytes(tmp_path, mo
     project_store = ProjectStore(tmp_path / "projects.json")
     project_store.set_label("demo", "keep")
     before = project_store.path.read_bytes()
-    original_lock = eventstore._interprocess_lock
+    original_lock = eventstore.interprocess_lock
 
     @contextmanager
     def unavailable(path, *, required=False):
@@ -206,7 +206,7 @@ def test_delete_run_acquires_project_lock_before_removing_run_bytes(tmp_path, mo
         raise EventStoreLockError(path, OSError("locking unsupported"))
         yield  # pragma: no cover - contextmanager syntax only
 
-    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    monkeypatch.setattr(eventstore, "interprocess_lock", unavailable)
     from looplab.events.eventstore import EventStore
     from looplab.serve.run_commands import run_generation_token
 
@@ -351,7 +351,7 @@ def test_a_hand_edited_row_missing_id_or_name_is_dropped_instead_of_500ing_every
 
 
 def test_project_mutating_routes_never_take_the_blocking_lock_on_the_event_loop(tmp_path, monkeypatch):
-    """`ProjectStore._transaction` ends in `_interprocess_lock(required=True)` — a blocking
+    """`ProjectStore._transaction` ends in `interprocess_lock(required=True)` — a blocking
     `fcntl.flock(LOCK_EX)` with NO timeout — plus load/atomic-save disk I/O. Run from an `async def`
     route that runs it INLINE, a lock another UI worker or process holds freezes this worker's whole
     event loop (every SSE tick and poll) until the other side releases it. Every mutating route must
