@@ -34,7 +34,7 @@ from looplab.events.eventstore import (
 # The vocabulary of the critical section. A public appender that names any of these is doing the
 # work itself again instead of delegating — which is exactly how the two copies drifted apart.
 _CRITICAL_SECTION_ONLY = (
-    "_interprocess_lock", "_append_lock", "_heal_torn_tail", "_disk_last_seq",
+    "interprocess_lock", "_append_lock", "_heal_torn_tail", "_disk_last_seq",
     "_publish_dir_entry", "_mark_uncertain_append", "_trusted_growth_stat",
     "strict_fsync", "best_effort_fsync", "assert_run_reset_write_allowed",
     "assert_run_deletion_write_allowed",

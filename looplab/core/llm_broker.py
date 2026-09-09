@@ -32,6 +32,11 @@ EVAL PATH blocks on is the opposite of that on every clause, so it belongs in ``
 enrichment-flavoured its prompt is — ``BACKGROUND_LANE_PRODUCERS`` below is the machine-checked
 spelling of that rule.
 
+The permit is also where a per-window ceiling on CALLS is debited (``ProviderCallMeter``): the same
+argument that put the run's reserve-commit budget on ``borrow()`` — this is the one seam every
+outbound provider request of every client passes through, so it is the only place such a count can be
+honest. It refuses nothing; it is read by the producer that set the ceiling.
+
 ``total=None`` disables the global ceiling.  This is the compatibility mode used when canonical
 ``llm_parallel`` is unset (including a legacy-only ``parallel_build`` configuration) and for startup
 AUTO: the foreground lanes (``build``, ``engine``) remain unbounded, exactly as before the broker
@@ -139,6 +144,7 @@ BACKGROUND_LANE_PRODUCERS: dict[str, tuple[str, ...]] = {
         "orchestrator.py::_reflect_lessons",
         "orchestrator.py::_comparative_lessons",
         "orchestrator.py::_maybe_distill_lessons",
+        "orchestrator.py::_maybe_promote_skills",
         "orchestrator.py::_maybe_refresh_lessons",
         "orchestrator.py::_maybe_reconcile_lessons",
         "orchestrator.py::_causal_meta_note",
@@ -152,8 +158,70 @@ BACKGROUND_LANE_PRODUCERS: dict[str, tuple[str, ...]] = {
         "concept_cadence.py::_maybe_snapshot_concept_coverage",
         "verifier_tiebreak.py::_maybe_verify_ties",
         "strategy.py::_maybe_consult_strategist",
+        # The MCTS value estimate: one bounded structured question per unestimated candidate at the
+        # creation boundary, on the MAIN task and two lines from `_maybe_verify_ties` in the same
+        # cadence block. Nothing on the eval or build path waits on it — the tree reads the frozen
+        # `node_value_estimated` prior, never a live call — and its width is
+        # `VALUE_ESTIMATE_CADENCE_CAP` per boundary rather than the eval width.
+        "value_estimate.py::_maybe_estimate_node_values",
     ),
 }
+
+
+class ProviderCallMeter:
+    """A COUNT of the provider requests admitted while this meter is installed on the context.
+
+    WHY IT LIVES HERE. A per-window ceiling on "LLM calls" can only be honest if it is debited where
+    the calls are, and `llm_request_permit` below is the ONE seam every outbound provider request of
+    every client passes through — the same argument that put the run's reserve-commit budget on
+    `borrow()`. `Settings.concurrent_research_max_calls` is the ceiling this was written for: it was
+    incremented once per repeated-research PASS in `engine/orchestrator.py::_research_overlap_loop`,
+    and a pass is a multi-turn agentic think plus its forced emit, its consolidation and its memo
+    verification — so a ceiling named "max calls" was counting somewhere between one and several
+    dozen of them at a time, and undercounted real spend by exactly that factor (doc 27 P1).
+
+    It is a METER and not a second budget: it refuses nothing. A pass is an indivisible
+    receipt -> provider -> record hop (see `_research_attempt_step`), so the only place a window can
+    honestly stop is BETWEEN passes; what this changes is the number the loop compares against its
+    cap, not where the comparison happens.
+
+    Debited at ADMISSION — after the permit is granted, before the request goes out — so a retry
+    inside one logical call counts (each attempt is a request the provider may bill; see
+    `core/llm.py::_bill_barren_cut` for a cut attempt that was), while a call the run's budget
+    refused before it ever left counts nothing.
+    """
+
+    __slots__ = ("_lock", "calls")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.calls = 0
+
+    def debit(self) -> int:
+        """Count one admitted request; returns the new total. Thread-safe: a producer's own worker
+        threads share one meter (a research pass runs on a worker and may fan out below it)."""
+        with self._lock:
+            self.calls += 1
+            return self.calls
+
+
+_CURRENT_CALL_METER: contextvars.ContextVar[Optional[ProviderCallMeter]] = contextvars.ContextVar(
+    "looplab_llm_call_meter", default=None)
+
+
+@contextmanager
+def provider_call_meter(meter: Optional[ProviderCallMeter]) -> Iterator[None]:
+    """Count every provider request issued in THIS context (and the threads it hands work to)."""
+    token = _CURRENT_CALL_METER.set(meter)
+    try:
+        yield
+    finally:
+        _CURRENT_CALL_METER.reset(token)
+
+
+def current_provider_call_meter() -> Optional[ProviderCallMeter]:
+    """The meter installed on this context, if any — diagnostics and the permit's own debit."""
+    return _CURRENT_CALL_METER.get()
 
 
 def default_llm_lane_limits(total: Optional[int]) -> dict[str, Optional[int]]:
@@ -372,13 +440,28 @@ def llm_lane_scope(lane: str) -> Iterator[None]:
 
 @contextmanager
 def llm_request_permit() -> Iterator[None]:
-    """Borrow for the current outbound request, or no-op outside a broker-scoped engine."""
+    """Borrow for the current outbound request, or no-op outside a broker-scoped engine.
+
+    Also the DEBIT point of any `ProviderCallMeter` installed on this context, in both branches:
+    an engine with no broker scope still makes real provider requests, and a ceiling that only
+    counted brokered ones would read zero there.
+    """
     broker = _CURRENT_BROKER.get()
     if broker is None:
+        _debit_call_meter()
         yield
         return
     with broker.borrow(_CURRENT_LANE.get()):
+        # After admission, never before it: a request the run's budget refused inside `borrow()`
+        # never reached the provider and must not spend a window's per-call ceiling.
+        _debit_call_meter()
         yield
+
+
+def _debit_call_meter() -> None:
+    meter = _CURRENT_CALL_METER.get()
+    if meter is not None:
+        meter.debit()
 
 
 def current_llm_lane() -> str:

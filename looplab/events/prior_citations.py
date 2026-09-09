@@ -82,7 +82,10 @@ def prior_citation_report(events: Iterable) -> dict:
     """The report over one run's events (`Event` objects or `(type, data)` pairs)."""
     lessons: dict[str, dict] = {}
     latest_prior: dict[str, list[dict]] = {}
-    pending_reads: list[tuple[str, list[dict]]] = []
+    # The rows only: the tool NAME was stored and never read (`for _tool, rows in …`), which read
+    # as per-tool provenance the report does not carry. A per-tool breakdown would add the field
+    # back beside a reader for it.
+    pending_reads: list[list[dict]] = []
     proposals = injections = reads = shown_pairs = cited_pairs = 0
 
     def slot(row: dict) -> dict:
@@ -100,7 +103,7 @@ def prior_citation_report(events: Iterable) -> dict:
             latest_prior[str(data.get("role") or "all")] = _rows(data)
         elif etype == "memory_read":
             reads += 1
-            pending_reads.append((str(data.get("tool") or ""), _rows(data)))
+            pending_reads.append(_rows(data))
         elif etype == "node_created":
             proposals += 1
             text = proposal_text(data)
@@ -114,7 +117,7 @@ def prior_citation_report(events: Iterable) -> dict:
                     if cites(entry["statement"], text, lesson_id=row["id"]):
                         entry["cited"] += 1
                         cited_pairs += 1
-            for _tool, rows in pending_reads:
+            for rows in pending_reads:
                 for row in rows:
                     entry = slot(row)
                     entry["shown_tool"] += 1

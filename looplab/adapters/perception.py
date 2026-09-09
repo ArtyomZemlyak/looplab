@@ -107,6 +107,34 @@ def primary_table(dirpath: str, entries: list[str],
     return pick if os.path.isfile(os.path.join(dirpath, pick)) else None
 
 
+def split_tables(path: str, suffixes: tuple[str, ...] = TABULAR_SUFFIXES
+                 ) -> Optional[tuple[str, str]]:
+    """The `(reference, current)` table pair a declared mount offers, or None.
+
+    The pair a distribution-shift comparison needs (`trust/drift.py`): the table the model was FIT
+    on and the one it will be SCORED on, named by the convention every Kaggle-shaped dataset on disk
+    already follows — `train*` is the reference, the first of `test*`/`valid*`/`holdout*`/`eval*` is
+    the current sample. A NAME rule and nothing more: this reads no bytes and opens no file, so a
+    mount that names its splits some other way answers None and the caller records "not compared"
+    rather than comparing two arbitrary tables and reporting the difference as shift.
+
+    Only a DIRECTORY mount can offer a pair — a single-file mount is one sample by construction."""
+    try:
+        if not os.path.isdir(path):
+            return None
+        entries = sorted(os.listdir(path))
+    except OSError:
+        return None
+    files = [f for f in entries if f.lower().endswith(suffixes)
+             and os.path.isfile(os.path.join(path, f))]
+    ref = next((f for f in files if f.lower().startswith("train")), None)
+    cur = next((f for f in files
+                if f.lower().startswith(("test", "valid", "holdout", "eval"))), None)
+    if ref is None or cur is None:
+        return None
+    return os.path.join(path, ref), os.path.join(path, cur)
+
+
 def mount_table(path: str) -> Optional[str]:
     """The table a declared mount offers for profiling: the file itself when it is tabular, else
     the primary table at the top level of a directory mount, else None."""

@@ -545,6 +545,40 @@ def seed_run_budget(engine: object) -> bool:
     return bool(budget.seed(persisted.values()))
 
 
+def adopt_accountant_ceilings(engine: object, accountants: Iterable[object]) -> None:
+    """Hand the run's declared USD ceiling to the RESERVE half of the same budget.
+
+    ONE CEILING, TWO HALVES (`core/llm_budget.py`). The commit half is the shared `CostAccountant`
+    `core/llm.py::run_cost_accountant` mints from the run's `Settings`; the reserve half is the
+    `RunBudget` the broker meters at `borrow()`. The engine builds the second from `EngineOptions`,
+    which carries `llm_cost_limit` and NOT `llm_budget_usd` — so a run that declared its ceiling the
+    documented way reserved against nothing, and kept exactly the fan-out overshoot the reserve half
+    exists to remove. This is the join: the accountants are already walked here, they carry the
+    ceiling their settings declared AND the knob that declared it, so the reserve half adopts it
+    from the object that holds it rather than re-reading `Settings` a second time.
+
+    It can only TIGHTEN (`RunBudget.adopt_cost_ceiling` never loosens), so a run whose reserve half
+    already held the lower cap is unchanged, and a run with no ceiling anywhere still reserves and
+    refuses nothing.
+    """
+    budget = getattr(engine, "_llm_budget", None)
+    adopt = getattr(budget, "adopt_cost_ceiling", None)
+    if not callable(adopt):
+        return
+    for accountant in accountants:
+        # NAMED rather than blind: the only foreign thing here is reading two attributes off an
+        # accountant this engine did not build (a stub, a `SimpleNamespace`, a property), and
+        # `adopt_cost_ceiling` is total over junk by construction. Anything else escaping is a real
+        # defect in the run's own budget and belongs in the traceback, not in a swallow.
+        try:
+            limit = getattr(accountant, "limit", None)
+            if not limit:
+                continue
+            adopt(limit, getattr(accountant, "limit_knob", "llm_budget_usd"))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            continue
+
+
 def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> list[object]:
     """Bind every currently reachable accountant exactly once.
 
@@ -555,6 +589,9 @@ def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> 
     seed_run_budget(engine)
     bindings, lock = _tracker(engine)
     found = find_cost_accountants(engine)
+    # Before any binding: the ceiling is an ADMISSION fact and a role swap can be the first moment
+    # an accountant carrying one becomes reachable at all.
+    adopt_accountant_ceilings(engine, found)
     with lock:
         for accountant in found:
             aid = id(accountant)

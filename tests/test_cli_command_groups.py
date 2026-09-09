@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from looplab.cli import (concept_cmds, governance_cmds, inspect_cmds, maintenance_cmds,
-                         memory_cmds)
+from looplab.cli import (concept_cmds, corpus_cmds, governance_cmds, inspect_cmds,
+                         maintenance_cmds, memory_cmds)
 
 _CLI = Path(__file__).resolve().parents[1] / "looplab" / "cli"
 
@@ -78,9 +78,30 @@ GROUPS = {
                      # `proxy_scored` rows against the metrics that came back and prints one
                      # number. It writes nothing, spends nothing, and reads no cross-run store —
                      # and it is the number the `proxy_skipped` KILL should be armed on.
-                     "tokens", "repair-candidates", "edit-types", "proxy-accuracy"},
+                     # `seed-distance` (doc 52 row 31, the last of that row) is `edit-types`'
+                     # sibling and shares its three clauses exactly: one fold of THIS run's log, one
+                     # regex pass over the same closed edit vocabulary, no model, no write, no
+                     # cross-run store. `edit-types` measures each STEP; this measures the whole
+                     # walk against the lineage root, which is the question a per-step tally cannot
+                     # answer — and nothing in the loop reads either.
+                     # `workspace-bytes` (doc 37 §8's R1) is this group's contract with the
+                     # subject read off the DISK instead of a sidecar, and that is the same
+                     # question rather than a new domain: it is one run's account of ITSELF — what
+                     # its own node workspaces weigh, printed beside the only sentence its own log
+                     # ever made about them (`workspace_seeded`'s file counts). It calls no model,
+                     # writes nothing and reads no cross-run store — the three clauses that keep
+                     # `stage-dups`, `landlock-check` and the rest here — so it is not `audit_cmds`
+                     # (which may spend money and writes a sidecar), not `maintenance_cmds` (which
+                     # appends events) and not `memory_cmds` (the cross-run stores).
+                     "tokens", "repair-candidates", "edit-types", "proxy-accuracy",
+                     "seed-distance", "workspace-bytes"},
+    # `concept-authorship` is this domain's READ side, on `prior-citations`' ground: a pure
+    # projection over the fold that compares what each proposer AUTHORED as its node's concepts
+    # against the membership the classifier left, calling no model and writing nothing. It is here
+    # rather than in `inspect_cmds` because the subject is the concept taxonomy — the same record
+    # `concept-coverage` builds and `--persist` writes — and not one run's account of itself.
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
-                     "research-targets", "novelty-recall", "lesson-guard"},
+                     "research-targets", "novelty-recall", "lesson-guard", "concept-authorship"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",
                         "concept-steward", "concept-ratify", "claim-decide", "task-facets",
                         "task-facets-set", "claim-steward", "cross-run-digest", "cross-run-search",
@@ -102,6 +123,19 @@ GROUPS = {
     # sits at its own ceiling and the subject is the cross-run store's usefulness, not one run's
     # account of itself.
     "memory_cmds": {"memory-orphans", "prior-citations"},
+    # CORPUS INSTRUMENTS. Its own group for the same two reasons `memory_cmds` and `audit_cmds` are,
+    # and they point the same way. The DOMAIN first: every command here takes a runs ROOT, folds
+    # each run's own event log and reports ONE reading a `docs/BACKLOG.md` marker named as the
+    # precondition for a decision it refuses to take on faith — the belief-key disagreement the
+    # concept key would merge, the undercut rule's stated trigger, whether ASHA ever had a curve to
+    # halve. None of them makes that decision, calls a model, writes a file, appends an event or
+    # reads a cross-run store; what distinguishes them from `inspect_cmds` (`comparability`
+    # included) is that the subject is the CORPUS rather than any named run's account of itself.
+    # THE CEILING SECOND, and it is not the reason but it agrees with it: the two groups whose
+    # subject is nearest — `inspect_cmds` (1194 lines against a 1200 cap) and `governance_cmds`
+    # (1092 against 1100) — are both at the bound below, whose own stated norm is that an overrun is
+    # answered by an extraction or a new home and never by a raise.
+    "corpus_cmds": {"belief-key-split", "card-ladder", "asha-rungs"},
     # OFFLINE RECORD REPAIRS. Its own group rather than `governance_cmds` because the subject is a
     # SINGLE run's account of itself — a node whose durable record kept the proposal and lost what
     # actually ran — not the cross-run store. It appends events, so it is not `inspect_cmds` either;
@@ -166,6 +200,12 @@ def test_each_group_docstring_says_what_it_mutates():
     assert "--persist" in concept_cmds.__doc__ and "appending" in concept_cmds.__doc__
     for phrase in ("DURABLE WRITES", "PAID LLM STEWARDS", "READ-ONLY"):
         assert phrase in governance_cmds.__doc__, f"{phrase} missing from the governance header"
+    # The corpus group's whole claim is that it touches NOTHING — an instrument that quietly grew a
+    # write would be the same drift as a "read-only" module that spent money, so its header states
+    # the four things it does not do and this pins them.
+    for phrase in ("read-only", "calls a model", "writes a file", "appends an event",
+                   "cross-run store"):
+        assert phrase in corpus_cmds.__doc__, f"{phrase} missing from the corpus header"
 
 
 def test_no_group_is_a_god_module_again():
@@ -192,8 +232,16 @@ def test_no_group_is_a_god_module_again():
     the slack instead would have been a cap that stopped being consulted, the exact trade
     `test_agent_factory_split.py` refuses next door — and the cap coming down with the extraction is
     what keeps the next overrun a real question rather than a formality.
+
+    AND AGAIN, WHICH IS THE POINT: `workspace-bytes` (doc 37 §8's R1) arrived on 2026-09-08 against
+    a file with six lines of headroom, and the answer was the second extraction rather than the
+    first raise — `edit-types`' body moved VERBATIM to `run_report.py::echo_edit_types`, beside the
+    rendering already there, and the new command's own walk lives in `cli/workspace_bytes.py`. So
+    `inspect_cmds.py` keeps the contract (the decorator, the signature, the docstring the CLI
+    reference is written against) and none of the arithmetic: 1194 -> 1154 lines, and the cap comes
+    down with it a second time, to 1175.
     """
-    caps = {"inspect_cmds": 1200}
+    caps = {"inspect_cmds": 1175}
     for module_name in GROUPS:
         lines = len((_CLI / f"{module_name}.py").read_text(encoding="utf-8").splitlines())
         assert lines < caps.get(module_name, 1100), f"{module_name} is back to {lines} lines"

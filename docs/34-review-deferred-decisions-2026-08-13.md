@@ -11,31 +11,41 @@ at its site so a reader meets the reasoning where the cost is paid, rather than 
 only three of the five do** (re-derived 2026-08-19: `grep -c 'docs/34'` is 0 in both
 `core/tracing.py` and `ui/test/settingsSchemaResource.test.js`). D-02's own status update admits it
 while this paragraph asserted the opposite; `docs/00-INDEX.md` propagates the false version.
+*(2026-09-08: `core/tracing.py` now carries its pointer, on the `JsonlSpanExporter._export_lines`
+docstring that closed D-02 — so it is four of five, and `ui/test/settingsSchemaResource.test.js`
+is the one left.)*
 
 Nothing below is a bug you can fix without deciding something first. That is the entry criterion.
 
-> **Re-derived 2026-08-19 against master `8be301f7`, and INDEXED.** Four of the five are genuinely
-> still deferred and now carry `OPEN[…]` markers whose proofs the guard re-derives from the tree;
-> **D-05 is CLOSED** and its own status update was false the day it was written. From here,
-> `grep -rn 'OPEN\['` is the answer to "what is still deferred in doc 34?".
+> **Re-derived 2026-08-19 against master `8be301f7`, and INDEXED.** Four of the five were genuinely
+> still deferred that day and took `OPEN[…]` markers whose proofs the guard re-derives from the tree;
+> **D-05 is CLOSED** and its own status update was false the day it was written. **D-02, D-03 and
+> D-04 closed on 2026-09-08** and their markers are gone, which is what closing means here — so this
+> sentence is not the count. From here, `grep -rn 'OPEN\['` is the answer to "what is still deferred
+> in doc 34?".
 >
-> - **OPEN[agent-node-purge-has-no-durable-receipt]** `_purge_node_snapshot` is still an irreversible
->   multi-file transaction inside a bare `try/finally` with the ad-hoc `events.jsonl.bak-del<N>`
->   backup, still reachable from the agent-facing tool provider — no operation id, no phase, no
->   crash-recovery record. proof:present:_purge_node_snapshot@looplab/tools/machine_runs_tools.py
->   (re-pointed 2026-08-25: the previous literal, the backup filename, exists in that file only
->   inside the f-strings that BUILD the path, so `test_no_proof_is_satisfiable_only_by_prose`
->   rightly refused it and the guard sat red from the day this row was indexed — the exact
->   silent-red this index exists to end. The deciding symbol is the function itself.)
-> - **OPEN[trace-exporter-hardens-per-span-not-per-batch]** the worker still takes exactly one row per
->   iteration and runs the whole hardened ladder (guarded open, torn-tail heal, identity CAS before
->   and after, one append receipt) per SPAN. proof:`line:item: Optional[bytes]&&= None@looplab/core/tracing.py`
-> - **OPEN[card-trace-scans-whole-run-span-index]** `card_trace_view` still copies the whole run's
->   light spans; `SpanIndex` has no `card_id` dimension and `_SCHEMA` is unbumped.
->   proof:`line:_SCHEMA&&= 12@looplab/events/span_index.py`
-> - **OPEN[span-index-hashes-every-source-row]** `_read_full` still re-hashes each selected row's FULL
->   bytes on the request path, and a 64-char digest is retained per row in memory and on disk.
->   proof:present:hashlib.sha256(data).hexdigest()@looplab/events/span_index.py
+> - *D-01 CLOSED 2026-09-08: the purge writes a durable receipt —
+>   `tools/node_purge_receipt.py`, the SCHEMA half of the same `core/receipt.py` protocol its
+>   three siblings use, not a fourth protocol. Its monotonic phase lattice names the transaction's
+>   own irreversible steps, an unresolved (or unreadable) receipt fences every later purge of that
+>   run, and the record names the `bak-del<N>` file that undoes it. Driven, not pinned, in
+>   `tests/test_node_purge_receipt.py`: a crash injected between the log rewrite and the trace
+>   publish leaves phase `log_rewritten`, the next purge refuses naming that phase and that backup,
+>   and the prescribed recovery lifts the fence.*
+> - *D-02 closed 2026-09-08: the async worker now drains the whole queue per iteration and
+>   `JsonlSpanExporter._export_lines` runs the hardened ladder ONCE for the batch — one guarded
+>   open, one heal, one identity CAS, one append receipt binding the whole appended byte range.
+>   No property was traded away and no schema moved: the receipt reader has always proved a byte
+>   RANGE rather than a row, so a receipt covering N spans is validated exactly as strictly
+>   (`tests/test_span_index.py::test_a_batched_multi_row_append_is_trusted_like_n_single_row_ones`).
+>   Driven in `tests/test_async_trace_exporter.py::test_one_drain_pays_the_hardened_ladder_once_for_the_whole_batch`:
+>   six spans across two drains pay two source opens instead of six.*
+> - *D-03 CLOSED 2026-09-08 — `SpanIndex` grew the `card_id` dimension the decision named
+>   (`card_propose_tids`) and `card_trace_spans` now serves BOTH research rules by lookup;
+>   `_SCHEMA` is 13.*
+> - *D-04 CLOSED 2026-09-08 — the row digest keeps its verification over a BOUNDED preimage
+>   (`_row_digest`: length + 8 KiB head + 8 KiB tail, 32 hex), with the corruption class it does and
+>   does not catch stated at `_ROW_DIGEST_PREFIX`; `_SCHEMA` 13 keeps the two widths apart.*
 >
 > **Dead line citations, all three in the 2026-08-14 status updates and all off by 80-170 lines:**
 > `machine_runs_tools.py:1623` → the pointer is at `:1796`; `serve/appstate.py:613` → the comment is
@@ -46,7 +56,38 @@ Nothing below is a bug you can fix without deciding something first. That is the
 
 ---
 
-## D-01 · The agent-facing node purge has no durable receipt · `tools/machine_runs_tools.py`
+## D-01 · The agent-facing node purge has no durable receipt · `tools/run_control_tools.py`
+
+> ***CLOSED (2026-09-08), and NOT the way the recommendation below says.*** *The recommendation was
+> "make it operator-initiated and route it through the deletion transaction, rather than growing a
+> fourth receipt protocol". Half of that was taken and half refused, deliberately:*
+>
+> * *No fourth protocol. The receipt TIER moved down from `serve/durable_op.py` to
+>   `core/receipt.py` — verbatim, `serve/durable_op.py` re-exports it and keeps the
+>   `HTTPException`-raising quiescence ladder — because `tools` may not import `serve` and that
+>   layering was the only thing making a fourth copy look necessary. The purge is now a third OWNER
+>   of the one protocol, declaring its own `ReceiptProtocol` exactly as reset and deletion do
+>   (`tools/node_purge_receipt.py`).*
+> * *Not made operator-only. That is a product decision about what the agent may do to a run's
+>   history and it is still open as one; a receipt does not widen the tool, it makes the tool's
+>   worst outcome legible. The four questions this section says the code could not answer are
+>   answered in that module's docstring, and the two load-bearing ones are: the OPERATION ID comes
+>   from the turn's own durable mutation journal (a recovered turn rebuilds the same key and
+>   therefore the same id), and RECOVERY REFUSES rather than resumes — for exactly the reason
+>   stated below, that re-entering a destructive rewrite of a run's own event log on a resume is
+>   worse than the state it repairs.*
+>
+> *The phase lattice is a monotonic index over the transaction's own steps (`prepared`,
+> `backed_up`, `log_rewritten`, `trace_published`, `workdirs_removed`, `succeeded`) with no
+> absorbing `quarantine_ambiguous`: deletion needs one because a Windows quarantine rename can
+> report failure after the destination became visible, while every step here is a copy, an atomic
+> replace or an `rmtree`, so the last COMPLETED phase is always a true statement and is strictly
+> more informative than "unknown". An unresolved receipt is already a fail-closed fence.*
+>
+> *What did NOT change: the purge still refuses a live run, a changed tail, a changed subtree, a
+> torn log and an unsafe sidecar in the same order, before anything is written — the receipt is
+> published after those refusals and before the first irreversible step, so a refused purge leaves
+> no record and fences nothing.*
 
 > **Status update (2026-08-14).** Unchanged. `_purge_node_snapshot` is still the bare `try/finally`
 > multi-file transaction with the ad-hoc `events.jsonl.bak-del<N>` backup, still reachable from the
@@ -103,6 +144,19 @@ the agent is allowed to do to the run's own history.
 > rows, and writes ONE receipt binding the whole appended byte range — the identity CAS then holds
 > at flush granularity, which is the amortization choice the paragraph below already names. Measure
 > before/after on the geesefs mount that motivated the numbers here.
+>
+> **CLOSED 2026-09-08, exactly as that paragraph prescribes.** `_worker_loop` takes the whole queue
+> per iteration and `JsonlSpanExporter._export_lines` (the pointer comment now lives on its
+> docstring) runs the ladder once for the batch: one guarded open, one heal, one before/after
+> identity CAS, one append receipt whose `append_sha256` covers the whole appended range. The
+> per-row physical-JSONL contract is still checked per ROW and before the lock, so one malformed row
+> refuses the drain with nothing appended. What moved is granularity, and it moved in the one place
+> the review said it could: the identity CAS now catches a run-root replacement mid-DRAIN rather
+> than between two rows of it, and a raising ladder loses the drain rather than one row — which is
+> the honest cost, since the failures this ladder produces (a replaced root, a full disk, a stale
+> descriptor) are properties of the path and fail every row of a drain together anyway. The
+> before/after measurement on the geesefs mount is still owed; what is measured here is the open
+> count itself (six spans across two drains: two source opens, not six).
 
 **What it is.** Each exported span performs roughly three hardened opens (~12 `stat` calls), two
 `flock`s, a torn-tail heal read and a 4 KiB read-and-parse of the append receipt journal, where the
@@ -132,6 +186,19 @@ motivated it.
 
 ## D-03 · `card_trace_view` scans the whole run's spans · `serve/appstate.py`
 
+> ***CLOSED (2026-09-08).*** *The recommendation below was taken as written. `SpanIndex` carries a
+> `card_id` dimension — `card_propose_tids`, stamped card id -> the traces of the root `propose`
+> spans naming it, built at `_append` from the ONE shared predicate
+> `traceview.card_research_root_card` — and `SpanIndex.card_trace_spans` serves BOTH match rules by
+> lookup: rule one from that dimension (which is why a trace-scoped narrowing was never the answer),
+> rule two from the owned traces the fold resolves. It returns the run-GLOBAL claim map with the
+> spans, because a claim's two halves live in different traces and a contested trace is a run-wide
+> refusal a subset cannot make. `project_card_trace` is unchanged in what it decides and gained one
+> optional `claimed=` parameter, shaped exactly like `_conversation_bands`'s. The `_SCHEMA` bump the
+> decision required is 13, shared with D-04. Pinned by the pair in
+> `tests/test_card_trace_projection.py`: the narrowed answer is IDENTICAL to the whole-run one, and
+> the selection copies the card's rows and nothing else (8 rows of the fixture's 610).*
+>
 > **Status update (2026-08-14).** Unchanged. The scan is still whole-run — `serve/appstate.py:613`
 > carries the "KNOWN COST … docs/34 (CARD-TRACE-SCAN)" comment feeding `project_card_trace` — and
 > `events/span_index.py` has no `card_id` or span-name dimension (`_SCHEMA` is 12; `card_id` appears
@@ -154,6 +221,22 @@ path, and a decision about what else deserves a dimension before the row grows a
 
 ## D-04 · `SpanIndex` hashes every source row · `events/span_index.py`
 
+> ***CLOSED (2026-09-08).*** *The corruption-class decision was made, in the form this entry asks
+> for: a `_SCHEMA` bump (to 13) with the chosen preimage rule written at `_read_full` and stated in
+> full at `span_index.py::_ROW_DIGEST_PREFIX`. The digest is KEPT and bounded —
+> `sha256(b"looplab:span-row:v1\0" + length + head 8 KiB + tail 8 KiB)`, truncated to 32 hex, so a
+> row of any size costs one 16 KiB hash and the per-row hex retained in memory and on disk halves.
+> What it must catch is named: any change to the row's LENGTH or either EDGE — offset drift onto a
+> neighbour, a resized in-place rewrite, a truncated tail, a persisted index loaded against another
+> file — with `_read_full`'s FULL normalized-light comparison still verifying every attribution
+> field at every read. What it deliberately does not catch is named too: a same-length mutation
+> strictly inside the heavy middle of a row over 16 KiB, which the no-index reader
+> (`traceview.load_spans`) also returns, so the index gives up no promise it usefully held. A v12
+> index's 64-hex digests can never be compared against the new ones — different width, refused
+> structurally by `_decode_row_digest`, and separated by the schema bump. The accountant is
+> `tests/test_span_index.py::test_read_full_hashes_bounded_bytes_per_row_not_whole_rows`
+> (measured: 600,346 bytes hashed per row under the old rule, 16,448 ceiling under this one).*
+>
 > **Status update (2026-08-14).** Unchanged. `_read_full` still SHA-256s each selected row's FULL
 > bytes and `_scan_light` still retains a 64-char digest per row; `_SCHEMA` is still 12. The pointer
 > comment is in place (`events/span_index.py:694`) and states the same bounded-prefix-plus-length

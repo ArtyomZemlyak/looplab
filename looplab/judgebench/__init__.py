@@ -28,6 +28,18 @@ that reused the condemned stage output, and the allocator's own words in the log
 looplab.judgebench` is the entry point for both (`score` / `extract` and `score-triage` /
 `extract-triage`).
 
+**A third kind of row lives here too, and it is authored rather than recorded.** `trajectory.py` +
+`trajectory_score.py` are rungs 2, 4 and 5 of the agent eval ladder in `docs/27` §4: curated
+trajectory cases with expected and forbidden tool calls, prompt-injection / confused-deputy /
+cross-run-scope containment cases, and the repeated stochastic trials with confidence intervals
+that turn a yes/no into a rate. They are in THIS package because they answer the same shape of
+question — is a change to this engine's agent layer better, measured, rather than believed — and
+because they are the same kind of developer tool over the same `python -m looplab.judgebench` entry
+point (`score-trajectory`). What they do NOT share is the label problem above: a trajectory case is
+graded against a contract the case itself states, so there is no outcome to recover and no incumbent
+to agree with. Its own honesty hazard is a different one and its module docstring names it: offline
+the model is SCRIPTED, so a pass says an effect is unreachable, never that a model declines.
+
 The failure bench also carries the one thing an accuracy number cannot: **the COST of each error**.
 Its answer selects a repair directive, gates the dependency install and meets the salvage refusal,
 so `crash`-for-`oom` (a wasted round) and `oom`-for-`diverged` (rounds spent moving the wrong dial)
@@ -54,9 +66,10 @@ one. `CORPUS_LIMITS` states this in the dataset header itself, so the caveat tra
 from __future__ import annotations
 
 from looplab.judgebench.judge_corpus import (
-    CONTRACT_PREFIX, CORPUS_LIMITS, DATASET_SCHEMA, LABELS, LABEL_BUDGET_EXHAUSTED, LABEL_PRODUCTIVE,
-    LABEL_UNKNOWN, LABEL_WASTED, build_dataset, extract_run, messages_of, read_dataset,
-    write_dataset)
+    CONTRACT_PREFIX, CORPUS_LIMITS, DATASET_SCHEMA, FAULT_LABELS, LABELS, LABEL_BUDGET_EXHAUSTED,
+    LABEL_PRODUCTIVE,
+    LABEL_REPAIRED, LABEL_UNKNOWN, LABEL_UNREPAIRED, LABEL_WASTED, build_dataset, extract_run,
+    messages_of, read_dataset, rederive_fault_label, write_dataset)
 from looplab.judgebench.score import (
     Gate, ScoreReport, attempt_totals, per_attempt_report, score_dataset)
 from looplab.judgebench.triage_corpus import (
@@ -66,15 +79,22 @@ from looplab.judgebench.triage_corpus import (
     rederive_label as rederive_triage_label, write_dataset as write_triage_dataset)
 from looplab.judgebench.triage_score import (
     ERROR_COSTS, cost_of, head_replay_candidate, score_dataset as score_triage_dataset)
+# `trajectory` / `trajectory_score` are deliberately NOT re-exported here. They reach `agents` and
+# `tools` to drive the real loop, and this `__init__` is imported by `cli/audit_cmds.py` for the
+# bait instruments — re-exporting would pull the whole agent stack into a command that does not use
+# it. Import them by module (`from looplab.judgebench import trajectory`), which is also what
+# `__main__.py` does.
 
 __all__ = [
     "ERROR_COSTS", "LABEL_BASES", "LiveRunRefused", "TRIAGE_LABEL_UNKNOWN",
     "build_triage_dataset", "cost_of", "derive_triage_label", "extract_triage_run",
     "head_replay_candidate", "read_triage_dataset", "rederive_triage_label",
     "score_triage_dataset", "write_triage_dataset",
-    "CONTRACT_PREFIX", "CORPUS_LIMITS", "DATASET_SCHEMA", "Gate", "LABELS", "LABEL_BUDGET_EXHAUSTED",
-    "LABEL_PRODUCTIVE",
-    "LABEL_UNKNOWN", "LABEL_WASTED", "ScoreReport", "build_dataset", "extract_run", "messages_of",
-    "per_attempt_report", "attempt_totals", "read_dataset", "score_dataset",
+    "CONTRACT_PREFIX", "CORPUS_LIMITS", "DATASET_SCHEMA", "FAULT_LABELS", "Gate", "LABELS",
+    "LABEL_BUDGET_EXHAUSTED",
+    "LABEL_PRODUCTIVE", "LABEL_REPAIRED",
+    "LABEL_UNKNOWN", "LABEL_UNREPAIRED", "LABEL_WASTED", "ScoreReport", "build_dataset",
+    "extract_run", "messages_of",
+    "per_attempt_report", "attempt_totals", "read_dataset", "rederive_fault_label", "score_dataset",
     "write_dataset",
 ]

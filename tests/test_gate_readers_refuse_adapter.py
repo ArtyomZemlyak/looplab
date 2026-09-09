@@ -207,3 +207,44 @@ def test_a_node_whose_GATES_NEVER_RAN_is_never_salvaged(tmp_path):
         "every OTHER salvage precondition holds — which is exactly why the flag is needed")
     assert salvage_condition(res, "no_metric") is None, (
         "a metric whose gates were never evaluated may not be recovered")
+
+
+def test_a_node_whose_GATES_NEVER_RAN_is_never_REPAIRED_either(tmp_path):
+    """The OTHER half, and it is the one that costs money.
+
+    `salvage_condition` has read this flag since the return replaced the raise; the repair path had
+    no clause at all. `no_metric` is in `REPAIRABLE_REASONS`, so every node ran its whole pipeline —
+    hours, on a real task — and then bought a triage judge plus `inline_repair_attempts` Developer
+    repairs trying to fix candidate code for a fault that lives in the OPERATOR's task file, and did
+    it again on the next node, for the length of the run. Nothing a Developer can write reaches an
+    `adapter` declared under `eval.metrics`.
+
+    Driven through the real `run_command_eval`, so the flag is the one the runtime actually sets,
+    and through the real phase, so what is asserted is the loop control the driver acts on.
+
+    MUTATION: drop the `gate_readers_refused` clause from `_eval_decide_repair` -> this is red.
+    """
+    import sys
+
+    import anyio
+
+    from looplab.engine.evaluate import PHASE_SETTLED, EvalAttempt, EvaluateMixin
+    from looplab.runtime.command_eval import run_command_eval
+
+    (tmp_path / "p.py").write_text('print("{\\"metric\\": 1.0}")', encoding="utf-8")
+    res = run_command_eval(
+        [sys.executable, "p.py"], str(tmp_path), 60, {"kind": "stdout_json", "key": "metric"},
+        metrics={"m": {"kind": "adapter", "path": "x.py"}})
+    assert res.gate_readers_refused is True
+
+    a = EvalAttempt(node_id=0)
+    a.res, a.reason, a.generation = res, "no_metric", 0
+
+    # The phase is asked directly: `self` is never touched before the clause, which is the point --
+    # the refusal is decided before the dep round, before the budget re-fold, before the judge.
+    sig = anyio.run(lambda: EvaluateMixin._eval_decide_repair(object(), a))
+
+    assert sig == PHASE_SETTLED, "the repair loop was entered for a refused eval SPEC"
+    assert a.triage_outcome is not None and a.triage_outcome[0] == "abandon", a.triage_outcome
+    # …and it says whose fault it is, because the next proposer reads this sentence.
+    assert "SPEC" in a.triage_outcome[1] and "no repair" in a.triage_outcome[1], a.triage_outcome

@@ -610,7 +610,7 @@ def test_direct_cli_resume_waits_for_finished_owner_tail(tmp_path, monkeypatch):
     monkeypatch.setattr(cmds.time, "sleep", lambda delay: sleeps.append(delay))
     monkeypatch.setattr(
         cmds, "_run_engine_guarded",
-        lambda _eng: guarded.append(True) or fold(_eng.store.read_all()),
+        lambda _eng, **_k: guarded.append(True) or fold(_eng.store.read_all()),  # **_k: mlflow_uri=
     )
     monkeypatch.setattr(cmds, "_print_result", lambda _state: None)
 
@@ -719,7 +719,7 @@ def test_cli_run_pending_finalize_preserves_and_uses_original_snapshots(
 
     monkeypatch.setattr(cli, "_engine", fake_engine)
     monkeypatch.setattr(
-        cmds, "_run_engine_guarded", lambda eng: fold(eng.store.read_all()))
+        cmds, "_run_engine_guarded", lambda eng, **_k: fold(eng.store.read_all()))  # **_k: mlflow_uri=
     monkeypatch.setattr(cmds, "_print_result", lambda _state: None)
 
     result = CliRunner().invoke(

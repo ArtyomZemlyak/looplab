@@ -430,12 +430,66 @@ def filter_useless(scored: list[tuple[float, int, dict]], *,
     return keep
 
 
-def lesson_rank_key(sim: float, idx: int, o: dict):
+#: How many operator names one lesson row may carry. A lesson's evidence is at most a handful of
+#: nodes and the vocabulary is closed (`search/policy.py`'s action kinds), so this is a runaway
+#: guard on an untrusted durable row, not a budget anyone should reach.
+MAX_LESSON_OPERATORS = 8
+
+
+def lesson_operators(o) -> tuple[str, ...]:
+    """The operator names a lesson's own evidence was produced under, off a durable row.
+
+    Total over junk, like every reader of these shared files: a row is written by a past version of
+    this code, by another run, or by a hand edit. Anything that is not a bounded list of non-empty
+    strings reads as UNTAGGED — the empty tuple — which is the neutral answer everywhere below.
+    """
+    values = o.get("operators") if isinstance(o, dict) else None
+    if not isinstance(values, list):
+        return ()
+    return tuple(dict.fromkeys(
+        value for value in values[:MAX_LESSON_OPERATORS]
+        if isinstance(value, str) and value and len(value) <= 64))
+
+
+def lesson_operator_bucket(o, operator: Optional[str]) -> int:
+    """The OPERATOR-SCOPING rule, as a truth table rather than a clause buried in the renderer.
+
+    Three buckets, lowest served first, and the whole design is in which rows land where:
+
+      0 — this lesson's own evidence was produced by the operator about to fire;
+      1 — UNTAGGED: a legacy row, a row whose evidence had no recorded operator, or no operator to
+          scope by at all. Every lesson written before 2026-09-08 is here, so an existing store is
+          ranked exactly as it was;
+      2 — tagged, and only with OTHER operators.
+
+    A BUCKET, not a filter. Bucket 2 rows still rank and still fill a slot when the pool above them
+    is thin, because the only per-operator scoping ablation in the field (AIRA-dojo) came back null:
+    a rule that DROPPED them would bet a real loss (a Developer never shown "the fix for this crash
+    class") on an effect nobody has measured. What this earns instead is the measurement — the
+    `prior_injected` receipt now names the operator each render was scoped to, so the citation-rate
+    instrument (`events/prior_citations.py`) can answer whether the scoping moved anything.
+    """
+    if not operator:
+        return 1
+    tags = lesson_operators(o)
+    if not tags:
+        return 1
+    return 0 if str(operator) in tags else 2
+
+
+def lesson_rank_key(sim: float, idx: int, o: dict, operator: Optional[str] = None):
     """Retrieval ranking: similarity first, then confidence × corroboration, then the READ-side
     utility (citation rate, neutral 0.5 when unrecorded), then recency — so a twice-confirmed
     lesson from a related task beats a one-off with equal similarity, and among equals the one
-    proposals actually cite beats the one they ignore."""
+    proposals actually cite beats the one they ignore.
+
+    `operator` (opt-in, `Settings.lesson_operator_scope`) prepends `lesson_operator_bucket` AHEAD of
+    similarity. Ahead, not as a tie-break: similarity is a continuous Jaccard and ties essentially
+    never happen, so a tie-break would be a knob that does nothing. `None` — the default and every
+    historical caller — reproduces the previous key BYTE FOR BYTE, because the bucket is then a
+    constant 1 in front of an unchanged tuple."""
     conf = float(o.get("confidence", 0.5) or 0.5)
     ev = min(3, int(o.get("evidence_count", 1) or 1))
     utility = lesson_utility(o)
-    return (-sim, -(conf * ev), -(0.5 if utility is None else utility), -idx)
+    base = (-sim, -(conf * ev), -(0.5 if utility is None else utility), -idx)
+    return base if operator is None else (lesson_operator_bucket(o, operator), *base)
