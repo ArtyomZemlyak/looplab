@@ -251,7 +251,8 @@ def _label_contradicted_by_its_own_denominator(row, medians) -> str | None:
     return None
 
 
-def _caveats(task, refs, inferred, contradicted, withdrawn, unattributed, serial_first) -> str:
+def _caveats(task, refs, inferred, contradicted, withdrawn, unattributed, serial_first,
+             neighboured=None) -> str:
     """Everything that had to be said about HOW this task's readings were selected.
 
     Lifted out of the pooled branch (§352): a task whose only mishandled rows are serial falls to
@@ -260,6 +261,7 @@ def _caveats(task, refs, inferred, contradicted, withdrawn, unattributed, serial
     produced it. A caveat that appears only on one of two paths is worse than none, because its
     absence reads as "nothing to report".
     """
+    neighboured = neighboured or {}
     how = ""
     seen_refs = refs.get((task, ruler_check.CAMPAIGN_REGIME)) or set()
     named = {r for r in seen_refs if r}
@@ -270,6 +272,9 @@ def _caveats(task, refs, inferred, contradicted, withdrawn, unattributed, serial
         how += " [no reading names the reference it used]"
     if inferred.get(task):
         how += f" ({inferred[task]} of them INFERRED, taken before {serial_first[:16]})"
+    if neighboured.get(task):
+        how += (f" [{neighboured[task]} reading(s) taken with another probe ALIVE on the box -- "
+                "quiet by cpu, not by neighbours]")
     if contradicted.get(task):
         how += (f" [{contradicted[task]} reading(s) whose own cached_ms belongs to the "
                 "OTHER regime's cache -- label refuted by the reading]")
@@ -302,6 +307,7 @@ def check_ruler_constants(bench: str):
     refs: dict = {}
     withdrawn: dict = {}
     contradicted: dict = {}
+    neighboured: dict = {}
     medians = _cache_medians(bench)
     # THE EARLIEST EVIDENCE THAT THE SERIAL REGIME EXISTED HERE, from two independent places: a
     # cache file's mtime and the log's own first regime-tagged row. The earlier of the two is the
@@ -398,6 +404,12 @@ def check_ruler_constants(bench: str):
                 # mistake with a different key. Rows written before the field exists carry None and
                 # are counted separately, because "not recorded" is not "the same as the others".
                 refs.setdefault((task, reg), set()).add(row.get("reference_sha"))
+                # AND WHETHER ANOTHER PROBE WAS ALIVE (§365). `busy_cpus_outside_lane == 0` says no
+                # neighbour was burning cpu at the sampled instants; it does not say none was about
+                # to. A reading taken beside four sleeping probes is filed as quiet today.
+                near = row.get("neighbours_alive")
+                if isinstance(near, int) and near > 0:
+                    neighboured[task] = neighboured.get(task, 0) + _n_values(row)
     except OSError as exc:
         return False, f"cannot read the drift log: {type(exc).__name__}"
 
@@ -447,7 +459,8 @@ def check_ruler_constants(bench: str):
         # AND outside the tolerance: the first test is what stops a +-4 % instrument reporting a
         # 3 % drift every other sitting, the second is what stops a very tight instrument reporting
         # a difference too small to act on.
-        how = _caveats(task, refs, inferred, contradicted, withdrawn, unattributed, serial_first)
+        how = _caveats(task, refs, inferred, contradicted, withdrawn, unattributed,
+                       serial_first, neighboured)
         vals = pool.get((task, ruler_check.CAMPAIGN_REGIME)) or []
         n = len(vals)
         if n >= 2:

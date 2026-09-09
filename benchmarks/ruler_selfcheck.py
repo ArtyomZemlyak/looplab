@@ -183,6 +183,55 @@ def reference_module(task: str, probe_root: str = f"{BENCH}/model-probes") -> tu
     return found[0], sha
 
 
+def probes_alive_outside_lane(proc: str = "/proc", affinity=None, mine=None) -> int | None:
+    """Bench probes ALIVE on other lanes -- running or merely waiting on the gateway.
+
+    §365. `busy_cpus_outside_lane` counts cpus in state R, and it is right to: a probe waiting on
+    the model burns no core, and §295's older version that counted every pinned process read 22 on
+    an idle box. Measured 2026-09-09 with FOUR probes live on the four bench lanes: state R on the
+    bench lanes was **zero** and the field read **0** -- an honest answer to the question it asks.
+
+    It is not the whole condition for a ruler reading, though. Those four probes will each start a
+    twenty-two-worker evaluation at a moment nobody controls, and a self-check runs for minutes; a
+    reading recorded as "quiet" can be wrecked between two of its own reps. The field's own
+    docstring already concedes the near case -- "a neighbour that both starts and ends inside a
+    single rep is missed" -- and this is the far one: a neighbour that is not running YET.
+
+    Recorded beside the cpu count, not folded into it. Changing what "quiet" means would re-open
+    every pooled number in the drift log; saying how many neighbours were alive lets a later reader
+    separate the two kinds of quiet without touching what was already measured.
+    """
+    # INJECTABLE, for `lanes.probes`' reason: the scan is only testable against a fake `/proc`, and
+    # the two mutations that matter -- counting our own probe as a neighbour, and counting a shell
+    # or a tool as the engine -- cannot go red without one.
+    affinity = affinity or os.sched_getaffinity
+    try:
+        mine = affinity(0) if mine is None else mine
+    except OSError:
+        return None
+    if not mine:
+        return None
+    root = f"{BENCH}/model-probes"
+    alive = 0
+    for pid in sorted(os.listdir(proc)):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"{proc}/{pid}/cmdline", "rb") as fh:
+                argv = fh.read().decode("utf-8", "replace").split("\0")
+            aff = affinity(int(pid))
+        except (OSError, ValueError):
+            continue
+        argv = " ".join(a for a in argv if a)
+        if not argv or root not in argv:
+            continue
+        if "looplab.cli" not in argv:
+            continue                       # the engine itself, not its shell or a tool
+        if aff and not (aff & mine):
+            alive += 1
+    return alive
+
+
 def build_solver(task: str, out_dir: str, probe_root: str = f"{BENCH}/model-probes") -> str:
     """Write a SELF-CONTAINED `solver.py` whose `solve()` is the reference's own.
 
@@ -354,7 +403,8 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
                    lane: str | None = None, busy: int | None = None,
                    regime: str | None = None, solver_ms: float | None = None,
                    cached_ms: float | None = None, reference_sha: str | None = None,
-                   reference_from: str | None = None, interpreter: str | None = None) -> dict:
+                   reference_from: str | None = None, interpreter: str | None = None,
+                   neighbours_alive: int | None = None) -> dict:
     """Append one dated reading, so the drift becomes a SERIES rather than a single number.
 
     §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
@@ -406,6 +456,10 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
            # HAND afterwards. They are excluded from today's verdict solely because they predate
            # `busy_cpus_outside_lane`, which is an accident, not a rule.
            "interpreter": interpreter,
+           # AND HOW MANY NEIGHBOURS WERE ALIVE (§365). `busy_cpus_outside_lane` answers "is another
+           # lane burning cpu NOW"; this answers "is another probe about to". Both, or a reading
+           # taken beside four sleeping probes is filed as quiet.
+           "neighbours_alive": neighbours_alive,
            "values": [round(float(v), 6) for v in values],
            "median": round(float(median), 6)}
     path = Path(path)
@@ -616,7 +670,8 @@ def main(argv=None) -> int:
                        args.lane, max(seen) if seen else None,
                        ran_regime, direct, cached,
                        reference_sha=ref_sha, reference_from=ref_from,
-                       interpreter=bench_python())
+                       interpreter=bench_python(),
+                       neighbours_alive=probes_alive_outside_lane())
         print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "
