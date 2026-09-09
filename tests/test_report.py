@@ -13,6 +13,11 @@ import pytest
 from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
 from looplab.events.replay import fold
 from looplab.serve.report import _report_context, generate_report, make_report_writer
+# The two seams these tests inject through — the report record's writer and the run-evidence
+# reader — are bound by the module that USES them, and doc 25 SR-02's remaining arm moved both
+# out of the router into `scope_generate`. Reading them off the router would read a module that
+# no longer writes reports or captures sources.
+from looplab.serve import scope_generate, scope_report_store
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -26,6 +31,7 @@ TASK = ROOT / "examples" / "toy_task.json"
 _STORE_PATCH_MODULE_PATHS = (
     "looplab.serve.scope_report_store",
     "looplab.serve.scope_actions",
+    "looplab.serve.scope_generate",
     "looplab.serve.routers.reports",
     "looplab.serve.routers.genesis",
 )
@@ -2811,7 +2817,7 @@ def test_scope_report_action_strictly_publishes_claim_report_and_terminal(
     action_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     _seed_scope_run(tmp_path, "strict-paid-run", task_id)
     writes = []
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
 
     def observe(path, text):
         writes.append((path.name, text))
@@ -2889,7 +2895,7 @@ def test_scope_report_refuses_to_pay_when_its_attempt_row_cannot_be_written(
     action_id = "aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae"
     _seed_scope_run(tmp_path, "unwritable-attempt-run", task_id)
     provider_calls = 0
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
 
     def provider(_settings, **_kw):
         nonlocal provider_calls
@@ -2948,7 +2954,7 @@ def test_scope_report_action_preworker_fence_failure_recovers_through_abandon(
     action_a = "a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0"
     action_b = "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1"
     _seed_scope_run(tmp_path, "preworker-fence-run", task_id)
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     failed = False
     provider_calls = 0
 
@@ -2992,7 +2998,7 @@ def test_scope_report_action_terminal_sync_failure_persists_indeterminate_and_re
     task_id = "terminal-sync-failure"
     action_id = "acacacac-acac-4cac-8cac-acacacacacac"
     _seed_scope_run(tmp_path, "terminal-sync-run", task_id)
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     receipt_writes = 0
 
     def fail_one_terminal(path, text):
@@ -3037,7 +3043,7 @@ def test_scope_report_action_double_terminal_failure_releases_retained_leases_on
     task_id = "retained-terminal-leases"
     action_id = "a2a2a2a2-a2a2-42a2-82a2-a2a2a2a2a2a2"
     _seed_scope_run(tmp_path, "retained-terminal-run", task_id)
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     receipt_writes = 0
 
     def publish_then_fail_terminal_and_fallback(path, text):
@@ -3117,7 +3123,7 @@ def test_scope_report_mismatched_done_tombstone_failure_stays_quarantined(
                 "result": reports._scope_action_failure({}, action_id),
             })
 
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     failed = False
     tombstone_attempted = threading.Event()
 
@@ -3173,7 +3179,7 @@ def test_scope_report_retained_recovery_survives_deleted_action_marker(
         else "a8a8a8a8-a8a8-48a8-88a8-a8a8a8a8a8a8"
     )
     _seed_scope_run(tmp_path, f"retained-marker-run-{visible_terminal}", task_id)
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     receipt_writes = 0
 
     def fail_both_terminal_confirmations(path, text):
@@ -3238,7 +3244,7 @@ def test_scope_report_retained_missing_receipt_can_be_directly_abandoned(
     task_id = "retained-missing-receipt-abandon"
     action_id = "a9a9a9a9-a9a9-49a9-89a9-a9a9a9a9a9a9"
     _seed_scope_run(tmp_path, "retained-missing-receipt-run", task_id)
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     receipt_writes = 0
 
     def fail_terminal_before_visibility(path, text):
@@ -3333,7 +3339,7 @@ def test_scope_report_action_canonical_report_sync_failure_is_durable_failure(
     task_id = "canonical-sync-failure"
     action_id = "acdcacdc-acdc-4cdc-8cdc-acdcacdcacdc"
     _seed_scope_run(tmp_path, "canonical-sync-run", task_id)
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     provider_calls = 0
 
     def provider(_settings, **_kw):
@@ -3369,7 +3375,7 @@ def test_scope_report_visible_canonical_without_success_terminal_is_quarantined_
     action_a = "a4a4a4a4-a4a4-44a4-84a4-a4a4a4a4a4a4"
     action_b = "a5a5a5a5-a5a5-45a5-85a5-a5a5a5a5a5a5"
     _seed_scope_run(tmp_path, "visible-canonical-run", task_id)
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     failed = False
     provider_calls = 0
 
@@ -3446,7 +3452,7 @@ def test_scope_report_action_visible_unconfirmed_terminal_is_quarantined_by_tomb
     task_id = "visible-unconfirmed-terminal"
     action_id = "acedaced-aced-4ced-8ced-acedacedaced"
     _seed_scope_run(tmp_path, "visible-unconfirmed-run", task_id)
-    real_write = reports.strict_atomic_write_text
+    real_write = scope_generate.strict_atomic_write_text
     receipt_writes = 0
 
     def publish_then_fail_once(path, text):
@@ -4217,7 +4223,7 @@ def test_scope_report_persists_uncapturable_members_without_permanent_staleness(
     task_id = "partial-source-scope"
     _seed_scope_run(tmp_path, "readable", task_id)
     _seed_scope_run(tmp_path, "uncapturable", task_id)
-    real_capture = reports.capture_scope_source
+    real_capture = scope_generate.capture_scope_source
 
     def partial_capture(root, run_id, **kwargs):
         if run_id == "uncapturable":
@@ -4250,7 +4256,7 @@ def test_scope_report_rechecks_transient_omission_even_when_probe_is_unchanged(
 
     task_id = "transient-omission-repair"
     _seed_scope_run(tmp_path, "temporarily-locked", task_id)
-    real_capture = reports.capture_scope_source
+    real_capture = scope_generate.capture_scope_source
     available = False
     repaired_captures = 0
 
@@ -4294,7 +4300,7 @@ def test_scope_report_get_reuses_stable_revision_but_rechecks_snapshot_identity(
     url = f"/api/scope-report/task/{task_id}"
     assert _generate_scope_report(client, url).json()["ok"] is True
 
-    real_capture = reports.capture_scope_source
+    real_capture = scope_generate.capture_scope_source
     captures = 0
 
     def counted_capture(*args, **kwargs):
@@ -4527,7 +4533,7 @@ def test_scope_report_revalidates_frozen_sources_before_provider(tmp_path, monke
     task_id = "pre-provider-cas"
     _seed_scope_run(tmp_path, "owned-run", task_id)
     event_path = tmp_path / "owned-run" / "events.jsonl"
-    original_capture = reports.capture_scope_source
+    original_capture = scope_generate.capture_scope_source
     captures = 0
     provider_calls = 0
 
@@ -5223,7 +5229,7 @@ def test_prior_learnings_index_inspects_at_most_256_directory_entries(
             return SimpleNamespace(name=f"ignored-{self.calls}.txt")
 
     entries = _Entries()
-    monkeypatch.setattr(reports.os, "scandir", lambda _base: entries)
+    monkeypatch.setattr(scope_report_store.os, "scandir", lambda _base: entries)
 
     assert reports._prior_learnings_index(reports_dir) == ""
     assert entries.calls == 256

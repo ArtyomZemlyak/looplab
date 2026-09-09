@@ -1215,6 +1215,14 @@ class CardReservationMixin:
 
             def _plan(events, tail):
                 nonlocal proposal_authority_seq
+                # *Closed 2026-09-08: the serial lane's reservation was running in an AnyIO
+                # worker (`_offload_build` took all of `_create_node`), which put the FOLDED
+                # `card_added` + `node_building` off the main task and left this fence's
+                # microsecond premise false — 38 of 40 paid proposals were silently discarded in an
+                # isolated 2x2 against 0/40 in every control. `orchestrator.py::
+                # _reserve_on_main_task` marshals the CAS back onto the loop, which restores both
+                # halves and the premise itself; widening this fence's exclusion list was refused
+                # because it would have bought the money half and left the mint in a worker.*
                 authority_seq = self._proposal_authority_seq(events)
                 if proposal_authority_seq is None:
                     proposal_authority_seq = authority_seq
@@ -1658,9 +1666,12 @@ class CardReservationMixin:
                     # the note below on why the two do not share `_link`). One paid Researcher call
                     # per action, run serially, so without a beacon a width-4 stage is four
                     # invisible waits in a row that read as one hang.
-                    with self._progress(PROGRESS_STAGE_BUILD, "propose",
-                                        node_id=proposal_node_ceiling + offset, prospective=True,
-                                        operator=action.get("kind")):
+                    # `_paid_progress`: this is a paid Researcher call, and a beacon alone leaves
+                    # it `trace_id=null`. See `SharedEngineMixin::_paid_progress`.
+                    with self._paid_progress(PROGRESS_STAGE_BUILD, "propose",
+                                             node_id=proposal_node_ceiling + offset,
+                                             prospective=True,
+                                             operator=action.get("kind")):
                         # OFF THE EVENT-LOOP THREAD, and only this half. `_prepare_node_idea` is a
                         # paid Researcher call — minutes of provider latency with no `await` in it —
                         # and it ran as ONE event-loop callback, so nothing else on the loop could
