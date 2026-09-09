@@ -364,8 +364,10 @@ def test_the_endpoint_line_dates_every_refusal(tmp_path):
     got = cm.endpoint_health(str(ledger))
     assert got["refusing"] == ["quiet"], (
         "an arm whose 401 was followed by a 200 is not refusing; only the NEWEST row counts")
-    assert got["newest"]["alive"] == (2000.0, "200")
-    assert got["newest"]["quiet"] == (1500.0, "401")
+    # (completion, status, start) since §387: these rows carry no `latency_ms`, so the two
+    # ends coincide -- which is exactly why a fixture like this cannot see the old bug.
+    assert got["newest"]["alive"] == (2000.0, "200", 2000.0)
+    assert got["newest"]["quiet"] == (1500.0, "401", 1500.0)
 
 
 def test_endpoint_health_survives_a_missing_or_torn_ledger(tmp_path):
@@ -378,7 +380,7 @@ def test_endpoint_health_survives_a_missing_or_torn_ledger(tmp_path):
     torn.write_text('{"ts": "1.0", "arm": "a", "status": "200"}\nnot json\n{"ts": ',
                     encoding="utf-8")
     got = cm.endpoint_health(str(torn))
-    assert got["newest"] == {"a": (1.0, "200")}
+    assert got["newest"] == {"a": (1.0, "200", 1.0)}
     # A torn tail is not a failure streak: the unparseable rows are skipped, and the one good row
     # is a 200, which clears rather than starts a run.
     assert got["streak"] == {}

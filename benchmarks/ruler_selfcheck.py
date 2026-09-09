@@ -353,6 +353,63 @@ def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 90
 
 DEFAULT_LOG = HERE / "algotune" / "ruler_selfcheck_log.jsonl"
 
+def cpus_counted_for(pid: int, mine: set, total: int) -> set:
+    """The CPUs ONE process contributes to the load figure -- empty when it contributes none.
+
+    §390. The per-process decision, exposed because it is the only thing about this rule that can be
+    checked deterministically. Three fixtures for the same claim have now failed for three different
+    reasons -- an absolute count red under a second suite, a delta red under a live probe, and a
+    "pick free CPUs and watch them" red when the OTHER pytest suite, pinned to the service lane,
+    took the very CPUs the fixture had just measured as free. Each version asked the box a question
+    about a moment; the rule is about a PROCESS, and this is that question.
+
+    The two halves, both load-bearing: a process sharing our own lane is not "outside" it, and a
+    process that is not RUNNING is not load (§295 counted 23 dead forkservers and read 22 on an idle
+    box).
+    """
+    try:
+        other = os.sched_getaffinity(pid)
+        if not (other and len(other) < total and not (other & mine)):
+            return set()
+        stat = open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace").read()
+        # After the ") " so a process whose NAME contains a bracket cannot shift the field.
+        if stat.split(") ")[-1].split()[0] != "R":
+            return set()
+        return set(other)
+    except (OSError, ValueError, IndexError, ProcessLookupError):
+        return set()
+
+
+def busy_cpus_outside_lane_set() -> set | None:
+    """The CPUs themselves, not their count -- see `busy_cpus_outside_lane` for the rule.
+
+    §388. Split out because a COUNT cannot be checked against a live box. The test for "an idle
+    pinned neighbour is not counted" compared the count before and after spawning one, and a probe
+    whose workers arrived between the two readings made it fail (0 -> 8) while the rule it is about
+    held perfectly. With the set, the claim is testable directly: the idle child's own CPUs must not
+    appear, whatever else the box is doing.
+    """
+    try:
+        mine = os.sched_getaffinity(0)
+        total = os.cpu_count() or 0
+        if not mine or not total or len(mine) >= total:
+            # §388. `None` FOR AN UNPINNED PROCESS, which is what this function's own docstring has
+            # always said ("None means the question is not answerable here") and what the code did
+            # NOT do: it answered `set()`, i.e. zero, and only an EMPTY affinity -- a state Linux
+            # does not produce -- got None. A row recording "0 cpus busy outside the lane" from a
+            # box with no lane makes a claim about the box that was never measured, which is §313's
+            # defect wearing the field that was added to fix it. The recorder already drops a None
+            # (`max(seen) if seen else None`), so declining costs nothing.
+            return None
+        seen: set[int] = set()
+        for pid in os.listdir("/proc"):
+            if pid.isdigit():
+                seen |= cpus_counted_for(int(pid), mine, total)
+        return seen
+    except OSError:
+        return None
+
+
 def busy_cpus_outside_lane() -> int | None:
     """CPUs occupied by PINNED work outside this process's own affinity set.
 
@@ -372,31 +429,8 @@ def busy_cpus_outside_lane() -> int | None:
     measurement of load; it is a measurement of how many workers once existed. State R is the
     difference between the two readings, and it is the whole content of the field.
     """
-    try:
-        mine = os.sched_getaffinity(0)
-        total = os.cpu_count() or 0
-        if not mine or not total or len(mine) >= total:
-            return None if not mine else 0
-        seen: set[int] = set()
-        for pid in os.listdir("/proc"):
-            if not pid.isdigit():
-                continue
-            try:
-                other = os.sched_getaffinity(int(pid))
-                if not (other and len(other) < total and not (other & mine)):
-                    continue
-                stat = open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace").read()
-                # After the ") " so a process whose NAME contains a bracket cannot shift the field.
-                if stat.split(") ")[-1].split()[0] != "R":
-                    continue
-            except (OSError, ValueError, IndexError, ProcessLookupError):
-                continue
-            seen |= other
-        return len(seen)
-    except OSError:
-        return None
-
-
+    got = busy_cpus_outside_lane_set()
+    return None if got is None else len(got)
 
 
 def append_reading(path, task: str, subset: str, values, median: float, stamp=None,

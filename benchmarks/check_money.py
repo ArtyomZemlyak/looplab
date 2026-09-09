@@ -147,7 +147,7 @@ def _still_calling(bench_root: str, probe: str, newest, now=None) -> bool:
     Both conditions, and ONE function so the two call sites cannot drift apart: its last ledger row
     is recent AND its run has not ended. `newest` is `endpoint_health()["newest"]`.
     """
-    when = (newest.get(probe) or (0.0, ""))[0]
+    when = (newest.get(probe) or (0.0, ""))[0]      # the COMPLETION, per §387
     recent = ((now if now is not None else time.time()) - when) <= INFLIGHT_GRACE_S
     return recent and not _ended(bench_root, probe)
 
@@ -331,6 +331,30 @@ def abandoned_line(probe: str, cost: float, archive: str = ARCHIVE) -> tuple[str
             arch)
 
 
+def completed_at(row) -> float:
+    """When a ledger row's call actually ENDED.
+
+    §387. The row is APPENDED when the call finishes -- it has to be, it carries `latency_ms` -- but
+    its `ts` is the moment the call STARTED. Measured over 1008 calls matched between the ledger and
+    the probes' own `llm_usage` spans across five probes: `ts + latency_ms` lands on the probe's span
+    to 0.00 s at the median AND at p90, while `ts` alone is off by 11.6 s at the median and 181 s at
+    p90 (worst seen ~640 s).
+
+    Every instrument here read `ts` as the completion, and §335/§339 wrote the belief down as
+    "the ledger records a call when it finishes". Half of that is true; the half that decides a
+    number is not. A `call age` built on `ts` reports the last call as one whole latency staler than
+    it is -- on `remDL14`, whose generations run 357-387 s, "545 s since the last call" was really
+    188 s -- and the same bias decides `_still_calling`, i.e. whether an arm mid-generation counts
+    as still able to produce a span the meter has already charged for.
+    """
+    try:
+        ts = float(row.get("ts"))
+    except (TypeError, ValueError):
+        return 0.0
+    lat = row.get("latency_ms")
+    return ts + (float(lat) / 1000.0 if isinstance(lat, (int, float)) else 0.0)
+
+
 def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
     """The NEWEST ledger row per arm, so "is the endpoint answering right now" is one command.
 
@@ -369,8 +393,12 @@ def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
             if ts < since:
                 continue
             arm = str(row.get("arm") or "?")
-            if arm not in newest or ts > newest[arm][0]:
-                newest[arm] = (ts, str(row.get("status") or "?"))
+            # THE COMPLETION, NOT THE START (§387). `ts` is when the call went out; the row is
+            # written when it comes back. "How long since this arm last heard from the endpoint"
+            # is a question about the coming back.
+            done = completed_at(row)
+            if arm not in newest or done > newest[arm][0]:
+                newest[arm] = (done, str(row.get("status") or "?"), ts)
             # THE LEDGER IS APPEND-ONLY AND IN ORDER, so the running streak is one comparison per
             # row: a 200 clears it, a repeat of the same non-200 extends it, a DIFFERENT non-200
             # starts a new one -- four 401s and four 503s are not one outage with eight rows.
@@ -382,7 +410,7 @@ def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
                 cur[0] += 1
             else:
                 streak[arm] = [1, ts, st]
-    refusing = sorted(a for a, (_t, st) in newest.items() if st not in ("200", ""))
+    refusing = sorted(a for a, row in newest.items() if row[1] not in ("200", ""))
     runs = {arm: {"count": v[0], "since": v[1], "status": v[2]}
             for arm, v in streak.items() if v}
     return {"newest": newest, "refusing": refusing, "streak": runs}
@@ -614,7 +642,7 @@ def main(argv: list[str]) -> int:
             print(f"         ${kept:.4f} of that is NOT unexplained: the trees are on the "
                   "persistent mount, and only the rest has no evidence anywhere")
     if health["newest"]:
-        newest_ts = max(t for t, _s in health["newest"].values())
+        newest_ts = max(row[0] for row in health["newest"].values())
         age = max(0.0, time.time() - newest_ts)
         # THE AGE IS NOT DECORATION. Driven the minute this line was added: `oldCK8b` showed as
         # "last call refused" for two and a half minutes while it was perfectly healthy -- it had
@@ -689,7 +717,7 @@ def main(argv: list[str]) -> int:
     # so the allowance expires with the ledger's own last row.
     idle_s = 0.0
     if health["newest"]:
-        idle_s = max(0.0, time.time() - max(t for t, _s in health["newest"].values()))
+        idle_s = max(0.0, time.time() - max(row[0] for row in health["newest"].values()))
     inflight = _inflight_call_cost(a.bench_root, since) * max(0, unnamed_live)
     allowance = max(a.max_residue, inflight)
     if inflight > a.max_residue:

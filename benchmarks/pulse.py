@@ -550,10 +550,15 @@ def main(argv=None) -> int:
         return 0
 
     root = args.root or f"{args.bench}/model-probes"
-    now = args.now if args.now is not None else time.time()
 
+    # THE CLOCK IS READ AFTER THE LEDGER, not before (§389). This file's own rule two hundred lines
+    # down says it -- "the clock is read after the stat" -- and this call site did the opposite. It
+    # only became visible once §387 measured a call's age from its END: on a loaded box the walk
+    # below takes minutes, a call that completed during it is NEWER than the clock, and `call age`
+    # printed **-207s**. A negative age is not a small error, it is a sentence that cannot be true.
     ledger = args.ledger or os.path.join(args.bench, "meter", "meter.jsonl")
     health = check_money.endpoint_health(ledger)
+    now = args.now if args.now is not None else time.time()
     newest = health["newest"]
     live = lanes.probes(args.bench)
     running = {r["probe"] for r in live if r["probe"]}
@@ -602,7 +607,9 @@ def main(argv=None) -> int:
         # `args.now` only when it was INJECTED: otherwise the clock is read after the stat.
         age = log_age(found[0], args.now)
         called = newest.get(name)
-        call_age = (now - called[0]) if called else None
+        # AND CLAMPED, because an INJECTED clock (tests, a replayed ledger) can still sit before a
+        # row: reporting "-207s ago" spends the reader's trust on arithmetic they cannot check.
+        call_age = max(0.0, now - called[0]) if called else None
         print(f'{name:10s} {lanes._fmt(row["cpus"]):12s} {got["spend"]:8.4f} {got["nodes"]:5d} '
               f'{got["zeros"]:5d} {got["errors"]:4d} {format_age(age)} '
               f'{(f"{call_age:8.0f}s" if call_age is not None else "       -"):>9s}  '
@@ -627,21 +634,25 @@ def main(argv=None) -> int:
             else:
                 print(f'      last call came back {called[1]}, not 200 -- check the endpoint before '
                       "the probe")
-        # A LONG GENERATION IS NOT SILENCE. The ledger records a call when it finishes, so a probe
-        # waiting on one looks identical to a probe waiting on nothing -- §335 measured 7.5 minutes
-        # of it, with no worker on the lane and nothing in state R.
+        # A LONG GENERATION IS NOT SILENCE. The ledger only gets a row once a call comes back, so a
+        # probe waiting on one looks identical to a probe waiting on nothing -- §335 measured 7.5
+        # minutes of it, with no worker on the lane and nothing in state R.
         if call_age is not None and call_age > 240 and call_in_flight(row["pid"]):
-            # AT MOST, NOT AT LEAST -- §339 corrects §335's own wording. The ledger's newest row
-            # is the last COMPLETED call; the open one started after it, so `call_age` bounds the
-            # open call's age from ABOVE. Saying "at least" turned an upper bound into a lower one
-            # and made every long-quiet probe look worse than the evidence allows.
+            # AT MOST, NOT AT LEAST -- §339 corrects §335's own wording. The open call started
+            # after the last one CAME BACK, so this bounds its age from ABOVE. Saying "at least"
+            # turned an upper bound into a lower one and made every long-quiet probe look worse
+            # than the evidence allows.
+            #
+            # And the bound is now measured from the right end (§387): `call_age` used to be
+            # `now - ts`, and `ts` is when the last call WENT OUT, not when it came back. On this
+            # probe's 357-387 s generations that reported 545 s of quiet where there were 188.
             label, budget = phase_budget(found[0])
             against = ""
             if budget:      # 0.0 means the phase was given no wall -- most of them are
                 against = (f'; its {label or "phase"} has a {budget:.0f}s budget')
-            print(f'      a call is OPEN to the meter now (the last one COMPLETED {call_age:.0f}s '
+            print(f'      a call is OPEN to the meter now (the last one CAME BACK {call_age:.0f}s '
                   f'ago, so this one is younger than that{against}) -- a long generation in flight, '
-                  "not silence: the ledger records a call when it ends")
+                  "not silence: a call reaches the ledger only once it returns")
         if call_age is not None and age > args.stall / 4 and call_age < age / 4:
             print(f'      CALLING BUT NOT PRODUCING: last call {call_age:.0f}s ago, log last grew '
                   f'{age:.0f}s ago. Three consecutive 504s at exactly 300 s are the nginx ceiling, '

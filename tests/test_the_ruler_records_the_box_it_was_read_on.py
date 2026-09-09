@@ -53,24 +53,98 @@ def _spawn(cpus, busy: bool, exe: str = sys.executable, orphan: bool = False):
 
 
 def test_an_idle_pinned_neighbour_is_not_counted_as_load():
+    """§390. THE PROCESS, not the box at a moment.
+
+    Three earlier versions of this fixture failed for three different reasons and none of them was
+    the rule being wrong: `== 0` went red under a second pytest suite, the delta that replaced it
+    went red under a live probe (0 before, 8 after -- the probe's workers arrived between the two
+    readings), and "pick CPUs that are free right now and watch them" went red when the OTHER suite,
+    pinned to the service lane, took the CPUs this fixture had just measured as free. Every one of
+    them asked the box a question about a moment. The claim is about a PROCESS: a pinned neighbour
+    that is asleep contributes nothing. `cpus_counted_for` answers exactly that, and nothing else on
+    the box can make it wrong.
+    """
     keep = os.sched_getaffinity(0)
     if os.cpu_count() is None or os.cpu_count() < 8:
         return
     try:
         _pin([0, 1])
-        # A DELTA, NOT AN ABSOLUTE. The first version asserted == 0 and went red the one time two
-        # pytest suites ran at once: the other suite is `taskset`ed to the service lane, which is
-        # exactly what this function is built to count. What the test is about is whether an IDLE
-        # pinned neighbour adds to the count, and that question survives any background load.
-        before = ruler_selfcheck.busy_cpus_outside_lane()
+        mine, total = os.sched_getaffinity(0), os.cpu_count()
         idle = _spawn([4, 5], busy=False)
         time.sleep(1.0)
-        # THE MUTATION TARGET. Without the state check this rises by 2, and the field it feeds
-        # becomes a count of workers that once existed rather than of a box under load.
-        assert ruler_selfcheck.busy_cpus_outside_lane() == before
+        # THE MUTATION TARGET. Without the state check the sleeping child's CPUs come back here, and
+        # the field it feeds becomes a count of workers that once existed rather than of load.
+        assert ruler_selfcheck.cpus_counted_for(idle.pid, mine, total) == set()
         idle.kill(); idle.wait(timeout=10)
     finally:
         os.sched_setaffinity(0, keep)
+
+
+def test_a_busy_pinned_neighbour_is_counted_as_the_cpus_it_holds():
+    """The other side of the same per-process question, so neither half can be removed quietly."""
+    keep = os.sched_getaffinity(0)
+    if os.cpu_count() is None or os.cpu_count() < 8:
+        return
+    try:
+        _pin([0, 1])
+        mine, total = os.sched_getaffinity(0), os.cpu_count()
+        busy = _spawn([4, 5], busy=True)
+        time.sleep(1.0)
+        assert ruler_selfcheck.cpus_counted_for(busy.pid, mine, total) == {4, 5}
+        busy.kill(); busy.wait(timeout=10)
+    finally:
+        os.sched_setaffinity(0, keep)
+
+
+def test_a_process_that_is_gone_contributes_nothing():
+    """A pid that vanishes mid-walk is the ordinary case on a box that spawns workers, not an error."""
+    assert ruler_selfcheck.cpus_counted_for(2 ** 22, {0, 1}, os.cpu_count() or 8) == set()
+
+
+def test_work_inside_our_own_lane_is_not_outside_it():
+    """The disjointness half of the rule, which nothing here drove (§388).
+
+    Without `not (other & mine)` the function counts the CPUs we are ourselves pinned to -- and the
+    reading would call the ruler's own evaluation "a loaded neighbour". A BUSY child sharing our
+    lane is the case that separates the two.
+    """
+    keep = os.sched_getaffinity(0)
+    if os.cpu_count() is None or os.cpu_count() < 8:
+        return
+    try:
+        _pin(sorted(keep)[:2])
+        mine = sorted(os.sched_getaffinity(0))
+        busy = _spawn(mine, busy=True)
+        time.sleep(1.0)
+        total = os.cpu_count()
+        assert ruler_selfcheck.cpus_counted_for(busy.pid, set(mine), total) == set()
+        busy.kill(); busy.wait(timeout=10)
+    finally:
+        os.sched_setaffinity(0, keep)
+
+
+def test_an_unpinned_process_cannot_answer_the_question(monkeypatch):
+    """`None` means "not answerable here", and it is not the same answer as zero: a process whose
+    affinity is the whole box has no "outside" to look at. Mutating it to `set()` left every other
+    test green."""
+    mine = os.sched_getaffinity(0)
+    monkeypatch.setattr(os, "cpu_count", lambda: len(mine))
+    assert ruler_selfcheck.busy_cpus_outside_lane_set() is None
+    assert ruler_selfcheck.busy_cpus_outside_lane() is None
+
+
+def test_the_count_is_exactly_the_size_of_the_set(monkeypatch):
+    """One rule, two spellings -- the split introduced in §388 is where they could drift apart.
+
+    Not measured twice on the live box: two walks of /proc a moment apart legitimately differ, and a
+    test that tolerated that would tolerate the drift as well.
+    """
+    monkeypatch.setattr(ruler_selfcheck, "busy_cpus_outside_lane_set", lambda: {4, 5, 90})
+    assert ruler_selfcheck.busy_cpus_outside_lane() == 3
+    monkeypatch.setattr(ruler_selfcheck, "busy_cpus_outside_lane_set", lambda: set())
+    assert ruler_selfcheck.busy_cpus_outside_lane() == 0
+    monkeypatch.setattr(ruler_selfcheck, "busy_cpus_outside_lane_set", lambda: None)
+    assert ruler_selfcheck.busy_cpus_outside_lane() is None
 
 
 def test_a_busy_pinned_neighbour_is_counted():
