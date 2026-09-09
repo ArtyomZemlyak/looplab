@@ -35,6 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lanes  # noqa: E402
+import arm_fidelity  # noqa: E402
 import events_read  # noqa: E402
 import ruler_check  # noqa: E402
 
@@ -1220,6 +1221,54 @@ def check_the_champion_is_the_best_evaluated_node(bench: str):
     return not disagree, detail
 
 
+def check_a_dollar_probe_costs_a_dollar(bench: str):
+    """"$1/проба" -- the figure every plan on this bench is built from, never checked against spend.
+
+    §370. Measured over the corpus: **143 of 149 probes with spend went OVER their budget**, median
+    excess $0.0096, total $1.5337. That is not a leak and mostly not news -- the engine checks the
+    budget before opening work, and the call already in flight completes and is charged, so a small
+    overshoot is structural. What was missing is that nobody had ever put a number on it: a $1 probe
+    costs about $1.01, and the corpus cost ~1 % more than the arithmetic everyone quotes.
+
+    The line between structural and wrong is not invented here: it is the run's own
+    `node_open_budget_floor_usd` (§363). Below that the engine refuses to OPEN work, so an overshoot
+    larger than the floor cannot be one last call finishing -- it is work that should never have
+    started. Exactly one probe is past it: `freeB3` at +$0.1056, which is §213's double payment, the
+    resume of a run that was already at its ceiling.
+    """
+    root = f"{bench}/model-probes"
+    over, worst, total, seen = [], 0.0, 0.0, 0
+    for probe_dir in sorted(glob.glob(f"{root}/*")):
+        name = os.path.basename(probe_dir)
+        if name == "_ruler" or not os.path.isdir(probe_dir):
+            continue
+        spend = arm_fidelity._spend(root, name)
+        if spend <= 0:
+            continue
+        seen += 1
+        budget = arm_fidelity.probe_budget(root, name)
+        excess = spend - budget
+        if excess <= 0:
+            continue
+        total += excess
+        worst = max(worst, excess)
+        floor = arm_fidelity.node_open_floor(root, name) or DEFAULT_NODE_FLOOR
+        if excess > floor:
+            over.append(f"{name} +${excess:.4f} over ${budget:.2f} (floor ${floor:.2f})")
+    detail = (f"{seen} probe(s) with spend; ${total:.4f} spent past the budgets in total, worst "
+              f"+${worst:.4f}")
+    if over:
+        detail += ("; PAST THE NODE-OPEN FLOOR, so not one last call finishing: "
+                   + ", ".join(sorted(over)))
+    return not over, detail
+
+
+# What the engine refuses to open new work below, where a run did not record its own (§363: 2 of 145
+# snapshots carry the field). Not a tolerance invented for this check -- the same number the engine
+# quotes in its own refusal.
+DEFAULT_NODE_FLOOR = 0.10
+
+
 def check_waste_before_the_first_node(bench: str):
     """§72: "трата ПОСЛЕ последнего узла" читается только рядом с тратой ДО первого -- и проверялась
     половина пары.
@@ -1305,6 +1354,7 @@ CLAIMS = [
      check_arm_a_constants_are_a_file),
     ("point 9: the probe submits the node the loop judged best",
      check_the_champion_is_the_best_evaluated_node),
+    ("point 3: a $1 probe costs $1", check_a_dollar_probe_costs_a_dollar),
     ("point 9: the other half of the pair -- spend BEFORE the first node",
      check_waste_before_the_first_node),
     ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),
