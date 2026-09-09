@@ -1165,6 +1165,61 @@ def check_arm_a_constants_are_a_file(bench: str):
     return not bad, detail
 
 
+_CHAMPION_LINE = re.compile(r"champion node (\d+) \(metric=([0-9.]+)\)")
+
+
+def check_the_champion_is_the_best_evaluated_node(bench: str):
+    """The probe must submit the node the LOOP judged best -- not the newest file on disk.
+
+    §367. `run_probe.sh` carries the reason in its own words: picking a fresh `solver.py` "не то же
+    самое, что лучший", and on `convex_hull` on 2026-08-27 node 0 scored 3.7777 on train against
+    node 1's 2.7342 while `ls -t` returned node 1, because it was written later. Node 1 was measured
+    on test and reported as the probe's result all day; the real champion was never measured at all.
+    `extract_champion.py --all-files` reads the fold and knows `state.best()`, and the driver is
+    supposed to call it -- "иначе проба меряет не то, что цикл счёл лучшим, — то есть меряет не цикл".
+
+    Nothing checked that it does. Driven here from two independent places that would have to lie
+    together: the champion line the extractor prints into `probe.log`, and the node metrics in the
+    run's own `events.jsonl`. Measured 2026-09-09 over the corpus: **141 probes agree, 0 disagree.**
+
+    A probe with no champion line is not counted -- it never shipped one, which §351 covers.
+    """
+    agree, disagree = 0, []
+    for probe_dir in sorted(glob.glob(f"{bench}/model-probes/*")):
+        name = os.path.basename(probe_dir)
+        if name == "_ruler" or not os.path.isdir(probe_dir):
+            continue
+        try:
+            said = _CHAMPION_LINE.search(
+                Path(probe_dir, "probe.log").read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if not said:
+            continue
+        node_id, metric = int(said.group(1)), float(said.group(2))
+        best, best_id = None, None
+        for path in glob.glob(f"{probe_dir}/runs/*/*/events.jsonl"):
+            for row in events_read.iter_events(path):
+                if row.get("type") != "node_evaluated":
+                    continue
+                data = row.get("data") or {}
+                got = data.get("metric")
+                if isinstance(got, (int, float)) and (best is None or got > best):
+                    best, best_id = got, data.get("node_id")
+        if best is None:
+            continue
+        if abs(best - metric) > 1e-4 or best_id != node_id:
+            disagree.append(f"{name} shipped node {node_id} ({metric:.4f}) while node {best_id} "
+                            f"scored {best:.4f}")
+        else:
+            agree += 1
+    if not agree and not disagree:
+        return False, "no probe on this box records which node it shipped"
+    detail = (f"{agree} probe(s) shipped the best evaluated node"
+              + ("; NOT THE BEST: " + "; ".join(disagree[:6]) if disagree else ""))
+    return not disagree, detail
+
+
 def check_waste_before_the_first_node(bench: str):
     """§72: "трата ПОСЛЕ последнего узла" читается только рядом с тратой ДО первого -- и проверялась
     половина пары.
@@ -1248,6 +1303,8 @@ CLAIMS = [
      check_every_node_was_graded_on_train),
     ("point 10: arm A's re-timed constants are a file, not a sentence",
      check_arm_a_constants_are_a_file),
+    ("point 9: the probe submits the node the loop judged best",
+     check_the_champion_is_the_best_evaluated_node),
     ("point 9: the other half of the pair -- spend BEFORE the first node",
      check_waste_before_the_first_node),
     ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),
