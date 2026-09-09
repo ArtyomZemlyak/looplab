@@ -87,16 +87,31 @@ def test_every_key_a_writer_writes_is_declared(writers):
         f"event writers put undeclared keys in the payload: {undeclared}")
 
 
-# The event types whose payload is built by a spread the writer scan CANNOT resolve, so their keys
-# are declared from the builder by hand instead of derived from the append site. Shrink-only, and
-# not empty by accident: `prior_injected` writes `{…, **receipt}` where the receipt is built five
-# frames away, and while the scan silently reported "no undeclared keys" for it, five of its eight
-# keys had no row at all and the generated reference under-described the record.
+# The event types whose payload the writer scan CANNOT resolve, so their keys are declared from the
+# builder by hand instead of derived from the append site. Shrink-only, and not empty by accident:
+# `prior_injected` writes `{…, **receipt}` where the receipt is built five frames away, and while
+# the scan silently reported "no undeclared keys" for it, five of its eight keys had no row at all
+# and the generated reference under-described the record.
+#
+# SIXTEEN GREW TO THIRTY-FOUR on 2026-09-08, and none of the eighteen is new code. They were
+# invisible: `event_payload_writers` marked only the `**spread` case opaque, and for every OTHER
+# unresolvable payload — a function's return value, an attribute, a `dict(...)` call — it simply
+# `continue`d and recorded NOTHING, so the type had no row and the assertion below (which reads
+# only the types the scan DID reach) could not name it. Forty-two registered types were unverified
+# and silent. Four real defects lived there and are fixed in the same change: `llm_usage` declared
+# 2 of its 7 columns (the durable money ledger, whose fold reads all five missing ones), `plan`
+# omitted the `max_nodes` its own `replan` reads back, `trace_export_health` omitted 15 of 25 keys
+# including the two a human debugging a stalled exporter needs, and `card_build_done`'s `required`
+# named three columns NO writer has ever written — a fabricated claim that could not fail, because
+# `test_required_keys_are_written_by_every_literal_writer` skips a type with no writer row.
 OPAQUE_PAYLOAD_WRITERS = frozenset({
-    "agent_validated", "card_enriched", "concept_coverage_snapshot", "coverage_snapshot",
-    "cross_run_prior", "diversity_archive", "finalize_step", "novelty_graded",
-    "novelty_rejected", "prior_injected", "run_finished", "run_started", "run_width_settled",
-    "setup_step", "spec_drift", "stage_finished"})
+    "agent_validated", "applied_params_backfilled", "asha_rank", "budget", "card_added",
+    "card_build_done", "card_enriched", "concept_coverage_snapshot", "coverage_snapshot",
+    "cross_run_prior", "data_shift", "diversity_archive", "finalize_step", "llm_usage",
+    "node_concepts", "novelty_graded", "novelty_rejected", "pause", "plan", "prior_injected",
+    "report_generated", "run_abort", "run_finished", "run_started", "run_width_settled",
+    "rung_promoted", "score_metrics_backfilled", "setup_step", "spec_drift", "spec_proposed",
+    "stage_finished", "trace_export_health", "train_monitor_alert", "trust_scan"})
 
 
 def test_the_writer_scan_says_which_types_it_cannot_verify(writers):
@@ -124,6 +139,80 @@ def test_a_key_added_to_a_payload_after_its_literal_is_seen(writers):
     covered. Pinned on the one live instance so the subscript hop cannot be dropped as dead code."""
     assert "source" in writers["memory_read"]["any"], (
         "the writer scan stopped following subscript writes into the payload")
+
+
+def test_a_key_added_by_an_UNPACKING_assignment_is_seen_too(writers):
+    """`data["a"], data["b"] = (…)` is one `Assign` whose single target is a TUPLE of subscripts.
+
+    A walk that accepted only a bare `ast.Subscript` target saw neither key, so
+    `node_failed.triage_action` — LLM-derived text about a crash, on a durable terminal — reached
+    the log with no contract row and no line in the generated reference, while
+    `test_every_key_a_writer_writes_is_declared` reported the type clean. Pinned on the live
+    instance so the unpacking hop cannot be dropped as dead code, exactly like the subscript hop
+    one test up.
+    """
+    assert "triage_action" in writers["node_failed"]["any"], (
+        "the writer scan stopped unpacking tuple assignment targets")
+    assert "triage_rationale" in writers["node_failed"]["any"]
+
+
+def test_a_key_put_in_by_UPDATE_or_SETDEFAULT_is_seen_too(writers):
+    """`payload.update({...})` and `payload.setdefault("k", …)` are never assignment TARGETS.
+
+    A target-only walk could not see them, so `train_monitor_alert` reached the durable log with
+    FIVE undeclared columns — two of them (`projected_overrun_s`, `stage_wall_s`) read live by
+    `serve/attention.py` — and `asha_rank`/`asha_verdict` with two each, while
+    `test_every_key_a_writer_writes_is_declared` reported all three types fully covered. Pinned on
+    the live instances so the hop cannot be dropped as dead code, exactly like the subscript and
+    unpacking hops above.
+    """
+    assert "resource_key" in writers["asha_rank"]["any"], (
+        "the writer scan stopped reading `.update({...})` onto the payload")
+    assert "resource" in writers["asha_verdict"]["any"]
+    # …and the CONSTANT-key rule: `update(<a name>)` is a spread this cannot resolve, and the
+    # honest answer there is `opaque`, not a silently short key list.
+    import ast
+
+    from tests._source_scan import subscript_string_keys
+    tree = ast.parse('def f():\n'
+                     '    p = {}\n'
+                     '    p.update({"seen": 1})\n'
+                     '    p.setdefault("also", 2)\n'
+                     '    p.update(kw=3)\n'
+                     '    p.update(opaque_spread)\n'
+                     '    store.append(EV_X, p)\n')
+    body = tree.body[0].body
+    assert subscript_string_keys(body, "p", after=0, before=99) == {"seen", "also", "kw"}
+
+
+def test_the_money_ledger_survives_stripping_its_undeclared_keys():
+    """`test_stripping_undeclared_keys_from_a_real_log_changes_nothing` is the rule; the golden log
+    is not the whole vocabulary.
+
+    That test folds `tests/data/golden_run_events.jsonl`, which carries 16 of the registered types
+    and asserts a floor of `>= 8` — and `llm_usage` is not among them. So the run's DURABLE COST
+    LEDGER declared 2 of its 7 columns while the fold read all five missing ones, and the check
+    designed to catch exactly this could not see it. Driven here on the type itself.
+    """
+    from looplab.events.replay import fold
+    from looplab.events.types import EVENT_PAYLOAD_KEYS
+
+    class _E:
+        def __init__(self, etype, data):
+            self.type, self.data, self.seq, self.ts = etype, data, 0, 0.0
+
+    usage = {"cost": 1.25, "calls": 4, "priced_calls": 4, "prompt_tokens": 100,
+             "completion_tokens": 50, "total_tokens": 150, "usage_id": "u" * 32}
+    rows = [_E("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"}),
+            _E("llm_usage", dict(usage))]
+    declared = EVENT_PAYLOAD_KEYS["llm_usage"].keys
+    stripped = [rows[0], _E("llm_usage", {k: v for k, v in usage.items() if k in declared})]
+
+    full, thin = fold(rows).llm_cost, fold(stripped).llm_cost
+    assert full == thin, (
+        "stripping undeclared payload keys changed the folded cost ledger — the contract row is "
+        f"missing what the fold reads: full={full} stripped={thin}")
+    assert full.get("cost") == 1.25 and full.get("total_tokens") == 150, full
 
 
 def test_required_keys_are_written_by_every_literal_writer(writers):

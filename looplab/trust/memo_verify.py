@@ -4,8 +4,11 @@ verification must be decoupled (Aletheia: "essential for identifying flaws the m
 overlooked"). This module checks a ResearchMemo's claims against their CITED evidence:
 
 1. `check_claims` — deterministic layer, no model: does every claim cite evidence at all, and do
-   the cited node ids exist? (It deliberately does NOT match numbers quoted in the statement
-   against node metrics — see the NOTE on `check_claims`; numeric correctness is the LLM layer's.)
+   the cited node ids exist? (Its VERDICT still turns on nothing numeric — see the NOTE on
+   `check_claims`: a regex cannot tell an arXiv id from a metric, so calling an unmatched decimal
+   a fabrication is exactly the false label that reasoning refuses, and semantic numeric
+   correctness stays the LLM layer's. What is NOT a classification is a MATCH, and since doc 52
+   row 32 `number_fidelity_report` records one beside the verdicts.)
 2. `verify_memo` — adds a single rubric-prompt LLM pass over the claims that survived layer 1
    (one call, one rubric — more consistent than an ensemble of judges, per Anthropic's
    multi-agent research evaluation), grading each claim supported/unsupported/unclear against
@@ -40,6 +43,7 @@ from looplab.core.fitness import is_usable_metric
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 from looplab.core.redact import redact_persisted_text
+from looplab.core.research_record import NUMBER_FIDELITY_VERSION, number_fidelity
 from looplab.core.source_identity import canonical_source_ref, valid_source_identity
 
 
@@ -129,6 +133,14 @@ def _derived_evidence_receipt(claim: dict) -> dict:
     }
 
 
+def _is_terminal_evidence(node, nid, aborted) -> bool:
+    """May this node be read as evidence at all? ONE spelling, shared by the snapshot below and by
+    the number-fidelity metric map, because two spellings of "which experiments count" would drift
+    into an instrument measuring a different population than the verifier it sits beside."""
+    return not (node is None or node.tombstoned or nid in aborted
+                or node.status not in (NodeStatus.evaluated, NodeStatus.failed))
+
+
 def _evidence_snapshot(claim: dict, state: RunState,
                        sources: Optional[dict[str, dict[str, str]]] = None) -> tuple[dict, dict]:
     """Freeze exactly the evidence shown to the verifier and its lifecycle-aware identities."""
@@ -147,8 +159,7 @@ def _evidence_snapshot(claim: dict, state: RunState,
         n = final_nodes.get(nid) if isinstance(final_nodes, dict) else None
         # a node id is an ABA-prone slot, not an evidence identity. Only the current,
         # non-deleted lifecycle may enter the verifier prompt and its promotion receipt.
-        if (n is None or n.tombstoned or nid in aborted
-                or n.status not in (NodeStatus.evaluated, NodeStatus.failed)):
+        if not _is_terminal_evidence(n, nid, aborted):
             continue
         generation = n.attempt
         if type(generation) is not int or generation < 0:
@@ -669,4 +680,83 @@ def provenance_coverage(memo: dict) -> dict:
     out["statements"] = total
     out["bound"] = bound_total
     out["coverage"] = (bound_total / total) if total else None
+    return out
+
+
+# ------------------------------------------ WHERE THE MEMO'S NUMBERS COME FROM (doc 52 row 32)
+#
+# `check_claims` above asks whether a claim cites anything and whether the citation resolves. It
+# says nothing about the NUMBERS in the statement, and its reason for that is on the record and
+# still holds: a regex cannot tell an arXiv id from a metric, so a numeric "confabulation"
+# heuristic produces false `fabricated` labels on well-supported claims. MLReplicate's 59 %
+# (fabricated numbers are what survives review) says the question is worth asking anyway, and the
+# way to ask it without a classifier is `core/research_record.py::number_fidelity`: do not decide
+# what a decimal IS, match it against what the cited experiments RECORDED.
+#
+# THE POSTURE IS `provenance_coverage`'S, DELIBERATELY. Deterministic and free — no model, no
+# provider call — computed for every memo with claims, recorded on the memo, and read by NOTHING
+# that decides. No verdict moves: a claim whose every number is unmatched is still `cited` and
+# still reaches the LLM rubric exactly as before, because "this run's terminal metrics do not
+# contain that decimal" is true of every honest quotation of a paper, of a sibling run, and of a
+# number derived from two metrics. What the block buys is the measurement that did not exist: the
+# share of a memo's quoted decimals that ARE this run's own numbers, and the `run` channel — a
+# decimal that is a metric of an experiment the claim does not cite, which is the one shape a
+# reader could not get from the statement and the verdict alone.
+def _run_metric_map(state: RunState) -> dict[int, float]:
+    """`{node_id: metric}` for every experiment whose number this run actually recorded.
+
+    The same lifecycle rule the verifier's own evidence snapshot applies (`_is_terminal_evidence`),
+    plus `is_usable_metric`: an unmeasured or non-finite metric is not a number a memo could be
+    quoting. Not built by calling `_evidence_snapshot` per claim — that assembles and redacts the
+    verifier PROMPT (params, rationale, error text) and this needs one float per node.
+    """
+    aborted = set(getattr(state, "aborted_nodes", ()) or ())
+    nodes = getattr(state, "nodes", {})
+    out: dict[int, float] = {}
+    for nid, node in (nodes.items() if isinstance(nodes, dict) else ()):
+        if type(nid) is not int or not _is_terminal_evidence(node, nid, aborted):
+            continue
+        metric = getattr(node, "metric", None)
+        if is_usable_metric(metric):
+            out[nid] = float(metric)
+    return out
+
+
+def number_fidelity_report(memo: dict, state: RunState) -> Optional[dict]:
+    """Where every decimal the memo's CLAIMS quote stands against the metrics they cite.
+
+    `{"v": 1, "claims": [{"quoted", "matched", "elsewhere", "unmatched", "excluded"}, …],
+      "quoted": n, "matched": n, "elsewhere": n, "unmatched": n, "excluded": n,
+      "fidelity": float | None}` — one row per retained claim in the memo's own order, the totals
+    beside them, and `fidelity` = matched / quoted, which is None when the claims quote no decimal
+    at all (that is not 0.0, and must not read as "nothing matched"). `None` for a memo with no
+    claims: there is no statement to measure, and a manufactured zero would be a worse answer.
+
+    Deterministic, free, and selection-neutral (see the block above). The per-number `values` rows
+    `number_fidelity` returns are deliberately NOT persisted: the statement they were read out of
+    is already on the record beside this block, so a reader can re-derive them, and the counts are
+    what a reader compares across memos.
+    """
+    raw_claims = (memo or {}).get("claims") if isinstance(memo, dict) else ()
+    claims = list(raw_claims[:_MAX_CLAIMS]) if isinstance(raw_claims, (list, tuple)) else []
+    if not claims:
+        return None
+    metrics = _run_metric_map(state)
+    rows: list[dict] = []
+    for claim in claims:
+        claim = claim if isinstance(claim, dict) else {}
+        raw_nids = claim.get("node_ids")
+        cited_ids = [nid for nid in (raw_nids if isinstance(raw_nids, (list, tuple)) else ())
+                     [:_MAX_NODE_REFS] if type(nid) is int]
+        cited = [(nid, metrics[nid]) for nid in cited_ids if nid in metrics]
+        # Sorted so the `run` channel names the same node on every replay of the same memo.
+        other = [(nid, value) for nid, value in sorted(metrics.items()) if nid not in cited_ids]
+        row = number_fidelity(claim.get("statement", ""),
+                              cited_metrics=cited, other_metrics=other)
+        rows.append({key: row[key]
+                     for key in ("quoted", "matched", "elsewhere", "unmatched", "excluded")})
+    out = {"v": NUMBER_FIDELITY_VERSION, "claims": rows}
+    for key in ("quoted", "matched", "elsewhere", "unmatched", "excluded"):
+        out[key] = sum(row[key] for row in rows)
+    out["fidelity"] = (out["matched"] / out["quoted"]) if out["quoted"] else None
     return out

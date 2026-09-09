@@ -32,7 +32,7 @@ from looplab.engine import orchestrator as _orch
 from looplab.engine.widths import per_experiment_gpu_budget
 
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.engine.orchestrator import Engine
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree

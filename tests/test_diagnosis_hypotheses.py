@@ -188,7 +188,8 @@ def test_every_slot_a_failure_row_carries_is_in_the_registry():
             written.add(value.attr)
     assert written, "the scanner found no durable failure-row slot at all"
     # `_reason_source` is the one such slot that is REBOUND rather than cleared — a failure always
-    # has an author, so its reset is `REASON_SOURCE_ENGINE`, not None — and `DIAGNOSIS_DEFAULTED`
+    # has an author, so its reset is a non-diagnostician source (`reason_source_for`: `engine`, or
+    # `declared` for the reason the eval states), never None — and `DIAGNOSIS_DEFAULTED`
     # names it so the exception is written down instead of widening the rule.
     assert written <= set(DIAGNOSIS_SLOTS) | set(DIAGNOSIS_DEFAULTED), (
         f"a failure row carries "

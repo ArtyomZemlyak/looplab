@@ -127,6 +127,37 @@ def _changed_something(commit: _Commit, commits: dict[str, _Commit]) -> bool:
     return all(commits[p].tree != commit.tree for p in commit.parents if p in commits)
 
 
+def _work_is_present(dropped: _Commit, merge: _Commit) -> bool:
+    """Did the merged tree keep everything this commit changed, even though the commit "went in and
+    came out with nothing"?
+
+    THE THIRD WAY A CANDIDATE CONTRIBUTES NOTHING, beside the two the module docstring already
+    names. Two sessions working the same tree can make the SAME fix independently — measured twice
+    on 2026-09-08, once for a one-line import the roles split left behind and once for moving
+    `bind_state` inside `developer_call_lock` — and when they do, whichever side merges second
+    produces a tree identical to its own parent while the other parent's commit is, correctly,
+    already there. Nothing is lost, so there is nothing to re-apply, and the guard's own stated harm
+    ("a fix and the tests guarding it die together") did not happen.
+
+    The test is exact rather than charitable: the merged tree must agree with the dropped commit on
+    EVERY path that commit touched. One byte missing anywhere in its work and this is False, so a
+    real discard cannot hide behind a partial coincidence. Checked against the two baselined
+    instances: `6df3a4f6` in `99438191` differs by 207 lines and stays a finding.
+
+    COST, and the module docstring's "no `git diff`" note is narrowed rather than deleted: this runs
+    only for the handful of candidates the pure graph walk ALREADY flagged, never per commit."""
+    touched = subprocess.run(
+        ["git", "-C", str(REPO), "diff", "--name-only", f"{dropped.sha}^", dropped.sha],
+        capture_output=True, text=True)
+    paths = [line for line in touched.stdout.splitlines() if line.strip()]
+    if touched.returncode != 0 or not paths:
+        return False                    # cannot tell (a root commit, an unreadable object): report it
+    residue = subprocess.run(
+        ["git", "-C", str(REPO), "diff", dropped.sha, merge.sha, "--"] + paths,
+        capture_output=True, text=True)
+    return residue.returncode == 0 and not residue.stdout.strip()
+
+
 def discarding_merges(commits: dict[str, _Commit]) -> dict[str, tuple[_Commit, list[_Commit]]]:
     """{merge sha: (merge, commits it discarded)} — see the module docstring for the rule."""
     found: dict[str, tuple[_Commit, list[_Commit]]] = {}
@@ -148,7 +179,8 @@ def discarding_merges(commits: dict[str, _Commit]) -> dict[str, tuple[_Commit, l
             dropped = [commits[sha]
                        for other in merge.parents if other != taken
                        for sha in sorted(_ancestors(other, commits) - kept)
-                       if sha in commits and _changed_something(commits[sha], commits)]
+                       if sha in commits and _changed_something(commits[sha], commits)
+                       and not _work_is_present(commits[sha], merge)]
             if best is None or len(dropped) < len(best):
                 best = dropped
         if best:
