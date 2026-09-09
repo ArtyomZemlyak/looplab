@@ -188,6 +188,75 @@ def _inflight_call_cost(root: str, since: float) -> float:
     return costs[min(len(costs) - 1, int(0.99 * len(costs)))]
 
 
+def stream_intent(root: str, probe: str):
+    """What the probe's INSTRUMENT.txt says it ASKED for: True, False, or None if it never said.
+
+    §391. `unstreamed_exposure` counts unstreamed calls per arm, and its own docstring explains why
+    they happen -- the stall fallback degrades a call to non-SSE, and this stand's proxy bounds the
+    WHOLE request at 300 s, so that retry is the one it kills. What the count cannot say is WHOSE
+    fault a given arm's share is, and the two answers have different fixes:
+
+      * an arm that asked for streaming and still sent some unstreamed calls was degraded BY THE
+        FALLBACK. `Settings.llm_stream_stall_fallback = False` exists for exactly this stand and is
+        not set here;
+      * an arm with no `LOOPLAB_LLM_STREAM=1` in its instrument never asked -- the launch was wrong,
+        which is the `.env` trap the standing brief warns about in capitals.
+
+    Measured over the ledger on 2026-09-09: 1489 of 47884 calls (3.1 %) unstreamed, 24 cut at the
+    300 s wall costing 2.00 h of wall clock, $4.6625 spent on unstreamed bodies -- and inside that,
+    `remEE`, `accEE` and `accPde` ran 100 % unstreamed (the launch), while `capB3` 24 %, `freeB3`
+    23 %, `oldCK9` 20 % and `remDL14` 4 % asked for streaming and were degraded (the fallback).
+    One number over both populations names neither.
+    """
+    path = os.path.join(root, probe, "INSTRUMENT.txt")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("LOOPLAB_LLM_STREAM="):
+                    said = line.split("=", 1)[1].strip()
+                    if said in ("(unset -> engine default)", ""):
+                        return None
+                    return said not in ("0", "false", "False", "no")
+    except OSError:
+        return None
+    return None
+
+
+def unstreamed_by_whose_doing(root: str, by_arm) -> dict:
+    """`{"degraded": {arm: n}, "never_asked": {arm: n}, "unknown": {arm: n}}` -- see `stream_intent`."""
+    out = {"degraded": {}, "never_asked": {}, "unknown": {}}
+    for arm, n in by_arm.items():
+        asked = stream_intent(root, arm)
+        key = "degraded" if asked else ("unknown" if asked is None else "never_asked")
+        out[key][arm] = n
+    return out
+
+
+WHOSE_DOING_SENTENCE = {
+    "degraded": ("asked for streaming and were DEGRADED by the stall fallback "
+                 "(`llm_stream_stall_fallback=False` is the switch, and this stand does not set it)"),
+    "never_asked": "never asked for streaming -- the launch, not the fallback",
+}
+
+
+def whose_doing_lines(whose: dict, limit: int = 4) -> list:
+    """The SENTENCES the streaming block prints, as a list -- empty groups say nothing.
+
+    A function because the wording IS the fix (§342), and because a test that greps the module for
+    `llm_stream_stall_fallback=False` passes on a file that only MENTIONS it: the string also lives
+    in `stream_intent`'s docstring, and the mutation that deleted it from the printed line came back
+    GREEN. §358 again -- pin the sentence, not the mention.
+    """
+    out = []
+    for key, sentence in WHOSE_DOING_SENTENCE.items():
+        arms = sorted((whose.get(key) or {}).items(), key=lambda kv: -kv[1])[:limit]
+        if arms:
+            named = ", ".join(f"{arm} x{n}" for arm, n in arms)
+            out.append(f"{sum((whose.get(key) or {}).values())} of them on arm(s) that "
+                       f"{sentence}: {named}")
+    return out
+
+
 def unstreamed_exposure(ledger_path: str, since: float = 0.0) -> dict:
     """How many calls went out WITHOUT streaming, and how many of those nginx cut at 300 s.
 
@@ -672,6 +741,11 @@ def main(argv: list[str]) -> int:
                  for by in (calls_by_arm.get(a, 0) or 0,) if by]
         if worst:
             print(f"    unstreamed by arm: {', '.join(worst)}")
+        # WHOSE DOING (§391): the fallback degraded an arm that ASKED for SSE, or the launch never
+        # asked. Same count, different fix -- `llm_stream_stall_fallback=False` against a launch bug.
+        whose = unstreamed_by_whose_doing(os.path.join(a.bench_root, "model-probes"), ex["by_arm"])
+        for said in whose_doing_lines(whose):
+            print(f"      {said}")
     # PAID RETRIES ARE A NAMED PART, capped per arm at what that arm's gap actually is: subtracting
     # more than the gap would invent credit, and subtracting on an arm with no fingerprints would
     # be a guess.
