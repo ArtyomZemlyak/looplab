@@ -25,9 +25,10 @@ import pytest
 
 from looplab.judgebench import judge_corpus, score
 from looplab.judgebench.judge_corpus import (
-    CORPUS_LIMITS, DATASET_SCHEMA, DEFAULT_DATASET, LABELS, LABEL_BUDGET_EXHAUSTED,
-    LABEL_PRODUCTIVE, LABEL_UNKNOWN, LABEL_WASTED, VERDICTS, build_dataset, extract_run,
-    messages_of, read_dataset, rederive_label, render_prompt, write_dataset)
+    CORPUS_LIMITS, DATASET_SCHEMA, DEFAULT_DATASET, FAULT_LABELS, LABELS, LABEL_BUDGET_EXHAUSTED,
+    LABEL_PRODUCTIVE, LABEL_REPAIRED, LABEL_UNKNOWN, LABEL_UNREPAIRED, LABEL_WASTED, VERDICTS,
+    build_dataset, extract_run, messages_of, read_dataset, rederive_fault_label, rederive_label,
+    render_prompt, write_dataset)
 
 
 # ---------------------------------------------------------------- synthetic run (drives the rule)
@@ -37,8 +38,14 @@ _STAGE_CTX = ("This is the live log of pipeline stage 'train' (stage 2 of 3; the
               "mine -> train -> score). Judge THIS stage's output only.")
 
 
-def _decision_spans(*, node_id, phase_span, start, digest, status, context="Optimizing metric 'm'."):
-    """One monitor DECISION as the engine records it: a tool turn, then the `emit` that ends it."""
+def _decision_spans(*, node_id, phase_span, start, digest, status, context="Optimizing metric 'm'.",
+                    fault=None):
+    """One monitor DECISION as the engine records it: a tool turn, then the `emit` that ends it.
+
+    `fault` is the attribution `should_monitor_repair` gates on and NO preserved run carries, which
+    is exactly why the fixture has to be able to emit one: the second label cannot be driven off a
+    corpus that has never reached the branch.
+    """
     messages = render_prompt({"system": _SYSTEM, "context": context, "stage_context": _STAGE_CTX,
                               "trajectory": "", "look_invitation": "", "digest": digest})
     common = {"kind": "generation", "name": "generation", "run_id": "synthetic",
@@ -54,7 +61,8 @@ def _decision_spans(*, node_id, phase_span, start, digest, status, context="Opti
                         "generation": 0, "model": "synthetic-model", "input": messages,
                         "output": "done",
                         "tool_calls": [{"name": "emit", "arguments": json.dumps(
-                            {"status": status, "reason": "synthetic", "confidence": 0.9})}]}},
+                            {"status": status, "reason": "synthetic", "confidence": 0.9,
+                             **({"fault": fault} if fault else {})})}]}},
     ]
 
 
@@ -163,6 +171,159 @@ def test_a_stage_that_worked_is_not_charged_for_a_later_stage_failing(tmp_path):
     assert row["label"]["label_basis"].startswith("stage_ok_node_failed_elsewhere")
 
 
+# ------------------------------------------------------- the SECOND label: what `fault` bought
+
+def _fault_run(tmp_path, *, fault, repaired, terminal):
+    """A run in which ONE monitor decision attributes a fault, a repair may follow it, and the node
+    then ends. Every fact the label reads is written the way the engine writes it."""
+    run = tmp_path / "fault-run"
+    run.mkdir(parents=True)
+    (run / "task.snapshot.json").write_text(json.dumps({"direction": "max"}), encoding="utf-8")
+    spans = _decision_spans(node_id=1, phase_span="f1", start=1000.0, digest="loss 5.0\nloss 5.0\n",
+                            status="broken", fault=fault)
+    (run / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans), encoding="utf-8")
+    events = [
+        {"seq": 1, "ts": 1500.0, "type": "stage_finished",
+         "data": {"node_id": 1, "name": "train", "status": "fail", "exit_code": 1,
+                  "seconds": 900.0}},
+        # A SECOND node that scored, and it is not scenery: `degenerate` is relative to the run's
+        # best metric, so a run whose only number is the dead one is undecidable rather than
+        # degenerate. That is the same limit the primary label has and it is a property of the rule,
+        # not of this fixture.
+        {"seq": 8, "ts": 900.0, "type": "node_evaluated",
+         "data": {"node_id": 2, "metric": 0.8, "eval_seconds": 100.0}},
+    ]
+    if repaired:
+        events.append({"seq": 2, "ts": 1600.0, "type": "node_repaired",
+                       "data": {"node_id": 1, "attempt": 1, "changed": ["train.py"],
+                                "rationale": "fixed the loss reduction", "files": {},
+                                "deleted": [], "error_in": "e", "stages_passed": 0,
+                                "generation": 0, "triage_action": "repair"}})
+    events.append(dict(terminal))
+    (run / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events),
+                                      encoding="utf-8")
+    return extract_run(run)[0]
+
+
+_SCORED = {"seq": 9, "ts": 4000.0, "type": "node_evaluated",
+           "data": {"node_id": 1, "metric": 0.8, "eval_seconds": 900.0}}
+_DEAD = {"seq": 9, "ts": 4000.0, "type": "node_evaluated",
+         "data": {"node_id": 1, "metric": 0.0, "eval_seconds": 900.0}}
+_FAILED = {"seq": 9, "ts": 4000.0, "type": "node_failed",
+           "data": {"node_id": 1, "reason": "crash", "eval_seconds": 900.0}}
+
+
+def test_a_fault_that_bought_a_repair_is_labelled_by_what_the_repair_then_did(tmp_path):
+    """THE LABEL THE `wasted`/`productive` RULE CANNOT PRODUCE.
+
+    `TrainingVerdict.fault` routes a `broken` stage to a REPAIR instead of a terminal, and the
+    primary label grades the stage's COMPUTE — whether it bought a number — which says nothing about
+    whether the thing to fix was the code. The fact that does is what the repair the attribution
+    bought then produced, and it is a join this file did not have: `node_repaired` after the
+    decision, then the node's own terminal.
+
+    The stage FAILED in all three arms, so the primary label is `wasted` throughout: it is the same
+    row, graded on two different questions, which is the whole reason the vocabularies are
+    separate."""
+    won = _fault_run(tmp_path / "a", fault="implementation", repaired=True, terminal=_SCORED)
+    assert won["label"]["fault_label"] == LABEL_REPAIRED
+    assert won["label"]["fault_label_basis"] == "node_metric_usable"
+    assert won["label"]["repairs_after_decision"] == 1
+    assert won["label"]["label"] == LABEL_WASTED, "the primary label is a different question"
+
+    lost = _fault_run(tmp_path / "b", fault="implementation", repaired=True, terminal=_FAILED)
+    assert lost["label"]["fault_label"] == LABEL_UNREPAIRED
+    assert lost["label"]["fault_label_basis"] == "node_failed_after_repair:crash"
+
+    # A repair that ran and left the node scoring nothing is `unrepaired` too — the same degenerate
+    # rule the primary label uses, because "a terminal exists" is not what the attribution bought.
+    dead = _fault_run(tmp_path / "c", fault="implementation", repaired=True, terminal=_DEAD)
+    assert dead["label"]["fault_label"] == LABEL_UNREPAIRED
+    assert dead["label"]["fault_label_basis"] == "node_metric_degenerate"
+
+
+@pytest.mark.parametrize("fault,repaired,basis", [
+    # No attribution at all — every row in the committed corpus, because the field postdates it.
+    (None, True, "no_fault_recorded"),
+    ("unknown", True, "no_fault_recorded"),
+    # An attribution that does not route: `hypothesis` and `environment` are RECORDED, never
+    # repaired, so no repair outcome exists to grade them by.
+    ("hypothesis", True, "fault_not_routed:hypothesis"),
+    ("environment", True, "fault_not_routed:environment"),
+    # It routed and nothing followed: the gate was off, or the confidence bar or the confirm streak
+    # was not met. Undecidable, and it says which.
+    ("implementation", False, "no_repair_after_decision"),
+])
+def test_every_way_the_fault_label_is_undecidable_says_which_one(tmp_path, fault, repaired, basis):
+    """Four different facts, four bases, one `unknown`. A bench that collapsed them could not say
+    why its coverage is what it is — which is precisely the state this label was added out of."""
+    row = _fault_run(tmp_path / basis.replace(":", "-"), fault=fault, repaired=repaired,
+                     terminal=_SCORED)
+    label = row["label"]
+    assert rederive_fault_label(row)["fault_label"] == LABEL_UNKNOWN
+    assert rederive_fault_label(row)["fault_label_basis"] == basis
+    if fault == "implementation":
+        # The routed branch is the ONLY one whose answer needs a fact the row does not otherwise
+        # carry (`repairs_after_decision`), so it is the only one that stores keys — see
+        # `extract_run` for why a derived, committed artefact must not grow a column recording
+        # something already recoverable.
+        assert label["fault_label_basis"] == basis
+    else:
+        assert "fault_label" not in label and "repairs_after_decision" not in label
+
+
+def test_the_fault_label_reads_only_repairs_that_followed_the_decision(tmp_path):
+    """A node's EARLIER repair chain is not something this verdict caused. Without the `ts` filter
+    the label would credit an attribution for a repair made before it was ever made."""
+    run = tmp_path / "earlier"
+    run.mkdir()
+    (run / "task.snapshot.json").write_text('{"direction": "max"}', encoding="utf-8")
+    spans = _decision_spans(node_id=1, phase_span="g1", start=3000.0, digest="loss 5.0\n",
+                            status="broken", fault="implementation")
+    (run / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans), encoding="utf-8")
+    (run / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in [
+        # The repair is BEFORE the decision, and it is the only one.
+        {"seq": 1, "ts": 1000.0, "type": "node_repaired",
+         "data": {"node_id": 1, "attempt": 1, "changed": ["train.py"], "rationale": "earlier",
+                  "files": {}, "deleted": [], "error_in": "e", "stages_passed": 0,
+                  "generation": 0}},
+        {"seq": 2, "ts": 3500.0, "type": "stage_finished",
+         "data": {"node_id": 1, "name": "train", "status": "fail", "exit_code": 1,
+                  "seconds": 10.0}},
+        _SCORED,
+    ]), encoding="utf-8")
+    label = extract_run(run)[0]["label"]
+    assert label["repairs_after_decision"] == 0
+    assert label["fault_label_basis"] == "no_repair_after_decision"
+
+
+def test_the_fault_vocabulary_is_closed_and_separate_from_the_primary_one():
+    """Two questions, two vocabularies. Merging them would put a label no confusion matrix consumes
+    into the set `score.py::PRIMARY_LABELS` slices on."""
+    from looplab.judgebench import score
+
+    assert set(FAULT_LABELS) == {LABEL_REPAIRED, LABEL_UNREPAIRED, LABEL_UNKNOWN}
+    assert {LABEL_REPAIRED, LABEL_UNREPAIRED}.isdisjoint(LABELS)
+    assert {LABEL_REPAIRED, LABEL_UNREPAIRED}.isdisjoint(score.PRIMARY_LABELS)
+
+
+def test_the_routed_fault_value_still_agrees_with_the_engine():
+    """A COPY, on `VERDICTS`' own argument: a bench that moves when production moves cannot detect
+    that it moved. `should_monitor_repair`'s load-bearing conjunct is `fault == "implementation"`,
+    and if that literal ever changes this label silently grades nothing at all."""
+    import inspect
+
+    from looplab.engine import train_monitor
+    from looplab.judgebench.judge_corpus import FAULT_ROUTED_TO_REPAIR
+
+    src = inspect.getsource(train_monitor.should_monitor_repair)
+    assert 'fault", "unknown") != "%s"' % FAULT_ROUTED_TO_REPAIR in src
+    fields = train_monitor.TrainingVerdict.model_fields["fault"]
+    # …and every value this rule can be handed is one the schema can actually produce.
+    allowed = set(getattr(fields.annotation, "__args__", ()) or ())
+    assert FAULT_ROUTED_TO_REPAIR in allowed and {"hypothesis", "unknown"} <= allowed
+
+
 def test_attempts_are_clustered_from_bursts_not_from_stage_windows(tmp_path):
     """`ts - seconds` is NOT a stage's window: the engine flushes every stage row of an eval attempt
     together at the end, so `mine`'s row can claim a start an hour before the burst while `train`'s
@@ -205,6 +366,31 @@ def test_every_label_rederives(dataset):
         fresh = rederive_label(row)
         assert fresh["label"] == row["label"]["label"], row["case_id"]
         assert fresh["label_basis"] == row["label"]["label_basis"], row["case_id"]
+
+
+def test_every_fault_label_rederives_and_the_corpus_grades_none_of_them(dataset):
+    """The second label's half of the same guarantee, plus the honest statement of its coverage.
+
+    Every row recomputes through the production rule from its own stored facts, exactly like the
+    primary label — and every row answers `unknown`, because nothing in this corpus reaches the
+    branch that grades. The DISTRIBUTION is pinned rather than described, and it corrects the line
+    this file used to carry ("not one recorded verdict carries `fault`"): 449 rows carry none, and
+    ONE — `e5small-dr-unified-v3` n2, `broken` at 0.95 over an uncaught `torch.OutOfMemoryError` —
+    says `environment`, which is recorded and never repaired.
+
+    The day a run records an `implementation` fault this goes red, and the fix is to read the number
+    the corpus can finally produce.
+    """
+    bases = {}
+    for row in dataset["rows"]:
+        fresh = rederive_fault_label(row)
+        stored = (row.get("label") or {}).get("fault_label")
+        # A row that could be regraded from facts it already carries stores no fault keys at all;
+        # the rule answers for it anyway, which is what makes this check total over the file.
+        assert stored is None or stored == fresh["fault_label"], row["case_id"]
+        assert fresh["fault_label"] == LABEL_UNKNOWN, row["case_id"]
+        bases[fresh["fault_label_basis"]] = bases.get(fresh["fault_label_basis"], 0) + 1
+    assert bases == {"no_fault_recorded": 449, "fault_not_routed:environment": 1}, bases
 
 
 def test_vocabularies_stay_closed(dataset):

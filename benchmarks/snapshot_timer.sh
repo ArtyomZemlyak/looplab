@@ -132,8 +132,24 @@ case "${1:-status}" in
         # (§214). The two earlier outliers, 1765 s and 608 s, sit over the pytest and mutation runs
         # of that morning. Lanes 44-47,92-95 are reserved so service work has cpus of its own; the
         # timer was the one service process not using them.
-        taskset -c "$SERVICE_LANE" "$HERE/snapshot.sh" 2>&1 | sed 's/^/    /'
-        snap_rc=${PIPESTATUS[0]}
+        # AND IF THE LANES DO NOT EXIST ON THIS BOX, SNAPSHOT ANYWAY. `taskset` fails with
+        # "Invalid argument" whenever the requested cpus are outside the process's own affinity
+        # mask -- a container with a narrower cpuset than 44-47,92-95, which is every box that is
+        # not this one. The snapshot then never ran at all: `snap_rc` was 1, the fingerprint was
+        # (correctly) not recorded, and the loop retried forever, once per tick, archiving nothing
+        # while printing "snapshot exited 1". An unpinned snapshot is what this rung was ADDED to
+        # improve on (§214 measured 976 s against 118 s under contention); it is still a snapshot,
+        # and no snapshot is the one outcome worse than a slow one. Probed once per attempt with
+        # `true`, so the pinned path is unchanged wherever the lanes are real.
+        if taskset -c "$SERVICE_LANE" true 2>/dev/null; then
+          taskset -c "$SERVICE_LANE" "$HERE/snapshot.sh" 2>&1 | sed 's/^/    /'
+          snap_rc=${PIPESTATUS[0]}
+        else
+          echo "    (cpus $SERVICE_LANE are not available to this process -- snapshotting UNPINNED;"
+          echo "     under load this is the slow path §214 measured, but it is not the no-backup one)"
+          "$HERE/snapshot.sh" 2>&1 | sed 's/^/    /'
+          snap_rc=${PIPESTATUS[0]}
+        fi
         if [ "$snap_rc" = "0" ]; then
           last="$cur"
         else

@@ -11,7 +11,7 @@ means a mutation lands on a node the operator never saw.
 """
 from __future__ import annotations
 
-from looplab.tools.machine_runs_tools import _node_lifecycle_unchanged, _node_subtree
+from looplab.tools.run_control_tools import _node_lifecycle_unchanged, _node_subtree
 
 
 class _Node:
