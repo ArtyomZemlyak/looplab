@@ -99,5 +99,6 @@ addopts = "-q"
 markers = [
     "landlock_refusal: the one test that asserts the confined probe FAILS CLOSED where Landlock is absent (tests/test_dev_probe.py)",
     "live: needs a reachable LLM endpoint (auto-skipped offline)",
+    "corpus: reads the live bench corpus under /var/tmp/looplab-bench -- correct and SLOW. A real read of 150 probe trees is what catches a drift no fixture can, and five such anchors cost 675 s of one selection on 2026-09-09 while the sixth-slowest test took 6.5 s (§379). Use -m 'not corpus' for a fast neighbour run; the full suite still runs them.",
     "docker: needs a Docker daemon",
 ]

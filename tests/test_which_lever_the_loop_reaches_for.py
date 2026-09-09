@@ -19,6 +19,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -70,6 +72,7 @@ def test_a_corpus_without_the_field_is_a_failure_not_a_silence(tmp_path):
     assert not ok and "the field §377 added is missing" in said, said
 
 
+@pytest.mark.corpus
 def test_the_live_corpus_shows_the_asymmetry():
     ok, said = sweep_claims.check_which_lever_the_loop_reaches_for("/var/tmp/looplab-bench")
     if "cannot be driven" in said:

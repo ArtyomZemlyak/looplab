@@ -15,6 +15,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -50,6 +52,7 @@ def test_every_unpinned_task_still_fails_the_claim():
         "тонкая полоса снова проходит молча"
 
 
+@pytest.mark.corpus
 def test_the_live_check_holds_and_names_pagerank():
     ok, said = sweep_claims.check_test_tracks_train("/var/tmp/looplab-bench")
     if "cannot be driven" in said or "no probe" in said:

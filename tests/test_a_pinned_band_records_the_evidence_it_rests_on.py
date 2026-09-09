@@ -20,6 +20,8 @@ import math
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -52,6 +54,7 @@ def test_every_band_records_how_much_evidence_it_rests_on():
         assert isinstance(n, int) and n >= sweep_claims.MIN_PROBES_TO_PIN, (task, band)
 
 
+@pytest.mark.corpus
 def test_a_band_may_not_claim_more_evidence_than_the_corpus_holds():
     """Полоса не может опираться на больше проб, чем на коробке есть. Обратное — можно: корпус
     растёт, и новые пробы полосу СУДЯТ, а не переопределяют."""

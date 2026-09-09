@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -83,6 +85,7 @@ def test_a_probe_with_no_champion_has_no_kind():
         "проба без чемпиона получает вид ядра из ниоткуда"
 
 
+@pytest.mark.corpus
 def test_the_live_corpus_separates_them():
     """Якорь: восьмикратная разница на edge_expansion обязана быть видна из инструмента."""
     got = subprocess.run([sys.executable, str(BENCH / "probe_summary.py"), "--json"],

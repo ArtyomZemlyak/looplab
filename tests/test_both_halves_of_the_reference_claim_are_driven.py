@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+
+import pytest
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
@@ -71,10 +73,13 @@ def test_the_verdict_still_rests_on_the_imports_half(tmp_path):
     assert ok, "вердикт поехал за вызовами"
 
 
-def test_the_live_sweep_prints_both():
-    got = subprocess.run([sys.executable, str(BENCH / "sweep_claims.py")],
-                         capture_output=True, text=True, timeout=1200)
-    line = [l for l in got.stdout.splitlines() if "run_probe spans" in l]
-    if not line:
+@pytest.mark.corpus
+def test_the_live_check_prints_both():
+    """§379: this asked the WHOLE sweep and cost 381 s -- more than every other test in its
+    selection combined -- to read one line. The claim is one check's; the check is called directly.
+    Spawning twenty-one checks to see what one of them prints is not a stronger test, only a slower
+    one."""
+    _ok, said = sweep_claims.check_reference_use_band("/var/tmp/looplab-bench")
+    if "cannot be driven" in said or "no probe" in said:
         return
-    assert "by CALLS rather than imports" in line[0], line[0]
+    assert "by CALLS rather than imports" in said, said
