@@ -37,6 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arm_fidelity  # noqa: E402  (score-free by its own test; used only for finished/paused)
+import events_read  # noqa: E402  (§381: the archive is where crash packets land)
 
 
 def _meter_start(port: int) -> float | None:
@@ -298,27 +299,23 @@ def archived_spend(probe: str, archive: str = ARCHIVE) -> tuple[float, int]:
     not exist when it is sitting on the persistent mount, one `glob` away. The same shape as the
     standing list's own warning about `remDL`: money written off as lost beside a tree that is
     there.
+
+    §381. The first version of this walked the file itself and skipped anything whose `type` was not
+    `llm_usage` -- which silently drops every call sealed inside a crash-atomic packet, and a
+    crashed tree is the ONLY kind this function is ever pointed at. Today's four archives hold zero
+    packet lines, so the $0.5078 above is unchanged and this is a latent defect, not a wrong number;
+    it is fixed here because the next abandoned arm is the one that will have them. The neighbours'
+    suite caught it as a class (`test_a_line_is_not_an_event_everywhere`), not as a report.
     """
     cost, rows = 0.0, 0
     for path in glob.glob(f"{archive}/{probe}/runs/*/*/events.jsonl"):
-        try:
-            fh = open(path, encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        with fh:
-            for line in fh:
-                if '"llm_usage"' not in line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if row.get("type") != "llm_usage":
-                    continue
-                got = (row.get("data") or {}).get("cost")
-                if isinstance(got, (int, float)):
-                    cost += max(0.0, float(got))
-                    rows += 1
+        for row in events_read.iter_events(path):
+            if row.get("type") != "llm_usage":
+                continue
+            got = (row.get("data") or {}).get("cost")
+            if isinstance(got, (int, float)):
+                cost += max(0.0, float(got))
+                rows += 1
     return cost, rows
 
 

@@ -44,6 +44,47 @@ DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 SHIPPED_CARD = "(none -- the shipped card)"
 
 
+def node0_kernel_effect(root: str, task: str, min_nodes: int = 2):
+    """`(effect, n_kernel, n_none)` for "node 0 carried a kernel" -- measured, not quoted.
+
+    §380. `--effect` defaults to 23.5, the figure §186 measured over 69 edge_expansion runs with two
+    or more nodes. The corpus is 118 such runs now, and the same split gives **+29.86**: the number
+    that sizes every arm is stale by a quarter, and nothing said so because it was a default rather
+    than a reading.
+
+    Recomputed with §377's distinction, which turns out NOT to matter here:
+
+        node 0 cython  n=50  node0 median 170.07  champion median 220.75
+        node 0 numba   n=16  node0 median  27.67  champion median 205.47
+        node 0 plain   n=52  node0 median  22.97  champion median 189.78
+
+    Merged as §186 did (any kernel against none) the difference is +29.86; splitting Cython out
+    gives +30.96, about one point apart. So §377's eightfold gap is real between CHAMPION kinds and
+    does not carry into the node-0 effect -- a run that opens with numba usually ships Cython later.
+    That correction belongs beside the number, because I raised the suspicion in §377 and it was
+    wrong.
+    """
+    kernel, none = [], []
+    for run in sorted(glob.glob(f"{root}/*/runs/{task}/run")):
+        metrics = [(e.get("data") or {}).get("metric")
+                   for e in events_read.iter_events(os.path.join(run, "events.jsonl"))
+                   if e.get("type") == "node_evaluated"]
+        metrics = [m for m in metrics if isinstance(m, (int, float))]
+        if len(metrics) < min_nodes:
+            continue
+        node0 = os.path.join(run, "nodes", "node_0")
+        body = ""
+        solver = os.path.join(node0, "solver.py")
+        if os.path.exists(solver):
+            body = Path(solver).read_text(encoding="utf-8", errors="replace")
+        has = bool(glob.glob(node0 + "/*.pyx")) or bool(
+            re.search(r"cimport|import cython|@njit|import numba|from numba", body))
+        (kernel if has else none).append(max(metrics))
+    if len(kernel) < 2 or len(none) < 2:
+        return None, len(kernel), len(none)
+    return statistics.median(kernel) - statistics.median(none), len(kernel), len(none)
+
+
 def probe_card_args(root: str, name: str):
     """What `card_args` this probe was launched with, or None when it predates the instrument.
 
@@ -192,6 +233,13 @@ def main(argv=None) -> int:
     print(f"{len(scores)} {args.task} champions: median {statistics.median(scores):.2f}, "
           f"p10 {srt[int(0.1 * len(srt))]:.2f}, p90 {srt[int(0.9 * len(srt))]:.2f}, "
           f"sd {statistics.pstdev(scores):.1f}")
+    # AND WHAT THE CORPUS SAYS THE EFFECT IS TODAY (§380). The default is a reading from a corpus
+    # that has since grown; a default nobody re-measures is a quoted number wearing a flag's clothes.
+    measured, n_k, n_n = node0_kernel_effect(args.root, args.task)
+    if measured is not None and abs(measured - args.effect) > 2.0:
+        print(f"NOTE: this corpus now gives +{measured:.2f} points for a kernel at node 0 "
+              f"({n_k} runs against {n_n}); --effect is simulating +{args.effect:.1f}. Sizing an "
+              "arm on the smaller figure asks for more probes than the effect needs.")
     print(f"effect simulated: +{args.effect:.1f} points, alpha {args.alpha}, "
           f"{args.trials} trials per row\n")
     print(f'{"batches":>8s} {"probes":>7s} {"$":>6s} {"power":>7s}')
