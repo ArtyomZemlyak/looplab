@@ -33,7 +33,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
-from looplab.core.models import FAILURE_REASONS, REPAIRABLE_REASONS
+from looplab.core.models import REPAIRABLE_REASONS
 
 if TYPE_CHECKING:  # layering: engine may import core, but avoid the import cost at runtime
     from looplab.core.config import Settings
@@ -131,6 +131,10 @@ class EngineOptions:
     confirm_top_k: int = 0
     confirm_seeds: int = 0
     confirm_seed_base: int = 1           # D1: first confirm seed; 1 keeps confirm splits disjoint
+    # THE EVAL NOISE FLOOR (doc 52 row 11): how many times ONE candidate is re-evaluated so the run
+    # records the spread of its own metric. 0 = off on BOTH sides — the same default, so no
+    # options-divergence row — and off means `engine/noise_floor.py` is never entered.
+    eval_noise_seeds: int = 0
     max_seconds: Optional[float] = None
     max_eval_seconds: Optional[float] = None
     # The run's LLM spend caps, reserved at admission (`core/llm_budget.py`, doc 52 row 15).
@@ -301,6 +305,10 @@ class EngineOptions:
     # one either: every row there exists because a bare `Engine(...)` must not gain unasked work or
     # authority, and this reads a folded payload — no call, no money, no kill, no selection.
     memo_verdict_cue: bool = True
+    # Operator-scoped cross-run lessons (doc 52 §4.3). Matches the `Settings` default — so NOT a
+    # divergence-table row — and a bare `Engine(...)` gains nothing: off, the Developer prior is the
+    # run-wide text it always was.
+    lesson_operator_scope: bool = False
     workdir_audit: bool = True           # 4.4: flag unexpected writes in the eval workdir
     # ADR-17: capture this run's bounded/redacted LLM I/O into its spans.jsonl. Bound to the run's OWN
     # Tracer (core/tracing.py) rather than the process-global flag, so two Engines in one process keep
@@ -318,7 +326,7 @@ class EngineOptions:
     cross_run_concepts: bool = False     # PART IV CR Step 2: surface prior-run concept outcomes (audit-only)
     concept_run_base: bool = False        # PART V B: run-base + node-delta concept authoring (opt-in)
     cross_run_advisory: bool = False     # PART IV CR Step 5: fold the cross-run context pack into the prompt
-    cross_run_structured_claims: bool = False  # PART IV CR §21.20.13: scope+polarity-safe structured claim key
+    cross_run_structured_claims: bool = True  # PART IV CR §21.20.13: scope+polarity-safe structured claim key
     cross_run_curation: bool = False     # PART IV §22.4: agentic taxonomy steward proposes merge/split/purge
     task_facets_finalize: bool = False   # opt-in paid facet steward; no live behavior consumer yet
     cross_run_curation_auto: bool = False  # deprecated/inert: old snapshots validate; proposals never auto-apply

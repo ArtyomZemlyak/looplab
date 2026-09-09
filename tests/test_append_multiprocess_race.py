@@ -25,7 +25,7 @@ actually produces is a COLLIDED SEQ — two processes derive the same `cur` from
 and invisible to the fold. Both are asserted below; the seq assertions are what carry the mutation.
 
 Verified NON-VACUOUS by mutation, on a `git archive HEAD` copy of the tree with `_locked_append`'s
-`_interprocess_lock(...)` replaced by `contextlib.nullcontext()` (the sibling `threading.Lock` left
+`interprocess_lock(...)` replaced by `contextlib.nullcontext()` (the sibling `threading.Lock` left
 alone, since that is the one this test has to prove is not what is holding the line). Both race arms
 go RED within the first four records on BOTH filesystems: on overlayfs the log reached three records
 and every child died with `EventLogCorruptionError`; on the geesefs mount the four records carried
@@ -58,7 +58,7 @@ from looplab.events.eventstore import (
     EventStore,
     EventStoreLockError,
     InterprocessLockContended,
-    _interprocess_lock,
+    interprocess_lock,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -120,10 +120,10 @@ _HOLDER = r'''
 """Takes the store's cross-process append lock and holds it until killed."""
 import sys, time
 from pathlib import Path
-from looplab.events.eventstore import _interprocess_lock
+from looplab.events.eventstore import interprocess_lock
 
 lock_path, held_marker = Path(sys.argv[1]), Path(sys.argv[2])
-with _interprocess_lock(lock_path, required=True):
+with interprocess_lock(lock_path, required=True):
     held_marker.write_text("held")
     time.sleep(300)          # the parent SIGKILLs us; never reached on a passing run
 '''
@@ -251,7 +251,7 @@ def test_concurrent_processes_never_tear_or_collide_in_one_event_log(tmp_path, r
     # claim, and unlike a handover count it is deterministic — a store that acquired once and kept
     # the lock would raise here on every box, under every load.
     store.append("after-the-race", {}, require_lock=True)
-    with _interprocess_lock(Path(str(store.path) + ".lock"), required=True, blocking=False):
+    with interprocess_lock(Path(str(store.path) + ".lock"), required=True, blocking=False):
         pass
 
 
@@ -284,7 +284,7 @@ def test_a_lock_held_by_another_process_excludes_us_and_a_killed_holder_does_not
             time.sleep(0.005)
 
         with pytest.raises(InterprocessLockContended):
-            with _interprocess_lock(lock_path, required=True, blocking=False):
+            with interprocess_lock(lock_path, required=True, blocking=False):
                 pass
     finally:
         holder.kill()
@@ -295,7 +295,7 @@ def test_a_lock_held_by_another_process_excludes_us_and_a_killed_holder_does_not
     deadline = time.monotonic() + 10.0
     while True:
         try:
-            with _interprocess_lock(lock_path, required=True, blocking=False):
+            with interprocess_lock(lock_path, required=True, blocking=False):
                 break
         except InterprocessLockContended:
             assert time.monotonic() < deadline, (
@@ -312,7 +312,7 @@ def test_an_unusable_lock_path_reaches_the_caller_instead_of_appending_unlocked(
     """`EventStoreLockError` is raised loudly — prove a caller actually SEES it, with no monkeypatch.
 
     A directory where the sibling `.lock` belongs makes `open(lock_path, "a+")` fail for real. That is
-    the PATH arm of `_interprocess_lock`'s two-failure split, and it must not degrade for anyone: the
+    the PATH arm of `interprocess_lock`'s two-failure split, and it must not degrade for anyone: the
     strict caller gets `EventStoreLockError`, the ordinary engine writer gets the bare `OSError`, and
     in NEITHER case does a record land unlocked.
     """
@@ -359,7 +359,7 @@ def _distinct_filesystem_scratch(tmp_path: Path) -> Path:
 def test_the_cross_process_lock_is_real_on_the_filesystem_the_runs_live_on(tmp_path):
     """The capability gap that would matter most is a filesystem where the lock silently no-ops.
 
-    `_interprocess_lock` degrades to an unlocked append for an ordinary engine writer when the
+    `interprocess_lock` degrades to an unlocked append for an ordinary engine writer when the
     primitive is unsupported — correct for portability, and catastrophic if it fired on the mount the
     runs are actually stored on, because the guarantee would be absent precisely there and nothing
     would say so. Ask the mount directly.
@@ -390,7 +390,7 @@ def test_the_cross_process_lock_is_real_on_the_filesystem_the_runs_live_on(tmp_p
                 assert time.monotonic() < deadline, "holder never acquired the lock on this mount"
                 time.sleep(0.005)
             with pytest.raises(InterprocessLockContended):   # ...it actually EXCLUDES
-                with _interprocess_lock(lock_path, required=True, blocking=False):
+                with interprocess_lock(lock_path, required=True, blocking=False):
                     pass
         finally:
             holder.kill()

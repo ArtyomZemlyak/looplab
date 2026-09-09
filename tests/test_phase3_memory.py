@@ -652,7 +652,7 @@ def test_auto_skill_write_serializes_on_the_shared_memory_lock(tmp_path):
     import threading
     from pathlib import Path as _Path
 
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     first = write_auto_skill(tmp_path, "Cache the featurizer", "body",
                              ["kind:dataset", "dir:max", "churn"], "task-a")
@@ -668,7 +668,7 @@ def test_auto_skill_write_serializes_on_the_shared_memory_lock(tmp_path):
     worker = threading.Thread(target=_second_run, daemon=True)
     # flock is per open-file-description, so this second acquisition blocks a same-process writer
     # exactly as it blocks another run's process.
-    with _interprocess_lock(_Path(str(first) + ".lock"), required=True):
+    with interprocess_lock(_Path(str(first) + ".lock"), required=True):
         worker.start()
         assert not done.wait(0.75), "the skill write did not wait for the shared-memory lock"
     worker.join(timeout=30)

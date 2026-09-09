@@ -71,15 +71,15 @@ from looplab.engine.concept_capsules import (  # noqa: F401
     _MAX_OVERVIEW_CONCEPTS,
     _MAX_OVERVIEW_RUNS_PER_CONCEPT,
     _MAX_OVERVIEW_RUN_CARDS,
-    _capsule_completeness,
+    capsule_completeness,
     _capsule_concept_evidence_completeness,
-    _capsule_fingerprint_scope_complete,
-    _capsule_rows,
-    _capsule_source_summary,
+    capsule_fingerprint_scope_complete,
+    capsule_rows,
+    capsule_source_summary,
     _concept_profit_signs,
-    _dedup_valid_capsules,
-    _filter_capsule_rows,
-    _portfolio_concept_overview_data,
+    dedup_valid_capsules,
+    filter_capsule_rows,
+    portfolio_concept_overview_data,
     _valid_capsule_record,
     build_concept_capsule,
     concept_profit_tendencies,
@@ -540,7 +540,7 @@ def reconcile_auto_skill_statuses(skills_dir: str | Path, lesson_rows: list[dict
         d = Path(skills_dir)
         if not d.is_dir():
             return receipts
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
         from looplab.tools.skills import parse_skill_frontmatter
         for path in sorted(d.glob("auto-*.md")):
             try:
@@ -568,8 +568,8 @@ def reconcile_auto_skill_statuses(skills_dir: str | Path, lesson_rows: list[dict
             rewritten = _rewrite_frontmatter(text, fields)
             if rewritten is None:
                 continue
-            with _interprocess_lock(d / ".auto-skills.lock", required=True):
-                with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+            with interprocess_lock(d / ".auto-skills.lock", required=True):
+                with interprocess_lock(Path(str(path) + ".lock"), required=True):
                     atomic_write_text(path, rewritten)
             receipts.append({"name": metadata.get("name", path.stem), "from": prior,
                              "to": new_status, "outcome": outcome, "run_id": run_id,
@@ -1038,7 +1038,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
         digest_path = d / f"auto-{storage_id}.md"
         legacy_path = d / f"auto-{skill_slug(statement)}.md"
         from contextlib import ExitStack
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
         # One directory-level identity lock makes legacy-path selection and the read-modify-write
         # atomic together. Per-file locks cannot protect two different full claims that alias the
         # same old 48-character slug while one process is deciding whether the legacy evidence is
@@ -1047,7 +1047,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
         # A filesystem that cannot provide the lock leaves the draft unwritten (the outer except
         # returns None): skipping one best-effort skill beats clobbering another run's evidence.
         with ExitStack() as locks:
-            locks.enter_context(_interprocess_lock(d / ".auto-skills.lock", required=True))
+            locks.enter_context(interprocess_lock(d / ".auto-skills.lock", required=True))
             p = digest_path
             if not identity_claim and not digest_path.exists() and legacy_path.exists():
                 legacy_text = legacy_path.read_text(encoding="utf-8")
@@ -1064,7 +1064,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     p = legacy_path
             # Retain the historical per-identity lock as an observable concurrency contract for
             # existing cooperating writers, nested after the directory identity-selection lock.
-            locks.enter_context(_interprocess_lock(Path(str(p) + ".lock"), required=True))
+            locks.enter_context(interprocess_lock(Path(str(p) + ".lock"), required=True))
             status, fps = "candidate", [fingerprint]
             carried: dict[str, str] = {}
             if p.exists():
@@ -1223,8 +1223,8 @@ class JsonlCaseLibrary:
         write. A filesystem unable to provide that guarantee fails closed and finalize retries later."""
         if not self._valid_case(case):
             return False
-        from looplab.events.eventstore import _interprocess_lock
-        with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
+        from looplab.events.eventstore import interprocess_lock
+        with interprocess_lock(Path(str(self.path) + ".lock"), required=True):
             self._reload()
             return self._add_locked(case)
 
@@ -1387,7 +1387,7 @@ def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
     """
     from looplab.engine.concept_registry import canonicalize_concepts
 
-    valid_capsules = _dedup_valid_capsules(capsules)
+    valid_capsules = dedup_valid_capsules(capsules)
     clusters: dict[str, dict] = {}
     for capsule in valid_capsules:
         run_id = capsule["run_id"]
@@ -1424,7 +1424,7 @@ def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
         "axes": retained_axes,
         "axes_omitted": len(axes) - len(retained_axes),
         "concepts_omitted": n_concepts - retained_concepts,
-        **_capsule_source_summary(valid_capsules),
+        **capsule_source_summary(valid_capsules),
     }
 
 

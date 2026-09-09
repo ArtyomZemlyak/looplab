@@ -554,9 +554,10 @@ class ProposalCuesMixin:
         touch a device is the prompt-side twin of the category error `_task_gpu_capable` exists to
         stop: inferring the WORK's needs from the BOX.
 
-        WHAT `Settings.gpu_footprint_cue` MOVES, and why the historical tail is a legacy branch
-        rather than an edit. The shipped paragraph closed with a claim the scheduler contradicts —
-        that declaring above the budget "does NOT get this experiment more hardware" and the run
+        WHAT `Settings.gpu_footprint_cue` MOVES, and why the historical tail became a QUIET branch
+        rather than an edit or a restoration. The shipped paragraph closed with a claim the
+        scheduler contradicts — that declaring above the budget "does NOT get this experiment more
+        hardware" and the run
         "serialises at the same per-experiment cost". `resources.py::_resource_request_for_node`
         takes a DECLARED count over AUTO, `_acquire_gpus` reserves exactly that many devices
         all-or-nothing and `_resource_eval_env` writes them into the child's
@@ -614,15 +615,21 @@ class ProposalCuesMixin:
         head = (f"\nGPU BUDGET — this run evaluates up to {self._eval_parallel} experiment(s) "
                 f"concurrently on a pool of {pool} GPU(s)")
         if not getattr(self, "_gpu_footprint_cue", False):
-            # LEGACY BRANCH: byte-identical to the pre-2026-08-19 paragraph. Spliced at the same
-            # position as the replacement below (the `_system_body` pattern), so `false` is the old
-            # prompt and not a shorter one.
+            # QUIET BRANCH (2026-09-08): the ordinary declaration and the count the command must
+            # target — the two clauses of the pre-2026-08-19 paragraph that were never in dispute —
+            # and NOTHING about what a larger count buys. It is spliced at the same position as the
+            # replacement below (the `_system_body` pattern), so `false` is a NARROWER prompt.
+            #
+            # It is no longer the historical paragraph byte for byte, and that is the decision this
+            # branch records (`agents/roles.py::_FOOTPRINT_BUDGET_QUIET` carries the argument; doc 45
+            # §2 is where it was left open). The old tail closed on "declaring more does NOT get this
+            # experiment more hardware … the run serialises at the same per-experiment cost", which
+            # the scheduler contradicts in both halves. A byte-for-byte off-switch is owed to a run
+            # ALREADY IN FLIGHT — the `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` contract — and
+            # `gpu_footprint_cue` has no row there, so nothing resumes onto this branch: what `false`
+            # reaches is a live prompt, and a live prompt may be quiet but may not be wrong.
             return (
-                head + ", so ONE experiment may declare at most "
-                f"`footprint.gpus = {budget}`. That is a CEILING, and declaring more does NOT get this "
-                "experiment more hardware: the extra devices are taken from the sibling experiments that "
-                "would otherwise run at the same time, so the run serialises at the same per-experiment "
-                f"cost. Declaring `gpus: {budget}` is the ordinary case, not an escalation. Whatever you "
+                head + f", so `footprint.gpus = {budget}` is the ORDINARY declaration. Whatever you "
                 "declare, the training/eval command must target that SAME count.")
         # WHAT A SMALLER DECLARATION DOES NOT BUY, said out loud, because the omission was
         # measurably expensive. `budget` already states the ordinary count; nothing stated what
@@ -967,17 +974,17 @@ class ProposalCuesMixin:
             from pathlib import Path
 
             from looplab.engine.claims import (
-                _filter_claim_source_rows,
+                filter_claim_source_rows,
                 build_context_pack,
                 claims_for_memory,
                 render_context_pack,
             )
             from looplab.engine.memory import (
-                _capsule_source_summary,
-                _capsule_completeness,
-                _capsule_fingerprint_scope_complete,
-                _portfolio_concept_overview_data,
-                _filter_capsule_rows,
+                capsule_source_summary,
+                capsule_completeness,
+                capsule_fingerprint_scope_complete,
+                portfolio_concept_overview_data,
+                filter_capsule_rows,
             )
             base = Path(self.memory_dir)
             if _governance is None:
@@ -1011,9 +1018,9 @@ class ProposalCuesMixin:
                 if not tid and not fp:
                     scope_unknown += 1
                     continue
-                if not _capsule_fingerprint_scope_complete(row):
+                if not capsule_fingerprint_scope_complete(row):
                     scope_unknown += 1
-                    meta = _capsule_completeness(
+                    meta = capsule_completeness(
                         row, "fingerprint", len(row.get("fingerprint") or []))
                     fingerprint_unknown += int(meta is None or meta[0] is None)
                     fingerprint_omitted += int(meta[1] or 0) if meta is not None else 0
@@ -1044,21 +1051,21 @@ class ProposalCuesMixin:
                 if not isinstance(stored, list):
                     return False
                 if capsule:
-                    from looplab.engine.memory import _capsule_fingerprint_scope_complete
+                    from looplab.engine.memory import capsule_fingerprint_scope_complete
                     # capsule fingerprints are bounded durable projections. A capped or
                     # pre-receipt fingerprint may still support its exact task above, but cannot authorize
                     # fuzzy transfer into a different task's live Researcher prompt.
-                    if not _capsule_fingerprint_scope_complete(row):
+                    if not capsule_fingerprint_scope_complete(row):
                         return False
                 stored = [t for t in stored if not str(t).startswith("param:")]
                 return fingerprint_similarity(fp, stored) >= 0.34
 
-            lessons = _filter_claim_source_rows(lessons, _scoped, research=False)
-            capsules = _filter_capsule_rows(capsules, lambda r: _scoped(r, capsule=True))
+            lessons = filter_claim_source_rows(lessons, _scoped, research=False)
+            capsules = filter_capsule_rows(capsules, lambda r: _scoped(r, capsule=True))
             # Research rows are scoped exactly like the Strategist note's: same live direction,
             # exact task, never this run. `_unscoped_research` is the same read `load_research_claims`
             # performed here before, now done once with the other two governed stores.
-            research = _filter_claim_source_rows(
+            research = filter_claim_source_rows(
                 _unscoped_research,
                 ctx.visible_row_predicate(current_direction, task_id=tid, excluded_run=rid),
                 research=True,
@@ -1068,9 +1075,9 @@ class ProposalCuesMixin:
             governance = _governance
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview.
-            capsule_source = _capsule_source_summary(capsules)
+            capsule_source = capsule_source_summary(capsules)
             if capsules or capsule_source.get("source_complete") is not True:
-                overview, concept_rows = _portfolio_concept_overview_data(
+                overview, concept_rows = portfolio_concept_overview_data(
                     capsules, aliases=governance["aliases"],
                     splits=governance["splits"])
             else:
