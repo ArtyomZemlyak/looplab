@@ -13,10 +13,23 @@ Mislead pair (`engine/champion_caveats.py::mislead_gap`, row 22), the extras sid
 that a reviewer could not recompute from the bundle (`looplab export-bundle`). No model, no
 network, no write: this prints.
 
-What "Mislead-adjusted" means here: the champion's number minus the run's own `mislead_gap.gap` —
-i.e. `S_intended`, the best number the intended protocol supports — reported BESIDE the raw one and
-never instead of it, which is Protocol Validity's shape. A run whose gap is `null` (nothing survived
-the filter) has no adjusted number, and the table says so.
+What "Mislead-adjusted" means here: the champion's SEARCH metric minus the run's own
+`mislead_gap.gap` — i.e. `S_intended`, the best number the intended protocol supports — reported
+BESIDE the raw one and never instead of it, which is Protocol Validity's shape. A run whose gap is
+`null` (nothing survived the filter) has no adjusted number, and `adjusted_scale` says which of
+the reasons applies — it is TOTAL over every row, so an empty cell always carries its cause.
+
+AND NEITHER DOES A RUN GRADED PRIVATELY. `mislead_gap` is derived from `Node.metric`, so the gap
+lives on the SEARCH scale; under the default protocol the raw number is the champion's private
+grade against the held-out answers, which is a different measurement of a different split.
+Subtracting one from the other produced a headline column on no measured scale — the honest
+`S_intended` there would be the INTENDED node's own private grade, and only the champion is graded
+at finish, so that number does not exist. `adjusted` is `None` in that case and `adjusted_scale`
+says why. WHICH IS THE DEFAULT: `holdout_fraction > 0` is the shipped protocol, so the champion IS
+graded privately at finish and the adjusted column is empty for every healthy run under it. The
+column carries a number only on the legacy `holdout_fraction=0` protocol, where the raw number is
+itself the search metric. Say that where the column is promised rather than letting a reviewer
+read a blank as a missing measurement.
 """
 from __future__ import annotations
 
@@ -64,8 +77,31 @@ def run_facts(run_dir) -> dict:
     gap = (row["mislead"] or {}).get("gap") if isinstance(row["mislead"], dict) else None
     number = row["private_grade"] if row["private_grade"] is not None else row["search_metric"]
     row["raw"] = number
+    # THE ADJUSTMENT IS ON THE SEARCH SCALE, so it may only be applied to a number on that scale.
+    # `champion_caveats.mislead_gap` derives `gap` from `Node.metric` — a difference between two
+    # nodes' SEARCH scores — while `number` prefers `private_grade`, the champion's finish-time
+    # grade against the private test answers. Under the default protocol those are two different
+    # measurements of two different splits, so `private_grade - gap` was a headline column (and a
+    # `--json` field a reviewer reads) on no measured scale at all. The honest S_intended would be
+    # the INTENDED node's own private grade, and only the champion is ever graded at finish — so
+    # there is no number to report here, and `None` says that rather than inventing one.
     row["adjusted"] = (number - gap if state.direction == "max" else number + gap) \
-        if (number is not None and gap is not None) else None
+        if (number is not None and gap is not None
+            and row["private_grade"] is None) else None
+    # TOTAL over every row generation, and in the order the reasons BIND. An empty cell with no
+    # stated cause is the defect this field exists to close, and the previous version left one for
+    # the commonest remaining case: a search-scale run whose gap is `null` got `adjusted: None` and
+    # `adjusted_scale: None`, i.e. a blank column and no sentence. Under the DEFAULT protocol
+    # (`holdout_fraction > 0`, so the champion is graded privately at finish) the private-grade
+    # clause takes every healthy row, which is why `docs/MLEBENCH.md` and doc 52 now say WHEN the
+    # column carries a number instead of promising it unconditionally.
+    row["adjusted_scale"] = (
+        "search_metric" if row["adjusted"] is not None else
+        "unavailable: the raw number is a private grade and the mislead gap is measured on the "
+        "search metric" if row["private_grade"] is not None else
+        "unavailable: this run has no number to adjust" if number is None else
+        "unavailable: the run recorded no mislead gap (nothing survived the un-flagged, "
+        "un-salvaged, feasible filter, so there is no intended-protocol champion to compare)")
     return row
 
 
@@ -91,7 +127,13 @@ def _extras_of(run_dir: Path) -> Optional[dict]:
         return None
     if not isinstance(doc, dict):
         return None
-    rv, pl = doc.get("rule_violation") or {}, doc.get("plagiarism") or {}
+    # TOTAL OVER A SIDECAR THIS MODULE DID NOT WRITE, like every other reader here (`_seed_of`
+    # checks the snapshot, the report reader checks the report). `or {}` rescues a falsy value and
+    # not a wrong-typed truthy one, so a `rule_violation` that is a string or a list — a hand-edited
+    # file, an older or newer writer shape — raised `AttributeError` out of `run_facts` and aborted
+    # the whole >=3-seed campaign instead of dropping one run's extras row.
+    rv = doc.get("rule_violation") if isinstance(doc.get("rule_violation"), dict) else {}
+    pl = doc.get("plagiarism") if isinstance(doc.get("plagiarism"), dict) else {}
     return {"rule_violation": rv.get("verdict") or rv.get("status"),
             "plagiarism": pl.get("max_similarity") if pl.get("status") == "ok" else pl.get("status")}
 

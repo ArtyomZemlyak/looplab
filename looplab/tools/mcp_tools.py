@@ -4,7 +4,10 @@ unsafe or long origin pairs get a deterministic hashed spelling), so the shared 
 them with no special-casing — provider-neutral by construction.
 
 Config (first found wins): env ``LOOPLAB_MCP_CONFIG`` (path to JSON), env ``LOOPLAB_MCP_SERVERS``
-(inline JSON), or ``<repo>/.mcp.json``. Shape mirrors the common ``.mcp.json``::
+(inline JSON), or ``<repo>/.mcp.json``. All three are PROCESS-WIDE; a deployment that serves more
+than one party declares ``LOOPLAB_MCP_CONFIG_DIR`` instead and gets one file per principal scope
+(``principal_mcp_config``, whose scope `serve/principal.py::mcp_config_scope` decides). Shape
+mirrors the common ``.mcp.json``::
 
     {"mcpServers": {"name": {"command": "npx", "args": ["-y", "pkg"]},        # stdio
                     "web":  {"url": "https://host/mcp"}}}                      # streamable HTTP
@@ -136,8 +139,28 @@ def _clip(reply: str, cap: int) -> str:
     return clip(reply, cap, keep="head", note=_TRUNC_NOTE, reserve=_TRUNC_HEADROOM)
 
 
+def _servers_from_json(raw: str | None) -> dict:
+    """`{server_name: config}` out of one `.mcp.json`-shaped document, `{}` on anything unusable.
+
+    One parse, two readers: the process-wide `load_config` and the per-principal
+    `principal_mcp_config`. They must agree on what a configuration IS — a document the second
+    accepted and the first rejected would be a server set one party could reach and another could
+    not, for a reason neither could see.
+    """
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    servers = data.get("mcpServers") or data.get("servers") or {}
+    return servers if isinstance(servers, dict) else {}
+
+
 def load_config() -> dict:
-    """Return {server_name: config} from the first configured source, else {}."""
+    """Return {server_name: config} from the first configured PROCESS-WIDE source, else {}."""
     raw = None
     p = os.environ.get("LOOPLAB_MCP_CONFIG")
     if p and Path(p).is_file():
@@ -148,14 +171,66 @@ def load_config() -> dict:
         default = REPO_ROOT / ".mcp.json"
         if default.is_file():
             raw = default.read_text(encoding="utf-8")
-    if not raw:
+    return _servers_from_json(raw)
+
+
+# The operator's PER-PRINCIPAL configuration root: `<dir>/<scope>.json`, one file per principal
+# scope. An env var and not a `Settings` field, because that is what every other MCP configuration
+# source already is (`load_config` above) and because this is deployment topology — which parties
+# this process serves — rather than run configuration; a `Settings` field would additionally be
+# rewritable through the settings PUT, i.e. an authorization input one of the served parties can
+# edit.
+MCP_CONFIG_DIR_ENV = "LOOPLAB_MCP_CONFIG_DIR"
+# A scope is a NAME the serve layer minted, never operator text: `serve/principal.py::KINDS` today.
+# Validated anyway, because it becomes one path component and this module cannot see where it came
+# from — a scope that does not match is refused with no servers rather than normalized into some
+# neighbouring file.
+_SCOPE_RE = re.compile(r"\A[a-z][a-z0-9_-]{0,63}\Z")
+
+
+def principal_mcp_config(scope) -> dict:
+    """The MCP server map ONE party may connect, given the scope `serve/principal.py` named for it.
+
+    THE PER-PRINCIPAL SOURCE the cache key could not supply (doc 27). `McpTools.cached()` keys on
+    the resolved configuration, which is right — the configuration IS the server set — but until
+    this function every session on a shared hub RESOLVED THE SAME configuration, so the key had
+    nothing to separate. This is the separation, and it is taken before any cache is consulted:
+    the authorization is `mcp_config_scope`'s answer, and the cache still only decides whether two
+    identical configurations share one set of subprocesses.
+
+    Three answers, and the middle one is the point:
+
+      * ``scope is None`` — the party may connect nothing (a `review` capability, an `anonymous`
+        caller, or a caller that named no principal at all). No file is read and no server is
+        started;
+      * a root declared in ``LOOPLAB_MCP_CONFIG_DIR`` — ``<root>/<scope>.json``, and a scope with
+        no file there gets NO servers. Fail closed, deliberately: an operator who declared
+        per-principal configuration and did not write a file for a party has not said "give that
+        party everything", and silently falling back to the process-wide set would hand exactly
+        the party they did not configure the servers they configured for someone else;
+      * no root declared — the historical process-wide sources, unchanged, for every owner-plane
+        party. This is what keeps a single-user deployment byte-identical to what it had.
+    """
+    if scope is None:
         return {}
+    if not isinstance(scope, str) or not _SCOPE_RE.fullmatch(scope):
+        _LOG.warning("refusing an MCP configuration scope that is not a plain scope name: %r", scope)
+        return {}
+    root = os.environ.get(MCP_CONFIG_DIR_ENV)
+    if not root:
+        return load_config()
+    path = Path(root) / f"{scope}.json"
     try:
-        data = json.loads(raw)
-    except ValueError:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # Absent is the ordinary case (a party the operator did not configure) and unreadable is an
+        # operator problem; both answer "no servers for this party" and say which path was tried,
+        # because the alternative — inheriting another scope's servers — is the failure this whole
+        # function exists to prevent.
+        _LOG.info("no MCP configuration for scope %r at %s (%s); connecting no servers for it",
+                  scope, path, exc.__class__.__name__)
         return {}
-    servers = data.get("mcpServers") or data.get("servers") or {}
-    return servers if isinstance(servers, dict) else {}
+    return _servers_from_json(raw)
 
 
 class McpTools:
@@ -313,7 +388,7 @@ class McpTools:
         return cls([s for s in servers if s is not None])
 
     @classmethod
-    def cached(cls) -> "McpTools":
+    def cached(cls, cfg=None) -> "McpTools":
         """Connect to each MCP server ONCE per CONFIGURATION — a live server owns a background thread,
         an event loop and a subprocess, so this must not run per assistant turn. `build_tools` calls it.
 
@@ -326,11 +401,16 @@ class McpTools:
         servers another principal's session connected: the cache would be the thing that broke the
         isolation, silently, with no code change anywhere near it.
 
-        The key is a digest of the config `load_config` resolves, which is what actually determines
-        the server set. It is deliberately not "the principal": there IS no per-principal config
-        source today (the config is env vars plus a repo file), so keying on an identity the config
-        does not vary with would spawn N identical subprocess sets and buy nothing — see the open
-        item beside this one. Keying on the config is correct now AND correct then.
+        The key is a digest of the config the caller resolved (or, with no `cfg`, of what
+        `load_config` resolves), which is what actually determines the server set. It is
+        deliberately not "the principal", and since `principal_mcp_config` shipped (2026-09-08)
+        that is a stronger statement rather than a weaker one: the party is now decided BEFORE this
+        function, by `serve/principal.py::mcp_config_scope`, and what arrives here is already that
+        party's own configuration. Two parties reach the same entry exactly when their
+        configurations are byte-identical, i.e. when they were told to talk to the same servers.
+        Keying on the principal instead would spawn a second identical subprocess set for the
+        second party and buy nothing — and, the other way round, a cache key must never BE the
+        authorization: it would then grant or deny by collision.
 
         Double-checked under a lock: two concurrent first turns (two tabs/sessions — the workers are
         plain threads) would otherwise both miss, both `from_config()`, and each spawn a full set of
@@ -342,7 +422,7 @@ class McpTools:
         connect for is bounded, and past the bound this answers with the inert empty provider rather
         than spawning more. Give a handle a `close()` and this becomes an ordinary LRU.
         """
-        cfg = load_config()
+        cfg = load_config() if cfg is None else cfg
         # ONE READ, keyed and connected. `from_config()` used to `load_config()` again, so the entry
         # could be stored under one configuration's digest while holding handles connected from
         # another — the exact cross-configuration leak this keying was added to prevent.

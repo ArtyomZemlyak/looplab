@@ -108,7 +108,7 @@ test('Authoring renders nested skill packages read-only and keeps root skills wr
     assert.match(document.body.textContent,
       /package>\/SKILL\.md: read-only.*flat Save\/recovery API rejects slash paths/is)
     assert.match(document.body.textContent,
-      /candidates need cross-task promotion for production.*not reviewed here/is)
+      /candidates need cross-task promotion for production.*review them under memory_skills/is)
     assert.match(document.body.textContent,
       /1\+ files omitted \(cap\)/is)
     assert.match(document.body.textContent,
@@ -118,6 +118,37 @@ test('Authoring renders nested skill packages read-only and keeps root skills wr
     await click(button('Save'))
     assert.equal(requests.length, requestCount, 'disabled read-only Save emitted a request')
 
+    await click(button('memory_skills'))
+    await reply(requests.at(-1), {
+      dir: '/memory/skills', target_root_id: ROOT_ID, truncated_files: 0,
+      inventory_incomplete: false,
+      files: [{
+        name: 'auto-0123456789abcdef.md',
+        text: '---\nprovenance: auto\nstatus: candidate\n---\n\n# Target-encode categoricals\n',
+        revision: REVISION('4'), truncated: false, read_only: true,
+      }],
+    })
+    assert.match(button('auto-0123456789abcdef.md').textContent, /read-only package/)
+    await click(button('auto-0123456789abcdef.md'))
+    const card = document.querySelector('textarea[aria-label="View auto-0123456789abcdef.md"]')
+    assert.ok(card, 'the engine-written card must render; a flat read-only name is not a package id')
+    assert.equal(card.readOnly, true)
+    assert.equal(card.disabled, false)
+    assert.match(card.value, /status: candidate/)
+    assert.equal(button('Save').disabled, true)
+    const cardRequests = requests.length
+    await click(button('Save'))
+    assert.equal(requests.length, cardRequests, 'a read-only auto card must never emit a save')
+    assert.match(document.body.textContent, /no run loads it/is)
+
+    await click(button('skills'))
+    await reply(requests.at(-1), {
+      dir: '/skills', target_root_id: ROOT_ID, truncated_files: 0, inventory_incomplete: false,
+      files: [{
+        name: 'root.md', text: '# root', revision: REVISION('1'), truncated: false,
+        read_only: false,
+      }],
+    })
     await click(button('root.md'))
     const writable = document.querySelector('textarea[aria-label="Edit root.md"]')
     assert.ok(writable)

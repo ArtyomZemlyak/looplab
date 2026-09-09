@@ -57,7 +57,7 @@ money twice.
 
 This stage buys nothing. Its only effect is one `record_concept_alias` append per decision, and that
 append is idempotent by construction: the `action_id` is a pure function of the semantic payload
-(`from` + `to` + action), so `_append_governance`'s idempotency lookup — which runs BEFORE CAS and
+(`from` + `to` + action), so `append_governance`'s idempotency lookup — which runs BEFORE CAS and
 validation — turns any repeat into a replay of the original receipt. A crash anywhere leaves a
 prefix of decisions applied and the rest untouched, and re-running completes it. So this is an
 AT-LEAST-ONCE-SAFE stage, where those two are AT-MOST-ONCE protocols, and joining either would mean
@@ -119,7 +119,6 @@ from typing import Optional
 
 from looplab.engine.concept_registry import (
     ConceptGovernanceGlobalConflict,
-    _append_governance,
     concept_governance_snapshot,
     load_concept_aliases,
     normalize_key,
@@ -132,6 +131,7 @@ from looplab.engine.governance_health import (
     curation_ledger_file,
     read_curation_rows,
 )
+from looplab.engine.governance_protocol import append_governance
 
 # The actor stamped on every alias row this stage writes. It is deliberately NOT "operator": `by` is
 # what a governance reader (CLI, HTTP, a future UI lens) joins on to tell a RATIFIED agent judgement
@@ -376,7 +376,7 @@ def _ratify_one(memory_dir, merge: ProposedMerge, *, by: str, at: str) -> tuple[
             return "revision_conflict", {}
         except (ValueError, GovernanceLedgerUnavailable) as exc:
             return _decline_reason(exc), {}
-        # A successful call does NOT prove this pass wrote the row. `_append_governance` resolves
+        # A successful call does NOT prove this pass wrote the row. `append_governance` resolves
         # action-id idempotency BEFORE CAS and validation, so a repeat returns the ORIGINAL receipt —
         # which is exactly the mechanism that protects an operator's undo, and exactly why "the call
         # returned" cannot be read as "the merge is now in force". The two cases it hides are
@@ -461,7 +461,7 @@ def _append_ratification_receipt(memory_dir, result: dict, *, by: str, at: str) 
     """Append one bounded audit row per pass to `concept_ratification_log.jsonl`.
 
     Audit output, not policy: nothing reads it to decide anything, `load_concept_aliases` never sees
-    it, and it therefore uses `_append_governance`'s lenient receipt-log path rather than joining the
+    it, and it therefore uses `append_governance`'s lenient receipt-log path rather than joining the
     strict operator-ledger vocabulary in `governance_health._PUBLIC_LEDGERS`. It carries no
     `action_id` on purpose — every pass is a new observation, even when it changed nothing.
 
@@ -484,7 +484,7 @@ def _append_ratification_receipt(memory_dir, result: dict, *, by: str, at: str) 
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        _append_governance(path, row, require_durable=True)
+        append_governance(path, row, require_durable=True)
         return True
     except Exception:  # noqa: BLE001 — an audit row must never be able to fail a finalization
         return False

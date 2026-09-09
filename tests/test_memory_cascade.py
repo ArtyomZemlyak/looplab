@@ -324,6 +324,33 @@ def test_a_legacy_row_with_no_uid_still_matches_by_name_and_says_so(memory):
     assert exact["name_matched"] == 0
 
 
+def test_a_store_that_cannot_be_read_is_a_failure_not_a_clean_success_at_any_uid(memory):
+    """THE SAME PROPERTY AS ITS SIBLING BELOW, without a file mode — so it runs as root too.
+
+    The sibling makes the store unreadable with `chmod 0o000` and skips when that has no effect,
+    which is correct about the CONSTRUCTION and wrong about the PROPERTY: "an unreadable store is a
+    failure, not a clean success" does not depend on who is asking. This box runs as root, so that
+    skip fired every time, and measured 2026-09-08 the whole property was untested here — restoring
+    the documented defect (`except OSError: return []` in `memory_cascade._rows`) left this file
+    and its three neighbours at 82 passed.
+
+    A DIRECTORY where a file belongs raises `IsADirectoryError` for root exactly as for anyone else,
+    which is the same `OSError` branch a permission failure takes.
+    """
+    _populate(memory)
+    path = memory / "lessons.jsonl"
+    path.unlink()
+    path.mkdir()                          # unreadable as a file, for every uid
+
+    survey = attributable_memory(memory, GONE, GONE_UID)
+    assert [u["file"] for u in survey["unreadable"]] == ["lessons.jsonl"]
+    result = purge_attributable_memory(memory, GONE, GONE_UID)
+    assert result["ok"] is False, "an unreadable store reported a clean purge"
+    assert any(f["file"] == "lessons.jsonl" for f in result["failures"])
+    # …and the OTHER stores still got purged. One unreadable store must not stop the rest.
+    assert result["deleted"] == 3
+
+
 def test_a_store_that_cannot_be_read_is_a_failure_not_a_clean_success(memory):
     """It used to return [] — "nothing of ours here" — so the purge reported success having done
     nothing, routing straight around the failures[] and the retry that exist for this."""

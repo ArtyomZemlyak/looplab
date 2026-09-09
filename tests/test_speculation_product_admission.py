@@ -25,7 +25,7 @@ import pytest
 import looplab.search.speculation_quality as quality
 from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.config import Settings
 from looplab.core.models import Idea
 from looplab.engine.evaluate import SpeculativeEvaluationInvariantError

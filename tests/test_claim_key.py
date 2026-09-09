@@ -127,12 +127,15 @@ def test_null_effect_does_not_merge_with_negative_effect():
     assert helps["polarity"] == 1
 
 
-# --- EM-06: the three identity modes, and the overlay key each one uses --------------------------
+# --- EM-06: the identity modes, and the overlay key each one uses -------------------------------
 
-def test_the_three_modes_are_documented_where_a_reviewer_reads_them():
-    """doc 25 EM-06's concrete cost is "operator decisions must overlay correctly across all three
-    modes", and nothing stated which overlay key guards which mode. The table lives at
-    `claim_assessments` because that is the function whose two flags select between them."""
+def test_the_one_identity_is_documented_where_a_reviewer_reads_them():
+    """doc 25 EM-06's concrete cost is "operator decisions must overlay correctly across every mode",
+    and nothing stated which overlay key guards which mode. The table lives at `claim_assessments`
+    because that was the function whose flag selected between them. Three modes became two on
+    2026-09-08 when the fuzzy merge was deleted, and two became ONE later the same day when the lean
+    read path went; the table is checked for the count it claims, so re-introducing a second identity
+    row without a second identity — or the reverse — is red."""
     import inspect
 
     from looplab.engine.claims_assessments import claim_assessments
@@ -140,30 +143,81 @@ def test_the_three_modes_are_documented_where_a_reviewer_reads_them():
     # Check the TABLE, not the function text: the first draft grepped the whole source, and every
     # needle also occurs in the body, so deleting a table row left it green.
     src = inspect.getsource(claim_assessments)
-    assert "THE THREE MODES" in src, "the mode table is gone"
+    assert "THE ONE IDENTITY" in src, "the identity table is gone"
     table = [l for l in src.split("\n")
              if l.lstrip().startswith("#") and "  " in l
-             and ("normalize_statement grouping" in l or "token-Jaccard" in l
-                  or "claim_key.claim_signature" in l)]
-    assert len(table) == 3, (
-        f"the mode table lists {len(table)} of the 3 identity modes; a caller flag combination is "
-        "now undocumented, which is exactly how an operator decision overlays the wrong claim")
-    assert any("_scoped_key" in l for l in src.split("\n") if "THE THREE MODES" in src), (
-        "the table must still name the legacy overlay key")
+             and ("normalize_statement grouping" in l or "claim_key.claim_signature" in l)]
+    assert len(table) == 1, (
+        f"the table lists {len(table)} identities; there is exactly one, and a second row means a "
+        "caller flag value is undocumented — which is exactly how an operator decision overlays "
+        "the wrong claim")
 
 
-def test_structured_still_wins_over_fuzzy():
-    """The one precedence rule the table asserts. If these ever became independent, a caller passing
-    both would silently get whichever branch happened to be tested first."""
-    import inspect
+def test_there_is_one_projection_and_the_retired_keyword_cannot_select_another():
+    """The DEFAULT is driven, not pinned, and so is the retirement. Two facts decide what a caller
+    gets: the same words in two different TASKS are two claims, and two opposite-polarity assertions
+    in one task are a CONTRADICTION rather than two unrelated rows. Passing the retired
+    `structured=False` — the lean normalized-statement projection, deleted 2026-09-08 (doc 25
+    EM-06) — changes NEITHER, byte for byte.
 
-    from looplab.engine.claims_assessments import claim_assessments
+    That is the EM-06 flip and then its close. The task boundary is the half that matters for
+    governance: under the lean projection a caller merged task A's evidence into task B's claim and
+    handed the merged row an operator decision — while `record_claim_decision` validated that
+    operator's `evidence_digest` against the structured, task-precise projection only."""
+    from looplab.engine.claims import claim_assessments
 
-    src = inspect.getsource(claim_assessments)
-    assert "structured wins" in src
-    lessons = [{"statement": "dropout helps", "outcome": "supported", "node_ids": [1],
-                "run_id": "r", "task_id": "t", "direction": "min"}]
-    both = claim_assessments(lessons, fuzzy=True, structured=True)
-    only = claim_assessments(lessons, structured=True)
-    assert [c.get("claim_uid") for c in both] == [c.get("claim_uid") for c in only], (
-        "passing fuzzy alongside structured changed the projection; structured must win")
+    across_tasks = [{"statement": "dropout helps accuracy", "outcome": "supported",
+                     "evidence": [1], "run_id": "rA", "task_id": "A"},
+                    {"statement": "dropout helps accuracy", "outcome": "supported",
+                     "evidence": [2], "run_id": "rB", "task_id": "B"}]
+
+    default = claim_assessments(across_tasks)
+    assert len(default) == 2, "the default projection merged two tasks' claims into one"
+    assert sorted(c["scope"] for c in default) == ["A", "B"]
+    assert len({c["claim_uid"] for c in default}) == 2, "the default projection carries no scope-precise uid"
+
+    # The keyword survives only because `EngineOptions.cross_run_structured_claims` still reaches
+    # here through `proposal_cues`/`strategy` and `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins it False.
+    # Accepting it is safe ONLY while both values name the same projection, which is what this drives.
+    assert claim_assessments(across_tasks, structured=False) == default, (
+        "`structured=False` produced a different projection — the lean read path is back, or the "
+        "retired keyword selects something again")
+
+    opposed = [{"statement": "dropout helps accuracy", "outcome": "supported",
+                "evidence": [1], "run_id": "r", "task_id": "t"},
+               {"statement": "dropout never helps accuracy", "outcome": "supported",
+                "evidence": [2], "run_id": "r", "task_id": "t"}]
+    contested = claim_assessments(opposed)
+    assert all(c["contradicts"] for c in contested), "the default projection lost the contradiction"
+    assert claim_assessments(opposed, structured=False) == contested
+
+
+def test_the_lean_shadow_namespace_is_gone_and_the_unscoped_fallback_is_not():
+    """`_scoped_key` was the loader index only the lean projection read; `_global_key` is read by
+    the STRUCTURED projection's `_decision_for` as its explicitly-unscoped fallback. They were one
+    bullet in the finding and they are two different questions, so only one of them left."""
+    from looplab.engine import claims, claims_assessments
+
+    for module in (claims, claims_assessments):
+        assert not hasattr(module, "_scoped_key"), (
+            f"{module.__name__} still exports the deleted lean overlay namespace")
+    assert hasattr(claims, "_global_key"), (
+        "`_global_key` was deleted with the lean path, but `_decision_for` reads it as the "
+        "structured projection's unscoped fallback — its removal is a separate question")
+
+
+def test_the_fuzzy_paraphrase_merge_is_gone():
+    """`_fuzzy_merge_claims` was the third identity mode: an opt-in token-Jaccard merge whose own
+    docstring called the structured key its full CR. Deleting it is half of EM-06's close, so the
+    kwarg must REFUSE rather than be quietly ignored — a silently-accepted `fuzzy=True` would read
+    as "paraphrases still merge" to every caller that still passes it."""
+    import pytest
+
+    from looplab.engine import claims, claims_assessments
+    from looplab.engine.claims import claim_assessments
+
+    with pytest.raises(TypeError):
+        claim_assessments([], fuzzy=True)
+    for module in (claims, claims_assessments):
+        assert not hasattr(module, "_fuzzy_merge_claims"), (
+            f"{module.__name__} still exports the deleted fuzzy merge")

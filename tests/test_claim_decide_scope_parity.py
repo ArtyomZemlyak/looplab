@@ -217,17 +217,27 @@ def test_receipt_names_its_projection_and_scope_filters_every_joined_store(tmp_p
     assert [c["scope"] for c in scoped["claims"]] == ["task-a"]
 
 
-def test_governance_receipt_is_undecidable_without_structured_identity(tmp_path):
-    """`--governance-receipt` without `--structured` emits rows that carry no `claim_uid`/
-    `evidence_digest` at all, so `--scope` only matters on the structured path. The receipt says so."""
+def test_the_governance_receipt_carries_structured_identity_and_lean_cannot_be_asked_for(tmp_path):
+    """`--governance-receipt` is decidable BY DEFAULT since 2026-09-08 (doc 25 EM-06).
+
+    Before the flip this command projected lean unless asked otherwise, and a lean row carries no
+    `claim_uid`/`evidence_digest` at all — so the operator-facing review surface handed back a
+    receipt that `claim-decide` (which validates against the structured projection, always) could
+    never accept, and `--scope` was inert. Later the same day the lean read path was DELETED, and
+    `--lean` with it: an operator who scripted the undecidable projection now gets a usage refusal
+    rather than a receipt whose meaning changed underneath them."""
     md = _portfolio(tmp_path)
     result = CliRunner().invoke(app, [
         "claims", str(md), "--json", "--governance-receipt", "--scope", "task-a"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
-    assert payload["structured"] is False and payload["scope"] == "task-a"
-    assert "claim_uid" not in payload["claims"][0]
-    assert "evidence_digest" not in payload["claims"][0]
+    assert payload["structured"] is True and payload["scope"] == "task-a"
+    assert payload["claims"][0]["claim_uid"] and payload["claims"][0]["evidence_digest"]
+
+    lean = CliRunner().invoke(app, [
+        "claims", str(md), "--lean", "--json", "--governance-receipt", "--scope", "task-a"])
+    assert lean.exit_code != 0, "`--lean` still names a projection"
+    assert "lean" in (lean.output + str(lean.exception or "")).lower()
 
 
 def test_cli_and_http_review_projections_are_identical(tmp_path):

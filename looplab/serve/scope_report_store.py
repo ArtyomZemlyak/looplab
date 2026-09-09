@@ -36,7 +36,7 @@ from typing import Any
 
 from looplab.core.atomicio import atomic_write_text, strict_atomic_write_text
 from looplab.core.comparison import (finite_measurement)
-from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.serve.scope_report import (MAX_SCOPE_REPORT_RUNS)
 from looplab.serve.scope_sources import (MAX_SCOPE_EVENT_BYTES, MAX_SCOPE_TOTAL_EVENT_BYTES)
 from looplab.core.redact import redact_persisted_text
@@ -219,7 +219,7 @@ def _scope_store_lock(reports_dir: Path):
     if entry is not None and (not stat.S_ISREG(entry.st_mode) or _is_link_or_reparse(entry)):
         raise _ScopeReportStorageConflict("scope report lock is not a trusted regular file")
     try:
-        with _SCOPE_STORE_THREAD_LOCK, _interprocess_lock(lock_path, required=True):
+        with _SCOPE_STORE_THREAD_LOCK, interprocess_lock(lock_path, required=True):
             _validated_reports_dir(reports_dir)
             yield
     except EventStoreLockError as exc:
@@ -292,6 +292,22 @@ def _legacy_scope_report_path(reports_dir: Path, scope_type: str, scope_id: str)
 
 
 def _stat_identity(entry: os.stat_result) -> tuple[int, ...]:
+    """A deliberate VARIANT of `core/atomicio.file_identity` (doc 25 SC-11), refused for two reasons.
+
+    First, every comparison this feeds is CROSS-SOURCE: `lstat(path)` against `fstat(descriptor)` in
+    `_open_scope_action_lease` and in the bounded report read, which is the same pairing
+    `serve/scope_sources.py` declares its own variant for — Windows reports a divergent `st_ctime`
+    through the two calls, so carrying `st_ctime_ns` would make an ordinary open fail as a conflict.
+    `st_mode` is added for the opposite reason: these are lease/authority fences, so a regular file
+    that became something else must not compare equal.
+
+    Second, it is PERSISTED. `serve/scope_generate.py::ScopeSourceProbes.probe_key` splices this
+    tuple into a 7-field per-file observation whose sha-256 is stored on every scope report and
+    re-derived to answer `stale`. Re-shaping it (`file_identity` reorders and drops `st_mode`) would
+    change every stored digest at once — every existing report would read stale until regenerated —
+    and a two-width reader/writer migration buys nothing here, because the digest's ONLY use is
+    equality against a freshly derived one. So the width stays and this docstring is the reason.
+    """
     return (
         int(entry.st_mode), int(entry.st_dev), int(entry.st_ino),
         int(entry.st_mtime_ns), int(entry.st_size),
