@@ -213,11 +213,25 @@ def test_a_REDACTOR_THAT_RAISES_yields_no_headline_rather_than_the_raw_text():
 def test_the_engine_passes_its_own_redactor():
     """Tier 3 is not enough for "did it run", so this drives the ARGUMENT: `Engine._redact` is the
     one funnel every persisted tail goes through, and the headline is now one of them."""
-    from tests._source_scan import called_names          # noqa: F401 - availability is the point
+    import ast
     import inspect
 
     from looplab.engine import evaluate
-    src = inspect.getsource(evaluate)
-    idx = src.index("headline=failure_headline(")
-    assert "self._redact" in src[idx:idx + 160], (
-        "the call site must hand the headline the engine's redactor")
+
+    # AST, NOT A SUBSTRING. This was `assert "self._redact" in src[idx:idx + 160]`, which a comment
+    # satisfies: replacing the redactor with `lambda _t: _t` and leaving `# self._redact` on the
+    # call line kept this file at 16 passed, and `test_torch_oom_is_an_oom` and
+    # `test_diagnosis_record` green beside it — 72 tests, none of which noticed that a raw stderr
+    # headline now reaches a durable row and a provider prompt. The sibling test proves
+    # `failure_headline` fails closed on a redactor that RAISES, which made this pin the only link
+    # between that function and the engine's funnel.
+    calls = [node for node in ast.walk(ast.parse(inspect.getsource(evaluate)))
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name) and node.func.id == "failure_headline"]
+    assert calls, "`failure_headline` is no longer called from `evaluate.py` at all"
+    for call in calls:
+        rendered = [ast.unparse(arg) for arg in call.args] + [
+            ast.unparse(kw.value) for kw in call.keywords]
+        assert "self._redact" in rendered, (
+            f"a `failure_headline` call at line {call.lineno} is not handed the engine's redactor "
+            f"(it got {rendered}) — the stderr it summarises reaches a durable row and a prompt")

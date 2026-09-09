@@ -25,7 +25,7 @@ a separate advisory signal. Metric ranking and champion selection are unchanged 
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from looplab.core.models import Idea, NodeStatus, RunState
@@ -164,6 +164,13 @@ _LEVELS = {
     5: "wrongly_abandoned",         # concept is a FAILED direction here -> re-examine (not reject)
 }
 _RECO = {1: "reject", 2: "repropose", 3: "surface_prior", 4: "allow", 5: "reexamine"}
+# The PRIOR-ART name at level 3. Level 3's recommendation is "surface the earlier outcome, do not
+# reject", which is exactly the right handling for "the run's own reading already describes this" —
+# so this shares level 3's number and recommendation and keeps a name of its own, because "tried
+# across runs" would be a false statement about a paper nobody in this project ran. Level 0's name
+# ("novel") has always been outside `_LEVELS` for the same reason: the map holds the five graded
+# levels, the terminal names are the vocabulary.
+_PRIOR_ART = "described_in_retrieved_literature"
 
 
 @dataclass
@@ -174,12 +181,17 @@ class NoveltyGrade:
     near_node: Optional[int]
     shared_concepts: list[str]
     rationale: str
+    # The retrieved papers this proposal overlaps (`engine/novelty.py::literature_overlap` rows:
+    # `[{id, title, similarity}, …]`), EMPTY unless the caller passed them. Carried on every grade so
+    # the evidence travels with the verdict rather than being re-derived by a reader.
+    prior_art: list[dict] = field(default_factory=list)
 
 
 def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
                   tags: Optional[dict[int, frozenset[str]]] = None,
                   idea_tags: Optional[frozenset] = None,
-                  prior_concepts: Optional[set[str]] = None) -> NoveltyGrade:
+                  prior_concepts: Optional[set[str]] = None,
+                  literature: Optional[list[dict]] = None) -> NoveltyGrade:
     """Grade a PROPOSED idea against the run's history over the concept graph (§21.4). Deterministic given
     its tags. The key advance over the flat gate: it distinguishes 'this DCL tweak' (near-dup / same-impl)
     from 'the whole DCL branch' (same-direction-new-impl -> ALLOW) using concept membership, and it
@@ -189,17 +201,35 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
     `idea_tags` (the LLM-built concept set for THIS proposed idea) so the branch-vs-leaf decision uses the
     agent's tagging, consistent with the LLM novelty gate. Both default to the deterministic alias tagger
     only as the no-LLM FALLBACK. `prior_concepts`: concept ids tried in EARLIER runs (cross-run memory).
+
+    `literature`: the papers THIS RUN retrieved that overlap this proposal
+    (`engine/novelty.py::literature_overlap` rows, under `Settings.novelty_literature`). It enters the
+    rubric at EXACTLY ONE terminal and in ONE direction, and both halves are the design:
+
+    * ONE TERMINAL — the level-0 fall-through. Every graded level 1-5 asserts something about THIS
+      RUN's history, and prior art neither strengthens nor weakens those claims. Level 0 is the only
+      one that asserts "a new region of the space", and a paper the run itself has read describing
+      the proposal is direct evidence against exactly that sentence — RQ-Bench's "novelty mirage".
+      Such a grade becomes level 3 `described_in_retrieved_literature` (`surface_prior`), which the
+      live pre-gate treats identically to level 0: it defers to the flat dedup gate, admits nothing
+      and rejects nothing, so no proposal is ever refused on an overlap.
+    * ONE DIRECTION — a PRESENT overlap moves a grade; an ABSENT one never does. `literature_overlap`
+      states that its recall is a FLOOR (no stemming, no synonyms: "sample difficult examples" and
+      "hard negative mining" share no content token), so an empty result is not evidence that the
+      literature is silent. Reading emptiness as novelty would manufacture exactly the false verdict
+      that floor forbids; `literature=None` is therefore byte-identical to the pre-2026-09-08 grade.
     """
     nodes = experiment_nodes(state)
     if tags is None:
         tags = tag_nodes_heuristic(state, graph)
     idea_concepts = idea_tags if idea_tags is not None else tag_idea(idea, graph)
+    prior_art = [row for row in (literature or ()) if isinstance(row, dict)]
 
     # 1) identical params to a tried node -> reject
     for nd in nodes:
         if _params_identical(idea.params, nd.idea.params) and (idea.params or nd.idea.params):
             return NoveltyGrade(1, _LEVELS[1], _RECO[1], nd.id, sorted(idea_concepts),
-                                f"same parameters as tried experiment #{nd.id}")
+                                f"same parameters as tried experiment #{nd.id}", prior_art)
 
     # Concept overlap analysis. The deferred axis-ancestor refinement is not implemented: this is
     # EXACT concept-id
@@ -223,7 +253,7 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
     for nd in same_concept_nodes:
         if _params_close(idea.params, nd.idea.params):
             return NoveltyGrade(2, _LEVELS[2], _RECO[2], nd.id, sorted(idea_concepts),
-                                f"same concepts and near-identical params as #{nd.id}")
+                                f"same concepts and near-identical params as #{nd.id}", prior_art)
 
     # 5) the proposed direction is a FAILED direction here -> re-examine (don't reject a sound direction).
     # Reached only AFTER the near-duplicate check above, so a proposal that merely REPEATS the failed
@@ -237,12 +267,14 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
                       if state.nodes[node_id].status is NodeStatus.failed]
         return NoveltyGrade(5, _LEVELS[5], _RECO[5], (failed_ids[0] if failed_ids else None),
                             sorted(idea_concepts),
-                            f"re-opens wrongly-abandoned direction '{fd.concept}' ({fd.reason})")
+                            f"re-opens wrongly-abandoned direction '{fd.concept}' ({fd.reason})",
+                            prior_art)
 
     # 3) concept tried in a PRIOR run -> surface the prior outcome (materially-different check is the caller's)
     if prior_concepts and (idea_concepts & set(prior_concepts)):
         return NoveltyGrade(3, _LEVELS[3], _RECO[3], None, sorted(idea_concepts),
-                            "concept(s) tried in an earlier run — surface the prior outcome")
+                            "concept(s) tried in an earlier run — surface the prior outcome",
+                            prior_art)
 
     # 4) shares a concept BRANCH with a tried node -> same direction, different implementation -> ALLOW.
     # ANY concept overlap qualifies: a FULL-profile near-duplicate with close params was already caught by
@@ -253,11 +285,24 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
     for nd in nodes:
         if overlap(nd):
             return NoveltyGrade(4, _LEVELS[4], _RECO[4], nd.id, sorted(overlap(nd)),
-                                f"same direction as #{nd.id} but a different implementation — allow")
+                                f"same direction as #{nd.id} but a different implementation — allow",
+                                prior_art)
 
-    # otherwise: no concept overlap -> a genuinely new region
+    # 0/3) no concept overlap with anything tried here. THIS is the one claim prior art can falsify:
+    # "a new region of the space" is a statement about the whole space, and the papers this run
+    # RETRIEVED are the only part of that space outside its own history the grader can see. A present
+    # overlap therefore renames the terminal (level 3, surface the prior art — the pre-gate defers
+    # for 3 exactly as it defers for 0, so nothing is admitted or refused by this), while an absent
+    # one leaves the sentence exactly as it was: the overlap's recall is a floor, so silence is not
+    # evidence of novelty and may not be spent as if it were.
+    if prior_art:
+        named = "; ".join(f"'{str(row.get('title') or '')[:80]}' (sim {row.get('similarity')})"
+                          for row in prior_art[:2])
+        return NoveltyGrade(3, _PRIOR_ART, _RECO[3], None, sorted(idea_concepts),
+                            f"no overlap with tried directions, but {len(prior_art)} paper(s) this "
+                            f"run retrieved describe it: {named}", prior_art)
     return NoveltyGrade(0, "novel", "allow", None, sorted(idea_concepts),
-                        "no overlap with tried directions — a new region of the space")
+                        "no overlap with tried directions — a new region of the space", prior_art)
 
 
 # --------------------------------------------------------------------------- #

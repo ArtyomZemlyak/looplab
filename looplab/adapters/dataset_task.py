@@ -47,7 +47,7 @@ def _resolve(p: str) -> str:
 # because they are this module's contract with its tests and its own readers below.
 from looplab.adapters.perception import (  # noqa: E402
     DIR_LISTING_MAX as _DIR_LISTING_MAX, add_sample as _add_sample, head_sample as _head_sample,
-    tabular_columns as _tabular_columns)
+    split_tables as _split_tables, tabular_columns as _tabular_columns)
 from looplab.adapters.perception import SAMPLE_CHARS as _SAMPLE_CHARS  # noqa: E402,F401 (tests import it)
 
 
@@ -162,6 +162,26 @@ class DatasetTask(BaseModel):
         # repo task); this kind keeps its own row knob and its own primary-file rule. A `.jsonl` /
         # `.parquet` primary is now also readable, which the old inline body refused with `{}`.
         return _tabular_columns(p, max(1, int(self.sample_rows)))
+
+    def shift_inputs(self) -> dict:
+        """For the distribution-shift record (docs/BACKLOG.md §15): the training sample and the
+        deployment one, as `{column: values}` over the same `sample_rows` bound `columns()` uses.
+
+        A DIRECTORY source that names its splits the usual way (`train*` beside `test*`/`valid*`)
+        offers the pair; the first source that does wins, in declaration order. `{}` — no comparison
+        — for a single-file source or a directory that names its splits some other way, which the
+        engine records as "not compared" rather than inventing a reference."""
+        rows = max(1, int(self.sample_rows))
+        for _label, path in self._paths():
+            pair = _split_tables(path)
+            if pair is None:
+                continue
+            reference = _tabular_columns(pair[0], rows)
+            current = _tabular_columns(pair[1], rows)
+            if reference and current:
+                return {"reference": reference, "current": current,
+                        "source": f"{os.path.basename(pair[0])} vs {os.path.basename(pair[1])}"}
+        return {}
 
     def assets(self) -> dict[str, str]:
         return {}                               # data is read by absolute path, not embedded

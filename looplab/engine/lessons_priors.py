@@ -10,6 +10,14 @@ prior renders (`_render_role_prior`), with a per-build memoized embedder (`_memo
 a shared/untagged lesson embeds once, not once per role. The role constants live here with the
 renderer that filters on them; lessons.py re-exports them for back-compat.
 
+Since 2026-09-08 the retrieval can also be scoped to the OPERATOR about to fire
+(`operator_scoped_prior`, `Settings.lesson_operator_scope`, OFF by default) — the arm that was
+missing from the memory stack: fingerprint + role and nothing about the action, while the in-run
+context has had parent-plus-sibling scoping since `events/digest.py::lineage_lessons`. It reuses the
+retained scan, so it costs no store read and no provider call, and it RANKS rather than filters —
+the field's only per-operator ablation (AIRA-dojo) is null, so the design refuses to spend a real
+loss on an unmeasured effect and instead makes the effect measurable through `prior_injected`.
+
 Layering: like lessons.py, no runtime import of the orchestrator (or lessons.py — the mixin is
 consumed there) and never serve — only engine.memory, events, core and stdlib (the retrieval/
 ranking deps stay lazy, method-local imports)."""
@@ -98,8 +106,8 @@ class LessonPriorsMixin:
         research-flavoured meta-notes (part 1) are skipped for the Developer. role=None -> everything."""
         if not (self._e._reflection_priors and self._e.memory_dir):
             return ""
-        text, receipt = self._pick_role_prior(
-            self._scan_prior_context(exclude_run_id, exclude_run_uid), role)
+        self.prior_ctx = self._scan_prior_context(exclude_run_id, exclude_run_uid)
+        text, receipt = self._pick_role_prior(self.prior_ctx, role)
         self.prior_receipts = {role or "all": receipt}
         return text
 
@@ -112,6 +120,11 @@ class LessonPriorsMixin:
         if not (self._e._reflection_priors and self._e.memory_dir):
             return "", ""
         ctx = self._scan_prior_context(exclude_run_id, exclude_run_uid)
+        # RETAINED for `operator_scoped_prior`, and only that: a per-operator Developer render must
+        # not re-read, re-fingerprint and re-embed the whole shared store once per build. Nothing
+        # else reads it, it is replaced wholesale by the next load/refresh, and with the scoping off
+        # (the default) nothing reads it at all.
+        self.prior_ctx = ctx
         researcher, r_receipt = self._pick_role_prior(ctx, LESSON_ROLE_RESEARCHER)
         developer, d_receipt = self._pick_role_prior(ctx, LESSON_ROLE_DEVELOPER)
         # The receipts of the LAST load, for `record_prior_injection` — the caller decides when
@@ -306,6 +319,57 @@ class LessonPriorsMixin:
         """Render ONE role's prior text (the historical surface; `_pick_role_prior` is the pair)."""
         return self._pick_role_prior(ctx, role)[0]
 
+    def operator_scoped_prior(self, role: Optional[str], operator: str, *,
+                              at_node: Optional[int] = None, phase: str = "build") -> Optional[str]:
+        """The OPERATOR-scoped render of one role's prior, or None when the scoping is not in play.
+
+        Cross-run lessons were retrieved by task fingerprint (Jaccard >= 0.34) and role and by
+        nothing about the ACTION about to fire — while the in-run context has had parent-plus-sibling
+        scoping all along (`events/digest.py::lineage_lessons`). This is the cross-run half, and the
+        Developer build is where the operator is actually known: `node_build.py::_directed_idea`
+        holds the `Idea` whose `operator` the node will carry.
+
+        OFF by default (`Settings.lesson_operator_scope`), and None means "use the unscoped text you
+        already have" — so with the flag off the Developer prompt is byte-identical, which is the
+        contract every prompt-touching flag in this tree keeps. Returning None rather than the
+        unscoped text is deliberate: the caller must not silently attribute a scoped receipt to an
+        unscoped render.
+
+        It costs no store read (the scan is the one `load_reflection_priors_both` already paid for)
+        and no provider call — `_pick_role_prior` re-runs the ranking over rows already in memory,
+        and the embedder in that scan is content-memoized, so the harmonic splice re-uses vectors
+        rather than buying them again.
+
+        A `prior_injected` row is appended for the scoped render, carrying its operator: DIAGNOSTIC,
+        so a build worker may append it (invariant 1), and it is what makes the scoping MEASURABLE —
+        `events/prior_citations.py` joins these rows to what the proposals cited, which is the
+        evidence the marker this closes asks for before the scoping is ever defaulted on.
+        """
+        if not (getattr(self._e, "_lesson_operator_scope", False) and operator):
+            return None
+        ctx = getattr(self, "prior_ctx", None)
+        if ctx is None:
+            return None
+        text, receipt = self._pick_role_prior(ctx, role, operator=str(operator))
+        self._record_scoped_injection(role, str(operator), receipt, at_node=at_node, phase=phase)
+        return text
+
+    def _record_scoped_injection(self, role: Optional[str], operator: str, receipt: dict, *,
+                                 at_node: Optional[int], phase: str) -> None:
+        """One `prior_injected` row for an operator-scoped render (doc 52 row 17's shape plus the
+        operator). Best-effort and diagnostic, exactly like `record_prior_injection`; it deliberately
+        does NOT touch `self.prior_receipts`, which belongs to the last full load and is what the
+        run-start / refresh records are written from."""
+        from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PRIOR_INJECTED
+        assert EV_PRIOR_INJECTED in DIAGNOSTIC_EVENTS
+        try:
+            self._e.store.append(EV_PRIOR_INJECTED, {
+                "role": role or "all", "at_node": int(at_node or 0), "phase": str(phase)[:32],
+                "operator": operator[:64], **receipt})
+        except Exception as exc:  # noqa: BLE001 — a diagnostic row must never fail a build
+            from looplab.core.containment import contain
+            contain("prior_injected append", exc)
+
     def record_prior_injection(self, *, at_node: int, phase: str) -> None:
         """Append one `prior_injected` row per role from the receipts the last load kept (doc 52
         row 17): WHICH lesson rows (by `lesson_id`), how many notes and whether the case were
@@ -322,17 +386,29 @@ class LessonPriorsMixin:
                 from looplab.core.containment import contain
                 contain("prior_injected append", exc)
 
-    def _pick_role_prior(self, ctx, role: Optional[str]) -> tuple[str, dict]:
+    def _pick_role_prior(self, ctx, role: Optional[str],
+                         operator: Optional[str] = None) -> tuple[str, dict]:
         """Render ONE role's prior text from a shared `_scan_prior_context` scan: filter the parsed
         lessons to that role (untagged = shared), score by fingerprint similarity, splice in Memora
         harmonic recall, apply D2 read-time hygiene + ranking, and pick the top 5 with a role label.
         Returns `(text, receipt)` — the receipt is the STRUCTURED record of what the text was built
         from (`record_prior_injection` writes it), so a later proposal can be joined to the exact
-        rows it was shown; the text is byte-identical to what this method always rendered."""
+        rows it was shown; the text is byte-identical to what this method always rendered.
+
+        `operator` (opt-in, through `operator_scoped_prior`) is the operator about to fire: it is
+        threaded into `lesson_rank_key`, which puts this operator's own lessons ahead of untagged
+        ones and those ahead of other-operator rows. It changes WHICH FIVE of the already-eligible,
+        already-hygiene-passed rows fill the slots and nothing else — no row is excluded, no
+        threshold moves, and `operator=None` (every historical caller) reproduces the old order
+        exactly."""
         from looplab.engine.memory import prompt_slot_key      # both slot budgets below key on it
         notes, parsed, fp, embed, health, case_line = ctx
         receipt: dict = {
             "notes": 0, "case": False, "rows": [], "quarantined_useless": 0,
+            # NOT a copy of the argument for its own sake: the citation instrument has to be able to
+            # tell a scoped render from an unscoped one, and the receipt is the only thing that
+            # survives to be joined against what the proposal cited.
+            **({"operator_scoped": str(operator)} if operator else {}),
             "source": {"lessons_sha256": health["lessons_digest"],
                        "notes_sha256": health["notes_digest"],
                        "complete": bool(health["complete"])},
@@ -433,7 +509,7 @@ class LessonPriorsMixin:
         receipt["quarantined_useless"] = before_useless - len(scored)
         # Rank: similarity, then confidence × corroboration (evidence_count), then recency —
         # so a twice-confirmed lesson from a related task beats a one-off at equal similarity.
-        scored.sort(key=lambda t: lesson_rank_key(*t))
+        scored.sort(key=lambda t: lesson_rank_key(*t, operator=operator))
         seen: set[tuple] = set()
         picked: list[str] = []
         for sim_v, _, o in scored:

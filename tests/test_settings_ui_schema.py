@@ -100,7 +100,25 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 207
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 211
+    # 210 -> 211 on 2026-09-08: `eval_noise_seeds`, the eval NOISE FLOOR (doc 52 row 11) — the
+    # number of times ONE candidate is re-evaluated so the run records the spread of its own metric.
+    # A ROW rather than an uncurated omission for the reason the spend caps are rows: it buys N full
+    # evaluations at the end of the run, and 0 (off) is the shipped behaviour an operator must be
+    # able to return to. Verified by INTERSECTION as every entry below prescribes rather than by
+    # adding the integer: 210 keys common to the previous keyset plus exactly that one, no
+    # duplicate and none removed.
+    # 207 + 2 -> 209 on 2026-09-08, at the MERGE: two branches each added one row on the same day,
+    # and each pinned 208 against a tree without the other's. Verified by INTERSECTION rather than by
+    # adding the integers: 207 keys are common to both files, and removing exactly
+    # `lesson_operator_scope` and `mlflow_tracking_uri` gives that set back — two real additions,
+    # nothing renamed away underneath either.
+    #   `lesson_operator_scope` (doc 52 §4.3) — whether the Developer's cross-run prior is RANKED by
+    #   the operator about to fire. A row on `memo_verdict_cue`'s ground (it changes a prompt), and
+    #   OFF is the shipped default, so the operator opting IN is the one who needs to find it.
+    #   `mlflow_tracking_uri` (docs/BACKLOG.md §16), the live MLflow mirror. A row and not an
+    #   uncurated omission because it decides whether this run's params, metrics and champion code
+    #   leave the box for an external server — the operator has to see it to turn it off.
     # 206 + 1 -> 207 on 2026-09-07, at the SECOND merge with master: master's ten rows had
     # already met this branch's ten, and this is the one row this branch authored after
     # that merge — `agent_read_loop_nudge_after`. Verified by intersection as every entry
@@ -324,10 +342,20 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # the two counts move together because it is a curated row.
     # 227 -> 229 Settings on 2026-09-06: A5's `established_context` / `established_context_bytes`,
     # the pair whose catalogue entry was also missing until 2026-09-07.
+    # 244 + 1 -> 245 on 2026-09-08, at the same merge sequence: `mcts_value_weight` was the day's
+    # THIRD field, from a third branch, and it pinned 242 for the same reason. Re-derived with the
+    # delta CHECKED by an AST diff against the merge base: exactly that key added, none removed.
+    # 242 + 2 -> 244 on 2026-09-08, at the MERGE: `lesson_operator_scope` (doc 52 §4.3) and
+    # `mlflow_tracking_uri` (docs/BACKLOG.md §16). Both counts move with the catalogue because both
+    # are curated rows — see the note above, and note that neither branch's 243 described a tree
+    # holding the other's field.
     # 241 + 1 -> 242 on 2026-09-07, at the SECOND merge: `agent_read_loop_nudge_after`,
     # the one field this branch added after master already carried its ten. The two counts
     # move together because it is a curated row.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 242
+    # 245 -> 246 on 2026-09-08: `eval_noise_seeds` (doc 52 row 11; a curated row, so the two counts
+    # move together). An AST scan of `Settings`' annotated assignments against the pre-change tree
+    # reports exactly `['eval_noise_seeds']` added and `[]` removed, so a +2/-1 cannot hide here.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 246
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

@@ -122,7 +122,7 @@ def test_the_facade_descent_is_what_answers_for_a_templated_developer():
     early return, a reordered guard). With it, the registry and the behaviour fail together.
     """
     from looplab.adapters.toytask import ToyTask
-    from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 
     task = ToyTask()
     researcher = ToyResearcher(task.bounds)

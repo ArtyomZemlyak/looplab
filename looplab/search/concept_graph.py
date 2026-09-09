@@ -65,6 +65,7 @@ CLAUDE.md's back-compat note warns about, and this cluster has live `monkeypatch
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -392,15 +393,83 @@ _SKELETON_ALIASES = {
 }
 
 
-def skeleton_for(task_type: str) -> ConceptGraph:
+# AN ADAPTER'S NAME IS NOT A DOMAIN (docs/BACKLOG.md, `concept-skeleton-matches-no-run`). Every run
+# recorded on the bench box answers `repo_task`, `dataset_task`, `e5small-dr-unified-v2` or
+# `toy_quadratic` for `state.task_id`, and none of them contains an alias above — so `seed` was None
+# on EVERY run, `build_concept_map` grew its vocabulary from scratch, and the curated 46-id taxonomy
+# matched nothing that ever ran. The two ids below are the harness's own defaults
+# (`adapters/repo_task.py`, `adapters/dataset_task.py`): they name the ADAPTER, never the subject,
+# which lives in the task's GOAL. They are excluded from the substring pass on purpose — a pack whose
+# alias happened to be a substring of `repo_task` would otherwise select a domain for every repo run
+# in existence, which is the opposite failure and a much quieter one.
+_GENERIC_ADAPTER_TASK_IDS = frozenset({"repo_task", "dataset_task"})
+
+# WHAT A PACK RECOGNIZES ITSELF BY, when the id says nothing: its own concepts, named in the task's
+# text. Only the DOMAIN axes count — `hyperparameter`, `training-schedule`, `regularization` and
+# `eval` carry vocabulary every ML task uses ("batch size", "learning rate", "dropout"), so a goal
+# about image segmentation would clear a threshold built on those alone. Two DISTINCT domain concepts
+# is the bar: one is a passing mention ("data retrieval from S3"), two is a description.
+_SKELETON_SIGNATURE_AXES = {
+    "dense-retrieval": ("data", "negatives", "loss", "distillation", "architecture", "pooling"),
+}
+_SKELETON_TEXT_MIN_CONCEPTS = 2
+_NON_WORD = re.compile(r"[^a-z0-9]+")
+
+
+def _signature_text(text: str) -> str:
+    """Casefolded, punctuation-separated and space-padded, so an alias match can be word-anchored."""
+    return " " + " ".join(t for t in _NON_WORD.split(str(text or "").lower()) if t) + " "
+
+
+def _signature_concepts(pack: str, text: str) -> int:
+    """How many DISTINCT domain concepts of `pack` this text names.
+
+    Word-ANCHORED prefix matching (` hard negative` matches "hard negatives" and refuses "ance"
+    inside "balance"), deliberately not `concept_tagging.py::tag_text`: that answers "what is this
+    experiment about" over a grown vocabulary, this answers "is this pack's domain the task's
+    domain" over the curated one — and this module is the BOTTOM of the concept cluster's layer
+    order, so it may not import its own taggers.
+    """
+    axes = set(_SKELETON_SIGNATURE_AXES.get(pack, ()))
+    haystack = _signature_text(text)
+    if not haystack.strip() or pack not in _SKELETONS:
+        return 0
+    hits: set[str] = set()
+    for concept in _SKELETONS[pack]().concepts():
+        if axes and not (set(concept.axes) & axes):
+            continue
+        for alias in concept.aliases:
+            token = _signature_text(alias).strip()
+            if token and f" {token}" in haystack:
+                hits.add(concept.id)
+                break
+    return len(hits)
+
+
+def skeleton_for(task_type: str, *, text: str = "") -> ConceptGraph:
     """Build the seed graph for a task type; a generic empty-but-typed graph when none is curated. Fuzzy:
-    an unregistered id is matched against known packs' aliases before falling back to generic."""
+    an unregistered id is matched against known packs' aliases before falling back to generic.
+
+    `text` is the task's own description (the run's GOAL at every live call site) and is consulted
+    ONLY when the id resolved nothing — which, before 2026-09-08, was every run this project has
+    recorded. A pack is selected from text only when the text names at least
+    `_SKELETON_TEXT_MIN_CONCEPTS` distinct concepts of that pack's DOMAIN axes; a goal that mentions
+    a batch size and a learning rate names none of them. Omitting `text` is exactly the old
+    behaviour, so a caller that has no description keeps the generic graph it always got.
+    """
     t = (task_type or "").strip().lower()
     if t in _SKELETONS:
         return _SKELETONS[t]()
-    for pack, aliases in _SKELETON_ALIASES.items():
-        if t and any(a in t for a in aliases):
-            return _SKELETONS[pack]()
+    if t and t not in _GENERIC_ADAPTER_TASK_IDS:
+        for pack, aliases in _SKELETON_ALIASES.items():
+            if any(a in t for a in aliases):
+                return _SKELETONS[pack]()
+    # The id said nothing. Ask the task's own words, and take the pack with the strongest signature
+    # (ties by pack name, so the answer is deterministic with more than one curated pack).
+    scored = sorted(((_signature_concepts(pack, text), pack) for pack in _SKELETONS),
+                    key=lambda row: (-row[0], row[1]))
+    if scored and scored[0][0] >= _SKELETON_TEXT_MIN_CONCEPTS:
+        return _SKELETONS[scored[0][1]]()
     return ConceptGraph(task_type=task_type or "")
 
 

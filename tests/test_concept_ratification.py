@@ -21,7 +21,6 @@ import pytest
 
 from looplab.engine import concept_tidy
 from looplab.engine.concept_registry import (
-    _append_governance,
     canonicalize_concepts,
     clear_concept_alias,
     concept_governance_global_revision,
@@ -38,6 +37,7 @@ from looplab.engine.concept_tidy import (
     read_ratification_receipts,
 )
 from looplab.engine.governance_health import curation_source_key
+from looplab.engine.governance_protocol import append_governance
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -71,7 +71,7 @@ def _append_proposal(memory_dir: Path, *, merges=(), splits=(), purges=(),
         "auto": False, "auto_requested": False, "receipt": None,
         "proposals": {"merges": list(merges), "splits": list(splits), "purges": list(purges)},
     }
-    return _append_governance(memory_dir / "concept_curation_log.jsonl", row, require_durable=True)
+    return append_governance(memory_dir / "concept_curation_log.jsonl", row, require_durable=True)
 
 
 def _merge(src: str, dst: str, why: str = "same technique") -> dict:
@@ -112,12 +112,12 @@ _EXPECTED = {
 # --------------------------------------------------------------------------- identity rules
 
 def test_the_action_id_is_a_pure_function_of_the_semantic_payload(tmp_path):
-    """Equal ids imply equal `_idempotency_payload`s, which is what makes a repeat a replay.
+    """Equal ids imply equal `idempotency_payload`s, which is what makes a repeat a replay.
 
     This is the property that decides whether a second pass appends a second row, and it is why the
     id is keyed on the merge and NOT on the proposal that carried it.
     """
-    from looplab.engine.concept_registry import _idempotency_payload
+    from looplab.engine.governance_protocol import idempotency_payload
 
     def row(src, dst):
         return {"v": 1, "action": "set", "from": src, "to": dst}
@@ -127,14 +127,14 @@ def test_the_action_id_is_a_pure_function_of_the_semantic_payload(tmp_path):
     same = ratification_action_id("  Model/Gradient_Boosting ", "model/gradient-boosting")
     assert same == ratification_action_id("model/gradient_boosting", "model/gradient-boosting")
     # The link the docstring names, through the SHIPPED normalizer. This used to hand-roll
-    # `.strip().lower()` and then compare `_idempotency_payload(row(a, b))` against
-    # `_idempotency_payload(row(a, b))` — literally the same dict on both sides, so it held for any
+    # `.strip().lower()` and then compare `idempotency_payload(row(a, b))` against
+    # `idempotency_payload(row(a, b))` — literally the same dict on both sides, so it held for any
     # implementation of either function and never joined the id to the payload at all.
     for raw_src in ("  Model/Gradient_Boosting ", "model/gradient_boosting", "MODEL/GRADIENT_BOOSTING"):
         prepared = prepare_concept_alias(raw_src, "model/gradient-boosting")
         assert ratification_action_id(raw_src, "model/gradient-boosting") == same
-        assert _idempotency_payload(row(prepared["from"], prepared["to"])) == \
-            _idempotency_payload(row("model/gradient_boosting", "model/gradient-boosting"))
+        assert idempotency_payload(row(prepared["from"], prepared["to"])) == \
+            idempotency_payload(row("model/gradient_boosting", "model/gradient-boosting"))
     # A different TARGET is a different decision and must get a different id, or a refinement would
     # be swallowed as a replay of the earlier merge.
     assert same != ratification_action_id("model/gradient_boosting", "model/gbm")
@@ -253,7 +253,7 @@ def test_a_dry_run_writes_no_policy_and_no_receipt(portfolio):
     """The operator's preview shares the stage's code path and must leave the portfolio untouched.
 
     "Untouched" is scoped to POLICY and AUDIT, not to the directory listing: reading a coherent
-    governance snapshot takes the memory-wide lock, and `_interprocess_lock` creates its lock file.
+    governance snapshot takes the memory-wide lock, and `interprocess_lock` creates its lock file.
     Every read-side surface (the HTTP concept lens, the CLI) does the same, so a dry run must not be
     held to a stricter rule than a plain read.
     """
