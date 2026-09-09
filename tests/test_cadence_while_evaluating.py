@@ -28,12 +28,15 @@ What this file drives, in the order the risk runs:
   6. THE OTHER THREE CONSUMERS — the first cut of this fix converted two of the five and section 6
      was added on 2026-08-19 after the corpus said so: `lessons_distilled` and
      `report_generated (trigger=cadence)` are zero in exactly the three runs with no quiescent
-     prefix. `_maybe_deep_research` is the one that stays on the old predicate, and its refusal is
-     pinned there too, because its concurrent half already covers it.
+     prefix. `_maybe_deep_research` is the CONDITIONAL one: while `concurrent_research` is on its
+     refusal is pinned here, because that half already covers the phase and opening the serial gate
+     beside it buys a double-spend; under `concurrent_research=false` the serial gate is the run's
+     only research path and now reaches the boundary (F1i-b, closed 2026-09-08). Both halves and
+     the money bound between them are driven at the bottom of this file.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -370,6 +373,16 @@ def test_the_graded_novelty_channel_cannot_see_an_in_flight_tag(tmp_path):
 
     host = SimpleNamespace(_graded_novelty=True, _reflect_client=None,
                            _cross_run_prior=lambda st: (set(), {}, {}, {}))
+    # The rubric's prior-art terminal (`novelty.py::_literature_rows`, doc 52 row 32) is evaluated
+    # as an ARGUMENT to `grade_novelty`, INSIDE the precheck's blind `except Exception` — so a host
+    # that does not answer it does not fail loudly, it takes the contained `return None` and the
+    # channel simply goes unreached. That is what this fixture did when the terminal landed, and the
+    # symptom was `NOT REACHED` on the CONTROL arm rather than any statement about the line under
+    # test. It is bound to the real method rather than stubbed to `[]` for the same reason the
+    # withholding is asserted through `Engine._graded_novelty_precheck` itself: `_novelty_literature`
+    # is absent here, so the production reader answers `[]` on its own and a future change to what
+    # the terminal needs surfaces here instead of being frozen into a stub.
+    host._literature_rows = MethodType(Engine._literature_rows, host)
     idea = Idea(operator="draft", theme="dcl-9", rationale="hard negatives")
 
     def _graph_for(state):
@@ -621,15 +634,8 @@ def test_a_fixed_node_count_buys_exactly_one_distill_and_one_report(tmp_path):
     assert writer.calls == 1, f"paid {writer.calls} reports at one node count"
 
 
-def test_the_serial_deep_research_gate_is_deliberately_left_on_the_old_predicate(tmp_path):
-    """THE ONE THAT MUST NOT BE 'COMPLETED'. `_maybe_deep_research` is the SERIAL half of a decision
-    whose CONCURRENT half (`_spawn_research`) never carried this guard and fires throughout every
-    eval — measured, `research_completed` has cadence rows in all six runs in `runs/`, including the
-    three with zero quiescent prefixes. Moving this gate would put a main-task think and a
-    background think at the SAME node count with only a read-then-write window between their shared
-    `_cadence_research_marks` check and their receipts, i.e. it buys a double-spend to reach work
-    that is already being done. The hole it leaves is `concurrent_research=false` (not the shipped
-    default), and it is filed rather than patched — `docs/BACKLOG.md` F1i-b."""
+def _research_engine(tmp_path, name, *, concurrent_research):
+    """A run whose nodes never stop being pending, with the deep-research cadence due every node."""
     class _Researcher:
         def __init__(self):
             self.calls = 0
@@ -639,13 +645,64 @@ def test_the_serial_deep_research_gate_is_deliberately_left_on_the_old_predicate
             return {}
 
     stub = _Researcher()
-    eng = make_engine(tmp_path / "dr", deep_researcher=stub, deep_research_every=1,
-                      cadence_while_evaluating=True)
+    eng = make_engine(tmp_path / name, deep_researcher=stub, deep_research_every=1,
+                      cadence_while_evaluating=True, concurrent_research=concurrent_research)
     eng.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
                                      "direction": "min"})
+    return eng, stub
+
+
+def test_the_serial_deep_research_gate_refuses_while_the_concurrent_half_is_live(tmp_path):
+    """THE ONE THAT MUST NOT BE 'COMPLETED' WHILE ITS OTHER HALF RUNS. `_maybe_deep_research` is the
+    SERIAL half of a decision whose CONCURRENT half (`_spawn_research`) never carried this guard and
+    fires throughout every eval — measured, `research_completed` has cadence rows in all six runs in
+    `runs/`, including the three with zero quiescent prefixes. Opening this gate there would put a
+    main-task think and a background think at the SAME node count with only a read-then-write window
+    between their shared `_cadence_research_marks` check and their receipts, i.e. it buys a
+    double-spend to reach work that is already being done. Under the shipped
+    `concurrent_research=True` the predicate is therefore the historical one, byte for byte."""
+    eng, stub = _research_engine(tmp_path, "dr-on", concurrent_research=True)
     state = fold(eng.store.read_all())
     state.nodes = _busy_nodes()
     out = eng._maybe_deep_research(state)
     assert stub.calls == 0
     assert "research_attempted" not in [e.type for e in eng.store.read_all()]
     assert out is state
+
+
+def test_the_serial_gate_is_the_only_path_under_concurrent_research_false_and_now_fires(tmp_path):
+    """F1i-b, closed 2026-09-08. With `concurrent_research=false` there is no background think to
+    race — `_spawn_research` returns at its first line — so the serial gate is the run's ONLY
+    research path, and on a GPU-shaped run (nodes exist, one is always training) the old predicate
+    meant it never fired at all. One path needs no agreement between two."""
+    eng, _stub = _research_engine(tmp_path, "dr-off", concurrent_research=False)
+    state = fold(eng.store.read_all())
+    state.nodes = _busy_nodes()
+    eng._maybe_deep_research(state)
+    assert "research_attempted" in [e.type for e in eng.store.read_all()]
+
+    # NEGATIVE CONTROL: the operator kill switch still restores the historical predicate exactly,
+    # in the one configuration where the gate is reachable at all.
+    eng2, stub2 = _research_engine(tmp_path, "dr-off-killed", concurrent_research=False)
+    eng2._cadence_while_evaluating = False
+    state2 = fold(eng2.store.read_all())
+    state2.nodes = _busy_nodes()
+    eng2._maybe_deep_research(state2)
+    assert "research_attempted" not in [e.type for e in eng2.store.read_all()]
+    assert stub2.calls == 0
+
+
+def test_a_fixed_node_count_buys_exactly_one_serial_think(tmp_path):
+    """THE MONEY BOUND for the newly reachable gate, and it needs no in-process memo for the same
+    reason `_maybe_distill_lessons` and `_maybe_refresh_report` do not: the receipt is written
+    BEFORE the provider call (`_record_research_attempt`) and `_cadence_research_marks` counts an
+    ATTEMPT as a spent window, so the durable gate alone bounds the loop however many times it
+    turns at one node count."""
+    eng, _stub = _research_engine(tmp_path, "dr-money", concurrent_research=False)
+    state = fold(eng.store.read_all())
+    state.nodes = _busy_nodes()
+    for _ in range(25):
+        state = eng._maybe_deep_research(state) or state
+        state.nodes = _busy_nodes()          # the run has not moved; only the loop has turned
+    attempts = [e for e in eng.store.read_all() if e.type == "research_attempted"]
+    assert len(attempts) == 1, f"paid {len(attempts)} thinks at one node count"

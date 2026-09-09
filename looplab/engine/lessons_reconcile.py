@@ -287,6 +287,29 @@ class LessonReconcileMixin:
                 out[str(nid)] = sig
         return out
 
+    def _evidence_operators(self, state: RunState, node_ids) -> list[str]:
+        """The OPERATORS a lesson's own evidence nodes were produced under, sorted and bounded.
+
+        Stamped at write time on every distilled row (doc 52 §4.3): cross-run lessons were retrieved
+        by task fingerprint and role and by NOTHING about the action about to fire, so the store
+        could not even be ASKED whether "the fix for a failed merge" is the row a merge should see.
+        It is written unconditionally — a durable fact about the row's own evidence costs no prompt
+        bytes and no call — while READING it is opt-in (`Settings.lesson_operator_scope`); that split
+        is what lets the scoping be measured on a store that was recorded either way.
+
+        Bounded by `MAX_LESSON_OPERATORS` and de-duplicated, so a whole-run reflection grounded in
+        twenty nodes still carries a handful of names. A node with no operator contributes nothing;
+        no evidence at all yields `[]`, which every reader treats as UNTAGGED (see
+        `lesson_hygiene.py::lesson_operator_bucket`), i.e. exactly the legacy behaviour."""
+        from looplab.engine.lesson_hygiene import MAX_LESSON_OPERATORS
+        names: list[str] = []
+        for nid in node_ids or []:
+            node = state.nodes.get(nid)
+            operator = str(getattr(node, "operator", "") or "") if node is not None else ""
+            if operator and operator not in names:
+                names.append(operator)
+        return sorted(names)[:MAX_LESSON_OPERATORS]
+
     def _lesson_evidence_stale(self, state: RunState, o: dict) -> bool:
         """True iff a lesson's grounding nodes no longer match the OUTCOME SIGNATURE it was distilled
         from — a re-eval FLIPPED something it depends on. Requires the exact `evidence_sig`: a node now
@@ -463,16 +486,16 @@ class LessonReconcileMixin:
             # be atomic vs a concurrent run's O_APPEND, or the whole-file replace clobbers a lesson that
             # landed in the read→write window (the pre-lock snapshot never saw it) — the exact race the
             # lock exists to prevent (JsonlCaseLibrary.add / append_lessons both re-read inside the lock).
-            from looplab.engine.claims import (_load_claim_source_path,
+            from looplab.engine.claims import (load_claim_source_path,
                                                _valid_claim_source_row)
             from looplab.events.eventstore import (
-                _interprocess_lock,
+                interprocess_lock,
                 replace_jsonl_rows_atomic_preserving_quarantine,
             )
-            with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+            with interprocess_lock(Path(str(path) + ".lock"), required=True):
                 # An authoritative in-lock read failure aborts the best-effort reconcile. Falling back to
                 # the stale pre-lock scan would let a later whole-file replace erase concurrent appends.
-                cur = _load_claim_source_path(
+                cur = load_claim_source_path(
                     path, research=False)   # authoritative interpreted rows, inside the lock
                 kept = [o for o in cur if isinstance(o, dict) and not _is_stale(o)]
                 n_retired = len(cur) - len(kept)   # rows ACTUALLY dropped (audit); reflect-sweep included

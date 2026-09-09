@@ -42,12 +42,24 @@ def _plain_delegators() -> dict[str, tuple[str, str, str | None]]:
     """
     found: dict[str, tuple[str, str, str | None]] = {}
     for node in _engine_class_tree().body:
-        if not isinstance(node, ast.FunctionDef) or len(node.body) != 1:
+        # `ast.AsyncFunctionDef` is a SEPARATE class, not a subclass of `ast.FunctionDef`, so
+        # filtering on the latter made this scanner blind to every `async` delegator in BOTH
+        # directions — it could neither find an unregistered one nor notice a registered one
+        # disappearing. Measured 2026-09-08: 34 delegators against 33 registered, the odd one
+        # being `_holdout_phase`, which follows the table's naming rule exactly. The lane is what
+        # is at stake: a delegator that loses `@in_llm_lane("enrichment")` runs outside the capped
+        # lane and competes with foreground work for provider concurrency, which surfaces as an
+        # unexplained stall rather than an error.
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or len(node.body) != 1:
             continue
         statement = node.body[0]
         if not isinstance(statement, ast.Return):
             continue
         call = statement.value
+        # …and an `async` delegator's return is an `Await` WRAPPING the call, so unwrap it before
+        # the shape test below. Without this the widened isinstance above would still see nothing.
+        if isinstance(call, ast.Await):
+            call = call.value
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
                 and isinstance(call.func.value, ast.Attribute)
                 and isinstance(call.func.value.value, ast.Name)

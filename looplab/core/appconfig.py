@@ -269,9 +269,9 @@ _TASK_BLOCKS = {
         "  max_degree: 4\n"
         "  cv_k: 5"),
     "timeseries": (
-        "  # Synthetic forecaster smoothing/seasonality via backtest.\n"
+        "  # Synthetic series; the LLM writes the forecaster, a shipped backtest scores it.\n"
         "  kind: timeseries\n"
-        "  goal: choose smoothing weight + seasonal period to minimize backtest MASE\n"
+        "  goal: write a forecaster minimizing the rolling-origin backtest MASE\n"
         "  direction: min\n"
         "  period: 7\n"
         "  max_period: 12"),

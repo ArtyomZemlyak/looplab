@@ -61,14 +61,17 @@ from looplab.events.types import EV_TRUST_SCAN
 #   workdir_audit  — runtime writes to protected/frozen files (`Settings.workdir_audit`)
 #   code_leakage   — `trust/leakage.py::code_leakage_findings` (`Settings.code_leakage_detect`)
 #   critic         — `trust/critic.py::critic_findings` (`Settings.critic_check`)
+#   feature_cv     — `trust/cv.py::feature_cv_findings` (`Settings.feature_engineering`) — the CV
+#                    keep/drop rule the FE directive states, applied to the node's own ledger
 TRUST_DETECTOR_REWARD_HACK = "reward_hack"
 TRUST_DETECTOR_EXPLOIT_SUITE = "exploit_suite"
 TRUST_DETECTOR_WORKDIR_AUDIT = "workdir_audit"
 TRUST_DETECTOR_CODE_LEAKAGE = "code_leakage"
 TRUST_DETECTOR_CRITIC = "critic"
+TRUST_DETECTOR_FEATURE_CV = "feature_cv"
 TRUST_DETECTORS: tuple[str, ...] = (
     TRUST_DETECTOR_REWARD_HACK, TRUST_DETECTOR_EXPLOIT_SUITE, TRUST_DETECTOR_WORKDIR_AUDIT,
-    TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC)
+    TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC, TRUST_DETECTOR_FEATURE_CV)
 
 # The schema version of the receipt payload, shared with `reward_hack_suspected`'s `evidence_version`
 # because the two rows commit to the same subject under the same digest rule.

@@ -20,9 +20,18 @@ _MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 _LOOPLAB_COMMAND = re.compile(r"\blooplab\s+([a-z][a-z0-9-]*)")
 _FINDING = re.compile(
     r"^#### ([A-Z]{2}-\d{2})\b.* — \*\*"
-    r"((?:PARTIALLY )?RESOLVED|DEFERRED|OPEN) \([^)]*\)\*\*$",
+    r"((?:PARTIALLY )?RESOLVED|DEFERRED|DECLINED|OPEN) \([^)]*\)\*\*$",
     re.M,
 )
+# DECLINED joined the heading vocabulary on 2026-09-08 with doc 25 SE-12, and it is the
+# PERMANENT form of "not done" that CLAUDE.md's open-item index already spells
+# `DECLINED[<slug>] … measured: <number>`: a finding weighed against a measurement and refused,
+# as against DEFERRED, which is "not now, and here is what would decide it". The doc's
+# human-facing rollup sentence has four buckets and is not being widened to five — a reader
+# counting "how many of these were not done" wants one number — so `_ROLLUP_DEFERRED` below
+# states the mapping instead of burying it: the sentence's `deferred` count is DEFERRED plus
+# DECLINED, and the heading is where the two are told apart.
+_ROLLUP_DEFERRED = ("DEFERRED", "DECLINED")
 
 
 def _registered_command_names() -> set[str]:
@@ -244,13 +253,14 @@ def test_architecture_ledger_has_one_current_status_per_finding_and_exact_rollup
     # eleven days. What is worth guarding is that the doc's human-facing rollup AGREES with its own
     # headings, and that the inventory has not silently lost a finding — both derived, so closing a
     # finding is one edit to the heading plus one to the sentence it is a summary of.
-    assert set(counts) <= {"RESOLVED", "PARTIALLY RESOLVED", "DEFERRED", "OPEN"}
+    assert set(counts) <= {"RESOLVED", "PARTIALLY RESOLVED", *_ROLLUP_DEFERRED, "OPEN"}
     summary = re.search(
         r"Status totals: (\d+) resolved, (\d+) partially resolved, (\d+) deferred, "
         r"(\d+) open \((\d+) total\)", text)
     assert summary, "the ledger must carry a `Status totals:` rollup sentence"
     derived = (counts.get("RESOLVED", 0), counts.get("PARTIALLY RESOLVED", 0),
-               counts.get("DEFERRED", 0), counts.get("OPEN", 0), len(statuses))
+               sum(counts.get(status, 0) for status in _ROLLUP_DEFERRED),
+               counts.get("OPEN", 0), len(statuses))
     assert tuple(map(int, summary.groups())) == derived, (
         "the ledger's `Status totals:` sentence disagrees with its own finding headings: "
         f"sentence says {summary.groups()}, headings derive {derived}")

@@ -201,6 +201,14 @@ has. The committed half is fed by the durable `llm_usage` ledger and seeded from
 the cap survives a restart; `looplab tokens` reconciles against that same ledger. Both default to
 0 = no cap (doc 52 row 15).
 
+**One ceiling, two halves (2026-09-08).** `llm_cost_limit` and `llm_budget_usd` were briefly two
+run-level USD caps enforced by two different halves — reserved before the call here, committed
+after it on the shared `CostAccountant` — so declaring one bought half a ceiling: only
+`llm_budget_usd` gets the `node_open_budget_floor_usd` stop, and only the reserve half stops the
+fan-out overshoot. `core/llm_budget.py::run_usd_ceiling` is now the ONE derivation both halves
+read: the tightest cap you actually declared binds both, and every refusal names the knob you
+typed. `llm_budget_usd` remains the documented spelling.
+
 ## Reasoning / thinking
 
 `llm_reasoning` controls the chain-of-thought sent in the request (defaults to `high` — the agent
@@ -304,6 +312,16 @@ this robust (all on by default):
   worktree; its diff is gated by an edit-surface allow-list (default `*.py`, reject-not-strip).
   Accepted files become `Node.files` (files-as-truth, resumable) and are materialized into the eval
   workdir.
+
+Each invocation that actually launched is recorded in the run's ledger as one **unpriced** call —
+one `calls`, no `priced_calls`, no tokens — under a `generation` span of its own, so an external
+Developer appears in `llm_usage`, `looplab tokens` and `looplab timings` instead of being the one
+role whose spend is invisible. The tokens themselves are spent inside the agent's process against
+the endpoint it was handed, and nothing it prints is a receipt LoopLab can authenticate, so the gap
+is *stated* rather than guessed (unpriced is not free — see the accounting section below). A
+launcher that never started is charged nothing. The agent is also stopped by a **cancel token**, not
+only by `agent_timeout`: a stopped run tree-kills the agent and its children within a second and
+records the invocation as cancelled rather than timed out.
 
 A dedicated `developer` profile may therefore describe the external tool's model/remote endpoint,
 but an external-only role must omit `api_key_env`: promising a LoopLab-managed key is rejected because
@@ -808,6 +826,20 @@ suppression drops real findings over bad footnotes. And it states no opinion abo
 foreign — a summary is prose with no per-number provenance, and deciding that from the model's own
 text is what docs/36 forbids.
 
+**And the rule itself is now shared, not two local fixes.** The memo above and the `kb_search` case
+record were the same habit measured twice in one day (`docs/BACKLOG.md` §0.17: the bound cuts the
+TAIL and the payload is at the tail), and each was repaired where it was found — which left nothing
+stopping the next bounded surface from doing it again. `core/context_budget.py::bounded_page` is that
+rule as code, beside `RESULT_CAP` in its canonical home: one PAGE of a long text under a cap, with a
+receipt — charged *inside* the cap, so the loop's own head-cut cannot eat it — that names the range
+it covered, the total, and the exact call that returns the rest (`{offset}` = the first character it
+did not cover). A text that fits whole is returned verbatim, so converting a surface changes no short
+answer by a byte; a surface with no continuation to offer says *that* rather than naming a call that
+does not exist. The scan for the same shape found one silent cut left among the agent-facing readers
+— `knowledge_tools.read_note` was `read_file(...)[:4000]`, no marker and no continuation, so an
+operator-authored note whose conclusion sat past char 4,000 came back looking whole — and it is now a
+paged reader with an `offset` argument its own receipt names.
+
 **The invariant.** `engine/signal_delivery.py` is a registry of these routes (signal → folded field
 → injection site → consumer), and `tests/test_signal_delivery.py` asserts each injection symbol
 resolves *and* that a synthetic input's content actually reaches the rendered output. A signal added
@@ -929,7 +961,9 @@ When `memory_dir` is configured, the same skill tool also reads auto-distilled M
 promotion but is excluded from the production agent surface. Only `status: promoted` auto-skills
 are listed/loaded, and their bodies carry an `UNTRUSTED_MEMORY_AUTO_SKILL` provenance label. The
 library constructor's explicit `include_auto_candidates=True` seam is for review and tests; it is
-not a runtime setting. Hand-written and legacy skills keep their previous visibility and body.
+not a runtime setting — Lab → Authoring → **memory_skills** lists that same directory read-only,
+frontmatter included, so a candidate can be judged without one. Hand-written and legacy skills keep
+their previous visibility and body.
 
 ### Prompt override keys (`prompt_dir`)
 

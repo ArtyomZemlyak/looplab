@@ -28,7 +28,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # sink-installing modules stops matching, so this cannot quietly fall behind the tree.
 PROPOSAL_TARGETS = {
     "fn": "looplab/engine/novelty.py",                       # the shared helper, both offload lanes
-    "_prepare_raw_card_stage": "looplab/engine/speculation.py",
+    # RE-POINTED 2026-09-08, by this rule's own escape hatch ("no offload of X found -- re-point
+    # this rule"). The speculative raw stage stopped calling `to_thread.run_sync` directly when its
+    # capture->offload->store->release shape was hoisted into
+    # `speculation.py::_run_isolated_producer`, so the AST scan below found no crossing in that
+    # module and the row went red. The PROPERTY did not move -- both producers still pass
+    # `limiter=_proposal_limiter()` -- only the line the crossing happens on. `worker` is what the
+    # hoisted helper offloads, exactly as `fn` is for the sink helper one row up; the indirection is
+    # covered by `test_the_isolated_producer_forwards_its_callers_limiter` below, which is the half
+    # an AST scan of one module cannot see.
+    "worker": "looplab/engine/speculation.py",
 }
 
 
@@ -106,19 +115,29 @@ def test_the_pool_admits_every_lane_that_can_be_in_flight_at_once():
 
 
 def test_every_offloaded_proposal_passes_the_limiter():
-    """The rule, over the tree. A lane that forgets the kwarg silently returns to the shared pool."""
+    """The rule, over the tree. A lane that forgets the kwarg silently returns to the shared pool.
+
+    NO TARGET FILTER, and that is the 2026-09-08 widening. The rule used to ask only about the ONE
+    name in each `PROPOSAL_TARGETS` row, so after the row was re-pointed to the hoisted helper's
+    `worker` a NEW lane in the same module — offloading anything else, onto anyio's default —
+    passed unseen, because the helper's own crossing still satisfied `found`. The name of the
+    callable was never the property. In these two modules EVERY crossing onto a thread must name a
+    pool; `PROPOSAL_TARGETS` now only says which modules are lanes (and
+    `test_the_lane_set_still_matches_the_sink_installers` keeps that set honest), while the
+    per-module `found` check stays as the escape hatch for a lane that moves out entirely.
+    """
     offenders = []
     for target, rel in PROPOSAL_TARGETS.items():
         path = ROOT / rel
         tree = ast.parse(path.read_text())
         found = False
         for call in _offload_calls(tree):
-            if _partial_target(call) != target:
-                continue
-            found = True
+            name = _partial_target(call)
+            if name == target:
+                found = True
             if _binds_the_limiter(call, tree):
                 continue
-            offenders.append(f"{rel}:{call.lineno} offloads {target} onto the DEFAULT pool")
+            offenders.append(f"{rel}:{call.lineno} offloads {name} onto the DEFAULT pool")
         if not found:
             offenders.append(f"{rel}: no offload of {target} found — re-point this rule")
     assert not offenders, "\n  " + "\n  ".join(offenders)
@@ -165,3 +184,71 @@ def test_the_offload_walk_can_actually_fail():
     assert _partial_target(call) == "_consume_batch_proposal"
     assert not any(kw.arg == "limiter" for kw in call.keywords), (
         "a call with no limiter must read as having none, or the rule above passes on anything")
+
+
+def test_the_isolated_producer_forwards_its_callers_limiter():
+    """The other half of the re-pointed row: the hoist put a FUNCTION between the lane and the pool.
+
+    `_run_isolated_producer` offloads its `worker` and takes `limiter=` from the caller, so the
+    tree-wide scan above proves only that the CROSSING names a limiter — it cannot see whether the
+    callers hand it the proposal pool or let it default to None, which is anyio's shared default,
+    which is the pool the evals pin. That is exactly the silent regression this file exists to
+    refuse, one indirection further out than it could previously reach.
+
+    Driven, not pinned: the helper is run with a real limiter and asked what it handed the offload.
+    """
+    import anyio
+
+    from looplab.engine.novelty import proposal_limiter
+    from looplab.engine.speculation import SpeculationMixin
+
+    seen: dict = {}
+
+    async def _drive():
+        real = anyio.to_thread.run_sync
+
+        async def _spy(worker, **kw):
+            seen["limiter"] = kw.get("limiter")
+            return await real(worker, **kw)
+
+        anyio.to_thread.run_sync = _spy
+        try:
+            await SpeculationMixin._run_isolated_producer(
+                object(), lambda: "result", on_failure=lambda _e: "failed",
+                store=lambda _r: None, release=lambda: None, notify=None, notify_key=None,
+                limiter=proposal_limiter())
+        finally:
+            anyio.to_thread.run_sync = real
+
+    anyio.run(_drive)
+    assert seen["limiter"] is proposal_limiter(), (
+        "the isolated producer dropped its caller's limiter and offloaded onto anyio's shared "
+        f"default pool: {seen['limiter']!r}")
+
+    # …and every CALLER hands it a DEDICATED pool rather than letting it default to None, which is
+    # anyio's shared default — the pool the evals pin, which is this file's whole subject. Which
+    # dedicated pool is the lane's own business: the raw stage rides `proposal_limiter` with the two
+    # create-path lanes it is sized against, and the speculative card build has its own one-token
+    # pool because `_request_card_build` admits only the head request (see
+    # `novelty.card_build_limiter` for why a fifth consumer on the proposal pool would make that
+    # pool's own derivation false). Found by this assertion on the day it was written:
+    # `_produce_card_build` offloaded a PAID Developer session onto anyio's default.
+    tree = ast.parse((ROOT / "looplab/engine/speculation.py").read_text())
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", None) == "_run_isolated_producer"]
+    assert calls, "no `_run_isolated_producer` call found — re-point this rule"
+    for call in calls:
+        bound = [kw for kw in call.keywords if kw.arg == "limiter"]
+        assert bound, f"speculation.py:{call.lineno} runs a producer on the DEFAULT pool"
+        dumped = ast.dump(bound[0].value)
+        assert "proposal_limiter" in dumped or "card_build_limiter" in dumped, (
+            f"speculation.py:{call.lineno} binds a limiter that is neither dedicated pool")
+
+    # The two pools are DISTINCT objects, or "its own pool" is a name and not a bound.
+    from looplab.engine.novelty import card_build_limiter
+    assert card_build_limiter() is not proposal_limiter()
+    assert card_build_limiter() is card_build_limiter(), "one pool, not one per call"
+
+    async def _not_the_default():
+        assert card_build_limiter() is not anyio.to_thread.current_default_thread_limiter()
+    anyio.run(_not_the_default)
