@@ -958,10 +958,18 @@ TEST_TRAIN_BANDS = {
     "edge_expansion": (0.892, 1.033, 118),
     "discrete_log": (0.890, 1.260, 11),     # its cached times run p90/p10 = 276; the width is the tail
     "pde_heat1d": (0.991, 1.054, 10),
-    # pagerank is NOT here on purpose. Its one probe reads x0.993, and pinning that as a band
-    # flagged that very probe on the next run -- 0.99296 is outside 0.993-0.993 by rounding alone.
-    # One measurement is a point; a band needs at least two, and saying so is cheaper than
-    # inventing a tolerance nobody measured.
+    # PINNED 2026-09-09 AT TEN PROBES (§376), the bar §364 set: the thinnest band already here rests
+    # on ten. Derived the way its neighbours were -- the corpus min and max at pinning time, rounded
+    # OUTWARD to three places: 0.9586 -> 0.958, 1.0134 -> 1.014. Checked against the other three
+    # before typing it: discrete_log 0.8901-1.2600 -> (0.890, 1.260), edge_expansion
+    # 0.8922-1.0326 -> (0.892, 1.033), pde_heat1d 0.9912-1.0538 -> (0.991, 1.054). The ten it is
+    # built from cannot fail it, which is why `n` is recorded: the eleventh probe onward can, and
+    # that is the whole use of a pinned band.
+    #
+    # The old note stays, because it is the reason this took ten probes: pagerank was NOT here while
+    # it had one probe reading x0.993, and pinning that flagged that very probe on the next run --
+    # 0.99296 is outside 0.993-0.993 by rounding alone. One measurement is a point.
+    "pagerank": (0.958, 1.014, 10),
 }
 
 MIN_PROBES_FOR_A_BAND = 2
