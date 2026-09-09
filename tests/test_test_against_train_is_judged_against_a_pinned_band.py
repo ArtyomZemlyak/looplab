@@ -63,11 +63,16 @@ def test_a_task_with_no_pinned_band_is_reported_rather_than_passed(tmp_path):
 def test_one_probe_is_a_point_and_is_not_judged(tmp_path):
     """Pinning `pagerank`'s single x0.993 as a band flagged that very probe on the next run: 0.99296
     is outside 0.993-0.993 by rounding alone. A band needs two, and saying so is cheaper than
-    inventing a tolerance nobody measured."""
-    rows = [_row("pgr1", "pagerank", 100.0, 99.296)]
+    inventing a tolerance nobody measured.
+
+    §376 pinned `pagerank` at ten probes, so the fixture moved to a task the bands do NOT cover: the
+    property is "a task with one probe is not judged", and it must be exercised on a task that is
+    actually unpinned or it stops testing anything. The pagerank story stays because it is the
+    reason the property exists."""
+    rows = [_row("pgr1", "kcenters", 100.0, 99.296)]
     ok, detail = sweep_claims.check_test_tracks_train(_bench(tmp_path, rows))
     assert ok, detail
-    assert "too few probes for a band: pagerank" in detail, detail
+    assert "too few probes for a band: kcenters" in detail, detail
 
 
 def test_the_bands_are_pinned_with_the_count_they_were_measured_over():
