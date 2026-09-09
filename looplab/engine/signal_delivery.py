@@ -135,8 +135,14 @@ SIGNALS: tuple[SignalRoute, ...] = (
         channel="pull",                                # dual channel: the tool (pull) + a state-brief résumé (context)
         inject="looplab.tools.run_tools:RunTools._research_memo",
         consumer="Researcher (read_research_memo tool + _state_brief résumé)",
+        # The résumé half lived in `agents/roles.py` until doc 25 AG-02 split `_state_brief` out
+        # whole into `agents/state_brief.py` (2026-09-08). `roles.py` still re-exports the name, so
+        # every caller kept working — but the CALL SITE this registry asserts is the rendered line
+        # itself, and that moved one module over. Point at where the text is written, not at where
+        # the name can still be imported from, or the guard passes on a re-export while the line
+        # that pushes the memo is gone.
         call_sites=(("looplab/tools/run_tools.py", "read_research_memo"),
-                    ("looplab/agents/roles.py", "read_research_memo"))),
+                    ("looplab/agents/state_brief.py", "read_research_memo"))),
     SignalRoute(
         name="operator_yields",
         produced_by="search.policy.operator_yields (folded from the DAG)",

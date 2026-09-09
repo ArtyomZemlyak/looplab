@@ -208,6 +208,34 @@ def test_a_node_that_already_wrote_its_own_terminal_does_not_get_a_second(tmp_pa
     assert _state(engine).nodes[node_id].error_reason == "no_metric"
 
 
+def test_a_node_that_closed_itself_does_not_pause_the_run_on_a_teardown_fault(tmp_path):
+    """A SUCCESSFUL node whose span exporter dies on the way out must not stop the run.
+
+    The terminal guard above has always declined the second terminal for a lifecycle that wrote its
+    own; the PAUSE was a separate `if` on the run's state alone, so it fired anyway. `spans.jsonl`
+    hitting ENOSPC, a closed tracer, any exporter fault inside the enclosing
+    `with self.tracer.span("evaluate", ...)` — the node is `evaluated`, the metric is recorded, and
+    the run needed an operator resume for telemetry. The pause is for a fault this handler could not
+    otherwise contain (a repeated one at dispatch is how one fault becomes N failed nodes); a
+    lifecycle that reached a terminal of its own is not that.
+    """
+    engine = make_engine(tmp_path)
+    node_id = _node(engine)
+
+    async def _drive():
+        async with engine._write_lock:
+            engine.store.append("node_evaluated", {
+                "node_id": node_id, "generation": 0, "metric": 0.5, "eval_seconds": 1.0})
+        await engine._contain_eval_crash(node_id, 0, OSError("span exporter: no space left"))
+
+    anyio.run(_drive)
+    state = _state(engine)
+    assert state.paused is False, "a node that succeeded paused the run for a teardown fault"
+    assert not [e for e in engine.store.read_all() if e.type == "node_failed"]
+    assert state.nodes[node_id].status is NodeStatus.evaluated
+    assert state.nodes[node_id].metric == 0.5
+
+
 def test_a_terminal_for_a_SUPERSEDED_generation_is_not_written(tmp_path):
     """The containment names the generation the body BOUND, not whatever is current when it fails:
     after a concurrent reset those are different lifecycles, and a terminal on the wrong one is
@@ -222,6 +250,39 @@ def test_a_terminal_for_a_SUPERSEDED_generation_is_not_written(tmp_path):
     assert not [e for e in engine.store.read_all() if e.type == "node_failed"]
     # ...but the run still pauses: the fault is real whatever lifecycle it belonged to.
     assert _state(engine).paused is True
+
+
+def test_a_superseded_generation_whose_node_has_CLOSED_still_pauses(tmp_path):
+    """The pair the sibling above does not cover, and the one a status-only predicate swallowed.
+
+    A node is reset mid-evaluation (`node_reset` -> attempt 1, pending), the new attempt runs and
+    writes its own terminal, and only then the ABANDONED worker dies of a real box fault — ENOSPC on
+    the run directory, a read-only mount. No terminal is owed (the generation is superseded, which
+    the sibling pins) but the FAULT is real: it will hit the next dispatch and the one after, which
+    is how one disk-full becomes N failed nodes. Reading only `node.status is not pending` conflated
+    "this lifecycle closed itself" with "some later lifecycle closed", so the pause was swallowed
+    and the only account of the fault was a logger line.
+
+    MUTATION: drop `node.attempt == generation` from `_self_closed` -> this is red.
+    """
+    engine = make_engine(tmp_path)
+    node_id = _node(engine)
+
+    async def _drive():
+        async with engine._write_lock:
+            engine.store.append("node_reset", {"node_id": node_id})
+            engine.store.append("node_evaluated", {
+                "node_id": node_id, "generation": 1, "metric": 0.5, "eval_seconds": 1.0})
+        # the abandoned generation-0 worker, dying of the box rather than of its own node
+        await engine._contain_eval_crash(node_id, 0, OSError(28, "No space left on device"))
+
+    anyio.run(_drive)
+    state = _state(engine)
+    assert state.nodes[node_id].attempt == 1, "fixture: the reset must have moved the generation on"
+    assert state.nodes[node_id].status is NodeStatus.evaluated
+    assert not [e for e in engine.store.read_all() if e.type == "node_failed"], (
+        "a terminal was written for a superseded generation")
+    assert state.paused is True, "a real box fault was swallowed because a LATER attempt had closed"
 
 
 def test_a_failing_append_inside_the_handler_is_swallowed(tmp_path):

@@ -11,8 +11,8 @@ from looplab.agents.roles import (
     SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS,
     SPECULATION_CUDA_PROBE_STATIC_EXTRA_METRICS,
     SPECULATION_CUDA_PROBE_VERSION,
-    ToyObjectiveDeveloper,
 )
+from looplab.agents.toy_roles import ToyObjectiveDeveloper
 from looplab.core.models import Idea
 
 
@@ -64,7 +64,7 @@ def test_calibration_toy_artifact_has_exact_cuda_driver_proof_and_numeric_metric
 # --- AG-02: the CUDA probe lives with the calibration, not with the role backends ----------------
 
 def test_the_probe_re_exports_are_the_same_objects():
-    """`agents/roles.py` is about LLM role backends and prompt fragments; the probe measures a GPU
+    """`agents/roles.py` is about LLM role backends and the role contracts; the probe measures a GPU
     and its only consumers are `search/speculation_quality` and these tests (doc 25 AG-02). It moved
     out, and `roles` re-exports it — identity, so every existing spelling keeps naming one object."""
     from looplab.agents import calibration, roles

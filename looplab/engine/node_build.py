@@ -16,11 +16,13 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Optional
 
+from looplab.agents.role_wrappers import audit_extra_of
 from looplab.agents.roles import DeveloperResult, developer_call_lock
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (Idea, NodeStatus, RunState, normalize_researcher_footprint,
                                  is_developer_error, is_developer_stuck)
 from looplab.engine.costs import find_cost_accountants
+from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER
 from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED, EV_NODE_FAILED, EV_PAUSE
 from looplab.search.operators import merge_idea
 
@@ -277,19 +279,16 @@ class NodeBuildMixin:
         lineage is an improve with a longer rationale. A Developer without the keyword is called
         exactly as before."""
         developer = developer or self.developer
-        bind_state = getattr(developer, "bind_state", None)
-        if callable(bind_state):
-            bind_state(state)
         impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
             if co_parents and accepts_co_parents(impl_from):
                 return self._run_developer(developer, impl_from, idea, parent,
-                                           co_parents=tuple(co_parents))
-            return self._run_developer(developer, impl_from, idea, parent)
-        return self._run_developer(developer, developer.implement, idea)
+                                           bind_to=state, co_parents=tuple(co_parents))
+            return self._run_developer(developer, impl_from, idea, parent, bind_to=state)
+        return self._run_developer(developer, developer.implement, idea, bind_to=state)
 
-    def _run_developer(self, developer, fn, *args, **kwargs) -> DeveloperResult:
-        """ONE Developer call — CLEAR, call, capture — as one atomic step under the instance's lock
+    def _run_developer(self, developer, fn, *args, bind_to=_OMIT, **kwargs) -> DeveloperResult:
+        """ONE Developer call — BIND, CLEAR, call, capture — as one atomic step under the instance's lock
         (`developer_call_lock`). The lock is what makes two offloaded calls on a SHARED instance
         safe: they queue here, in a worker, instead of on the event loop.
 
@@ -312,8 +311,22 @@ class NodeBuildMixin:
         the optional output on a repair now reads as "no estimate" instead of inheriting the last
         build's. A call site may no longer clear on its own: an unlocked write is the defect, and a
         LOCKED one at the site would not fix it either, since the gap between that lock and this one
-        is all an intervening call needs (`tests/test_developer_result.py`)."""
+        is all an intervening call needs (`tests/test_developer_result.py`).
+
+        AND THE BIND IS THE FOURTH MEMBER, for the same reason and after the same miss. When the
+        clear moved in, its unlocked sibling did not: `_implement_result` and `_repair_result` each
+        called `bind_state(state)` on the shared Developer ABOVE this lock. `bind_state` is a plain
+        write (`repo_developer` stores `self._memory_state = state`), so with two offloaded calls on
+        one instance worker A could bind its fold, block here, and run its build against the fold
+        worker B bound while A was waiting — the Developer's memory and cross-run providers
+        answering about a different lifecycle than the node being built. `bind_to` defaults to
+        `_OMIT` rather than None because `_repair_result` legitimately binds None (no state given),
+        and a call that asks for no bind at all must be distinguishable from that."""
         with developer_call_lock(developer):
+            if bind_to is not _OMIT:
+                bind_state = getattr(developer, "bind_state", None)
+                if callable(bind_state):
+                    bind_state(bind_to)
             self._reset_developer_footprint(developer)
             code = fn(*args, **kwargs)
             return self._capture_developer_result(developer, code)
@@ -359,6 +372,16 @@ class NodeBuildMixin:
                                if isinstance(getattr(developer, "last_budget_facts", None), dict)
                                else None),
             last_edit_calls=edit_calls,
+            # NOT A REGISTRY MEMBER but the same call's output, so it is captured under the same
+            # lock — see `DeveloperResult.audit_extra` for the race this closes. That is also why
+            # it is not one of the literal per-member `getattr`s above: those mirror the registry,
+            # and this is a method the registry cannot hold.
+            audit_extra=audit_extra_of(developer),
+            # …and the predictive pick, for the reason `DeveloperResult.last_foresight_pick`
+            # records: a repair on the shared developer clears it between this call and the emit.
+            last_foresight_pick=(dict(getattr(developer, "last_foresight_pick", None))
+                                 if isinstance(getattr(developer, "last_foresight_pick", None),
+                                               dict) else None),
         )
 
     @staticmethod
@@ -380,12 +403,24 @@ class NodeBuildMixin:
             if current is None or id(current) in seen:
                 continue
             seen.add(id(current))
-            if hasattr(current, "last_footprint"):
+            # ONLY ON THE OBJECT THAT OWNS THE ATTRIBUTE. `search/foresight.py::
+            # ForesightPanelResearcher` is a READ-ONLY `__getattr__` proxy with no `__setattr__`,
+            # and under the shipped defaults (`unified_agent`, `foresight`, `foresight_panel=2`)
+            # it IS the engine's `developer`. `hasattr` there resolves THROUGH to the wrapped
+            # agent, so this clear used to land in the PROXY's own `__dict__` and shadow the inner
+            # agent's real value for the rest of the run: `_capture_developer_result` read None off
+            # the proxy on every build from the second one on, `_finalize_developer_footprint` fell
+            # back to the Researcher's proposal every time, and a build that RAISED its own resource
+            # estimate was scheduled at the old one — exactly what the envelope prevents. Walking to
+            # `base` (below) reaches the real slot; declining to CREATE the attribute is what stops
+            # the proxy from shadowing it. An object that has never set it is already "cleared".
+            if "last_footprint" in getattr(current, "__dict__", {}):
                 try:
                     current.last_footprint = None
                 except Exception:  # noqa: BLE001 - optional audit output must never block a build
                     pass
-            for attr in ("inner", "developer", "fallback"):
+            # `base` is the `__getattr__` proxy's delegate; the other three are the wrapper chain.
+            for attr in ("inner", "developer", "fallback", "base"):
                 try:
                     child = getattr(current, attr, None)
                 except Exception:  # noqa: BLE001 - a plugin property may be defensive/remote
@@ -438,12 +473,29 @@ class NodeBuildMixin:
         path (`_repair` routes through here), where "what fixed this crash class" is exactly relevant."""
         from looplab.agents.hints import render_hint_directives
         blocks = [b for b in (render_hint_directives(state.pending_hints),
-                              self._dev_prior_note_text.strip()) if b]
+                              self._developer_prior_text(idea).strip()) if b]
         if not blocks:
             return idea
         di = idea.model_copy(deep=True)
         di.rationale = ((di.rationale or "") + "\n" + "\n".join(blocks)).strip()
         return di
+
+    def _developer_prior_text(self, idea) -> str:
+        """The Developer's cross-run prior for THIS build — operator-scoped when the operator about
+        to fire is known and the operator scoping is on, otherwise the run-wide text verbatim.
+
+        This is the one place in the loop that holds both halves: the retrieved cross-run lessons and
+        the `Idea` whose `operator` the node will carry. Cross-run LESSONS were retrieved by task
+        fingerprint and role and by nothing about the action (doc 52 §4.3), so a merge, a repair and
+        an improve all read the same five rows.
+
+        `operator_scoped_prior` returns None with the flag off (the default), with no operator on the
+        idea, or before any prior has been loaded — and then this is the historical expression, byte
+        for byte. It never falls back to the unscoped text while claiming a scoped receipt: the
+        receipt is written by the scoped render itself or not at all."""
+        scoped = self.lessons.operator_scoped_prior(
+            LESSON_ROLE_DEVELOPER, str(getattr(idea, "operator", "") or ""), phase="build")
+        return self._dev_prior_note_text if scoped is None else scoped
 
     @in_llm_lane("build")
     def _repair(self, node, err: str, state: Optional[RunState] = None, *, developer=None) -> str:
@@ -461,13 +513,10 @@ class NodeBuildMixin:
         """`_repair`, returning the whole `DeveloperResult` envelope — see `_implement_result`."""
         idea = self._directed_idea(node.idea, state) if state is not None else node.idea
         developer = developer or self.developer
-        bind_state = getattr(developer, "bind_state", None)
-        if callable(bind_state):
-            bind_state(state)
         rf = getattr(developer, "repair_from", None)
         if callable(rf):
-            return self._run_developer(developer, rf, idea, node, err)
-        return self._run_developer(developer, developer.repair, idea, node.code, err)
+            return self._run_developer(developer, rf, idea, node, err, bind_to=state)
+        return self._run_developer(developer, developer.repair, idea, node.code, err, bind_to=state)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
