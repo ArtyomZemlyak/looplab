@@ -163,7 +163,8 @@ def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_cal
 def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "steward", at: str = "") -> dict:
     """Persist a task's facets (append-only, last-write-wins per task_id) to `task_facets.jsonl`. Only
     known FACET_AXES with a non-empty value are kept. Returns the stored record. Raises on no task_id/dir."""
-    from looplab.engine.concept_registry import _append_governance, normalize_key
+    from looplab.engine.concept_registry import normalize_key
+    from looplab.engine.governance_protocol import append_governance
     tid = str(task_id or "").strip()
     actor, recorded_at = str(by or "steward"), str(at or "")
     if not tid or len(tid) > _MAX_TASK_ID or _contains_control(tid):
@@ -195,7 +196,7 @@ def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "ste
         raise_governance_storage_unavailable(path, exc)
     # facets are operator meaning too. Refuse an append when any historical row is unknown;
     # a fresh last-write-wins record must never make a torn/corrupt decision appear repaired.
-    return _append_governance(
+    return append_governance(
         path, rec, read_rows=_read_task_facet_rows, require_durable=True)
 
 

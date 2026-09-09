@@ -211,3 +211,157 @@ def test_the_claim_uid_still_keys_the_same_statements_together():
 
 def test_the_word_pattern_itself_did_not_change():
     assert WORD_RE.pattern == r"[^\W_]+" and bool(WORD_RE.flags & re.UNICODE)
+
+
+# ------------------------------------------------------------------ SC-03: one run-child rule
+#
+# Canonical run-path validation was implemented at least six ways. The first pass shared the LEAVES
+# (`is_reparse`, `WINDOWS_RESERVED`, `filesystem_identity`); the six full validators kept their own
+# copy of the COMPOSITION and had already drifted — two re-spelled `is_reparse` inline out of the
+# mode bit and the Windows attribute, one omitted the junction probe its siblings make, one compared
+# `normcase(abspath(...))` where `filesystem_identity` also folds macOS normalization.
+#
+# `pathsafe.validate_run_child` is that composition; what stays per-caller is the VOCABULARY, which
+# is why the copies survived. Both halves are driven below: one physical defect, five callers, five
+# different refusals.
+
+@pytest.mark.parametrize("name,default,strict", [
+    ("run1", None, None),
+    ("run.2026-08-01", None, None),
+    ("", "absent", "absent"),
+    (None, "absent", "absent"),
+    (7, "absent", "absent"),
+    (".", "not_a_plain_name", "not_a_plain_name"),
+    ("..", "not_a_plain_name", "not_a_plain_name"),
+    ("a/b", "not_a_plain_name", "not_a_plain_name"),
+    ("a\\b", "not_a_plain_name", "not_a_plain_name"),
+    ("a\x00b", "not_a_plain_name", "not_a_plain_name"),
+    # Everything below is admitted at READ time and refused where a run is CREATED or DESTROYED.
+    ("x" * 256, None, "filesystem_ambiguous"),
+    (" run", None, "filesystem_ambiguous"),
+    ("run ", None, "filesystem_ambiguous"),
+    ("run.", None, "filesystem_ambiguous"),
+    ("run:1", None, "filesystem_ambiguous"),
+    ("run\x01", None, "filesystem_ambiguous"),
+    ("run\x7f", None, "filesystem_ambiguous"),
+    ("CON", None, "filesystem_ambiguous"),
+    ("com1.log", None, "filesystem_ambiguous"),
+])
+def test_the_two_name_tiers_admit_exactly_what_their_callers_admitted(name, default, strict):
+    """The tiers are a DECISION, not an accident: the read paths must keep opening a directory the
+    CLI created out of band, while the paths that create or destroy one refuse every
+    filesystem-ambiguous spelling. Strict is a superset — a name the read tier refuses can never be
+    accepted by the writer."""
+    from looplab.core.pathsafe import run_child_name_defect
+
+    assert run_child_name_defect(name) == default
+    assert run_child_name_defect(name, strict=True) == strict
+    if default is not None:
+        assert strict is not None, "the strict tier must refuse everything the default tier does"
+
+
+def test_the_containment_half_inspects_no_entry_and_the_full_half_does(tmp_path):
+    """`must_exist=False` is a DIFFERENT question, not a weaker one: `launch` is about a run that
+    does not exist yet, and what an existing entry there means is its own conflict policy. Proven by
+    the case that separates them — a symlink is accepted by one and refused by the other."""
+    from looplab.core.pathsafe import validate_run_child
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    assert validate_run_child(tmp_path, "never-created", must_exist=False).defect is None
+    assert validate_run_child(tmp_path, "link", must_exist=False).defect is None
+    assert validate_run_child(tmp_path, "never-created").defect == "missing"
+    assert validate_run_child(tmp_path, "link").defect == "indirect"
+    assert validate_run_child(tmp_path, "real").path == (tmp_path / "real").resolve()
+
+
+def test_the_full_rule_refuses_every_shape_that_is_not_a_direct_child_directory(tmp_path):
+    from looplab.core.pathsafe import validate_run_child
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "nodes").mkdir()
+    (tmp_path / "afile").write_text("x", encoding="utf-8")
+
+    assert validate_run_child(tmp_path, "afile").defect == "not_a_directory"
+    # The descendant case this rule exists for: `real/nodes` is sandbox-WRITABLE, so an events.jsonl
+    # a candidate wrote there must never be addressable as a run.
+    assert validate_run_child(tmp_path, "real/nodes").defect == "not_a_plain_name"
+    assert validate_run_child(tmp_path, tmp_path / "real" / "nodes").defect == "outside_root"
+    assert validate_run_child(tmp_path, tmp_path).defect == "outside_root"
+
+
+def _serve_root(tmp_path):
+    """A real app over a run root holding one good run, one symlink to it, and one plain file."""
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    (tmp_path / "good").mkdir()
+    EventStore(tmp_path / "good" / "events.jsonl").append(
+        "run_started", {"run_id": "good", "task_id": "t", "goal": "g", "direction": "min"})
+    (tmp_path / "link").symlink_to(tmp_path / "good", target_is_directory=True)
+    (tmp_path / "afile").write_text("x", encoding="utf-8")
+    return make_app(tmp_path).state.looplab
+
+
+def test_one_defect_five_callers_five_preserved_vocabularies(tmp_path):
+    """The whole point of SC-03's second half. A run id that resolves through a SYMLINK is one
+    physical defect, and every validator that judges the entry must now agree it is a defect — while
+    each keeps answering in its own protocol, which is exactly why the six copies survived the first
+    pass. Driven through the real callers, not asserted about their source."""
+    from fastapi import HTTPException
+
+    from looplab.serve import deletion_service, launch
+
+    srv = _serve_root(tmp_path)
+    root = srv.root.resolve()
+
+    assert srv.run_dir("good") == root / "good"                       # precondition: the run opens
+
+    with pytest.raises(HTTPException) as read:                        # AppState.run_dir
+        srv.run_dir("link")
+    assert read.value.status_code == 404
+
+    with pytest.raises(HTTPException) as generation:                  # run_generation_if_present
+        srv.commands.run_generation_if_present(root / "link")
+    assert generation.value.status_code == 404
+
+    with pytest.raises(HTTPException) as delete:                      # _strict_existing_run
+        deletion_service._strict_existing_run(srv, "link")
+    assert delete.value.status_code == 404
+    assert delete.value.detail["code"] == "run_not_found"
+
+    with pytest.raises(HTTPException) as start:                       # safe_run_dir
+        launch.safe_run_dir(root, "link")
+    assert start.value.status_code == 409, "launch answers the SAME defect as a name conflict"
+    assert start.value.detail["code"] == "run_path_conflict"
+
+
+def test_the_command_service_still_owns_the_containment_half(tmp_path):
+    """`validate_paths` deliberately takes the containment half only — it runs on a path
+    `AppState.run_dir` already judged, and a run may legitimately be mid-creation. What it DOES own
+    is the direct-child rule, and a node workspace is the descendant it must refuse."""
+    from fastapi import HTTPException
+
+    srv = _serve_root(tmp_path)
+    root = srv.root.resolve()
+    (root / "good" / "nodes").mkdir()
+
+    assert srv.commands.validate_paths(root / "good") == root / "good"
+    with pytest.raises(HTTPException) as exc:
+        srv.commands.validate_paths(root / "good" / "nodes")
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.parametrize("rel", ["serve/appstate.py", "serve/reset_route.py",
+                                 "serve/run_commands.py", "serve/deletion_service.py",
+                                 "serve/launch.py"])
+def test_no_run_validator_re_derives_the_composition(rel):
+    """A NEGATIVE pin, which stays a substring on purpose: what must not come back is the TEXT of
+    the copies — the inline reparse flag and the hand-rolled junction probe that `validate_run_child`
+    now owns. `core/pathsafe.py` is the one place either may appear."""
+    from _source_scan import PKG
+
+    source = (PKG / rel).read_text(encoding="utf-8-sig")
+    assert "FILE_ATTRIBUTE_REPARSE_POINT" not in source, f"{rel} re-spells the reparse flag"
+    assert 'getattr(requested, "is_junction"' not in source, f"{rel} re-spells the junction probe"

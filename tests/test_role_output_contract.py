@@ -15,8 +15,21 @@ from looplab.agents.roles import (DEVELOPER_OUTPUT_ATTRS, RESEARCHER_ACTION_ATTR
 
 _ALL = set(DEVELOPER_OUTPUT_ATTRS) | set(RESEARCHER_ACTION_ATTRS) | set(RESEARCHER_OUTPUT_ATTRS)
 
-# Consumer probes: getattr(<expr>, "<attr>") over developer/researcher/wrapper handles.
-_CONSUMER = re.compile(r'getattr\([A-Za-z_][\w.]*,\s*"((?:last_|choose_)[a-z_]+)"')
+# Consumer probes: getattr(<expr>, "<attr>") over developer/researcher/wrapper handles, AND the
+# name-as-argument form. The second alternative is why the three foresight/ranking attrs were
+# carved out of this contract for years: `engine/audit.py::_emit_role_telemetry` and
+# `engine/novelty.py::_snapshot_role_telemetry` take the attribute NAME as a string and do the
+# `getattr` inside, so a literal-`getattr` scan finds no consumer for them and "registry rot" fires
+# on a registry that is perfectly alive. Reading the name out of the helper CALL is the same
+# guarantee by the same means — the string is still in the caller's source, where a one-sided
+# rename leaves it behind.
+# ONE capturing group across both alternatives on purpose: `_source_scan.scan` uses `findall`,
+# which returns TUPLES the moment a pattern has two groups, and every captured name would then be
+# an unusable key. Driven — the two-group first cut did exactly that.
+_CONSUMER = re.compile(
+    r'(?:getattr\([A-Za-z_][\w.]*,\s*'
+    r'|_(?:emit|snapshot)_role_telemetry\([^)]*?)'
+    r'"((?:last_|choose_)[a-z_]+)"')
 # Producer writes: `self.last_files = …` / `obj.last_files = …` (also catches `last_filez =`
 # style renames as long as the prefix survives — the near-miss check below covers the rest).
 #
@@ -49,9 +62,11 @@ _PRODUCER = _producer_pattern(_ALL)
 
 
 def test_every_consumer_probe_is_registered():
-    # Telemetry attrs (last_hyp_priority/last_foresight*) have their own explicit-property
-    # discipline in surrogate.py — they are read via _emit_role_telemetry's registry, not here.
-    telemetry = {"last_hyp_priority", "last_foresight", "last_foresight_pick"}
+    # The telemetry carve-out that used to sit here named a registry that does not exist
+    # (`_emit_role_telemetry` is a method taking the attr name as a string), so it excluded three
+    # live role outputs from the only contract that would have caught a one-sided rename. They are
+    # registered in `RESEARCHER_OUTPUT_ATTRS` now and go through this scan like every other.
+    telemetry: set[str] = set()
     # RunState domain fields probed defensively with getattr(final, …, default) (e.g. `last_finish_seq`,
     # read at finalize for old/partial states) — NOT the duck-typed role-output seam. The `last_` prefix
     # heuristic over-matches them; they carry the RunState model contract, not the roles.py registry.
@@ -64,7 +79,7 @@ def test_every_consumer_probe_is_registered():
 
 def test_every_producer_write_is_registered():
     unknown = {n: fs for n, fs in scan(_PRODUCER).items()
-               if n not in _ALL and not n.startswith(("last_foresight", "last_hyp"))}
+               if n not in _ALL}          # …and the producer half no longer needs its twin
     assert not unknown, (
         f"assignment(s) to near-registry role output attr(s): {unknown} — a producer-side "
         "rename the engine's getattr default would silently swallow.")

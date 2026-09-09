@@ -89,7 +89,19 @@ def test_runtime_holds_only_process_execution_modules():
                      # above `core`. It records what the configuration that ran said and
                      # decides nothing — the POLICY that reads it (`engine/champion_caveats.py`
                      # `params_overridden`) lives above, exactly as the subject side's does.
-                     "applied_params"}, (
+                     "applied_params",
+                     # `effective_batch` (2026-09-08) is the FOURTH face of that same record and
+                     # sits here on the identical clause: at the metric read it walks the eval's own
+                     # workdir for the trainer's `trainer_state.json` and binds each one through the
+                     # SAME `metric_subject.bind_one` — identity, containment, digest and the
+                     # freshness floor are one rule — so it imports nothing above `core`, and in
+                     # fact nothing above `runtime`. It reports what the launched training PROCESS
+                     # recorded about the batch it ran at, which is a property of the execution and
+                     # of nothing else, and it DECIDES nothing: no scalar when two readings
+                     # disagree, silence when there is no trainer artifact. Every POLICY that could
+                     # read the record lives above this boundary, exactly as the three clauses here
+                     # describe for the subject, input and coordinate sides.
+                     "effective_batch"}, (
         "a module that is not process execution landed in runtime again")
 
 

@@ -407,7 +407,7 @@ def test_the_authorship_assertion_reads_the_engines_own_wiring_and_never_the_art
     profile, whose Developer is the engine's probe splicer and whose `calibration_gpu_probe` flag is
     deliberately not a Settings/env/UI knob (`cli/__init__.py::_make_calibration_roles` is its only
     writer). Every other run, including one whose artifact carries the prefix, answers False."""
-    from looplab.agents.roles import ToyObjectiveDeveloper
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper
     from looplab.engine.speculation_gate import engine_authored_artifacts
 
     splicer = ToyObjectiveDeveloper(calibration_gpu_probe=True)
@@ -431,8 +431,8 @@ def test_the_real_calibration_artifact_still_tags_its_four_keys_engine_and_nothi
     """The other direction: the artifact the calibration DEVELOPER really builds keeps its channel,
     with a genuine measurement printed beside the probe's keys because the whole claim is that the
     two populations separate."""
-    from looplab.agents.roles import (SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS,
-                                      ToyObjectiveDeveloper)
+    from looplab.agents.roles import SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper
     from looplab.core.models import apply_engine_extra_metric_channels
     from looplab.core.models import Idea
     from looplab.runtime.sandbox import stdout_extra_metric_channels
@@ -462,7 +462,7 @@ def test_a_solution_tier_run_records_engine_only_when_the_engine_authored_the_ar
     by two engines that differ only in their Developer, record two different channel maps — which is
     the property, because the artifact cannot be what decides."""
     import looplab.agents.calibration as calibration_mod
-    from looplab.agents.roles import ToyObjectiveDeveloper
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper
 
     probe = "# engine-owned probe source\n"
     # The grant resolves the classifier through the calibration MODULE on every call, so the probe

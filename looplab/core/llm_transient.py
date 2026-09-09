@@ -5,13 +5,20 @@ Free functions only, no client state: exponential backoff (`_backoff`), Retry-Af
 is worth retrying (`_sdk_transient`), is a rate-limit throttle dressed as a 403
 (`_is_throttle_403`), is an endpoint rejecting our reasoning toggle (`_is_reasoning_reject`), or —
 once every retry is spent — WHAT KIND of failure the operator is actually looking at
-(`classify_llm_failure`). `core.llm` re-imports every name under its original name, so
-`looplab.core.llm._backoff` (and the flat `looplab.llm._backoff`) keep resolving to the SAME
-objects — tests and callers import and monkeypatch through those paths.
+(`classify_llm_failure`) — plus the CANCEL token every request site reads (`cancel_check_scope` /
+`request_cancelled` / `sleep_or_cancel`), which lives here because the retry ladder's sleeps are
+where a cancelled call spends its wall clock. `core.llm` re-imports every name under its original
+name, so `looplab.core.llm._backoff` (and the flat `looplab.llm._backoff`) keep resolving to the
+SAME objects — tests and callers import and monkeypatch through those paths.
 """
 from __future__ import annotations
 
-from typing import Optional
+import contextvars
+import time
+from contextlib import contextmanager
+from typing import Callable, Iterator, Optional
+
+from looplab.core.errors import LLMCancelled
 
 # `ssl` is used by the SDK-path error classifier.
 import ssl
@@ -236,3 +243,83 @@ def _retry_after_seconds(ra) -> Optional[float]:
         return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+# --- cancellation: the token an in-flight provider request reads -------------------------------
+# WHY IT LIVES BESIDE THE BACKOFF and not in `core.llm`: the retry ladder is where a cancelled call
+# spends its wall clock (a single `_backoff(3)` is already 16 s, a `Retry-After` up to 120 s), so
+# the sleep and the token have to be the same module's concern. `core.llm` re-exports every name
+# here under its own path, exactly as it does for `_backoff`.
+#
+# THE DEFECT THIS CLOSES (doc 27, `cancel-not-propagated-into-provider-request`): a cancel token
+# reached the tool loop's TURN BOUNDARY and the MCP transport, and stopped there. Nothing reached
+# the request itself, so pressing Stop during a long generation still waited out the whole answer,
+# every remaining retry and every backoff between them before anyone looked at the token again.
+#
+# A ContextVar, like `model_override`, for the same reason: every request site already reads its
+# ambient state from the context, a producer scopes it once around the work it owns, and a worker
+# thread the producer hands work to (`anyio.to_thread.run_sync` copies the context) inherits it.
+_CANCEL_CHECK: contextvars.ContextVar[Optional[Callable[[], bool]]] = contextvars.ContextVar(
+    "looplab_llm_cancel_check", default=None)
+
+
+@contextmanager
+def cancel_check_scope(cancel_check: Optional[Callable[[], bool]]) -> Iterator[None]:
+    """Publish a cancel PREDICATE for every provider request made in this context.
+
+    `None` clears it for the block, which is how a nested producer that must not be cancellable by
+    its parent's token says so explicitly.
+    """
+    token = _CANCEL_CHECK.set(cancel_check if callable(cancel_check) else None)
+    try:
+        yield
+    finally:
+        _CANCEL_CHECK.reset(token)
+
+
+def request_cancelled() -> bool:
+    """Has the caller cancelled? A GUARDED probe: a predicate that raises answers False.
+
+    Same rule as `agents/tool_loop.py::_cancelled`, and for the same reason — a broken observer must
+    never be able to wedge or kill a paid call. Absent predicate = never cancelled, so every caller
+    that installs nothing is byte-identical to before this existed.
+    """
+    predicate = _CANCEL_CHECK.get()
+    if predicate is None:
+        return False
+    try:
+        return bool(predicate())
+    except Exception:  # noqa: BLE001 — a broken cancel probe must not fail the request it observes
+        return False
+
+
+def raise_if_cancelled(where: str = "") -> None:
+    """Refuse to start (or continue) a provider request the caller has already cancelled."""
+    if request_cancelled():
+        raise LLMCancelled(f"LLM request{' to ' + where if where else ''} was cancelled by the "
+                           "caller before it was sent; nothing was spent on it")
+
+
+def sleep_or_cancel(seconds: float, where: str = "", *, poll: float = 0.25) -> None:
+    """Wait out a retry backoff, but WAKE ON CANCEL — `time.sleep` with a cancellation point.
+
+    The whole point of propagating the token into the client: the sleeps between attempts are the
+    longest thing a cancelled call does. Polls rather than waits on an Event because the predicate
+    is the caller's (an `Event.is_set`, a flag, a closure over a request-scoped box) and the client
+    may not assume any of those shapes. `poll` is small enough that a Stop feels immediate and large
+    enough that a 120 s `Retry-After` costs 480 cheap boolean calls.
+    """
+    if _CANCEL_CHECK.get() is None:
+        # NOTHING TO WAKE FOR: the plain sleep this replaced, byte for byte, including the seam every
+        # backoff test patches (`looplab.core.llm.time.sleep`). A caller that installs no predicate
+        # must not pay a polling loop — nor change what a test observes — for a feature it declined.
+        time.sleep(max(0.0, float(seconds)))
+        return
+    raise_if_cancelled(where)
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(poll, remaining))
+        raise_if_cancelled(where)

@@ -110,10 +110,15 @@ def test_the_ordinary_check_failed_directive_is_unchanged():
     """`off == today` for the 17 of 22 rows this does not concern: a `check_failed` that really was
     a failure asks exactly the question it always did."""
     eng = _Eng()
-    assert eng.context("check_failed", "boom") == eng.context("check_failed", "boom")
-    assert "[failure kind:" not in eng.context("check_failed", "boom") or True
-    # the fallback contains the raw error and no check-was-wrong framing
-    assert "boom" in eng.context("check_failed", "boom")
+    # A BYTE PIN, because the three assertions here used to assert nothing: comparing the call to
+    # ITSELF, an `or True` that cannot fail, and a substring that survives any added prefix. Driven
+    # 2026-09-08: prefixing the ordinary directive with "[failure kind: check_failed]" left all
+    # seven files that touch `_repair_error_context` green — 160 passed — while the thing this test
+    # is named for was demonstrably changed. `or True` is the shape that hid it; the predicate it
+    # was hiding holds today, so it becomes a real assertion rather than a deleted one.
+    assert eng.context("check_failed", "boom") == "boom", (
+        "the ordinary `check_failed` directive is no longer the raw error alone")
+    assert "[failure kind:" not in eng.context("check_failed", "boom")
 
 
 # ------------------------------------------------------------------ what the model is told

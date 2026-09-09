@@ -38,6 +38,22 @@ def _body(root: Path, **kw) -> str:
     return dev._system_body(lambda _store, _key, default: default)
 
 
+def _developer_from_settings(**fields) -> LLMRepoDeveloper:
+    """The in-house repo Developer as `make_roles` builds it, from real `Settings`.
+
+    `in_house_repo_developer` is the ONE gate that turns a setting into this role's behaviour
+    (`agents/developer_backends.py`), and it is what `agents/factory.py::make_roles` calls, so
+    driving it covers the whole path from the operator's field to the constructor keyword.
+    """
+    from looplab.adapters.tasks import load_task
+    from looplab.agents.developer_backends import in_house_repo_developer
+    from looplab.core.config import Settings
+
+    task = load_task(Path(__file__).resolve().parents[1] / "examples" / "repo_task.json")
+    settings = Settings(backend="llm", unified_agent=False, **fields)
+    return in_house_repo_developer(task, settings, client=None, param_search=False, established=None)
+
+
 def test_the_block_is_present_by_default(tmp_path):
     body = _body(tmp_path / "a")
     assert "TRAIN-THEN-SCORE PIPELINE" in body
@@ -70,7 +86,15 @@ def test_a_missing_sentinel_returns_the_body_untouched(tmp_path):
 
 
 def test_the_setting_reaches_the_developer_through_the_factory():
-    factory = Path(__file__).resolve().parents[1] / "looplab" / "agents" / "factory.py"
-    body = factory.read_text(encoding="utf-8")
-    assert 'stage_guidance=bool(getattr(settings, "developer_stage_guidance", True))' in body, \
-        "the operator's setting must actually reach the constructor"
+    """The operator's setting must actually reach the constructor.
+
+    This was a source pin on `agents/factory.py` until 2026-09-08, when doc 25 RA-01's second half
+    moved the in-house repo Developer's wiring into `agents/developer_backends.py` and the pin went
+    looking for a line that had legitimately moved one module over. A pin that follows a rename is
+    a pin that can be satisfied by a comment, so drive the property instead (CLAUDE.md's tier 1):
+    call the real gate `make_roles` calls, with real `Settings`, and read the setting back off the
+    role it built. Delete the keyword at ANY of those hops and this goes red.
+    """
+    off = _developer_from_settings(developer_stage_guidance=False)
+    assert off._stage_guidance is False, "the operator's setting must actually reach the constructor"
+    assert _developer_from_settings()._stage_guidance is True, "and the default must stay ON"
