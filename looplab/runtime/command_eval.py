@@ -2114,6 +2114,17 @@ class _EvalRun:
     # on this object rather than returned separately for the reason every other field here is: the
     # tail must never read a name the branch that ran happened not to bind.
     metric_subject: Optional[dict] = None
+    # WHOSE STDOUT `out` CURRENTLY IS — this stage's, or the previous one's. `out` is overwritten
+    # only when a stage's command actually RUNS, and three of the early returns fire BEFORE that
+    # (the host-scorer subject expansion, the `needs` input contract, the declared-environment
+    # refusal), so at those the field still holds the stdout of the stage that PASSED. Anything that
+    # reads a stage's own words off `out` has to be able to tell the two apart:
+    # `declared_failure_reason` could not, and stamped a reason a PASSING stage declared onto a
+    # later stage's unrelated failure — which `triage._failure_reason` ranks above the exit code, so
+    # an engine-measured, REPAIRABLE `needs_failed` was reclassified as a non-repairable
+    # `rules_violation` and the node was abandoned instead of repaired. Cleared at the top of every
+    # stage iteration and set beside `out`, so it is a fact about THIS stage and not a convention.
+    out_is_this_stage: bool = False
 
 
 # --- The inter-stage checker's VERDICT vocabulary ----------------------------------------------
@@ -2690,6 +2701,8 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
     run = _EvalRun(stage_results=[])
     stage_results = run.stage_results
     for _i, _stg in enumerate(stages):
+        # `run.out` still holds the PREVIOUS stage's stdout until this stage's command runs.
+        run.out_is_this_stage = False
         _sname = str(_stg.get("name") or f"stage{_i}")
         _scmd = list(_stg.get("command") or [])
         if _i < _run_from:
@@ -2879,6 +2892,7 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 signals=run.signals, on_deadline=ex.on_deadline,
                 deadline_grace_max_s=ex.deadline_grace_max_s)
             run.timed_out = _timed_out(run.timed_out, run.rc, ex.is_docker)
+            run.out_is_this_stage = True
             if _sh is not None:
                 _sh.set_many(exit_code=run.rc, timed_out=run.timed_out, stage=_sname)
         _status = "timeout" if run.timed_out else ("ok" if run.rc == 0 else "fail")
@@ -3244,6 +3258,29 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                         subject_glob=subject_glob)
             if stages else _run_single(command, _ex, timeout=timeout))
     if _run.early is not None:
+        # THE DECLARED REASON TRAVELS ON EVERY EXIT, not only the all-stages-passed tail below.
+        # `declared_failure_reason` was read once, there, so the STAGED path never carried it — and
+        # the staged path is what `_resolve_stages` builds for every repo task and what
+        # `benchmarks/algotune/make_task.py` emits. The AlgoTune bridge prints
+        # `{"looplab_failure_reason": "rules_violation"}` and exits 2; `_run_stages` returned at the
+        # failed stage with the field unset, `engine/triage.py::_failure_reason` fell through to
+        # `exit_code != 0` and answered `crash`, which is in `REPAIRABLE_REASONS` — so the engine
+        # paid a triage judge plus `inline_repair_attempts` Developer repairs, on every node, trying
+        # to fix a candidate the arena had refused before it was imported, and told the next
+        # proposer a lie about why. Driven: the same bridge through the single-command path answered
+        # `rules_violation`; through a one-stage manifest it answered `crash`.
+        #
+        # Set here rather than at the seven `run.early = RunResult(` sites: one funnel every exit
+        # passes through cannot be the one an eighth site forgets. Never OVERWRITTEN — a producer
+        # that already stated a reason keeps it.
+        # …AND ONLY FROM A STAGE THAT RAN. `_EvalRun.out_is_this_stage` says whether `stdout` is the
+        # FAILING stage's own words or the last passing stage's; three early returns fire before the
+        # command does. Deriving from the wrong one is not a missing reason but a WRONG one, and a
+        # wrong one is worse: `triage._failure_reason` reads `declared_reason` above the exit code
+        # and above the stage row, so a `rules_violation` declared by a stage that PASSED turned a
+        # repairable `needs_failed` into a non-repairable terminal (driven).
+        if _run.out_is_this_stage:
+            _run.early.declared_reason = declared_failure_reason(_run.early.stdout)
         return _run.early
     # THE SUBJECT BINDING for the single-command path, and the backstop for a staged one that never
     # reached its final stage. The staged path binds at the SCORE stage's start (see `_run_stages`),
@@ -3346,7 +3383,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     #
     # ONLY TWO CHANNELS HERE, and that is a fact about this tier rather than an omission. The third,
     # `EXTRA_METRIC_ENGINE`, names keys printed by source the ENGINE spliced into the artifact — and
-    # the one splicer that exists, `agents/roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
+    # the one splicer that exists, `agents/toy_roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
     # `solution.py` artifact and never a repo eval COMMAND. A repo task's argv runs the operator's
     # own program over the agent's working set; nothing the engine authored is inside it, so every
     # undeclared number on its stdout really is the candidate's. If that ever stops being true, the

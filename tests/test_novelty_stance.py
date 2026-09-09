@@ -8,7 +8,8 @@ from pathlib import Path
 import anyio
 
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import RESEARCHER_HINT_ATTRS, ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.roles import RESEARCHER_HINT_ATTRS
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.agents.strategist import (
     StrategyContext, _rule_novelty_stance, _assemble_strategy, _StrategyOut, validate_strategy,
     RuleStrategist,

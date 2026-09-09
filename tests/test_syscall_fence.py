@@ -131,6 +131,28 @@ def test_the_engine_stamps_the_policy_only_when_it_is_on(tmp_path):
 def test_the_probe_launcher_carries_the_mknod_rung_and_it_holds_against_a_native_caller(tmp_path):
     from looplab.tools.dev_probe import render_launcher
     source = render_launcher(str(tmp_path / "program.py"))
+    # THE LAUNCHER ITSELF, over a native caller, because the pin below is comment-satisfiable:
+    # `NO_MUTATION_FUNCTION` is the name of the function `no_mutation_source()` DEFINES, so its own
+    # `def` line satisfies `in source` whether or not the launcher ever CALLS it. Driven against
+    # the shipped code: replacing the launcher's `_SC_REASON = <fn>()` with `_SC_REASON = None` and
+    # leaving the call in a comment kept this file and `test_dev_probe.py` fully green while a
+    # ctypes `mkfifo` from inside the probe created the FIFO. Worse here than elsewhere, because
+    # `test_dev_probe.py` skips every probe-EXECUTING test on a kernel without Landlock (this box),
+    # so on such a box that pin was the only guard on this rung at all.
+    program = tmp_path / "program.py"
+    program.write_text(
+        "import ctypes, os\n"
+        f"libc = ctypes.CDLL(None, use_errno=True)\n"
+        f"rc = libc.mkfifo({str(tmp_path / 'via_launcher').encode()!r}, 0o600)\n"
+        "print('LAUNCHED mkfifo', rc)\n",
+        encoding="utf-8")
+    launched = subprocess.run([sys.executable, "-c", render_launcher(str(program))],
+                              capture_output=True, text=True)
+    assert "LAUNCHED mkfifo" in launched.stdout, (launched.stdout, launched.stderr)
+    assert not (tmp_path / "via_launcher").exists(), (
+        "the launcher ran the program without arming the mknod rung — a native caller made a "
+        "device node inside the probe")
+
     assert seccomp.NO_MUTATION_FUNCTION in source
     # The rung alone, in a fresh interpreter: a ctypes call into libc — no audit event, no Python
     # `os.mkfifo` for the hook to wrap — is refused by the KERNEL.

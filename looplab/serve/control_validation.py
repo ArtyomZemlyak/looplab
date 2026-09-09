@@ -48,7 +48,6 @@ from looplab.core.concepts import (
 )
 from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
-    is_error_stop,
     CARD_STATEMENT_MAX_CHARS,
     Idea, IdeaEmission, durable_idea_payload, effective_card_footprint, idea_field_carried,
     idea_proposal_digest,

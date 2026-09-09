@@ -46,7 +46,7 @@ whose failure it can live with, and grouping must never quietly attribute.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 __all__ = ["LEGACY_REF_PREFIX", "run_ref", "row_belongs_to_run", "run_ref_is_legacy"]
 

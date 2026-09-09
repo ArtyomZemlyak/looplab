@@ -24,10 +24,11 @@ import types
 import anyio
 
 from factories import make_engine
+from looplab.cli.run_report import run_opening_split
 from looplab.core.models import ResearchMemo
 from looplab.engine.cadence import DEEP_RESEARCH_OFF
 from looplab.engine.orchestrator import Engine
-from looplab.engine.research_cadence import ResearchCadenceMixin
+from looplab.engine.research_cadence import RUN_START_TRIGGER, ResearchCadenceMixin
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 
@@ -84,6 +85,32 @@ def test_the_first_memo_lands_before_the_first_node_of_a_real_run(tmp_path):
     grounded = fold(prefix)
     assert grounded.nodes == {}
     assert [m["at_node"] for m in grounded.research] == [0]
+
+
+def test_a_real_runs_own_log_prices_the_opening_think_it_bought(tmp_path):
+    """The instrument that measures this phase must find it in the log the ENGINE actually writes.
+
+    `first-propose-runs-with-every-gpu-idle` asks for the split between this think and the first
+    propose, and the reader (`cli/run_report.py::run_opening_split`) locates the think by the exact
+    trigger `_ground_run_start` records. That is one fact in two files, so it is one CONSTANT
+    (`RUN_START_TRIGGER`) and this drives the coupling over a real run rather than pinning the
+    literal: rename the trigger without the reader and the instrument reports "this run never
+    thought" about a run that thought for two hours.
+    """
+    eng = make_engine(tmp_path / "run", n_seeds=1, max_nodes=2,
+                      deep_researcher=_CountingResearcher(), deep_research_every=0)
+    anyio.run(eng.run)
+
+    split = run_opening_split(eng.store.read_all(), [])
+    assert split["available"] is True
+    assert split["notes"] == [] or "run-opening think" not in " ".join(split["notes"]), (
+        "the reader could not find the run-opening think in a log that contains one")
+    assert split["to_think_seconds"] is not None and split["to_think_seconds"] >= 0.0
+    think = next(p for p in split["phases"] if p["name"] == "run-start think")
+    assert RUN_START_TRIGGER in think["boundary"]
+    # …and it is INSIDE the opening window, which is the property that makes the number an answer to
+    # "how much of the GPU-idle head of the run was the think" rather than a bare duration.
+    assert split["to_think_seconds"] <= split["opening_seconds"]
 
 
 # ------------------------------------------------------------------ replay safety (invariant 3)
@@ -202,6 +229,12 @@ def test_the_opening_think_does_not_move_the_ordinary_window():
             _outstanding_manual_research=lambda _s: 0,
             _already_researched_at=lambda _s, n: n in marks,
             _cadence_research_marks=lambda _s: marks,
+            # The Researcher's own question sweep runs at this entry point ahead of every trigger
+            # (`_register_idea_questions`); it reads a carrier this stub's state does not model and
+            # is unrelated to WHICH trigger fires, which is all these tests are about. A passthrough
+            # keeps the stub a stub — the sweep has its own coverage in
+            # `tests/test_open_questions_ask.py`.
+            _register_idea_questions=lambda state: state,
             _cadence_due=Engine._cadence_due,
             _ground_run_start=ResearchCadenceMixin._ground_run_start,
             _run_deep_research=lambda state, *, trigger, manual: (

@@ -28,7 +28,11 @@ const TEST = new URL('./', import.meta.url)
 
 // The modules api.js re-exports. Adding another split module means adding it here.
 const EXTRACTED = ['apiClient.js', 'commandModel.js', 'commandStorage.js', 'commandProtocol.js',
-                   'eventStream.js', 'scopeReportActions.js']
+                   'eventStream.js', 'scopeReportActions.js',
+                   // The three UI-02's resolution declined, extracted 2026-09-08: the CONTROL action
+                   // vocabulary, the paid concept-lens family (the ninth concern the finding never
+                   // named) and the cross-run ledger reads with their sanitizers.
+                   'controlActions.js', 'conceptLensApi.js', 'crossRunLedger.js']
 const NARROW_FACADES = ['reviewRouteApi.js']
 
 const readDirSource = async base => {
@@ -103,7 +107,8 @@ test('every name a consumer takes from the barrel really resolves through it', a
   assert.ok(sources.size >= 20, `the scan found consumers in only ${sources.size} file(s)`)
   assert.ok(wanted.size >= 100, `the scan derived only ${wanted.size} barrel names`)
   for (const canary of ['apiPrefix', 'commandFeedback', 'saveRunTransport', 'runCommand',
-                        'fetchEventStream', 'genScopeReport']) {
+                        'fetchEventStream', 'genScopeReport',
+                        'CONTROL', 'submitConceptLens', 'projectLedgerSource']) {
     assert.ok(wanted.has(canary), `${canary} is no longer derived from any call site`)
   }
 
@@ -225,6 +230,100 @@ test('the review read-only refusal still fires before a command reaches the wire
       error => error.code === 'REVIEW_READ_ONLY')
     assert.equal(calls.length, 0, 'a blocked review mutation must not reach fetch')
   })
+})
+
+test('the action vocabulary still speaks the one command lifecycle after leaving api.js', async () => {
+  // CONTROL is a MAP OF PAYLOADS over `runCommand`; extracting it must not have turned any entry
+  // into its own transport or dropped a fence. Driven, not read: every control below goes to fetch
+  // through the real protocol, and the review tab's refusal still fires before the wire.
+  const { CONTROL, appendAction } = await import('../src/api.js')
+  const previous = { location: globalThis.location, sessionStorage: globalThis.sessionStorage,
+                     fetch: globalThis.fetch }
+  const generation = 'a'.repeat(64)
+  const calls = []
+  globalThis.location = { pathname: '/user/a/proxy/8765/', hash: '' }
+  globalThis.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, method: options.method, body: JSON.parse(options.body || '{}') })
+    return { ok: true, status: 200, headers: { get: () => null },
+             json: async () => ({ ok: true, status: 'succeeded', id: 'cmd_' + 'b'.repeat(32),
+                                  generation }) }
+  }
+  try {
+    // The three run-wide controls are `(rid) => runCommand(...)` and take no options, so the
+    // lifecycle READS the current generation before submitting — that GET is part of the fence and
+    // stays visible below rather than being stubbed away.
+    await CONTROL.stop('demo')
+    await CONTROL.nodeAbort('demo', 7, 2, { expectedGeneration: generation })
+    await appendAction('demo', { type: 'hint', data: { text: 'try dropout' } },
+                       { expectedGeneration: generation })
+    const reads = calls.filter(call => call.method !== 'POST')
+    const posts = calls.filter(call => call.method === 'POST')
+    assert.equal(reads.length, 1, 'only the unfenced control reads a generation of its own')
+    assert.deepEqual(posts.map(call => call.body.type), ['pause', 'node_abort', 'hint'])
+    assert.deepEqual(posts[1].body.data, { node_id: 7, generation: 2, reason: 'ui' })
+    assert.deepEqual(posts[2].body.data, { text: 'try dropout' })
+    for (const call of posts) {
+      assert.match(call.url, /^\/user\/a\/proxy\/8765\/api\/runs\/demo\/command/)
+      assert.equal(call.body.expected_generation, generation,
+        'every control still carries the generation fence the operator saw')
+    }
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[name]
+      else globalThis[name] = value
+    }
+  }
+  await withReviewTab(async blocked => {
+    await assert.rejects(CONTROL.resume('demo', { expectedGeneration: generation }),
+      error => error.code === 'REVIEW_READ_ONLY')
+    assert.equal(blocked.length, 0, 'a review tab must not reach fetch through the action map')
+  })
+})
+
+test('the paid concept-lens family refuses an unfenced or unkeyed submission', async () => {
+  // The reason this family is one module: every entry is a PAID request, and each one refuses before
+  // fetch unless it carries both a verified run generation and the saved idempotency identity. A
+  // refusal that reached the wire first is a charge nobody can rejoin.
+  const { submitConceptLens, abandonRecoveredConceptLens } = await import('../src/api.js')
+  const previous = { location: globalThis.location, fetch: globalThis.fetch }
+  const reached = []
+  globalThis.location = { pathname: '/user/a/proxy/8765/', hash: '' }
+  globalThis.fetch = async url => { reached.push(url); throw new Error('must not be reached') }
+  try {
+    await assert.rejects(
+      submitConceptLens('demo', 'why', 'not-a-generation', { idempotencyKey: 'k'.repeat(36) }),
+      error => error.code === 'invalid_run_generation')
+    await assert.rejects(
+      submitConceptLens('demo', 'why', 'a'.repeat(64), { idempotencyKey: '' }),
+      /idempotency key/)
+    await assert.rejects(
+      abandonRecoveredConceptLens('demo', 'a'.repeat(64), 'f'.repeat(64), -1,
+        { resolutionIdempotencyKey: '00000000-0000-4000-8000-000000000000' }),
+      /start sequence/)
+    assert.deepEqual(reached, [], 'no refused paid request may reach fetch')
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[name]
+      else globalThis[name] = value
+    }
+  }
+})
+
+test('the ledger sanitizers still bound what a cross-run read may put into React state', async () => {
+  // The allowlist and the caps are the point of this module — a field it omits never reaches React,
+  // and an unbounded shared ledger never reaches the DOM. Both survive the extraction.
+  const { boundedLedgerText, projectLedgerSource } = await import('../src/api.js')
+  assert.equal(boundedLedgerText({ unsafe: 'shape' }), '')
+  assert.equal(boundedLedgerText('claim‮-x⁦ y⁩'), 'claim -x y')
+  const projected = projectLedgerSource('atlas', {
+    n_runs: 3, contradictions: Array.from({ length: 30 }, (_, i) => ({ statement: `c${i}` })),
+    n_contested: 0, unlisted_field: 'must not survive',
+  })
+  assert.equal(projected.n_runs, 3)
+  assert.equal(projected.contradictions.length, 12, 'the cap travels with the sanitizer')
+  assert.equal(projected.n_contested, 30, 'the atlas correction still counts what was served')
+  assert.ok(!Object.hasOwn(projected, 'unlisted_field'))
 })
 
 test('the extracted modules never import the barrel they are part of', async () => {

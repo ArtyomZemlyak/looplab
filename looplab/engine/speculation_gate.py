@@ -132,7 +132,7 @@ def engine_authored_artifacts(engine) -> bool:
     role wiring — state no candidate can reach, in a run no candidate participates in.
 
     True in exactly one configuration: the speculation-calibration profile, whose Developer is the
-    engine's own probe splicer. `agents/roles.py::ToyObjectiveDeveloper.implement` splices the probe
+    engine's own probe splicer. `agents/toy_roles.py::ToyObjectiveDeveloper.implement` splices the probe
     UNCONDITIONALLY when `calibration_gpu_probe` is set, and that flag is deliberately not a
     Settings/env/UI knob — `cli/__init__.py::_make_calibration_roles` is its only writer. So in that
     run every artifact is engine-authored, and in every other run this is False and the fail-safe
@@ -142,7 +142,7 @@ def engine_authored_artifacts(engine) -> bool:
     which is the same rule for the same object and refuses the calibration run outright if it does
     not hold. Total and fail-closed: any engine without a readable developer answers False.
     """
-    from looplab.agents.roles import ToyObjectiveDeveloper
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper
 
     developer = getattr(engine, "developer", None)
     return (type(developer) is ToyObjectiveDeveloper
@@ -151,7 +151,7 @@ def engine_authored_artifacts(engine) -> bool:
 
 def _calibration_role_pair_errors(task, researcher, developer) -> list[str]:
     """Validate the two default-off purpose flags without accepting wrappers/subclasses."""
-    from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 
     errors: list[str] = []
     if type(researcher) is not ToyResearcher:  # exact: a wrapper could make live/model calls

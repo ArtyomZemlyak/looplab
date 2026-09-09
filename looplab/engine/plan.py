@@ -15,8 +15,11 @@ The plan is a FOLDED event (`EV_PLAN`, `RunState.plan`) written by the main task
   (the top-2 ensemble, once) and `sweep` (a champion sweep for every remaining slot).
 * `endgame_actions` is the dispatcher's rule inside the reserve: pending evaluations and the
   finish are untouched; every other create is replaced by the endgame's own — the merge if it has
-  not been minted in the reserve yet and two breedable nodes exist, else an `improve` of the
-  champion stamped `_sweep`, whose idea `engine/orchestrator.py::_prepare_node_idea` asks the
+  not been minted in the reserve yet and two breedable nodes exist (its two parents drawn from
+  `search/policy.py::pareto_front`, the run's non-dominated set over the primary metric plus every
+  authenticated, orientable extra metric — the metric leaders alone when no such axis exists, so
+  the pick is the historical top-2 on every run that records one objective), else an `improve` of
+  the champion stamped `_sweep`, whose idea `engine/orchestrator.py::_prepare_node_idea` asks the
   k-NN surrogate for (`search/surrogate.py`, bounds inferred from the run's own evaluated
   params; the LLM Researcher is its fallback below warm-up). A selected Card that already IS an
   endgame action (a merge of two evaluated nodes, an improve of the champion) keeps its slot.
@@ -128,7 +131,7 @@ def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
     best_id = best.id if best is not None else None
     from looplab.search.card_selection import META_CARD_ID
     from looplab.search.policy import (KIND_IMPROVE, KIND_MERGE, META_CHOSEN, META_REASON,
-                                       rank_by_metric)
+                                       pareto_front, rank_by_metric)
     # A selected CARD that already is an endgame action keeps its slot (its proposal is paid for);
     # a plain policy create — an improve of the champion included — is replaced by the endgame's
     # own sequence below, the ensemble first and then the surrogate-proposed sweeps.
@@ -140,8 +143,25 @@ def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
     merged_in_reserve = any(n.operator == "merge" and n.id >= start for n in state.nodes.values())
     kinds = (plan.get("phases") or [{}])[-1].get("kinds") or list(ENDGAME_KINDS)
     if "merge" in kinds and not merged_in_reserve and len(breedable) >= 2:
-        return [{"kind": KIND_MERGE, "parent_ids": [breedable[0].id, breedable[1].id],
-                 META_CHOSEN: breedable[0].id, META_REASON: "endgame: ensemble of the top-2"}]
+        # THE ONE PLACE SELECTION READS THE NON-DOMINATED FRONT (docs/BACKLOG.md §0.1 row 12). The
+        # ensemble's two parents come from `pareto_front` rather than straight off the scalar
+        # ranking: the top-2 by metric are frequently the same idea twice — an improve and its own
+        # parent, separated by noise — and an ensemble of two near-identical models buys the run
+        # nothing it did not already have. The front's second member is the best node NOT dominated
+        # by the leader, i.e. one that pays for its lower metric with a declared objective the leader
+        # loses on, which is the recombination an endgame reserve exists to spend its slots on.
+        #
+        # INERT UNTIL A RUN RECORDS A REAL SECOND OBJECTIVE, by construction and not by a flag: with
+        # no authenticated, orientable extra metric the only axis is the primary metric, the front is
+        # the metric leader alone, `len(front) < 2`, and this falls through to the byte-identical
+        # top-2 ranking it always used. That is why there is no new setting here — a knob would
+        # imply the front is a policy choice, and it is a reading of what the record supports.
+        front = pareto_front(state, breedable)
+        parents = front[:2] if len(front) >= 2 else breedable[:2]
+        reason = ("endgame: ensemble of the Pareto front's top-2"
+                  if len(front) >= 2 else "endgame: ensemble of the top-2")
+        return [{"kind": KIND_MERGE, "parent_ids": [parents[0].id, parents[1].id],
+                 META_CHOSEN: parents[0].id, META_REASON: reason}]
     if best is None:
         return actions
     if sweep and "sweep" in kinds:

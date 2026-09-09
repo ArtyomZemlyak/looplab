@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from looplab.core.atomicio import durable_no_replace_rename, strict_fsync_parent
-from looplab.core.pathsafe import is_reparse, WINDOWS_RESERVED
+from looplab.core.pathsafe import is_reparse, run_child_name_defect, validate_run_child
 from looplab.core.run_deletion import (
     RUN_DELETION_FENCE_PREFIX, RUN_DELETION_OPERATION_RE, RunDeletionStorageError,
     assert_run_deletion_write_allowed, clear_run_deletion_fence,
@@ -20,7 +20,7 @@ from looplab.core.run_deletion import (
     run_deletion_snapshot_token)
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.events.eventstore import (
-    EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+    EventStoreLockError, InterprocessLockContended, interprocess_lock)
 from looplab.events.span_index import (
     invalidate as invalidate_span_index, span_destructive_write_guard)
 from looplab.serve.appstate import (
@@ -65,12 +65,13 @@ def _detail(code: str, message: str, *, operation_id: str | None = None,
 
 
 def _plain_run_path(srv, run_id: str) -> Path:
-    if (not isinstance(run_id, str) or not run_id or len(run_id) > 255
-            or run_id != run_id.strip() or run_id.endswith((".", " "))
-            or ":" in run_id or any(ord(ch) < 32 or ord(ch) == 127 for ch in run_id)
-            or run_id.split(".", 1)[0].upper() in WINDOWS_RESERVED
-            or Path(run_id).name != run_id or run_id in {".", ".."}
-            or "/" in run_id or "\\" in run_id):
+    # The STRICT name tier (doc 25 SC-03): deletion is a destroying path, so it refuses every
+    # filesystem-ambiguous spelling — length, surrounding/trailing whitespace, a trailing dot, a
+    # drive/stream colon, control characters and the reserved DOS device names — rather than
+    # resolving one and destroying whatever it landed on. `launch.safe_run_dir` takes the same tier
+    # from the same function, which is the point: what may be created and what may be deleted must
+    # not be two different sets.
+    if run_child_name_defect(run_id, strict=True) is not None:
         raise HTTPException(404, _detail(
             "run_not_found", "No run exists with that exact direct-child identity."))
     root = srv.root.resolve()
@@ -86,18 +87,16 @@ def _plain_run_path(srv, run_id: str) -> Path:
 
 def _strict_existing_run(srv, run_id: str) -> Path:
     requested = _plain_run_path(srv, run_id)
-    try:
-        entry = requested.lstat()
-        canonical = requested.resolve(strict=True)
-        is_junction = getattr(requested, "is_junction", None)
-        junction = bool(callable(is_junction) and is_junction())
-    except (FileNotFoundError, OSError) as exc:
-        raise HTTPException(404, _detail("run_not_found", "No such run.")) from exc
-    if (is_reparse(entry) or junction or not stat.S_ISDIR(entry.st_mode)
-            or canonical != requested.resolve(strict=False)
-            or canonical.parent != srv.root.resolve()):
+    # One predicate, two vocabularies preserved: an unreadable/absent entry is still "No such run."
+    # while a STRUCTURAL defect still names the canonical-direct-directory rule, because those tell
+    # the operator different things about what to do next.
+    child = validate_run_child(srv.root, requested, must_exist=True)
+    if child.defect in ("missing", "unreadable"):
+        raise HTTPException(404, _detail("run_not_found", "No such run."))
+    if child.defect is not None:
         raise HTTPException(404, _detail(
             "run_not_found", "The requested run path is not a canonical direct directory."))
+    canonical = child.path
     events = canonical / "events.jsonl"
     try:
         event_entry = events.lstat()
@@ -438,7 +437,7 @@ def _purge_quarantine(path: Path) -> bool:
         return True
     engine_lock = path / "engine.lock"
     try:
-        with _interprocess_lock(engine_lock, required=True, blocking=False):
+        with interprocess_lock(engine_lock, required=True, blocking=False):
             pass
     except InterprocessLockContended:
         return False
@@ -473,7 +472,7 @@ def _purge_recreated_writer_shell(rd: Path) -> bool:
             if is_reparse(lock_info) or not stat.S_ISREG(lock_info.st_mode):
                 return False
             try:
-                with _interprocess_lock(engine_lock, required=True, blocking=False):
+                with interprocess_lock(engine_lock, required=True, blocking=False):
                     pass
             except InterprocessLockContended:
                 return False
@@ -708,7 +707,7 @@ def begin_or_resume_run_deletion(
                         try:
                             with (run_config_write_lock(
                                       snap, deletion_operation_id=operation_id),
-                                  _interprocess_lock(
+                                  interprocess_lock(
                                       Path(str(rd / "events.jsonl") + ".lock"), required=True),
                                   span_destructive_write_guard(
                                       rd / "spans.jsonl", required=True)):
