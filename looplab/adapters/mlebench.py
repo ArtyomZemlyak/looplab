@@ -34,12 +34,9 @@ from __future__ import annotations
 
 import json
 import random
-from typing import Optional
 
-from pydantic import BaseModel, field_validator
-
-from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState, validate_direction
+from looplab.adapters.synthetic import IntWalk, PerturbResearcher, SyntheticTaskBase
+from looplab.core.models import Idea
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
 
@@ -143,21 +140,16 @@ def score(predictions):
 '''
 
 
-class MLEBenchResearcher:
-    """Blind hyperparameter optimizer over the model-complexity knob `k` (k-NN count)."""
+def mlebench_researcher(max_k: int = 15, seed: int = 0) -> PerturbResearcher:
+    """Blind hyperparameter optimizer over the model-complexity knob `k` (k-NN count).
 
-    def __init__(self, max_k: int = 15, seed: int = 0):
-        self.max_k = max_k
-        self.rng = random.Random(seed)
-
-    def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
-        if parent is None:
-            return Idea(operator="draft", params={"k": float(self.rng.randint(1, self.max_k))},
-                        rationale="random k")
-        pk = int(round(parent.idea.params.get("k", 3)))
-        k = max(1, min(self.max_k, pk + self.rng.choice([-2, -1, 1, 2])))
-        return Idea(operator="improve", params={"k": float(k)},
-                    rationale=f"perturb node {parent.id} (k={pk})")
+    The one knob walks in steps of +/-1 or +/-2 and NEVER stands still — the only `IntWalk` in the
+    tree whose `steps` omit 0, because with a single parameter a zero step re-proposes the parent
+    verbatim and buys an evaluation that can teach nothing. Collapsed onto `PerturbResearcher`
+    (doc 25 RA-06) with the same four-way choice, so the seeded stream is unchanged.
+    """
+    return PerturbResearcher((IntWalk("k", 1, max_k, default=3.0, steps=(-2, -1, 1, 2)),),
+                             seed=seed, draft_rationale="random k")
 
 
 class MLEBenchDeveloper:
@@ -174,7 +166,7 @@ class MLEBenchDeveloper:
         return tmpl.format(k=k)
 
 
-class MLEBenchTask(BaseModel):
+class MLEBenchTask(SyntheticTaskBase):
     """A held-out-graded classification competition. The LLM/agent Developer writes a
     classifier; the Researcher tunes `k`. Offline it falls back to a templated k-NN."""
 
@@ -183,12 +175,6 @@ class MLEBenchTask(BaseModel):
     goal: str = ("train a classifier on train.json and maximize held-out accuracy on "
                  "test.json, scored by the private grader")
     direction: str = "max"          # accuracy: higher is better
-
-    @field_validator("direction")
-    @classmethod
-    def _direction_valid(cls, v):
-        return validate_direction(v)
-    comparison_contract: ComparisonContract | None = None
     seed: int = 0
     n_train: int = 80
     n_test: int = 40
@@ -254,7 +240,7 @@ class MLEBenchTask(BaseModel):
         return {"predictions": "predictions.json", "scorer": "accuracy", "labels": yte}
 
     def build_roles(self):  # offline fallback (templated k-NN)
-        return (MLEBenchResearcher(max_k=self.max_k, seed=self.seed),
+        return (mlebench_researcher(max_k=self.max_k, seed=self.seed),
                 MLEBenchDeveloper(max_train=self.n_train, host_graded=self.host_graded))
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):

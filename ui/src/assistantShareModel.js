@@ -38,6 +38,16 @@ const SNAPSHOT_TURN_CODES = Object.freeze([
   'assistant_share_turn_active', 'assistant_share_turn_incomplete',
 ])
 
+// The CREATE-RECOVERY refusals (doc 25 SC-10). Each is authoritative about THIS envelope and about
+// nothing else, and each names a different thing for the operator to do: the link this browser was
+// recovering is dead (make a new one), or the saved identity is unusable (start again). They are
+// listed for the same reason the four above are — a future code has to be adopted deliberately.
+const SNAPSHOT_RECOVERY_NOTICES = Object.freeze({
+  assistant_share_replay_terminal: 'That public link was revoked or expired · create a new one',
+  assistant_share_recovery_conflict: 'Saved public-link request no longer matches · try again',
+  assistant_share_recovery_invalid: 'Saved public-link request is unusable · try again',
+})
+
 export function shareActionBlock(action, {
   shareActionActive = false, forkingSession = false, deletingSession = false, turnIncomplete = false,
 } = {}) {
@@ -65,13 +75,20 @@ export function shareActionFailure(action, error) {
       ? { uncertain: false, notice: 'Revoke failed' }
       : { uncertain: true, notice: 'Revoke uncertain · retry to confirm' }
   }
-  if (!authoritative) return { uncertain: true, notice: 'Share uncertain · revoke before retrying' }
+  // The advice changed with the create-recovery contract (doc 25 SC-10): an uncertain mint used to
+  // mean "you may now own a link you cannot see, so revoke everything before trying again". The
+  // browser now holds the create identity, so the same click RECOVERS the link the lost response
+  // was carrying. `uncertain` stays true — the state really is unknown until an authoritative read,
+  // so the session is still marked unknown and the list still re-read.
+  if (!authoritative) return { uncertain: true, notice: 'Share uncertain · try again to recover it' }
   return {
     uncertain: false,
     notice: error?.code === 'assistant_share_snapshot_too_large'
       ? 'This chat is too large for a complete snapshot · fork or share a shorter chat'
       : SNAPSHOT_TURN_CODES.includes(error?.code)
-        ? 'Wait for a complete Assistant reply before sharing' : 'Share failed',
+        ? 'Wait for a complete Assistant reply before sharing'
+        : Object.hasOwn(SNAPSHOT_RECOVERY_NOTICES, error?.code ?? '')
+          ? SNAPSHOT_RECOVERY_NOTICES[error.code] : 'Share failed',
   }
 }
 

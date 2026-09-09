@@ -8,7 +8,7 @@ export * from './format.js'
 export * from './layout.js'
 export * from './nodeActivity.js'
 
-import { nodeActivityStatus, runCanWork, workingNodeIds, NODE_ACTIVITY } from './nodeActivity.js'
+import { nodeActivityStatus, primaryWorkingNode, runCanWork } from './nodeActivity.js'
 
 // Browser storage is optional infrastructure, not a render prerequisite. SecurityError is common in
 // locked-down/private contexts; every preference read/write therefore degrades to an in-memory
@@ -37,11 +37,12 @@ export const tokText = (tok) => (tok && tok.text != null) ? tok.text : (typeof t
 
 // The primary live node retained for compatibility with one-subject consumers (auto-collapse).
 // Visual surfaces use `workingNodeIds` directly so parallel builds/evaluations all remain visible.
+// WHICH one it names is `nodeActivity.js::primaryWorkingNode` — evidence (lane, then the run's own
+// start receipt) rather than the `Math.max` this used to be, which named a number and not a fact
+// (BACKLOG §0.14). One rule, stated where the activity vocabulary lives, so this and any other
+// single-subject consumer cannot come to disagree about which experiment is running.
 export function workingId(state) {
-  const ids = workingNodeIds(state)
-  if (!ids.size) return null
-  const building = [...ids].filter(id => nodeActivityStatus(state?.nodes?.[id], state) === NODE_ACTIVITY.BUILDING)
-  return Math.max(...(building.length ? building : [...ids]))
+  return primaryWorkingNode(state)
 }
 
 export function nodeClass(node, state, workIds) {

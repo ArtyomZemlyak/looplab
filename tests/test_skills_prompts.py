@@ -257,7 +257,12 @@ def test_every_env_var_the_authoring_panel_prints_actually_configures_that_kind(
     from looplab.serve.routers.misc import _current_author_directory
 
     kinds = _authoring_kind_env()
-    assert set(kinds) == {"prompts", "skills", "knowledge"}, kinds
+    assert set(kinds) == {"prompts", "skills", "knowledge", "memory_skills"}, kinds
+    # `memory_skills` is the one DERIVED root: the operator configures `memory_dir` and the store is
+    # its `skills/` child (`serve/routers/misc.py::memory_skills_dir`), so the hint names the var
+    # that moves it rather than a variable of its own — which is the same failure this test exists
+    # for, one indirection further along.
+    expected_suffix = {"memory_skills": "skills"}
 
     for kind, env in kinds.items():
         target = tmp_path / kind
@@ -270,7 +275,8 @@ def test_every_env_var_the_authoring_panel_prints_actually_configures_that_kind(
                 return settings
 
         resolved = _current_author_directory(_Srv(), kind)
-        assert resolved == target, (
+        suffix = expected_suffix.get(kind)
+        assert resolved == (target / suffix if suffix else target), (
             f"the Authoring panel tells an operator to set {env} for `{kind}`, but the "
             f"{kind} authoring route resolved {resolved!r} instead — the hint is a no-op")
         monkeypatch.delenv(env)

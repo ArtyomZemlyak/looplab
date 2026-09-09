@@ -20,7 +20,12 @@ looplab tokens          TOKEN breakdown by phase, reconciled against the durable
 looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
 looplab edit-types      What KIND of edit each experiment made, which kinds paid, and how much was already tried once (doc 52 row 31)
 looplab proxy-accuracy  Was the proxy that KILLED candidates any good? Pairwise ranking accuracy against the metrics that came back (doc 52 row 31)
+looplab seed-distance   How far each experiment moved from the SEED program it descends from, and how much of that movement is tuning (doc 52 row 31)
+looplab workspace-bytes What this run's node workspaces actually WEIGH on disk, beside the seed claim its log made about them — bounded, and it says so (doc 37 §8 R1)
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
+looplab belief-key-split Concept-equal card groups the seed-TEXT belief key SPLITS, and what a concept key would merge (corpus instrument)
+looplab card-ladder     The direction -> experiment ladder over a corpus, and whether the undercut rule's trigger fired (corpus instrument)
+looplab asha-rungs      Did any run publish a rung CURVE the ASHA watchdog could have halved? (corpus instrument)
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab lock-in         Action-space lock-in detector (PART IV D7)
@@ -28,6 +33,7 @@ looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV 
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab novelty-recall  Audit executed proposals for paraphrases the novelty gate missed (PART IV E3)
 looplab lesson-guard    Audit distilled lessons for over-generalization and contradiction (PART IV D6/E4)
+looplab concept-authorship How much of each proposer's authored concept set survived the classifier's answer (PART IV D5)
 looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cross-run Step 1)
 looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
@@ -157,11 +163,14 @@ A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys)
 
 **Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task. This is
 the CLI planning surface; the Web **New run** flow uses the owner Assistant's `propose_run` tool and
-the TUI uses `/api/genesis`. They share task-adapter validation and backend-default authority, but
-not one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token; the TUI
-asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
+the TUI uses `/api/genesis`. Three ways to AUTHOR a plan; one shape for the plan itself since
+2026-09-08 — `core/run_proposal.py::RunProposal` owns the proposal fields, the `/api/start` body,
+the run-id slug and the launch-settings filter, and all three surfaces share task-adapter validation
+and backend-default authority. Web additionally submits a reviewed `/api/start/preflight` token; the
+TUI asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
 `/api/start` to the token it returns; CLI validates directly. The CLI announces its choice
-(`Genesis -> kind=…`) before launching, and:
+(`Genesis -> kind=…`) and then the PLAN itself — run name, task, goal, the settings knobs and the
+rationale, in the same lines the TUI's proposal panel renders — before launching, and:
 
 - picks the `kind` from your words — *or* stays within the kind you **pin** with `--kind` (it doesn't
   skip Genesis, it constrains it; what the run does within a kind depends on the model);
@@ -744,7 +753,7 @@ reconciliation vs 27.9 min wall clock:
   untraced     18.0 min  (65%)  no span open — not attributable from spans.jsonl
 ```
 
-**Three sections, and why.**
+**The sections, and why.**
 
 * **Per node** — unchanged: each node's `create_node` / `evaluate` / `repair` work. An operation
   span's recorded duration includes every nested span, so each row is charged its **self** time
@@ -761,6 +770,22 @@ reconciliation vs 27.9 min wall clock:
   remainder — work with no span at all, engine bookkeeping, provider waits, and the idle gap while a
   stopped run waits for someone to finalize it. It is reported rather than hidden: a residual you
   can see is a residual you can go and instrument.
+* **Run opening** — the head of the run: its first event to its first `node_eval_started`, which
+  is by construction the window in which no evaluation of this run was running. Split at the
+  boundaries the run already writes — `setup_started -> setup_finished`, the run-opening think
+  (`research_attempted -> research_completed`, `trigger=run_start`), the first `propose` span,
+  `-> node_created`, `-> node_eval_started` — with the rest of the window named as `unattributed`
+  and the two headline numbers stated: *run start -> the run-opening think complete* and *run start
+  -> the first propose complete*. This is the phase that is systemically the longest in a run
+  (`docs/BACKLOG.md`: the run's own maximum in four of seven measured runs) and the only one that
+  cannot overlap an evaluation, so what it costs and how it divides is now a number a run produces
+  rather than one someone reconstructs. Everything but the propose row comes from the durable log,
+  so a run whose trace was cleared still gets the rest. The propose row is the earliest `propose`
+  span that FITS the window, never simply the earliest in the file — the seed path that mints node 0
+  opens none, so on such a run the first traced propose belongs to a later node and is already
+  running beside an evaluation. Every absence is printed as a NOTE and never as a zero, and the two
+  are kept apart: "no `propose` span at all" (turn tracing on) reads differently from "spans, but
+  none inside the opening window" (this run cannot answer).
 * **Contained failures** — printed only when a span carries one. `core/containment.py::contain`
   stamps the span it ran under with a `contained` count and a `contained` event (the reason and the
   exception type), so a run whose watchdog ticks or agentic calls degraded to their fallbacks says
@@ -1152,6 +1177,257 @@ this command is what that decision should be made on.
 
 ---
 
+## `seed-distance`
+
+Read-only, no model. How far each experiment moved from the **seed program** it descends from, and
+how much of that movement is tuning rather than structure.
+
+```bash
+looplab seed-distance RUN_DIR
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (folds its `events.jsonl`; reads the committed `files` of each node and of its lineage ROOT) |
+
+The sibling of [`edit-types`](#edit-types) and deliberately not the same question. `edit-types`
+measures each parent→child **step**; this measures the whole walk, in **one** diff against the
+first-parent lineage root — so a change and its undo **cancel**, where a per-step tally counts two
+edits. Same classifier, same closed vocabulary (`looplab/tools/node_diff.py::EDIT_TYPES`), no second
+taxonomy; `looplab/search/seed_distance.py` only groups it into three bands plus the vocabulary's own
+residue, and that partition is asserted total at import:
+
+| Band | Types | Why |
+|---|---|---|
+| tuning | `hyperparameter`, `call_argument` | the knobs — the same knob written as a literal or as a keyword argument (`Adam(..., lr=1e-4)`) |
+| structural | `import`, `definition`, `control_flow`, `data_io` | what the program **is**: its dependencies, shape, path and where its data comes from |
+| cosmetic | `comment`, `whitespace`, `logging` | what a reader sees and the machine does not — excluded from every share's denominator |
+| *(residue)* | `other` | counted in the total, claimed by no band |
+
+```
+distance from the seed program over 2 descendant node(s) (1 seed(s) are their own reference; direction=min)
+ node  seed  depth  files  lines  tuning  struct  cosmetic  tuning%  re-added        gain
+    1     0      1      1      2       2       0         0     100%         0        +0.1
+    2     0      2      1      7       4       2         1      67%         0        +0.2
+  lines = added + removed against the SEED, so a change and its undo cancel; `re-added` is what this node's own lineage had already deleted.
+  tuning share of the movement, improved (2 node(s)): 83%; not improved: n/a
+  MLGym reports that models usually improve by finding better hyperparameters. 2 node(s) is an observation about this run, not a test of that.
+```
+
+`gain` is direction-aware and measured against the node's **own seed**, so the last two lines are the
+shape MLGym's sentence is in: the mean tuning share of the nodes that beat their seed, beside those
+that did not. The count is printed with it on purpose — a dozen nodes is an observation about one
+run, not a test of a field result.
+
+**The path is not thrown away with the displacement.** `re-added` is
+`node_diff.py::reintroduced_lines` on the same first-parent chain: lines this node adds that its own
+ancestry had already deleted. A lineage cycling in place therefore reads as re-introductions rather
+than as a node that never moved.
+
+**What it will not do.** It decides nothing — no selection, gate or proposal cue reads it, and doc 17
+§11's own warning ("novel ≠ good") is why: a distance *maximised* is a run rewarded for churn. A node
+whose file set is missing from the record is NOT measured and is counted separately, because an
+unreadable record is not a node that never moved. And this is the distance from the seed **program**;
+the semantic distance from a seed **corpus** (§11/§17's Scoop-Check, an embedder over a versioned
+external corpus) is a different, unbuilt artifact.
+
+---
+
+## `workspace-bytes`
+
+Read-only, no model. What this run's node workspaces actually **weigh**, beside the only sentence
+its own log ever made about them.
+
+```bash
+looplab workspace-bytes RUN_DIR [--max-entries 200000] [--node 4] [--top 3]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (walks its `nodes/*` workspaces; reads its own `workspace_seeded` rows for the claim column) |
+| `--max-entries` | `200000` | The BOUND, in directory entries stat'ed across the whole run. Spent = the walk stops and every total becomes a floor |
+| `--node` | *(all)* | Spend the whole budget on ONE node (its id, or its directory name) |
+| `--top` | `3` | How many of a node's largest subtrees to name |
+
+**Why it exists.** `workspace_seeded` is the only workspace fact in the event log, and it says
+`.[auto]:75 tracked` — an accurate statement about 0.9 MB, and the sole thing a reader could see
+about a directory that measured **944,779,776 B**, 937,847,296 of it three intermediate checkpoints
+plus a final because that node's own trainer said `save_total_limit=3`. So the one visible number
+named the copy, the copy got blamed for 727 GB it never wrote, and a whole migration proposal was
+written against a mechanism responsible for 0.096 % of the bytes
+(doc 37 §6 — the measurement that DECLINED it — and §8's R1, which asked for
+exactly this receipt). The claim and the measurement now print on the same rows.
+
+```
+workspace bytes for runs/demo — apparent size (sum of file sizes, what doc 37 quotes), symlinks NOT followed
+entry budget: 1,204 of 200,000 directory entries spent; the walk COMPLETED
+
+where                                  bytes     files
+(the record)                       1,204,913         5
+nodes/                           944,779,776       168
+confirm/                                   0         0
+run total                        945,984,689       173
+  run total = 945,984,689 B (902.2 MiB). `(the record)` is the run directory's own top-level files: the event log, the snapshots, the lock.
+
+node workspaces, largest first (top 3 subtree(s) each):
+  node_4: 944,779,776 B (901.0 MiB) in 168 file(s)
+      checkpoint-1200/            312,615,765 B (298.1 MiB)  in 6 file(s)
+      checkpoint-800/             312,615,765 B (298.1 MiB)  in 6 file(s)
+      final/                      312,615,766 B (298.1 MiB)  in 6 file(s)
+      seeded (the log's only workspace fact): .[auto]:75 tracked, data:train->link
+```
+
+**The bound is stated, and crossing it is a floor rather than a smaller number.** A byte total over
+a tree is unbounded work — doc 37 §9 records that as R1's own open problem — so the walk spends one
+shared budget of directory entries. When it runs out the walk **stops**: every total prints with
+`>=`, the nodes and subtrees it never reached are named `NOT WALKED` (which is not the same claim as
+`0 B`), and the report ends with the call that continues past it, at a budget the caller has not
+already spent.
+
+```
+BUDGET SPENT after 200,000 entries: every number above is a FLOOR (>=), not a measurement.
+  continue:  looplab workspace-bytes runs/demo --max-entries 400000
+  or spend the whole budget on one node:  looplab workspace-bytes runs/demo --node <id>
+```
+
+**What the number is.** The **apparent** size — the sum of file sizes — not allocated blocks, so it
+is directly comparable with doc 37's figures and reads differently from `du` (which counts blocks:
+larger for many small files, smaller for a sparse one). **Symlinks are never followed**: a `data:`
+mount is a link into a dataset the node did not write (189 GiB on the v1 testbed), so it is counted
+as the link it is and its target is not walked — which is also what keeps the walk inside the run
+directory it claims to be measuring.
+
+**What it will not do.** It decides nothing and deletes nothing. Doc 37 §8's next two rungs — a
+workspace disk budget stated to the Developer (R2), and reclaiming non-champion checkpoints at run
+end (R3) — both need something this command deliberately is not: R3 deletes evidence
+`engine/metric_salvage.py` reads, and needs a written retention policy first.
+
+---
+
+## `belief-key-split`
+
+Read-only, no model, **over a runs root**. Where the seed-TEXT belief key and a CONCEPT key would
+disagree — and what a concept key would merge.
+
+```bash
+looplab belief-key-split RUNS_ROOT [--limit 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUNS_ROOT` | `runs` | The runs root (one subdirectory per run), or a single run directory. One `fold` per run |
+| `--limit` | `20` | How many split groups to print, widest first |
+| `--json` | off | Emit the whole report as JSON |
+
+`card_ledger.py::_apply_card_belief_lineage` keys belief identity on the seed TEXT
+(`hypothesis_statement_digest(seed)`); the sibling design proposes {concepts} + metric + direction
+instead. This groups tagged cards by **(run, concept set, direction)** and lists the groups the text
+key SPLITS, with the statements, evidence and verdicts a concepts-keyed merge would pool:
+
+```
+84 concept-equal group(s) over 691 card(s) in 7 run(s) — 528 tagged, 163 untagged, 0 with no seed statement (excluded)
+distinct belief ids per group: 1x66 2x9 3x2 4x3 5x3 7x1
+18 group(s) SPLIT by the seed-TEXT key, covering 61 card(s); 5 of them would pool CONFLICTING verdicts
+```
+
+*(the shape of the report; the numbers above are the 2026-08-26 hand fold this command replaces, not
+this command's own output.)*
+
+**It changes no key and calls no group a restatement.** Disagreement is not evidence that the
+concept key is right: an identical concept set does not establish an identical belief —
+"temperature 0.05" and "temperature 0.01" are two positions on one axis — so a merge POOLS two
+experiments' evidence under one verdict, which is worse than today's fragmentation. Groups whose
+members' verdicts already differ are flagged `CONFLICTING VERDICTS` because those are the ones a
+human must read first. Reading them is the decision; this is the corpus.
+
+**Two stated scope limits.** The key is (run, concept set, direction) and not (concepts, metric,
+direction): within one run the objective is constant, so the metric changes no group here, and
+merging ACROSS runs is a bigger claim this instrument does not make. Runs are identified by
+`core/run_identity.py::run_ref`, so two incarnations of one directory name stay two runs. A card
+with no concept tags, or with no seed statement (hence no `belief_id`), is counted and EXCLUDED —
+neither can agree or disagree.
+
+---
+
+## `card-ladder`
+
+Read-only, no model, **over a runs root**. The direction → experiment ladder, and the one trigger
+the unbuilt UNDERCUT rule is waiting on.
+
+```bash
+looplab card-ladder RUNS_ROOT [--limit 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUNS_ROOT` | `runs` | The runs root, or a single run directory. One `fold` per run |
+| `--limit` | `20` | How many trigger rows / runs to list |
+| `--json` | off | Emit the whole report as JSON |
+
+Three of the four card propagation rules already hold by construction (support does not flow up,
+refutation does not flow up, a broad claim gets a child TALLY rather than a verdict). Rule 3 —
+refutation flows DOWN as **undercut** — was deferred against a measurement, and its trigger was
+written down: *build it when a fold produces a card with BOTH `child_card_ids` and a non-empty
+`evidence`*. This evaluates that sentence:
+
+```
+691 card(s) over 7 run(s); 1 parent/child edge(s); max depth 1
+ladder depth histogram: 0x690 1x1
+1 card(s) with children, of which 1 carry NO own-level evidence
+
+TRIGGER NOT FIRED — no card in this corpus carries both `child_card_ids` and a non-empty `evidence`,
+so the undercut rule would have zero possible firings.
+```
+
+*(the shape; the counts are the 2026-08-26 fold this command replaces.)*
+
+Both halves of the predicate are load-bearing: a card with children and no own evidence is a
+research direction nobody ran an experiment against at its own generality (nothing to refute), and a
+card with evidence and no children has nobody to undercut. Only the conjunction is the state rule 3
+acts from. FIRED means the corpus can now reach that state — never that the rule should be written
+a particular way, which stays the operator's decision.
+
+---
+
+## `asha-rungs`
+
+Read-only, no model, **over a runs root**. Did any run publish a rung CURVE the ASHA watchdog could
+have halved?
+
+```bash
+looplab asha-rungs RUNS_ROOT [--limit 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUNS_ROOT` | `runs` | The runs root, or a single run directory |
+| `--limit` | `20` | How many runs to list |
+| `--json` | off | Emit the whole report as JSON |
+
+Successive halving needs a sequence of intermediate objective observations at increasing training
+plus siblings at the same rung to rank against. Two rungs are reported separately, in the
+watchdog's own order:
+
+| Rung | Read from | What it decides |
+|---|---|---|
+| contract | the `inert_reason` + `kill_reachable=false` `asha_monitor` span `engine/asha_monitor.py::_state_asha_inert` writes | whether a kill was reachable AT ALL for that metric contract — decided before the first tick |
+| observational | distinct `resource` coordinates on `asha_monitor` spans and `asha_rank` rows | whether the training ever printed the objective more than once (`CURVE_MIN_POINTS` = 2), and how many nodes share one coordinate |
+
+The launch snapshot's `asha_live` / `asha_live_kill` / `asha_live_min_siblings` are printed beside
+each run, because the contradiction this is pointed at is a config that says underperformers are
+being stopped over a corpus where the kill could never fire.
+
+**Its silence is bounded, and the report says so.** The samples it can see are the ones the watchdog
+PUBLISHED — an `asha_monitor` span opens on a verdict CHANGE or to announce inertness, and
+`asha_rank` rows are appended only on a warning/recovery edge — so an empty reading is consistent
+with "the curve existed and never changed the verdict" as well as with "there was no curve". An
+`inert_reason` is the strong evidence: the engine said the kill was unreachable before it read any
+log. A run with no readable `spans.jsonl` is reported UNREADABLE, never as a run without a curve.
+It arms nothing: `Settings.asha_live_kill`, the min-siblings floor and the undeclared
+`eval.metric.resource_key` are all exactly where they were.
+
+---
+
 ## `export-sft`
 
 Read-only, no model. This run's model turns as **execution-grounded** SFT rows.
@@ -1223,7 +1499,7 @@ looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--mo
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
-| `--task-type NAME` | inferred from the run's `task_id` | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches |
+| `--task-type NAME` | inferred from the run's `task_id`, then from its GOAL | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches. Since 2026-09-08 an id that names no pack (every run answers `repo_task` or a run name) falls back to the run's own goal, which selects a pack only when it names ≥2 distinct concepts of that pack's DOMAIN axes — so a goal naming only a batch size and a learning rate still selects nothing |
 | `--offline` | off (**default is the agentic build**) | Skip the LLM/network and use only the deterministic alias heuristic over the curated seed pack — a fast local fallback (needs a pack; no per-task importance) |
 | `--model ID` | configured model | Override the model for the agentic build |
 | `-j, --jobs N` | `8` | Concurrent node-tagging calls in the agentic build |
@@ -1269,7 +1545,7 @@ looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5] [--offline] [--model 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton (e.g. `dense-retrieval`) |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (e.g. `dense-retrieval`). Since 2026-09-08 an id that names no curated pack falls back to the run’s own goal, which selects one only when the goal names ≥2 distinct concepts of that pack’s domain axes |
 | `--threshold N` | `5` | Consecutive same-lever experiments that trip the alarm |
 | `--offline` | off | Do not call the LLM; build tags with the deterministic heuristic |
 | `--model ID` | configured model | Override the model used for the agentic tag build |
@@ -1290,7 +1566,7 @@ looplab board-dedup RUN_DIR [--task-type NAME] [--offline] [--model ID]
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory whose Card belief board to analyze |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (an id naming no curated pack falls back to the goal — see `concept-coverage`) |
 | `--offline` | off | Do not call the LLM; use deterministic graph and hypothesis tags |
 | `--model ID` | configured model | Override the model used for the agentic build/tag pass |
 
@@ -1311,7 +1587,7 @@ looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH] [--offli
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory whose coverage to target |
-| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--task-type NAME` | inferred from `task_id`, then from the run’s GOAL | Concept-graph skeleton (an id naming no curated pack falls back to the goal — see `concept-coverage`) |
 | `--asset-repo PATH` | — | Task repo used to ground the derived importance and queries in a D1 asset brief |
 | `--offline` | off | Do not call the LLM; use the deterministic graph and axis targets only |
 | `--model ID` | configured model | Override the model used for the agentic build |
@@ -1359,6 +1635,33 @@ looplab lesson-guard RUN_DIR [--model ID]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run whose distilled lessons should be audited |
 | `--model ID` | configured model | Override the verifier model |
+
+---
+
+## `concept-authorship`
+
+PART IV D5, the READ side. The classifier cadence REPLACES a node's concept membership rather than
+merging into it, so once it has run, what the PROPOSER said the node was about is invisible to every
+read surface (`events/digest.py::_folded_axes` forbids resurrecting the frozen `idea.concepts`, and
+rightly: a deliberately cleared node must not keep classifying under its old authored axis). The fold
+therefore keeps the authored set beside the membership in `RunState.node_concepts_authored`, and this
+is the instrument over it: per node the authored set, the folded set, what survived and what was
+replaced, plus the run totals and a survival rate.
+
+Pure projection — no model call, no write, nothing appended. Both sides are canonicalized through the
+run's consolidation rename map first, so a concept a later merge RENAMED is not reported as a
+classifier replacement. A run whose log predates the record reports zero authored nodes, which is the
+honest reading of a log that never carried the claim.
+
+```bash
+looplab concept-authorship RUN_DIR [--limit 30] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run whose folded memberships to compare against their authoring |
+| `--limit N` | `30` | How many node rows to print (the totals are always over the whole run) |
+| `--json` | off | Emit the whole report as JSON |
 
 ---
 
@@ -1780,13 +2083,13 @@ the evidence mixed. Legacy rows without the verifier payload remain
 `unverified` and never become positive support merely because they cited a node. New distilled lessons carry an
 explicit `claim_stance` separating literal proposition support from action guidance, so a confirmed negative
 fact is no longer inverted; legacy rows without the field keep the historical outcome mapping. This is still not
-an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is normalized statement text unless
-`--structured` is selected. `--scope` narrows every joined store (lessons, D8 research claims and, with
+an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is the
+scope+polarity-safe structured claim key — the only claim identity since 2026-09-08 (doc 25 EM-06). `--scope` narrows every joined store (lessons, D8 research claims and, with
 `--pack`, concept capsules) to one task — the CLI spelling of the HTTP `/api/cross-run/claims?scope_task=`
 read. Pure read; no LLM/endpoint.
 
 ```bash
-looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structured] [--scope TASK_ID]
+looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--structured] [--scope TASK_ID]
                [--json] [--governance-receipt]
 ```
 
@@ -1796,11 +2099,10 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | `--top N` | `20` | How many most-evidenced claims to list — **and, with `--pack`, the pack's `max_claims` cap** (`engine/claims_retrieval.py::build_context_pack`), so it bounds both listings and the rendered context pack |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly. Concept tendencies are derived from the full retained pre-cap aggregate while the rendered labels remain bounded |
-| `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
-| `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
+| `--structured` | on (inert) | Claim identity, and there is only one: the scope+polarity-safe **structured claim key** (`engine/claim_key.py`): claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge); governance overlays by scope-precise `claim_uid`. The flag is accepted and changes nothing. `--lean` — the deprecated normalized-statement projection, whose rows carried no `claim_uid`/`evidence_digest` and whose `--governance-receipt` could therefore never satisfy `claim-decide` — was DELETED on 2026-09-08 (doc 25 EM-06) and now refuses as an unknown option |
 | `--scope TASK_ID` | `""` (portfolio-wide) | Project only this task's evidence, filtering **every** joined store through the same access boundary the Atlas and HTTP reads use. **Required to obtain a usable `--governance-receipt` for a task-scoped claim** — see the projection rule below. Empty keeps the portfolio-wide read |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
-| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--structured --scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide`. `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
+| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide` (the structured projection is the only one; the deleted `--lean` read path could not produce them). `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
 
 ### The projection rule: review at the scope you decide at
 
@@ -2153,6 +2455,12 @@ looplab export-mlflow RUN_DIR [--tracking-uri URI] [--experiment NAME]
 | `RUN_DIR` | *(required)* | Run directory to export |
 | `--tracking-uri URI` | local `./mlruns` | MLflow tracking URI |
 | `--experiment NAME` | — | MLflow experiment name |
+
+This command exports a run that has already happened. To have MLflow receive a run **while it runs**
+— a child MLflow run per node as each one lands, with `node_metric` / `best_metric` series on the
+parent — set [`mlflow_tracking_uri`](configuration.md) (`LOOPLAB_MLFLOW_TRACKING_URI`) before
+`looplab run` / `looplab resume`. It is blank (off) by default because a tracking server is an
+egress boundary.
 
 ## `export-notebook`
 

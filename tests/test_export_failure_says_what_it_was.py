@@ -112,7 +112,7 @@ def test_A_REAL_EXPORT_FAILURE_REACHES_metrics(tmp_path):
     publishing `""` for every failure.
 
     So: a real exporter, a delegate write that raises, and the snapshot the engine publishes. The
-    seam is `exporter._writer._export_line`, the one `test_async_trace_exporter.py` already drives.
+    seam is `exporter._writer._export_lines`, the one `test_async_trace_exporter.py` already drives.
 
     MUTATION: drop `self._last_export_error = export_error` -> `last_export_error` is "" while
     `export_failures` is 1, which is precisely the undiagnosable shape.
@@ -124,13 +124,13 @@ def test_A_REAL_EXPORT_FAILURE_REACHES_metrics(tmp_path):
     def _boom(_line, **_kwargs):
         raise OSError(28, "No space left on device")
 
-    exporter._writer._export_line = _boom
+    exporter._writer._export_lines = _boom
     try:
         assert exporter.export({"name": "probe"}) is True
         exporter.force_flush(timeout_millis=2_000)
         snapshot = exporter.metrics()
     finally:
-        exporter._writer._export_line = None
+        exporter._writer._export_lines = None
         exporter.shutdown(timeout_millis=2_000)
 
     assert snapshot["export_failures"] >= 1, "the fixture must actually produce a failure"
