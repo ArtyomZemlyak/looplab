@@ -430,12 +430,27 @@ def summarise(run_dir: Path) -> dict | None:
     champ = probe_dir / "champion_solver.py"
     kernel = False
     champ_lines = 0
+    body = ""
     if champ.is_file():
         body = champ.read_text(errors="replace")
         champ_lines = body.count("\n")
         kernel = bool(re.search(r"import numba|@njit|cimport|import cython", body))
-    if not kernel and probe_dir.is_dir():
-        kernel = kernel or any(p.suffix == ".pyx" for p in probe_dir.glob("*"))
+    shipped_pyx = probe_dir.is_dir() and any(p.suffix == ".pyx" for p in probe_dir.glob("*"))
+    kernel = kernel or shipped_pyx
+    # WHICH KERNEL, NOT JUST WHETHER (§377). `kernel` is one boolean over two populations that are
+    # nothing alike. Measured 2026-09-09 over every probe with a champion and a final score, by task:
+    #
+    #     edge_expansion   cython n=108 median 219.79 | numba n=8 median 26.68 | plain n=2 30.06
+    #     pagerank         cython n=  8 median  53.37 | numba n=2 median 34.12
+    #     discrete_log     cython n=  6 median   9.99 | numba n=6 median  7.78
+    #     pde_heat1d       numba  n= 10 median 119.25 | no cython champion at all
+    #
+    # Eight-fold on the task that sizes every arm. A flag that answers "a kernel, yes or no" cannot
+    # separate 219 from 26, and §186's own prose says "Cython kernel" where this flag also matches
+    # numba -- a discrepancy to settle when that arm is designed, not to assume away here.
+    kernel_kind = ("cython" if shipped_pyx or re.search(r"cimport|import cython", body)
+                   else "numba" if re.search(r"import numba|@njit", body)
+                   else ("plain" if champ.is_file() else None))
 
     return {
         "probe": probe_dir.name,
@@ -467,6 +482,7 @@ def summarise(run_dir: Path) -> dict | None:
         "ref_call_pct": ref_call_pct,
         "champion_lines": champ_lines,
         "kernel": kernel,
+        "kernel_kind": kernel_kind,
         "to_build_min": to_build,
         "build_min": build_min,
         "age_s": age_s,
