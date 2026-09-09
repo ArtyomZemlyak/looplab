@@ -1179,15 +1179,60 @@ def check_arm_a_constants_are_a_file(bench: str):
         if not isinstance(got, (int, float)):
             bad.append(f"{task} has no number")
             continue
-        drift = (100 * (got - was) / was) if isinstance(was, (int, float)) and was else 0.0
-        if abs(drift) > 5.0:
-            bad.append(f"{task} moved {drift:+.1f} % from §181's {was}")
-        said.append(f"{task} {got:.4f} ({regime}, {drift:+.1f} % vs §181)")
+        if not isinstance(was, (int, float)):
+            bad.append(f"{task} carries no §181 constant to compare against")
+            said.append(retimed_line(task, row, None))
+            continue
+        drift, problem = retimed_verdict(got, was)
+        if problem:
+            bad.append(f"{task} {problem}")
+        said.append(retimed_line(task, row, drift))
     detail = "; ".join(said) + ("; PROBLEM: " + "; ".join(bad) if bad else "")
     return not bad, detail
 
 
 _CHAMPION_LINE = re.compile(r"champion node (\d+) \(metric=([0-9.]+)\)")
+
+
+def retimed_verdict(got, was):
+    """`(drift_percent_or_None, problem_or_None)` for one re-timed constant against §181's.
+
+    §385. The old line computed `100 * (got - was) / was` behind `if was`, so a task whose §181
+    constant is **0.0** produced a drift of exactly `+0.0 %` whatever the re-timing said, and the
+    5 % gate could not fire on it. `pagerank` is that task, and it is the one where arm A shipped a
+    solver that returns nothing valid -- the row where a change is most worth catching, because
+    going from "no valid speedups" to a real number is the difference between an arm that failed
+    and an arm that ran.
+
+    A zero is not a small speedup, so the two are never compared in per cent. Crossing between them
+    is a change of KIND and is reported as one.
+    """
+    zero_now, zero_then = not got, not was
+    if zero_now and zero_then:
+        return None, None
+    if zero_then:
+        return None, (f"§181 recorded NO valid speedups and the re-timing reads {got:.4f} -- "
+                      "a change of kind, not a drift: arm A now produces something scorable")
+    if zero_now:
+        return None, (f"§181 recorded {was:.4f} and the re-timing reads NO valid speedups -- "
+                      "a change of kind, not a drift: arm A stopped producing anything scorable")
+    drift = 100.0 * (got - was) / was
+    if abs(drift) > 5.0:
+        return drift, f"moved {drift:+.1f} % from §181's {was}"
+    return drift, None
+
+
+def retimed_line(task: str, row: dict, drift) -> str:
+    """The SENTENCE one constant gets. A function because the wording is the fix (§342): the
+    docstring above has always shown `pagerank ... no_valid_speedups`, while the code rendered
+    `pagerank 0.0000 (__w22x1r3, +0.0 % vs §181)` -- a zero dressed as a score, next to three real
+    ones, with the reason the file records dropped on the floor."""
+    got, regime = row.get("speedup"), row.get("regime")
+    reason = row.get("no_speedup_reason")
+    if not got:
+        return f"{task} NO VALID SPEEDUPS ({regime}, reason {reason or 'unrecorded'})"
+    drift_part = f"{drift:+.1f} % vs §181" if drift is not None else "no §181 constant"
+    return f"{task} {got:.4f} ({regime}, {drift_part})"
 
 
 def check_the_champion_is_the_best_evaluated_node(bench: str):
