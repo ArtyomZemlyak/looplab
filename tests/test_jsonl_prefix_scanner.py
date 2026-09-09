@@ -277,15 +277,15 @@ def test_lesson_hygiene_does_not_import_back_into_memory():
 
 
 def test_concept_capsule_re_exports_are_the_same_objects():
-    """The capsule half of EM-10. `tools/` reaches for `_dedup_valid_capsules`,
-    `_portfolio_concept_overview_data` and `_capsule_rows` THROUGH `memory` (they are declared
+    """The capsule half of EM-10. `tools/` reaches for `dedup_valid_capsules`,
+    `portfolio_concept_overview_data` and `capsule_rows` THROUGH `memory` (they are declared
     cross-package private seams), so identity — not name resolution — is the contract."""
     from looplab.engine import concept_capsules, memory
 
-    for name in ("ConceptCapsuleStore", "build_concept_capsule", "_dedup_valid_capsules",
-                 "_capsule_rows", "_filter_capsule_rows", "_portfolio_concept_overview_data",
+    for name in ("ConceptCapsuleStore", "build_concept_capsule", "dedup_valid_capsules",
+                 "capsule_rows", "filter_capsule_rows", "portfolio_concept_overview_data",
                  "portfolio_concept_overview", "_valid_capsule_record",
-                 "_capsule_source_summary", "_capsule_completeness", "concept_profit_tendencies",
+                 "capsule_source_summary", "capsule_completeness", "concept_profit_tendencies",
                  "CONCEPT_CAPSULE_VERSION"):
         assert getattr(memory, name) is getattr(concept_capsules, name), (
             f"{name} is a COPY in memory, not a re-export")

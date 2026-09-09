@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from looplab.serve.routers.runs import _assert_lens_generation
+from looplab.serve.concept_lens_service import assert_lens_generation
 
 
 GENERATION = "a" * 64
@@ -42,7 +42,7 @@ class _Srv:
 
 def _fence(current, core_generation, *, expected=GENERATION, canonical=None):
     srv = _Srv(_Commands(current, canonical=canonical))
-    return _assert_lens_generation(
+    return assert_lens_generation(
         srv, Path("/runs/demo"), core_generation=core_generation,
         expected_generation=expected,
         stale_message="stale caller", stale_remediation="reload",
@@ -124,7 +124,7 @@ def test_the_paths_are_validated_before_the_generation_is_read():
             return super().run_generation(rd)
 
     srv = _Srv(_Ordered(GENERATION))
-    _assert_lens_generation(
+    assert_lens_generation(
         srv, Path("/runs/demo"), core_generation=GENERATION, expected_generation=GENERATION,
         stale_message="m", stale_remediation="r", prepared_message="p")
     assert order == ["validate", "generation"]

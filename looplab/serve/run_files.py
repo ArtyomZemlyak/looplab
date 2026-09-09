@@ -1,39 +1,14 @@
-"""Shared serialization for mutable per-run snapshot files."""
+"""Shared serialization for mutable per-run snapshot files.
+
+The two locks themselves moved DOWN to `looplab/engine/run_lifecycle.py` on 2026-09-08 (doc 25
+XP-03): `run_config_write_lock` is one of the five `RunLifecycleFns` primitives a run-MUTATING agent
+tool needs, and while it lived here `tools/` could only reach its own default by importing `serve/`
+upward. This module stays as the historical import path — `serve/routers/*` and the CLI both name
+it — and re-exports both names unchanged.
+"""
 from __future__ import annotations
 
-import hashlib
-import os
-import threading
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator, Optional
-
-from looplab.core.run_deletion import assert_run_deletion_write_allowed
-from looplab.core.run_reset import assert_run_reset_write_allowed
-from looplab.events.eventstore import _interprocess_lock
-
-
-_RUN_CONFIG_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
-
-
-def run_config_thread_lock(snapshot_path: Path) -> threading.Lock:
-    """Bound same-process serialization without retaining a lock for every historical run."""
-    identity = os.path.normcase(os.path.abspath(snapshot_path)).encode(
-        "utf-8", errors="surrogatepass")
-    stripe = int.from_bytes(hashlib.sha256(identity).digest()[:2], "big")
-    return _RUN_CONFIG_LOCK_STRIPES[stripe % len(_RUN_CONFIG_LOCK_STRIPES)]
-
-
-@contextmanager
-def run_config_write_lock(
-        snapshot_path: Path, *, operation_id: Optional[str] = None,
-        deletion_operation_id: Optional[str] = None) -> Iterator[None]:
-    """Own the config transaction and enforce every whole-run writer fence."""
-    with (run_config_thread_lock(snapshot_path),
-          _interprocess_lock(Path(str(snapshot_path) + ".lock"), required=True)):
-        assert_run_reset_write_allowed(snapshot_path.parent, operation_id)
-        assert_run_deletion_write_allowed(snapshot_path.parent, deletion_operation_id)
-        yield
-
+from looplab.engine.run_lifecycle import (  # noqa: F401 - re-exported for the historical import path
+    run_config_thread_lock, run_config_write_lock)
 
 __all__ = ["run_config_thread_lock", "run_config_write_lock"]

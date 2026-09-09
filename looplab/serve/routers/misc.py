@@ -39,7 +39,7 @@ from looplab.core.memory_window import (
 )
 from looplab.core.pathsafe import is_reparse
 from looplab.engine.concept_shelf import bounded_row_concepts, build_shelf, run_concept_index
-from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.serve.http import if_none_match, json_object, request_body_contract
 from looplab.serve.launch import task_file_roots
 from looplab.serve.assistant import safe_provider_failure
@@ -60,6 +60,23 @@ _MEMORY_SOURCE_ROWS = MEMORY_SOURCE_ROWS
 # name guard keeps `PUT /api/{kind}/{name}` to the authored-markdown surface `list_author` can show.
 _AUTHOR_MAX_FILES = 500
 _AUTHOR_MAX_BYTES = 256 * 1024
+# THE AUTHORING SURFACE'S ROOTS. `memory_skills` (2026-09-08) is the fourth and the only one the
+# operator does not write: `<memory_dir>/skills`, the auto-distilled cards
+# `engine/memory.py::write_auto_skill` drafts from a run's own supported work items. Until it was
+# listed here those cards were invisible to the operator until CROSS-TASK promotion moved them into
+# the production listing (`tools/skills.py::skill_tier` — an auto card is `task`, and `task` stays
+# out of the run-time listing), so the one party who could judge a candidate could only read it by
+# opening files on the host. That was doc 27's `auto-distilled-skills-outside-authoring`.
+#
+# READ-ONLY, and not as a convenience: every file there carries the lifecycle frontmatter
+# (`status`, `claim_sha256`, `fingerprints`, `demotions`) that `write_auto_skill`'s
+# read-modify-write and the production visibility gate both key on, so a hand edit through this
+# surface is an unreviewed write to a trust boundary — one that could promote a one-task candidate
+# by typing a word. The review question this root answers ("what did my runs distil, and is it
+# true?") does not need a write; retiring a bad card is a file deletion on the host, which this
+# surface has never offered for any kind.
+_AUTHOR_KINDS = ("prompts", "skills", "knowledge", "memory_skills")
+_AUTHOR_WRITABLE_KINDS = ("prompts", "skills", "knowledge")
 # Recursive skill packages are a display surface, not permission to walk an operator-controlled
 # tree without end. These bounds cap both directory work and relative-path complexity independently
 # of the response/file caps above.
@@ -102,6 +119,20 @@ def _valid_author_name(value: object) -> bool:
             and "/" not in value and "\\" not in value
             and Path(value).name == value
             and not any(unicodedata.category(ch).startswith("C") for ch in value))
+
+
+def _require_writable_author_kind(kind: str) -> None:
+    """Refuse a write route for an unknown kind (404) or a READ-ONLY one (405), never the same way.
+
+    `memory_skills` is a real Authoring root — it lists, and every one of its rows says
+    `read_only` — so answering its PUTs with "unknown kind" would tell a client the resource it
+    just read does not exist. 405 is the honest answer: the resource is there, this method is not
+    for it, and the reason is the lifecycle frontmatter named at `_AUTHOR_KINDS`.
+    """
+    if kind not in _AUTHOR_KINDS:
+        raise HTTPException(404, "unknown kind")
+    if kind not in _AUTHOR_WRITABLE_KINDS:
+        raise HTTPException(405, f"the {kind} store is written by the engine and is read-only here")
 
 
 def _valid_skill_display_name(value: object) -> bool:
@@ -1039,6 +1070,20 @@ def _configured_author_root(directory: Path | None, kind: str) -> Path:
             retryable=True) from exc
 
 
+def memory_skills_dir(settings) -> Path | None:
+    """`<memory_dir>/skills` — the auto-distilled skill store — or None when no memory dir is set.
+
+    ONE derivation, read by the listing route and by every refusal beside it. Deliberately NOT a
+    `Settings` field of its own: the directory is not independently configurable anywhere in the
+    engine (`engine/lessons_distill.py` writes `Path(memory_dir) / "skills"` and
+    `tools/skills.py`'s auto library reads that same path), so a field here would be a second
+    spelling of one place — i.e. a way for the writer and the reviewer to disagree about which
+    cards exist. It moves with `memory_dir`, which is what the operator actually configures.
+    """
+    configured = getattr(settings, "memory_dir", None)
+    return Path(configured) / "skills" if configured else None
+
+
 def _current_author_directory(srv, kind: str) -> Path | None:
     """Read one configured-directory snapshot (mutation callers hold the settings lock)."""
     settings = srv.global_settings()
@@ -1046,6 +1091,7 @@ def _current_author_directory(srv, kind: str) -> Path | None:
         "prompts": settings.prompt_dir,
         "skills": settings.skills_dir,
         "knowledge": settings.knowledge_dir,
+        "memory_skills": memory_skills_dir(settings),
     }.get(kind)
     return Path(configured) if configured else None
 
@@ -1092,7 +1138,7 @@ def _run_author_operation(srv, *, kind: str, name: str, operation_id: str, text_
     try:
         # Hold both locks for the full transition. The settings lock makes "current root" a real
         # precondition rather than a Path captured just before the authoring lock was acquired.
-        with _AUTHOR_THREAD_LOCK, _interprocess_lock(
+        with _AUTHOR_THREAD_LOCK, interprocess_lock(
                 _author_operation_lock_path(srv), required=True), \
                 srv.settings.ui_settings_transaction():
             directory = _current_author_directory(srv, kind)
@@ -1254,7 +1300,7 @@ def _lookup_author_operation(srv, *, kind: str, name: str, operation_id: str,
 
 def _run_legacy_author_write(srv, *, kind: str, name: str, text: str) -> dict[str, Any]:
     try:
-        with _AUTHOR_THREAD_LOCK, _interprocess_lock(
+        with _AUTHOR_THREAD_LOCK, interprocess_lock(
                 _author_operation_lock_path(srv), required=True), \
                 srv.settings.ui_settings_transaction():
             directory = _current_author_directory(srv, kind)
@@ -1360,7 +1406,7 @@ def build_router(srv) -> APIRouter:
         # Atomic rename prevents torn JSON but cannot protect this larger load→merge→write cycle:
         # two concurrent disjoint PUTs must observe one another instead of losing the first rename.
         # OFF the event loop. `ui_settings_transaction()` takes a threading.Lock plus
-        # `_interprocess_lock(required=True)` — a blocking `fcntl.flock` with NO timeout — and then
+        # `interprocess_lock(required=True)` — a blocking `fcntl.flock` with NO timeout — and then
         # does load / merge / `Settings()` validation / atomic write inline. Run inline on the ASGI
         # loop, a lock another server process holds froze every SSE stream and poll on this worker
         # until it was released. Same offload `/control` and `submit_command` already use; the JSON
@@ -2017,7 +2063,7 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/{kind}")
     def list_author(kind: str, response: Response):
-        if kind not in ("prompts", "skills", "knowledge"):
+        if kind not in _AUTHOR_KINDS:
             raise HTTPException(404, "unknown kind")
         # The returned digest is a write precondition, never a cacheable display hint.
         response.headers["Cache-Control"] = "private, no-store"
@@ -2044,12 +2090,17 @@ def build_router(srv) -> APIRouter:
             candidates, truncated_files, inventory_incomplete = _skill_author_candidates(root)
         else:
             names = sorted(root.glob("*.md"))
-            candidates = [(p.name, p, False) for p in names[:_AUTHOR_MAX_FILES]]
+            # `memory_skills` is the engine's own store: every row is read-only (see `_AUTHOR_KINDS`),
+            # and the flat `auto-<digest>.md` shape it writes is why the name check below is a rule
+            # about the NAME rather than about the flag — a read-only row is either a nested package
+            # id or a plain basename, and neither is a write name here.
+            read_only_kind = kind not in _AUTHOR_WRITABLE_KINDS
+            candidates = [(p.name, p, read_only_kind) for p in names[:_AUTHOR_MAX_FILES]]
             truncated_files = max(0, len(names) - len(candidates))
             inventory_incomplete = False
         for display_name, p, read_only in candidates:
-            if ((read_only and not _valid_skill_display_name(display_name))
-                    or (not read_only and not _valid_author_name(display_name))):
+            if not (_valid_author_name(display_name)
+                    or (read_only and _valid_skill_display_name(display_name))):
                 truncated_files += 1
                 continue
             # knowledge_dir is AGENT-WRITABLE (see above), so a file can be deleted or renamed
@@ -2081,8 +2132,7 @@ def build_router(srv) -> APIRouter:
     def get_author_operation(kind: str, name: str, operation_id: str,
                              expected_target_root_id: str, expected_revision: str,
                              desired_revision: str, response: Response):
-        if kind not in ("prompts", "skills", "knowledge"):
-            raise HTTPException(404, "unknown kind")
+        _require_writable_author_kind(kind)
         if not _valid_author_name(name):
             raise HTTPException(400, "bad name (expected a plain <file>.md)")
         if _AUTHOR_OPERATION_RE.fullmatch(operation_id) is None:
@@ -2112,8 +2162,7 @@ def build_router(srv) -> APIRouter:
     )
     async def write_author_operation(kind: str, name: str, operation_id: str,
                                      body: AuthoringOperationRequest, response: Response):
-        if kind not in ("prompts", "skills", "knowledge"):
-            raise HTTPException(404, "unknown kind")
+        _require_writable_author_kind(kind)
         if not _valid_author_name(name):
             raise HTTPException(400, "bad name (expected a plain <file>.md)")
         if _AUTHOR_OPERATION_RE.fullmatch(operation_id) is None:
@@ -2136,8 +2185,7 @@ def build_router(srv) -> APIRouter:
 
     @router.put("/api/{kind}/{name}")
     async def write_author(kind: str, name: str, request: Request):
-        if kind not in ("prompts", "skills", "knowledge"):
-            raise HTTPException(404, "unknown kind")
+        _require_writable_author_kind(kind)
         d = _author_dir(kind)
         if d is None:
             raise HTTPException(400, f"no {kind} dir configured (set LOOPLAB_{kind.upper()}_DIR)")

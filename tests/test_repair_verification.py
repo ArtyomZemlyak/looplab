@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from pathlib import Path
 
 import anyio
@@ -23,7 +24,8 @@ from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_MIN
                                           REPAIR_INERT, REPAIR_UNMET,
                                           REPAIR_UNSTATED, REPAIR_VERDICTS, REPAIR_VERIFIED,
                                           _assigned_numeric_paths, changed_region, claimed_tokens,
-                                          declared_param_overrides, inert_streak, verify_repair)
+                                          declared_param_overrides, inert_streak,
+                                          names_an_exception_class, verify_repair)
 from looplab.engine.triage import AGENT_TRIAGE_ACTIONS, TRIAGE_ACTIONS, coerce_triage_action
 from looplab.engine.metric_salvage import SALVAGE_CAUSE_TRIAGE_ACTION
 from looplab.events.eventstore import EventStore
@@ -161,6 +163,23 @@ _V8_ABBREVIATION_REGION = (
     "a\n"
     "+    config.train.training.batch_size = 4096\n"
     "+    config.train.training.gradient_accumulation_steps = 4\n")
+
+
+# `rubertlite-dr-unified-v6` node 1 attempt 1, verbatim — the row the module docstring filed as the
+# NEGATED claim and the one the 2026-09-08 clause-scanner correction moves. BOTH of its concrete
+# lists sit inside a clause about another node, and the old digit-only rule cut the first of those
+# clauses at the dot in `train.py` and the second at the dot in `loss.temperature`, so seven tokens
+# the citation rule had already excused convicted anyway.
+_V6_NEGATED_CLAIM = (
+    "The crash is purely mechanical: node 1 passed three CLI args the harness's train.py "
+    "argparse does not define (gradient_accumulation_steps, max_grad_norm, weight_decay). The "
+    "fix is to drop those unsupported args and keep the supported set node 0 used "
+    "(loss.temperature, batch_size, learning_rate, n_epochs, warmup_ratio), still applying the "
+    "symmetric mnsr loss + lr 1e-3 change in the solution code.")
+_V6_NEGATED_CLAIM_CHANGED = ["looplab_stages.json"]
+_V6_NEGATED_CLAIM_REGION = (
+    'looplab_stages.json\n@@\n     "python",\n     "-m",\n-    "vectorsearch.train",\n'
+    '-    "%params%"\n+    "vectorsearch.train"\n    ],\n-   "gpus": 1,\n')
 
 
 class _ClaimingDev:
@@ -650,28 +669,427 @@ def test_a_citation_may_acquit_but_never_convict_and_never_reaches_verified():
     assert _verdict(after, ["train.py"], "train.py\n@@\n-x = 1\n").verdict == REPAIR_UNMET
 
 
+@pytest.mark.parametrize("token,is_exception", [
+    ("IndentationError", True),
+    ("KeyError", True),
+    ("torch.OutOfMemoryError", True),       # the quoted, dotted spelling `_QUOTED_RE` yields intact
+    ("DeprecationWarning", True),
+    ("KeyboardInterrupt", True),
+    ("ValueErrorHandler", False),           # ends in a name, is not one — anchored at both ends
+    ("error_handler", False),
+    ("mine_stage.py", False),
+    ("grad_accum", False),
+    ("Error", False),                       # the suffix alone names nothing
+    ("", False),
+    (None, False),
+])
+def test_an_exception_class_is_recognised_by_shape_and_nothing_else_is(token, is_exception):
+    """The truth table, driven directly, because the rule is a SHAPE and a shape is exactly the kind
+    of thing that quietly widens. The negatives are the load-bearing half: `ValueErrorHandler` is an
+    ordinary identifier a repair can genuinely promise, and excusing it would take a real claim out
+    of the convicting set for the rest of time."""
+    assert names_an_exception_class(token) is is_exception
+
+
+def test_an_exception_class_may_acquit_but_never_convict_alone():
+    """`sim-nosignal` node 5's shape, and the asymmetry that makes it safe.
+
+    A rationale naming `IndentationError` is reporting what the dead process called ITSELF. The
+    repair that fixes an indentation error writes that word nowhere, so the literal-token extractor
+    convicted it — the fifth of the five unpatched `unmet` shapes, and the only one recognisable
+    without reading the sentence.
+
+    Both directions are asserted because the whole argument for demoting rather than DROPPING the
+    token is the first one: a `_NOT_A_CLAIM` row would take the acquittal away with the conviction,
+    and a row whose only met token was the exception name would move `verified` -> `unmet`, i.e. a
+    weak signal would start convicting."""
+    fixed = "the crash is a plain IndentationError in the mine stage; re-indent the loop body"
+    # 1. IT MAY NOT CONVICT ALONE. `unstated` — the verdict that already means "I could not check
+    #    this" — and never `verified`, which would be the record vouching for the repair.
+    demoted = _verdict(fixed, ["train.py"], "train.py\n@@\n-x = 1\n+x = 2\n")
+    assert demoted.verdict == REPAIR_UNSTATED and demoted.unmet == ()
+    # 2. NOTHING IS DROPPED: the token is still on the record as a claim, exactly like a citation.
+    assert "IndentationError" in demoted.claims
+    # 3. IT MAY STILL ACQUIT. A diff that really contains the name verifies the row as before —
+    #    this is the behaviour a `_NOT_A_CLAIM` row would have destroyed.
+    kept = _verdict(fixed, ["train.py"],
+                    "train.py\n@@\n-    x = 1\n+  except IndentationError:\n+    pass\n")
+    assert kept.verdict == REPAIR_VERIFIED
+    # 4. AND IT EXCUSES NOTHING ELSE. A real promise in the same rationale still convicts, with the
+    #    exception name dropped from the list the judge is shown.
+    mixed = _verdict("the crash is an IndentationError; fix mine_stage.py to re-indent the loop",
+                     ["mine_negatives.py"], "mine_negatives.py\n@@\n+    pass\n")
+    assert mixed.verdict == REPAIR_UNMET
+    assert "mine_stage.py" in mixed.unmet and "IndentationError" not in mixed.unmet
+
+
+def _digit_only_clause_end(text, k):
+    """The clause rule as it stood until 2026-09-08: a `.` is exempt ONLY between two digits.
+
+    Re-derived here rather than imported, because the point of the tests that install it is that the
+    shipped rule answers DIFFERENTLY — a defect no longer in the tree cannot be reproduced from it.
+    Kept byte-for-byte equivalent to the code it replaces so the comparison is honest."""
+    ch = text[k]
+    if ch not in repair_verify._CLAUSE_ENDS:
+        return False
+    if ch == "." and 0 < k < len(text) - 1 and text[k - 1].isdigit() and text[k + 1].isdigit():
+        return False
+    return True
+
+
+@pytest.mark.parametrize("text,index,is_end", [
+    ("train.py argparse", 5, False),           # a file extension: inside the token
+    ("loss.temperature, batch_size", 4, False),  # a dotted configuration path: likewise
+    ("Node 1 used lr 0.5 and nll_cos", 16, False),  # the decimal the digit rule was written for
+    ("mine_stage.py. Then I edited", 10, False),   # the extension's dot …
+    ("mine_stage.py. Then I edited", 13, True),    # … and the sentence's, one character later
+    ("Node 1 used version 2. Then", 21, True),  # a trailing `2.` still ends it
+    ("the ratio was .5 there", 14, True),       # so does a leading `.5`
+    ("node 1 reached 0.73; I will", 19, True),  # `;` is untouched by any of this
+    ("node 1 reached 0.73\nI will", 19, True),  # so is the newline
+])
+def test_a_clause_ends_at_a_sentence_and_never_inside_a_token(text, index, is_end):
+    """The rule as a truth table, because it is a SHAPE and a shape is what quietly widens.
+
+    The two bounds the digit-only spelling stated out loud are the load-bearing negatives here: a
+    trailing `2.` and a leading `.5` must still END the clause, or one sentence about another node
+    swallows the paragraph after it into the citation. They hold as CONSEQUENCES of the shape rule
+    (prose puts a space after the period that ends a sentence) rather than as special cases."""
+    from looplab.engine.repair_verify import _clause_end_at
+
+    assert _clause_end_at(text, index) is is_end
+
+
+def test_a_citation_clause_does_not_end_inside_a_filename(monkeypatch):
+    """`rubertlite-dr-unified-v6` node 1 attempt 1, the row the module docstring filed as the fourth
+    unpatched `unmet` shape, driven both ways.
+
+    Its rationale is two sentences and BOTH of them are about another node — "node 1 passed three
+    CLI args … (gradient_accumulation_steps, max_grad_norm, weight_decay)" and "keep the supported
+    set node 0 used (loss.temperature, batch_size, …)". The citation rule has excused tokens like
+    those since 2026-08-15; what convicted this row anyway was the clause SCANNER, which took the
+    dot in `train.py` and the dot in `loss.temperature` for sentence ends and closed each window
+    before it reached the parenthetical it was opened for."""
+    from looplab.engine.repair_verify import _citation_clauses
+
+    # 1. THE DEFECT, reproduced on the shipped path by restoring the old predicate and nothing else.
+    monkeypatch.setattr(repair_verify, "_clause_end_at", _digit_only_clause_end)
+    before = _verdict(_V6_NEGATED_CLAIM, _V6_NEGATED_CLAIM_CHANGED, _V6_NEGATED_CLAIM_REGION)
+    assert before.verdict == REPAIR_UNMET
+    assert "gradient_accumulation_steps" in before.unmet and "warmup_ratio" in before.unmet
+    # The scanner is the whole difference: the first clause stopped mid-`train.py`.
+    assert [_V6_NEGATED_CLAIM[a:b] for a, b in _citation_clauses(_V6_NEGATED_CLAIM)][0].endswith(
+        "the harness's train")
+
+    # 2. THE FIX. Each clause now runs to its own sentence end, so it covers the list it was about.
+    monkeypatch.undo()
+    clauses = [_V6_NEGATED_CLAIM[a:b] for a, b in _citation_clauses(_V6_NEGATED_CLAIM)]
+    assert clauses[0].endswith("(gradient_accumulation_steps, max_grad_norm, weight_decay)")
+    assert ("(loss.temperature, batch_size, learning_rate, n_epochs, warmup_ratio)"
+            in clauses[1]), "the second clause reaches its own parenthetical too"
+    after = _verdict(_V6_NEGATED_CLAIM, _V6_NEGATED_CLAIM_CHANGED, _V6_NEGATED_CLAIM_REGION)
+    assert after.verdict == REPAIR_UNSTATED and after.unmet == ()
+
+    # 3. AND THE NEGATION IS STILL UNREAD, which is what the row was actually filed for. The same
+    #    promise made OUTSIDE a citation clause — kept by deleting the `%params%` placeholder that
+    #    passed the flag — still convicts, because reading it needs the manifest and not the text.
+    negated = _verdict("Fix: drop the --weight_decay flag the harness cannot parse",
+                       _V6_NEGATED_CLAIM_CHANGED, _V6_NEGATED_CLAIM_REGION)
+    assert negated.verdict == REPAIR_UNMET and "--weight_decay" in negated.unmet
+
+
+def test_the_old_rule_convicted_a_sentence_only_because_it_happened_to_name_a_file(monkeypatch):
+    """The argument that the widening costs no conviction the rung ever meant to make: under the old
+    predicate the SAME sentence was scored two different ways depending on whether it mentioned a
+    dotted token, and the version without one — which nothing here changes — was already `unstated`.
+
+    So what the correction removes is an inconsistency, not a signal."""
+    plain = "node 1 used the same config so I will edit mine_stage"
+    dotted = "node 1 used config.yaml so I will edit mine_stage"
+    changed, region = ["looplab_eval.py"], "looplab_eval.py\n@@\n+pass\n"
+
+    monkeypatch.setattr(repair_verify, "_clause_end_at", _digit_only_clause_end)
+    assert _verdict(plain, changed, region).verdict == REPAIR_UNSTATED
+    assert _verdict(dotted, changed, region).verdict == REPAIR_UNMET, "the inconsistency"
+
+    monkeypatch.undo()
+    assert _verdict(plain, changed, region).verdict == REPAIR_UNSTATED
+    assert _verdict(dotted, changed, region).verdict == REPAIR_UNSTATED
+    # A promise made BEFORE the citation is untouched in either regime — a longer clause runs
+    # forward from the reference, so it can never reach back over a claim already made.
+    promise_first = "Fix mine_stage.py to relax the threshold; node 1's config.yaml passed at 0.73"
+    assert _verdict(promise_first, changed, region).verdict == REPAIR_UNMET
+
+
+def test_the_clause_correction_can_only_ever_withdraw_an_accusation(monkeypatch):
+    """The direction bound, as a truth table over every verbatim corpus row these tests carry rather
+    than as a fixture count — the claim the module docstring makes and the one that matters, because
+    the corpus that sized every other rule here (`runs/`) no longer exists on any box.
+
+    A longer clause can only REMOVE a token from the convicting set; `_is_citation_only` is
+    consulted only where NOTHING was met at all; and its single landing place is `unstated`. So
+    `verified` and `inert` are unreachable here, and `unmet` can only be withdrawn, never widened."""
+    rows = {
+        "v8 n3 a1 (the true positive)": (_V8_TRUE_POSITIVE, _V8_TRUE_POSITIVE_CHANGED,
+                                         _V8_TRUE_POSITIVE_REGION),
+        "v8 n3 a2 (cited baseline)": (_V8_CITED_BASELINE, _V8_CITED_BASELINE_CHANGED,
+                                      _V8_CITED_BASELINE_REGION),
+        "v8 n3 a4 (abbreviation)": (_V8_ABBREVIATION, _V8_ABBREVIATION_CHANGED,
+                                    _V8_ABBREVIATION_REGION),
+        "v6 n1 a1 (the negated claim)": (_V6_NEGATED_CLAIM, _V6_NEGATED_CLAIM_CHANGED,
+                                         _V6_NEGATED_CLAIM_REGION),
+        "kept promise": ("cutting n_epochs 10 -> 5 to fit the budget", ["train.py"],
+                         "train.py\n@@\n-n_epochs = 10\n+n_epochs = 5\n"),
+        "broken promise": ("cutting n_epochs 10 -> 5 to fit the budget", ["train.py"],
+                           "train.py\n@@\n-lr = 1e-4\n+lr = 3e-4\n"),
+        "the crash's own word": ("the crash is an IndentationError in mine_stage.py; re-indent it",
+                                 ["train.py"], "train.py\n@@\n-x = 1\n+x = 2\n"),
+    }
+    monkeypatch.setattr(repair_verify, "_clause_end_at", _digit_only_clause_end)
+    old = {k: _verdict(*v) for k, v in rows.items()}
+    monkeypatch.undo()
+    new = {k: _verdict(*v) for k, v in rows.items()}
+
+    moved = []
+    for name in rows:
+        was, now = old[name], new[name]
+        if was.verdict == now.verdict:
+            assert was.unmet == now.unmet, f"{name}: the accusation changed without the verdict"
+            continue
+        moved.append(name)
+        assert (was.verdict, now.verdict) == (REPAIR_UNMET, REPAIR_UNSTATED), (name, was, now)
+        assert now.unmet == () and set(was.claims) == set(now.claims), "nothing is dropped"
+    # And the one row that moves is the one the docstring names. The true positive is not on this
+    # list, which is the regression floor for every future widening of the clause window.
+    assert moved == ["v6 n1 a1 (the negated claim)"], moved
+
+
+def test_the_exception_rule_leaves_a_real_corpus_row_convicted():
+    """The regression floor for the widening, and it is a REAL row rather than a fixture written to
+    pass: `rubertlite-dense-retrieval` n40's rationale (verbatim from `bench-out/cand.durable.jsonl`,
+    the durable-arm replay of this rung's own inputs — the repair rationale IS the triage rationale)
+    names `FileNotFoundError` AND `model_soup.py`, and the repair edited the eval harness instead.
+
+    The exception name drops out of the accusation; the accusation stands. A rule that excused the
+    row wholesale would be the claim-clause whitelist this module refuses."""
+    rationale = (
+        "The soup stage exited 0 but produced no stdout, so the engine's check_failed fired "
+        "(no_metric/check_failed is the engine's out-of-band verdict, not a diagnosis). Underlying "
+        "cause is a mechanical FileNotFoundError: model_soup.py references a hardcoded path "
+        "(models/rubertlite_run_37/last.ckpt, then rubertlite-20e-v7/last.ckpt) that doesn't "
+        "exist, so the script dies before printing anything. The idea")
+    v = _verdict(rationale, ["looplab_eval.py"],
+                 "looplab_eval.py\n@@\n-    ckpt = 'models/x/last.ckpt'\n+    ckpt = resolve()\n")
+    assert v.verdict == REPAIR_UNMET
+    assert "model_soup.py" in v.unmet, "the file it named and did not touch still convicts"
+    assert "FileNotFoundError" not in v.unmet
+    assert "FileNotFoundError" in v.claims
+
+
+# ------------------------------------------------- the three rows that stay `unmet`, and WHY
+# The `repair-unmet-five-unpatched-shapes` decline (its marker lives in the module docstring — a
+# second one here would enter the index as a duplicate declaration), driven rather than argued. Each
+# test installs a CANDIDATE rule as a throwaway — the `_digit_only_clause_end` pattern, over the
+# module global the shipped decision path already consults — and measures what it costs on rows this
+# tree still carries verbatim. The corpus that sized every shipped rule here (`runs/`) is gone and the
+# three rows' own rationales went with it, so a refusal argued in prose is a refusal nobody can
+# re-run, which is the thing this module keeps having to correct.
+#
+# Two rows verbatim from `bench-out/cand.durable.jsonl`, the triage bench's durable arm over these
+# same runs: the repair rationale IS the triage rationale (`engine/evaluate.py` hands
+# `verify_repair` exactly this field), and each carries the slice of the FAILURE OUTPUT the triage
+# quoted back at it (`evidence.source == "error"` — a transcription of the stderr the engine handed
+# it, which is the input a crash-text rule would read).
+_BENCH_FLAGS = (
+    "The CLI parser exposes the training hyperparameters under the `--adapter.training.*` namespace "
+    "(see the usage block showing `--adapter.training.val_sample_ratio`, "
+    "`--adapter.training.early_stopping_patience`, etc.), but the experiment passed "
+    "`--train.training.gradient_accumulation_steps` and `--train.training.weight_decay`. The fix is "
+    "to rename the offending flags to the `adapter.training` namespa")
+_BENCH_FLAGS_CRASH = ("train.py: error: unrecognized arguments: "
+                      "--train.training.gradient_accumulation_steps=2 "
+                      "--train.training.weight_decay=0.1")
+_BENCH_PICKLE = (
+    "The eval script pickles a dataset that contains a UniqueSparseContainer object, but that class "
+    "is not importable from __main__ when unpickling. The fix is to import the module that defines "
+    "UniqueSparseContainer (likely in the repo, e.g. dataset.py) so pickle can resolve the "
+    "attribute. This is a mechanical import fix, not an idea flaw.")
+_BENCH_PICKLE_CRASH = ("AttributeError: Can't get attribute 'UniqueSparseContainer' on "
+                       "<module '__main__' from '.../looplab_eval.py'>")
+# `rubertlite-dense-retrieval` node 32's own failing line, from that row's `evidence.quote` (source
+# `code`, and the ONE row of the three whose crash bytes survive anywhere on this box). Its two
+# tokens are the two the docstring names.
+_N32_CRASH_LINE = "dd_mask = (s_dd_local <= pos_scores_broadcast + thr_val) & (~diag_dd)"
+
+# The crash-CLAUSE whitelist: the candidate that needs no new input at all, i.e. "the crash is in X"
+# read as evidence the way `_CITATION_RE` reads "node 1 used X". Union with the shipped pattern,
+# because the question is what the WIDENING costs and not what the citation rule already does.
+_CRASH_CLAUSE_RE = re.compile(
+    r"\b(?:crash|bug|error|failure|traceback|exception)\s+(?:is|was)\b"
+    r"|\bcrashed\b|\bdied\b|\bfailed\s+with\b", re.IGNORECASE)
+
+
+def _failure_output_rule(failure: str, *, exempt_files: bool = False):
+    """The candidate rule: a claimed token the FAILURE OUTPUT contains may not convict alone.
+
+    The honest generalisation of `names_an_exception_class` — an exception name is a SHAPE proxy for
+    "the crash's own word for itself", and the engine really does hold the crash's actual words at
+    the call site. Installed over `names_an_exception_class` itself so the demotion runs through the
+    shipped gate (same landing place, `unstated`, and the same inability to reach `verified`).
+    """
+    def rule(token: str) -> bool:
+        if names_an_exception_class(token):
+            return True                      # the shipped rule, unchanged underneath the candidate
+        if exempt_files and repair_verify._FILE_RE.fullmatch(token or ""):
+            return False                     # the exemption the true positive forces, below
+        return bool(token) and token in failure
+    return rule
+
+
+def test_the_crash_text_rule_withdraws_the_one_live_true_positive(tmp_path, monkeypatch):
+    """THE DIRECTION ARGUMENT, driven on real bytes instead of asserted about tracebacks.
+
+    A traceback names the FILE it died in — so the rule that would excuse `rubertlite-dense-
+    retrieval` node 32's two crash-message tokens also excuses `mine_stage.py`, which is the whole
+    of v8 node 3 attempt 1, the only true positive this rung has produced on a live run. The
+    traceback here is a real one: a script that fails the same coverage guardrail the rationale
+    quotes, so what the rule reads is Python's own output and not a fixture written to lose.
+    """
+    import runpy
+    import traceback as tb_mod
+
+    script = tmp_path / "mine_stage.py"
+    script.write_text("def main(coverage):\n"
+                      "    assert coverage >= 0.9, f'coverage {coverage:.2f}'\n", encoding="utf-8")
+    try:
+        runpy.run_path(str(script))["main"](0.43)
+        raise AssertionError("the guardrail did not fire")
+    except AssertionError as exc:
+        if "coverage" not in str(exc):
+            raise
+        failure = tb_mod.format_exc()
+    assert "mine_stage.py" in failure, "Python names the file it died in — that IS the argument"
+
+    # 1. THE SHIPPED VERDICT: the accusation the rung was built to make.
+    shipped = _verdict(_V8_TRUE_POSITIVE, _V8_TRUE_POSITIVE_CHANGED, _V8_TRUE_POSITIVE_REGION)
+    assert shipped.verdict == REPAIR_UNMET and "mine_stage.py" in shipped.unmet
+
+    # 2. UNDER THE RULE it is gone, because every token it convicts on is in the crash text.
+    monkeypatch.setattr(repair_verify, "names_an_exception_class", _failure_output_rule(failure))
+    lost = _verdict(_V8_TRUE_POSITIVE, _V8_TRUE_POSITIVE_CHANGED, _V8_TRUE_POSITIVE_REGION)
+    assert lost.verdict == REPAIR_UNSTATED and lost.unmet == ()
+
+    # 3. SO THE FILE EXEMPTION IS FORCED, not chosen — and it is what makes the rule miss two of the
+    #    three rows it exists for. `mine_stage` (the identifier `_IDENT_RE` lifts out of the file
+    #    claim) is still excused; the accusation survives on the path alone.
+    monkeypatch.setattr(repair_verify, "names_an_exception_class",
+                        _failure_output_rule(failure, exempt_files=True))
+    kept = _verdict(_V8_TRUE_POSITIVE, _V8_TRUE_POSITIVE_CHANGED, _V8_TRUE_POSITIVE_REGION)
+    assert kept.verdict == REPAIR_UNMET and kept.unmet == ("mine_stage.py",)
+    # …and a 0-byte stub parquet — the second of the three rows — is a file claim by this module's
+    # own extractor, so the exemption puts it out of the rule's reach for the same reason.
+    assert repair_verify._FILE_RE.fullmatch("negatives.parquet")
+
+
+def test_the_crash_text_rule_excuses_the_PROMISE_and_not_only_the_citation():
+    """AND THE REACH, which is the half no direction argument had said out loud.
+
+    A crash message quotes the offending flag, the failing line's own variables, the class that
+    would not unpickle — and a repair worth the name promises to change exactly that thing. So "the
+    failure output contains it" is a proxy for THE SUBJECT OF THE REPAIR, not for "the crash's own
+    vocabulary". Both rows are verbatim (rationale AND the crash slice the triage quoted), and in
+    both the tokens the rule excuses are the ones the rationale's own `The fix is to …` clause
+    names. Measured over the whole durable arm: 38 of the 64 rows whose triage quoted the failure
+    output name a claimed token inside that ONE quoted line, and 35 of the 38 do it through a token
+    that is not a file — so the exemption the test above forces saves three rows in thirty-eight.
+    """
+    excused = [t for t in claimed_tokens(_BENCH_FLAGS) if t in _BENCH_FLAGS_CRASH]
+    assert {"--train.training.gradient_accumulation_steps",
+            "--train.training.weight_decay"} <= set(excused), (
+        "argparse printed the very flags the repair promises to rename")
+    excused = [t for t in claimed_tokens(_BENCH_PICKLE) if t in _BENCH_PICKLE_CRASH]
+    assert "UniqueSparseContainer" in excused, "the AttributeError names the class it promises"
+
+    # End to end on the flags row, over a change set that renames nothing (the row's real diff is
+    # gone with `runs/`; its TEXT and its crash slice are the verbatim halves the rule reads). The
+    # shipped rung says the promise is unkept; the candidate rule says there was nothing to check.
+    changed, region = ["train.py"], "train.py\n@@\n-    epochs = 10\n+    epochs = 5\n"
+    shipped = _verdict(_BENCH_FLAGS, changed, region)
+    assert shipped.verdict == REPAIR_UNMET
+    assert "--train.training.weight_decay" in shipped.unmet
+    rule = _failure_output_rule(_BENCH_FLAGS_CRASH)
+    convicting = [t for t in shipped.unmet if not rule(t)]
+    assert "--train.training.weight_decay" not in convicting
+
+
+def test_no_token_shape_separates_the_crashs_own_identifier_from_a_promised_one():
+    """AND THE SHAPE CHANNEL IS SPENT, which is why the fourth shape closed and these three cannot.
+
+    `names_an_exception_class` works because an exception name IS a shape: Python's own suffixes,
+    whole-token. The crash-citation rows convict on ordinary identifiers — node 32's two are the
+    variables on the line that raised — and no predicate over the TOKEN tells them from the
+    parameters a repair promises to change, because there is nothing in the token to tell.
+    """
+    from_the_crash = claimed_tokens(_N32_CRASH_LINE)
+    assert {"s_dd_local", "pos_scores_broadcast"} <= set(from_the_crash)
+    promised = claimed_tokens("Fix: lower rdrop_alpha and raise gradient_accumulation_steps to 4")
+    assert {"rdrop_alpha", "gradient_accumulation_steps"} == set(promised)
+    for token in tuple(from_the_crash) + tuple(promised):
+        # The same extractor branch and the same answer from the one shape rule this module has.
+        assert repair_verify._IDENT_RE.fullmatch(token), token
+        assert names_an_exception_class(token) is False, token
+
+
+def test_the_crash_clause_whitelist_withdraws_a_genuine_accusation_and_misses_the_row_it_wants(
+        monkeypatch):
+    """THE OTHER CANDIDATE — a clause rule, needing no new input — and the two things it does.
+
+    It withdraws `rubertlite-dense-retrieval` node 11, where the rationale names the broken
+    component and the repair then edits a DIFFERENT file: one of the seven the docstring counts as
+    the rung working. And it does not even reach the true positive, whose promise sits in the
+    sentence AFTER the crash clause — so the trade is not "precision for recall", it is the genuine
+    accusations for none of the three. Measured over the durable arm with this exact pattern: every
+    concrete token excused in 4 of the 71 rationales that name anything, some token in 9; widen the
+    phrasing list the way such a list always gets widened (bare `failed`, `exited`, `OOM`) and it is
+    8 and 20.
+    """
+    dense = ("The device mismatch error is a mechanical bug in the NegLogLikelihoodCos_S "
+             "implementation — EMA buffers or learnable threshold parameters weren't moved to the "
+             "correct GPU device. The idea itself (EMA centering + learnable threshold to stabilize "
+             "training at sharp temperature 0.01) is sound and directly addresses the constant-loss "
+             "failures of nodes 8/9. Fixing device placement is straightforward.")
+    changed = ["looplab_eval.py"]
+    region = "looplab_eval.py\n@@\n+    # CRITICAL: load to CPU first, then move to target device.\n"
+    assert _verdict(dense, changed, region).verdict == REPAIR_UNMET
+
+    widened = re.compile(repair_verify._CITATION_RE.pattern + "|" + _CRASH_CLAUSE_RE.pattern,
+                         re.IGNORECASE)
+    monkeypatch.setattr(repair_verify, "_CITATION_RE", widened)
+    withdrawn = _verdict(dense, changed, region)
+    true_pos = _verdict(_V8_TRUE_POSITIVE, _V8_TRUE_POSITIVE_CHANGED, _V8_TRUE_POSITIVE_REGION)
+    monkeypatch.undo()
+    assert withdrawn.verdict == REPAIR_UNSTATED and withdrawn.unmet == ()
+    assert "NegLogLikelihoodCos_S" in withdrawn.claims, "nothing is dropped, as ever"
+    assert true_pos.verdict == REPAIR_UNMET and "mine_stage.py" in true_pos.unmet
+
+
 def test_the_historical_corpus_cases_the_docstring_cites_keep_their_verdicts():
     """The regression floor: the rows the module docstring names, replayed as fixtures so a later
     widening of either rule has to move one of them to go green. Every one is verbatim from `runs/`.
 
     Rules that only ever get tested on the cases they were written for are how an extractor drifts
     into noise — these are the ones they must NOT touch."""
-    # rubertlite-dr-unified-v6 node 1 attempt 1: a NEGATED claim ("drop those unsupported args")
-    # kept by deleting the `"%params%"` placeholder that passed them. Still `unmet`, and left that
-    # way on purpose — a rule for the indirection would have to model the manifest, not the text.
-    # What the citation rule DOES do here is drop `train.py`, which sits in the node-1 clause.
-    v6 = _verdict(
-        "The crash is purely mechanical: node 1 passed three CLI args the harness's train.py "
-        "argparse does not define (gradient_accumulation_steps, max_grad_norm, weight_decay). The "
-        "fix is to drop those unsupported args and keep the supported set node 0 used "
-        "(loss.temperature, batch_size, learning_rate, n_epochs, warmup_ratio), still applying the "
-        "symmetric mnsr loss + lr 1e-3 change in the solution code.",
-        ["looplab_stages.json"],
-        'looplab_stages.json\n@@\n     "python",\n     "-m",\n-    "vectorsearch.train",\n'
-        '-    "%params%"\n+    "vectorsearch.train"\n    ],\n-   "gpus": 1,\n')
-    assert v6.verdict == REPAIR_UNMET
-    assert "train.py" not in v6.unmet, "a token inside the node-1 clause may not convict"
-    assert "gradient_accumulation_steps" in v6.unmet, "the promise itself still stands"
+    # rubertlite-dr-unified-v6 node 1 attempt 1: filed as a NEGATED claim ("drop those unsupported
+    # args") kept by deleting the `"%params%"` placeholder that passed them. `unstated` since the
+    # 2026-09-08 clause-scanner correction, and NOT because the indirection is now read — every
+    # concrete token it names sits in a clause citing another node, which the shipped citation rule
+    # already excused and a scanner that stopped at the dot inside `train.py` did not. Driven in
+    # both directions by `test_a_citation_clause_does_not_end_inside_a_filename` below.
+    v6 = _verdict(_V6_NEGATED_CLAIM, _V6_NEGATED_CLAIM_CHANGED, _V6_NEGATED_CLAIM_REGION)
+    assert v6.verdict == REPAIR_UNSTATED, v6
+    assert v6.unmet == (), "a rationale whose every token is cited accuses nobody"
+    # NOTHING IS DROPPED, exactly as for the other two demotions: the tokens stay on the record.
+    assert {"train.py", "gradient_accumulation_steps", "warmup_ratio"} <= set(v6.claims)
 
     # rubertlite-dense-retrieval node 11 attempt 2: the rationale names the BROKEN component and the
     # repair edits the eval harness. Deliberately left `unmet` — a claim-clause whitelist would

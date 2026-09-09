@@ -28,9 +28,8 @@ import sys
 from pathlib import Path
 
 
-# OPEN[model-entry-update-strips-provider-pin] the remedy campaign.sh itself prints silently
-# unpins the reference arm's model deployment.
-# proof:`present:text = text[:existing.start()]@benchmarks/algotune/patch_model_entry.py`
+# THE PROVIDER PIN SURVIVES AN UPDATE (2026-09-08). What follows is the review that forced it, kept
+# because it is the measurement, not a note about a note:
 # REVIEW 2026-08-25 (correctness): the update path below REPLACES an existing entry wholesale with
 # `_entry(...)`'s block, and `_entry` never emits a `provider:` pin -- its own docstring argues the
 # omission for a Google model. But `campaign.sh::budget_hint` prints this exact command for
@@ -43,9 +42,40 @@ from pathlib import Path
 # -- the pin is gone, nothing says so, and re-running setup_algotune.sh does NOT restore it (its
 # model block is inserted only when the key is absent). So the standard budget-mismatch flow
 # leaves arm A on a different deployment per call while arm B stays pinned -- an arms asymmetry in
-# the exact variable the pin exists to hold still. Fix direction: update `spend_limit` in place
-# instead of replacing the block, or have `_entry` carry over an existing entry's
-# `extra_body.provider` subtree (and say when it did).
+# the exact variable the pin exists to hold still.
+#
+# WHAT LANDED: the second of the two directions that review named. `carried_provider` lifts the
+# existing entry's `extra_body.provider` subtree VERBATIM and `_with_provider` splices it back into
+# the block this script writes, and the command SAYS it did -- a pin that moves silently is the
+# same defect one level down. The first direction (edit `spend_limit` in place) was refused: it
+# preserves whatever else the old entry carried, including a `temperature` or a `drop_params` some
+# earlier hand set, so two arms could end up on two configurations again with nothing saying which.
+# Replacing the block keeps this script's output a FUNCTION of its arguments; the pin is the one
+# thing that is a property of the SLUG rather than of this invocation, so it is the one thing
+# carried.
+_PROVIDER_PIN = re.compile(r"^      provider:\n(?:        .*\n|\n)*", re.M)
+
+
+def carried_provider(existing_block: str) -> str:
+    """The `extra_body.provider` subtree of an entry already in the file, verbatim, or "".
+
+    Text, not YAML, for the reason the module docstring gives about the whole file: a round-trip
+    through a dumper reflows the comments that carry this campaign's deviations. The indentation IS
+    the address here -- six spaces is `models.<key>.extra_body.provider`, and the block runs to the
+    next line that is not one of its own eight-space children -- so the same anchoring rule the
+    entry search below uses, one level in.
+    """
+    found = _PROVIDER_PIN.search(existing_block)
+    return found.group(0) if found else ""
+
+
+def _with_provider(block: str, provider: str) -> str:
+    """`block` with `provider` spliced under its `extra_body:`, or `block` unchanged."""
+    if not provider:
+        return block
+    return block.replace("    extra_body:\n", "    extra_body:\n" + provider, 1)
+
+
 def _entry(key: str, slug: str, spend_limit: float, effort: str) -> str:
     """The block to write. Mirrors the shape of the entries already in the file.
 
@@ -99,12 +129,23 @@ def main() -> int:
     # (a sibling key) or to a dedent. Anchored on the KEY, so a slug that is a prefix of another
     # cannot be clobbered.
     existing = re.search(rf"^  {re.escape(key)}:\n(?:    .*\n|\n)*", text, re.M)
+    pin = ""
     if existing:
+        # THE PIN IS A PROPERTY OF THE SLUG, NOT OF THIS INVOCATION, so it is carried over the
+        # replacement rather than re-derived or dropped. See the review above this file's `_entry`
+        # for what dropping it cost: the printed budget remedy silently unpinned the reference arm's
+        # deployment, leaving arm A on a different provider per call while arm B stayed pinned.
+        pin = carried_provider(existing.group(0))
+        block = _with_provider(block, pin)
         if existing.group(0) == block:
             print(f"already current: {key}")
             return 0
         text = text[:existing.start()] + block + text[existing.end():]
         print(f"updated: {key}")
+        # SAID, not assumed. A pin that moves silently is the same defect one level down, and the
+        # absence of one is worth saying too -- it is the difference between "this slug is served by
+        # one deployment" and "nobody pinned it".
+        print(f"  provider pin: {'carried over' if pin else 'none in the previous entry'}")
     else:
         models = re.search(r"^models:\s*\n", text, re.M)
         if not models:
@@ -129,7 +170,15 @@ def main() -> int:
     if float(got.get("spend_limit", -1)) != args.spend_limit:
         print(f"  spend_limit did not land: {got.get('spend_limit')!r}", file=sys.stderr)
         return 1
-    print(f"  verified: spend_limit={got['spend_limit']} effort={args.effort}")
+    # VERIFIED BY PARSING for the same reason the spend limit is: a splice at the wrong indentation
+    # reads fine in a diff. A pin that was carried and did not land is the original defect with an
+    # extra print in front of it, so it fails LOUD rather than being reported as carried.
+    if pin and not isinstance((got.get("extra_body") or {}).get("provider"), dict):
+        print("  CARRIED THE PROVIDER PIN AND IT DID NOT LAND -- the reference arm would run "
+              "unpinned. Restore it by hand before measuring anything.", file=sys.stderr)
+        return 1
+    print(f"  verified: spend_limit={got['spend_limit']} effort={args.effort}"
+          + (" provider=pinned" if pin else ""))
     if args.show:
         print(block)
     return 0

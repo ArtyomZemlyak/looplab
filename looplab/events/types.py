@@ -105,12 +105,28 @@ EV_SCORE_METRICS_BACKFILLED = "score_metrics_backfilled"
 EV_NODE_TOMBSTONED = "node_tombstoned"
 EV_CONFIRM_EVAL = "confirm_eval"
 EV_NODE_CONFIRMED = "node_confirmed"
+# THE EVAL NOISE FLOOR (doc 52 row 11), under `Settings.eval_noise_seeds` (0 = off, the default).
+# `eval_noise_seed` is ONE repeat of one candidate's evaluation under the SEARCH's own protocol —
+# the node's own `idea.eval_profile`, seeds 0..N-1 — and `eval_noise_floor` is the pass's summary:
+# the metrics, their mean, the sample std and `sem`, the exact quantity `trust/gate.py::one_se_better`
+# compares a margin against. Both are FOLDED, and each carries what the other cannot: the per-seed
+# rows are the resume memo (a crashed pass re-runs only the seeds it has not paid for) and the
+# summary row is the pass's completion gate, so a finished pass is never bought twice. Neither is a
+# node TERMINAL — invariant #2 is about `node_evaluated`/`node_failed`, and a repeated evaluation
+# that minted a second one would make the same node win twice. Nothing that decides reads either.
+EV_EVAL_NOISE_SEED = "eval_noise_seed"
+EV_EVAL_NOISE_FLOOR = "eval_noise_floor"
 EV_HOLDOUT_EVALUATED = "holdout_evaluated"
 EV_AGENT_VALIDATED = "agent_validated"
 EV_DATA_PROFILED = "data_profiled"
 EV_DATA_PROVENANCE = "data_provenance"
 EV_HOST_GRADING = "host_grading"
 EV_DATA_LEAKAGE = "data_leakage"
+# The deterministic distribution-shift RECORD (docs/BACKLOG.md §15): how far the deployment sample
+# the task declares is from the training one, column by column. DIAGNOSTIC on purpose and not merely
+# fold-ignored — shift is the normal case on a real task, so nothing selects, gates or caveats on it,
+# and no reader may key on its position (`trust/drift.py` has the account).
+EV_DATA_SHIFT = "data_shift"
 EV_APPROVAL_REQUESTED = "approval_requested"
 EV_SPEC_PROPOSED = "spec_proposed"
 EV_SPEC_APPROVAL_REQUESTED = "spec_approval_requested"
@@ -222,6 +238,13 @@ EV_NODE_VERIFIED = "node_verified"
 # Versioned all-or-nothing verifier treatment for one complete selector tie component. Replay validates
 # every member/generation/evidence digest before publishing any score; legacy per-node events remain readable.
 EV_VERIFIER_GROUP_SCORED = "verifier_group_scored"
+# docs/BACKLOG.md §0.1 row 17: the LLM VALUE ESTIMATE for one node's branch, in [0, 1] — how much a
+# model thinks expanding that lineage still has left, computed live by `engine/value_estimate.py`
+# (an LLM output can't live in the deterministic fold) and frozen here so a replay picks the same
+# nodes. Generation-scoped exactly like `node_verified`; folds into `Node.value_prior` and is read
+# ONLY by `MCTSPolicy` as a decaying adjustment to the UCB1 value term — never by champion
+# selection. Emitted only when `mcts_value_weight` > 0. Additive, reader-defaulted.
+EV_NODE_VALUE_ESTIMATED = "node_value_estimated"
 EV_PROXY_SCORED = "proxy_scored"
 EV_BEST_CONFIRMED = "best_confirmed"
 EV_RUN_FINISHED = "run_finished"
@@ -394,6 +417,12 @@ EV_FORESIGHT_SELECTED = "foresight_selected"
 EV_LOG_REPAIRED = "log_repaired"                # operator `repair-log`: provenance of a mid-file
 #                                                 divergence recovery (backup + truncate boundary)
 EV_REFLECTION_NOTE = "reflection_note"          # run-end LLM distillation: causal note + lessons + auto-skills
+# The MID-RUN half of the M4 skill promotion (BACKLOG §0.17). Diagnostic like `reflection_note` and
+# for the same reason — nothing the fold decides reads it — but it is a GATE as well as a receipt:
+# `lessons.py::maybe_promote_skills` reads its `at_node` for the cadence and its `promoted` pairs
+# for "which cards this run has already paid for", so a resume promotes nothing twice (invariant 3).
+# Main-task only, like every other cadence write.
+EV_SKILLS_PROMOTED = "skills_promoted"
 EV_LESSONS_RECONCILED = "lessons_reconciled"    # a node re-eval changed an outcome → this run's lessons
 #                                                 citing it were retired + re-derived from the corrected state
 EV_COMMAND_ACK = "command_ack"                  # engine folded a server command intent (causal ack)
@@ -684,6 +713,12 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
         # only inside `_evaluate`'s own loop, which is a different stage and would need its own
         # append site. Removed rather than left dangling, per the rule stated below: an entry no run
         # can reach renders a step the operator watches and never sees complete.
+        "discarded",   # the proposal was PAID FOR and no node came of it: `_reserve_node_build`
+                       # returned None because a control/research/lifecycle row won its CAS, and
+                       # returning to the selection boundary is correct there. Registered because
+                       # the branch used to return in SILENCE — no node, no card, no row — so a
+                       # loss that costs a whole proposal was invisible in the log and
+                       # unmeasurable afterwards. This beacon does not fix the loss; it counts it.
     ),
     # There is deliberately NO `commit` phase for the fold-verify-and-append tail after the Developer
     # returns. It is seconds, not minutes, and it already ENDS in `node_created` — a folded event the
@@ -772,6 +807,34 @@ EV_DEPS_DECLARED = "deps_declared"
 # immaterial — a property of the READERS, not of the event.
 # `engine/evaluate.py::_durable_full_retrains` reads it straight off the log.
 EV_FULL_RETRAIN_CHARGED = "full_retrain_charged"
+# WHAT THE TRAINING PROCESS SAYS IT ACTUALLY RAN AT — `trainer_state.json::train_batch_size`, read
+# off the node's own workdir at the metric read (`runtime/effective_batch.py`). One row per evaluated
+# node that HAS such an artifact; every task that is not a transformers training records none, and
+# that silence is the point (see the module's ABSENCE IS SILENCE rule).
+#
+# WHY IT IS AN EVENT AND NOT A FIELD ON `metric_provenance`. The record it completes is
+# `applied_params`, which states its own bound — a statement about a DOCUMENT, never about an
+# execution — and the batch is the coordinate where that bound has a measured cost:
+# `docs/45-claim-surfaces-2026-08-20.md` §3.2 REFUSED `auto_find_batch_size` as the memory answer
+# because transformers 4.51.0 keeps the DECLARED `per_device_train_batch_size` on `args` while the
+# reduced one survives only in `trainer_state.json` and a `logger.debug` line, so a run would report
+# a batch it never trained at. That document named the condition that lifts the refusal — the
+# effective batch lifted into a DURABLE LoopLab event — and a field merged onto another event's
+# payload is not that: it would be readable only through the terminal that carries it, absent from
+# every node whose terminal is a failure, and invisible to a reader asking "what did this box
+# actually train at" without folding.
+#
+# NOT AN `extra_metrics` CHANNEL, deliberately. The number comes off an artifact the CANDIDATE wrote,
+# and CLAUDE.md's rule is that nothing derivable from such an artifact can authenticate its author —
+# so it may not be spliced as an `engine`-channel metric, and it is not a secondary METRIC at all: it
+# is a coordinate the process recorded about itself. It ranks nothing, gates nothing and cannot cost
+# a node its terminal.
+#
+# DIAGNOSTIC, on `full_retrain_charged`'s ground and with the same caveat: the fold ignores it, and
+# what makes its POSITION immaterial is that `_proposal_receipt_fence` excludes DIAGNOSTIC_EVENTS
+# wholesale — a property of the readers, not of the event. Diagnostic is also what lets the eval
+# worker thread append it at all (invariant 1).
+EV_EFFECTIVE_TRAIN_BATCH = "effective_train_batch"
 # ONE stage ROLLBACK decision — the Developer asserting that a LATER stage's failure was caused by an
 # EARLIER stage that had already been counted successful, and the engine's answer. Written on BOTH
 # outcomes (`accepted` true/false, with `refusal` naming which rung of the ladder said no) because the
@@ -813,6 +876,33 @@ EV_STAGE_ROLLBACK = "stage_rollback"
 # the same loop). Position-immaterial for the same READER-side reason they are:
 # `speculation.py::_proposal_authority_seq` excludes DIAGNOSTIC_EVENTS wholesale.
 EV_REPAIR_CRITIC_VERDICT = "repair_critic_verdict"
+# THE ATTEMPT-SCOPED RECEIPT for one paid evaluation — the claim before the evaluator is invoked and
+# the settle after it returns (doc 27 `paid-eval-has-no-attempt-scoped-receipt`; the serve/governance
+# half of that item shipped as `serve/paid_ledger.py`'s claim->terminal ledger, this is the ENGINE
+# half). `node_eval_started` is the NODE-lifecycle boundary and answers "was this node ever
+# dispatched"; it is written once per lifecycle and carries no attempt, so it cannot answer the
+# question the evaluator boundary actually raises: an evaluation may finish paid/external side
+# effects — a training run, a submission, a remote job — and its terminal event is appended much
+# later, so a process death in that gap leaves a resume unable to tell "never ran" from "ran and the
+# record was lost", and the retry is indistinguishable from a first attempt.
+#
+# THE PAIR IS THE RECEIPT: a claim with no settle is an invocation whose outcome is unknown, and the
+# id is DETERMINISTIC over (run, node, generation, attempt) — `engine/evaluate.py::eval_invocation_id`
+# — so the resumed process re-derives the same key for the attempt it is repeating and can say so
+# rather than re-mint an unrelated one. That is the reconciliable idempotency key the boundary needs;
+# it is deliberately NOT a promise that the external side effect was undone, which LoopLab cannot make
+# for an arbitrary evaluator. The repeat is STAMPED instead (`after_interrupted_attempt` on the claim),
+# exactly as `eval_dispatch.py::_ensure_run_setup` stamps its own at-least-once repeat.
+#
+# DIAGNOSTIC, and that is load-bearing rather than incidental. These rows are appended PER ATTEMPT
+# from the eval child, so a FOLDED pair here would land inside the speculative election's
+# compare-and-swap window — the measured cost `_record_eval_start_boundary` documents (a depth-1
+# treatment run silently became serial: 17 builds / 5 discards became 12 / 0). `DIAGNOSTIC_EVENTS` is
+# excluded WHOLESALE from every seq-equality fence, so nothing keys on these rows' position, and the
+# fold ignores them: the receipt is evidence about a paid invocation, never a second authority for a
+# node's outcome (invariant #2 — the terminal is still exactly one `node_evaluated`/`node_failed`).
+EV_EVAL_INVOCATION_CLAIMED = "eval_invocation_claimed"
+EV_EVAL_INVOCATION_SETTLED = "eval_invocation_settled"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -984,7 +1074,7 @@ SETUP_THREAD_APPENDABLE: frozenset[str] = frozenset({
 
 # Invariant #1's FOURTH writer, and the one it did not name. The invariant says "UI/CLI append only
 # control intents (allow-listed in `serve/protocol.py::CONTROL_EVENTS`)" — the ASSISTANT'S TOOL
-# LAYER is neither, and `tools/machine_runs_tools.py::MachineRunsTools` appends these two FOLDED
+# LAYER is neither, and `tools/run_control_tools.py::RunControlTools` appends these two FOLDED
 # types directly. Neither is in `CONTROL_EVENTS`; `node_tombstoned` has no other writer in the tree
 # at all. So the seam existed, was reachable by an LLM, and was declared nowhere.
 #
@@ -1044,11 +1134,11 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
     EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION, EV_NODE_BUILD_DELTA,
-    EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
+    EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET, EV_DATA_SHIFT,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
-    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,
+    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN, EV_EFFECTIVE_TRAIN_BATCH,
     EV_WORKSPACE_SEEDED,
-    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
+    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
     EV_TRAIN_MONITOR_ALERT,
@@ -1060,6 +1150,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
     EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
+    EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED,
 })
 
 # --------------------------------------------------------------- THE PAYLOAD CONTRACT (doc 52 row 30)
@@ -1190,7 +1281,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "intermediate", "kill_comparable", "node_id", "population", "quantile",
             "resource_underperforming", "underperforming"
         ),
-        optional=(),
+        # The conditional `.update()` in `asha_monitor.py`, invisible to a target-only scan.
+        optional=("resource", "resource_key"),
     ),
     "asha_verdict": PayloadContract(
         "The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence.",
@@ -1198,7 +1290,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "comparable_population", "confidence", "direction", "generation", "intermediate",
             "kill", "node_id", "quantile", "reason", "status", "stop_decided", "under_streak"
         ),
-        optional=("confidence_valid", "kill_superseded_by", "train_monitor_status"),
+        optional=("confidence_valid", "kill_superseded_by", "resource", "resource_key",
+                  "train_monitor_status"),
     ),
     "belief_admission": PayloadContract(
         "How many researcher-proposed beliefs one proposal turn offered and how many the board admitted.",
@@ -1252,8 +1345,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     ),
     "card_build_done": PayloadContract(
         "A Card's build finished: the node it produced, or the reason it was skipped.",
-        required=("error", "eval_seconds", "generation", "node_id", "reason"),
-        optional=("card_id", "skipped", "speculative"),
+        # REQUIRED NAMED `error` / `eval_seconds` / `reason` — three of `node_failed`'s columns
+        # that this type's ONE writer (`engine/speculation.py`'s card-build lane) has never
+        # written. A fabricated `required` could not fail: `test_required_keys_are_written_by_
+        # every_literal_writer` skips a type with no writer row, and this payload is a `Name` the
+        # scan could not resolve. What IS always written is the pair below; `skipped_reason` is
+        # written on the skip branch, is named in this row's own prose, and had no declaration.
+        required=("card_id", "generation"),
+        optional=("node_id", "skipped", "skipped_reason", "speculative"),
     ),
     "card_build_requested": PayloadContract(
         "The durable selection-and-compute gate for one Card's build.",
@@ -1273,7 +1372,19 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "card_enriched": PayloadContract(
         "A Card's novelty / cross-run / footprint delta (last write by seq wins).",
         required=(),
-        optional=("generation", "id", "node_id", "proposal_ref"),
+        # THE FOUR FENCE KEYS AND THE TEN THE FOLD ACTUALLY READS. Until 2026-09-08 this row
+        # declared the fence alone, while `replay.py::_on_card_enriched` copied a ten-name
+        # allow-list out of the payload — so the contract, and the generated
+        # `docs/guide/event-reference.md` page built from it, published a four-key event whose
+        # handler reads fourteen. That is the dead-reader class this table exists to convict,
+        # inverted: the reader was alive and the declaration was short. It survived because
+        # `tests/test_event_payload_contract.py` can only enumerate LITERAL `store.append(EV_X,
+        # {...})` payloads, and every writer of this one builds its dict in a variable or a splat
+        # (`engine/research_cadence.py` appends it with `**delta`), which the module's own comment
+        # already concedes is the scan's blind spot.
+        optional=("claim_refs", "concept_tags", "confidence", "cross_run_prior", "footprint",
+                  "foresight_rank", "generation", "id", "lesson_refs", "node_id",
+                  "novelty_verdict", "proposal_ref", "research_origin", "steering_context"),
         stored_whole=True,
     ),
     "card_merged": PayloadContract(
@@ -1408,6 +1519,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(),
         stored_whole=True,
     ),
+    "data_shift": PayloadContract(
+        "How far the deployment sample the task declares is from the training one, per column.",
+        required=("checked", "columns", "detector", "n_columns", "n_shifted", "only_current",
+                  "only_reference", "shift", "source"),
+        optional=(),
+    ),
     "deep_research": PayloadContract(
         "An operator request for a deep-research pass — the intent itself, with no payload.",
         required=(),
@@ -1438,10 +1555,39 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("reason",),
         optional=(),
     ),
+    "effective_train_batch": PayloadContract(
+        "What the training process itself recorded as the batch it ran at, read off the node's own "
+        "workdir at the metric read.",
+        required=("disagree", "generation", "node_id", "read_at", "readings", "train_batch_size"),
+        optional=("files_seen", "truncated"),
+    ),
     "env_changed": PayloadContract(
         "A resume observed that the Python/library environment differs from the one the run started in.",
         required=("now", "was"),
         optional=(),
+    ),
+    "eval_invocation_claimed": PayloadContract(
+        "One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id.",
+        required=("attempt", "generation", "invocation_id", "node_id"),
+        # Written only when TRUE (an absent key is not the same fact as a false one): this attempt
+        # re-invokes an evaluator whose previous invocation of the SAME id never settled.
+        optional=("after_interrupted_attempt",),
+    ),
+    "eval_invocation_settled": PayloadContract(
+        "That evaluator invocation returned, with the outcome and the seconds it charged.",
+        required=("attempt", "eval_seconds", "generation", "invocation_id", "node_id", "outcome"),
+        optional=(),
+    ),
+    "eval_noise_floor": PayloadContract(
+        "The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor.",
+        required=("generation", "mean", "metrics", "n", "node_id", "profile", "search_metric",
+                  "seeds", "sem", "spread", "std"),
+        optional=("reason",),
+    ),
+    "eval_noise_seed": PayloadContract(
+        "One repeat of that candidate's evaluation, with its seed, metric and eval seconds.",
+        required=("eval_seconds", "generation", "metric", "node_id", "seed"),
+        optional=("superseded",),
     ),
     "finalization_finished": PayloadContract(
         "The wrap-up for one finish (keyed by that finish's seq) completed.",
@@ -1498,7 +1644,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "holdout_evaluated": PayloadContract(
         "The node's number on the agent-invisible holdout split, beside the search metric and their gap.",
         required=("gap", "generation", "metric", "n_holdout", "node_id", "search_epoch"),
-        optional=("attempt", "protocol"),
+        # `program_sha256`: the digest of the operator's WITHHELD scorer program, on the rows whose
+        # `protocol` is `holdout_scorer` (doc 52 row 10a slice (b)) — the same receipt the consistent
+        # scorer writes to `metric_provenance.host_scorer`, so "the same unseen scorer for every
+        # leader" stays checkable after the fact. Absent on every other protocol and on every log
+        # written before it (reader-side default, invariant #5).
+        optional=("attempt", "program_sha256", "protocol"),
     ),
     "host_grading": PayloadContract(
         "The host-side scorer's grade over the candidate's predictions.",
@@ -1590,7 +1741,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "llm_usage": PayloadContract(
         "One sanitized provider-call delta, folded cumulatively into the run's durable ledger.",
         required=(),
-        optional=("priced_calls", "usage_id"),
+        # EVERY COLUMN `sanitize_usage_delta` EMITS, not two of them. The row declared
+        # `priced_calls` and `usage_id` alone while the writer (`engine/costs.py::_payload`) spreads
+        # the whole sanitized delta and the fold (`replay.py::_clean_llm_totals`) reads all five
+        # missing ones — so `docs/guide/event-reference.md` described the run's cost ledger as
+        # carrying no cost and no tokens. Optional rather than required: `_row_priced_calls` already
+        # establishes that a log written before a counter existed omits it.
+        optional=("calls", "completion_tokens", "cost", "priced_calls", "prompt_tokens",
+                  "total_tokens", "usage_id"),
         stored_whole=True,
     ),
     "log_repaired": PayloadContract(
@@ -1664,7 +1822,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "never_evaluated", "node_id", "reason", "reason_evidence",
             "reason_evidence_resolved", "reason_findings", "reason_hypotheses",
             "reason_override_refused", "reason_source", "reason_summary", "scope", "step",
-            "triage_rationale"
+            "triage_action", "triage_rationale"
         ),
     ),
     "node_repaired": PayloadContract(
@@ -1690,6 +1848,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "Nodes struck from selection without deleting their history.",
         required=("node_ids",),
         optional=(),
+    ),
+    "node_value_estimated": PayloadContract(
+        "How much a model thinks expanding one node's branch still has left, in [0, 1].",
+        required=("generation", "node_id", "value"),
+        optional=("attempt", "rationale"),
     ),
     "node_verified": PayloadContract(
         "The selection verifier's score for one node, over a named evidence digest.",
@@ -1727,7 +1890,13 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "plan": PayloadContract(
         "The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve.",
         required=(),
-        optional=("at_node", "endgame_start", "phases", "reason", "reserve"),
+        # `max_nodes` IS LOAD-BEARING: `engine/plan.py::replan` reads it back off the folded
+        # `state.plan` as `planned_budget` and it is the budget-changed re-plan trigger. The row was
+        # authored from the fold-read side alone, so the three keys `build_plan` returns and nothing
+        # folds were simply absent — and `stored_whole` is True, which makes them undocumented
+        # fields of `RunState.plan`.
+        optional=("at_node", "endgame_start", "max_nodes", "phases", "reason", "reserve",
+                  "reserve_frac", "source"),
         stored_whole=True,
     ),
     "policy_decision": PayloadContract(
@@ -1741,8 +1910,13 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # The last five arrive as `**receipt` from `lessons_priors.py::_pick_role_prior`, a spread
         # the writer scan reads as opaque — so they are declared from the builder by hand and the
         # type is named in `tests/test_event_payload_contract.py::OPAQUE_PAYLOAD_WRITERS`.
+        # `operator` / `operator_scoped` ride the same spread and appear only on an OPERATOR-SCOPED
+        # render (`Settings.lesson_operator_scope`, off by default): which action the retrieval was
+        # scoped to. Both, not one — the outer key is what the row was scoped to and the receipt's own
+        # copy is what the RANKING actually used, so a render that fell back is visibly different.
         optional=(
-            "at_node", "case", "notes", "phase", "quarantined_useless", "role", "rows", "source"
+            "at_node", "case", "notes", "operator", "operator_scoped", "phase",
+            "quarantined_useless", "role", "rows", "source"
         ),
     ),
     "promote": PayloadContract(
@@ -1765,8 +1939,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The run-end distillation: the causal note, the lessons and the auto-skills it proposed.",
         required=(
             "at_nodes", "coverage_digest", "fingerprint", "finish_seq", "lessons", "n_lessons",
-            "n_skill_candidates", "n_skills", "n_skills_demoted", "note", "prior_citations",
-            "skill_candidates", "skills", "skills_demoted", "task_id"
+            "n_skill_candidates", "n_skills", "n_skills_demoted", "n_skills_promoted_earlier",
+            "note", "prior_citations", "skill_candidates", "skills", "skills_demoted", "task_id"
         ),
         optional=(),
     ),
@@ -1955,6 +2129,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "depth", "error", "eval_seconds", "evidence", "generation", "node_id", "previous"
         ),
     ),
+    "skills_promoted": PayloadContract(
+        "The mid-run per-card skill promotion: which settled cards it judged, and what it wrote.",
+        required=("at_node", "cards", "count", "promoted", "skill_candidates", "skills", "trigger"),
+        optional=(),
+    ),
     "stage_finished": PayloadContract(
         "One stage of a multi-stage eval pipeline finished: name, status, exit code, seconds.",
         required=(),
@@ -1975,19 +2154,35 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "trace_export_health": PayloadContract(
         "The span exporter is unhealthy — one row per distinct state, never on a healthy run.",
         required=(),
+        # THE WHOLE `metrics()` DICT, which is what the writer publishes and what
+        # `core/tracing.py::AsyncJsonlSpanExporter.metrics` says it publishes. Eleven keys were
+        # declared against twenty-five written; the missing fifteen include the `dropped_*` family
+        # (per `_TRACE_EXPORT_DROP_REASONS`), the `stopped_*` family (per
+        # `TRACE_WORKER_STOP_REASONS`) and `last_export_error` / `worker_stop_detail`, the two
+        # fields tracing.py's own comments name as what a human debugging a stalled exporter needs.
+        # `buffered_spans` was declared while NOTHING writes it.
         optional=(
-            "accepted_spans", "buffered_bytes", "buffered_spans", "dropped_spans",
-            "export_failures", "exported_spans", "loss_receipt_failures", "queued_spans",
-            "shutdown", "worker_alive", "worker_stop_reason"
+            "accepted_spans", "buffered_bytes", "dropped_queue_bytes", "dropped_queue_full",
+            "dropped_serialization_error", "dropped_shutdown", "dropped_shutdown_timeout",
+            "dropped_spans", "dropped_worker_start", "export_failures", "exported_spans",
+            "last_export_error", "loss_receipt_failures", "loss_receipts", "queued_spans",
+            "shutdown", "stopped_abandoned", "stopped_crashed", "stopped_idle",
+            "stopped_receipt_failed", "stopped_retired", "stopped_shutdown", "worker_alive",
+            "worker_stop_detail", "worker_stop_reason"
         ),
     ),
     "train_monitor_alert": PayloadContract(
         "The live training-log judge's verdict about one running stage, and the log role it judged.",
         required=("confidence", "generation", "log_role", "node_id", "reason", "status"),
+        # …AND THE FIVE OVERRUN COLUMNS `train_monitor.py::stamp_projected_overrun` fills and the
+        # alert then `.update()`s in. A `.update()` is never an assignment TARGET, so the writer
+        # scan could not see them and reported this type fully covered; two of the five
+        # (`projected_overrun_s`, `stage_wall_s`) are read live by `serve/attention.py`.
         optional=(
             "citation_resolved", "confidence_valid", "evidence_locator", "evidence_source", "fault",
-            "kill", "kill_role_withheld", "kill_superseded_by", "repair_decided", "stage",
-            "stop_decided", "trajectory", "trajectory_veto"
+            "kill", "kill_role_withheld", "kill_superseded_by", "overrun_alert_floor_s",
+            "overrun_beyond_noise_s", "projected_overrun_s", "repair_decided", "stage",
+            "stage_grace_s", "stage_wall_s", "stop_decided", "trajectory", "trajectory_veto"
         ),
     ),
     "trust_gate_changed": PayloadContract(

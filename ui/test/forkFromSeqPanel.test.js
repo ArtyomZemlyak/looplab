@@ -171,16 +171,21 @@ test('the transport fence admits the branch and nothing else, and only from a sn
   // of its PAYLOAD" quietly becomes "read-only views can mutate". The seam predates this change and
   // has one other caller, `resetRun`, on a different route and deliberately wider — Start over is
   // the operation that RESOLVES a stale link and an unresolved start-over, so it must run in them.
+  // The CONTROL map left api.js for `controlActions.js` (doc 25 UI-02's declined half, 2026-09-08);
+  // the slice follows it, and `resetRun` — the deliberately wider caller on the OTHER route — stayed
+  // behind with the endpoint functions, which is why these two are read from two files now.
   const api = await source('api.js')
+  const actions = await source('controlActions.js')
   const protocol = await source('commandProtocol.js')
-  const control = api.slice(api.indexOf('export const CONTROL = {'),
-    api.indexOf('export async function appendAction'))
+  const control = actions.slice(actions.indexOf('export const CONTROL = {'),
+    actions.indexOf('export async function appendAction'))
+  assert.ok(control.length > 1000, 'the action map must still be found where this pin now reads')
   const named = [...control.matchAll(/allowRunMutationModes: (\[[^\]]*\])/g)].map(m => m[1])
   assert.deepEqual(named, ["['history']"],
     'exactly one durable run command may name the read-only exception')
   assert.match(api, /export const resetRun[\s\S]{0,400}allowRunMutationModes: \['start-over', 'stale-link', 'history'\]/,
     'the pre-existing wider caller is Start over, and it is not on the command route')
-  assert.match(api, /forkFrom: \(rid, payload, options = \{\}\) => runCommand\([\s\S]{0,120}allowRunMutationModes: \['history'\]/)
+  assert.match(actions, /forkFrom: \(rid, payload, options = \{\}\) => runCommand\([\s\S]{0,120}allowRunMutationModes: \['history'\]/)
   assert.match(protocol,
     /assertRunMutationAllowed\(path, \{ allowModes: allowRunMutationModes \}\)/)
   assert.match(protocol, /allowRunMutationModes = \[\]/,

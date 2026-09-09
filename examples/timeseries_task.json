@@ -1,7 +1,7 @@
 {
   "kind": "timeseries",
   "id": "seasonal_forecast",
-  "goal": "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE",
+  "goal": "forecast a seasonal+trend series: write a forecaster that minimizes the rolling-origin backtest MASE",
   "direction": "min",
   "n": 120,
   "period": 7,

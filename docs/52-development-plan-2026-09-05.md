@@ -113,11 +113,11 @@ folded in where an agent showed the third pass was wrong:
 
 | Pool | What the pass found | Disposition |
 |---|---|---|
-| Docs 01–05 (design, ADRs) | ADR-11's hardening targets SHIPPED where they mattered (deny-by-default egress via `--network`, cgroup/ulimit caps, allow-listed installs, the reproduction manifest, approvals as command events); two SUPERSEDED (OpenTelemetry `gen_ai` conventions by doc 08's span model — still open as a low-rank bridge item, `otel-bridge-carries-no-genai-semconv`; gateway tokens by the sandbox's secret refusal); the dollar cap tracked (`no-shared-reserve-commit-run-budget`, promoted by the infrastructure agent) | one open DECISION untagged: "parallel sidecar ordering" (doc 03 §Open) |
+| Docs 01–05 (design, ADRs) | ADR-11's hardening targets SHIPPED where they mattered (deny-by-default egress via `--network`, cgroup/ulimit caps, allow-listed installs, the reproduction manifest, approvals as command events); two SUPERSEDED (OpenTelemetry `gen_ai` conventions by doc 08's span model — and the bridge item `otel-bridge-carries-no-genai-semconv` closed 2026-09-08, the conventions now mirrored beside our own names; gateway tokens by the sandbox's secret refusal); the dollar cap tracked (`no-shared-reserve-commit-run-budget`, promoted by the infrastructure agent) | one open DECISION untagged: "parallel sidecar ordering" (doc 03 §Open) |
 | Doc 06 | every partial done; LanceDB / MCP server bus / gVisor / gateway tokens are design substitutions recorded in the ADRs | nothing to tag |
 | Docs 10–12 (2026-07 roadmap) | shipped: T1, T2, T4, T5, T6, T7 (`core/llm.py::_ResponseCache`), P1, P3, P4 (off by default), M2/M3, D2, D4, D5, D7 (`weighted_parent`), D8, D9, D10, D11. **Corrected by the fourth pass**: T8 is HALF shipped — `merge_mode="auto"` resolves to `ensemble` for every LLM Developer and `engine/node_build.py::_ensemble_idea` is the A0b recombination merge, but the Developer receives a directive and never the parents' code (`speculation.py` hands it `parents[0]`); D3's stall rule EXISTS (`agents/strategist.py::improves_since_best` against `stall_window`, greedy⇄broad, deep research at 2×) and only the consult's TIMING ignores it; M1's in-run half exists (`events/digest.py::lineage_lessons` + `sibling_digest`), the cross-run half does not | markers rewritten: `merge-operator-is-mean-of-params-not-code`, `strategist-consult-is-cadence-not-stagnation-triggered`, `lessons-are-not-operator-scoped`, `no-plan-artifact-with-endgame-reserve` |
 | Docs 13–16 (July reviews) | closed lists; doc 16's SSE blocking read is fixed, the enum gaps closed 2026-09-02 | untagged, stated |
-| Doc 17 (capability matrix) | typed Developer result tracked (`developer-output-has-no-immutable-envelope`); manifest, default-deny auth, deadline watcher, temporal CV shipped; "no first-class Evaluator" is a naming question | `no-distance-from-seed-signal` (demoted by the search agent: no measured precedent; edit-TYPE annotation is what the field measured) |
+| Doc 17 (capability matrix) | typed Developer result tracked (`developer-output-has-no-immutable-envelope`); manifest, default-deny auth, deadline watcher, temporal CV shipped; "no first-class Evaluator" is a naming question | — (`no-distance-from-seed-signal` closed 2026-09-08 as the seed-relative displacement over the edit-TYPE vocabulary; §11's SEMANTIC distance over an external corpus is §17's Scoop-Check and unbuilt) |
 | Docs 18–24 (UI, workspace) | Approve/Ratify and DecisionFreshness shipped; doc 21's atlas claims shipped as F7; doc 20's direction → `eval-parallelism-is-in-process-only` (re-pointed) | accessibility evidence untagged (cost unmeasured) |
 | Doc 22 | phases 0–3 shipped; phase 4's golden never added | `parallel-build-has-no-golden-replay`; the shipped shape is a bulk-synchronous barrier → `parallel-build-is-a-bulk-synchronous-barrier` |
 | Docs 25, 27, 34 | markers stand (30 / 14 / 4); seven proofs re-pointed (§2.2) | — |
@@ -286,13 +286,30 @@ replay byte-identical) and the no-host negative control. `generalization_gap` is
 folded from this pair — the search optimised the host's number, so the self-report is an
 over-reporting audit and not an unseen signal; the unseen signal is slice (b)'s.*
 
-OPEN[repo-task-champion-is-picked-on-the-candidates-own-metric] slice (b), the WITHHELD half:
-the repo task's host scorer is consistent (row 10a) but scores a split the candidate can read, so
-the champion is still picked on a number the candidate could overfit — AIRA₂'s "marginal" half, a
-host-held split scored ONCE at finish for the top-k with selection through `holdout_select`, and
-`generalization_gap` folded for repo runs from that pair. Unenforceable until the run-record fence
-(row 2, shipped) is joined by the Landlock validation on a real GPU eval; a replay-digest proof
-that undeclared runs are byte-identical is part of the slice. proof:absent:HoldoutScorerSpec@looplab/adapters/repo_task.py
+*Closed 2026-09-08 (slice (b) shipped): the marker `repo-task-champion-is-picked-on-the-candidates-own-metric`
+stood here.* `adapters/repo_task.py::HoldoutScorerSpec` is the WITHHELD half — the operator's own
+program over a split the HOST holds, declared as `cmd.holdout_scorer` and refused at submit by the
+same rule as its consistent sibling (`scorer_outside_editables`, now ONE walk for both halves, the
+message naming the field as written). It is never a stage in any pipeline shape, a task declaring
+only a holdout scorer is refused (it scores nothing during the run), and its reader joins
+`EvalSpec.readers()` so every rule about readers covers it. `engine/holdout.py` runs it ONCE at
+finish over the val-top-k in the node's own workdir, under the eval's declared environment plus its
+own — the number lands as `holdout_metric` on a `holdout_evaluated` row stamped
+`protocol: "holdout_scorer"` with the program's `program_sha256` (a new optional payload key), the
+fold derives `generalization_gap` from the pair, and `holdout_select` (on by default) elects the
+champion by the unseen number among those leaders. A scorer that exits non-zero, times out or prints
+nothing readable yields NO number and never falls back to the search metric — that fallback is the
+defect this half removes. `tests/test_holdout_scorer.py` drives all five parts, including the one
+that is the slice: over the repo fixture the withheld ranking DISAGREES with the search ranking and
+the champion follows the withheld one, with `holdout_select=false` the same rows are recorded and the
+scalar pick returns, and an undeclared run folds byte-identically to what it always did.
+
+  **What is still owed, and it is not code:** the split's UNREACHABILITY rests on the read fence
+  (`runtime/read_fence.py` + `Settings.landlock`), whose kernel rung this box can only validate in
+  the advisory tier — the CAP_DAC_OVERRIDE warning every run here prints. An operator running this
+  on a real GPU box must keep the withheld split outside every mount the eval declares and read the
+  fence's own report; the mechanism above makes the number unseen by CONSTRUCTION (no stage can run
+  the scorer, and the split is named only in its `env`), not by kernel enforcement measured here.
 
 *Closed 2026-09-06 (row 3 shipped): the marker `mlebench-search-optimises-the-private-grade` stood
 here. `engine/holdout.py::apply_host_grade` graded every node against the private answers and
@@ -334,11 +351,26 @@ performance gains" from embedding rejection and only "marginal" gains from the L
 shipped default (`novelty_mode="llm"`, `novelty_semantic=False`) is the inverse of the field's
 ablation; one more arm of the profile A/B decides it. proof:missing:docs/audit/novelty-gate-ab.md
 
-OPEN[eval-noise-floor-is-never-measured] no run records the repeated-seed spread of one candidate's
-metric, so whether a champion's margin exceeds evaluation noise — AIRA₂'s explanation of the field's
-"overfitting" — is undecidable; `confirm_top_k=0` / `confirm_seeds=0` by default and
-`trust/gate.py::one_se_better` is wired only into confirm. The instrument is the same ≥3-seed arm the
-profile A/B needs. proof:absent:eval_noise@looplab+absent:noise_floor@looplab/trust
+OPEN[eval-noise-floor-is-never-measured] *(narrowed 2026-09-08: the MECHANISM shipped, the NUMBER is
+what stays open.)* What is still owed is the spread on a REAL task, on the box — the ≥3-seed arm the
+profile A/B needs, reported beside `generalization_gap` — and with it the answer to whether any
+champion margin this repo has published exceeds its own evaluation noise, AIRA₂'s explanation of the
+field's "overfitting". proof:missing:docs/audit/eval-noise-floor.md
+
+*The instrument (2026-09-08). `Settings.eval_noise_seeds` (0 = off and shipped off; 1 is off too,
+because one number has no spread) makes `engine/noise_floor.py::_noise_floor_phase` re-evaluate the
+CHAMPION N times under the SEARCH's own protocol — the node's own `idea.eval_profile`, seeds 0..N-1,
+so the first repeat re-measures the exact configuration the search scored — once per run, in the
+empty-action ladder BEFORE the confirm pass. It is deliberately not confirmation, which re-scores the
+top-k at the FULL profile from a DISJOINT seed base and whose mean SELECTS. Each repeat is an
+`eval_noise_seed` row charged to its own `noise` budget bucket and never a second node terminal
+(invariant 2); the pass writes one `eval_noise_floor` summary that doubles as its completion gate —
+metrics, mean, sample std, range and `sem`, the same quantity `trust/gate.py::one_se_better` compares
+a margin against (`core/fitness.py::standard_error_difference(std, n, 0.0, 0)`), so that rule and
+`engine/champion_caveats.py::mislead_gap` are on the floor's scale by construction. Read by nothing
+that decides: an instrument that also moved a champion could not be used to judge the champions it
+moved. Driven end to end over a real toy run (`tests/test_eval_noise_floor.py`), whose floor is a
+MEASURED ZERO because the toy quadratic is deterministic — the mechanism working, not the number.*
 
 OPEN[no-external-benchmark-number-exists] `adapters/mlebench_real.py` and `docs/MLEBENCH.md` ship the
 real host-graded path and no completed run is recorded anywhere in the tree. Every blocker is now in
@@ -539,11 +571,31 @@ before the measure existed still folds to exactly what it folded to. Selection-n
 nothing that decides — the instrument first, as the row asked (`tests/test_memo_provenance.py`).
 Deleted per the index rule.*
 
-OPEN[memo-quoted-numbers-unmatched-against-cited-metrics] the deterministic verifier declines to
-match numbers (a regex cannot tell an arXiv id from a metric) and leaves numeric correctness to the
-LLM verifier; MLReplicate's 59 % says fabricated numbers are what survives review, and matching a
-decimal against the CITED nodes' recorded metrics needs no classifier. Measure the match rate over
-the corpus first. proof:missing:docs/audit/memo-number-fidelity.md
+*Closed 2026-09-08 (row 32's fourth part shipped): the marker
+`memo-quoted-numbers-unmatched-against-cited-metrics` stood here. The verifier's refusal to
+CLASSIFY a decimal stands unchanged — a regex still cannot tell an arXiv id from a metric, and
+`check_claims` still moves no verdict on a number — but classifying was never the only way to ask:
+`core/research_record.py::number_fidelity` MATCHES each decimal a claim quotes against the metrics
+of the experiments it CITES, at the precision the memo quoted (`0.88` IS a recorded 0.87764 to two
+places), with URL and arXiv-id spans excluded LEXICALLY and counted, integers left out (a memo
+quotes `bs 8192` by the dozen), and the sign part of the number. Three channels, and the middle one
+is the finding: `cited`, `run` (a real metric of an experiment the claim does NOT cite — a
+mis-attribution no reader could see from the statement and the verdict together) and `none`, which
+is deliberately not called `fabricated`. `trust/memo_verify.py::number_fidelity_report` aggregates
+it per claim onto every memo with claims, free of `research_verify`, read by nothing that decides;
+`core/advisory_payloads.py::_number_fidelity` bounds the block and RECOMPUTES its aggregates, and a
+memo written before the measure existed stays without it (`tests/test_memo_number_fidelity.py`).
+Measured on the one real memo in the tree — 21 decimals over 8 claims, all unmatched and correctly
+so (the run held zero nodes and every result number came from a sibling), and **13 of the 21 are
+hyperparameter values**, which is why the recorded share is an instrument reading and not a grade
+(`docs/audit/memo-number-fidelity.md`). Deleted per the index rule.*
+
+OPEN[memo-number-fidelity-corpus-rate-unmeasured] the instrument above shipped 2026-09-08 and the
+NUMBER the row asked for first has not: this checkout holds one real memo, and the corpus is the
+~119 completed memos across the thirty run dirs on the bench box. The pass is offline and free
+(fold each run, `number_fidelity_report` per `research_completed`, pool the rows) — what it needs
+is the box that holds `runs/`. Columns and the dated result line are in
+`docs/audit/memo-number-fidelity.md` §4. proof:`absent:RESULT 2026-@docs/audit/memo-number-fidelity.md`
 
 *Closed 2026-09-07 (row 32 shipped): the marker `novelty-gates-never-consult-literature` stood here.
 `engine/novelty.py::literature_overlap` is the deterministic, model-free overlap between a proposal
@@ -558,13 +610,22 @@ novelty, which is precisely why nothing may act on it. `tests/test_novelty_liter
 including the paraphrase it misses. What is NOT done here and is now its own item: the graded gate's
 LEVEL still comes from the run's history alone. Deleted per the index rule.*
 
-OPEN[graded-novelty-level-ignores-the-literature-overlap] `_literature_note` records the overlap and
-`search/graded_novelty.py::grade_novelty` still grades levels 0-5 from the concept graph and this
-run's nodes alone, so a proposal the run's own reading describes can still be graded `novel` and
-short-circuit the flat gate at level 4/5. The overlap is on the row beside the grade and is read by
-nothing that decides. Needs the level rubric to take prior art as an input, which is a prompt change
-and a grade-semantics change — measure the overlap rate on real runs first.
-proof:absent:literature@looplab/search/graded_novelty.py
+*Closed 2026-09-08: the marker `graded-novelty-level-ignores-the-literature-overlap` stood here.
+`grade_novelty(literature=…)` takes prior art as an input at EXACTLY ONE terminal and in EXACTLY ONE
+direction, and both halves are the whole design. One terminal: levels 1-5 each assert something
+about THIS RUN's history, which a paper neither strengthens nor weakens, while level 0 asserts "a
+new region of the space" — the one sentence the run's own reading can falsify. Such a grade becomes
+level 3 `described_in_retrieved_literature` with level 3's own recommendation (`surface_prior`), and
+`_graded_novelty_precheck` returns None for 3 exactly as it does for 0 — **no proposal's admission
+moves, nothing is rejected, the flat dedup gate decides as it always did**. One direction: only a
+PRESENT overlap moves a grade, because `literature_overlap`'s recall is a stated FLOOR (the driven
+paraphrase it misses is fed through the whole rubric and the grade is byte-identical to the
+literature-free one) — reading silence as novelty would spend a floor as if it were a ceiling. The
+engine hands the rubric the SAME rows the audit row carries (`_literature_rows`, one derivation),
+and with `novelty_literature` off (the default) that is `[]` and the grade is byte-identical to its
+pre-2026-09-08 self. Six driven cases in `tests/test_novelty_literature.py`. What is still owed is
+the RATE — how often a graded-novel proposal overlaps a retrieved paper on a real run — which needs
+runs with `novelty_literature` on. Deleted per the index rule.*
 
 *Closed 2026-09-07 (row 30 shipped): the marker `prov-export-carries-no-claims` stood here. The
 export now carries the claims half: one activity per deep-research memo (its trigger, summary,
@@ -626,10 +687,22 @@ rungs (Landlock TCP at ABI 4, a network namespace) are named, not claimed. Measu
 `AF_INET` refused in a child. The probe carries `mutators` always. Off by default for the evidence
 `landlock` waits on. Deleted per the index rule.*
 
-OPEN[otel-bridge-carries-no-genai-semconv] the OTel bridge opens spans with LoopLab's own attribute
-names and no `gen_ai.operation.name` or `gen_ai.usage.*`; the GenAI conventions are Development-status
-with no release in their new repository (2026-06). Deferred until they cut one.
-proof:absent:gen_ai@looplab/core/tracing.py
+*Closed 2026-09-08: the marker `otel-bridge-carries-no-genai-semconv` stood here.
+`core/tracing.py::genai_semconv` restates a generation's or tool's facts in the GenAI conventions —
+`gen_ai.operation.name`, `gen_ai.request.model`, the request parameters and `gen_ai.usage.*`, plus
+`gen_ai.tool.name` for a real tool observation — and the bridge writes them BESIDE LoopLab's own
+names on the OTLP span, at open and again on every late `SpanHandle.set` (usage is stamped after the
+call returns and is the whole of the usage half). Additive on purpose: `spans.jsonl` is the same
+attribute map that `events/traceview.py`, `looplab timings` and `looplab tokens` read, so a rename
+would have broken every one of them; the mirror never touches the durable row. It guesses nothing —
+no `gen_ai.provider.name`/`gen_ai.system` (an OpenAI-COMPATIBLE endpoint may be Ollama, vLLM, a
+LiteLLM proxy or OpenAI, and a guessed provider is read by a collector as authoritative), no
+`gen_ai.response.model` (no span records what the endpoint answered with), and a wrong-typed or
+absent fact produces no key. The conventions being Development-status is why it stays a mapping of
+facts already held rather than a schema LoopLab depends on: a renamed key changes one table.
+`tests/test_otel_genai_semconv.py` drives the truth table and the bridge through a recording double,
+including that the durable row gains no `gen_ai.` key and that a hostile provider cannot fail a span.
+Deleted per the index rule.*
 
 ### 4.2 From doc 50's residue and the in-code `CODEX AGENT` notes
 
@@ -779,12 +852,25 @@ off. Deleted per the index rule.*
 
 ### 4.3 From the docs pass (§2.1), corrected
 
-OPEN[lessons-are-not-operator-scoped] cross-run LESSONS are retrieved by task fingerprint and role
-(`engine/lessons_priors.py::_render_role_prior`: fingerprint Jaccard ≥ 0.34, harmonic recall, top-5)
-regardless of the operator about to fire; the in-run parent-plus-siblings context DOES exist
-(`events/digest.py::lineage_lessons`, `sibling_digest`). The only per-operator scoping ablation in the
-field (AIRA-dojo) is null, so this is LAST in the memory stack and closes as a decline if the
-citation-rate audit shows no operator effect. proof:absent:operator_scoped@looplab/engine/lessons_priors.py
+*Closed 2026-09-08: the marker `lessons-are-not-operator-scoped` stood here.
+`engine/lessons_priors.py::operator_scoped_prior` ranks the DEVELOPER's cross-run prior by the
+operator of the `Idea` being built — `node_build.py::_developer_prior_text` is the one site in the
+loop that holds both halves — through `lesson_hygiene.py::lesson_operator_bucket`: this operator's
+own lessons, then untagged ones, then rows tagged only with others. Every distilled lesson now
+records the operators of its own evidence nodes unconditionally
+(`lessons_reconcile.py::_evidence_operators`, stamped by both `lessons_distill` writers), which is
+the fact the store never held.
+
+Three shapes chosen against the field evidence rather than around it. It RANKS and never filters,
+because the only per-operator ablation (AIRA-dojo) is null and a filter would bet a real loss — a
+Developer never shown the fix for a crash class — on an unmeasured effect. It is OFF by default
+(`Settings.lesson_operator_scope`) and OFF reproduces the Developer prompt BYTE FOR BYTE, driven
+through `_directed_idea` in `tests/test_lesson_operator_scope.py`. And it makes the decline
+DECIDABLE instead of arguable: a scoped render writes a `prior_injected` row naming its operator, so
+`events/prior_citations.py` can measure whether the operator's own lessons are cited more than the
+rest — the citation-rate audit this marker made the condition of its own close. It costs no store
+read and no provider call (the retained scan is re-ranked, the embedder memo intact). Deleted per
+the index rule.*
 
 *Closed 2026-09-06 (row 18 shipped): the marker `no-plan-artifact-with-endgame-reserve` stood here.
 `events/types.py::EV_PLAN` is a FOLDED plan artifact (`RunState.plan` / `plan_history`) that
@@ -855,11 +941,25 @@ in order; `tests/data/golden_parallel_projection.json` is the checked-in order-i
 of what the search finds, which is the golden a nondeterministic byte order permits. Deleted per the
 index rule.*
 
-OPEN[no-distance-from-seed-signal] nothing measures how far a candidate moved from the seed program
-(doc 17 §11; MLGym's "models usually improve by finding better hyperparameters" is what it would
-show). Demoted: no measured precedent in the window; the edit-type marker is the field-measured
-diagnostic. Guessed names — re-point on landing.
-proof:absent:distance_from_seed@looplab/search+absent:seed_distance@looplab/search
+*Closed 2026-09-08 (row 31, the last code part): the marker `no-distance-from-seed-signal` stood
+here. `search/seed_distance.py::seed_distance` measures one node's DISPLACEMENT from the seed
+program it descends from — one diff against the lineage ROOT (`tools/node_diff.py::lineage`,
+first-parent), classified by that module's own closed `EDIT_TYPES` and no second vocabulary, so a
+change and its undo CANCEL where a per-step tally counts two edits. The bands are the only judgement
+added on top (tuning / structural / cosmetic + the vocabulary's named residue) and they are asserted
+TOTAL over `EDIT_TYPES` at import, so a tenth type cannot shrink a share's denominator unnoticed.
+`run_seed_distances` puts each node's direction-aware gain over its own seed beside its tuning share
+— which is the shape MLGym's sentence is in — and `looplab seed-distance` prints it with the count it
+was taken over, because 12 nodes is an observation about one run and not a test of a field result.
+The PATH is not lost with the displacement: `reintroduced_lines` rides on every row, so a lineage
+cycling in place reads as re-introductions rather than as a node that never moved.*
+
+*It DECIDES nothing and that is the finding's own instruction, not a staging post: doc 17 §11's
+"novel != good" is about exactly this family, and a distance maximised is a run rewarded for churn.
+`tests/test_seed_distance.py` drives the cancellation, the bands, the direction-aware gain, the
+missing-file-set answer (not the same as "did not move"), and pins that the only importer under
+`looplab/` is the CLI. What is NOT closed by this is doc 17 §11's SEMANTIC distance-from-seed — an
+embedder over a versioned external corpus — which is `§17`'s Scoop-Check and a different artifact.*
 
 *Closed 2026-09-06 (row 24 shipped): the marker `stage-assert-has-no-model-free-numeric-form` stood
 here. `STAGE_EXPECT_KEYS` is the closed triple `("files", "assert", "numeric")`:
@@ -957,7 +1057,7 @@ marker(s) it retires**, so the list re-derives from `grep -rn 'OPEN\['`.
 | 8 | One launch-readiness gate behind `/api/validate` | two copies, one pointing at the backlog | S | `launch-readiness-gate-is-two-copies` |
 | 9 | **The stage checker gets the log tools** the three watchdog judges already have | the last blind 4,000-char judge; the re-train BACKLOG §0.9 recorded | S–M | `stage-checker-is-handed-a-blind-tail` |
 | 10 | **Consistent host-side scoring for `repo_task`**, in two slices: (a) a host-side score stage held constant across candidates, `generalization_gap` folded for repo runs; (b) the split made HIDDEN once #2 and the Landlock validation hold, selection through `holdout_select`; replay-digest proof that undeclared runs are byte-identical | the field's largest measured selection effect, open on the box's own runs; L4-m → L4-v | L | `repo-task-champion-is-picked-on-the-candidates-own-metric` |
-| 11 | **The profile A/B, properly designed** on the box: knobs without the gate / the gate alone / the embedding-novelty arm, ≥3 seeds per arm, `generalization_gap` and the noise floor reported | the built quality machinery ships off, undecided; the arms decide three markers at once | S code, box time | `research-grade-profile-is-not-the-default`, `embedding-novelty-gate-declined-on-one-incident`, `eval-noise-floor-is-never-measured` |
+| 11 | **The profile A/B, properly designed** on the box: knobs without the gate / the gate alone / the embedding-novelty arm, ≥3 seeds per arm, `generalization_gap` and the noise floor reported. **The noise-floor INSTRUMENT shipped 2026-09-08** (`engine/noise_floor.py` under `Settings.eval_noise_seeds`, off): a run records the repeated-seed spread of its champion under the search's own protocol, with the `sem` the >1-SE rule uses, and reads it into no decision — so the arm now has a floor to report rather than one to invent. The three MEASUREMENTS stay open | the built quality machinery ships off, undecided; the arms decide three markers at once | S code, box time | `research-grade-profile-is-not-the-default`, `embedding-novelty-gate-declined-on-one-incident`, `eval-noise-floor-is-never-measured` |
 | 12 | **A `DeveloperResult` envelope, then the repair path AND the serial build lane off the loop** (one helper on the proposal pool, capture-sink discipline, a loop-liveness test per site) | zero ticks during a 116–276 s median hold; a dead node waited 62 min for its terminal while both GPUs idled | M | `developer-output-has-no-immutable-envelope`, `repair-path-holds-the-engine-loop`, `serial-node-build-holds-the-loop` |
 | 13 | **One untrusted-evidence envelope** (`core/evidence.py`) behind a flag, on the Strategist, triage / critic stderr, arXiv / web | model-authored text reaches decision-moving surfaces unlabelled | M | `no-single-untrusted-evidence-envelope` |
 | 14 | **Containment made countable**: ruff `BLE001` as a census, the 652 `noqa`s as an allow-list, `contain(span, reason)`, the paid-call `BudgetExceeded` funnel | 460 silent handlers; a swallowed budget stop at a selection site | M | `containment-is-unmeasured` |
@@ -975,10 +1075,10 @@ marker(s) it retires**, so the list re-derives from `grep -rn 'OPEN\['`.
 | 26 | **Mount the three giant components** through the `cardKanban.test.js` pattern, one gate-flip test each, the harness extracted; the trajectory overlay once the run row carries a series | the pattern exists; the components are outside it | S–M | `largest-ui-components-are-never-mounted`, `cross-run-trajectory-overlay-unbuilt` |
 | 27 | **Verification of the seams**: a 2-wide parallel golden; a layering guard; per-attempt stage rows (after #21's baseline); a watermark that hashes data; the write tool's descriptor-relative reopen | each one test or one line, each a hole a review found | S × 5 | `parallel-build-has-no-golden-replay`, `layering-rules-are-not-machine-checked`, `stage-rows-are-last-wins-per-name`, `readmodel-watermark-ignores-event-data`, `write-tool-reopens-the-approved-path-by-name` |
 | 28 | **The kernel rungs, together**: the Landlock GPU validation on the box, the `EACCES` translation at the repair boundary landing WITH it, then the default flip; a seccomp / egress fence for the subprocess tier on Sandlock's shape | the refusal must not read as a missing file to the judge; the default tier can `connect()` anywhere | box + S + M | `landlock-is-opt-in-by-default`, `landlock-refusal-is-not-translated-for-triage`, `subprocess-tier-has-no-syscall-or-egress-fence` |
-| 29 | **Retire the legacy `/control` route**; the per-POST rescan shrinks with it; the SSE state stream as deltas; the cross-run flag per principal. *Status 2026-09-07: the principal (a) and the delta stream (b) shipped; the retirement (c) is open — 62 call sites in 9 test files, each a property to re-verify under `/commands`, counted at the marker.* | a lost-response retry re-appends paid intents; O(events × state) bytes per tab; a shared-hub gap | M | `legacy-control-route-is-not-retired`, `eventstore-rescans-the-log-per-control-post`, `sse-retransmits-the-whole-folded-state`, `cross-run-tools-are-a-process-wide-flag` |
-| 30 | **The event payload contract**, the PROV export carrying claims with verdicts, the GenAI semconv bridge when the spec ships | invariant #5 unverifiable; `/prov` exports no claim | M, S, deferred | **Shipped 2026-09-07** (both code parts): `events/types.py::EVENT_PAYLOAD_KEYS` is one contract row per registered type — description, `required`/`optional` payload vocabulary, `stored_whole` — with `tests/test_event_payload_contract.py` re-deriving BOTH sides from source (the fold's 437 reads through the helper chain; every writer's keys) and DRIVING invariant #5 by folding every type with an empty payload and re-folding the golden run with undeclared keys stripped; `docs/guide/event-reference.md` is generated from it. `/prov` now carries claims as individuals with their evidence spans and D8 verdicts (`tests/test_prov_claims.py`). `otel-bridge-carries-no-genai-semconv` stays deferred: the GenAI conventions are still Development-status with no release in their new repository. |
-| 31 | **Search diagnostics**: edit-type and re-introduction annotation over `node_diff.py`; a cost term in MCTS; the proxy's pairwise accuracy, foresight's selective accuracy and smoke→full rank fidelity measured on the box; the seed-distance scalar when a run pays for it | the field measures its judges; LoopLab's kill and prioritise on unmeasured ones | S, M, box × 3, S | **Shipped 2026-09-07** (every code part): `tools/node_diff.py::EDIT_TYPES` + `reintroduced_lines` with the `edits` section and `looplab edit-types`; `search/policy.py::eval_cost_penalty` behind `Settings.mcts_cost_weight` (0.0 = the historical score, byte for byte); `search/proxy.py::pairwise_accuracy` with `looplab proxy-accuracy`, which prints the number AND the bias it carries. Still open, all three MEASUREMENTS on the box: `proxy-accuracy-never-run-on-the-corpus` (the instrument now exists), `foresight-selective-accuracy-unmeasured`, `smoke-full-rank-fidelity-unmeasured`; and `no-distance-from-seed-signal` stays demoted — the edit-type diagnostic is the field-measured one that replaced it. |
-| 32 | **The memo's own measures**: provenance coverage per section; a number-fidelity audit against cited metrics; literature in the novelty gates (after #16); competing hypotheses in failure diagnosis | 57.9 % synthesis accuracy is the field's number for the unchecked fields; 59 % fabricated among accepted | S, S, M, M | **Shipped 2026-09-07** (three of four): `trust/memo_verify.py::provenance_coverage` on every memo it writes; `engine/novelty.py::literature_overlap` on the novelty audit rows and, under `Settings.novelty_literature`, in the re-proposal; `engine/failure_diagnosis.py::coerce_hypotheses` under `Settings.diagnosis_hypotheses`, recorded and read by nothing that decides. Still open: `memo-quoted-numbers-unmatched-against-cited-metrics` (the row asks for the corpus match rate FIRST, which is a box measurement) and the new `graded-novelty-level-ignores-the-literature-overlap`. |
+| 29 | **Retire the legacy `/control` route**; the per-POST rescan shrinks with it; the SSE state stream as deltas; the cross-run flag per principal. *Status 2026-09-08: the principal (a) and the delta stream (b) shipped, and the per-POST rescan (`eventstore-rescans-the-log-per-control-post`) closed on its own — construction walks the log once instead of twice, and `appstate.py::AppState.event_store` gives the control route a reader that survives the request (12 appends after a 40-record seed: 570 records re-parsed before, 12 after). The retirement (c) stays open and its marker now states what blocks it: `/commands` requires an `Idempotency-Key`, requires a strict `expected_generation` with no `expected_seq` equivalent for the 17 tail-CAS sites, applies `EV_PAUSE` and every non-`NO_SPAWN` intent asynchronously, and turns 400-class refusals into coded failed records — so each of the 63 sites is a property to re-verify, and the window still names no `Sunset` date.* | a lost-response retry re-appends paid intents; O(events × state) bytes per tab; a shared-hub gap | M | `legacy-control-route-is-not-retired`, `eventstore-rescans-the-log-per-control-post`, `sse-retransmits-the-whole-folded-state`, `cross-run-tools-are-a-process-wide-flag` |
+| 30 | **The event payload contract**, the PROV export carrying claims with verdicts, the GenAI semconv bridge when the spec ships | invariant #5 unverifiable; `/prov` exports no claim | M, S, deferred | **Shipped 2026-09-07** (both code parts): `events/types.py::EVENT_PAYLOAD_KEYS` is one contract row per registered type — description, `required`/`optional` payload vocabulary, `stored_whole` — with `tests/test_event_payload_contract.py` re-deriving BOTH sides from source (the fold's 437 reads through the helper chain; every writer's keys) and DRIVING invariant #5 by folding every type with an empty payload and re-folding the golden run with undeclared keys stripped; `docs/guide/event-reference.md` is generated from it. `/prov` now carries claims as individuals with their evidence spans and D8 verdicts (`tests/test_prov_claims.py`). The GenAI semconv bridge SHIPPED 2026-09-08 (§4.1's closure note): `core/tracing.py::genai_semconv` mirrors `gen_ai.*` onto the OTLP span BESIDE LoopLab's own names, leaving `spans.jsonl` byte-identical — additive, so the conventions still being Development-status costs one table if a key is renamed. |
+| 31 | **Search diagnostics**: edit-type and re-introduction annotation over `node_diff.py`; a cost term in MCTS; the proxy's pairwise accuracy, foresight's selective accuracy and smoke→full rank fidelity measured on the box; the seed-distance scalar when a run pays for it | the field measures its judges; LoopLab's kill and prioritise on unmeasured ones | S, M, box × 3, S | **Shipped 2026-09-07** (every code part): `tools/node_diff.py::EDIT_TYPES` + `reintroduced_lines` with the `edits` section and `looplab edit-types`; `search/policy.py::eval_cost_penalty` behind `Settings.mcts_cost_weight` (0.0 = the historical score, byte for byte); `search/proxy.py::pairwise_accuracy` with `looplab proxy-accuracy`, which prints the number AND the bias it carries. Still open, all three MEASUREMENTS on the box: `proxy-accuracy-never-run-on-the-corpus` (the instrument now exists), `foresight-selective-accuracy-unmeasured`, `smoke-full-rank-fidelity-unmeasured`; `search/seed_distance.py` + `looplab seed-distance` landed 2026-09-08 as the displacement half of the same vocabulary (`no-distance-from-seed-signal` closed): the seed-relative distance the per-step tally cannot state, recorded and read by nothing that decides. |
+| 32 | **The memo's own measures**: provenance coverage per section; a number-fidelity audit against cited metrics; literature in the novelty gates (after #16); competing hypotheses in failure diagnosis | 57.9 % synthesis accuracy is the field's number for the unchecked fields; 59 % fabricated among accepted | S, S, M, M | **Shipped 2026-09-07** (three of four): `trust/memo_verify.py::provenance_coverage` on every memo it writes; `engine/novelty.py::literature_overlap` on the novelty audit rows and, under `Settings.novelty_literature`, in the re-proposal; `engine/failure_diagnosis.py::coerce_hypotheses` under `Settings.diagnosis_hypotheses`, recorded and read by nothing that decides. **Completed 2026-09-08** (the remaining two): `core/research_record.py::number_fidelity` + `trust/memo_verify.py::number_fidelity_report` MATCH every decimal a claim quotes against the metrics it cites (the verifier still classifies nothing and no verdict moves — `docs/audit/memo-number-fidelity.md`), and `search/graded_novelty.py::grade_novelty(literature=…)` takes prior art at the one terminal it can falsify, deferring exactly where level 0 deferred. Still open: `memo-number-fidelity-corpus-rate-unmeasured`, the box measurement the row asked for first. |
 | 33 | **Throughput beyond the box and the noun's own benchmark**: the build barrier into a steady-state lane; a cross-machine pool with static per-worker GPU pinning and remote execution once it can reach four workers; the trace export for operator training; an experiment-level benchmark adapter | rank saturates at 4 GPUs; the best full-set number ran on ≤2; Frontis trained on exactly this corpus | M, L, S, box | **Partly shipped 2026-09-07**: `looplab export-sft` (the S item, closed) and the steady-state lane behind `Settings.steady_state_build` — the lane is driven and off, and its marker stays open for the DEFAULT flip, which needs a box run comparing wall clock and proposal quality. `eval-parallelism-is-in-process-only` (the cross-machine pool, L) and `no-research-lifecycle-benchmark-number` (box) are untouched. |
 | 34 | The remaining product rows and ledgers when their trigger fires or the file is open: MLflow autolog, Pareto in selection under `select`, a drift detector, the MCTS value estimate, the FE operator, a forecasting backend; CODE_REVIEW's Windows job object and categorical leakage; doc 29's F3 byte total; the doc 25 / 27 / 34 ledgers | real gaps with driven falsifiers, lower leverage | — | **One shipped 2026-09-07**: `target-leakage-misses-non-monotone-and-categorical` — `trust/leakage.py::categorical_leak` sees both shapes and REPORTS them beside the verdict; arming it is `categorical-leak-rung-never-measured`, which needs a false-positive rate over real tasks. `windows-tree-kill-is-not-atomic` needs a Windows box; `f3-workspace-byte-total` is a measurement; the six BACKLOG product markers and the 48 ledger markers stay as the row says — when their trigger fires or the file is open. |
 
@@ -988,8 +1088,10 @@ In the order they pay: (1) #11, the profile A/B with its three arms; (2) the hac
 (`developer-hack-rate-unmeasured`) — before the campaign; (3) the serial-build harm report beside #12
 (`serial-node-build-holds-the-loop`); (4) #23, the campaign; (5) the prior citation-rate audit
 (`prior-injection-hit-rate-unmeasured`); (6) the first-propose split
-(`first-propose-runs-with-every-gpu-idle`); (7) ASHA's promotion mask — the 2.08 starved hours are
-already in hand, the soundness question is not (`asha-promotion-mask-blocks-all-production`); (8)
+(`first-propose-runs-with-every-gpu-idle`); (7) ASHA's promotion mask left this queue on
+2026-09-08 — the soundness question was answerable offline after all, so the refusal became a
+RESERVATION over the one expansion the masked node is already doing rather than a veto over the
+whole lane, and the 2.08 starved hours it was holding are bought back without a box; (8)
 `TrainingVerdict.fault`'s outcome label (`monitor-fault-has-no-outcome-label`); (9) researcher
 questions (`researcher-questions-not-appended`); (10) the Landlock validation with the `EACCES`
 translation (#28); (11) the two caches' counts; (12) crash lead time

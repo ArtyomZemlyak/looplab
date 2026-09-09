@@ -25,7 +25,7 @@ def main(memory_dir: str) -> None:
 
     def kill_after_first(*args, **kwargs):
         record = original(*args, **kwargs)
-        # The row is fsynced by `_append_governance(require_durable=True)` before this returns, so
+        # The row is fsynced by `append_governance(require_durable=True)` before this returns, so
         # the kill lands strictly AFTER a durable decision and strictly BEFORE the stage could
         # observe it, receipt it, or move on.
         sys.stdout.flush()
