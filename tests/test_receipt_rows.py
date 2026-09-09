@@ -27,10 +27,10 @@ from looplab.engine.claims_health import (
     ClaimEvidenceSources,
     _ClaimAssessmentRows,
     _ClaimSourceRows,
-    _filter_claim_assessments,
-    _filter_claim_source_rows,
+    filter_claim_assessments,
+    filter_claim_source_rows,
 )
-from looplab.engine.concept_capsules import _CapsuleRows, _filter_capsule_rows
+from looplab.engine.concept_capsules import _CapsuleRows, filter_capsule_rows
 
 # --------------------------------------------------------------------------- #
 # fixtures: one UNHEALTHY receipt per type, so "the receipt survived" is distinguishable from
@@ -51,7 +51,7 @@ _QUARANTINED_CAPSULE_HEALTH = {
 }
 
 # A CURRENT (v1) aggregate receipt, i.e. the shape every live producer emits. Legacy producer-only
-# receipts are deliberately not used here: `_safe_research_source_summary` normalizes those to
+# receipts are deliberately not used here: `safe_research_source_summary` normalizes those to
 # `read_health_v: 0` and then rejects its own output on a second pass, so a legacy receipt is dropped
 # by any re-sanitizing projection. That asymmetry predates EM-09 and is unreachable in production
 # (`_research_source_summary` always stamps the current version); this change preserves it exactly
@@ -209,7 +209,7 @@ def test_an_undeclared_attribute_cannot_be_stashed_on_a_snapshot(snapshot):
 
 def test_scoping_claim_source_rows_keeps_the_quarantine():
     rows = _ClaimSourceRows([_LESSON, _OTHER_LESSON], read_health=_QUARANTINED_READ_HEALTH)
-    scoped = _filter_claim_source_rows(rows, lambda row: row["task_id"] == "t1", research=False)
+    scoped = filter_claim_source_rows(rows, lambda row: row["task_id"] == "t1", research=False)
     assert list(scoped) == [_LESSON]
     assert scoped.read_health["read_complete"] is False
     assert scoped.read_health["lessons"] == _QUARANTINED_READ_HEALTH["lessons"]
@@ -217,7 +217,7 @@ def test_scoping_claim_source_rows_keeps_the_quarantine():
 
 def test_scoping_capsule_rows_keeps_the_quarantine():
     rows = _CapsuleRows([_CAPSULE, _OTHER_CAPSULE], source_health=_QUARANTINED_CAPSULE_HEALTH)
-    scoped = _filter_capsule_rows(rows, lambda row: row["task_id"] == "t1")
+    scoped = filter_capsule_rows(rows, lambda row: row["task_id"] == "t1")
     assert list(scoped) == [_CAPSULE]
     assert scoped.source_health == _QUARANTINED_CAPSULE_HEALTH
 
@@ -227,7 +227,7 @@ def test_filtering_assessments_keeps_the_aggregate_authority():
         [{"statement": "a", "maturity": "machine-proposed"},
          {"statement": "b", "maturity": "operator-rejected"}],
         claim_source=_UNKNOWN_CLAIM_SOURCE, research_source=_UNKNOWN_RESEARCH_SOURCE)
-    live = _filter_claim_assessments(rows, lambda row: row["maturity"] != "operator-rejected")
+    live = filter_claim_assessments(rows, lambda row: row["maturity"] != "operator-rejected")
     assert [row["statement"] for row in live] == ["a"]
     assert live.claim_source["receipt_known"] is False
     assert live.research_source["producer_unknown_runs"] == 1
@@ -237,7 +237,7 @@ def test_a_plain_list_of_assessments_carries_no_forged_aggregate():
     """`None` is the third state, and it is NOT interchangeable with a default receipt: the retrieval
     layer reads it as "no aggregate was carried, fall back to the per-row copies", whose own fallback
     is fail-closed. Synthesizing a complete-looking receipt here would defeat that."""
-    filtered = _filter_claim_assessments([{"statement": "a"}], lambda row: True)
+    filtered = filter_claim_assessments([{"statement": "a"}], lambda row: True)
     assert filtered.claim_source is None and filtered.research_source is None
 
 
@@ -262,7 +262,7 @@ def test_a_malformed_research_line_survives_the_load_projection_and_the_scope_fi
     assert loaded.read_health["research"]["malformed_rows"] == 1
     assert loaded.read_health["read_complete"] is False
 
-    scoped = _filter_claim_source_rows(loaded, lambda row: row["task_id"] == "t1", research=True)
+    scoped = filter_claim_source_rows(loaded, lambda row: row["task_id"] == "t1", research=True)
     assert len(scoped) == 1
     assert scoped.read_health["read_complete"] is False, (
         "scoping to the row's OWN task must not repair the file's quarantine")

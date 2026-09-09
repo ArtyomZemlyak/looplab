@@ -31,12 +31,13 @@ from looplab.serve.paid_ledger import (  # noqa: E402
     FAIL_CLOSED, FIRST_TERMINAL_WINS, PaidLedgerSpec, SERVE_PAID_LEDGER_DIAGNOSTIC_EVENTS,
     SERVE_PAID_LEDGER_EVENTS, SERVE_PAID_LEDGER_FOLDED_EVENTS, append_claim,
     confirm_terminal_receipt, fold_paid_ledger, record_terminal)
+from looplab.serve import concept_lens_service  # noqa: E402
 from looplab.serve.routers import boss as boss_router, runs as runs_router  # noqa: E402
 
 from _source_scan import PKG, called_names, iter_trees  # noqa: E402
 
 REFRESH = boss_router._REPORT_REFRESH_LEDGER
-LENS = runs_router._CONCEPT_LENS_LEDGER
+LENS = concept_lens_service.CONCEPT_LENS_LEDGER
 
 ID_A = "a" * 64
 DIGEST_A = "1" * 64
@@ -395,21 +396,33 @@ def _calls_in(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
 
 
-@pytest.mark.parametrize("relative", ["serve/routers/boss.py", "serve/routers/runs.py"])
-def test_neither_paid_router_still_binds_strict_fsync(relative):
-    """The fsync-confirm seam moved, and a router that re-binds `strict_fsync` silently un-moves it.
+#: The three modules that own a paid protocol built on the shared ledger. `serve/routers/runs.py` is
+#: still listed for the BINDING half even though doc 25 SR-04 moved the concept-lens protocol into
+#: `serve/concept_lens_service.py` on 2026-09-08: re-binding `strict_fsync` in the router would be
+#: exactly as damaging there as it ever was, and dropping the row would retire that guard silently.
+_PAID_PROTOCOL_MODULES = {
+    "serve/routers/boss.py": (boss_router, True),
+    "serve/routers/runs.py": (runs_router, False),
+    "serve/concept_lens_service.py": (concept_lens_service, True),
+}
+
+
+@pytest.mark.parametrize("relative", sorted(_PAID_PROTOCOL_MODULES))
+def test_no_paid_protocol_module_still_binds_strict_fsync(relative):
+    """The fsync-confirm seam moved, and a module that re-binds `strict_fsync` silently un-moves it.
 
     `tests/test_report.py` injects an unsyncable storage through
-    `looplab.serve.paid_ledger.strict_fsync`. If a router imported the name again and confirmed a
-    terminal with its own copy, that injection would still SUCCEED and simply reach nothing — the
-    measured failure mode where the suite stays green with the property fully broken. So the rule is
-    stated over the binding, not over the test.
+    `looplab.serve.paid_ledger.strict_fsync`. If a paid protocol imported the name again and
+    confirmed a terminal with its own copy, that injection would still SUCCEED and simply reach
+    nothing — the measured failure mode where the suite stays green with the property fully broken.
+    So the rule is stated over the binding, not over the test.
     """
-    module = {"serve/routers/boss.py": boss_router, "serve/routers/runs.py": runs_router}[relative]
+    module, confirms = _PAID_PROTOCOL_MODULES[relative]
     assert not hasattr(module, "strict_fsync"), (
         f"{relative} re-bound strict_fsync; the confirm seam must stay paid_ledger's")
-    assert "confirm_terminal_receipt" in _calls_in(_module_tree(relative)), (
-        f"{relative} no longer calls the shared confirm — a comment cannot satisfy this")
+    if confirms:
+        assert "confirm_terminal_receipt" in _calls_in(_module_tree(relative)), (
+            f"{relative} no longer calls the shared confirm — a comment cannot satisfy this")
 
 
 def test_the_shared_confirm_is_the_one_that_actually_syncs():

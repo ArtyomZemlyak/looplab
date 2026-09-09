@@ -250,6 +250,40 @@ React control plane (built artifacts served by `serve/server.py`). The house pat
 
 ## Conventions and traps (the full account)
 
+### The telemetry that was carved out for a registry that never existed
+
+`agents/roles.py::RESEARCHER_OUTPUT_ATTRS` gained `last_hyp_priority`,
+`last_foresight` and `last_foresight_pick` on 2026-09-08. It is a one-line entry there because the
+module sits at its `test_role_module_split.py` cap (787 of 788), so the account lives here.
+
+They had been excluded from `tests/test_role_output_contract.py` since the contract was written,
+with the reason *"they are read via `_emit_role_telemetry`'s registry, not here"*.
+`engine/audit.py::_emit_role_telemetry` is a METHOD that takes the attribute name as a string
+argument. There was no registry anywhere in the tree, so the carve-out protected nothing — and it
+read as though it did, which is worse than an unguarded attribute, because a reader checking
+whether the seam was covered would stop there.
+
+What was unguarded, measured: the three names appear as bare string literals at 32 sites across
+`search/foresight.py`, `search/surrogate.py`, `engine/audit.py` and `engine/novelty.py`, and every
+consumer reads them with a FALSY `getattr` default. So a one-sided rename does not raise: the
+engine stops emitting `hypothesis_ranked` and `foresight_selected` altogether, and `Card.confidence`
+— copied straight from `last_hyp_priority["confidence"]` in `search/card_selection.py` — goes
+unset. `search/surrogate.py`'s own docstring records that this already happened once.
+
+Registering them alone was not enough, and this is the part worth keeping: the contract's consumer
+scan looks for a literal `getattr(x, "attr")`, and these three are read by passing the NAME to
+`_emit_role_telemetry` / `_snapshot_role_telemetry`, which do the `getattr` inside. Registered
+without teaching the scan that form, they failed the contract's own "no consumer left — registry
+rot" check on a registry that was perfectly alive. The pattern learned the helper-call spelling,
+which is the same guarantee by the same means: the string is still in the caller's source, where a
+one-sided rename leaves it behind. It keeps ONE capturing group across both alternatives because
+`_source_scan.scan` uses `findall`, which returns tuples the moment there are two — the first cut
+did exactly that and made every captured name an unusable key.
+
+Mutation-tested from both sides, since a two-way registry is only as good as its weaker direction:
+renaming the producer in `search/foresight.py` and renaming the consumer in `engine/audit.py` each
+redden the contract.
+
 ### A phase that SPENDS must open a SPAN
 
 RESTORED 2026-09-07. This rule was master's and the merge resolved `CLAUDE.md` by taking the other

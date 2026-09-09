@@ -49,9 +49,9 @@ from looplab.core.trace_files import (
     open_private_trace_file, trace_file_change_token, trace_file_identity,
     windows_file_change_time)
 from looplab.events.eventstore import (
-    JsonlRecordInvalid, _interprocess_lock, decode_jsonl_line, scan_jsonl_region)
+    JsonlRecordInvalid, interprocess_lock, decode_jsonl_line, scan_jsonl_region)
 from looplab.events.traceview import (
-    _normalize_span, _strip_span_io, claimed_trace_node_id,
+    _normalize_span, _strip_span_io, card_research_root_card, claimed_trace_node_id,
     effective_node_id, root_span_generation, root_span_node_id, span_build_trace_claim,
     trace_root_generation, trace_root_node_id, trace_root_span)
 
@@ -60,7 +60,13 @@ from looplab.events.traceview import (
 # 12: `_normalize_span` began keeping `build_trace`/`card_build_generation`, and `build_claims` is
 # derived from the light rows — a persisted index written by the previous normalizer has neither, so
 # it must be rebuilt from source rather than cold-loaded into a claim map that would come up empty.
-_SCHEMA = 12
+# 13 (2026-09-08, docs/34 D-04 + D-03): `_h` is now the BOUNDED row digest `_row_digest` computes
+# (a different preimage AND a different width), so a v12 file's full-bytes digests must never be
+# compared against it — a mismatch would read as corruption on every row, and an equal-width
+# coincidence must not be reachable at all. Same bump carries the `card_id` propose dimension: it is
+# derived from the light rows this schema already persists, so it needs no new field, but a reader
+# that trusts a v12 tail would build it from records the v12 normalizer never validated for it.
+_SCHEMA = 13
 _INDEX_NAME = "spans.index.jsonl"
 _INDEX_LOCK_NAME = ".spans-index.lock"
 # Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
@@ -90,6 +96,40 @@ _SCAN_CHUNK_BYTES = 1024 * 1024
 # the largest bytes object this reader may allocate.
 _FULL_READ_COALESCE_GAP_BYTES = 256 * 1024
 _FULL_READ_BATCH_MAX_BYTES = TRACE_JSONL_ROW_MAX_BYTES
+# THE ROW-DIGEST PREIMAGE — the decision docs/34 D-04 deferred, made 2026-09-08 and made HERE so
+# there is one place to read it (`_row_digest` is the only producer, `_read_full` the only verifier).
+# Until this bump every row digest was SHA-256 over the row's FULL bytes, recomputed on the request
+# path, where one generation span carries 100 KB+ of `input`/`output`/`thinking` — so a node window
+# of 500 such rows re-hashed ~50 MB to prove 500 offsets. The digest is not deleted (that would
+# remove the verification this accelerator's "returns None or less, never WRONG data" promise rests
+# on); what it runs over is BOUNDED, and the class of corruption it must catch is stated:
+#
+#   MUST catch — the indexed `(offset, length)` no longer names the row that was indexed: offset
+#   drift onto another line, a resized in-place rewrite, a renumbered/reordered log, a persisted
+#   index cold-loaded against a different file. Every one of those changes the length or an edge,
+#   and both are in the preimage. A truncated tail changes the length. `_read_full` additionally
+#   compares the COMPLETE normalized light record — ids, name, kind, timing, usage, attributes —
+#   for every row at every read, so attribution metadata is still verified in full at any size.
+#
+#   Deliberately NOT caught — a same-length mutation strictly INSIDE the heavy middle of a row
+#   larger than `_ROW_DIGEST_BOUND_BYTES`. That is not a promise this index gives up, because it
+#   never held it usefully: the no-index reader (`traceview.load_spans`) reads those same mutated
+#   bytes and reports them as the run's spans, and any mutation landing between the digest and the
+#   caller's use is invisible to both. The index owes "the row at this offset is still THIS row",
+#   which the bound covers; `spans.jsonl` remains the sole source of truth for what a span SAID.
+#
+# 8 KiB per edge means the overwhelming majority of spans (every non-generation row) is still hashed
+# in FULL — the bound only takes effect where the old cost was paid. 128 bits is a corruption
+# detector, not a collision-resistant commitment: an actor who can rewrite `spans.jsonl` in place
+# can equally rewrite `spans.index.jsonl` beside it, so widening the digest buys nothing the
+# identity/mtime/mutation-token rebuild fences in `get_index` do not already carry, and it halves
+# the per-row hex retained in memory and in the persisted index.
+_ROW_DIGEST_EDGE_BYTES = 8 * 1024
+_ROW_DIGEST_BOUND_BYTES = 2 * _ROW_DIGEST_EDGE_BYTES
+_ROW_DIGEST_HEX = 32
+# Domain separation: this hash is never a bare SHA-256 of anything, so a full-bytes digest from an
+# older index (or a receipt's `append_sha256`) can never be mistaken for one of these by value.
+_ROW_DIGEST_PREFIX = b"looplab:span-row:v1\0"
 # A contiguous exporter receipt chain is the proof that an index may be extended. Size/mtime alone
 # cannot distinguish a true append from an in-place prefix rewrite followed by append, while hashing
 # the whole old prefix on every append is O(n²) live I/O. Receipts bind exact appended byte ranges to
@@ -165,7 +205,7 @@ def span_index_write_guard(
     path = Path(_path_key(spans_path))
     lock = _path_lock(str(path))
     with lock:
-        manager = _interprocess_lock(
+        manager = interprocess_lock(
             path.with_name(_INDEX_LOCK_NAME), required=required)
         try:
             manager.__enter__()
@@ -194,7 +234,7 @@ def span_destructive_write_guard(
     publish old-source derived offsets or accept a late attempt-A append behind their replacement.
     """
     path = Path(_path_key(spans_path))
-    with (_interprocess_lock(
+    with (interprocess_lock(
               path.with_name(TRACE_WRITER_LOCK_NAME), required=required),
           span_index_write_guard(path, required=required)):
         yield
@@ -321,6 +361,56 @@ def _decode_sha256(value) -> Optional[str]:
     except ValueError:
         return None
     if len(raw) != hashlib.sha256().digest_size:
+        return None
+    return value.lower()
+
+
+def _row_digest_preimage(data) -> bytes:
+    """EXACTLY the bytes `_row_digest` hashes for one source row — the rule, as a value.
+
+    Split out from the digest so the bound is a statable property rather than a timing claim:
+    `len(_row_digest_preimage(row))` is what `tests/test_span_index.py` counts, and it is bounded by
+    `_ROW_DIGEST_BOUND_BYTES` plus framing for a row of ANY size. It also bounds the copy — a
+    `memoryview` slice of a 100 KB row never becomes a 100 KB `bytes` on the request path.
+
+    The LENGTH is in the preimage, not merely implied by the bytes: it is what makes an offset that
+    drifted onto a longer or shorter neighbour fail HERE rather than at the JSON parse, and it is
+    the half a bounded read cannot otherwise see.
+    """
+    length = len(data)
+    head = b"%s%d\0" % (_ROW_DIGEST_PREFIX, length)
+    if length <= _ROW_DIGEST_BOUND_BYTES:
+        return head + bytes(data)                # small rows keep the full-bytes strength verbatim
+    edge = _ROW_DIGEST_EDGE_BYTES
+    return head + bytes(data[:edge]) + bytes(data[length - edge:])
+
+
+def _row_digest(data) -> str:
+    """The BOUNDED identity digest of one exact source row. See `_ROW_DIGEST_PREFIX` above for the
+    corruption class this preimage does and does not cover, and `_read_full` for the read that
+    verifies it.
+
+    ONE producer, so the preimage rule cannot drift between the scan that mints a digest and the
+    read that checks it — the failure `traceview.span_build_trace_claim` was extracted to end. Takes
+    `bytes` or a `memoryview` (`_read_full` validates slices of one coalesced batch and must not
+    copy a 100 KB row just to hash 16 KiB of it).
+    """
+    return hashlib.sha256(_row_digest_preimage(data)).hexdigest()[:_ROW_DIGEST_HEX]
+
+
+def _decode_row_digest(value) -> Optional[str]:
+    """Validate an on-disk/in-flight row digest STRUCTURALLY (`_append`'s trust boundary).
+
+    Deliberately not `_decode_sha256`: that one accepts exactly the 64-hex full-bytes shape, and a
+    reader that accepted both widths would let a v12 index's digests through into a v13 map, where
+    every read would then report the source as corrupt. Widths are how the two are told apart, and
+    `_SCHEMA` is what keeps them from ever meeting.
+    """
+    if not isinstance(value, str) or len(value) != _ROW_DIGEST_HEX:
+        return None
+    try:
+        bytes.fromhex(value)
+    except ValueError:
         return None
     return value.lower()
 
@@ -550,7 +640,8 @@ def _scan_light(buf: bytes, base: int) -> tuple[list[tuple[dict, int, int, str]]
     """Parse complete JSONL lines from `buf` (a slice of spans.jsonl starting at file offset `base`),
     applying `iter_jsonl`'s durability rules (stop at the first torn/corrupt line). Yields
     `(light_span, off, length, digest)` where `off` is the line-start offset IN THE FILE, `length` is
-    the line length WITHOUT the trailing newline, and `digest` identifies those exact full bytes.
+    the line length WITHOUT the trailing newline, and `digest` is `_row_digest` over that row — its
+    length and its bounded edges, which is what IDENTIFIES the row at that offset.
     The digest lets a node-specific conditional reader prove that its heavy I/O rows did not change
     without re-reading them on every unchanged poll. Returns `(records, consumed)`; `consumed` lands
     on a newline boundary (the exact prefix `iter_jsonl` would have accepted), so it is the index's
@@ -564,7 +655,7 @@ def _scan_light(buf: bytes, base: int) -> tuple[list[tuple[dict, int, int, str]]
         if normalized is not None:
             raw = buf[start:end]
             records.append((_strip_span_io(normalized), base + start, end - start,
-                            hashlib.sha256(raw).hexdigest()))
+                            _row_digest(raw)))
     # `consumed` is the offset of the last complete-newline boundary within buf (a torn/corrupt tail
     # is NOT consumed — it is left for a later top-up once completed). Absolute coverage = base+consumed.
     return records, base + consumed
@@ -577,9 +668,10 @@ class SpanIndex:
         self.path = Path(path)
         self.light: list[dict] = []               # light spans, file order (fed to build_trace_view)
         self.meta: list[tuple[int, int]] = []     # (offset, length) in spans.jsonl, parallel to light
-        # SHA-256 of each exact FULL source row, parallel to ``light``/``meta``. This is derived
-        # metadata, not trace authority: cold loads validate it structurally and every source
-        # rewrite still passes through get_index's identity/mtime/mutation-token rebuild fences.
+        # `_row_digest` of each source row, parallel to ``light``/``meta`` — bounded preimage,
+        # 32 hex (docs/34 D-04, closed 2026-09-08; the rule is stated at `_ROW_DIGEST_PREFIX`). This
+        # is derived metadata, not trace authority: cold loads validate it structurally and every
+        # source rewrite still passes through get_index's identity/mtime/mutation-token fences.
         self.row_digests: list[str] = []
         self.by_sid: dict[str, int] = {}          # span_id -> row
         self.by_tid: dict[str, list[int]] = defaultdict(list)   # trace_id -> rows
@@ -591,6 +683,13 @@ class SpanIndex:
         self.build_claims: dict[str, tuple] = {}
         self.build_claim_conflicts: set = set()                 # two nodes claimed it: award neither
         self.node_build_tids: dict[str, set] = defaultdict(set)  # str(node_id) -> {claimed trace_id}
+        # THE CARD DIMENSION (docs/34 D-03, closed 2026-09-08): stamped card_id -> {trace_id} of the
+        # ROOT `propose` spans that name it. It is a TRACE set, not a row set, because every reader
+        # of a research match needs the whole trace anyway (the row reports its span count and its
+        # rollup). Built here rather than at read time for the same reason `build_claims` is: the
+        # match is one span in a trace nothing else about this card points at, so only a whole-index
+        # view can find it — which is precisely what made the card trace scan the entire run.
+        self.card_propose_tids: dict[str, set] = defaultdict(set)
         self.covers: int = 0
         self.identity: Optional[tuple] = None
         self.source_epoch: Optional[str] = None
@@ -639,7 +738,7 @@ class SpanIndex:
         # repeat runs only over the small light record. A pre-validated flag would save that pass at
         # the cost of making the trust boundary opt-in, which is the wrong default for a parser.
         normalized = _normalize_span(light)
-        digest = _decode_sha256(digest)
+        digest = _decode_row_digest(digest)
         if normalized is None or digest is None:
             return False
         light = normalized
@@ -658,6 +757,12 @@ class SpanIndex:
             if nid is not None:
                 self.node_tids[str(nid)].add(tid)
                 self._claim_build_trace(light, attributes, nid, tid)
+            # A research root carries NO node_id (the proposal precedes the node, and
+            # `orchestrator.stamp_proposal_span` refuses to make a run-scoped span name one), so this
+            # sits OUTSIDE the branch above rather than beside the claim.
+            stamped = card_research_root_card(light)
+            if stamped:
+                self.card_propose_tids[stamped].add(tid)
         return True
 
     def _claim_build_trace(self, light: dict, attributes: dict, nid, tid) -> None:
@@ -712,6 +817,7 @@ class SpanIndex:
             self.build_claims.clear()
             self.build_claim_conflicts.clear()
             self.node_build_tids.clear()
+            self.card_propose_tids.clear()
             self._extend(records)
             self.covers = consumed
             self.append_journal_identity = journal_identity
@@ -753,19 +859,24 @@ class SpanIndex:
         with self._rlock:
             return len(self.light)
 
-    # DEFERRED DECISION D-04 (docs/34): the per-row SHA-256 below re-hashes each selected row's
-    # FULL bytes, and a generation span can carry 100 KB+. It is what makes this accelerator's
-    # "never WRONG data" promise enforceable, so it is a cost to reduce deliberately (a bounded
-    # prefix + length is strictly weaker), never one to delete.
+    # DECIDED 2026-09-08 — docs/34 D-04 closed. The per-row hash below no longer re-hashes each
+    # selected row's FULL bytes (a generation span carries 100 KB+ of `input`/`output`/`thinking`);
+    # it runs `_row_digest`, whose preimage is `length || head 8 KiB || tail 8 KiB` under a
+    # domain-separated prefix, so the hashed bytes per row are bounded by `_ROW_DIGEST_BOUND_BYTES`
+    # regardless of the row's size. The verification is KEPT, not deleted: the chosen preimage rule
+    # and the exact class of corruption it does and does not catch are stated once, at
+    # `_ROW_DIGEST_PREFIX`, and `_SCHEMA` 13 is what stops an older index's full-bytes digests from
+    # ever being compared against it. The accountant is `tests/test_span_index.py::
+    # test_read_full_hashes_bounded_bytes_per_row_not_whole_rows`.
     def _read_full(self, rows: list[int]) -> list[dict]:
         """Read and safely project selected full span lines through bounded coalesced ranges.
 
         A per-node/-trace/-span view still touches only selected rows plus small bounded gaps, never
         the whole file. Joining nearby rows changes the S3/geesefs cost from one range request per
-        span to one per <=8 MiB extent while every selected slice retains the exact SHA-256 and
-        normalized-light comparison that makes this accelerator fail closed. `rows` is a snapshot
-        taken under `_rlock` by the caller; the parallel arrays are append-only, so existing entries
-        never move while the slow reads run outside that lock.
+        span to one per <=8 MiB extent while every selected slice retains the bounded row digest and
+        the FULL normalized-light comparison that make this accelerator fail closed. `rows` is a
+        snapshot taken under `_rlock` by the caller; the parallel arrays are append-only, so
+        existing entries never move while the slow reads run outside that lock.
         """
         out: list[dict] = []
         plan = _coalesced_full_read_plan(rows, self.meta)
@@ -780,7 +891,7 @@ class SpanIndex:
                 view = memoryview(batch)
                 for r, relative, row_length in slices:
                     data = view[relative:relative + row_length]
-                    if hashlib.sha256(data).hexdigest() != self.row_digests[r]:
+                    if _row_digest(data) != self.row_digests[r]:
                         raise OSError(
                             getattr(errno, "ESTALE", errno.EIO),
                             "indexed trace row no longer matches its source digest", self.path)
@@ -945,6 +1056,55 @@ class SpanIndex:
             }
         return claims
 
+    def card_trace_spans(self, card_id, *, node_ids=(), node_trace_ids=None) -> tuple[list, dict]:
+        """The BOUNDED span selection ONE card's story is assembled from, plus the claim map.
+
+        DEFERRED DECISION D-03 (docs/34), decided 2026-09-08. `serve/appstate.py::card_trace_view`
+        used to hand `project_card_trace` the WHOLE run's light span list — a 1 GB run's index is
+        ~220 MB of dicts — which the projection then grouped by trace, folded for claims and rescanned
+        once per owned node: ~1M predicate evaluations for a card owning 5 nodes on a 200k-span run,
+        on the request thread. It could not simply be given the card's own traces, because research
+        is matched TWO ways and the first is "a root `propose` span carrying this `card_id`", which
+        lives in a trace the card does not own — a trace-scoped selection silently drops the research
+        section for the draft/debug/improve paths, which is worse than being slow.
+
+        So the index grew the dimension the decision named (`card_propose_tids`, `_SCHEMA` 13) and
+        this method serves BOTH rules by lookup:
+
+          * rule one — the traces of the root `propose` spans stamped with this card;
+          * rule two — the traces this card's nodes were created in, which the caller resolves from
+            the fold (the only component that knows `idea.card_id` and `node_created.trace_id`).
+
+        The selection is a SUPERSET of what the projection can match, never a pre-decision: whole
+        candidate traces are returned (a research row reports its trace's span count and rollup) and
+        every wanted node's rows come from `_rows_for_node`, the same selection its own trace view
+        reads. The projection's rules are re-applied unchanged over the smaller list, so the answer
+        is identical to the whole-run one and only the work differs — pinned both ways by
+        `tests/test_card_trace_projection.py::test_narrowed_selection_matches_the_whole_run_projection`
+        and by the row accountant in `tests/test_span_index.py`.
+
+        The claim map is returned WITH the spans and not re-derived by the caller: a claim's two
+        halves live in different traces and a contested trace is a run-GLOBAL refusal this index
+        makes permanent across appends (`_claim_build_trace`), so a map folded from a narrowed
+        selection could award a trace the whole-run reading awards to nobody.
+        """
+        target = str(card_id)
+        wanted = [str(node_id) for node_id in (node_ids or ())]
+        owned = {str(tid) for tid in (node_trace_ids or {}).values() if tid}
+        with self._rlock:
+            rows: set[int] = set()
+            for tid in {*self.card_propose_tids.get(target, ()), *owned}:
+                rows.update(self.by_tid.get(tid, ()))
+            for node_id in wanted:
+                # Not `light_spans_for_node`: that one copies rows out and applies the window caps
+                # this projection does not want. `_rows_for_node` is the row selection itself, and it
+                # already resolves the run-scoped BUILD trace a node claims — the rows a card's node
+                # section is mostly made of, and the ones a `node_tids` lookup alone would miss.
+                rows.update(self._rows_for_node(node_id))
+            spans = [self.light[row] for row in sorted(rows)]
+            claimed = dict(self.build_claims)
+        return spans, claimed
+
     def has_span(self, sid) -> bool:
         """Does this index know the span id a caller wants to anchor a window at?
 
@@ -1058,7 +1218,7 @@ class SpanIndex:
 
         A global source size/mtime token changes when *another* concurrently executing node appends,
         forcing this node's expensive conversation projector to run even though none of its selected
-        rows moved. The index already knows the exact selected rows and their full-byte digests, so
+        rows moved. The index already knows the exact selected rows and their row digests, so
         hash that node/generation/window snapshot instead. Relevant append/rewrite changes a row
         digest, membership, total or file identity; a foreign append changes none of them on the
         receipt-proven incremental path. A conservative full rebuild may rotate the source epoch.
@@ -1092,7 +1252,7 @@ class SpanIndex:
                 node_id, limit, generation=generation, before=before)
         spans = self._read_full(rows)
         # Promotion is process-local and happens only after every selected source row passed both its
-        # exact-byte digest and normalized-light comparison. If a concurrent relevant append changed
+        # row digest and normalized-light comparison. If a concurrent relevant append changed
         # the window, the route's post-read snapshot computes a different unverified revision.
         with self._rlock:
             current_rows, _current_total, current_revision = self._node_window_snapshot(
@@ -1268,7 +1428,7 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
                 digest = rec.pop("_h", None)
                 if (not isinstance(off, int) or isinstance(off, bool)
                         or not isinstance(length, int) or isinstance(length, bool)
-                        or _decode_sha256(digest) is None
+                        or _decode_row_digest(digest) is None
                         or off < 0 or length < 0
                         or length + 1 > TRACE_JSONL_ROW_MAX_BYTES
                         or off + length + 1 > observed_covers):
@@ -1364,6 +1524,14 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
     guard is held by that caller for the whole call.
     """
     stt = os.fstat(handle.fileno())
+    # Three LOCALS, not a fourth stat signature (doc 25 SC-11). The identity question is already
+    # answered by `trace_file_identity` below (= `core/atomicio.same_file_entry`, the replacement
+    # tier); these three are never compared as a tuple. Each is threaded separately into
+    # `_load_persisted` / `_topup` and compared FIELD BY FIELD against a persisted per-field header
+    # and the exporter's `before_*`/`after_*` receipt chain, which is what lets the reuse decision
+    # distinguish `shrank` from `non_growth_rewrite` from a true append. Folding them into one
+    # signature would collapse three distinguishable outcomes into "equal / not equal" and would
+    # re-shape a durable journal for nothing.
     size, mtime_ns, ctime_ns = stt.st_size, stt.st_mtime_ns, stt.st_ctime_ns
     source_change_token = _source_change_token(handle, stt)
     identity = trace_file_identity(stt)

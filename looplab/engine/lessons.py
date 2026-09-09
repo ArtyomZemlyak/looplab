@@ -35,17 +35,19 @@ from typing import TYPE_CHECKING
 
 import orjson
 
-from looplab.core.atomicio import append_jsonl_bytes_locked
+from looplab.core.atomicio import append_jsonl_bytes_locked, file_identity
 from looplab.core.models import (
     NODE_CONCEPT_PROVENANCE_CLASSIFIER,
     RunState,
     latest_lesson_node_count,
+    safe_lesson_node_count,
     valid_concept_id,
 )
 from looplab.engine.cadence import at_creation_boundary
 from looplab.engine.concept_registry import normalize_key
 from looplab.engine.curation_protocol import CurationProtocolMixin
-from looplab.engine.lessons_distill import LessonDistillMixin
+from looplab.engine.lessons_distill import (LessonDistillMixin, promoted_skill_keys,
+                                            settled_skill_cards)
 # The role constants moved to lessons_priors.py with the prior renderer that filters on them;
 # re-imported so `from looplab.engine.lessons import LESSON_ROLE_*` (tests, cross-run tooling)
 # keeps resolving.
@@ -55,7 +57,7 @@ from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import JsonlCaseLibrary
 from looplab.events.replay import fold
 from looplab.events.types import (
-    EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_LESSONS_STORE_UNAVAILABLE)
+    EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_LESSONS_STORE_UNAVAILABLE, EV_SKILLS_PROMOTED)
 
 if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestrator
     from looplab.engine.orchestrator import Engine
@@ -68,9 +70,13 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
 
     def __init__(self, engine: "Engine") -> None:
         self._e = engine
-        self.seen_stamp = None   # (size, mtime_ns) of the store at the last read
+        self.seen_stamp = None   # `file_identity` of the store at the last read
         self.prior_note_text = ""   # E4: cross-run RESEARCHER prior (R&D lessons), loaded at run start
         self.dev_prior_note_text = ""   # §role-split: cross-run DEVELOPER prior (code-fix lessons)
+        # The last `_scan_prior_context` result, retained ONLY for `operator_scoped_prior` (the
+        # opt-in per-operator Developer render) so a build never re-reads the shared store. None
+        # until the first prior load; replaced wholesale by every load and refresh.
+        self.prior_ctx = None
         # Reconcile gate: a hash of {node_id -> outcome-signature} at the last reconcile scan. Recomputed
         # each cadence pass (cheap, no I/O); when it CHANGES (a node reached / left / flipped a terminal —
         # in particular a node_reset re-eval that altered a metric or status), we re-read the lesson file
@@ -112,7 +118,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         hygiene can wait for run end instead of rewriting a shared file every few nodes."""
         if not (lessons and self._e.memory_dir):
             return
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
         base = Path(self._e.memory_dir)
         path = base / "lessons.jsonl"
         # The concept SHELF's durable tag, stamped at the ONE funnel both producers reach so a lesson
@@ -149,7 +155,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # Degrading there would be indistinguishable from silently dropping the lock requirement.
         try:
             base.mkdir(parents=True, exist_ok=True)
-            with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+            with interprocess_lock(Path(str(path) + ".lock"), required=True):
                 append_jsonl_bytes_locked(path, payload)
         except OSError as e:  # noqa: BLE001 - advisory cross-run memory cannot fail the run
             self._e.store.append(EV_LESSONS_STORE_UNAVAILABLE, {
@@ -190,8 +196,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         quiesce (dense-retrieval 19, v6 1, v8 1) distilled normally. That takes the whole M6 write
         side with it — the mid-run half of the AgentRxiv live-share pattern this method exists for,
         i.e. exactly the lessons a CONCURRENT run could have picked up while this one trained.
-        (Auto-skill promotion is NOT downstream of this call and was checked: it hangs off
-        `lessons_distill.py::write_reflection_note` -> `memory.write_auto_skill`, a run-END phase.)
+        (Auto-skill promotion is NOT downstream of this call: it has its own pass beside this one,
+        `maybe_promote_skills`, on the same `lessons_every` pace. Until 2026-09-08 it hung off
+        `lessons_distill.py::write_reflection_note` -> `memory.write_auto_skill` and was a run-END
+        phase only, which is what this parenthesis used to record.)
 
         THE MONEY RULE. The PACE is untouched — `_cadence_due` against `latest_lesson_node_count`
         still admits one pass per node count — and unlike the Strategist consult and the concept
@@ -234,14 +242,104 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         self._e._append_lessons(lessons, hygiene=False, state=state)
         return fold(self._e.store.read_all())
 
+    def maybe_promote_skills(self, state: RunState) -> RunState:
+        """M4 mid-run: promote the techniques of cards that have SETTLED, without waiting for the end.
+
+        WHAT WAS WRONG WITH RUN-END ONLY (BACKLOG §0.17, measured there). `memory.write_auto_skill`
+        had exactly one caller — `write_reflection_note`, whose contract is the FINAL state — so a
+        technique a run established at node 6 of 40 reached the shared store only once the run
+        finished, and a run that was KILLED (no pause, no finish) never wrote it at all. `looplab
+        finalize` reaches the same pass on a stopped run, so the phase was never the problem: the
+        TRIGGER was. This is the trigger, and it is per CARD rather than per run, because a card
+        whose evidence has settled is not going to say anything different at the end.
+
+        THE PACE IS `lessons_every`, deliberately not a knob of its own. It is already the operator's
+        answer to "how often may this run write to the shared cross-run store mid-flight" (the M6
+        lesson write above), the two passes are the same money in the same lane on the same board,
+        and a second number would let them be configured into disagreeing. `lessons_every: 0` — the
+        `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` value, so every resumed pre-field run — leaves promotion
+        exactly where it was: run-end only.
+
+        NOT NEW SPEND, MOVED SPEND. The classifier is paid once per card either way: the run-end
+        pass skips a card this one already promoted at the same statement (`promoted_skill_keys`),
+        and `settled_skill_cards` refuses a card whose Δ could still move, so nothing is judged
+        early on a number that has not stopped changing.
+
+        REPLAY-SAFE (invariant 3), by a receipt that is also the gate: every pass appends
+        `skills_promoted` — even with zero promotions, so the `at_node` watermark advances and a
+        resume does not re-open this node count — and its `promoted` pairs are what stop a LATER
+        window, and the run-end sweep, from paying for the same card again.
+
+        THE RECEIPT IS APPENDED AFTER THE WRITE, unlike the M6 lesson pass's event-first ordering
+        one method up, and the two orderings are right for opposite reasons. This one must NAME what
+        it wrote, and it cannot know that before writing. The window that leaves open is a crash
+        between the skill file and the receipt: it costs ONE repeated classifier call and rewrites
+        the identical card (`write_auto_skill` is a read-modify-write keyed on the claim, and the
+        same task fingerprint cannot promote a candidate, so the lifecycle does not move). Event
+        first would instead record a promotion the store never received — a card silently missing
+        from what later runs read as verified practice, which is the worse failure of the two.
+
+        Main task only; no background writer touches it.
+        """
+        if (self._e.lessons_every <= 0
+                or not (self._e._reflection_priors and self._e.memory_dir)):
+            return state
+        if not at_creation_boundary(len(state.pending_nodes()),
+                                    while_evaluating=getattr(
+                                        self._e, "_cadence_while_evaluating", False)):
+            return state
+        n = len(state.nodes)
+        rows = [e for e in self._e.store.read_all() if e.type == EV_SKILLS_PROMOTED]
+        last = max((safe_lesson_node_count(e.data.get("at_node")) or 0 for e in rows), default=0)
+        if not self._e._cadence_due(n, last, self._e.lessons_every):
+            return state
+        cards = settled_skill_cards(state, promoted_skill_keys(rows))
+        skills: list = []
+        candidates: list = []
+        promoted: list = []
+        if cards:
+            # NO blanket try/except here on purpose, and the reason is where the containment
+            # already is: `memory.classify_skill_candidate` re-raises `BudgetExceeded` and contains
+            # everything else (a refused candidate is data), `_distill_skill_body` does the same, and
+            # `write_auto_skill` never raises at all. A second blind handler wrapping them would add
+            # a census row that catches only what the run-end pass — the same writer, one method
+            # over — deliberately lets propagate, i.e. it would make the two passes fail differently
+            # while pretending to be one.
+            fp = self._e._task_fingerprint(state, state.best())
+            skills, candidates = self.promote_settled_skills(state, cards, fp)
+            # WHICH card each promotion belongs to is the run-end pass's join key, and only this
+            # loop can supply it: a candidate receipt names the STATEMENT digest (the identity a
+            # skill card is written under), never the board row it came from.
+            from looplab.engine.memory import skill_source_digest
+            accepted = {receipt.get("source_sha256") for receipt in candidates
+                        if isinstance(receipt, dict) and receipt.get("accepted")}
+            promoted = [[card.id, digest] for card in cards
+                        if (digest := skill_source_digest(str(card.statement or ""))) in accepted]
+        # `promoted` is the LEDGER and is bounded far above the display caps beside it on purpose: a
+        # pair dropped here is a card the run-end sweep would judge and pay for a second time, so its
+        # cap answers "how many cards can settle inside one window" (all of them) rather than "how
+        # much of this is worth rendering". The rest are receipts and stay display-sized.
+        self._e.store.append(EV_SKILLS_PROMOTED, {
+            "at_node": n, "trigger": "cadence", "count": len(skills),
+            "cards": [card.id for card in cards][:12],
+            "promoted": promoted[:256],
+            "skills": skills[:8], "skill_candidates": candidates[:12]})
+        return fold(self._e.store.read_all())
+
     def lessons_store_stamp(self):
-        """(size, mtime_ns) of the shared lessons store, or None — the cheap change detector the
-        refresh gate uses to skip a full re-read/re-score when no run has written since."""
+        """`core/atomicio.py::file_identity` of the shared lessons store, or None — the cheap change
+        detector the refresh gate uses to skip a full re-read/re-score when no run has written since.
+
+        The canonical tuple rather than the (size, mtime_ns) pair this used to spell (doc 25 SC-11):
+        the store is not only appended to, it is REPLACED — `compact_lessons` /
+        `consolidate_lessons_file` rewrite it through an atomic replace, and a compaction that lands
+        on the same size and nanosecond is invisible to the weaker pair. The cost is identical (one
+        `stat`), the comparison is in-memory only, and a false CHANGE merely re-reads the store.
+        """
         if not self._e.memory_dir:
             return None
         try:
-            st = (Path(self._e.memory_dir) / "lessons.jsonl").stat()
-            return (st.st_size, st.st_mtime_ns)
+            return file_identity((Path(self._e.memory_dir) / "lessons.jsonl").stat())
         except OSError:
             return None
 
@@ -338,20 +436,20 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         exactly the loss the lock exists to prevent. Hygiene is best-effort and cadence-driven, so a
         skipped round costs nothing: the next one merges the combined file."""
         try:
-            from looplab.engine.claims import (_load_claim_source_path,
+            from looplab.engine.claims import (load_claim_source_path,
                                                _valid_claim_source_row)
             from looplab.engine.memory import consolidate_lessons
-            from looplab.events.eventstore import (_interprocess_lock,
+            from looplab.events.eventstore import (interprocess_lock,
                                                    replace_jsonl_rows_atomic_preserving_quarantine)
             lock_path = Path(str(path) + ".lock")
-            with _interprocess_lock(lock_path, required=True):
+            with interprocess_lock(lock_path, required=True):
                 before = LessonMemory.lessons_file_token(path)
-                rows = _load_claim_source_path(path, research=False)
+                rows = load_claim_source_path(path, research=False)
             merged = consolidate_lessons(rows, client=client, embed=embed,   # unlocked: may be paid
                                          parser=parser, prompts=prompts)
             if len(merged) >= len(rows):
                 return
-            with _interprocess_lock(lock_path, required=True):
+            with interprocess_lock(lock_path, required=True):
                 if before is None or LessonMemory.lessons_file_token(path) != before:
                     return              # a concurrent writer moved the store under the merge
                 # hygiene owns only understood lesson rows. Raw malformed/future records stay
@@ -374,12 +472,12 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         across the paid consolidation pass. There is no unlocked window to swap against here: no
         provider call sits between the read and the write."""
         try:
-            from looplab.engine.claims import (_load_claim_source_path,
+            from looplab.engine.claims import (load_claim_source_path,
                                                _valid_claim_source_row)
-            from looplab.events.eventstore import (_interprocess_lock,
+            from looplab.events.eventstore import (interprocess_lock,
                                                    replace_jsonl_rows_atomic_preserving_quarantine)
-            with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-                rows = _load_claim_source_path(path, research=False)
+            with interprocess_lock(Path(str(path) + ".lock"), required=True):
+                rows = load_claim_source_path(path, research=False)
                 if len(rows) > max_lines:
                     # Retention applies to interpreted lessons, never to quarantine bytes. A damaged/
                     # future row may exceed the soft file cap but cannot be silently laundered by

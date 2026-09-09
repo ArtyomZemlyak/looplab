@@ -9,7 +9,7 @@ import pytest
 import looplab.engine.orchestrator as orchestrator_module
 import looplab.search.speculation_quality as speculation_quality
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.config import Settings
 from looplab.core.models import Idea, NodeStatus, RunState
 from looplab.engine.options import EngineOptions

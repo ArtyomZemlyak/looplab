@@ -17,7 +17,7 @@ from looplab.events.comment_projection import (  # noqa: E402
     COMMENT_TEXT_MAX_BYTES, CommentCursorError, apply_comment_event, comments_page,
     history_page, normalize_comment_text, project_comments)
 from looplab.events.eventstore import (  # noqa: E402
-    EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock)
+    EventStore, EventStoreConcurrencyError, EventStoreLockError, interprocess_lock)
 from looplab.events.replay import fold  # noqa: E402
 from looplab.events.types import (  # noqa: E402
     EV_ANNOTATION, EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED)
@@ -253,10 +253,10 @@ def test_strict_lock_wraps_unsupported_runtime_operations(tmp_path, monkeypatch)
         monkeypatch.setattr(fcntl, "flock", unsupported)
 
     lock = tmp_path / "events.lock"
-    with _interprocess_lock(lock, required=False):
+    with interprocess_lock(lock, required=False):
         pass
     with pytest.raises(EventStoreLockError, match="lock is unavailable"):
-        with _interprocess_lock(lock, required=True):
+        with interprocess_lock(lock, required=True):
             pass
 
 

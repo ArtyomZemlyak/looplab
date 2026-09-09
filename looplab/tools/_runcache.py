@@ -4,6 +4,9 @@
 off disk: resolve <run_root>/<run_id> with a path-traversal guard, fold the log into a `RunState`,
 and cache the fold by the log's (size, mtime) fingerprint so repeated turns don't re-fold unchanged
 runs. That plumbing was duplicated verbatim in both providers; it lives here once and they delegate.
+Beside the bounded state cache sits `summary()`, the per-run LISTING ROW (`run_summary`): a sweep is
+wider than the LRU by construction, so the row is what survives it and what a second sweep answers
+from.
 Every reader soft-fails (returns None / []) — a junk run_id or a torn log must never crash the loop.
 """
 from __future__ import annotations
@@ -14,6 +17,7 @@ from typing import Optional
 
 from looplab.core.atomicio import file_identity
 from looplab.core.models import RunState
+from looplab.events import digest
 
 
 class RunStateCache:
@@ -30,15 +34,6 @@ class RunStateCache:
         # Small on purpose: cross-run tools reason over a handful of runs per turn (a sibling, the
         # best few), while `list_runs` sweeps every run once and must not evict what the turn is
         # actually working with — 32 covers the working set without pinning a whole run-root.
-        # OPEN[repeated-sweep-refolds-the-whole-corpus] a SECOND sweep in one turn still misses on
-        # every run, because 32 slots cannot hold a 46-59 run corpus and `scan=True` deliberately
-        # does not try to. Closing it means either a bound that covers the corpus or a cheaper
-        # per-run projection, and BOTH need a number this box cannot produce: how often a turn
-        # sweeps twice, and what a fold costs at this corpus size (`runs/` is empty here, and the
-        # sibling reader's `~2,500 ms warm` figure is the OTHER defect — the working-set eviction
-        # fixed below — measured without being recognised as one).
-        # proof:`present:_cache_max = 32@looplab/tools/_runcache.py`
-        #
         # WHAT WAS FIXED, and why it needed no measurement: this comment ALREADY stated the policy
         # ("`list_runs` sweeps every run once and must not evict what the turn is actually working
         # with") and the code did the opposite. A sweep promoted every hit and inserted every miss
@@ -54,6 +49,24 @@ class RunStateCache:
         # the exact claim `source_note` exists to prevent. A receipt is a handful of counters, so
         # keeping one per run seen costs nothing next to the RunStates the bound is actually for.
         self._partial: dict[str, dict] = {}
+        # THE SWEEP'S ANSWER, kept when its `RunState` is not. A sweep over `run_ids()` renders one
+        # ROW per run — the handful of scalars `run_summary` below projects — and then drops the
+        # folded state it read them off. The LRU above deliberately does not retain that state (a
+        # sweep is wider than the bound by construction), so a SECOND sweep in the same turn re-
+        # folded every run, and the listing tools sweep more than once by construction:
+        # `SiblingRunTools._sibling_ids` walks every run to answer "which are mine", and the render
+        # pass then reads the survivors again.
+        #
+        # THIS NEEDED NO CORPUS MEASUREMENT, which is exactly why it is here and a bigger
+        # `_cache_max` is not. Widening the bound is a POLICY sized in RunStates — every node's
+        # code, logs and trials — and sizing that without knowing the corpus is the unmeasured
+        # policy this repo refuses elsewhere. A projection is not a policy: one row per run seen is
+        # a handful of scalars, the same shape and the same argument as `_partial` above and
+        # `run_tools.py::ForeignRunReader._contracts` one layer up, both already unbounded in run
+        # COUNT for this reason. Keyed by the same `file_identity` signature as the fold it came
+        # from, so an appended log misses here too — a stale listing row is the one thing these
+        # tools must never publish, and it is unrepresentable rather than merely unlikely.
+        self._summaries: dict[str, tuple] = {}   # run_id -> (sig, row)
 
     def safe_dir(self, run_id: Optional[str]) -> Optional[Path]:
         """Resolve <run_root>/<run_id>, with the same path-traversal guard as server._run_dir: the
@@ -122,6 +135,9 @@ class RunStateCache:
         except (OSError, ValueError, TypeError):
             divergence = {"unreadable": True}
         self._partial[str(run_id)] = divergence
+        # RECORDED OFF THIS FOLD, not off a later re-read: deriving the listing row anywhere else
+        # would make it a second reading of the log, free to disagree with the state just returned.
+        self._summaries[str(run_id)] = (sig, run_summary(st))
         # EVICT BEFORE INSERTING, and that order is the whole of it. Inserting first and then
         # `move_to_end(last=False)` put the new entry at the FRONT — which is the end
         # `popitem(last=False)` pops — so at capacity a sweep evicted the entry it had just made and
@@ -142,6 +158,42 @@ class RunStateCache:
         # landing exists to prevent. Widening `_cache_max` is the lever, not this order.
         self._cache.move_to_end(str(run_id), last=not scan)
         return st
+
+    def summary(self, run_id: Optional[str]) -> Optional[dict]:
+        """The LISTING projection of one run — the row a sweep renders — without retaining its
+        `RunState`. None for a run that cannot be read, exactly like `state()`.
+
+        THE READ THIS EXISTS FOR is a sweep over `run_ids()`, and a sweep is wider than the LRU by
+        construction, so its folds are gone before the next sweep asks for them. The fold behind a
+        MISS here is the same one `state(scan=True)` would have paid — nothing is read twice and
+        nothing is read differently — but the ANSWER outlives the state, so the second sweep of a
+        turn costs zero folds at any corpus size, which is the property the bound cannot give.
+
+        A caller needing anything the row does not carry still calls `state()`. This is a
+        projection, deliberately not a substitute, and widening it is how it would become one.
+        """
+        rd = self.safe_dir(run_id)
+        if rd is None:
+            return None
+        sig = self.sig(rd)
+        hit = self._summaries.get(str(run_id))
+        if hit and hit[0] == sig:
+            return hit[1]
+        # A miss folds through `state()` — one code path for reading a log, one place the divergence
+        # receipt is recorded — and as a SCAN, because every caller of this walks the whole
+        # population (`state`'s docstring states that rule for both).
+        st = self.state(run_id, scan=True)
+        if st is None:
+            return None
+        hit = self._summaries.get(str(run_id))
+        if hit and hit[0] == sig:
+            return hit[1]
+        # TOTAL rather than trusting the write above to have happened under THIS signature:
+        # `state()` may have answered from its own cache, or stat'd a log that grew between the two
+        # reads. A row is cheap enough that re-deriving it beats an assumption about a sibling.
+        row = run_summary(st)
+        self._summaries[str(run_id)] = (sig, row)
+        return row
 
     def partial(self, run_id: Optional[str]) -> Optional[dict]:
         """The divergence receipt for a run whose log could not be read to the end, else None.
@@ -174,3 +226,32 @@ class RunStateCache:
                           if p.is_dir() and (p / "events.jsonl").exists())
         except OSError:
             return []
+
+
+def run_summary(state: RunState) -> dict:
+    """The handful of scalars a LISTING row is made of, projected off one folded run.
+
+    Pure and total. Every listing tool under `tools/` renders its rows out of exactly these fields,
+    which is what makes the row the thing a sweep may keep once the `RunState` it came from is gone.
+    Both metrics are carried because the two listings have always published different ones —
+    `machine_runs_tools.py::MachineRunsTools.summaries` publishes the ranking/display metric
+    (`events/digest.py::node_metric`, the robust confirmed mean when there is one) and the string
+    listings publish the raw — and a row that dropped either would quietly change a tool's output
+    while claiming to be a performance fix.
+
+    NOT the place for anything a reader must DECIDE on: the divergence receipt (`partial`) and the
+    evaluation-contract notice stay their own reads, because a row asserting them would be asserting
+    them for a run whose log it is no longer holding.
+    """
+    best = state.best()
+    return {
+        "run_id": state.run_id,
+        "task_id": state.task_id,
+        "goal": state.goal,
+        "direction": state.direction,
+        "finished": bool(state.finished),
+        "nodes": len(state.nodes),
+        "best_node_id": (best.id if best is not None else None),
+        "best_metric": (best.metric if best is not None else None),
+        "best_display_metric": (digest.node_metric(best) if best is not None else None),
+    }
