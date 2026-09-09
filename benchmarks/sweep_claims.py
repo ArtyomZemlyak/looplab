@@ -692,24 +692,14 @@ def check_denominator_composition(bench: str):
     so it costs no timing run; a task whose reading predates those fields is reported as unmeasured
     rather than passed over.
     """
-    have = {}
     try:
-        for line in open(Path(bench) / DRIFT_LOG, encoding="utf-8", errors="replace"):
-            if not line.startswith("{"):
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            cached, solver = row.get("cached_ms"), row.get("solver_ms")
-            if isinstance(cached, (int, float)) and isinstance(solver, (int, float)) \
-                    and 0 < solver < cached:
-                have[row.get("task")] = (float(cached), float(solver), str(row.get("stamp") or ""))
+        have = denominator_halves(Path(bench) / DRIFT_LOG)
     except OSError as exc:
         return False, f"cannot read the drift log: {type(exc).__name__}"
     if not have:
-        return False, ("no reading records both halves of the denominator yet -- run "
-                       "ruler_selfcheck --record once per task")
+        return False, ("no reading records both halves of the denominator in "
+                       f"{ruler_check.CAMPAIGN_REGIME} yet -- run ruler_selfcheck --record once "
+                       "per task on a bench lane")
     said, worst = [], 0.0
     for task, (cached, solver, _stamp) in sorted(have.items()):
         share = 100 * (cached - solver) / cached
@@ -722,10 +712,12 @@ def check_denominator_composition(bench: str):
             # than a fixed cost every instance pays -- so a task nobody has beaten badly leaves the
             # question open rather than answered. discrete_log's best is 16.8, which bounds nothing
             # useful; edge_expansion's 276.7 bounds it at 1 %.
-            said.append(f"{task}: {share:.0f} % harness, and a score of {best:.1f} bounds the FIXED "
+            said.append(f"{task}: {share:.0f} % harness ({ruler_check.CAMPAIGN_REGIME}), "
+                        f"and a score of {best:.1f} bounds the FIXED "
                         f"part at {fixed:.1f} % of it{'  <-- not bounded below 10 %' if fixed >= 10 else ''}")
         else:
-            said.append(f"{task}: {share:.0f} % harness (no score here to bound the fixed part)")
+            said.append(f"{task}: {share:.0f} % harness ({ruler_check.CAMPAIGN_REGIME}); "
+                        "no score here to bound the fixed part")
     # THE BOOLEAN ANSWERS THE LIST'S CLAIM, which is that a speedup divides by the reference's time.
     # It does not: between a third and a half of the denominator is harness. Reusing this boolean
     # for the second question -- is that overhead fixed or proportional -- would let one answer hide
@@ -1266,6 +1258,46 @@ def constant_moved(vals, quoted: float, tolerance: float = DRIFT_TOLERANCE):
     delta = (mean - quoted) / quoted
     moved = abs(mean - quoted) > 2 * scatter and abs(delta) > tolerance
     return moved, mean, scatter, sem
+
+
+def denominator_halves(log_path, regime: str = None) -> dict:
+    """`{task: (cached_ms, solver_ms, stamp)}` for readings taken in ONE regime.
+
+    §395. The old loop kept whichever row came LAST in the file, whatever regime it was taken in --
+    and the two regimes have different denominators: `pde_heat1d` caches 146.49 ms wide against
+    78.32 ms serial. So the answer depended on which regime happened to write last. It did:
+    2026-09-09 morning the sweep printed "pde_heat1d: 3 % harness ... bounds the FIXED part at
+    20.0 %", and the same afternoon, after two wide readings landed, "47 % harness ... 1.3 %". Same
+    task, same box, same claim, fifteen times apart, and nothing said a regime had changed under it.
+
+    The pairing has to hold: the bound divides by the best PROBE score, and probes run wide. A
+    serial denominator against a wide score is two different measurements in one fraction.
+
+    A reading whose regime was never recorded is not silently adopted -- both regimes existed by the
+    time most of them were written, so it cannot be attributed (the same rule §-the constants check
+    applies to its own pool).
+    """
+    want = regime or ruler_check.CAMPAIGN_REGIME
+    out = {}
+    try:
+        fh = open(log_path, encoding="utf-8", errors="replace")
+    except OSError:
+        raise
+    with fh:
+        for line in fh:
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if str(row.get("regime") or "").lstrip("_") != want:
+                continue
+            cached, solver = row.get("cached_ms"), row.get("solver_ms")
+            if isinstance(cached, (int, float)) and isinstance(solver, (int, float)) \
+                    and 0 < solver < cached:
+                out[row.get("task")] = (float(cached), float(solver), str(row.get("stamp") or ""))
+    return out
 
 
 def check_the_champion_is_the_best_evaluated_node(bench: str):
