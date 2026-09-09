@@ -281,6 +281,59 @@ def paid_retries(ledger_path: str, since: float = 0.0) -> dict:
     return {"paid": paid, "count": count}
 
 
+ARCHIVE = "/home/jovyan/data/looplab-bench/runs-archive/model-probes"
+
+
+def archived_spend(probe: str, archive: str = ARCHIVE) -> tuple[float, int]:
+    """`(cost, rows)` an abandoned arm's tree still accounts for, off the persistent runs-archive.
+
+    §368. "No tree on disk" is measured against `/var/tmp` alone, and `/var/tmp` was wiped on
+    2026-08-29. The snapshot machinery exists precisely to survive that: `capA1`, `capB1`, `freeA1`
+    and `freeB1` all have trees under `runs-archive/model-probes` carrying 157 generation spans and
+    **$0.5078** between them, while this file writes off **$0.8987** for the four as unexplained.
+
+    Neither the count nor the arithmetic changes here. The reconciliation's rule -- an abandoned arm
+    is subtracted WHOLE, so it must not also be decomposed -- is load-bearing and §112 is the record
+    of what re-ordering its reads costs. What changes is that the line stops saying evidence does
+    not exist when it is sitting on the persistent mount, one `glob` away. The same shape as the
+    standing list's own warning about `remDL`: money written off as lost beside a tree that is
+    there.
+    """
+    cost, rows = 0.0, 0
+    for path in glob.glob(f"{archive}/{probe}/runs/*/*/events.jsonl"):
+        try:
+            fh = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"llm_usage"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("type") != "llm_usage":
+                    continue
+                got = (row.get("data") or {}).get("cost")
+                if isinstance(got, (int, float)):
+                    cost += max(0.0, float(got))
+                    rows += 1
+    return cost, rows
+
+
+def abandoned_line(probe: str, cost: float, archive: str = ARCHIVE) -> tuple[str, float]:
+    """The sentence one abandoned arm gets, and the money the archive accounts for.
+
+    A function because the WORDING is the fix (§342's lesson): a test that reads the number out of
+    a dict passes through a print block that says the evidence does not exist.
+    """
+    arch, rows = archived_spend(probe, archive)
+    return (f"{probe} ${cost:.4f}"
+            + (f" (${arch:.4f} of it has {rows} span(s) in the runs-archive)" if rows else ""),
+            arch)
+
+
 def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
     """The NEWEST ledger row per arm, so "is the endpoint answering right now" is one command.
 
@@ -549,9 +602,20 @@ def main(argv: list[str]) -> int:
     # before the first call), so "meter rows, no tree" cannot be a running probe -- it is a probe
     # whose tree was deleted, i.e. one abandoned.
     if abandoned:
+        # AND WHAT THE ARCHIVE STILL HOLDS FOR EACH (§368). "No tree on disk" means no tree under
+        # /var/tmp, which was wiped once; the persistent runs-archive is where the snapshot put it.
+        said = []
+        kept = 0.0
+        for p, c in sorted(abandoned.items()):
+            line, arch = abandoned_line(p, c)
+            said.append(line)
+            kept += arch
         print(f"         {sum(m_calls[p] for p in abandoned)} call(s) from "
-              f"{len(abandoned)} ABANDONED probe(s) -- in the meter, no tree on disk: "
-              + ", ".join(f"{p} ${c:.4f}" for p, c in sorted(abandoned.items())))
+              f"{len(abandoned)} ABANDONED probe(s) -- no tree under model-probes: "
+              + ", ".join(said))
+        if kept:
+            print(f"         ${kept:.4f} of that is NOT unexplained: the trees are on the "
+                  "persistent mount, and only the rest has no evidence anywhere")
     if health["newest"]:
         newest_ts = max(t for t, _s in health["newest"].values())
         age = max(0.0, time.time() - newest_ts)
