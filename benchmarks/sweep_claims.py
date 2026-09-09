@@ -1347,9 +1347,54 @@ def check_the_champion_is_the_best_evaluated_node(bench: str):
             agree += 1
     if not agree and not disagree:
         return False, "no probe on this box records which node it shipped"
-    detail = (f"{agree} probe(s) shipped the best evaluated node"
+    # AND THE EXPOSURE (§396): how many runs could have caught the rule being wrong. A pass rate
+    # without it is a green tick on a corpus that may not contain the case at all.
+    with_choice, differ, lost = where_the_newest_rule_would_differ(bench)
+    exposure = (f"; {differ} of {with_choice} run(s) with a choice have their best node NOT last, "
+                f"so the newest-file rule would have shipped a node worth "
+                f"{lost:.0f} % less metric (median)" if differ and lost is not None else
+                f"; {differ} of {with_choice} run(s) with a choice have their best node NOT last"
+                if with_choice else
+                "; NOTHING ON THIS BOX HAS TWO EVALUATED NODES -- the rule is untested here")
+    detail = (f"{agree} probe(s) shipped the best evaluated node" + exposure
               + ("; NOT THE BEST: " + "; ".join(disagree[:6]) if disagree else ""))
     return not disagree, detail
+
+
+def where_the_newest_rule_would_differ(bench: str):
+    """`(runs_with_a_choice, runs_where_best_is_not_newest, median_metric_at_stake)`.
+
+    §396. "149 probe(s) shipped the best evaluated node" is a green tick that says nothing about
+    whether the rule was ever TESTED: if the best node were always the last one, `ls -t` and
+    `state.best()` would agree everywhere and the check would pass on a corpus that cannot fail it.
+    Measured 2026-09-09 over 143 runs with two or more evaluated nodes: in **103 of them (72 %)**
+    the best node is NOT the newest, and the naive rule would have shipped a node worth a median of
+    499 % less metric. §367's defect was not a near miss -- it is the common case.
+
+    So the count is reported WITH the number of runs that could have caught it. A guard's pass rate
+    and its exposure are two different facts, and only the pair means anything.
+    """
+    with_choice = differ = 0
+    lost = []
+    for run in sorted(glob.glob(f"{bench}/model-probes/*/runs/*/run")):
+        nodes = []
+        for row in events_read.iter_events(os.path.join(run, "events.jsonl")):
+            if row.get("type") != "node_evaluated":
+                continue
+            data = row.get("data") or {}
+            metric, ts = data.get("metric"), row.get("ts")
+            if isinstance(metric, (int, float)):
+                nodes.append((data.get("node_id"), metric, ts or 0))
+        if len(nodes) < 2:
+            continue
+        with_choice += 1
+        best = max(nodes, key=lambda r: r[1])
+        newest = max(nodes, key=lambda r: r[2])
+        if best[0] != newest[0]:
+            differ += 1
+            if newest[1]:
+                lost.append(100.0 * (best[1] - newest[1]) / newest[1])
+    return with_choice, differ, (statistics.median(lost) if lost else None)
 
 
 def check_a_dollar_probe_costs_a_dollar(bench: str):
