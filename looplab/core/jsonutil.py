@@ -80,6 +80,39 @@ def canonical_json_digest(value: object, *, prefix: str = "",
     return prefix + hashlib.sha256(encoded).hexdigest()
 
 
+def bounded_int(value: object, lo: int, hi: int) -> bool:
+    """Whether *value* is an exact ``int`` inside the INCLUSIVE range ``[lo, hi]`` (doc 25 EV-04).
+
+    The other half of the admission predicate `valid_digest_ref` answers for digests, and it lives
+    beside it for the same reason: both are read by the FOLD, over event data a hand-edited or
+    foreign log can put any JSON type into, and both were hand-rolled per site — 21 ``0 <= …``
+    bound expressions in `events/replay.py` alone, each re-deciding two things a reader then has to
+    re-derive by eye.
+
+    Those two decisions are what this function makes once:
+
+    * ``type(value) is int``, not ``isinstance`` — ``isinstance(True, int)`` is True, so an
+      ``isinstance`` bound accepts ``{"depth": true}`` and then arithmetics it as ``1``. Replay's
+      copies knew that and spelled it two different ways (``type(x) is int`` at most sites, an
+      ``isinstance(x, int) and not isinstance(x, bool)`` pair at others). The two agree on
+      everything JSON can produce and disagree only on an in-process ``int`` SUBCLASS, which can
+      override the very comparisons the bound is expressed in — so the strict spelling wins, for
+      the same reason `core/receipts.py::bounded_receipt_count` took it: a bound a value can talk
+      its way past is not a bound. Nothing writes an event field as a subclass, so converting a
+      site from the loose spelling changes no reachable behaviour.
+    * an INCLUSIVE range with both ends stated. An exclusive upper bound (``0 <= p < 256``) is
+      spelled ``bounded_int(p, 0, 255)``: one shape, so a reader never has to check which end a
+      given site meant.
+
+    Returns a bool rather than a normalized value because the fold's call sites disagree about what
+    to do next — some fall back to ``0``, some to ``None``, some drop the whole event — and that
+    decision belongs to the handler, not to its leaf guard. Same contract as
+    `bounded_receipt_count`, which is the receipt-flavoured sibling of this rule (it fixes ``lo`` at
+    zero and names its ``maximum`` after the collection being counted).
+    """
+    return type(value) is int and lo <= value <= hi
+
+
 _HEX = "0123456789abcdef"
 
 

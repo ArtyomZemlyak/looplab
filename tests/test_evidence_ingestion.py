@@ -2,7 +2,10 @@
 
 The structured (scope+polarity) and lean (normalized-statement) projections each walked the lesson
 and research rows into their claim groups, and the two walks were identical except for how a row
-finds its group. The rules inside them are the ones a quiet mistake makes unrecoverable:
+finds its group. The lean projection was deleted on 2026-09-08 (doc 25 EM-06) and the structured one
+is the last caller, but the walk stays a separate, directly drivable function — these are the rules a
+quiet mistake makes unrecoverable, and inlining them back into a projection is how they stop being
+tested on their own:
 
 * a NEUTRAL lesson still registers its run and scope — it takes no stance, but it does prove the
   claim was seen there, and dropping that silently shrinks the breadth a reader judges by;
@@ -139,7 +142,7 @@ def test_without_the_hook_nothing_is_weighted_and_nothing_raises():
 # ------------------------------------------------------------------ both projections use it
 
 @pytest.mark.parametrize("fn", ["_structured_assessments", "claim_assessments"])
-def test_neither_projection_re_inlines_the_walk(fn):
+def test_the_projection_does_not_re_inline_the_walk(fn):
     import inspect
 
     from looplab.engine import claims_assessments
@@ -149,10 +152,10 @@ def test_neither_projection_re_inlines_the_walk(fn):
     assert "_research_verification(" not in source, f"{fn} re-derives the research verdict routing"
 
 
-def test_the_two_projections_agree_on_stance_and_verification_for_the_same_rows():
-    """An end-to-end cross-check: the structured and lean paths group differently on purpose, but a
-    supported research claim and an `improved` lesson must not land in different buckets depending on
-    which projection the caller asked for."""
+def test_the_projection_agrees_with_the_walk_on_stance_and_verification():
+    """An end-to-end cross-check: a supported research claim and an `improved` lesson must land in
+    the buckets the walk above puts them in, whichever spelling of the retired `structured` keyword
+    the caller uses (there is one projection since doc 25 EM-06, 2026-09-08)."""
     from looplab.engine.claims_assessments import claim_assessments
 
     lessons = [_lesson(outcome="improved", evidence=[1])]

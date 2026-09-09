@@ -2,8 +2,8 @@
 
 Split out of `memory.py` (doc 25 EM-10), which was named for the episodic case library its docstring
 describes and had grown to hold five unrelated subsystems. This is the capsule one: what a valid
-capsule record IS (`_valid_capsule_record`, `_dedup_valid_capsules`), the receipts that say how
-complete it is (`_capsule_completeness`, `_capsule_source_summary`), the store that persists it
+capsule record IS (`_valid_capsule_record`, `dedup_valid_capsules`), the receipts that say how
+complete it is (`capsule_completeness`, `capsule_source_summary`), the store that persists it
 (`ConceptCapsuleStore`), and the portfolio overview projection built from it.
 
 Moved VERBATIM, together with the capsule/overview bound constants that only these functions use.
@@ -22,8 +22,15 @@ order is the whole reason this split is a layering rather than a cycle: `memory`
 module, so this module must not import `memory`, and both now reach the shared helpers downward.
 
 `memory.py` re-exports every name here, so both spellings resolve to the SAME objects and existing
-imports and monkeypatch seams (`tools/` reaches for `_dedup_valid_capsules`,
-`_portfolio_concept_overview_data`, `_capsule_rows` &c.) are unaffected.
+imports and monkeypatch seams are unaffected.
+
+The seven capsule VIEWS (`capsule_rows`, `filter_capsule_rows`, `capsule_completeness`,
+`capsule_fingerprint_scope_complete`, `capsule_source_summary`, `dedup_valid_capsules`,
+`portfolio_concept_overview_data`) are PUBLIC as of 2026-09-08 and re-exported by
+`engine/knowledge_views.py`, which is the surface `tools/`, `cli/` and `serve/` import (doc 25
+XP-01/TO-09). They spent years underscored while four packages imported them by those private
+names — a rename freedom that had already been spent, and one that failed SILENTLY because those
+imports are function-local and the tool layer swallows the ImportError.
 """
 from __future__ import annotations
 
@@ -34,7 +41,8 @@ from typing import Optional
 
 from looplab.core.fitness import finite_or_absent_metric as _is_finite_metric
 from looplab.core.text import fingerprint_similarity
-from looplab.core.receipts import ReceiptRows, bounded_receipt_count
+from looplab.core.receipts import (ReceiptRows, bounded_receipt_count, receipt_field_set,
+                                   receipt_payload, receipt_presence)
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.core.run_identity import row_belongs_to_run, run_ref
 from looplab.core.jsonlio import (read_jsonl_lenient_with_health,
@@ -64,6 +72,46 @@ _MAX_OVERVIEW_RUN_CARDS = 512
 
 _MAX_OVERVIEW_CARD_CONCEPTS = 64
 
+# --- the capsule receipts, declared ONCE for both ends (doc 25 EM-12) ---------------------------
+#
+# Each of these was spelled twice: as literal keys in `build_concept_capsule`/`capsule_source_summary`
+# and again as a local `keys = (...)` tuple in the reader that checks their presence — one of them in
+# another module (`concept_steward._concept_source_receipt`). A field added at one end was invisible
+# at the other, and silent in the worst direction: a reader that still finds every field it knows
+# about calls the receipt complete. Both ends now consume the declaration, so neither can move alone.
+
+#: The classifier-membership producer receipt. These three landed TOGETHER and are read
+#: all-or-nothing: a v2 row written before them is a valid observation with an unknowable
+#: denominator, but a row carrying some of them is corrupt.
+CAPSULE_EVIDENCE_RECEIPT = receipt_field_set(
+    "concept_evidence_nodes_total",
+    "concept_evidence_nodes_incomplete",
+    "concept_evidence_complete",
+)
+#: `concept_evidence_observed` is its OWN declaration because it was added later and is separately
+#: additive — old positive/partial rows that predate it stay readable (see the reader). Folding it
+#: into the tuple above would retire every v2 row written between the two additions.
+CAPSULE_OBSERVED_RECEIPT = receipt_field_set("concept_evidence_observed")
+
+
+def capsule_completeness_receipt(stem: str) -> tuple[str, ...]:
+    """The three-field completeness receipt for one bounded collection (`fingerprint`, `concepts`,
+    `concept_outcomes`). One declaration, parameterized by stem, because the writer emits three
+    copies of the same shape and the reader takes the stem as an argument."""
+    return receipt_field_set(f"{stem}_total", f"{stem}_omitted", f"{stem}_complete")
+
+
+#: The aggregate source receipt's COUNTS, read across a module boundary by
+#: `concept_steward._concept_source_receipt`. `source_complete` is deliberately not in here: it is
+#: the derived conjunction over these counts AND the store-health axis, so it has a consistency
+#: rule of its own rather than being one more count.
+CAPSULE_SOURCE_COUNTS = receipt_field_set(
+    "partial_capsules",
+    "source_unknown_capsules",
+    "source_concepts_omitted",
+    "source_outcomes_omitted",
+)
+
 _EMPTY_CAPSULE_STORE_HEALTH = {
     "source_store_complete": True,
     "source_rows_total": 0,
@@ -83,7 +131,7 @@ class _CapsuleRows(ReceiptRows):
         super().__init__(rows)
         self.source_health = {**_EMPTY_CAPSULE_STORE_HEALTH, **(source_health or {})}
 
-def _capsule_rows(rows=(), *, source=None) -> _CapsuleRows:
+def capsule_rows(rows=(), *, source=None) -> _CapsuleRows:
     """Copy rows while preserving the originating store health receipt."""
     origin = source if source is not None else rows
     health = getattr(origin, "source_health", None)
@@ -91,13 +139,13 @@ def _capsule_rows(rows=(), *, source=None) -> _CapsuleRows:
         health = {**_EMPTY_CAPSULE_STORE_HEALTH, "source_rows_total": len(origin)}
     return _CapsuleRows(rows, source_health=health)
 
-def _filter_capsule_rows(rows, predicate) -> _CapsuleRows:
+def filter_capsule_rows(rows, predicate) -> _CapsuleRows:
     """Filter a capsule snapshot without laundering quarantined source rows into exact absence."""
     source = rows if isinstance(rows, (list, tuple)) else []
-    # `_capsule_rows` first, because inheriting the receipt from a plain list is capsule-specific
+    # `capsule_rows` first, because inheriting the receipt from a plain list is capsule-specific
     # (it derives `source_rows_total` from the origin); the narrowing itself is the shared
     # receipt-preserving projection rather than a comprehension that would drop it (EM-09).
-    return _capsule_rows(source, source=source).filter(predicate)
+    return capsule_rows(source, source=source).filter(predicate)
 
 def _capsule_concept_evidence_completeness(
         capsule: dict,
@@ -107,17 +155,12 @@ def _capsule_concept_evidence_completeness(
     The receipt is additive over capsule v2.  A v2 row written before this receipt remains a valid
     positive observation, but its membership denominator is unknowable and therefore incomplete.
     """
-    keys = (
-        "concept_evidence_nodes_total",
-        "concept_evidence_nodes_incomplete",
-        "concept_evidence_complete",
-    )
-    present = [key in capsule for key in keys]
-    if not any(present):
+    presence = receipt_presence(capsule, CAPSULE_EVIDENCE_RECEIPT)
+    if presence == "absent":
         return None, None, False, None
-    if not all(present):
+    if presence == "partial":
         return None
-    total, incomplete, complete = (capsule[key] for key in keys)
+    total, incomplete, complete = (capsule[key] for key in CAPSULE_EVIDENCE_RECEIPT)
     # `incomplete` is bounded by `total`, not by the collection cap — a subset denominator, so its
     # own ceiling is the total it is a subset of.
     if (not bounded_receipt_count(total, _MAX_CAPSULE_SOURCE_ITEMS)
@@ -125,7 +168,7 @@ def _capsule_concept_evidence_completeness(
             or type(complete) is not bool):
         return None
     observed = capsule.get("concept_evidence_observed")
-    if "concept_evidence_observed" not in capsule:
+    if receipt_presence(capsule, CAPSULE_OBSERVED_RECEIPT) == "absent":
         # Old v2 positive/partial rows remain useful.  An old EMPTY row, however, did not distinguish
         # "classifier observed zero memberships" from "classifier never ran", so its absence is unknown.
         observed = True if total > 0 or capsule.get("concepts") or capsule.get("concept_outcomes") else None
@@ -142,17 +185,18 @@ def _capsule_concept_evidence_completeness(
     # A pre-marker empty v2 row is readable but cannot prove authoritative absence.
     return total, incomplete, complete if observed is True else False, observed
 
-def _capsule_completeness(
+def capsule_completeness(
         capsule: dict, stem: str, included: int,
 ) -> Optional[tuple[Optional[int], Optional[int], bool]]:
     """Read one additive capsule completeness triplet; old v2 rows are valid but UNKNOWN/partial."""
-    total_key, omitted_key, complete_key = f"{stem}_total", f"{stem}_omitted", f"{stem}_complete"
-    present = [key in capsule for key in (total_key, omitted_key, complete_key)]
-    if not any(present):
+    fields = capsule_completeness_receipt(stem)
+    total_key, omitted_key, complete_key = fields
+    presence = receipt_presence(capsule, fields)
+    if presence == "absent":
         # Old v2 writers silently capped collections. Their retained observations remain useful, but neither
         # the original total nor completeness can be reconstructed honestly from the durable row.
         return None, None, False
-    if not all(present):
+    if presence == "partial":
         return None
     total, omitted, complete = capsule[total_key], capsule[omitted_key], capsule[complete_key]
     if (not bounded_receipt_count(total, _MAX_CAPSULE_SOURCE_ITEMS)
@@ -183,14 +227,14 @@ def _capsule_completeness(
         return None
     return total, omitted, complete
 
-def _capsule_source_summary(capsules: list[dict]) -> dict:
+def capsule_source_summary(capsules: list[dict]) -> dict:
     """Aggregate capsule omissions plus the durable store's quarantine/read-health receipt."""
-    capsules = _dedup_valid_capsules(capsules)
+    capsules = dedup_valid_capsules(capsules)
     concept_omitted = outcome_omitted = partial = unknown = 0
     for capsule in capsules:
         evidence_meta = _capsule_concept_evidence_completeness(capsule)
-        concept_meta = _capsule_completeness(capsule, "concepts", len(capsule.get("concepts") or []))
-        outcome_meta = _capsule_completeness(
+        concept_meta = capsule_completeness(capsule, "concepts", len(capsule.get("concepts") or []))
+        outcome_meta = capsule_completeness(
             capsule, "concept_outcomes", len(capsule.get("concept_outcomes") or {}))
         # Callers pass validated rows; keep this total if a future caller violates that private contract.
         if evidence_meta is None or concept_meta is None or outcome_meta is None:
@@ -212,14 +256,18 @@ def _capsule_source_summary(capsules: list[dict]) -> dict:
         # quarantine keeps poisoned content out, but it cannot turn an unreadable durable row
         # into proof of absence. Completeness crosses both the per-capsule bounds and file/schema health.
         "source_complete": partial == 0 and store_health["source_store_complete"] is True,
-        "partial_capsules": partial,
-        "source_unknown_capsules": unknown,
-        "source_concepts_omitted": concept_omitted,
-        "source_outcomes_omitted": outcome_omitted,
+        # The COUNTS through their declaration, which `concept_steward._concept_source_receipt`
+        # reads on the other side of a module boundary — the widest writer/reader gap of the three
+        # capsule receipts, and the one where a silently added field would be least visible.
+        **receipt_payload(CAPSULE_SOURCE_COUNTS, {
+            "partial_capsules": partial,
+            "source_unknown_capsules": unknown,
+            "source_concepts_omitted": concept_omitted,
+            "source_outcomes_omitted": outcome_omitted}),
         **store_health,
     }
 
-def _capsule_fingerprint_scope_complete(capsule: dict) -> bool:
+def capsule_fingerprint_scope_complete(capsule: dict) -> bool:
     """Whether a capsule's persisted fingerprint is an exact source projection.
 
     Related-task transfer treats this as an applicability boundary.  Exact ``task_id`` matches do not need
@@ -230,7 +278,7 @@ def _capsule_fingerprint_scope_complete(capsule: dict) -> bool:
     fingerprint = capsule.get("fingerprint")
     if not isinstance(fingerprint, list):
         return False
-    meta = _capsule_completeness(capsule, "fingerprint", len(fingerprint))
+    meta = capsule_completeness(capsule, "fingerprint", len(fingerprint))
     return meta is not None and meta[2] is True
 
 def _valid_capsule_record(capsule) -> bool:
@@ -291,11 +339,11 @@ def _valid_capsule_record(capsule) -> bool:
             and (concepts or outcomes) and evidence_meta[0] == 0):
         return False
     return (evidence_meta is not None
-            and _capsule_completeness(capsule, "fingerprint", len(fingerprint)) is not None
-            and _capsule_completeness(capsule, "concepts", len(concepts)) is not None
-            and _capsule_completeness(capsule, "concept_outcomes", len(outcomes)) is not None)
+            and capsule_completeness(capsule, "fingerprint", len(fingerprint)) is not None
+            and capsule_completeness(capsule, "concepts", len(concepts)) is not None
+            and capsule_completeness(capsule, "concept_outcomes", len(outcomes)) is not None)
 
-def _dedup_valid_capsules(capsules) -> _CapsuleRows:
+def dedup_valid_capsules(capsules) -> _CapsuleRows:
     """Quarantine + deterministically de-duplicate a raw capsule sequence: keep only valid records, collapse
     duplicate run ids to ONE, and return them in sorted-run-id order. The shared portfolio read-models feed
     this RAW decoded rows (a caller may concatenate shards or hand a pre-compaction file), so the collision
@@ -487,32 +535,43 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         raise ValueError("unobserved concept evidence cannot carry memberships or outcomes")
     concept_evidence_complete = (
         concept_evidence_observed and concept_evidence_nodes_incomplete == 0)
+    # Every receipt field below goes through `receipt_payload`, which refuses a payload that is not
+    # EXACTLY its declaration (doc 25 EM-12): the reader's presence check and this writer now read
+    # one tuple, so a field added at either end raises here instead of shipping a durable row the
+    # other end cannot see. The non-receipt keys (identity, the bounded collections themselves, the
+    # metric) stay literal — they are the capsule's content, not a completeness claim about it.
     return {
         "v": CONCEPT_CAPSULE_VERSION,
         "concept_evidence": NODE_CONCEPT_PROVENANCE_CLASSIFIER,
         # ``observed=true`` plus empty collections is a same-run tombstone. ``false`` is an
         # unknown snapshot and must stay partial; this additive bit keeps old positive v2 rows readable.
-        "concept_evidence_observed": concept_evidence_observed,
-        "concept_evidence_nodes_total": concept_evidence_nodes_total,
-        "concept_evidence_nodes_incomplete": concept_evidence_nodes_incomplete,
-        "concept_evidence_complete": concept_evidence_complete,
+        **receipt_payload(CAPSULE_OBSERVED_RECEIPT, {
+            "concept_evidence_observed": concept_evidence_observed}),
+        **receipt_payload(CAPSULE_EVIDENCE_RECEIPT, {
+            "concept_evidence_nodes_total": concept_evidence_nodes_total,
+            "concept_evidence_nodes_incomplete": concept_evidence_nodes_incomplete,
+            "concept_evidence_complete": concept_evidence_complete}),
         "run_id": str(run_id or ""),
         **({"run_uid": str(run_uid)} if isinstance(run_uid, str) and run_uid else {}),
         "task_id": str(task_id or ""),
         "fingerprint": bounded_fingerprint,
-        "fingerprint_total": fingerprint_total,
-        "fingerprint_omitted": fingerprint_omitted,
-        "fingerprint_complete": fingerprint_omitted == 0,
+        **receipt_payload(capsule_completeness_receipt("fingerprint"), {
+            "fingerprint_total": fingerprint_total,
+            "fingerprint_omitted": fingerprint_omitted,
+            "fingerprint_complete": fingerprint_omitted == 0}),
         "direction": normalized_direction,
         "concepts": bounded_concepts,
-        "concepts_total": concepts_total,
-        "concepts_omitted": concepts_omitted,
-        "concepts_complete": concepts_omitted == 0 and concept_evidence_complete,
+        **receipt_payload(capsule_completeness_receipt("concepts"), {
+            "concepts_total": concepts_total,
+            "concepts_omitted": concepts_omitted,
+            "concepts_complete": concepts_omitted == 0 and concept_evidence_complete}),
         "best_metric": best_metric if _is_finite_metric(best_metric) else None,
         "concept_outcomes": bounded_outcomes,
-        "concept_outcomes_total": outcomes_total,
-        "concept_outcomes_omitted": outcomes_omitted,
-        "concept_outcomes_complete": outcomes_omitted == 0 and concept_evidence_complete,
+        **receipt_payload(capsule_completeness_receipt("concept_outcomes"), {
+            "concept_outcomes_total": outcomes_total,
+            "concept_outcomes_omitted": outcomes_omitted,
+            "concept_outcomes_complete": (outcomes_omitted == 0
+                                          and concept_evidence_complete)}),
         # PART V Phase 1: a direction-normalized RANK-WITHIN-RUN sign per concept (+1 clearly-better-half /
         # 0 neutral / -1 clearly-worse-half vs this run's own field) — additive over v2 (old capsules lack
         # it, readers default {}). Relative rank, not causal profit; the per-node delta is Phase 3.
@@ -569,7 +628,7 @@ class ConceptCapsuleStore:
     def add(self, capsule: dict) -> bool:
         """Upsert by `run_id` under the same interprocess lock the case/lesson stores use, re-reading
         inside the lock so a concurrent run's capsule survives. Returns True once stored."""
-        from looplab.events.eventstore import _interprocess_lock
+        from looplab.events.eventstore import interprocess_lock
         if not self._valid_capsule(capsule):
             return False
         # run_id is only a run-root-local label (separate checkouts default to run_local),
@@ -578,7 +637,7 @@ class ConceptCapsuleStore:
         # globally unique run-incarnation UID; retain run_id only for display.
         rid = str(capsule.get("run_id") or "")
         ruid = str(capsule.get("run_uid") or "")
-        with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
+        with interprocess_lock(Path(str(self.path) + ".lock"), required=True):
             # quarantine is a read policy, not permission to erase old/future durable data.
             # Preserve raw malformed AND decoded future rows; supersede only the exact run id.
             replace_jsonl_rows_atomic_preserving_quarantine(
@@ -634,7 +693,7 @@ class ConceptCapsuleStore:
             # the writer bounds fingerprints.  A retained prefix (or a pre-receipt v2 row)
             # can inflate Jaccard and is not authority for related-task transfer.  Exact task identity is
             # still usable because it does not depend on the lossy fingerprint projection.
-            if not exact_task and not _capsule_fingerprint_scope_complete(c):
+            if not exact_task and not capsule_fingerprint_scope_complete(c):
                 continue
             sim = 1.0 if exact_task else fingerprint_similarity(fingerprint, c.get("fingerprint") or [])
             if sim >= min_sim:
@@ -667,10 +726,10 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     `aliases` (from `load_concept_aliases`, CR1a) canonicalizes concept slugs at read time: merged aliases
     collapse to one concept and purged concepts drop; `splits` (from `load_concept_splits`) re-tags a coarse
     concept per that run's OWN sibling concepts. The raw per-run tags are untouched (non-destructive)."""
-    return _portfolio_concept_overview_data(
+    return portfolio_concept_overview_data(
         capsules, aliases=aliases, splits=splits)[0]
 
-def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[dict] = None,
+def portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[dict] = None,
                                      splits: Optional[dict] = None) -> tuple[dict, list[dict]]:
     """Build the public bounded overview and its full internal concept rows from one exact snapshot.
 
@@ -679,7 +738,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
     """
     from looplab.engine.concept_registry import canonicalize_concept, canonicalize_concepts
 
-    valid_capsules = _dedup_valid_capsules(capsules)
+    valid_capsules = dedup_valid_capsules(capsules)
 
     per_concept: dict[str, dict] = {}
     for c in valid_capsules:
@@ -689,7 +748,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
         # concept lost a run.
         ref, rid = run_ref(c), str(c.get("run_id") or "")
         oc = c.get("concept_outcomes") or {}
-        outcome_meta = _capsule_completeness(
+        outcome_meta = capsule_completeness(
             c, "concept_outcomes", len(c.get("concept_outcomes") or {}))
         # pre-receipt v2 writers could truncate BEFORE computing rank signs. Keep their positive
         # concept/outcome observations, but never aggregate a sign whose comparison field may be incomplete.
@@ -746,8 +805,8 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
     for c in valid_capsules:
         canonical = canonicalize_concepts(c.get("concepts") or [], aliases=aliases, splits=splits)
         evidence_meta = _capsule_concept_evidence_completeness(c)
-        concept_meta = _capsule_completeness(c, "concepts", len(c.get("concepts") or []))
-        outcome_meta = _capsule_completeness(
+        concept_meta = capsule_completeness(c, "concepts", len(c.get("concepts") or []))
+        outcome_meta = capsule_completeness(
             c, "concept_outcomes", len(c.get("concept_outcomes") or {}))
         assert evidence_meta is not None and concept_meta is not None and outcome_meta is not None
         # The overview must apply normalization even with empty governance maps; otherwise
@@ -776,7 +835,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
     result = {"n_runs": len(valid_capsules), "n_concepts": len(concepts),
                "concepts": concepts[:_MAX_OVERVIEW_CONCEPTS],
                "runs": cards[:_MAX_OVERVIEW_RUN_CARDS],
-               **_capsule_source_summary(valid_capsules)}
+               **capsule_source_summary(valid_capsules)}
     if len(concepts) > len(result["concepts"]):
         result["concepts_omitted"] = len(concepts) - len(result["concepts"])
     if len(cards) > len(result["runs"]):
