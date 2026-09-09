@@ -53,6 +53,46 @@ BENCH_LANES = ("0-10,48-58", "11-21,59-69", "22-32,70-80", "33-43,81-91")
 SERVICE_LANE = "44-47,92-95"
 
 
+def tree_cpus(pid: int, root: str = DEFAULT_ROOT, proc: str = "/proc", affinity=None) -> set:
+    """The cpus a probe's WHOLE tree may run on -- the engine and every descendant.
+
+    §366. `pulse`'s lane verdict (§358) judged the top-level process only. Measured 2026-09-09 with
+    four probes live: three were generating and had ONE process each, but `pgr4` was evaluating and
+    had SIX. An evaluation spawns twenty-two workers, and a worker whose affinity escaped its lane
+    would contend with a neighbour's timing while every instrument reported the lane the engine was
+    born on -- which is the shape of the stray rulers of 2026-09-07, one level down.
+
+    The union, not a list: a lane is a set, and the question is whether the tree as a whole stays
+    inside one. `proc` and `affinity` are injectable for `probes`' reason -- a scan of the real
+    `/proc` cannot be tested, and it is the only way the escaping-worker case can go red.
+    """
+    affinity = affinity or os.sched_getaffinity
+    kids: dict = {}
+    for entry in os.listdir(proc):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"{proc}/{entry}/stat", encoding="utf-8", errors="replace") as fh:
+                parent = int(fh.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        kids.setdefault(parent, []).append(int(entry))
+    seen: set = set()
+    stack = [int(pid)]
+    cpus: set = set()
+    while stack:
+        here = stack.pop()
+        if here in seen:
+            continue
+        seen.add(here)
+        stack.extend(kids.get(here, ()))
+        try:
+            cpus |= set(affinity(here))
+        except OSError:
+            continue                       # a worker that exited under the walk is not a leak
+    return cpus
+
+
 def lane_fault(cpus: set[int]) -> str | None:
     """What is wrong with this probe's cpu set, or None when it sits exactly on a bench lane.
 

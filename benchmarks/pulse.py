@@ -594,7 +594,10 @@ def main(argv=None) -> int:
         if not found:
             print(f'{name:10s} {lanes._fmt(row["cpus"]):12s}  no events.jsonl yet')
             continue
-        fault = lanes.lane_fault(row["cpus"])
+        # THE WHOLE TREE, NOT THE ENGINE ALONE (§366). An evaluation spawns twenty-two workers;
+        # judging only the top-level process reports the lane it was born on whatever its children
+        # do. The union of the tree is what has to stay inside one lane.
+        fault = lanes.lane_fault(lanes.tree_cpus(row["pid"]) or row["cpus"])
         got = pulse(found[0])
         # `args.now` only when it was INJECTED: otherwise the clock is read after the stat.
         age = log_age(found[0], args.now)

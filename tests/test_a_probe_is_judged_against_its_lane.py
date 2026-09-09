@@ -68,7 +68,10 @@ def test_the_service_pair_matches_the_one_the_snapshot_uses():
 
 def test_pulse_prints_the_fault():
     src = (BENCH / "pulse.py").read_text(encoding="utf-8")
-    assert 'lanes.lane_fault(row["cpus"])' in src, "pulse снова не судит полосу"
+    # §366 расширил вердикт с процесса на ДЕРЕВО: оценка порождает двадцать два воркера, и
+    # судить один верхний процесс значило бы докладывать полосу, на которой он родился, что бы ни
+    # делали его дети. Инвариант тот же — полосу судят; источник шире.
+    assert "lanes.lane_fault(lanes.tree_cpus(" in src, "pulse снова не судит полосу"
     # ВЕТКА, а не только строка: `if False:` оставляет и вызов, и текст на месте.
     assert "        if fault:\n            print(f'      LANE: {name} {fault}')" in src, \
         "вердикт посчитан и не напечатан"
