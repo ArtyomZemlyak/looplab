@@ -39,7 +39,6 @@ from looplab.core.text import WORD_RE as _WORD
 
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
-    confirm_governance_durable,
     observed_path_missing,
     read_governance_rows,
     raise_governance_storage_unavailable,
@@ -48,13 +47,29 @@ from looplab.engine.governance_health import (
     validate_optional_text,
     validate_revision_fields,
 )
+# The durable governance append protocol lives in `governance_protocol.py` (doc 25 EM-05): it is
+# generic, four subsystems outside concepts import it, and it knows no ledger by name. The three
+# conflict types are RE-EXPORTED here because their `Concept…` spellings are a contract — the
+# assistant tool layer classifies them by `type(exc).__name__` — and because `serve/routers/
+# cross_run.py`, `concept_tidy.py` and the CLI have always imported them from this module.
+from looplab.engine.governance_protocol import (  # noqa: F401 — re-exported for existing importers
+    ConceptGovernanceConflict,
+    ConceptGovernanceGlobalConflict,
+    ConceptGovernanceIdempotencyConflict,
+    append_governance,
+    validate_expected_revision,
+)
 
 # Versioned identity contract. Bump only on a normalization change that would re-key existing concepts; a
 # record carries no version today (the algorithm is the contract), but the constant pins the intent and
 # lets a future migration detect a normalization mode change.
 CONCEPT_KEY_VERSION = 1
 
-_TOMBSTONE = "\x00purged"   # canonical target that marks a concept purged (dropped from cross-run views)
+# The purge SENTINEL: a canonical alias target that marks a concept purged (dropped from every
+# cross-run view). PUBLIC as of 2026-09-08 and re-exported by `engine/knowledge_views.py` — a
+# concept read model outside `engine/` has to be able to tell a purge from a merge, and
+# `tools/concept_tools.py` was doing it by importing this module's `_TOMBSTONE` (doc 25 XP-01).
+CONCEPT_TOMBSTONE = "\x00purged"
 _MAX_CONCEPT = 500
 _MAX_ACTOR = 120
 _MAX_AT = 120
@@ -65,37 +80,6 @@ _MAX_ACTION_ID = 160
 _CONCEPT_GOVERNANCE_THREAD_LOCK = threading.Lock()
 _ALIAS_LEDGER = "concept_aliases"
 _SPLIT_LEDGER = "concept_splits"
-
-
-class ConceptGovernanceConflict(ValueError):
-    """Optimistic-concurrency failure for an alias/split ledger mutation."""
-
-    def __init__(self, path: Path, expected: int, actual: int):
-        self.path = path
-        self.expected = expected
-        self.actual = actual
-        super().__init__(f"stale governance revision for {path.name}: expected {expected}, current {actual}")
-
-
-class ConceptGovernanceGlobalConflict(ValueError):
-    """Optimistic-concurrency failure across the combined alias/split policy."""
-
-    def __init__(self, expected: int, actual: int):
-        self.expected = expected
-        self.actual = actual
-        super().__init__(
-            "stale concept governance revision: "
-            f"expected {expected}, current {actual}"
-        )
-
-
-class ConceptGovernanceIdempotencyConflict(ValueError):
-    """An action id was already committed with a different semantic payload in this ledger."""
-
-    def __init__(self, path: Path, action_id: str):
-        self.path = path
-        self.action_id = action_id
-        super().__init__(f"action_id {action_id!r} already exists with a different payload in {path.name}")
 
 
 def normalize_key(s: str) -> str:
@@ -126,11 +110,6 @@ def _bounded_text(value, field: str, maximum: int) -> str:
     if len(out) > maximum:
         raise ValueError(f"{field} exceeds {maximum} characters")
     return out
-
-
-def _validate_expected_revision(value: Optional[int], field: str = "expected_revision") -> None:
-    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
-        raise ValueError(f"{field} must be a non-negative integer")
 
 
 def _validated_action_id(value: str) -> str:
@@ -184,7 +163,7 @@ def _would_cycle(src: str, dst: str, aliases: dict) -> bool:
     while cur in aliases and cur not in seen:
         seen.add(cur)
         nxt = aliases[cur]
-        if nxt == _TOMBSTONE:
+        if nxt == CONCEPT_TOMBSTONE:
             return False               # a purge chain terminates, never a cycle
         cur = nxt
     return cur == src
@@ -201,8 +180,8 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
     the ONE versioned contract, so writes and reads agree."""
     prepared = prepare_concept_alias(from_concept, to_concept)
     src, dst = prepared["from"], prepared["to"]
-    _validate_expected_revision(expected_revision)
-    _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
+    validate_expected_revision(expected_revision)
+    validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
@@ -247,12 +226,13 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
 
     with _concept_governance_transaction(memory_dir):
         with _concept_source_transaction(memory_dir, required=require_existing):
-            return _append_governance(path, rec, validate=_validate_locked,
-                                      read_rows=_read_alias_rows,
-                                      expected_revision=expected_revision,
-                                      governance_memory_dir=memory_dir,
-                                      expected_governance_revision=expected_governance_revision,
-                                      require_durable=True)
+            return append_governance(
+                path, rec, validate=_validate_locked, read_rows=_read_alias_rows,
+                expected_revision=expected_revision,
+                global_revision=lambda: concept_governance_global_revision(memory_dir),
+                expected_global_revision=expected_governance_revision,
+                require_durable=True,
+            )
 
 
 def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", at: str = "",
@@ -266,8 +246,8 @@ def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", 
     normalized identity again.
     """
     src = prepare_concept_source(from_concept)
-    _validate_expected_revision(expected_revision)
-    _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
+    validate_expected_revision(expected_revision)
+    validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
@@ -285,11 +265,11 @@ def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", 
             raise ValueError(f"no active alias or purge policy exists for {src!r}")
 
     with _concept_governance_transaction(memory_dir):
-        return _append_governance(
+        return append_governance(
             path, rec, validate=_validate_clear, read_rows=_read_alias_rows,
             expected_revision=expected_revision,
-            governance_memory_dir=memory_dir,
-            expected_governance_revision=expected_governance_revision,
+            global_revision=lambda: concept_governance_global_revision(memory_dir),
+            expected_global_revision=expected_governance_revision,
             require_durable=True,
         )
 
@@ -362,16 +342,16 @@ def load_concept_aliases(memory_dir) -> dict:
         if action == "clear":
             out.pop(src, None)
         elif action == "purge":
-            out[src] = _TOMBSTONE
+            out[src] = CONCEPT_TOMBSTONE
         elif action == "set":
             dst = normalize_key(r.get("to"))
             if dst and len(dst) <= _MAX_CONCEPT:
                 out[src] = dst
         elif action == "legacy":
             dst = normalize_key(r.get("to"))
-            out[src] = _TOMBSTONE if not dst else dst
+            out[src] = CONCEPT_TOMBSTONE if not dst else dst
         target = out.get(src)
-        if target and target != _TOMBSTONE and _would_cycle(src, target, out):
+        if target and target != CONCEPT_TOMBSTONE and _would_cycle(src, target, out):
             raise GovernanceLedgerUnavailable(
                 _ALIAS_LEDGER, "identity_cycle", line=line_number)
     return out
@@ -414,12 +394,12 @@ def withdrawn_alias_pairs(memory_dir) -> set:
             # The target comes from whatever edge this clear reversed. A clear with no live edge
             # withdraws nothing — there was no judgement to take back.
             target = live.pop(src, "")
-            if target and target != _TOMBSTONE:
+            if target and target != CONCEPT_TOMBSTONE:
                 withdrawn.add(frozenset({src, target}))
             continue
         dst = normalize_key(r.get("to"))
         if action == "purge" or (action == "legacy" and not dst):
-            live[src] = _TOMBSTONE
+            live[src] = CONCEPT_TOMBSTONE
         elif dst and len(dst) <= _MAX_CONCEPT:
             live[src] = dst
             # LAST row wins, exactly as the alias replay resolves it: re-governing a pair that was
@@ -442,7 +422,7 @@ def resolve_slug(slug: str, aliases: dict) -> Optional[str]:
         positions[cur] = len(order)
         order.append(cur)
         nxt = aliases[cur]
-        if nxt == _TOMBSTONE:
+        if nxt == CONCEPT_TOMBSTONE:
             return None            # purged
         cur = normalize_key(nxt)
     return cur or None
@@ -505,8 +485,8 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
     src = prepared["from"]
     norm_rules = prepared["rules"]
     dflt = prepared["default"]
-    _validate_expected_revision(expected_revision)
-    _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
+    validate_expected_revision(expected_revision)
+    validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
@@ -590,12 +570,13 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
 
     with _concept_governance_transaction(memory_dir):
         with _concept_source_transaction(memory_dir, required=require_existing):
-            return _append_governance(path, rec, validate=_validate_targets,
-                                      read_rows=_read_split_rows,
-                                      expected_revision=expected_revision,
-                                      governance_memory_dir=memory_dir,
-                                      expected_governance_revision=expected_governance_revision,
-                                      require_durable=True)
+            return append_governance(
+                path, rec, validate=_validate_targets, read_rows=_read_split_rows,
+                expected_revision=expected_revision,
+                global_revision=lambda: concept_governance_global_revision(memory_dir),
+                expected_global_revision=expected_governance_revision,
+                require_durable=True,
+            )
 
 
 def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", at: str = "",
@@ -604,8 +585,8 @@ def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", 
                         action_id: str = "", require_existing: bool = False) -> dict:
     """Undo the active split rule for one source through an append-only clear record."""
     src = prepare_concept_source(from_concept)
-    _validate_expected_revision(expected_revision)
-    _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
+    validate_expected_revision(expected_revision)
+    validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
@@ -623,11 +604,11 @@ def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", 
             raise ValueError(f"no active split policy exists for {src!r}")
 
     with _concept_governance_transaction(memory_dir):
-        return _append_governance(
+        return append_governance(
             path, rec, validate=_validate_clear, read_rows=_read_split_rows,
             expected_revision=expected_revision,
-            governance_memory_dir=memory_dir,
-            expected_governance_revision=expected_governance_revision,
+            global_revision=lambda: concept_governance_global_revision(memory_dir),
+            expected_global_revision=expected_governance_revision,
             require_durable=True,
         )
 
@@ -977,11 +958,11 @@ def _concept_governance_transaction(memory_dir):
     alias purge. A memory-wide lock supplies that linearization point; the shared revision makes the
     resulting cross-ledger order visible in every mutation receipt.
     """
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     base = Path(memory_dir)
     with _CONCEPT_GOVERNANCE_THREAD_LOCK:
-        with _interprocess_lock(base / "concept_governance.lock", required=True):
+        with interprocess_lock(base / "concept_governance.lock", required=True):
             yield
 
 
@@ -991,127 +972,8 @@ def _concept_source_transaction(memory_dir, *, required: bool):
     if not required:
         yield
         return
-    from looplab.events.eventstore import _interprocess_lock
+    from looplab.events.eventstore import interprocess_lock
 
     source_lock = Path(memory_dir) / "concept_capsules.jsonl.lock"
-    with _interprocess_lock(source_lock, required=True):
+    with interprocess_lock(source_lock, required=True):
         yield
-
-
-def _idempotency_payload(rec: dict) -> str:
-    """Canonical semantic payload; actor/timestamp/revision are receipt metadata, not mutation identity."""
-    semantic = {k: rec.get(k) for k in ("v", "action", "from", "to", "rules", "default") if k in rec}
-    return json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[], None]] = None,
-                       guard: Optional[Callable[[], None]] = None,
-                       read_rows: Optional[Callable[[Path], list[dict]]] = None,
-                       expected_revision: Optional[int] = None,
-                       governance_memory_dir=None,
-                       expected_governance_revision: Optional[int] = None,
-                       require_durable: bool = False) -> dict:
-    """Append one governance record under a required cross-platform interprocess lock.
-
-    Lenient JSONL replay can tolerate a torn tail, but it cannot recover an interleaved or lost policy
-    decision.  Governance therefore fails closed when the locking guarantee is unavailable.  `validate`,
-    when supplied, runs in the same critical section as the append.
-    """
-    if validate is not None and guard is not None:
-        raise ValueError("pass either validate or guard, not both")
-    # Retain the shipped `guard` spelling while executing both forms inside the required lock.
-    validator = validate or guard
-
-    from looplab.core.atomicio import best_effort_fsync, strict_fsync, strict_fsync_parent
-    from looplab.events.eventstore import _interprocess_lock
-
-    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-        strict_rows = read_rows(path) if read_rows is not None else None
-        if governance_memory_dir is not None:
-            # The caller holds the memory-wide lock, so this health preflight is stable through
-            # idempotency lookup and append. A retry may return its old receipt only when the full
-            # alias+split policy remains projectable; an unhealthy sibling ledger is not an exact state.
-            concept_governance_global_revision(governance_memory_dir)
-        # Idempotency keys are namespaced by the physical governance ledger. Alias and split endpoints may
-        # use the same caller-generated key; changing that boundary requires a durable cross-ledger action
-        # index rather than an unlocked scan of the sibling file.
-        action_id = str(rec.get("action_id") or "")
-        if action_id and path.exists():
-            if strict_rows is not None:
-                existing_rows = strict_rows
-            else:
-                # `read_rows` is now the ONLY way a caller selects a strict reader (doc 25 EM-05).
-                # This used to branch on `concept_aliases.jsonl`/`concept_splits.jsonl` by name, so a
-                # primitive that four subsystems import as generic secretly knew the concept ledgers.
-                # Those two call sites pass their reader explicitly; what is left here is the lenient
-                # projection that non-policy RECEIPT logs have always used.
-                from looplab.events.eventstore import read_jsonl_lenient
-                existing_rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
-            for existing in existing_rows:
-                if str(existing.get("action_id") or "") != action_id:
-                    continue
-                # Resolve idempotency before CAS/validation. A transport retry carrying the original stale
-                # revision must return its first durable receipt, never append again or fail with a conflict.
-                if _idempotency_payload(existing) == _idempotency_payload(rec):
-                    if require_durable:
-                        # The first response may have failed during fsync after bytes reached the page
-                        # cache. A retry must re-confirm both contents and publication before returning 200.
-                        confirm_governance_durable(path)
-                    return dict(existing)
-                raise ConceptGovernanceIdempotencyConflict(path, action_id)
-        governance_revision = None
-        if governance_memory_dir is not None:
-            # Public concept writes hold the memory-wide governance lock before entering this per-ledger
-            # lock. Resolve action-id replay first so a lost-response retry can return its original receipt
-            # even though both revision tokens are now stale.
-            governance_revision = concept_governance_global_revision(governance_memory_dir)
-            _validate_expected_revision(
-                expected_governance_revision, "expected_governance_revision"
-            )
-            if (expected_governance_revision is not None
-                    and expected_governance_revision != governance_revision):
-                raise ConceptGovernanceGlobalConflict(
-                    expected_governance_revision, governance_revision
-                )
-        if strict_rows is None:
-            current = _ledger_revision(path)
-        else:
-            explicit = [row.get("revision") for row in strict_rows
-                        if isinstance(row.get("revision"), int)
-                        and not isinstance(row.get("revision"), bool)]
-            current = max([len(strict_rows), *explicit], default=0)
-        created = not path.exists()
-        _validate_expected_revision(expected_revision)
-        if expected_revision is not None and expected_revision != current:
-            raise ConceptGovernanceConflict(path, expected_revision, current)
-        if validator is not None:
-            validator()
-        if governance_revision is not None:
-            rec["governance_revision"] = governance_revision + 1
-        # Allocate the CAS revision inside the same required lock as validation and append.
-        rec["revision"] = current + 1
-        separator = ""
-        # `read_rows is None` now carries the whole distinction (doc 25 EM-05). It always did for
-        # these two ledgers — they reach this line with a reader, so the filename clause that used to
-        # sit here could only ever agree with it. A strict ledger is one whose caller supplied a
-        # strict reader, which is the same statement the name check was making indirectly.
-        if read_rows is None and path.exists() and path.stat().st_size:
-            with open(path, "rb") as existing:
-                existing.seek(-1, 2)
-                if existing.read(1) not in (b"\n", b"\r"):
-                    # Non-policy receipt logs retain their historical torn-tail separation. Strict
-                    # operator ledgers were rejected by _ledger_revision before reaching this branch.
-                    separator = "\n"
-        line = separator + json.dumps(rec) + "\n"
-        try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                (strict_fsync if require_durable else best_effort_fsync)(f.fileno())
-            if require_durable and created:
-                strict_fsync_parent(path)
-        except (OSError, TimeoutError, RuntimeError) as exc:
-            if require_durable:
-                raise_governance_storage_unavailable(path, exc)
-            raise
-    return rec

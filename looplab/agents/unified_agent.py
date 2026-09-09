@@ -145,7 +145,20 @@ class UnifiedAgent(WrapsDeveloper):
         # is THIS agent; forward them (P2 — roles.forward_hints owns the rule) to the internal
         # researcher that actually reads them.
         forward_hints(self, self.researcher)
-        idea = self.researcher.propose(state, parent)
+        try:
+            idea = self.researcher.propose(state, parent)
+        finally:
+            # IN A `finally`, like the four code stages below and for the same reason: a delegate
+            # that RAISES must not leave this facade mirroring the PREVIOUS call. Without it a
+            # transport failure that escapes the inner `resilient` kept node N-1's cutoff on the
+            # facade, and `orchestrator` then logged node N's proposal as "cut short by its
+            # <turns|time> budget … treat it as TRUNCATED" for a proposal that had no cutoff — the
+            # cross-call misattribution the scoped name was introduced to end, one call later.
+            self._mirror_propose_receipt()
+        return idea
+
+    def _mirror_propose_receipt(self) -> None:
+        """Mirror the inner researcher's per-call propose receipt onto this facade."""
         # WHICH BOUND ENDED THIS PROPOSE: mirror the inner researcher's per-call receipt onto the
         # facade, exactly as `WrapsDeveloper._sync_audit` mirrors the Developer's after every code
         # stage — `RESEARCHER_OUTPUT_ATTRS` names the attr and `_prepare_node_idea._link` reads it
@@ -164,7 +177,6 @@ class UnifiedAgent(WrapsDeveloper):
         # non-facade researcher is unchanged.
         self.last_propose_budget_exhausted = getattr(
             self.researcher, "last_budget_exhausted", "") or ""
-        return idea
 
     def bind_state(self, state, parent=None) -> None:
         """Bind the run state to EVERY per-stage Developer backend, not just the active one.

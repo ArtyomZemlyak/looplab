@@ -37,7 +37,7 @@ import anyio
 import pytest
 
 from tests.factories import make_engine
-from looplab.agents.roles import ToyResearcher
+from looplab.agents.toy_roles import ToyResearcher
 from looplab.core.models import Event, Idea
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold

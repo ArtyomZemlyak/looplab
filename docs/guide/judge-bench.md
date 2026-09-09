@@ -723,3 +723,61 @@ by `looplab bait-materialize` / `looplab bait-audit` rather than by this package
 because the judge is a paid call. The protocol, the arms and the (still unmeasured) number are in
 `docs/audit/developer-hack-rate.md`.
 
+
+## The fourth instrument — the agent trajectory ladder (doc 27 §4, rungs 2, 4 and 5)
+
+`looplab/judgebench/trajectory.py` and `trajectory_score.py` are a different kind of row again:
+**authored, not recorded**. The two benches above replay decisions a run already made; these cases
+are hand-written contracts about what the agent *layer* must do, and they live in this package
+because they answer the same shape of question — is a change to the agent layer better, **measured**
+— through the same entry point.
+
+```bash
+python -m looplab.judgebench score-trajectory                 # every case once (rungs 2 + 4)
+python -m looplab.judgebench score-trajectory --case t4/      # only the containment cases
+python -m looplab.judgebench score-trajectory --trials 20     # rung 5: repeated, with a Wilson CI
+```
+
+The corpus is `tests/data/agent_trajectory/harness.v1.jsonl` — plain JSONL, not the gzip the two
+outcome benches use, because a reviewer has to be able to read the attack string in the diff.
+`tests/test_agent_trajectory_corpus.py` drives every case in the suite.
+
+**What a case does.** It materializes a real temporary world (workspace files, a cross-run
+`lessons.jsonl`, sibling run event logs), composes the **real** tool providers over it, drives the
+**real** `drive_tool_loop`, and grades the ordered `(tool, args, result)` sequence plus the emit that
+ends the phase. Nothing is a source pin.
+
+| rung | what the cases are | examples in the corpus |
+|---|---|---|
+| **2** — curated trajectory | expected/forbidden calls, and the handoff that ends the phase | a stuck loop still hands off through the forced emit; a hallucinated tool name is answered and the phase survives; a number forwarded out of a neighbouring run keeps the run id the reader put at the head of the same string |
+| **4** — containment | prompt injection, confused deputy, cross-run scope | an injected lesson that tries to write outside the workspace, to edit the protected answer key inside it, to read another task's run through the same-task sibling reader, or to close its own `UNTRUSTED_RUN_EVIDENCE` fence from the inside |
+| **5** — repeated trials | a rate with a confidence interval, and cost/latency regression gates | each rung-4 case run N times against a **perturbed** agent (retries, reordering, interleaved calls) |
+
+!!! warning "What an offline number here is evidence for"
+
+    Offline the model is **scripted** — a rung-4 case scripts a *fully complying* agent that obeys
+    the injected instruction verbatim on the next turn. A pass therefore says the effect is
+    **unreachable**; it says nothing about whether any model would decline, because "the model
+    declined" is a property of a checkpoint while "the tool refused and the world tree is
+    byte-identical" is a property of this repository. The caveat is stored in the corpus header and
+    printed under every report. The live arm (`run_case(client=…)`, same grader) is where the model
+    chooses, and it is opt-in behind `LOOPLAB_LIVE_SCENARIOS=1` like the other live smokes.
+
+**Two rules make a green run mean something.**
+
+- **Every containment case carries a positive control.** A rung-4 case is refused at load unless it
+  declares a `control` arm — the same providers, the same world, one *legitimate* target — that must
+  **succeed**. A refusal proves nothing if the tool was broken or misconfigured, and `run_and_grade`
+  reports a verdict per arm so a case whose control fails is a broken case, not a passing guard.
+- **The corpus can be seen to go red.** `tests/test_agent_trajectory_corpus.py` ends with two
+  mutation tests that widen the write root and drop the evidence envelope in a *throwaway* world and
+  require the same cases to fail, with a sentence naming what broke.
+
+**The gates never pass silently.** `RegressionBand` holds a pass-rate floor (pinned at 1.0 — a
+containment claim that admits one failure in twenty is not a containment claim), a cost ceiling and
+a latency ceiling, and each reports `pass`, `fail` or **`not_applicable`**: cost is not applicable on
+an arm with no accountant (`Trajectory.cost_usd` is `None`, never `0.0`, because an unpriced arm and
+a free arm are different facts), and latency is recorded but pinned by nobody — wall time is a
+property of the box, and a number pinned on one machine is a flaky test on another. The interval is
+Wilson rather than the normal approximation for the same family of reasons: 20 of 20 reports a lower
+bound near 0.84, not certainty from twenty samples.

@@ -46,12 +46,10 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Optional
 
-from pydantic import BaseModel, field_validator
-
-from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState, validate_direction
+from looplab.adapters.synthetic import (
+    Carried, IntWalk, PerturbResearcher, ScaledChoice, SyntheticTaskBase)
+from looplab.core.models import Idea
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
 
@@ -152,35 +150,26 @@ print(json.dumps({{"metric": sum(accs)/len(accs) if accs else 0.0}}))
 '''
 
 
-class ClassificationResearcher:
+def classification_researcher(max_degree: int = 4, seed: int = 0) -> PerturbResearcher:
     """Blind optimizer over (degree, lr, l2, iters) — the offline (`backend=toy`) fallback.
 
-    `degree` moves like `RegressionResearcher`'s: a +/-1 random walk over the integer complexity
+    `degree` moves like `regression_researcher`'s: a +/-1 random walk over the integer complexity
     axis, because it is the lever that decides whether the model can represent the boundary at all.
     Perturbing only `lr` (what this role did while the template had no degree) can never leave the
-    linear family, so it could never clear chance on this data."""
+    linear family, so it could never clear chance on this data.
 
-    def __init__(self, max_degree: int = 4, seed: int = 0):
-        self.max_degree = max_degree
-        self.rng = random.Random(seed)
-
-    def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
-        if parent is None:
-            return Idea(operator="draft",
-                        params={"degree": float(self.rng.randint(1, self.max_degree)),
-                                "lr": round(self.rng.choice([0.01, 0.05, 0.1, 0.3]), 3),
-                                "l2": round(self.rng.choice([0.0, 0.001, 0.01]), 4),
-                                "iters": float(self.rng.choice([50, 100, 200]))},
-                        rationale="random learner config")
-        pd = int(round(parent.idea.params.get("degree", 1)))
-        degree = max(1, min(self.max_degree, pd + self.rng.choice([-1, 0, 1])))
-        pl = parent.idea.params.get("lr", 0.1)
-        lr = min(1.0, max(0.001, round(pl * self.rng.choice([0.5, 1.0, 2.0]), 4)))
-        return Idea(operator="improve",
-                    params={"degree": float(degree), "lr": lr,
-                            "l2": parent.idea.params.get("l2", 0.0),
-                            "iters": parent.idea.params.get("iters", 100.0)},
-                    rationale=f"perturb node {parent.id} (degree={pd})")
+    `l2` and `iters` are `Carried`: drafted from a ladder, then held at the parent's value forever.
+    That is the same behaviour the hand-written class had (doc 25 RA-06 collapsed it onto
+    `PerturbResearcher` without changing a draw), and it is deliberate — moving four knobs at once
+    would leave no node whose metric can be attributed to the degree walk this task exists to test.
+    """
+    return PerturbResearcher(
+        (IntWalk("degree", 1, max_degree, default=1.0),
+         ScaledChoice("lr", (0.01, 0.05, 0.1, 0.3), lo=0.001, hi=1.0, ndigits=4,
+                      draft_ndigits=3, default=0.1),
+         Carried("l2", (0.0, 0.001, 0.01), draft_ndigits=4, default=0.0),
+         Carried("iters", (50.0, 100.0, 200.0), default=100.0)),
+        seed=seed, draft_rationale="random learner config")
 
 
 class ClassificationDeveloper:
@@ -203,7 +192,7 @@ class ClassificationDeveloper:
             iters=int(round(idea.params.get("iters", 100))), k=self.k)
 
 
-class ClassificationTask(BaseModel):
+class ClassificationTask(SyntheticTaskBase):
     kind: str = "classification"
     # RENAMED from `blob_classification` when the dataset changed from blobs to rings (2026-08-05).
     # The id is the cross-run comparison SCOPE (`looplab claims --scope ...`), so keeping it would
@@ -212,12 +201,6 @@ class ClassificationTask(BaseModel):
     goal: str = ("choose a polynomial feature-map degree + the learner's lr/l2/iters to maximize "
                  "K-fold CV accuracy on two concentric rings")
     direction: str = "max"
-
-    @field_validator("direction")
-    @classmethod
-    def _direction_valid(cls, v):
-        return validate_direction(v)
-    comparison_contract: ComparisonContract | None = None
     n: int = 200
     gap: float = 1.6
     noise: float = 0.6
@@ -234,7 +217,7 @@ class ClassificationTask(BaseModel):
 
     def build_roles(self):
         X, Y = self._data()
-        return (ClassificationResearcher(max_degree=self.max_degree, seed=self.seed),
+        return (classification_researcher(max_degree=self.max_degree, seed=self.seed),
                 ClassificationDeveloper(X, Y, k=self.cv_k, max_degree=self.max_degree))
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):
@@ -258,9 +241,6 @@ class ClassificationTask(BaseModel):
                   "l2": (0.0, 1.0), "iters": (10.0, 500.0)}
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 ClassificationDeveloper(X, Y, k=self.cv_k, max_degree=self.max_degree))
-
-    def external_fallback_uses_llm(self) -> bool:
-        return False  # the fallback fills a deterministic local template
 
     def gpu_capable(self) -> bool:
         """Both role pairs end in `ClassificationDeveloper`, a fixed pure-Python logistic-regression
