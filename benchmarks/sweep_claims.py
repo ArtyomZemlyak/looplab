@@ -1740,24 +1740,52 @@ CLAIMS = [
 ]
 
 
+def verdict_line(stale: int, checked: int, broken: int) -> str:
+    """The footer sentence, and the reason it is a function (§342: the wording IS the fix).
+
+    §404. A check that RAISES was named `UNCHECKABLE` and then `continue`d -- out of the stale count
+    and out of nothing else. The denominator stayed `len(CLAIMS)`, so the line went on saying
+    "of 21 CHECKED" about claims nobody checked, and a claim that was STALE until its check broke
+    simply left the tally: driven here, breaking one stale check moved the headline from 14 to 13.
+    A broken instrument IMPROVED the score.
+
+    Driven to the limit: with every check raising, the tool printed "0 of 21 checked claim(s) no
+    longer hold" and exited **0** -- a green result from instruments that measured nothing, which is
+    the exact failure this file exists to catch, in the file itself.
+    """
+    said = f"{stale} of {checked} checked claim(s) no longer hold"
+    if broken:
+        said += (f"; {broken} claim(s) UNCHECKABLE -- their checks raised, so they are neither "
+                 "holding nor stale and nobody measured them")
+    return said
+
+
+def sweep_exit_code(stale: int, broken: int) -> int:
+    """`1` when anything is stale OR any check broke. A dead instrument is at least as urgent as a
+    stale claim; exiting 0 over it is how a silent sweep looks like a clean one (§404)."""
+    return 1 if (stale or broken) else 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bench", default=DEFAULT_BENCH)
     args = ap.parse_args(argv)
     print(f"the standing sweep list as worded on {WORDING_DATE}, checked against the bench")
-    stale = 0
+    stale = broken = checked = 0
     for claim, check in CLAIMS:
         try:
             ok, detail = check(args.bench)
         except Exception as exc:                       # noqa: BLE001 - a broken check is not a verdict
+            broken += 1
             print(f"  UNCHECKABLE  {claim}\n               {type(exc).__name__}: {exc}")
             continue
+        checked += 1
         if not ok:
             stale += 1
         print(f'  {"HOLDS" if ok else "STALE":>11s}  {claim}\n               {detail}')
-    print(f"  {stale} of {len(CLAIMS)} checked claim(s) no longer hold")
-    return 1 if stale else 0
+    print("  " + verdict_line(stale, checked, broken))
+    return sweep_exit_code(stale, broken)
 
 
 if __name__ == "__main__":

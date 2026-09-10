@@ -105,7 +105,14 @@ def test_a_broken_check_is_not_a_verdict(tmp_path, monkeypatch, capsys):
     rc = sweep_claims.main(["--bench", str(tmp_path)])
     out = capsys.readouterr().out
     assert "UNCHECKABLE" in out and "no such thing" in out, out
-    assert rc == 0 and "0 of 1" in out, (rc, out)
+    # §404 STRENGTHENS THIS TEST'S OWN DOCSTRING. It said a raising check "is unchecked, and saying
+    # otherwise is exactly the false reading this tool exists to stop" -- and then pinned `rc == 0`
+    # and a denominator of 1, which is that false reading in both places. Driven end to end: with
+    # every check raising, the tool printed "0 of 21 checked claim(s) no longer hold" and exited 0.
+    # The denominator is now what was CHECKED, and a dead instrument fails the run.
+    assert rc != 0, (rc, out)
+    assert "0 of 0 checked" in out, out
+    assert "1 claim(s) UNCHECKABLE" in out, out
 
 
 def test_the_comparison_figure_is_read_from_the_probes_own_record(tmp_path):
