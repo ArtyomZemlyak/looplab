@@ -1434,6 +1434,29 @@ def where_the_newest_rule_would_differ(bench: str):
     return with_choice, differ, (statistics.median(lost) if lost else None)
 
 
+def overshoot_sentence(seen: int, excesses, total: float, worst: float) -> str:
+    """The sentence for "a $1 probe costs $1" -- magnitude AND frequency.
+
+    §405. The line reported the total ($1.5537) and the worst (+$0.1056), from which a reader takes
+    a handful of stragglers. Recomputed independently from the probes' own `llm_usage` spans -- the
+    total reproduces to the cent, and the missing fact is the frequency: **147 of 156 probes (94 %)
+    finish over budget**, median +$0.0096, 81 of them within a cent, 64 between one and five, two
+    above five. The claim is not false by a lot; it is false almost always, by about one per cent.
+
+    A magnitude without a frequency invites the wrong inference, which is the same shape as §396's
+    pass-rate-without-exposure and §402's alarm-without-reach.
+    """
+    said = (f"{seen} probe(s) with spend; ${total:.4f} spent past the budgets in total, worst "
+            f"+${worst:.4f}")
+    if excesses and seen:
+        ranked = sorted(excesses)
+        median = ranked[len(ranked) // 2]
+        said += (f"; {len(excesses)} of {seen} ({100 * len(excesses) / seen:.0f} %) finish OVER "
+                 f"budget, median +${median:.4f} -- not a few stragglers, a standing overshoot of "
+                 "about one per cent")
+    return said
+
+
 def check_a_dollar_probe_costs_a_dollar(bench: str):
     """"$1/проба" -- the figure every plan on this bench is built from, never checked against spend.
 
@@ -1451,6 +1474,7 @@ def check_a_dollar_probe_costs_a_dollar(bench: str):
     """
     root = f"{bench}/model-probes"
     over, worst, total, seen = [], 0.0, 0.0, 0
+    excesses: list = []
     for probe_dir in sorted(glob.glob(f"{root}/*")):
         name = os.path.basename(probe_dir)
         if name == "_ruler" or not os.path.isdir(probe_dir):
@@ -1465,11 +1489,11 @@ def check_a_dollar_probe_costs_a_dollar(bench: str):
             continue
         total += excess
         worst = max(worst, excess)
+        excesses.append(excess)
         floor = arm_fidelity.node_open_floor(root, name) or DEFAULT_NODE_FLOOR
         if excess > floor:
             over.append(f"{name} +${excess:.4f} over ${budget:.2f} (floor ${floor:.2f})")
-    detail = (f"{seen} probe(s) with spend; ${total:.4f} spent past the budgets in total, worst "
-              f"+${worst:.4f}")
+    detail = overshoot_sentence(seen, excesses, total, worst)
     if over:
         detail += ("; PAST THE NODE-OPEN FLOOR, so not one last call finishing: "
                    + ", ".join(sorted(over)))
