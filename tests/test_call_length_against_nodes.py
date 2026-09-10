@@ -110,3 +110,15 @@ def test_the_live_corpus_still_shows_the_trend():
     assert got, "no finished probe has 30+ priced calls"
     if 1 in got and 3 in got:
         assert got[1] > got[3], got
+
+
+def test_the_footer_note_carries_the_within_run_correction():
+    """§403. Таблица межпробная, и читатель берёт из неё «длинные вызовы мешают узлам».
+
+    Внутри прогона стрелка смотрит НАОБОРОТ: медиана ответа 284 токена ДО первого узла и 538 ПОСЛЕ,
+    и растёт она в 127 пробах из 154. Примечание обязано это нести, иначе таблица подсказывает
+    вывод, который собственные данные не поддерживают.
+    """
+    src = (BENCH / "probe_summary.py").read_text(encoding="utf-8")
+    assert "127 of 154" in src and "284 -> 538" in src, "the within-run correction is gone"
+    assert "not 'long calls prevent nodes'" in src, "the note stopped naming what it refutes"

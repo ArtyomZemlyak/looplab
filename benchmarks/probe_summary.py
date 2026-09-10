@@ -539,10 +539,13 @@ def completions_by_node_count(probes, ledger_path: str, finished=None) -> list:
         3 nodes   n= 88    423
         4+ nodes  n= 16    428
 
-    A probe that gets few nodes writes long bodies. Which way it runs is NOT settled here -- an essay
-    per call leaves less budget for evaluations, and a run that cannot land a node has nothing to do
-    but write -- and §392's split (one-node probes spend 30 % of the dollar after their only node
-    against 2.2 % for the rest) is the same population seen from the money side.
+    A probe that gets few nodes writes long bodies. §403 settles half of the direction with a
+    WITHIN-run measurement, which points the opposite way to the reading a reader would take from
+    this table: over 154 probes with ten calls on each side, the median completion goes from 284
+    tokens BEFORE the first node to 538 AFTER, and it rises in 127 of them. So it is not that long
+    calls prevent nodes; it is that the phase after a node writes long, and a run stalled on one
+    node spends its whole life there. §392's split (one-node probes leave 30 % of the dollar after
+    their only node against 2.2 %) is that same population seen from the money side.
 
     Printed so the next sweep reads it instead of re-deriving it from a single probe, which is how
     it looked like three separate anomalies.
@@ -873,8 +876,10 @@ def main(argv: list[str]) -> int:
         for nodes, count, med in profile:
             label = f"{nodes}+" if nodes >= 4 else str(nodes)
             print(f"  {label:>3} node(s): n={count:3d}  completion median {med:6.0f} tokens")
-        print("  -- a probe that gets few nodes writes long bodies; which way that runs is not "
-              "settled by this table (§392's money-side split is the same population)")
+        print("  -- a probe that gets few nodes writes long bodies. WITHIN a run the arrow points "
+              "the other way (§403): calls get LONGER after the first node in 127 of 154 probes, "
+              "median 284 -> 538 tokens, so this is not 'long calls prevent nodes' -- it is that a "
+              "run stalled after one node spends its life in the phase that writes long")
 
     multi = [s for s in seen.values() if len(s["nodes"]) >= 2]
     live_multi = [s for s in multi

@@ -1585,6 +1585,46 @@ def check_which_lever_the_loop_reaches_for(bench: str):
     return True, detail
 
 
+def probes_to_move_the_median_out(vals, band, cap: int = 500):
+    """How many NEW probes at 100 % it would take to push this task's median outside `band`.
+
+    §402. The check judges a MEDIAN against a band, and a median is a rank statistic: it does not
+    move until a large fraction of the corpus moves. Measured 2026-09-10 it takes **104 new probes
+    at 100 %** to push `edge_expansion`'s median out of (20, 45) -- on a corpus of 118. That alarm
+    cannot be reached by any plausible run of events, so the green tick beside it says nothing about
+    the thing the claim is for: a probe burning its budget before it ever evaluates.
+
+    Individual probes DO fall outside -- 12 of 153 (7.8 %), worst `remDL3` at 77 %, `capA9` at 64 %,
+    `remPde9` at 39 % under a floor of 40 -- and the check never mentioned them. `None` when the
+    median is already outside, and `cap` when even that many would not do it.
+    """
+    v = sorted(float(x) for x in vals)
+    if not v or not band:
+        return None
+    lo, hi = band
+    if not lo <= v[len(v) // 2] <= hi:
+        return None
+    for k in range(1, cap + 1):
+        w = sorted(v + [100.0] * k)
+        if not lo <= w[len(w) // 2] <= hi:
+            return k
+    return cap
+
+
+def probes_outside_their_band(by_task: dict, bands: dict) -> tuple:
+    """`(total_outside, [(task, probe, value)])` for probes outside their own task's band."""
+    out = []
+    for task, entries in by_task.items():
+        band = bands.get(task)
+        if not band:
+            continue
+        for value, probe in entries:
+            if not band[0] <= value <= band[1]:
+                out.append((task, probe, value))
+    out.sort(key=lambda r: -abs(r[2]))
+    return len(out), out
+
+
 def check_waste_before_the_first_node(bench: str):
     """§72: "трата ПОСЛЕ последнего узла" читается только рядом с тратой ДО первого -- и проверялась
     половина пары.
@@ -1618,8 +1658,10 @@ def check_waste_before_the_first_node(bench: str):
     if not reached:
         return False, "no probe on this box reached an evaluated node"
     by_task = collections.defaultdict(list)
+    named_by_task = collections.defaultdict(list)
     for r in reached:
         by_task[r.get("task") or "?"].append(float(r["before_pct"]))
+        named_by_task[r.get("task") or "?"].append((float(r["before_pct"]), r.get("probe")))
     said, loud = [], []
     for task, vals in sorted(by_task.items(), key=lambda kv: -len(kv[1])):
         v = sorted(vals)
@@ -1628,6 +1670,17 @@ def check_waste_before_the_first_node(bench: str):
         band = BEFORE_FIRST_NODE_BANDS.get(task)
         if band and not band[0] <= med <= band[1]:
             loud.append(f"{task} median {med:.0f} % outside {band[0]:.0f}-{band[1]:.0f}")
+    # WHAT THE MEDIAN ALARM COSTS TO REACH, AND WHO IS ALREADY OUTSIDE (§402). A median moves only
+    # when a large share of the corpus does; naming the price is how a reader knows what the tick is
+    # worth, and the probes outside their own band are the event the claim is actually about.
+    reach = [(task, probes_to_move_the_median_out(vals, BEFORE_FIRST_NODE_BANDS.get(task)))
+             for task, vals in sorted(by_task.items(), key=lambda kv: -len(kv[1]))]
+    # EVERY pinned task, not the ones whose price happens to exceed their own n. The first cut used
+    # `k >= len(vals)` and dropped `edge_expansion` -- 104 probes needed on a corpus of 118 -- which
+    # is the MOST unreachable of the four and the one the filter hid. The price is four numbers;
+    # print them and let the reader judge.
+    dear = [f"{task} {k}" for task, k in reach if k is not None]
+    n_out, worst = probes_outside_their_band(named_by_task, BEFORE_FIRST_NODE_BANDS)
     everyone = sorted(float(r["before_pct"]) for r in reached)
     # HELD OUT AND SAID SO. A check whose corpus silently changes size when a probe is running
     # reports a different band each sweep with no line explaining why (§360).
@@ -1639,6 +1692,13 @@ def check_waste_before_the_first_node(bench: str):
     detail = (f"{len(reached)} probe(s): median {everyone[len(everyone) // 2]:.0f} % of spend goes "
               f"BEFORE the first evaluated node (max {max(everyone):.0f} %); by task: "
               + "; ".join(said) + aside)
+    if n_out:
+        detail += (f"; {n_out} of {len(reached)} probe(s) sit OUTSIDE their task's band: "
+                   + ", ".join(f"{p} ({t}) {v:.0f} %" for t, p, v in worst[:4]))
+    if dear:
+        detail += ("; new probes at 100 % needed to move each median OUT of its band: "
+                   + ", ".join(dear) + " -- a median is a rank statistic, so this alarm answers "
+                   "about the corpus, never about one bad run")
     if loud:
         detail += "; OUTSIDE the pinned band: " + ", ".join(loud)
     return not loud, detail
