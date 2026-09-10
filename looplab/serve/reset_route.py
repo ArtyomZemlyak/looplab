@@ -19,11 +19,12 @@ from looplab.adapters.tasks import load_task
 from looplab.core.atomicio import (
     durable_no_replace_rename, strict_atomic_write_bytes, strict_fsync_parent)
 from looplab.core.config import settings_from_snapshot
+from looplab.core.pathsafe import run_child_name_defect, validate_run_child
 from looplab.core.run_reset import (
     RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RunResetFenceError,
     RunResetStorageError, load_run_reset_marker, publish_run_reset_marker)
 from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
-from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.events.span_index import (
     invalidate as invalidate_span_index, span_destructive_write_guard)
 from looplab.serve.engine_proc import (
@@ -34,7 +35,7 @@ from looplab.serve.appstate import (
     _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.durable_op import refuse_unless_quiescent
-from looplab.serve.http import json_object
+from looplab.serve.http import generation_conflict, json_object
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 from looplab.serve.reset_transaction import (
     RESET_ARTIFACT_NAMES, ResetReceiptError, complete_reset_if_observed,
@@ -232,12 +233,9 @@ def _validate_reset_quiescence(srv, rd: Path, expected_generation: str) -> None:
     """Reject every deterministic preflight failure before publishing reset ownership."""
     current_generation = srv.commands.run_generation(rd)
     if expected_generation != current_generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "expected_generation": expected_generation,
-            "current_generation": current_generation or None,
-            "message": "The run changed before Replay was committed.",
-        })
+        raise generation_conflict("The run changed before Replay was committed.",
+                                  expected=expected_generation,
+                                  current=current_generation or None)
     ownership = _engine_liveness(rd)
     if ownership is None:
         raise HTTPException(409, {
@@ -254,12 +252,9 @@ def _revalidate_reset_quiescence_locked(
     """Repeat mutable quiescence checks after this request owns engine/config/event locks."""
     current_generation = srv.commands.run_generation(rd)
     if expected_generation != current_generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "expected_generation": expected_generation,
-            "current_generation": current_generation or None,
-            "message": "The run changed before Replay ownership was published.",
-        })
+        raise generation_conflict("The run changed before Replay ownership was published.",
+                                  expected=expected_generation,
+                                  current=current_generation or None)
     if (_fresh_resume_launch_pending(rd) or _fresh_run_launch_pending(rd)
             or not srv.state(rd).finished):
         raise HTTPException(409, "run changed or began launching during Replay preflight")
@@ -657,7 +652,7 @@ def _restore_existing_fence(
         snap = rd / "config.snapshot.json"
         try:
             with (run_config_write_lock(snap, operation_id=operation_id),
-                  _interprocess_lock(
+                  interprocess_lock(
                       Path(str(rd / "events.jsonl") + ".lock"), required=True)):
                 marker = load_run_reset_marker(rd)
                 if marker is None:
@@ -1105,7 +1100,7 @@ def _reset_blocking(
                 snap = rd / "config.snapshot.json"
                 try:
                     with (run_config_write_lock(snap, operation_id=operation_id),
-                          _interprocess_lock(
+                          interprocess_lock(
                               Path(str(rd / "events.jsonl") + ".lock"), required=True),
                           span_destructive_write_guard(
                               rd / "spans.jsonl", required=True)):
@@ -1184,30 +1179,21 @@ async def durable_reset_run(
         raise HTTPException(400, "operation_id must be a lowercase UUID")
 
     root = srv.root.resolve()
-    requested = root / run_id
-    try:
-        entry = requested.lstat()
-        rd = requested.resolve()
-        is_junction = getattr(requested, "is_junction", None)
-        junction = bool(callable(is_junction) and is_junction())
-        attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
-        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    except (FileNotFoundError, OSError) as exc:
-        raise HTTPException(404, "no such run") from exc
-    requested_identity = os.path.normcase(os.path.abspath(requested))
-    resolved_identity = os.path.normcase(os.path.abspath(rd))
-    if (Path(run_id).name != run_id or run_id in {".", ".."}
-            or requested.name.lower() in _RESERVED_RUN_IDS
-            or requested.name.lower().startswith((
+    # The service-name reservation is this route's own (those entries are root-side files, not
+    # runs); everything else — plain name, lstat, reparse, junction, directory, resolved identity,
+    # direct child — is `pathsafe.validate_run_child`, the one spelling (doc 25 SC-03). This site
+    # compared `normcase(abspath(...))` by hand, which is `filesystem_identity` minus its macOS
+    # half: an NFC-typed name for an NFD-stored directory compared unequal and 404'd a real run.
+    if (run_child_name_defect(run_id) is not None
+            or run_id.lower() in _RESERVED_RUN_IDS
+            or run_id.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
-                _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))
-            or requested.parent != root or rd.parent != root
-            or requested_identity != resolved_identity
-            or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode)
-            or bool(attributes & reparse_flag)
-            or junction
-            or not rd.is_dir()):
+                _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))):
         raise HTTPException(404, "no such run")
+    child = validate_run_child(root, run_id)
+    if child.defect is not None:
+        raise HTTPException(404, "no such run")
+    rd = child.path
 
     if expected_generation is None:
         # The non-browser opt-out, resolved ONCE here so everything downstream keeps working on a real

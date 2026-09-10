@@ -388,8 +388,50 @@ REASON_SOURCE_TRIAGE = "triage"
 # `UNCLASSIFIED_REASON` and exists so that unavailability is countable rather than papered over as
 # agreement.
 REASON_SOURCE_UNDIAGNOSED = "undiagnosed"
+# THE EVAL SAID SO, AND THE ENGINE DID NOT MEASURE IT. The one reason on the engine-final side that
+# the engine was TOLD rather than observed: `triage.DECLARABLE_REASONS` is read by
+# `runtime/command_eval.py::declared_failure_reason` out of the LAST JSON LINE OF STDOUT — the same
+# channel the candidate's own code writes to, because the arena imports and runs the solver inside
+# the evaluator process. `_failure_reason`'s ORDERING is what contains that (the branch sits below
+# every authenticated flag, so it can only rename a residual), and this is the other half: the
+# durable row now SAYS which it was.
+#
+# WHY A SOURCE AND NOT A SEPARATE REASON. The word is the same fact whoever said it — "this arena
+# will not accept a solver built this way" — and splitting the vocabulary would put the same
+# condition in two places for every reader of `FAILURE_REASONS`, `NEVER_SALVAGED_REASONS` and
+# `inline_repair_reasons`. What differs is the WITNESS, and the witness already has a column. This
+# is the `extra_metrics_provenance` distinction one registry over: a value is carried with the fact
+# of who authored it, because nothing derivable from the bytes afterwards can re-establish it.
+#
+# WHAT IT CHANGES AND WHAT IT DOES NOT. It changes the RECORD only: `rules_violation` is still
+# engine-final (no diagnostician is consulted about it, `diagnosed_failure_reason` returns it
+# unchanged), still in `NON_REPAIRABLE_REASONS`, and still ends its node. What it buys is that a
+# reader — a digest, an audit, the Researcher reading why a lineage died — can tell a STATED reason
+# from a MEASURED one instead of reading `engine` and believing the engine saw it.
+REASON_SOURCE_DECLARED = "declared"
 REASON_SOURCES: tuple[str, ...] = (REASON_SOURCE_ENGINE, REASON_SOURCE_TRIAGE,
-                                   REASON_SOURCE_UNDIAGNOSED)
+                                   REASON_SOURCE_UNDIAGNOSED, REASON_SOURCE_DECLARED)
+# The sources that are NOT a diagnostician's reading, i.e. the ones no model authored. Spelled once
+# because two rules ask the same question — `diagnosis_repair_lead` (may this account be led with?)
+# and any future reader of the column — and a second literal list would drift the moment a third
+# non-model source arrives.
+NON_DIAGNOSIS_SOURCES: tuple[str, ...] = (REASON_SOURCE_ENGINE, REASON_SOURCE_DECLARED)
+
+
+def reason_source_for(reason) -> str:
+    """WHO the durable row credits for the ENGINE's own classification of `reason`.
+
+    Pure and total, and it is the ONE derivation of that column for every non-diagnosed path: the
+    per-attempt stamp in `evaluate._eval_salvage`, and `diagnosed_failure_reason`'s engine-final
+    branch below. A caller that spells `REASON_SOURCE_ENGINE` inline instead is asserting the engine
+    measured something it may only have been told.
+
+    Deferred (function-local) import for `diagnosed_failure_reason`'s own stated reason: `triage`
+    imports THIS module at module scope so the split reads beside the classifier it splits, and a
+    module-scope import back would close the cycle.
+    """
+    from looplab.engine.triage import DECLARABLE_REASONS
+    return REASON_SOURCE_DECLARED if str(reason) in DECLARABLE_REASONS else REASON_SOURCE_ENGINE
 
 # The key an ENGINE-SIDE caller stamps to report that NO diagnostician was wired, so the rule path's
 # verdict is not mistaken for a diagnostician's non-answer. Unforgeable from the wire BY
@@ -744,7 +786,9 @@ def diagnosis_repair_lead(summary, reason_source, error_text) -> str:
     * the reason must NOT be engine-final. `REASON_SOURCE_ENGINE` means the ENGINE classified the
       failure from something it did, ran or measured (its clock, its watchdogs, its own `stat`), so
       a diagnostician's account is not what that reason rests on and leading with it would dress an
-      engine fact as a model's opinion;
+      engine fact as a model's opinion — and `REASON_SOURCE_DECLARED` sits with it in
+      `NON_DIAGNOSIS_SOURCES` for the same reason one rung weaker: the eval STATED that reason, so
+      it is not a diagnostician's reading either, whatever else it is;
     * the summary must not already BE in the error text. The watchdog path prepends its own
       sentence upstream, and on a `not_learning` kill the two texts can be the same words; saying
       them twice reads as two independent findings agreeing.
@@ -755,7 +799,7 @@ def diagnosis_repair_lead(summary, reason_source, error_text) -> str:
     """
     if not isinstance(summary, str) or not summary.strip():
         return ""
-    if reason_source == REASON_SOURCE_ENGINE:
+    if reason_source in NON_DIAGNOSIS_SOURCES:
         return ""
     text = error_text if isinstance(error_text, str) else ""
     if summary.strip() in text:
@@ -1029,7 +1073,9 @@ def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
       1. The engine's own answer is ENGINE-FINAL -> returned unchanged, and the verdict is not even
          looked at. That is the override, and it is spelled as "the model is never ASKED to
          contradict a fact" rather than "the model's answer is discarded if it contradicts a fact".
-         The two behave identically and only the first is checkable by reading this function.
+         The two behave identically and only the first is checkable by reading this function. Its
+         SOURCE comes from `reason_source_for`, because one member of that tuple is a fact the
+         engine was TOLD by the eval it launched rather than one it measured.
       2. NO DIAGNOSTICIAN WAS WIRED (`DIAGNOSIS_UNAVAILABLE_KEY`, set only by
          `triage._rule_triage`) -> the engine keeps its structural residual with
          `REASON_SOURCE_ENGINE`. A configuration is not a failure, and this branch is what keeps
@@ -1057,7 +1103,11 @@ def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
     the terminal that is being written."""
     det = str(deterministic)
     if det not in DIAGNOSABLE_ENGINE_REASONS:
-        return det, REASON_SOURCE_ENGINE
+        # …and the SOURCE of an engine-final answer is not always the engine: `rules_violation` is
+        # the one member of that tuple the engine was TOLD (see `REASON_SOURCE_DECLARED`). The
+        # answer itself is returned unchanged either way — this branch is still "the model is never
+        # ASKED to contradict a fact" — and only the column that says who witnessed it moves.
+        return det, reason_source_for(det)
     if not isinstance(verdict, dict):
         # Not "the diagnostician failed" — a caller that has no verdict object at all never reached
         # one, which is the no-judge shape. Fail to the engine's own answer, as before.

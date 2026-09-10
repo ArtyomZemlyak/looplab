@@ -158,6 +158,16 @@ the raw mean ± SEM, the **Mislead-adjusted** mean ± SEM beside it (the raw num
 own gap — `S_intended`, never instead of the raw), the private-grade mean ± SEM, the mean
 percentile, the medal and above-median rates, and the rule-violation count.
 
+**When the adjusted column carries a number.** `mislead_gap` is derived from `Node.metric`, so the
+gap lives on the SEARCH scale, while the raw number prefers the champion's finish-time
+`private_grade` — a different measurement of a different split. Subtracting one from the other
+would be a headline column on no measured scale, so the aggregator reports `null` instead. Under
+the shipped protocol (`holdout_fraction > 0`) the champion IS graded privately at finish, so **the
+adjusted column is empty for every healthy run under the default** and carries a number only on
+the legacy `holdout_fraction=0` protocol, where the raw number is itself the search metric. Every
+empty cell states its own cause in `adjusted_scale`, which is total over all four reasons — a
+blank is never a missing measurement.
+
 ## The two official extras: rule violation + plagiarism
 
 `mle-bench/extras` runs two detectors over every agent transcript in the paper, and since 2026-09-06
