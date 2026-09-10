@@ -5,8 +5,10 @@ distinguish a proposal claim from independent classifier evidence without migrat
 """
 import pytest
 
-from looplab.core.models import Idea, IdeaEmission, Node, durable_idea_payload
+from looplab.core.models import (Idea, IdeaEmission, Node, authored_node_concepts,
+                                 classifier_verified_node_concepts, durable_idea_payload)
 from looplab.engine.concept_cadence import ConceptCadenceMixin
+from looplab.events.concept_authorship import concept_authorship_report
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 
@@ -437,3 +439,153 @@ def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):
     assert captured["known_tags"] == {0: ["operator/hand-tag"], 1: ["classifier/known"]}
     emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
     assert not any(row["node_id"] == 0 for row in emitted)   # operator node never re-tagged
+
+
+# --------------------------------------------------------------------------- the AUTHORED record
+# The classifier REWRITES a membership rather than adding to it, so before `node_concepts_authored`
+# existed the proposer's own ids survived only in the raw log — and `events/digest.py::_folded_axes`
+# forbids every read surface from resurrecting `idea.concepts` (rightly: a deliberately cleared node
+# must not keep classifying under its old authored axis). These drive the record itself: what it
+# keeps, what it is not allowed to keep, and what the instrument over it computes.
+def test_a_classifier_row_replaces_the_membership_and_keeps_the_authored_claim(tmp_path):
+    """The measured case, in miniature: node 3's exactly-curated `regularization/r-drop` was replaced
+    by the invented `regularization/rdrop`, and nothing folded held the original."""
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, ["regularization/r-drop"]))
+    s.append("node_concepts", {"node_id": 0, "concepts": ["regularization/rdrop"], "at_vocab": 4})
+    state = fold(s.read_all())
+
+    assert state.node_concepts == {0: ["regularization/rdrop"]}      # the membership is the classifier's
+    assert state.node_concept_provenance == {0: "classifier"}
+    assert authored_node_concepts(state, 0) == ["regularization/r-drop"]
+    # …and the authored claim is NOT evidence: the one door admission crosses still answers the
+    # classifier's set, so nothing gained an admission input from this record.
+    assert classifier_verified_node_concepts(state, 0) == ["regularization/rdrop"]
+
+
+def test_the_authored_record_survives_a_retag_in_either_order(tmp_path):
+    """Invariant 5, over the orders the fold actually admits. A classifier row that ARRIVES FIRST is
+    dropped by the pre-existing unknown-node rule (`_on_node_concepts` fails closed on a node it has
+    not seen), so the two orders differ in the MEMBERSHIP — which is exactly why the authored write
+    may not be a branch of the membership. It is a fact about the Idea and answers identically."""
+    def _folded(order):
+        s = _store(tmp_path / order)
+        rows = {"c": ("node_created", _created(0, ["a/authored"])),
+                "t": ("node_concepts", {"node_id": 0, "concepts": ["b/tagged"]})}
+        for key in order:
+            s.append(*rows[key])
+        return fold(s.read_all())
+    (tmp_path / "ct").mkdir()
+    (tmp_path / "tc").mkdir()
+    created_first, tagged_first = _folded("ct"), _folded("tc")
+    for order, state in (("ct", created_first), ("tc", tagged_first)):
+        assert authored_node_concepts(state, 0) == ["a/authored"], order
+    assert created_first.node_concepts[0] == ["b/tagged"]     # the retag landed
+    assert tagged_first.node_concepts[0] == ["a/authored"]    # …the early row never did
+
+
+def test_an_operator_edit_cannot_erase_the_authored_claim(tmp_path):
+    """The operator owns the MEMBERSHIP (`concept_tag_edited` is authoritative and the classifier
+    yields to it). It does not own what the proposer said, which is a fact about the Idea."""
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, ["a/authored"]))
+    s.append("concept_tag_edited", {"node_id": 0, "concepts": ["operator/hand-tag"]})
+    state = fold(s.read_all())
+    assert state.node_concepts == {0: ["operator/hand-tag"]}
+    assert state.node_concept_provenance == {0: "operator-edited"}
+    assert authored_node_concepts(state, 0) == ["a/authored"]
+
+
+def test_a_propose_reset_drops_the_authored_claim_with_its_idea(tmp_path):
+    """The record follows the IDEA, so the boundary that abandons an Idea must take it — otherwise a
+    re-proposed node reports the previous proposal's concepts as its author's claim forever."""
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, ["a/authored"]))
+    s.append("node_reset", {"node_id": 0, "from_stage": "propose"})
+    assert authored_node_concepts(fold(s.read_all()), 0) == []
+    # …and an IMPLEMENT reset keeps it: the same idea is being re-developed, not re-proposed.
+    s2 = _store(tmp_path / "impl")
+    s2.append("node_created", _created(0, ["a/authored"]))
+    s2.append("node_reset", {"node_id": 0, "from_stage": "implement"})
+    assert authored_node_concepts(fold(s2.read_all()), 0) == ["a/authored"]
+
+
+def test_a_replacement_idea_replaces_the_authored_claim_even_under_a_classifier_receipt(tmp_path):
+    """The concept envelope is EXCLUDED from the subject-equality test, so a re-emitted `node_created`
+    may legitimately carry a new authored set while a classifier receipt keeps the membership. The
+    authored record must follow the newest authoring, not freeze at the first one."""
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, ["a/first"]))
+    s.append("node_concepts", {"node_id": 0, "concepts": ["b/tagged"]})
+    s.append("node_created", _created(0, ["a/second"]))
+    state = fold(s.read_all())
+    assert state.node_concepts == {0: ["b/tagged"]}          # the receipt is protected, as before
+    assert state.node_concept_provenance == {0: "classifier"}
+    assert authored_node_concepts(state, 0) == ["a/second"]
+
+
+def test_a_node_that_authored_nothing_has_no_authored_record(tmp_path):
+    """Absence is the honest answer for a proposal with no concept envelope — the state every log
+    written before this record is in. An explicit `full: []` is the OTHER statement and is kept."""
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, None))
+    s.append("node_concepts", {"node_id": 0, "concepts": ["b/tagged"]})
+    empty = _created(1, [])
+    empty["idea"]["concept_mode"] = "full"
+    s.append("node_created", empty)
+    state = fold(s.read_all())
+    assert 0 not in state.node_concepts_authored
+    assert state.node_concepts_authored[1] == []
+
+
+def test_a_delta_node_keeps_its_authored_operands_where_they_already_live(tmp_path):
+    """`node_concepts_authored` is FULL SETS ONLY on purpose: a delta node's authored operands are
+    already durable in `node_concept_deltas`, which no classifier writer clears, so a second copy
+    would be a record that can drift from the one the materialization reads."""
+    s = _store(tmp_path)
+    s.append("run_concepts", {"concepts": ["base/x"]})
+    delta = _created(0, None)
+    delta["idea"]["concept_mode"] = "delta"
+    delta["idea"]["concepts_added"] = ["a/added"]
+    s.append("node_created", delta)
+    s.append("node_concepts", {"node_id": 0, "concepts": ["b/tagged"]})
+    state = fold(s.read_all())
+    assert 0 not in state.node_concepts_authored
+    assert state.node_concept_deltas[0] == {"added": ["a/added"], "removed": []}
+    assert state.node_concepts == {0: ["b/tagged"]}
+
+
+def test_the_authorship_instrument_counts_survival_and_resolves_renames(tmp_path):
+    """The instrument makes the hand measurement a command. The rename half is the interpretation it
+    applies: an id a later consolidation RENAMED is the same concept, so it must not be reported as a
+    classifier replacement — that is the only reason both sides are canonicalized before comparison."""
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, ["a/kept", "a/dropped"]))
+    s.append("node_concepts", {"node_id": 0, "concepts": ["a/kept", "c/invented"]})
+    s.append("node_created", _created(1, ["b/old-spelling"]))
+    s.append("node_concepts", {"node_id": 1, "concepts": ["b/new-spelling"]})
+    s.append("concept_consolidation", {"rename": {"b/old-spelling": "b/new-spelling"}})
+    s.append("node_created", _created(2, None))              # no authored claim -> not a row at all
+    report = concept_authorship_report(fold(s.read_all()))
+
+    assert [row["node_id"] for row in report["nodes"]] == [0, 1]
+    assert report["nodes"][0]["replaced"] == ["a/dropped"]
+    assert report["nodes"][1]["replaced"] == []              # a rename is not a replacement
+    assert report["authored_nodes"] == 2 and report["reclassified_nodes"] == 2
+    assert report["authored_ids"] == 3 and report["survived_ids"] == 2
+    assert report["survival_rate"] == pytest.approx(2 / 3)
+    assert report["by_producer"] == {"classifier": 2}
+    # A run that authored nothing reports `None`, never 0.0 — "no claim was made" and "every claim
+    # was replaced" are opposite readings and the rate may not conflate them.
+    bare = _store(tmp_path / "bare")
+    bare.append("node_created", _created(0, None))
+    assert concept_authorship_report(fold(bare.read_all()))["survival_rate"] is None
+
+
+def test_the_instrument_bounds_the_list_and_not_the_totals(tmp_path):
+    s = _store(tmp_path)
+    for node_id in range(5):
+        s.append("node_created", _created(node_id, [f"a/c{node_id}"]))
+    report = concept_authorship_report(fold(s.read_all()), limit=2)
+    assert len(report["nodes"]) == 2 and report["truncated"] == 3
+    assert report["authored_nodes"] == 5 and report["authored_ids"] == 5

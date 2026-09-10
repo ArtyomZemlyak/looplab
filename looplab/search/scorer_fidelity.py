@@ -80,6 +80,36 @@ class _Case:
     expected_ownership: tuple[str | None, ...]
 
 
+# WHY THE FIXTURE BUILDERS AND THE 15-CASE MATRIX BELOW LIVE IN PRODUCTION, AND STAY (doc 25 SE-12,
+# DECLINED 2026-09-08 after the evaluation its 2026-08-05 deferral asked for). They read as a unit
+# test shipped by mistake; they are the gate's EVIDENCE. Everything from here to `_cases()` is
+# executed at receipt-issue time and its report goes into the receipt body verbatim
+# (`speculation_quality.py`'s `"scorer_fidelity": dict(scorer)`), which is the only runtime proof
+# that THIS tree's `card_next_actions` still tracks `GreedyTree.next_actions`. A test-suite result
+# cannot stand in: nobody is obliged to have run the suite before issuing a receipt, and this module
+# is deliberately self-contained (see the module docstring) for exactly that reason.
+#
+# The review recommended keeping "a handful of forced-gate cases" here and moving the rest to
+# `tests/`. Measured, both halves: the whole matrix is 5.55 ms and 5,858 canonical-JSON bytes --
+# 0.13% of one receipt validation (which cannot avoid a 4,162 ms
+# `speculation_implementation_digest`) and 2.2% of `_MAX_SCORER_BYTES`. The four `forced_*`
+# cases reach 3 of the 8 distinct `(kind, _reason)` verdicts the matrix makes the legacy
+# authority emit; `merge top-2`, `ablate highest-impact param` and the three bandit verdicts
+# are reachable ONLY through the eleven rows the move would delete. So the trade is 5 of 8
+# verdicts of live parity evidence for 0.13% of a validation.
+#
+# Both numbers are re-derived every suite run rather than trusted from this comment, by
+# `tests/test_card_scorer_fidelity_gate.py`'s
+# `test_the_matrix_the_receipt_carries_is_a_bounded_share_of_its_byte_budget` and
+# `test_the_forced_cases_alone_would_drop_the_cadence_and_bandit_verdicts`.
+#
+# If you DO change this matrix, you are changing the receipt: `SCORER_FIDELITY_CASE_NAMES` and the
+# case bodies are part of the scorer report `_self_digest` hashes, so every issued calibration
+# receipt is revoked and has to be re-earned (the F5 note in `_cases()` is the precedent).
+# Growing it -- doc 50 SE-01 asks for `EvolutionaryPolicy`/`MCTSPolicy` rows -- is welcome on
+# those terms.
+
+
 def _node(
     node_id: int,
     *,

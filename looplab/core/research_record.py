@@ -6,7 +6,7 @@ or a later run could re-check a verifier verdict against, nothing that survived 
 durable record of which papers a run had actually read (doc 28 DR-01 / DR-02; doc 51's
 `retrieved-literature-is-never-durable`; doc 27's `inner-agent-phases-not-event-sourced`).
 
-Three pure builders, all deterministic over what a tool RETURNED — never over what a model said
+Four pure builders, all deterministic over what a tool RETURNED — never over what a model said
 about it, which is the same line `metric_salvage.py` draws for the eval: the record is bytes the
 engine observed.
 
@@ -21,6 +21,10 @@ engine observed.
 * `bind_claims_to_evidence(claims, evidence)` — the deterministic join: a claim citing a URL is
   bound to every evidence item whose locator identity is that URL's, a claim citing a node id to
   every item read from that experiment. The model never chooses an evidence id; the record does.
+* `number_fidelity(statement, …)` — the numbers half of that join: every decimal a claim QUOTES,
+  matched against the recorded metrics of the experiments it CITES. A match, never a classifier
+  (see the block above the function for why that distinction is the whole design), and it grades
+  nothing — `trust/memo_verify.py::number_fidelity_report` aggregates it onto the memo's record.
 """
 from __future__ import annotations
 
@@ -129,3 +133,156 @@ def bind_claims_to_evidence(claims: Iterable[dict], evidence: Iterable[dict]) ->
                     if eid not in ids:
                         ids.append(eid)
         claim["evidence_ids"] = ids
+
+
+# ------------------------------------------------- DOES THE MEMO'S NUMBER COME FROM THE RUN'S OWN
+#
+# WHY THIS IS A MATCH AND NOT A CLASSIFIER (doc 52 row 32, second half). `trust/memo_verify.py::
+# check_claims` declined to look at numbers at all, and its reason is on the record and still true:
+# a research claim legitimately quotes non-metric decimals — an arXiv id (2506.12928), a percentage
+# from a paper, a dataset size, a p-value — and NO regex can tell those from a metric, so a
+# "confabulation" heuristic over them labels well-supported claims fabricated. MLReplicate measured
+# 59 % of the numbers in accepted write-ups unsupported, so the question is worth asking; the way to
+# ask it without a classifier is to stop classifying and start MATCHING: take every decimal the
+# statement quotes and ask whether the CITED experiments' recorded metrics contain it.
+#
+# WHAT AN UNMATCHED NUMBER IS, AND IS NOT. It is not a fabrication and this module never says it is.
+# A memo quoting a paper's 37.9 and an experiment's 0.8776 has one matched and one unmatched decimal
+# and is entirely honest; a memo quoting a plateau from a SIBLING run has every number unmatched and
+# is also honest about it. The three channels are the whole finding: `cited` (this number is one the
+# cited experiments actually recorded), `run` (it is a metric of THIS run, but of an experiment the
+# claim does not cite — a mis-attribution, and the one channel a reader could not get any other way)
+# and `none` (it is not a metric of this run at all, which covers every legitimate foreign number as
+# well as every invented one). The instrument RECORDS the three counts; nothing here grades a claim,
+# and `unmatched` is deliberately not called anything else.
+#
+# ITS RECALL IS A FLOOR IN ONE DIRECTION AND EXACT IN THE OTHER. A `cited` match is exact: the
+# metric, formatted to the number of decimal places the memo quoted, IS the quoted literal. An
+# unmatched number is only "this run's terminal metrics do not contain it" — a metric printed in a
+# log but never recorded, a number derived from two metrics (a delta, a ratio), and a sign the memo
+# drops all read as unmatched. So a low match rate is not evidence of fabrication and a high one is
+# not a clean bill of health, which is exactly why the block that carries these counts is read by
+# nothing that decides.
+#
+# WHAT THE DENOMINATOR IS MADE OF, measured on the one real memo preserved in this tree
+# (`tests/data/v8_research_memo.json`, `rubertlite-dr-unified-v8`, 8 claims): **21 decimals**, of
+# which 6 are results (0.8776, 0.8835, 0.8173, 0.852, 0.728 and a second 0.8835), 2 are deltas
+# (+0.03, 0.04) and **13 are hyperparameter VALUES** — weight decay 0.1, temperature 0.05, R-Drop
+# alpha 0.5, OneCycle pct_start 0.2, a cosine threshold 0.264. Nothing separates those from a
+# metric without the classifier this design refuses, so the recorded share has hyperparameters in
+# its denominator by construction. That is the reason `fidelity` is an instrument reading rather
+# than a grade, and the reason the `run` channel — a real metric of an experiment the claim does
+# NOT cite — is the finding worth a reader's attention (`docs/audit/memo-number-fidelity.md`).
+NUMBER_FIDELITY_VERSION = 1
+MAX_QUOTED_NUMBERS = 32
+NUMBER_MATCH_KINDS = ("cited", "run", "none")
+
+# The two shapes a regex CAN tell apart, excluded by LEXICAL span rather than by judging the number:
+# anything inside a URL or DOI, and an arXiv id (four digits, a dot, four or five digits, optional
+# version suffix). Both are excluded rather than counted as unmatched, and the count of what was
+# excluded rides on the record so the denominator can be checked. A metric that happens to be
+# spelled like an arXiv id is indistinguishable from one, and this errs toward the smaller claim.
+_EXCLUDED_SPANS = (
+    re.compile(r"\b(?:https?://|www\.|arxiv\.org/|doi\.org/|10\.\d{4,9}/)\S*", re.I),
+    re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b"),
+)
+# A DECIMAL, never a bare integer. The memos quote hyperparameters as integers by the dozen (batch
+# 8192, 10 epochs, seed 42) and a recorded metric is a measured decimal, so admitting integers would
+# fill the denominator with numbers nobody claims are results. A version triple (`1.2.3`) is refused
+# by the two guards: `1.2` is followed by `.` and `2.3` is preceded by one.
+_DECIMAL = re.compile(r"(?<![\w.])[-+]?\d{1,12}\.\d{1,10}(?![\w.])")
+
+
+def _scan_numbers(statement: str) -> tuple[list[dict], int]:
+    """`([{text, value, places, percent}, …], excluded)` — the decimals a statement quotes."""
+    text = str(statement or "")
+    spans = [(m.start(), m.end()) for pattern in _EXCLUDED_SPANS for m in pattern.finditer(text)]
+    kept: list[dict] = []
+    excluded = 0
+    for match in _DECIMAL.finditer(text):
+        if any(start < match.end() and match.start() < end for start, end in spans):
+            excluded += 1
+            continue
+        literal = match.group(0)
+        try:
+            value = float(literal)
+        except ValueError:                        # unreachable for this pattern; never raise here
+            continue
+        kept.append({
+            "text": literal,
+            "value": value,
+            "places": len(literal.split(".", 1)[1]),
+            # A memo that writes a fraction as a percentage is quoting the same measurement, so the
+            # `%` immediately after the literal is read as scale rather than as a different number.
+            "percent": text[match.end():match.end() + 1] == "%",
+        })
+        if len(kept) >= MAX_QUOTED_NUMBERS:
+            break
+    return kept, excluded
+
+
+def quoted_numbers(statement: str) -> list[dict]:
+    """Every decimal a claim statement quotes, minus the URL/arXiv spans (see `_scan_numbers`)."""
+    return _scan_numbers(statement)[0]
+
+
+def number_matches_metric(number: dict, metric) -> bool:
+    """Is `metric` the number this statement quoted, AT THE PRECISION IT WAS QUOTED?
+
+    `0.88` matches a recorded 0.8776 and `0.8776` does not match 0.8835 — the memo's own rounding is
+    the tolerance, so nothing here has to invent one. The SIGN is part of the number: a quote that
+    drops the minus of a negative metric reads as unmatched rather than as a match, because deciding
+    that a memo "meant" the absolute value is exactly the guess this instrument exists to avoid.
+    """
+    try:
+        value = float(metric)
+    except (TypeError, ValueError):
+        return False
+    if value != value or value in (float("inf"), float("-inf")):    # NaN / inf: never a match
+        return False
+    places = number.get("places")
+    places = places if type(places) is int and 0 <= places <= 10 else 0
+    try:
+        literal = f"{float(number['value']):.{places}f}"
+    except (KeyError, TypeError, ValueError):
+        return False
+    if f"{value:.{places}f}" == literal:
+        return True
+    return bool(number.get("percent")) and f"{value * 100:.{places}f}" == literal
+
+
+def number_fidelity(statement: str, *, cited_metrics: Iterable[tuple] = (),
+                    other_metrics: Iterable[tuple] = ()) -> dict:
+    """Where one claim's quoted decimals stand against the metrics it cites (see the block above).
+
+    `cited_metrics` / `other_metrics` are `(node_id, metric)` pairs: the experiments this claim
+    CITES, and the run's other recorded experiments. Pure and deterministic — the caller resolves
+    which nodes are admissible evidence, this counts.
+
+    Returns `{"v", "quoted", "matched", "elsewhere", "unmatched", "excluded", "values"}`, where
+    `values` names each decimal and the channel it landed in. A claim that quotes no decimal
+    reports `quoted: 0`, which is not a failure of anything.
+    """
+    numbers, excluded = _scan_numbers(statement)
+    cited = [(nid, metric) for nid, metric in (cited_metrics or ())]
+    other = [(nid, metric) for nid, metric in (other_metrics or ())]
+    values: list[dict] = []
+    matched = elsewhere = unmatched = 0
+    for number in numbers:
+        row = {"text": number["text"]}
+        hit = next((nid for nid, metric in cited if number_matches_metric(number, metric)), None)
+        if hit is not None:
+            matched += 1
+            row.update(match="cited", node_id=hit)
+        else:
+            near = next((nid for nid, metric in other
+                         if number_matches_metric(number, metric)), None)
+            if near is not None:
+                elsewhere += 1
+                row.update(match="run", node_id=near)
+            else:
+                unmatched += 1
+                row["match"] = "none"
+        values.append(row)
+    return {"v": NUMBER_FIDELITY_VERSION, "quoted": len(numbers), "matched": matched,
+            "elsewhere": elsewhere, "unmatched": unmatched, "excluded": excluded, "values": values}

@@ -30,6 +30,19 @@ the same change and say why in the commit:
     open('tests/data/golden_run_state.json', 'wb').write(
         orjson.dumps(d, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS))
     PY
+
+Regenerations so far, each one an ADDITIVE model field (the case the paragraph above names), with
+the diff that justified it:
+
+* 2026-09-08 — `RunState.eval_noise_floor` + `RunState.eval_noise_seed_results` (`core/models.py`,
+  doc 52 row 11: the eval NOISE FLOOR's summary and its per-seed resume memo). The diff was 2
+  insertions and 0 deletions — `"eval_noise_floor": null` and `"eval_noise_seed_results": {}`, the
+  defaults a log with no `eval_noise_*` row folds to — and no shared leaf changed, so this log
+  still folds byte-identically to what it folded before and no recorded run is invalidated.
+* 2026-09-08 — `Node.value_prior` (`core/models.py`, docs/BACKLOG.md §0.1 row 17: the MCTS value
+  estimate the LLM freezes onto the node). The diff was 8 insertions and 0 deletions — one
+  `"value_prior": null` per node, no shared leaf changed — so the fold produces byte-identically
+  what it produced before for this log and nothing recorded under the old snapshot is invalidated.
 """
 from __future__ import annotations
 
