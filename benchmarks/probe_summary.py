@@ -525,6 +525,61 @@ def _task_ref_note(task_ref: dict, task: str, filtered: bool = False) -> str:
     return f"; this task: {len(vals)} probes, median {statistics.median(vals):.1f} %"
 
 
+def completions_by_node_count(probes, ledger_path: str, finished=None) -> list:
+    """`[(nodes, n_probes, median_completion_tokens)]` -- how long a call is, against how many nodes
+    the probe got. `probes` is `{probe: node_count}`.
+
+    §401. Three sweeps in a row opened with "this probe is spending slower than its siblings", and
+    three times the answer was the same: the calls are LONGER, not slower. Measured across 155
+    probes with 30+ priced calls, it is one phenomenon and it is monotone:
+
+        0 nodes   n=  2   1952 tokens
+        1 node    n= 10    800
+        2 nodes   n= 39    577
+        3 nodes   n= 88    423
+        4+ nodes  n= 16    428
+
+    A probe that gets few nodes writes long bodies. Which way it runs is NOT settled here -- an essay
+    per call leaves less budget for evaluations, and a run that cannot land a node has nothing to do
+    but write -- and §392's split (one-node probes spend 30 % of the dollar after their only node
+    against 2.2 % for the rest) is the same population seen from the money side.
+
+    Printed so the next sweep reads it instead of re-deriving it from a single probe, which is how
+    it looked like three separate anomalies.
+    """
+    import collections as _c
+    lengths = _c.defaultdict(list)
+    try:
+        fh = open(ledger_path, encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    with fh:
+        for line in fh:
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            got = row.get("completion_tokens")
+            if row.get("status") == 200 and isinstance(got, (int, float)) and got > 0:
+                lengths[row.get("arm")].append(got)
+    buckets = _c.defaultdict(list)
+    for probe, nodes in probes.items():
+        seen = lengths.get(probe) or []
+        if len(seen) < 30:                 # a handful of calls is not a probe's profile
+            continue
+        # ONLY PROBES THAT FINISHED. The zero-node bucket was six probes and none of them belonged:
+        # four ABANDONED arms whose trees survive only in the archive, one probe that died at
+        # 93-token calls, and the live one, whose profile is half-written. Their calls are short
+        # because they stopped, which is the opposite of the thing being measured -- and pooling
+        # them turned the row from 1952 tokens into 405 and reversed the trend it is about.
+        if finished is not None and probe not in finished:
+            continue
+        buckets[min(int(nodes), 4)].append(statistics.median(seen))
+    return [(nodes, len(v), statistics.median(v)) for nodes, v in sorted(buckets.items())]
+
+
 def main(argv: list[str]) -> int:
     wanted = set()
     while "--probe" in argv:
@@ -801,6 +856,26 @@ def main(argv: list[str]) -> int:
     # them finished) -- but the denominator said "runs" about a run that had not ended, and the
     # direction of that error is not fixed. Held-out rows are counted below rather than dropped
     # silently.
+    # HOW LONG A CALL IS, AGAINST HOW MANY NODES THE PROBE GOT (§401). Three sweeps opened with
+    # "this probe spends slower than its siblings" and each time the answer was the same: longer
+    # calls, not slower ones. Printed so it is read rather than re-derived one probe at a time.
+    # THE ROOT IS THE BENCH ROOT ITSELF, measured rather than assumed: `_roots([])` answers
+    # `/var/tmp/looplab-bench`, not `.../model-probes`. Deriving it by stripping two components put
+    # the ledger under `/var/tmp/meter`, the block printed nothing, and a silent empty block is
+    # exactly the skipped anchor of §395.
+    ledger = os.path.join(str(roots[0]), "meter", "meter.jsonl") if roots else ""
+    done = {s["probe"] for s in seen.values()
+            if (Path(s["probe_dir"]) / "champion_solver.py").is_file()}
+    profile = completions_by_node_count({s["probe"]: len(s["nodes"]) for s in seen.values()},
+                                        ledger, finished=done)
+    if profile:
+        print("\ncall length against nodes evaluated (finished probes, 30+ priced calls):")
+        for nodes, count, med in profile:
+            label = f"{nodes}+" if nodes >= 4 else str(nodes)
+            print(f"  {label:>3} node(s): n={count:3d}  completion median {med:6.0f} tokens")
+        print("  -- a probe that gets few nodes writes long bodies; which way that runs is not "
+              "settled by this table (§392's money-side split is the same population)")
+
     multi = [s for s in seen.values() if len(s["nodes"]) >= 2]
     live_multi = [s for s in multi
                   if not (Path(s["probe_dir"]) / "champion_solver.py").is_file()]
