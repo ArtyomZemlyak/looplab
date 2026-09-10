@@ -658,10 +658,13 @@ def main(argv=None) -> int:
                   f'{age:.0f}s ago. Three consecutive 504s at exactly 300 s are the nginx ceiling, '
                   "not a hang (§175); check the ledger's statuses before the process")
         for z in got["bad"]:
-            # THE ZERO'S OWN SECONDS ARE THE DIAGNOSIS. A zero under five seconds means the harness
-            # declined to measure -- a regime mismatch, an unloadable solver -- and blaming the
-            # model for it sends the next hour in the wrong direction. All 12 corpus zeros are the
-            # other kind: 41-47 s of real evaluation that came back invalid.
+            # THE ZERO'S OWN SECONDS WERE THE DIAGNOSIS, and the sentence that justified it has
+            # been outgrown by the corpus. It read "All 12 corpus zeros are the other kind: 41-47 s
+            # of real evaluation that came back invalid". Measured 2026-09-10 there are **14**, and
+            # they run **4.2 s to 60.9 s** (median 42.1) -- only seven inside 41-47. The case the
+            # rule warns about is here too: `remDL13` node 0 scored zero at **4.2 s**, and
+            # `remEE6` node 3 at 8.3 s. A frozen count and a frozen band, both false now; §407.
+            # This is why the seconds are only the FALLBACK below.
             # AND THE BRIDGE'S OWN NAME WHERE IT SAID ONE. The seconds are the fallback now, not
             # the diagnosis: `evaluator_timeout` is a refusal that costs the FULL timeout, so the
             # rule "a zero at 45 s is the solver's" gets that one exactly backwards.

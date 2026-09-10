@@ -725,6 +725,34 @@ def check_denominator_composition(bench: str):
     return False, "; ".join(said)
 
 
+# What the DECISION to leave the foresight panel blind was made on, quoted from the source that
+# carries it -- `looplab/engine/proposal_cues.py`, checked verbatim 2026-09-10:
+#   "`foresight_rank` and `hyp_prioritize` are 2.4 % of spend between them and stay blind. That is a
+#    decision, not an oversight ... Revisit if either grows past a few per cent."
+# The revisit line is per-phase, but the EVIDENCE is the pair, and the pair is what moved.
+BLIND_PAIR_AT_DECISION = 2.4
+
+
+def blind_pair_sentence(shares: dict, recorded: float = BLIND_PAIR_AT_DECISION) -> str:
+    """What the two blind phases cost TOGETHER, against the figure the decision rests on.
+
+    §406. The check tested each phase against 3 % on its own, so `foresight_rank` at 2.1 % and
+    `hyp_prioritize` at 1.2 % both passed and the line read "both under 3 % of spend". The sentence
+    the decision actually carries is about the pair -- 2.4 % between them -- and the pair is now
+    **3.3 %**, 37 % above the number it was decided on. Nothing said so, because nothing added them
+    up: the decision's own basis moved while the check watched its halves.
+    """
+    pair = sum(v for k, v in shares.items() if k in ("foresight_rank", "hyp_prioritize"))
+    if not pair:
+        return ""
+    drift = 100.0 * (pair - recorded) / recorded if recorded else 0.0
+    said = (f"; together they are {pair:.1f} % of spend against the {recorded:.1f} % recorded when "
+            f"the decision was made ({drift:+.0f} %)")
+    if pair > recorded:
+        said += " -- the decision's own basis has grown"
+    return said
+
+
 def check_money_cue_reaches_the_choosers(bench: str):
     """"денежная подсказка не доходит до plan/foresight_rank/hyp_prioritize"
 
@@ -787,6 +815,8 @@ def check_money_cue_reaches_the_choosers(bench: str):
         detail += ("; STILL BLIND: " + ", ".join(sorted(blind_named))
                    + (" -- and past its own 'a few per cent' revisit line: " + ", ".join(over)
                       if over else " -- a recorded decision, both under 3 % of spend"))
+        # AND THE PAIR (§406): the revisit line is per-phase, the recorded evidence is the pair.
+        detail += blind_pair_sentence({p: sh for p, sh in still_blind})
     return blind_named == named, detail
 
 
