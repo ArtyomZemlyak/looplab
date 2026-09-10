@@ -143,7 +143,11 @@ def test_index_mentions_every_numbered_document():
     #   link, every prose `doc NN`, the index's first column, the mkdocs nav and
     #   `benchmarks/algotune/README.md` moved in this same change. 54 remains the gap it
     #   already was. Master's two documents are the +2; nothing was dropped.
-    assert len(numbered) == 63, "the derived numbered-document inventory changed"
+    #   63 -> 64 (2026-09-10): doc 65, the review of the 2026-09-03..09-10 week. No collision — 65
+    #   was claimed by checking the glob, the index table AND the mkdocs nav together (the procedure
+    #   the eight entries above exist for), and the document, its index row, its nav row and this
+    #   count move in ONE change, which is what `af0c99c0` and `f316f392` each paid half an hour for.
+    assert len(numbered) == 64, "the derived numbered-document inventory changed"
     #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
     #   claimed by checking the glob AND the index table together.
     #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`

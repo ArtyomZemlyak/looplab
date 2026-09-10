@@ -1512,7 +1512,6 @@ def test_the_probe_refuses_the_grader_under_full_default_confinement(fake_grader
     assert "exit=0" in out and "AN ORDINARY DEPENDENCY" in out, out
 
 
-@pytest.mark.landlock_refusal
 def test_a_punched_directory_keeps_its_files_readable_and_loses_only_its_listing(fake_grader):
     """§383's mechanism, pinned so it cannot change quietly in either direction.
 
@@ -1520,6 +1519,16 @@ def test_a_punched_directory_keeps_its_files_readable_and_loses_only_its_listing
     not. That is why a sibling opens by path and no package in it imports by name. If the rung ever
     grants `READ_DIR` on the punched directory — which would restore import-by-name and let the
     fence answer with its own sentence — this goes red and the test above should be tightened back.
+
+    NO `landlock_refusal` MARKER, and this paragraph is why one must not come back. That marker is
+    the autouse gate's ONE exclusion — `pyproject.toml` spells it "the one test that asserts the
+    confined probe FAILS CLOSED where Landlock is absent" — and it carried this test from
+    2026-09-09 to 2026-09-10. But what is asserted below is the rung's POSITIVE behaviour, and that
+    needs Landlock PRESENT: on a kernel without it the marker defeated the skip, the probe failed
+    closed exactly as it promises to, and this went red for a guarantee the shipped code does not
+    claim on that box — the one thing the gate's own comment above says a suite may never do. The
+    neighbour asserts the same mechanism, carries no marker, and says so in as many words
+    ("skipped by the autouse gate otherwise").
     """
     site, name = fake_grader
     tools = _grader_probe(site, name)

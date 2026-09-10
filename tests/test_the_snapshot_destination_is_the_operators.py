@@ -116,11 +116,25 @@ def test_a_timer_started_against_a_scratch_root_writes_only_to_the_scratch_desti
              "SNAPSHOT_RUNS_ARCHIVE": str(tmp_path / "runs-archive")},
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
     try:
-        # Waited on PROVENANCE.txt, not on the directory: `mkdir -p "$OUT"` is the FIRST thing the
-        # snapshot does, so a directory here means "started", and killing the loop at that moment
-        # leaves a half-written snapshot the assertions below cannot read.
+        # Waited on what the assertion READS, not on the directory and not on the file's existence.
+        # `mkdir -p "$OUT"` is the FIRST thing the snapshot does, so a directory here means
+        # "started"; and `> "$OUT/PROVENANCE.txt"` opens the file EMPTY before the block that fills
+        # it runs, so its existence means "started" one level down -- same defect, same shape.
+        # Killing the loop at either moment leaves a half-written snapshot the assertions below
+        # cannot read, which is what happened on 2026-09-10 under the four-way parallel suite this
+        # repo prescribes: the file held `snapshot <stamp>` and nothing else, and the test that
+        # passes alone on every box failed under load. The predicate is now the assertion's own
+        # string, so "the wait ended" and "the line is there" are ONE fact rather than two that
+        # agree while the box is fast enough.
+        def _named_its_root() -> bool:
+            found = sorted(dest.glob("2*/PROVENANCE.txt"))
+            try:
+                return bool(found) and f"bench root: {src}" in found[0].read_text(encoding="utf-8")
+            except OSError:                       # a read that races the writer is simply "not yet"
+                return False
+
         end = time.time() + 60
-        while time.time() < end and not sorted(dest.glob("2*/PROVENANCE.txt")):
+        while time.time() < end and not _named_its_root():
             time.sleep(0.1)
     finally:
         try:

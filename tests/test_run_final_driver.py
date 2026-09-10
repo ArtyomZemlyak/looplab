@@ -208,15 +208,26 @@ def test_the_harness_refuses_to_hand_the_real_driver_a_real_checkout(tmp_path):
     # `tmp_path` IS disposable, so the guard must not fire on it -- the two refusal tests below
     # hand the driver exactly such a tree. What it fires on is a checkout it does not own.
     assert _is_disposable(str(existing)), existing
+    # The checkout the guard MUST fire on is BUILT here, not named on the box. Naming the live
+    # stand asserted the guard only where the stand happens to exist: the gate is
+    # `exists(root) and not _is_disposable(root)`, so on a clean checkout the first clause was
+    # False, the guard never fired, the driver reached its own refusal and this test failed with
+    # DID NOT RAISE -- a rule tested through the paths that happen to exist here, which is what
+    # `test_what_counts_as_a_disposable_checkout` below exists to stop. A `looplab-bench` segment
+    # under `tmp_path` is non-disposable by the NAME clause and owned by this run, so the guard is
+    # driven on every box and no real tree is ever handed to the driver.
+    stand = tmp_path / "looplab-bench" / "AlgoTune"
+    (stand / "AlgoTuner").mkdir(parents=True)
+    assert not _is_disposable(str(stand)), stand
     with pytest.raises(AssertionError, match="refusing to drive the real campaign"):
-        _run(env={"ALGOTUNE_ROOT": "/var/tmp/looplab-bench/AlgoTune",
-                  "CAMPAIGN_OUT": str(tmp_path / "out")})
+        _run(env={"ALGOTUNE_ROOT": str(stand), "CAMPAIGN_OUT": str(tmp_path / "out")})
+    # …and the live stand is the same answer, as a PREDICATE: `_is_disposable` is realpath plus two
+    # string clauses and never touches the disk, so this holds whether or not the stand is built.
     assert not _is_disposable("/var/tmp/looplab-bench/AlgoTune")
     # The STUB is exactly what may be handed one: that is what the end-to-end drive does.
     stub = tmp_path / "run_final.sh"
     stub.write_text("#!/usr/bin/env bash\nexit 7\n", encoding="utf-8")
-    assert _run(env={"ALGOTUNE_ROOT": "/var/tmp/looplab-bench/AlgoTune"},
-                script=stub).returncode == 7
+    assert _run(env={"ALGOTUNE_ROOT": str(stand)}, script=stub).returncode == 7
 
 
 def test_the_absent_root_this_file_leans_on_is_really_absent():

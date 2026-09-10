@@ -11,7 +11,7 @@ Design docs live in `docs/` (see `docs/02-architecture.md`, ADRs in
 
 ```bash
 pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/TUI tests (fastapi)
-python -m pytest                  # full suite (16,748 collected, ~40 min; addopts already has -q)
+python -m pytest                  # full suite (17,087 collected, ~40 min; addopts already has -q)
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
 python -m pytest -m "not docker"  # skip Docker-daemon tests
@@ -45,7 +45,7 @@ style: `[tool.ruff]` selects `BLE` only (doc 52 row 14), so `python -m ruff chec
 blind `except Exception`/`BaseException`/bare `except` that carries no `# noqa: BLE001 — <why this is
 safe to contain>`. Containment is the house posture (739 such handlers), so the rule is not "do not
 write one" but "say why"; `tests/test_containment_census.py` re-derives the same census by AST with no
-`ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 103 pre-existing
+`ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 102 pre-existing
 reason-less sites as a shrink-only backlog in `tests/data/containment_unreviewed.txt` (review one =
 write its reason, delete its row). Match the style of surrounding code (~100-col lines, heavy
 why-comments) and do not reformat.
