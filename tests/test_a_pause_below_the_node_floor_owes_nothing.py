@@ -20,6 +20,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -81,5 +83,7 @@ def test_a_run_that_never_paused_is_not_at_a_ceiling(tmp_path):
 def test_the_live_probe_records_the_floor_the_engine_quoted():
     live = "/var/tmp/looplab-bench/model-probes"
     if not Path(live, "pgr2").is_dir():
-        return
+        # SKIP, not `return`: this anchor reads the LIVE bench corpus, and a box without one
+        # must report "not checked" rather than print a green dot for a check that never ran.
+        pytest.skip("no pgr2 probe on this box")
     assert arm_fidelity.node_open_floor(live, "pgr2") == 0.1

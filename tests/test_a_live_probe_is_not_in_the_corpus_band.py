@@ -19,6 +19,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -42,7 +44,9 @@ def test_liveness_is_the_process_not_a_terminal_event():
     import arm_fidelity
     root = "/var/tmp/looplab-bench/model-probes"
     if not Path(root, "freeB3").is_dir():
-        return
+        # SKIP, not `return`: this anchor reads the LIVE bench corpus, and a box without one
+        # must report "not checked" rather than print a green dot for a check that never ran.
+        pytest.skip("no freeB3 probe on this box")
     assert arm_fidelity.is_finished(root, "freeB3") is False
     assert "freeB3" not in sweep_claims.live_probes("/var/tmp/looplab-bench")
 

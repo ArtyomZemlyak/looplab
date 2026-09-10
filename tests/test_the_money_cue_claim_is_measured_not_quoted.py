@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -89,7 +91,9 @@ def test_cue_reach_json_says_the_same_as_its_table():
                    key=lambda p: p.stat().st_mtime, reverse=True)
     roots = [str(r.parent) for r in roots if r.parent.name != "_ruler"][:2]
     if not roots:
-        return
+        # SKIP, not `return`: this anchor reads the LIVE bench corpus, and a box without one
+        # must report "not checked" rather than print a green dot for a check that never ran.
+        pytest.skip("no probe runs on this box")
     tool = str(BENCH / "cue_reach.py")
     as_json = json.loads(subprocess.run([sys.executable, tool, "--json", *roots],
                                         capture_output=True, text=True, timeout=600).stdout)

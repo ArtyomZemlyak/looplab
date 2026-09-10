@@ -26,6 +26,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -98,5 +100,7 @@ def test_the_corpus_really_holds_packets():
         with open(p, errors="replace") as fh:
             n += sum(1 for l in fh if SENTINEL in l)
     if not glob.glob("/var/tmp/looplab-bench/model-probes/*/runs/*/*/events.jsonl"):
-        return
+        # SKIP, not `return`: this anchor reads the LIVE bench corpus, and a box without one
+        # must report "not checked" rather than print a green dot for a check that never ran.
+        pytest.skip("no probe packets on this box")
     assert n >= 20, f"корпус держал 23 пакета, сейчас {n} -- проверить, не сменился ли формат"

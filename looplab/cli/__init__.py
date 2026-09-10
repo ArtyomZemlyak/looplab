@@ -25,7 +25,7 @@ import sys
 import copy
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Optional, get_origin
 
 import typer
 from typer.core import TyperGroup
@@ -706,9 +706,30 @@ def _wrap_with_foresight_panel(researcher, settings, ftools):
 
 def _apply_speculation_calibration_profile(settings: Settings) -> None:
     """Force the source-owned offline measurement profile before any role/client is built."""
+    fields = settings.__class__.model_fields
     for field, value in SPECULATION_CALIBRATION_PROFILE_SETTINGS.items():
-        if field not in settings.__class__.model_fields:
+        if field not in fields:
             raise RuntimeError(f"calibration profile references unknown Settings field {field!r}")
+        # THE PROFILE IS JSON; THE FIELD IS NOT. `SPECULATION_CALIBRATION_PROFILE_SETTINGS` is
+        # round-tripped through `orjson` on purpose — the digest is a JSON preimage — so a
+        # schema-native tuple arrives here as a LIST, and `setattr` on a Settings model does not
+        # validate, so the list was simply stored under a `tuple[str, ...]` annotation. Pydantic
+        # said so on every `model_dump` of such a run (`PydanticSerializationUnexpectedValue`). The
+        # warning is the SYMPTOM; what it reports is a field holding a value of a type its schema
+        # forbids, and a list differs from the otherwise-identical tuple in the two ways this tree
+        # actually uses: `==` answers False, and a list cannot be hashed or put in a set. No live
+        # reader depends on either today — this is why the defect was only ever a warning — but the
+        # declared type is the contract every future reader will assume. `inline_repair_reasons` is
+        # the tree's only tuple-typed Settings field today; the coercion is written against the
+        # ANNOTATION so the second one is covered on the day it lands.
+        #
+        # Coerced by the declared annotation rather than by running Pydantic's assignment
+        # validation: this loop assigns every field in profile order, so an intermediate state is
+        # not necessarily a valid Settings, and validating here could refuse an assignment that has
+        # always been legal. Nothing about the digest or the snapshot moves — `orjson` and
+        # `model_dump(mode="json")` both write a tuple and a list as the same JSON array.
+        if get_origin(fields[field].annotation) is tuple and isinstance(value, list):
+            value = tuple(value)
         setattr(settings, field, copy.deepcopy(value))
 
 

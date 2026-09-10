@@ -16,6 +16,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(BENCH / "algotune"))
@@ -74,10 +76,12 @@ def test_the_two_instruments_answer_alike_on_the_live_record():
     """Якорь в настоящих данных: узел 0 пробы remDL13, из-за которого расхождение и нашлось."""
     live = Path("/var/tmp/looplab-bench/model-probes/remDL13/runs/discrete_log/run/events.jsonl")
     if not live.is_file():
-        return
+        # SKIP, not `return`: this anchor reads the LIVE bench corpus, and a box without one
+        # must report "not checked" rather than print a green dot for a check that never ran.
+        pytest.skip("no remDL13 record on this box")
     bad = [b for b in pulse_mod.pulse(str(live))["bad"] if b.get("reason")]
     if not bad:
-        return
+        pytest.skip("the live record holds no classified bad row")
     assert bad[0]["whose"] == "candidate", bad[0]
     assert compare_arms.looks_like_the_candidates_own_build("Failed in nopython mode pipeline")
 

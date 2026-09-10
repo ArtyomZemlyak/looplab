@@ -31,12 +31,37 @@ DRIVER = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "run_
 ISO = re.compile(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] ")
 
 
+# The pytest tmp root ACTUALLY in use, which `tempfile.gettempdir()` alone cannot answer.
+# `CLAUDE.md` prescribes `--basetemp=<private dir>` for every suite run (pytest's default root is
+# keyed by OS USER, so two concurrent runs delete each other's fixtures) and says nothing about
+# that directory living under the system temp dir. Point it anywhere else -- a scratch dir beside
+# the checkout, say -- and a `tmp_path` tree stops reading as disposable, so the §384 harness guard
+# below fires on the THREE tests that hand the driver a `_bench_root`-built AlgoTune tree and they
+# fail for a reason that has nothing to do with what they assert. A directory this run's own
+# fixture factory minted IS a directory this run owns, whatever TMPDIR says.
+_BASETEMP = ""
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _own_this_runs_tmp_root(tmp_path_factory):
+    """Record the basetemp so `_is_disposable` can recognise what this run created."""
+    global _BASETEMP
+    _BASETEMP = os.path.realpath(str(tmp_path_factory.getbasetemp()))
+
+
 def _is_disposable(path: str) -> bool:
-    """True for a path this test run created and owns -- under the temp dir, and never the stand."""
+    """True for a path this test run created and owns -- under a root this run owns, never the stand.
+
+    TWO CLAUSES, and the second is a VETO over the first however many roots the first grows: a
+    `looplab-bench` segment names the stand's own layout, and a widening that reached it would put
+    the real campaign back within the harness's reach, which is the whole point of §384's guard.
+    """
     real = os.path.realpath(path)
-    tmp = os.path.realpath(tempfile.gettempdir())
-    inside_tmp = real == tmp or real.startswith(tmp + os.sep)
-    return inside_tmp and "looplab-bench" not in real
+    roots = [os.path.realpath(tempfile.gettempdir())]
+    if _BASETEMP:
+        roots.append(_BASETEMP)
+    owned = any(real == root or real.startswith(root + os.sep) for root in roots)
+    return owned and "looplab-bench" not in real
 
 
 def _run(*, env: dict, cwd: Path | None = None, script: Path = DRIVER) -> subprocess.CompletedProcess:

@@ -81,5 +81,7 @@ def test_the_live_check_prints_both():
     one."""
     _ok, said = sweep_claims.check_reference_use_band("/var/tmp/looplab-bench")
     if "cannot be driven" in said or "no probe" in said:
-        return
+        # SKIP, not `return` -- see the same clause in `test_a_band_of_two_points_is_not_pinnable`:
+        # a box with no corpus must report "not checked", never a green dot for an absent check.
+        pytest.skip(f"no live corpus on this box: {said}")
     assert "by CALLS rather than imports" in said, said

@@ -279,7 +279,17 @@ def _recovery_envelope(body: ReviewCreate) -> dict | None:
     names = ("expected_generation", "request_id", "token_secret")
     # Presence, not value, selects the recovery contract: three explicit JSON nulls must be rejected
     # below and can never silently downgrade into the legacy random-create path.
-    fields_set = getattr(body, "model_fields_set", getattr(body, "__fields_set__", set()))
+    # TWO STATEMENTS, not a nested `getattr` default: Python evaluates a default argument BEFORE
+    # the call it is passed to, so `getattr(body, "model_fields_set", getattr(body, "__fields_set__",
+    # set()))` reads the DEPRECATED attribute on every request, V2 model or not — the fallback that
+    # was written to be a fallback ran first, so every call raises `PydanticDeprecatedSince20` —
+    # which is why this line appears in the suite's warning summary at all. `__fields_set__` is
+    # removed in
+    # Pydantic V3, where the eager read would quietly answer `set()` and select the legacy path for
+    # a body that DID supply the recovery fields — the one thing the comment above forbids.
+    fields_set = getattr(body, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(body, "__fields_set__", set())
     supplied = tuple(name in fields_set for name in names)
     if not any(supplied):
         return None

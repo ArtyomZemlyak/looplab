@@ -56,7 +56,12 @@ def test_every_unpinned_task_still_fails_the_claim():
 def test_the_live_check_holds_and_names_pagerank():
     ok, said = sweep_claims.check_test_tracks_train("/var/tmp/looplab-bench")
     if "cannot be driven" in said or "no probe" in said:
-        return
+        # SKIP, not `return`: this anchor reads the LIVE corpus, and a box without one must say
+        # "not checked" rather than print a green dot for a check that never ran. The three other
+        # corpus anchors in the suite already spell it this way (`test_eval_scratch_is_swept…`,
+        # both in `test_the_zero_band_is_measured_not_frozen.py`), and the difference is only
+        # visible in the REPORT -- which is exactly where an overstated tick does its damage.
+        pytest.skip(f"no live corpus on this box: {said}")
     assert "pagerank" in said, said
     if "n=2" in said:
         assert "TOO THIN TO PIN" in said and "UNPINNED task(s): pagerank" in said, said

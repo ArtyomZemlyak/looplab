@@ -126,6 +126,13 @@ def test_a_timer_started_against_a_scratch_root_writes_only_to_the_scratch_desti
         # passes alone on every box failed under load. The predicate is now the assertion's own
         # string, so "the wait ended" and "the line is there" are ONE fact rather than two that
         # agree while the box is fast enough.
+        #
+        # NOT `.complete`, which is the snapshot's OWN finished-marker (`snapshot.sh` writes it last
+        # and after the shortfall check, and `restore_from_snapshot.sh` picks "NEWEST COMPLETE, not
+        # newest"). It is the right signal for a restorer and the wrong one here: it lands only if
+        # every declared source copied, so a synthetic `_bench_root` that is short of one would
+        # never produce it and this would spend the whole 60 s to fail. What this test needs is one
+        # finished PROVENANCE line, and that is what it now waits for.
         def _named_its_root() -> bool:
             found = sorted(dest.glob("2*/PROVENANCE.txt"))
             try:

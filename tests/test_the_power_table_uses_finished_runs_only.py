@@ -22,6 +22,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
@@ -82,7 +84,9 @@ def test_the_live_corpus_refuses_rather_than_borrowing_running_runs():
     теми, кто ещё работает."""
     got = arm_power.champions("/var/tmp/looplab-bench/model-probes", "pagerank")
     if not got:
-        return
+        # SKIP, not `return`: this anchor reads the LIVE bench corpus, and a box without one
+        # must report "not checked" rather than print a green dot for a check that never ran.
+        pytest.skip("no pagerank champions on this box")
     assert len(got) >= 1
     import subprocess
     r = subprocess.run([sys.executable, str(BENCH / "arm_power.py"), "--task", "pagerank",

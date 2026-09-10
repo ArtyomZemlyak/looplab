@@ -720,6 +720,13 @@ def install_reap_hooks(app) -> None:
     """Wire the JupyterHub reaper to this app's lifecycle: an ASGI shutdown hook plus — on a shared
     hub only — an atexit backstop. Called once per `make_app`, at the same construction point the
     inline registration used to occupy."""
+    # OPEN[serve-lifecycle-uses-deprecated-on-event] the four `@app.on_event` hooks here and in
+    # `server.py` are deprecated by FastAPI and go away in a future major. The replacement is one
+    # `lifespan=` at `FastAPI(...)` construction, which is why this is not a rename: the hooks come
+    # from THREE independent installers, one conditional, and `_cancel_resume_timers` records that
+    # its position is ordered against claim+Popen — so composing them means owning that order in a
+    # registry. A lifecycle change belongs in a change whose subject it is; `on_event` still works.
+    # proof:`present:@app.on_event@looplab/serve/engine_proc.py`
     @app.on_event("shutdown")
     def _reap_on_shutdown():
         _reap_spawned_engines()

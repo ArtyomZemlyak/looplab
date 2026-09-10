@@ -397,7 +397,11 @@ def _table_cells(line: str):
 
 
 def test_every_guide_table_row_has_the_columns_its_header_declares():
-    """A row with an EXTRA cell loses it — silently, and exactly where a reader needs it.
+    # RAW docstring: the incident it quotes contains `\``, which is not a Python escape. An unknown
+    # escape is preserved with its backslash, so the text is unchanged either way — but it is a
+    # DeprecationWarning today, a SyntaxWarning from 3.12 and an error later, and the suite's own
+    # warning summary is where a real one has to stay visible.
+    r"""A row with an EXTRA cell loses it — silently, and exactly where a reader needs it.
 
     Markdown renders a row against the header's column count and DROPS the overflow. The
     `hide_empty_tools` row landed in llm-and-agents.md's two-column "Setting | What it adds" table
