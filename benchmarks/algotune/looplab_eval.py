@@ -1096,6 +1096,19 @@ def _print_ruler(argv: list[str]) -> int:
 
 
 def main() -> int:
+    # CLEANUP ON EVERY PATH, not only the one that prints a result (§408). `_sweep_artefacts` was
+    # called at the end of `emit`, so an evaluation that raised, refused or was killed left its
+    # `results/LoopLab-<pid>/<task>/` behind -- measured 2026-09-10: sixteen of them, from 2026-09-04
+    # to 09-08, one per failed reading, in the very namespace `results/<model>/<task>/` where the
+    # fence machinery keeps other models apart. The 2026-08-22 note above records 77 after ONE
+    # campaign and is what added the sweep; it added it to the happy path only.
+    try:
+        return _main()
+    finally:
+        _sweep_artefacts()
+
+
+def _main() -> int:
     if "--print-ruler" in sys.argv[1:]:
         return _print_ruler(sys.argv[1:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
