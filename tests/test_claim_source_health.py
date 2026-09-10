@@ -8,7 +8,7 @@ import pytest
 
 from looplab.engine.lessons import LessonMemory
 from looplab.events.eventstore import (
-    _interprocess_lock,
+    interprocess_lock,
     read_jsonl_lenient,
     read_jsonl_lenient_with_health,
 )
@@ -169,7 +169,7 @@ def test_lesson_append_refuses_to_mutate_without_required_lock(tmp_path, monkeyp
         seen.append(required)
         raise EventStoreLockError(path, OSError("locking unavailable"))
 
-    monkeypatch.setattr("looplab.events.eventstore._interprocess_lock", _unavailable)
+    monkeypatch.setattr("looplab.events.eventstore.interprocess_lock", _unavailable)
     with pytest.raises(Exception, match="locking unavailable"):
         LessonMemory(_Engine()).append_lessons([_lesson("must not land", "r")], hygiene=False)
     assert seen == [True]
@@ -237,7 +237,7 @@ def test_claim_decision_holds_both_evidence_locks_through_fsync(tmp_path, monkey
     def _observe_fsync(_fd):
         fsync_observations.append(set(active))
 
-    monkeypatch.setattr("looplab.events.eventstore._interprocess_lock", _tracked_lock)
+    monkeypatch.setattr("looplab.events.eventstore.interprocess_lock", _tracked_lock)
     monkeypatch.setattr("looplab.core.atomicio.strict_fsync", _observe_fsync)
 
     def _validate(snapshot):
@@ -280,7 +280,7 @@ def test_claim_decision_evidence_lock_failure_appends_nothing(tmp_path, monkeypa
             raise EventStoreLockError(path, OSError("evidence lock unavailable"))
         yield
 
-    monkeypatch.setattr("looplab.events.eventstore._interprocess_lock", _lock)
+    monkeypatch.setattr("looplab.events.eventstore.interprocess_lock", _lock)
     with pytest.raises(EventStoreLockError, match="evidence lock unavailable"):
         record_claim_decision(
             tmp_path, statement="x", decision="ratified",

@@ -19,6 +19,10 @@ This module gives the party a name and moves the decision to it:
     principal is the third clause — a `review` or `anonymous` principal never reads the portfolio,
     whatever the flag says. Evaluated PER TURN from the principal the route captured, and pinned
     on a standing watch at arming so a wake-up runs as the party that armed it;
+  * `mcp_config_scope(principal)` is the second such decision (2026-09-08, doc 27): WHICH MCP
+    server set this party may connect. It answers a scope NAME that
+    `tools/mcp_tools.py::principal_mcp_config` resolves, so the authorization is taken before any
+    configuration is read and never falls out of a cache key;
   * a caller that passes no principal is `anonymous` — fail closed. A missing identity is not an
     owner.
 
@@ -57,9 +61,19 @@ class Principal:
             raise ValueError("only a review principal carries a review id")
 
     @property
+    def on_owner_plane(self) -> bool:
+        """The owner plane — the token holder, or the local single-user plane without a token.
+
+        Named on its own because two different questions now rest on it (the portfolio read and the
+        MCP server set), and a future third must be able to say which plane it means without
+        borrowing the vocabulary of a decision it has nothing to do with.
+        """
+        return self.kind in (OWNER, LOCAL)
+
+    @property
     def may_read_portfolio(self) -> bool:
         """The owner plane — the token holder, or the local single-user plane without a token."""
-        return self.kind in (OWNER, LOCAL)
+        return self.on_owner_plane
 
 
 OWNER_PRINCIPAL = Principal(OWNER)
@@ -93,6 +107,43 @@ def coerce(value) -> Principal:
     if isinstance(value, str) and value in KINDS and value != REVIEW:
         return Principal(value)
     return ANONYMOUS_PRINCIPAL
+
+
+def mcp_config_scope(principal) -> tuple[Optional[str], str]:
+    """`(scope, why)`: which MCP configuration may this party connect servers for? (doc 27)
+
+    THE RESIDUE THE CACHE KEY COULD NOT SUPPLY. `McpTools.cached()` has been keyed on the resolved
+    configuration since 2026-09-03, and its own comment said the keying would be correct "the day a
+    per-principal configuration source exists" — there was none, so every session on a shared hub
+    connected the SAME servers whichever party was driving it. MCP tools are arbitrary external
+    side effects (`GatedMcpTools` treats every one of them as an unknown external effect and asks),
+    so "whose servers am I calling" is a property of the party, and it is decided here beside
+    `portfolio_access` rather than anywhere near the cache: a cache key is a performance decision
+    that must never become an authorization boundary — if it were, two parties would share a server
+    set exactly when their keys happened to collide.
+
+    The SCOPE is a name, not a path and not a config: `tools/mcp_tools.py::principal_mcp_config`
+    resolves it against the operator's declared per-principal root, and the serve layer holds no
+    filesystem knowledge about MCP. Two clauses:
+
+      * the party must be on the OWNER plane. A `review` capability is one run, read-only, and an
+        `anonymous` caller presented nothing; neither may start a subprocess or reach a remote
+        server through this process. A caller that names no principal is `anonymous` — fail closed,
+        exactly as the portfolio decision does;
+      * the scope is the party's own kind, so `owner` and `local` are different scopes. They are
+        different credentials (a per-deployment token vs the historical unauthenticated
+        single-user plane) and an operator who declares a per-principal root can give them
+        different servers; with no root declared they both resolve to the historical process-wide
+        configuration, which is why nothing changes for a single-user deployment.
+
+    A per-USER identity does not exist yet (the owner token is per-deployment — see WHAT THIS IS
+    NOT above), so two people sharing one token share one scope. That is the same limit
+    `portfolio_access` carries, and it moves the day the token does.
+    """
+    party = coerce(principal)
+    if not party.on_owner_plane:
+        return None, f"a {party.kind} principal may not connect MCP servers"
+    return party.kind, f"the {party.kind} principal connects the {party.kind} MCP configuration"
 
 
 def portfolio_access(principal, settings) -> tuple[bool, str]:

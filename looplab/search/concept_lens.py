@@ -11,9 +11,9 @@ both fail:
 
   * `serve/` is not reachable. `tools/run_tools.py` consumes `project_hierarchy` and
     `node_concept_delta`, and `tools` sits BELOW `serve`;
-    `tests/test_cross_package_private_seams.py::test_the_upward_import_is_confined_to_that_one_default`
-    allows exactly ONE `tools -> serve` import, inside `RunControlTools.lifecycle`. Two more are a
-    red test, not a tidier layer.
+    `tests/test_cross_package_private_seams.py::test_no_upward_import_of_serve_is_left_anywhere_in_tools`
+    allows NO `tools -> serve` import at all — since 2026-09-08 not even the one that used to sit
+    inside `RunControlTools.lifecycle` (doc 25 XP-03). One is a red test, not a tidier layer.
   * `events/` cannot take the group whole. `events` imports nothing above `core` (measured: zero
     non-core `looplab.` imports in the package), and `node_concept_delta` needs
     `search/concept_projection.py`'s receipt-aware CURRENT projection — the boundary that decides

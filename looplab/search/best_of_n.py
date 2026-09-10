@@ -8,7 +8,7 @@ with the ADR-7 cost rule. N=1 is a transparent pass-through (== today).
 """
 from __future__ import annotations
 
-from looplab.agents.roles import WrapsDeveloper
+from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, WrapsDeveloper
 from looplab.core.models import Idea
 from looplab.core.prompts import render
 from looplab.core.validate import validate_agent_code
@@ -133,8 +133,52 @@ class BestOfNDeveloper(WrapsDeveloper):
     Deterministic given a deterministic inner (toy); with an LLM at temperature>0 the candidates
     vary, so best-of-N actually explores. `repair` delegates to inner (single attempt).
 
-    Forwarding (brief/client/prompts/is_code_generating/last_report) and one-candidate output sync
-    come from `WrapsDeveloper`; the N-candidate path restores the winning files/deletions/footprint."""
+    Forwarding (brief/client/prompts/is_code_generating) and one-candidate output sync come from
+    `WrapsDeveloper`; the N-candidate path restores the winning candidate's registered outputs —
+    `last_report` included, through the property below, because that one is a read-through on the
+    base class and a plain `setattr` cannot reach it."""
+
+    _NO_CHOSEN_REPORT = object()
+
+    @property
+    def last_report(self):
+        """The CHOSEN candidate's validation report, not whichever candidate ran LAST.
+
+        `WrapsDeveloper.last_report` reads through to the inner developer, which is correct for a
+        single-shot wrapper and wrong here: N candidates each overwrite the inner's report, so the
+        read-through describes candidate N while every other registered output describes the one
+        that was PICKED. `engine/audit.py::_emit_agent_report` writes that value to the durable
+        `agent_validated` row, and `_capture_developer_result` copies the same read-through into the
+        envelope — so a best-of-N node's ADR-7 audit trail described a candidate that did not ship,
+        beside files and a footprint that did.
+
+        Falls back to the read-through whenever no N-candidate pick is standing: `n == 1`, either
+        repair path (both clear it explicitly — `_sync_audit` does NOT, it assigns ten other names),
+        or before the first build."""
+        chosen = getattr(self, "_chosen_report", self._NO_CHOSEN_REPORT)
+        if chosen is not self._NO_CHOSEN_REPORT:
+            return chosen
+        return getattr(self._wrapped, "last_report", None)
+
+    @last_report.setter
+    def last_report(self, value) -> None:
+        """AND IT IS WRITABLE, because a read-only property here silently disarmed the DISCARD.
+
+        `engine/audit.py::_discard_node_build_telemetry` clears an abandoned build's channels with
+        `if hasattr(current, attr): setattr(current, attr, None); break`, inside a blanket
+        `except (AttributeError, TypeError): pass`. Against a property with no setter that `setattr`
+        RAISES, the handler swallows it, the `break` is skipped, and the walk nulls the INNER
+        developer instead — which was sufficient while `last_report` read through to that inner, and
+        stopped being sufficient the moment this property started answering from `_chosen_report`.
+        Driven, and A/B'd against the parent commit: the discard cleared the report before, and did
+        not after, so an abandoned build's chosen candidate stood on the instance and
+        `speculation.py`'s producer emit — the one `_emit_agent_report` deliberately left on the
+        instance read — stamped it on the NEXT node. That is verbatim the failure
+        `_discard_node_build_telemetry`'s own docstring exists to prevent.
+
+        Assigning None means "no report", which is what the discard means; it does not fall back to
+        the inner's, or the discard would be a no-op by another route."""
+        self._chosen_report = value
 
     def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call",
                  foresight: bool = True, direction: str = "min", goal: str = "",
@@ -195,6 +239,7 @@ class BestOfNDeveloper(WrapsDeveloper):
         if not callable(rf):
             return self.repair(idea, getattr(node, "code", ""), error)
         self.last_foresight_pick = None     # repair uses no predictive ranker: clear the prior pick
+        self._chosen_report = self._NO_CHOSEN_REPORT   # …nor a build's pick: this is single-shot
         out = rf(idea, node, error)
         self._sync_audit()                  # else last_files stale from a prior implement()
         return out
@@ -205,19 +250,29 @@ class BestOfNDeveloper(WrapsDeveloper):
         by `implement` and `implement_from` so both get identical best-of-N + parent-aware behavior."""
         if self.n == 1:
             code = gen_one()
+            self._chosen_report = self._NO_CHOSEN_REPORT   # single-shot: read through, as before
             self._sync_audit()
             self.last_n_scores = [_score(code)]
             return code
         self.last_n_scores = []          # per-node telemetry: reset so it holds only THIS node's N
-        cands: list[tuple[str, dict, list, object, float]] = []
+        cands: list[tuple[str, dict, list, object, float, dict]] = []
         for _ in range(self.n):
             code = gen_one()
             sc = _score(code)
             self.last_n_scores.append(sc)
             raw_footprint = getattr(self.inner, "last_footprint", None)
             footprint = dict(raw_footprint) if isinstance(raw_footprint, dict) else raw_footprint
+            # THE WHOLE REGISTRY, PER CANDIDATE, not the three this wrapper happened to need. N
+            # inner calls each overwrite the inner's side channels, so a scalar read AFTER the loop
+            # describes the LAST candidate — and this wrapper's shipping path used to read none of
+            # them at all, leaving `last_rollback_stage`, `last_budget_exhausted`, `last_edit_calls`
+            # and the rest at their FALSY defaults on the facade the engine reads
+            # (`_capture_developer_result`): "no rollback was requested", "the session finished on
+            # its own terms", "zero edits", on every best-of-N node. Snapshotting here is what makes
+            # `chosen` describe ONE call rather than a mixture of N.
             cands.append((code, getattr(self.inner, "last_files", {}) or {},
-                          getattr(self.inner, "last_deleted", []) or [], footprint, sc))
+                          getattr(self.inner, "last_deleted", []) or [], footprint, sc,
+                          {a: getattr(self.inner, a, None) for a in DEVELOPER_OUTPUT_ATTRS}))
         best_score = max(c[4] for c in cands)
         top = [c for c in cands if c[4] >= best_score - 1e-9]
         chosen = top[0]
@@ -259,6 +314,17 @@ class BestOfNDeveloper(WrapsDeveloper):
             kw = {"prompts": self.prompts} if self.prompts is not None else {}
             idx = _listwise_pick(self.client, idea, [c[0] for c in top], parser=self.parser, **kw)
             chosen = top[idx]
+        # The chosen candidate's OWN side channels first, then the three this wrapper owns
+        # explicitly (files/deleted/footprint are re-derived above so a copy is never shared).
+        # `last_report` is NOT among them: it is a read-through property on the base class, so a
+        # `setattr` here raised and was swallowed — which left the one member the durable
+        # `agent_validated` row is built from describing candidate N while the other ten described
+        # the pick. It goes through `_chosen_report` and the property above instead.
+        self._chosen_report = chosen[5].get("last_report")
+        for _attr, _value in chosen[5].items():
+            if _attr == "last_report":
+                continue
+            setattr(self, _attr, _value)
         self.last_files, self.last_deleted, self.last_footprint = chosen[1], chosen[2], chosen[3]
         return chosen[0]
 
@@ -266,6 +332,7 @@ class BestOfNDeveloper(WrapsDeveloper):
         repair = getattr(self.inner, "repair", None)
         if callable(repair):
             self.last_foresight_pick = None   # repair uses no predictive ranker: clear the prior pick
+            self._chosen_report = self._NO_CHOSEN_REPORT   # …nor a build's: this is single-shot
             out = repair(idea, code, error)   # so this node's audit/`foresight_selected` isn't stale
             self._sync_audit()                # else last_files stale from prior implement()
             return out

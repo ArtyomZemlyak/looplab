@@ -61,10 +61,29 @@ The training was not wasted, the scoring was, and the monitor watching the train
 call it healthy. A tighter rule would have labelled that node `wasted` and marked three correct
 verdicts wrong.
 
+## The SECOND label (2026-09-08)
+
+`fault` is the field that routes a `broken` stage to a REPAIR instead of a terminal, and the
+`wasted`/`productive` rule above cannot grade it: that rule asks whether the stage's compute bought
+a number, and `fault` asks whether the thing to fix was the CODE. What answers THAT is the repair
+the attribution bought — `node_repaired` after the decision, then the node's own terminal — so it is
+a separate vocabulary (`FAULT_LABELS`: `repaired` / `unrepaired` / `unknown`) on its own keys,
+derived by `_fault_label` and recomputable offline by `rederive_fault_label`. The keys are STORED
+only on a row whose fault ROUTES to a repair, because that is the only branch whose answer needs a
+fact the row does not already carry — no row in the committed corpus does: see below.
+
 ## What the label does NOT support
 
-* **`fault`.** `TrainingVerdict.fault` exists in the schema but not one recorded verdict in this
-  corpus carries it (the field postdates every preserved run). It cannot be benched here at all.
+* **A `fault` MEASUREMENT.** Measured 2026-09-08 over the committed corpus: **449 of the 450 rows
+  carry no `fault` at all** (the field postdates almost every preserved run) and the one that does —
+  `e5small-dr-unified-v3` n2, `broken` at confidence 0.95 over an uncaught `torch.OutOfMemoryError`
+  — says `environment`, which is RECORDED and never repaired. (The line this replaces said "not one
+  recorded verdict carries it", and that was already false when it was written.) Reaching the graded
+  branch needs `train_monitor_kill` on, a `broken` at or above the confidence bar confirmed twice,
+  and `fault="implementation"`, which no preserved run did, so the rule grades nothing yet. What
+  changed is that the corpus now repairs itself the moment a run records one: the extractor already
+  read the field, and the LABEL that says whether the attribution bought anything now arrives with
+  it instead of having to be invented afterwards.
 * **A verdict on a stage whose failure the log could not show.** `check_failed` / `expect_failed`
   are decided by the engine AFTER the stage exits, over artifacts, not over the log the judge read.
   `stage_exit_code` and `label_basis` are on the row so this slice can be cut out.
@@ -121,6 +140,48 @@ LABEL_UNKNOWN = "unknown"
 # The closed label vocabulary. `budget_exhausted` is a member and is NOT a synonym for `wasted`;
 # `score.py::PRIMARY_LABELS` is what decides which members enter the confusion matrix.
 LABELS = (LABEL_WASTED, LABEL_PRODUCTIVE, LABEL_BUDGET_EXHAUSTED, LABEL_UNKNOWN)
+
+# --- THE SECOND LABEL: what the `fault` ATTRIBUTION bought -------------------------------------
+# `TrainingVerdict.fault` is the field that routes a `broken` stage to a REPAIR instead of a
+# terminal (`engine/train_monitor.py::should_monitor_repair`, whose load-bearing conjunct is
+# `fault == "implementation"`), and until 2026-09-08 nothing measured it. The reason is not that the
+# field was unreadable — `extract_run` has recorded `recorded.fault` from the first version, and it
+# is absent from 449 of the 450 rows only because the field postdates almost every preserved run (the
+# 450th says `environment`; see "What the label does NOT support") — it is that the label above
+# CANNOT grade it. `wasted`/`productive` asks whether the compute the
+# stage was spending bought a number; `fault` asks whether the thing to fix was the CODE, and the
+# only fact that answers it is what the REPAIR the attribution bought then did.
+#
+# So this is a second, INDEPENDENT vocabulary rather than two more members of `LABELS`. Merging them
+# would put a label no confusion matrix consumes into the set `score.py` slices on, and would make
+# `by_label` a mix of two questions; the two are also decided from different facts (a stage status
+# and a node metric, against a `node_repaired` row and the terminal AFTER it).
+#
+#   `repaired`    a repair followed the decision and the node then produced a usable metric — the
+#                 attribution named something that was in fact fixable, which is the strongest thing
+#                 an outcome can say about it.
+#   `unrepaired`  a repair followed and the node still produced nothing usable. NOT "the attribution
+#                 was wrong": a correct `implementation` verdict can be followed by a repair that
+#                 failed. It is the cost side, and it is the number the repair-stop's own price is
+#                 read off.
+#   `unknown`     no fault was recorded, the fault was not one that routes to a repair
+#                 (`hypothesis`/`environment` are RECORDED, never repaired), no repair followed, or
+#                 the node never reached an eval terminal at all.
+#
+# WHAT THIS STILL DOES NOT BUY, said out loud because the label existing is not the measurement: no
+# preserved run reaches the branch (it needs `train_monitor_kill` on, a `broken` at or above the
+# confidence bar confirmed twice, and `fault="implementation"`), so every row in the committed corpus
+# labels `unknown` — 449 `no_fault_recorded` and one `fault_not_routed:environment`, which
+# `tests/test_judge_bench.py` pins exactly. The corpus repairs itself the moment a run records a
+# routed one — extractor and label both — which is what this closes.
+LABEL_REPAIRED = "repaired"
+LABEL_UNREPAIRED = "unrepaired"
+FAULT_LABELS = (LABEL_REPAIRED, LABEL_UNREPAIRED, LABEL_UNKNOWN)
+
+# The one `fault` value that ROUTES. A copy of `should_monitor_repair`'s conjunct, on `VERDICTS`'
+# own argument: a bench that moves when production moves cannot detect that it moved, and
+# `tests/test_judge_bench.py` asserts the two still agree.
+FAULT_ROUTED_TO_REPAIR = "implementation"
 
 # The verdict vocabulary, mirrored from `engine/train_monitor.py::TrainingVerdict.status`. A copy
 # rather than an import because a bench that moves when the production Literal moves cannot detect
@@ -431,6 +492,97 @@ def _label(stage: Optional[str], attempt: Optional[dict], outcome: Optional[dict
             "label_basis": "stage_ok_node_failed_elsewhere:%s" % (outcome.get("reason") or "?")}
 
 
+def _node_repairs(events_path: Path) -> dict:
+    """node_id -> [ts of every `node_repaired` row], oldest first.
+
+    The OTHER join this file needs and the only one the primary label never did: a repair is not a
+    stage and not a terminal, so it appears in neither `_stage_attempts` nor `_node_outcomes`. Read
+    as its own pass over the log rather than threaded through those, because the two questions are
+    independent and a reader of either should not have to know about the other.
+    """
+    out: dict = {}
+    for row in _iter_jsonl(events_path):
+        if row.get("type") != "node_repaired":
+            continue
+        data = row.get("data") or {}
+        out.setdefault(data.get("node_id"), []).append(float(row.get("ts") or 0.0))
+    for stamps in out.values():
+        stamps.sort()
+    return out
+
+
+def _fault_label(fault, repairs_after: int, outcome: Optional[dict]) -> dict:
+    """What the `fault` attribution BOUGHT, and the basis it rests on. See `FAULT_LABELS`.
+
+    Pure, total and derived from facts the judge did not author: a count of `node_repaired` rows
+    written after the decision, and the node's own terminal. Every non-answer is its own basis
+    rather than a shared `unknown`, because the four ways this is undecidable are four different
+    facts and a bench that collapses them cannot say why its coverage is what it is.
+    """
+    fault = str(fault or "").strip().lower()
+    # `unknown` IS the schema default and means nobody attributed anything, so it is folded into the
+    # absent case here rather than kept as a value: `fault: None` is this rule's ONE spelling of "no
+    # attribution", and `extract_run` reads exactly that field to decide whether the row carries
+    # fault keys at all. The raw verdict value is untouched beside it in `recorded.fault`.
+    attributed = fault not in ("", "unknown")
+    base = {"fault": fault if attributed else None,
+            "repairs_after_decision": int(repairs_after)}
+    if not attributed:
+        return {**base, "fault_label": LABEL_UNKNOWN, "fault_label_basis": "no_fault_recorded"}
+    if fault != FAULT_ROUTED_TO_REPAIR:
+        # `hypothesis` and `environment` are RECORDED and never repaired, so there is no repair
+        # outcome to grade them by. Not a gap in this rule — a property of the branch it measures.
+        return {**base, "fault_label": LABEL_UNKNOWN,
+                "fault_label_basis": "fault_not_routed:%s" % fault}
+    if repairs_after <= 0:
+        # The attribution was made and no repair followed it: the gate was off, the confidence bar
+        # or the confirm streak was not met, or the stage finished before the stop could land.
+        return {**base, "fault_label": LABEL_UNKNOWN,
+                "fault_label_basis": "no_repair_after_decision"}
+    if outcome is None:
+        return {**base, "fault_label": LABEL_UNKNOWN, "fault_label_basis": "no_node_terminal"}
+    if outcome.get("terminal") == "node_evaluated":
+        degenerate = outcome.get("degenerate")
+        if degenerate is None:
+            return {**base, "fault_label": LABEL_UNKNOWN,
+                    "fault_label_basis": "metric_undecidable"}
+        # THE SAME degenerate rule as the primary label, deliberately: a repair that ends in a node
+        # scoring 2e-05 against a 0.79 best did not fix anything, and calling that `repaired`
+        # because a terminal exists would grade the mechanism on whether it ran rather than on what
+        # it bought.
+        return {**base, "fault_label": LABEL_UNREPAIRED if degenerate else LABEL_REPAIRED,
+                "fault_label_basis": ("node_metric_degenerate" if degenerate
+                                      else "node_metric_usable")}
+    if outcome.get("never_evaluated") or outcome.get("reason") in NON_EVAL_FAILURE_REASONS:
+        return {**base, "fault_label": LABEL_UNKNOWN, "fault_label_basis": "node_never_evaluated"}
+    return {**base, "fault_label": LABEL_UNREPAIRED,
+            "fault_label_basis": "node_failed_after_repair:%s" % (outcome.get("reason") or "?")}
+
+
+def rederive_fault_label(row: dict) -> dict:
+    """Recompute a row's fault label from the row's OWN stored facts, through the production rule.
+
+    `rederive_label`'s sibling and its guarantee: the committed dataset is derived and must never be
+    hand-edited, so every stored label is recomputable offline with no `runs/` present. A row that
+    carries no fault keys at all — which today is every row in the corpus, because the field
+    postdates every preserved run — rederives to the same `unknown`/`no_fault_recorded` the rule
+    answers for an absent fault, so the check is total over the file rather than over a subset.
+    """
+    label = row.get("label") or {}
+    context = row.get("context") or {}
+    terminal = label.get("node_terminal")
+    outcome = None if terminal is None else {
+        "terminal": terminal,
+        "metric": label.get("node_metric"),
+        "reason": label.get("node_reason"),
+        "never_evaluated": label.get("node_never_evaluated"),
+        "degenerate": _is_degenerate(label.get("node_metric"), label.get("run_best_metric"),
+                                     str(context.get("direction") or "max")),
+    }
+    return _fault_label((row.get("recorded") or {}).get("fault"),
+                        int(label.get("repairs_after_decision") or 0), outcome)
+
+
 def rederive_label(row: dict) -> dict:
     """Recompute a row's label from the row's OWN stored facts, through the production rule.
 
@@ -480,6 +632,7 @@ def extract_run(run_dir) -> list:
 
     attempts = _stage_attempts(events_path)
     outcomes = _node_outcomes(events_path, direction)
+    repairs = _node_repairs(events_path)
 
     rows = []
     for (phase_span, node_id), spans in groups.items():
@@ -498,6 +651,13 @@ def extract_run(run_dir) -> list:
         attempt = next((smap for end, smap in attempts.get(node_id, []) if started <= end), None)
         outcome = outcomes.get(node_id)
         label = _label(stage["stage"], attempt, outcome)
+        # ...and the SECOND label, over the same node and the same terminal but a different fact:
+        # what the verdict's `fault` attribution bought. Only repairs written AFTER this decision
+        # count -- a node's earlier repair chain is not something this verdict caused.
+        fault_label = _fault_label(
+            verdict.get("fault"),
+            len([ts for ts in repairs.get(node_id, []) if ts >= started]),
+            outcome)
         tool_names = sorted({c.get("name") for s in spans
                              for c in ((s.get("attributes") or {}).get("tool_calls") or [])
                              if isinstance(c, dict) and c.get("name")})
@@ -544,6 +704,19 @@ def extract_run(run_dir) -> list:
             # makes a hand-edited label a red test on a machine that has no `runs/` at all.
             "label": {
                 **label,
+                # STORED ONLY WHERE THE ROW COULD NOT OTHERWISE BE REGRADED, which is the branch
+                # that consults `repairs_after_decision` -- i.e. an attribution that ROUTES to a
+                # repair. Everything else this rule answers is a function of facts the row already
+                # carries (`recorded.fault` and the terminal), so `rederive_fault_label` reproduces
+                # it offline with no key at all, and today NO row in the committed corpus reaches
+                # the routed branch.
+                #
+                # It is a gate and not "always write the keys" because the artefact is COMMITTED and
+                # derived: the regeneration guard in `tests/test_judge_bench.py` rebuilds it and
+                # compares byte for byte on the one box that has the source corpus, so a column
+                # added for rows whose answer is already recoverable would invalidate the committed
+                # file to record nothing.
+                **(fault_label if fault_label.get("fault") == FAULT_ROUTED_TO_REPAIR else {}),
                 "node_terminal": (outcome or {}).get("terminal"),
                 "node_metric": (outcome or {}).get("metric"),
                 "node_reason": (outcome or {}).get("reason"),

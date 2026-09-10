@@ -7,7 +7,8 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, history_page, project_comments)
-from looplab.serve.http import comment_cursor_error, comment_filter_invalid
+from looplab.serve.http import (
+    comment_cursor_error, comment_filter_invalid, generation_conflict)
 from looplab.serve.run_commands import run_generation_token
 
 
@@ -46,11 +47,12 @@ def _assert_still_current(srv, rd, generation: str) -> None:
     locks in both rejections, so weakening either one fails loudly instead of silently mixing pages.
     """
     if srv.commands.run_generation(rd) != generation:
-        raise HTTPException(409, {
-            "code": "run_generation_changed",
-            "message": "the run was reset while comments were being projected",
-            "remediation": "refresh comments for the replacement run generation",
-        })
+        # No `expected`/`current`: this surface fences on the generation it PROJECTED against and
+        # never publishes one to CAS on, so naming a null pair would offer the client a token it
+        # cannot use. Omitted, not sent as null — see `http.py::generation_conflict`.
+        raise generation_conflict(
+            "the run was reset while comments were being projected",
+            remediation="refresh comments for the replacement run generation")
 
 
 def build_router(srv) -> APIRouter:
