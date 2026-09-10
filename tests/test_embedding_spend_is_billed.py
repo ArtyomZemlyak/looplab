@@ -211,3 +211,49 @@ def test_billing_never_breaks_an_embed():
 
     embedder.accountant = _Exploding()
     assert embedder.embed("hello") == [1.0, 0.0, 0.0, 0.0]
+
+
+def test_the_embedder_stops_at_the_run_ceiling_instead_of_billing_past_it():
+    """The spend stop is not telemetry, and `_bill` used to treat it as telemetry.
+
+    `accountant.add` is WHERE `BudgetExceeded` is raised, and `_bill` wrapped it in a blind
+    `except Exception: pass` whose comment said telemetry must never break an embed. True of a
+    malformed usage payload; false of the ceiling. Driven on the shipped code before the fix:
+    twenty $0.25 embeds against a $1.00 limit committed $5.00 and raised nothing — a 400 %
+    overshoot on a call the knowledge index repeats for the life of the run.
+
+    Both halves are asserted here, because the containment this replaces was real: the ceiling must
+    propagate, AND a junk payload must still not break an embed.
+    """
+    from looplab.core.llm import BudgetExceeded, CostAccountant
+    from looplab.tools.vectorstore import LLMEmbedder
+
+    accountant = CostAccountant(limit=1.0)
+    embedder = LLMEmbedder.__new__(LLMEmbedder)
+    embedder.accountant = accountant
+
+    def bill_one():
+        LLMEmbedder._bill(embedder, {"usage": {"prompt_tokens": 1000, "total_tokens": 1000,
+                                               "cost": 0.25}})
+
+    # The ceiling fires when spend REACHES the limit, not when it passes it — the refusal says
+    # "$1.0000 of the $1.0000" — so three quarter-dollar calls fit and the fourth is the one that
+    # must speak. Written from the observed refusal rather than from what I first assumed.
+    for _ in range(3):
+        bill_one()
+    with pytest.raises(BudgetExceeded):
+        bill_one()
+
+    # …and the containment that was there for a reason is still there. A FRESH accountant, because
+    # the one above is now AT its ceiling and would refuse these too — which is correct behaviour
+    # and would make this half assert nothing about containment.
+    embedder.accountant = CostAccountant(limit=1.0)
+    LLMEmbedder._bill(embedder, {"usage": "not a dict"})
+    LLMEmbedder._bill(embedder, "not a body")
+
+    class _Broken:
+        def add(self, *_a, **_k):
+            raise RuntimeError("the accountant itself is broken")
+
+    embedder.accountant = _Broken()
+    LLMEmbedder._bill(embedder, {"usage": {"total_tokens": 1}})   # must not raise

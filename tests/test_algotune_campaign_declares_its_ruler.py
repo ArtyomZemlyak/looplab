@@ -212,3 +212,60 @@ def test_without_the_declaration_the_guard_is_dead(tmp_path):
     row = _bridge_row(tmp_path, cache, {})
     assert (row.get("no_speedup") or {}).get("reason") != "baseline_regime_mismatch", (
         "the pre-fix environment already refused; the falsifier above proves nothing", row)
+
+
+# ------------------------------------------------------------------------------------------------
+# an INHERITED width is named before it is honoured (docs/63 §8, resolved 2026-09-08)
+# ------------------------------------------------------------------------------------------------
+def _declare_output(repo: Path, at: Path, **overrides: str) -> str:
+    """The lines `declare_baseline_ruler` prints, as an operator would read them in the log."""
+    script = (_harness() + f'REPO={repo!s}\nAT={at!s}\ndeclare_baseline_ruler\n')
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("ALGOTUNE_BASELINE", "ALGOTUNE_EVAL"))}
+    env.update(overrides)
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=120,
+                         env=env)
+    assert out.returncode == 0, out.stdout + out.stderr
+    return out.stdout
+
+
+def test_an_inherited_width_above_one_is_named_and_still_honoured(tmp_path):
+    """THE REMEDY docs/63 §8 PRESCRIBED. `${VAR:-auto}` is a default, not a pin, and `set -a; . .env;
+    set +a` two hundred lines up is a live channel — so a width nobody chose for this campaign can
+    arrive silently, and the width IS the instrument: an inherited 2 keys `__w2x1r3`, a cache this
+    box has never written, so the reference is re-measured in the same pass and the evaluator
+    reports it against ITSELF at ~1.0. It is honoured (a side experiment may mean it) and it is
+    SAID, which is the same treatment `ALGOTUNE_EVAL_CORES_PER_WORKER` already gets."""
+    at = _patched_checkout(tmp_path, str(tmp_path / "t"))
+    printed = _declare_output(tmp_path / "repo", at, ALGOTUNE_EVAL_WORKERS="2")
+    assert "ALGOTUNE_EVAL_WORKERS=2 was INHERITED" in printed, printed
+    assert _declare(tmp_path / "repo", at,
+                    ALGOTUNE_EVAL_WORKERS="2")["ALGOTUNE_EVAL_WORKERS"] == "2"
+
+
+def test_the_campaigns_own_ruler_and_a_deliberate_serial_one_say_nothing(tmp_path):
+    """The falsifier for a notice that fires on everything: `auto` is this campaign's own
+    declaration (already in the banner) and `1` is the serial ruler docs/62 §10 mandates. Neither
+    arrived by accident, so neither is news."""
+    at = _patched_checkout(tmp_path, str(tmp_path / "t"))
+    assert "INHERITED" not in _declare_output(tmp_path / "repo", at)
+    assert "INHERITED" not in _declare_output(tmp_path / "repo", at, ALGOTUNE_EVAL_WORKERS="1")
+    assert "INHERITED" not in _declare_output(tmp_path / "repo", at,
+                                              ALGOTUNE_EVAL_WORKERS="auto")
+
+
+def test_the_regime_note_says_that_unset_is_no_longer_serial(tmp_path):
+    """The doc contradiction docs/63 §8 carried, closed at the source of truth: docs/62 §10 says
+    "leave it unset" reaches the serial ruler and `declare_baseline_ruler` defaults it to `auto`,
+    so the two could not both be true. The banner is what an operator actually reads, and it now
+    names the spelling that gets the mandated ruler — and cites the section that measures it."""
+    source = CAMPAIGN.read_text(encoding="utf-8")
+    block = source[source.index("AND SAY WHICH INSTRUMENT THAT IS"):]
+    block = block[:block.index("\nesac")]
+    # What the OPERATOR reads — the echoed lines, not the comment above them (which is allowed to
+    # say what the wrong pointer was, and is the only place in this file that may).
+    spoken = "\n".join(line for line in block.splitlines() if not line.strip().startswith("#"))
+    assert "docs/62 s10" in spoken and "docs/51" not in spoken, (
+        "the ~75 % measurement lives in docs/62 §10; docs/51 §10 is 'What must not change'")
+    assert "UNSET no longer gets you it" in spoken
+    assert "Set ALGOTUNE_EVAL_WORKERS=1" in spoken

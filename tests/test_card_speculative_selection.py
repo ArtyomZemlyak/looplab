@@ -883,3 +883,155 @@ def test_asha_reserves_non_spec_pending_promotion_action_without_excluded_card_i
         12,
         context=SpeculativeSelectionContext(ignored_pending_node_ids={4}),
     ) == ["sibling-b"]
+
+
+def test_the_masked_seed_lane_keeps_the_key_every_draft_shares():
+    """The raw lane may reserve the BOARD's expansions and not the Card-derived ones (2026-09-08).
+
+    `_action_key` gives every draft the same key, `("draft", ())`, because a draft names no parent.
+    So a masked pending SEED whose Card carries a draft action reserves the one key the forced seed
+    prefix's own raw actions carry, and filtering the raw lane on the Card-derived reservations
+    empties the lane that bootstraps a run — measured here as `[]` instead of the two drafts this
+    board is still missing, and at Tier 1 as `test_occupancy_pace_under_asha.py::
+    test_a_running_asha_root_no_longer_holds_the_whole_board_dark` going red.
+    """
+    state = RunState(
+        nodes={0: _node(0, operator="draft", status=NodeStatus.pending, metric=None,
+                        card_id="seed-0")},
+        cards={"seed-0": _owned(
+            _ready_card("seed-0", operator="draft", parents=(), best=None), 0)},
+    )
+    policy = ASHAPolicy(n_seeds=3, max_nodes=12, eta=2, debug_depth=0)
+
+    assert speculative_raw_actions(
+        state,
+        policy,
+        12,
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={0}),
+    ) == [{"kind": "draft"}, {"kind": "draft"}]
+
+
+def test_asha_reserves_a_masked_promotion_read_off_the_node_when_no_card_carries_it():
+    """The same reservation when the masked node's CARD cannot supply the key (2026-09-08).
+
+    Identical board to the test above except that node 4 carries no `card_id` at all — the shape
+    `_asha_mask_is_unsound`'s clause 2 used to refuse the WHOLE query over, because the reservation
+    was derived from the masked node's Card and there was no Card to derive it from. It is now read
+    off `parent_ids` on the folded node, which is the identity ASHA expands over, so the duplicate
+    is dropped and the sibling the query never endangered is still answered.
+    """
+    nodes = {node_id: _node(node_id, metric=1.0 - node_id / 10) for node_id in range(4)}
+    nodes[4] = _node(
+        4,
+        parents=(0,),
+        operator="improve",
+        status=NodeStatus.pending,
+        metric=None,
+        card_id=None,
+    )
+    state = RunState(
+        direction="max",
+        nodes=nodes,
+        best_node_id=0,
+        cards={
+            "duplicate-a": _ready_card("duplicate-a", parents=(0,)),
+            "sibling-b": _ready_card("sibling-b", parents=(1,)),
+        },
+    )
+    policy = ASHAPolicy(n_seeds=4, max_nodes=12, eta=2, debug_depth=0)
+
+    assert speculative_card_selection_set(
+        state,
+        policy,
+        12,
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={4}),
+    ) == ["sibling-b"]
+
+
+# ------------------------------------------------------------------ doc 25 SE-04, the second half
+#
+# `eligible_cards(selection_state, policy)` was spelled out twice inside one `_speculative_selection`
+# pass — once to validate a forced lane, once to build the discretionary candidates — with the same
+# three admissibility clauses copied beside each call. The finding records that the two never both
+# execute, so the cost was never the work: it was that a clause added to one copy and not the other
+# is a lane admitting exactly what its sibling refuses, with nothing anywhere to say so. Both now
+# ask `_admissible_cards`, and these two tests are the rule's truth table and the routing.
+
+def _fenced_stale_card() -> tuple[RunState, Card]:
+    """A Card whose parent generation no longer describes the live node — the fence clause's input."""
+    stale = _ready_card("stale", parents=(0,))
+    state = RunState(
+        nodes={0: _node(0, metric=0.9, attempt=3)},
+        best_node_id=0,
+        cards={"stale": stale},
+    )
+    return state, stale
+
+
+@pytest.mark.parametrize("clause", ["excluded", "generation", "envelope"])
+def test_one_admissibility_rule_answers_for_both_speculative_lanes(clause):
+    """Each clause refuses on its own, through the ONE derivation both lanes now read.
+
+    Driven per clause rather than as one board, because "the set came back empty" is satisfied by a
+    predicate that refuses everything: each case asserts the admissible answer for the SAME card
+    when its own clause is not tripped.
+    """
+    from looplab.search.card_selection import _admissible_cards
+
+    policy = GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0)
+    if clause == "generation":
+        state, card = _fenced_stale_card()
+        assert _admissible_cards(state, policy, frozenset(), None) == []
+        current = RunState(nodes={0: _node(0, metric=0.9)}, best_node_id=0,
+                           cards={"stale": card})
+        assert [c.id for c in _admissible_cards(current, policy, frozenset(), None)] == ["stale"]
+        return
+
+    state = RunState(
+        nodes={0: _node(0, metric=0.9)},
+        best_node_id=0,
+        cards={"wide": _ready_card("wide", footprint={"gpus": 2, "gpu_mem_mib": 32_000})},
+    )
+    assert [c.id for c in _admissible_cards(state, policy, frozenset(), None)] == ["wide"]
+    if clause == "excluded":
+        assert _admissible_cards(state, policy, frozenset({"wide"}), None) == []
+    else:
+        # A box with no GPU at all against a Card that declares two: the envelope clause's one
+        # unambiguous refusal. A NARROWER pool is deliberately not one — Layer 4 admits the clamped
+        # request, so an over-declaration is not a permanent miss (`card_fits_resource_envelope`).
+        assert _admissible_cards(
+            state, policy, frozenset(), CardResourceEnvelope(gpu_count=0)) == []
+
+
+def test_both_speculative_lanes_route_through_that_one_derivation(monkeypatch):
+    """The routing, driven: an admissibility answer of `[]` must reach BOTH lanes.
+
+    A lane that kept its own copy of the three clauses would be untouched by this substitution and
+    would still answer — which is exactly the drift the hoist exists to make impossible. The counts
+    pin the other half of the finding: one derivation per pass, not one per lane consulted.
+    """
+    from looplab.search import card_selection
+
+    calls: list[int] = []
+    monkeypatch.setattr(card_selection, "_admissible_cards",
+                        lambda *args, **kwargs: calls.append(1) or [])
+
+    # The discretionary lane: past its seed, a ready improve Card, nothing forced.
+    discretionary = RunState(
+        nodes={0: _node(0, metric=0.9)},
+        best_node_id=0,
+        cards={"next": _ready_card("next")},
+    )
+    policy = GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0)
+    assert speculative_card_selection_set(discretionary, policy, 8) == []
+    assert len(calls) == 1, f"one pass derived the admissible set {len(calls)} times"
+
+    # The forced lane: a staged seed receipt the prefix wants to consume. With nothing admissible it
+    # must fail CLOSED rather than hand back a Card the session may not act on.
+    calls.clear()
+    forced = RunState(cards={
+        "seed-a": _ready_card("seed-a", operator="draft", parents=(), best=None),
+    })
+    assert speculative_card_selection_set(
+        forced, GreedyTree(n_seeds=1, max_nodes=2, debug_depth=0), 2) == []
+    assert len(calls) == 1, f"one pass derived the admissible set {len(calls)} times"

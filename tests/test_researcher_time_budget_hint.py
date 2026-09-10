@@ -29,8 +29,8 @@ import pytest
 
 import looplab.engine.orchestrator as _orch
 from looplab.adapters.toytask import ToyTask
-from looplab.agents.roles import (RESEARCHER_HINT_ATTRS, RESEARCHER_PROMPT_CUES, LLMResearcher,
-                                  ToyObjectiveDeveloper, ToyResearcher)
+from looplab.agents.roles import (RESEARCHER_HINT_ATTRS, RESEARCHER_PROMPT_CUES, LLMResearcher)
+from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.models import Idea, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.engine.shared import effective_eval_time_budget
