@@ -973,6 +973,32 @@ MIN_PROBES_FOR_A_BAND = 2
 MIN_PROBES_TO_PIN = min(n for _lo, _hi, n in TEST_TRAIN_BANDS.values())
 
 
+def band_exposure(by_task: dict) -> list:
+    """`[(task, judged, pinned_n)]` -- how many probes each pinned band has actually JUDGED.
+
+    §400. §330's rule is written into this file: a band derived from the probes it judges cannot be
+    failed by them, so each band records the `n` it was pinned at. What the line never said is how
+    many probes have arrived SINCE. Measured 2026-09-10:
+
+        discrete_log   pinned at 11, 13 now -> 2 judged
+        pde_heat1d     pinned at 10, 12 now -> 2 judged
+        edge_expansion pinned at 118, 118 now -> 0 judged
+        pagerank       pinned at 10, 10 now -> 0 judged
+
+    Two of the four bands still rest entirely on the probes they were derived from. That is not a
+    defect in the band -- it is the state of the evidence, and a reader who sees "n=118" takes it
+    for 118 probes' worth of testing when it is 118 probes' worth of DERIVING and none of testing.
+    The number that says which is the difference between the two.
+    """
+    out = []
+    for task, ratios in sorted(by_task.items()):
+        band = TEST_TRAIN_BANDS.get(task)
+        if band is None:
+            continue
+        out.append((task, len(ratios) - band[2], band[2]))
+    return out
+
+
 def check_test_tracks_train(bench: str):
     """"тест против train" -- point 9 asks for the pair per probe; this is what the pair DOES.
 
@@ -1043,6 +1069,17 @@ def check_test_tracks_train(bench: str):
         if not lo <= test / best <= hi:
             loud.append(f"{probe} on {task} x{test / best:.3f} outside {lo:.3f}-{hi:.3f}")
     detail = "; ".join(said)
+    # AND HOW MANY EACH BAND HAS JUDGED (§400): pinned-at-n is what it was DERIVED from, and a band
+    # that has judged nothing since cannot have been failed by anything.
+    exposure = band_exposure(by_task)
+    untested = [f"{task} (pinned at {n}, judged 0 since)" for task, judged, n in exposure
+                if judged <= 0]
+    tested = [f"{task} +{judged}" for task, judged, _n in exposure if judged > 0]
+    if tested:
+        detail += "; judged since pinning: " + ", ".join(tested)
+    if untested:
+        detail += ("; STILL RESTING ON ITS OWN DATA: " + ", ".join(untested)
+                   + " -- a band no later probe has met cannot have been failed by one")
     if loud:
         detail += "; OUTSIDE the pinned band: " + ", ".join(sorted(loud))
     if unpinned:
