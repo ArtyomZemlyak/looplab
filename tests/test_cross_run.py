@@ -221,6 +221,7 @@ def test_production_lessons_reach_a_bound_reader(tmp_path):
     hand-built test fixtures (which manufacture the field) passed. This pins the two ends together.
     """
     from looplab.engine.lessons_distill import LessonDistillMixin
+    from looplab.engine.lessons_reconcile import LessonReconcileMixin
     from looplab.trust.cross_run import same_live_direction
 
     class _Task:
@@ -232,11 +233,16 @@ def test_production_lessons_reach_a_bound_reader(tmp_path):
         def _reflect_client(self):
             return None          # offline -> the `_winner_lesson` safety net writes the row
 
-    class _Writer(LessonDistillMixin):
+    # Composed the way `lessons.py::LessonMemory` composes them, rather than stubbing the two
+    # per-evidence stampers `LessonDistillMixin` calls on its sibling (`_evidence_sig_map` and
+    # `_evidence_operators`). A stub of a sibling mixin is a snapshot of what that sibling offered
+    # on the day the stub was written: `_evidence_sig_map` was stubbed to `{}` here, and when
+    # `_evidence_operators` joined the same call path (doc 52 §4.3, the operator scope stamped on
+    # every distilled row) this fixture failed with an AttributeError that says nothing about the
+    # polarity contract it exists to pin. Both methods are self-contained reads of the folded state
+    # this test already has, so inheriting them costs nothing and tracks the writer as it grows.
+    class _Writer(LessonDistillMixin, LessonReconcileMixin):
         _e = _E()
-
-        def _evidence_sig_map(self, final, ids):
-            return {}
 
     rd = tmp_path / "runA"
     final = anyio.run(_engine(rd).run)

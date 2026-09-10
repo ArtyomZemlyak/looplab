@@ -124,9 +124,13 @@ def check(reference: Path, solver: Path, n: int, size: int, seed: int, timeout: 
     """
     # A MISSING `Solver` IS A FILE-LEVEL FACT, reported ONCE. Asked per-instance it would come back
     # as n identical rows, which reads like n failures. Checked in the parent, before any fork.
-    # OPEN[solver-check-requires-a-literal-class-statement] a valid solver that BINDS `Solver`
-    # (import or assignment) is refused by this regex while the arena's loader accepts it.
-    # proof:present:search(r"^\s*class@benchmarks/algotune/looplab_check.py
+    # THE ONE DEPARTURE FROM VERBATIM (2026-09-08): the `OPEN[...]` marker and its `proof:` line
+    # that stood here were deleted when the LIVE checker's gate was fixed. Nothing else changed --
+    # this file is still `103c4b1e^`'s gate, regex and all, which is the whole point of the arm that
+    # runs it. The deletion is forced by the index's own frozen-manifest guard, which refuses a
+    # frozen file declaring a slug no file it reads declares, and a frozen copy cannot carry an
+    # opt-out without ceasing to be verbatim. See `FROZEN_COPIES.txt`, which is where anything that
+    # scans this tree for markers has to be told about this file from the outside.
     # REVIEW 2026-08-30 (correctness): the arena resolves the module ATTRIBUTE — as
     # `_run_isolated`'s own `getattr(solver_mod, "Solver", None)` does one function up — so
     # `from impl import Solver` or `Solver = make_solver()` scores fine and this checker tells the

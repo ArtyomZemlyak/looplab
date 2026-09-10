@@ -516,22 +516,30 @@ _COUNTS_RE = re.compile(r"(?P<valid>\d+)/(?P<total>\d+) valid \((?P<pct>[\d.]+)%
 # noise, while ERROR/CRITICAL is where a task's `is_solution` states its rejection.
 _WORKER_ERROR_RE = re.compile(r"^(?:ERROR|CRITICAL):(?P<logger>[\w.]*):(?P<msg>\S.*)$")
 
-_MAX_IS_SOLUTION_EXAMPLES = 3      # what arm A's own agent is shown (message_writer.py:744)
 _MAX_IS_SOLUTION_CHARS = 400       # one rejection line, not a pasted traceback
-# THE COST OF RANKING BY FREQUENCY, measured on the real verification run (2026-08-22, node_2 of
-# `runs-armb/spectral_clustering`): a HARNESS-internal error can outnumber every task rejection and
-# take the top slot. That run logged
+# THE COST OF RANKING BY FREQUENCY INTO THREE SLOTS, measured on the real verification run
+# (2026-08-22, node_2 of `runs-armb/spectral_clustering`): a HARNESS-internal error can outnumber
+# every task rejection and take the top slot. That run logged
 # `get_fresh_solve_callable_with_module_reload: Class 'Solver' not found in solver module` exactly
 # 100 times — once per instance, out of `isolated_benchmark.py`'s daemonic in-process fallback while
 # the REFERENCE was being timed — against 8 + 5 + 4 for the three real `is_solution` rejections, so
-# 4 distinct kinds went into 3 slots and one real rejection was dropped.
+# 4 distinct kinds went into 3 slots and one real rejection was DROPPED. The dropped one is the
+# cheapest sentence a proposer could have been handed, and it was dropped by an arithmetic accident.
 #
-# The cap is still 3, deliberately. That line is NOT noise in general: on a candidate that really
-# ships no `Solver` class it is THE diagnosis, and no rule this side of the boundary can tell "the
-# harness could not load a class" from "the task rejected the answer" — both arrive as one
-# `logging.error` string through the same accidental channel. `is_solution_errors_distinct` is what
-# keeps the omission visible (4 shown as 3), and raising the cap is a one-constant change the
-# operator can make on evidence rather than a guess made here.
+# WHY THE FIX IS NOT A DISCRIMINATOR AND NOT A BIGGER N. That line is not noise in general: on a
+# candidate that really ships no `Solver` class it is THE diagnosis, and no rule this side of the
+# boundary can tell "the harness could not load a class" from "the task rejected the answer" —
+# both arrive as one `logging.error` string through the same accidental channel (`_WORKER_ERROR_RE`
+# sees `ERROR:root:` for both; measured over the recorded run, all 17 lines carry that same
+# logger). And an example COUNT is the wrong unit for the thing the cap protects: what may not blow
+# up is the JSON LINE, which `runtime/sandbox.py` puts in the node's score.log, so three
+# 400-character rejections and thirty 40-character ones cost the same either way.
+#
+# So the cap is a CHARACTER BUDGET over the distinct kinds, most frequent first. Every kind fits
+# until the budget is spent — 4 kinds are 4 rows, and the 100-distinct case `remPde4` produced
+# ("max abs err=0.131, max rel err=1.39e+06" and friends) is cut by SIZE with the number omitted
+# stated beside it, which is a fact about this line rather than about the run.
+_IS_SOLUTION_ERRORS_BUDGET_CHARS = 1600
 
 
 # THE ONE THING ON THIS LINE THAT IS NOT SCRAPED. `is_solution_errors` above are a windfall off an
@@ -606,9 +614,14 @@ def _verdict_from_stderr(stderr: str, task: str) -> str:
 def _is_solution_errors(stderr: str) -> tuple[list[dict], int, int]:
     """The distinct `ERROR:` lines the evaluator's workers logged, most frequent first.
 
-    Returns `(top rows, total lines, distinct count)`. Deduplicated by message and COUNTED, because
-    the same rejection fires on many instances and three copies of one string is not three findings.
+    Returns `(rows, total lines, distinct count)`. Deduplicated by message and COUNTED, because the
+    same rejection fires on many instances and three copies of one string is not three findings.
     Frequency order, ties broken by first appearance, so the answer is deterministic for a fixture.
+
+    EVERY DISTINCT KIND IS REPORTED UNTIL THE CHARACTER BUDGET IS SPENT, which is what stops the
+    frequency ranking from dropping a real rejection behind a harness-internal one (see
+    `_IS_SOLUTION_ERRORS_BUDGET_CHARS` for the run that measured it). The order still matters — a
+    cut by size cuts the RAREST kinds — but four kinds no longer contend for three slots.
 
     These are NOT per-instance and they are NOT a count of invalid instances — the recorded run has
     6 invalid instances and 17 of these lines. `instances_invalid` is the count; this is the reason.
@@ -623,8 +636,17 @@ def _is_solution_errors(stderr: str) -> tuple[list[dict], int, int]:
         message = match.group("msg").strip()[:_MAX_IS_SOLUTION_CHARS]
         counts[message] = counts.get(message, 0) + 1
     order = list(counts)
-    top = sorted(order, key=lambda m: (-counts[m], order.index(m)))[:_MAX_IS_SOLUTION_EXAMPLES]
-    return [{"message": m, "count": counts[m]} for m in top], total, len(counts)
+    rows: list[dict] = []
+    spent = 0
+    for message in sorted(order, key=lambda m: (-counts[m], order.index(m))):
+        # The FIRST kind is admitted whatever it costs: a single 400-char rejection is still the
+        # whole answer on a task whose `is_solution` logs one long sentence, and an empty list here
+        # reads as "the task said nothing", which is a different fact.
+        if rows and spent + len(message) > _IS_SOLUTION_ERRORS_BUDGET_CHARS:
+            break
+        rows.append({"message": message, "count": counts[message]})
+        spent += len(message)
+    return rows, total, len(counts)
 
 
 _FAILURE_SHAPE_KEYS = ("error_type", "runs", "num_errors", "num_timeouts")
@@ -696,6 +718,10 @@ def _no_speedup(reason: str, *, stderr: str = "", task: str = "",
         out["is_solution_errors"] = rows
         out["is_solution_error_lines"] = lines
         out["is_solution_errors_distinct"] = distinct
+        # STATED, not left to be subtracted. What was cut here was cut by the SIZE of this line and
+        # not by anything about the run, so a reader who needs the rest has to know there is a rest.
+        if distinct > len(rows):
+            out["is_solution_errors_omitted"] = distinct - len(rows)
     # LAST, and only when the checkout actually produced it. This is the one field here that is
     # THEIRS rather than ours: not parsed out of a log line, but read from the record they wrote.
     contexts = _invalid_analysis(analysis)
@@ -1294,13 +1320,12 @@ def main() -> int:
     # under it left site-packages at 358 entries unchanged and the module imported from the target
     # via PYTHONPATH. Per-invocation directory, so two concurrent evaluations cannot shadow each
     # other either.
-    # OPEN[bridge-leaks-a-piptarget-dir-per-eval] this tempdir is created per invocation and never
-    # joins the artefact cleanup, so a campaign leaks one compiled-extension directory per eval
-    # onto the disk the watchdog alarms at 15 GB free.
-    # proof:absent:(_pip_target)@benchmarks/algotune/looplab_eval.py
-    # REVIEW 2026-08-30 (hygiene): `_ARTEFACTS` above is exactly the registry for this (keep-flag
-    # respected, best-effort removal); one append after the mkdtemp closes it.
+    # REGISTERED FOR THE SWEEP: one compiled-extension directory per eval, on the disk the campaign
+    # watchdog alarms at 15 GB free, is a leak a long campaign notices. `_ARTEFACTS` is exactly the
+    # registry for it -- best-effort removal after the JSON line is printed, and kept when
+    # `ALGOTUNE_KEEP_EVAL_ARTEFACTS=1` says a disputed score needs the evidence.
     _pip_target = tempfile.mkdtemp(prefix="looplab-piptarget-")
+    _ARTEFACTS.append(Path(_pip_target))
     env["PIP_TARGET"] = _pip_target
     env["PYTHONPATH"] = os.pathsep.join([_pip_target] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
 
@@ -1334,23 +1359,22 @@ def main() -> int:
     # construction rather than by coincidence of clones. The glob and the reassigned-`subset`
     # closure were fixed 2026-08-25.
     #
-    # ITS COMPANION DID NOT SHIP, and it is its own item now because it was never about which
-    # directory is watched:
-    # OPEN[campaign-cannot-re-score-a-refused-champion-pass] a champion pass this block REFUSES is
-    # recorded as terminal and is never scored again.
-    # proof:absent:RETRY_REFUSED@benchmarks/algotune/campaign.sh
-    # REVIEW 2026-08-30 (correctness): this refusal is the right verdict and costs almost nothing to
-    # repeat -- the champion is already extracted and the reference cache is warm the second time --
-    # but `record_done` writes the marker whatever the scoring pass said, and `already_measured`
-    # re-runs nothing that carries one. `RETRY_WALL_CUT=1` is the shape the answer takes: one flag
-    # that reopens exactly one class of marker, and the environment name in the predicate above is
-    # the one a fix would add. The refusal BRANCH is also executed by no test (see the annotation in
-    # tests/test_algotune_refuses_baseline_measured_in_pass.py).
+    # ITS COMPANION SHIPPED 2026-09-08, and it was never about which directory is watched: a
+    # champion pass this block REFUSES used to be recorded as terminal and never scored again.
+    # `record_done` wrote its marker whatever the scoring pass said and `already_measured` re-runs
+    # nothing that carries one -- while this particular refusal is the one a second pass CLEARS,
+    # because the pass that earned it is the pass that cached the timings. What landed is the shape
+    # `RETRY_WALL_CUT=1` set: `campaign.sh::rescore_refused_champion` under `RETRY_REFUSED=1`,
+    # reopening exactly this class (`RESCORABLE_NO_SPEEDUP_REASONS`) and re-running the SCORING PASS
+    # alone -- the champion is already on disk, so no model is called and no search is repeated.
+    # The refusal branch below is executed end to end by
+    # `tests/test_algotune_refuses_baseline_measured_in_pass.py` against a stub evaluator.
     # ONE KEY, FIXED BEFORE THE RUN, and a glob that matches what the patch really writes.
     #
     # `patch_baseline_cache.py` names a per-instance cache `<task>__<subset>[__<regime>].json`, and
-    # its regime segment is the EMPTY string whenever workers <= 1 — which docs/51 SS10 mandates and
-    # `campaign.sh` never overrides, so on every campaign run to date the file is the bare
+    # its regime segment is the EMPTY string whenever workers <= 1 — which docs/62 §10 mandates and
+    # `campaign.sh` did not override until it began declaring `ALGOTUNE_EVAL_WORKERS=auto`
+    # (`declare_baseline_ruler`), so on every campaign run to THAT date the file was the bare
     # `<task>__<subset>.json`. The old pattern demanded a literal `__` plus a third segment, so it
     # matched NOTHING in the serial regime: both fingerprints were `{}`, compared equal, and the
     # reference-timed-in-pass refusal — the whole point of this block — could not fire on the one

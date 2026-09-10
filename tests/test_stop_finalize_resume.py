@@ -147,7 +147,10 @@ def test_cli_resume_preserves_pending_finalize_after_error_finish(monkeypatch, t
     monkeypatch.setattr(run_cmds, "_load_task", lambda _path, **_k: object())
     monkeypatch.setattr(run_cmds, "_engine", lambda *_args, **_kwargs: fake)
     monkeypatch.setattr(run_cmds, "_engine_singleton", singleton)
-    monkeypatch.setattr(run_cmds, "_run_engine_guarded", lambda eng: fold(eng.store.read_all()))
+    # `**_k` absorbs `mlflow_uri=` (2026-09-08): `resume` now hands the drive the live MLflow
+    # mirror's URI, and a stub that refuses it fails before the property under test runs.
+    monkeypatch.setattr(run_cmds, "_run_engine_guarded",
+                        lambda eng, **_k: fold(eng.store.read_all()))
     monkeypatch.setattr(run_cmds, "_print_result", lambda _state: None)
     run_cmds.resume(rd, task_file=rd / "task.snapshot.json", max_nodes=None)
 
@@ -181,7 +184,10 @@ def test_direct_cli_resume_marks_a_crashed_eval_as_waiting_for_readmission(monke
     monkeypatch.setattr(run_cmds, "_load_task", lambda _path, **_k: object())
     monkeypatch.setattr(run_cmds, "_engine", lambda *_args, **_kwargs: FakeEngine())
     monkeypatch.setattr(run_cmds, "_engine_singleton", singleton)
-    monkeypatch.setattr(run_cmds, "_run_engine_guarded", lambda eng: fold(eng.store.read_all()))
+    # `**_k` absorbs `mlflow_uri=` (2026-09-08): `resume` now hands the drive the live MLflow
+    # mirror's URI, and a stub that refuses it fails before the property under test runs.
+    monkeypatch.setattr(run_cmds, "_run_engine_guarded",
+                        lambda eng, **_k: fold(eng.store.read_all()))
     monkeypatch.setattr(run_cmds, "_print_result", lambda _state: None)
     monkeypatch.setattr(run_cmds, "_exit_nonzero_if_the_run_produced_nothing", lambda *_a, **_k: None)
 
