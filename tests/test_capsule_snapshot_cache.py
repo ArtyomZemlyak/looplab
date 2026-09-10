@@ -27,7 +27,7 @@ def _memory(tmp_path, rows):
 
 def _row(run_id, concepts):
     """A REAL capsule, minted the way the store mints them — a hand-rolled dict is dropped by
-    `_dedup_valid_capsules`, so a fixture that skipped the builder would test an empty portfolio."""
+    `dedup_valid_capsules`, so a fixture that skipped the builder would test an empty portfolio."""
     from looplab.engine.memory import build_concept_capsule
 
     return build_concept_capsule(

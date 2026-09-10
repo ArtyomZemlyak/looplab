@@ -151,8 +151,16 @@ class ConfirmPhaseMixin:
                     await anyio.sleep(1.0)
 
             resource_node = nd
+            # The sibling of the dispatch loop's resource wait, and it gates its re-fold the same
+            # way (doc 25 ES-12): this wait is also unbounded by anything in this process — another
+            # run can hold the host pool for hours — and it also re-checks state that can only
+            # change by an APPEND (a Card re-pin, a pause/stop, a reset/abort/tombstone). The
+            # snapshot stays loop-local; `_fold_if_tail_moved` is the Engine's own gate and folds
+            # through the `orchestrator.fold` module attribute, so the seam is unchanged.
+            waited_fold = None
             while True:
-                resource_state = fold(self.store.read_all())
+                waited_fold = self._fold_if_tail_moved(waited_fold)
+                resource_state = waited_fold[1]
                 live = resource_state.nodes.get(nd.id)
                 if (
                     resource_state.paused
@@ -175,7 +183,9 @@ class ConfirmPhaseMixin:
                 if reservation is None:
                     # The finite resource tick is also the operator-control polling cadence.  Re-fold
                     # before retrying so a GPU->CPU re-pin can progress without any GPU release and a
-                    # pause/stop/abort/reset cannot start an obsolete confirmation subprocess.
+                    # pause/stop/abort/reset cannot start an obsolete confirmation subprocess.  Every
+                    # one of those lands as an append, which is exactly what the tail gate above
+                    # keys on — a quiet tick reuses the snapshot, a control moves the tail.
                     continue
                 admitted = fold(self.store.read_all())
                 current = admitted.nodes.get(nd.id)

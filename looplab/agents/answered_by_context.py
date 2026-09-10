@@ -130,12 +130,11 @@ def _offered(tools) -> frozenset:
     try:
         return frozenset((spec.get("function") or {}).get("name") for spec in getter() or ())
     except Exception:  # noqa: BLE001 - a prompt must never fail on an optional receipt
-        # OPEN[offered-fallback-names-unoffered-tools] on a specs() error the fallback names every
-        # INVENTORIED tool — including ones the failed offer never carried — which is the exact
-        # defect this function's docstring exists to prevent, restored on the error path.
-        # proof:absent:frozenset()@looplab/agents/answered_by_context.py
-        # REVIEW 2026-08-30 (rule-inversion): the module's own "silence costs at most the call"
-        # rule prescribes failing toward the EMPTY frozenset (block suppressed) here; the
-        # no-specs()-at-all branch above is a different case (a bare provider offers everything it
-        # reports) and keeps its behaviour.
-        return frozenset(collect_inventory(tools))
+        # FAILS TOWARD THE EMPTY SET, which suppresses the block entirely. An offer that RAISED
+        # carried nothing we can name, so crediting every INVENTORIED tool here would restore the
+        # exact defect this function exists to prevent -- on the one path where we know least. The
+        # module's own rule decides the direction: silence costs at most the call that would have
+        # happened anyway, a fabricated row costs a call that would have found something. The
+        # no-`specs()`-at-all branch above is a DIFFERENT case (a bare provider offers everything
+        # it reports) and deliberately keeps its behaviour.
+        return frozenset()

@@ -15,9 +15,9 @@ import pytest
 
 from looplab.core.config import Settings
 from looplab.core.errors import BudgetExceeded
-from looplab.core.llm import CostAccountant, OpenAICompatibleClient
+from looplab.core.llm import CostAccountant, OpenAICompatibleClient, run_cost_accountant
 from looplab.core.llm_broker import LLMConcurrencyBroker, llm_broker_scope, llm_lane_scope
-from looplab.core.llm_budget import RunBudget
+from looplab.core.llm_budget import RunBudget, run_usd_ceiling
 from looplab.engine.costs import _payload, bind_cost_accountants, seed_run_budget
 from looplab.engine.options import EngineOptions
 from looplab.events.types import EV_LLM_USAGE
@@ -244,3 +244,105 @@ def test_a_resumed_run_seeds_the_budget_from_the_durable_ledger(tmp_path):
     assert seed_run_budget(second) is False
     with pytest.raises(BudgetExceeded):        # 0.9 committed + a 0.45 estimate > 1.0
         second._llm_broker.borrow("build").__enter__()
+
+
+# ------------------------------------------------------------------ ONE ceiling, two halves
+
+def test_run_usd_ceiling_takes_the_tightest_declared_cap_and_names_its_knob():
+    """The statable rule both halves read. Every row is a configuration an operator can type.
+
+    Before it, the reserve half read `llm_cost_limit` and the commit half read `llm_budget_usd`, so
+    rows 2 and 3 below were HALF a ceiling each and row 4 stopped the run at one number under a
+    message naming the other.
+    """
+    assert run_usd_ceiling(0.0, 0.0) == (None, "")                    # nothing declared
+    assert run_usd_ceiling(2.5, 0.0) == (2.5, "llm_cost_limit")       # the reserve half's spelling
+    assert run_usd_ceiling(0.0, 1.5) == (1.5, "llm_budget_usd")       # the documented spelling
+    assert run_usd_ceiling(2.5, 1.5) == (1.5, "llm_budget_usd")       # tightest wins…
+    assert run_usd_ceiling(1.0, 4.0) == (1.0, "llm_cost_limit")       # …from either side
+    # A tie names the knob every operator-facing sentence already names.
+    assert run_usd_ceiling(1.0, 1.0) == (1.0, "llm_budget_usd")
+    # The shared no-cap rule: 0 / negative / non-finite / junk declares nothing and cannot pull the
+    # other declaration down with it.
+    for junk in (0, -1, float("inf"), float("nan"), None, "x"):
+        assert run_usd_ceiling(junk, 3.0) == (3.0, "llm_budget_usd"), junk
+        assert run_usd_ceiling(3.0, junk) == (3.0, "llm_cost_limit"), junk
+
+
+def test_a_run_that_declares_only_llm_budget_usd_still_reserves_before_the_call(tmp_path):
+    """THE HALF THAT WAS MISSING. The documented ceiling now holds at the broker's permit too.
+
+    `EngineOptions` carries `llm_cost_limit` and not `llm_budget_usd`, so a run that declared its
+    ceiling the documented way built a budget with NO cap and kept the whole fan-out overshoot the
+    reserve half exists to remove. The ceiling reaches the reserve half through the run's own shared
+    accountant, which is the object that actually holds it.
+    """
+    from types import SimpleNamespace
+
+    settings = Settings(llm_budget_usd=1.0)
+    engine = make_engine(tmp_path / "run", options=EngineOptions.from_settings(settings))
+    assert engine._llm_budget.enabled is False, "nothing has declared a cap to the ENGINE yet"
+
+    engine.researcher.client = SimpleNamespace(accountant=run_cost_accountant(settings))
+    bind_cost_accountants(engine)
+
+    budget = engine._llm_budget
+    assert budget.enabled and budget.cost_limit == pytest.approx(1.0)
+    assert budget.cost_knob == "llm_budget_usd"
+    budget.commit(_delta(0.9))
+    with pytest.raises(BudgetExceeded, match="llm_budget_usd"):
+        budget.reserve()               # 0.9 committed + a 0.9 estimate is over the operator's $1
+
+
+def test_a_run_that_declares_only_llm_cost_limit_gets_the_commit_half_and_the_node_floor():
+    """The other direction, and it is the one that buys the `node_open_budget_floor_usd` stop.
+
+    The floor is asked of the ACCOUNTANT (`require_headroom`), so a ceiling declared only to the
+    reserve half had no remainder to test and the stop was inert. Both refusals name the knob that
+    was actually typed — a message naming a knob the operator never set is an instruction they
+    cannot follow.
+    """
+    accountant = run_cost_accountant(Settings(llm_cost_limit=2.0))
+    assert accountant.limit == pytest.approx(2.0) and accountant.limit_knob == "llm_cost_limit"
+
+    accountant.spent = 1.95
+    with pytest.raises(BudgetExceeded, match="llm_cost_limit"):
+        accountant.require_headroom(0.10, "a node")
+    with pytest.raises(BudgetExceeded, match="llm_cost_limit"):
+        accountant.add(0.10, usage={"prompt_tokens": 1, "completion_tokens": 1,
+                                    "total_tokens": 2, "cost": 0.10})
+
+
+def test_both_halves_of_one_run_hold_the_same_number(tmp_path):
+    """Two knobs, one ceiling: whichever is tighter binds the reserve half AND the commit half."""
+    from types import SimpleNamespace
+
+    settings = Settings(llm_budget_usd=5.0, llm_cost_limit=1.0)
+    engine = make_engine(tmp_path / "run", options=EngineOptions.from_settings(settings))
+    accountant = run_cost_accountant(settings)
+    engine.researcher.client = SimpleNamespace(accountant=accountant)
+    bind_cost_accountants(engine)
+
+    assert accountant.limit == pytest.approx(1.0)
+    assert engine._llm_budget.cost_limit == pytest.approx(1.0)
+    assert accountant.limit_knob == engine._llm_budget.cost_knob == "llm_cost_limit"
+
+
+def test_adopting_a_ceiling_can_only_tighten_it():
+    """A run whose reserve half already holds the lower cap is never loosened by the other half."""
+    budget = RunBudget(cost_limit=1.0)
+    assert budget.adopt_cost_ceiling(5.0, "llm_budget_usd") is False
+    assert budget.cost_limit == pytest.approx(1.0) and budget.cost_knob == "llm_cost_limit"
+    assert budget.adopt_cost_ceiling(0.5, "llm_budget_usd") is True
+    assert budget.cost_limit == pytest.approx(0.5) and budget.cost_knob == "llm_budget_usd"
+    # Idempotent, and a figure that declares nothing changes nothing.
+    assert budget.adopt_cost_ceiling(0.5, "llm_budget_usd") is False
+    for junk in (0, -1, None, float("nan"), "x"):
+        assert budget.adopt_cost_ceiling(junk) is False, junk
+    assert budget.cost_limit == pytest.approx(0.5)
+
+
+def test_the_snapshot_says_which_knob_set_the_cost_cap():
+    snap = RunBudget(budget_usd=3.0).snapshot()
+    assert snap["cost_limit"] == pytest.approx(3.0) and snap["cost_knob"] == "llm_budget_usd"
+    assert RunBudget().snapshot()["cost_knob"] == ""

@@ -34,24 +34,24 @@ from looplab.engine.claims_health import (
     _MAX_DECISION_SCOPE,
     _MAX_RETRIEVAL_HITS,
     _bounded_claim_projection,
-    _claim_source_rows,
+    claim_source_rows,
     _claim_source_summary,
     _claim_text,
     _epistemic,
-    _filter_claim_assessments,
-    _filter_claim_source_rows,
+    filter_claim_assessments,
+    filter_claim_source_rows,
     _identity_text,
     _node_ids,
     _research_source_summary,
     _safe_claim_read_health,
-    _safe_claim_source_summary,
-    _safe_research_source_summary,
+    safe_claim_source_summary,
+    safe_research_source_summary,
     _string_list,
     _unknown_claim_source_summary,
     _valid_claim_source_rows,
     scope_cross_run_sources,
 )
-from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, _filter_capsule_rows, normalize_statement
+from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, filter_capsule_rows, normalize_statement
 from looplab.trust.cross_run import (
     cross_run_identity_text,
     cross_run_text,
@@ -67,12 +67,12 @@ _CAVEAT_STATES = ("mixed", "refuted", "inconclusive")
 
 def _claim_research_source_summary(claims) -> Optional[dict]:
     """Return one coherent aggregate receipt carried by all rows in an assessment snapshot."""
-    carried = _safe_research_source_summary(getattr(claims, "research_source", None))
+    carried = safe_research_source_summary(getattr(claims, "research_source", None))
     if carried is not None:
         return carried
     rows = [row for row in (claims if isinstance(claims, (list, tuple)) else [])
             if isinstance(row, dict)]
-    explicit = [_safe_research_source_summary(row.get("research_source")) for row in rows
+    explicit = [safe_research_source_summary(row.get("research_source")) for row in rows
                 if "research_source" in row]
     if not explicit:
         return None
@@ -96,12 +96,12 @@ def _claim_research_source_summary(claims) -> Optional[dict]:
 
 def _claim_claim_source_summary(claims) -> Optional[dict]:
     """Return one coherent lessons+research authority receipt, including for an empty snapshot."""
-    carried = _safe_claim_source_summary(getattr(claims, "claim_source", None))
+    carried = safe_claim_source_summary(getattr(claims, "claim_source", None))
     if carried is not None:
         return carried
     rows = [row for row in (claims if isinstance(claims, (list, tuple)) else [])
             if isinstance(row, dict)]
-    explicit = [_safe_claim_source_summary(row.get("claim_source")) for row in rows
+    explicit = [safe_claim_source_summary(row.get("claim_source")) for row in rows
                 if "claim_source" in row]
     if not explicit:
         return None
@@ -191,7 +191,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         "n_pinned_omitted": max(0, len(pinned) - sum(
             1 for c in picked if c.get("maturity") == "operator-pinned")),
     }
-    research_source = (_safe_research_source_summary(_research_source)
+    research_source = (safe_research_source_summary(_research_source)
                        if _research_source is not None
                        else _claim_research_source_summary(claims))
     if _research_source is not None and research_source is None:
@@ -205,7 +205,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         }
     if research_source is not None:
         pack["research_source"] = research_source
-    claim_source = (_safe_claim_source_summary(_claim_source)
+    claim_source = (safe_claim_source_summary(_claim_source)
                     if _claim_source is not None else _claim_claim_source_summary(claims))
     if _claim_source is not None and claim_source is None:
         claim_source = _unknown_claim_source_summary()
@@ -384,7 +384,7 @@ def _preselect_retrieval_docs(docs, query: str, limit: int):
 
 def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None,
                        research_claims=None, scope_task: str = "", contradiction_quota: float = 0.34,
-                       max_corpus: int = 2000, structured: bool = False, intent: Optional[str] = None,
+                       max_corpus: int = 2000, structured: bool = True, intent: Optional[str] = None,
                        scope_receipt: Optional[dict] = None,
                        _governance: Optional[dict] = None) -> dict:
     """CR2a retrieval planner (§21.20.5, full CR): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
@@ -408,18 +408,12 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     from looplab.engine.claims import claim_assessments, load_claim_lessons, load_research_claims
     from pathlib import Path
 
-    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
-    from looplab.engine.memory import (ConceptCapsuleStore, _filter_capsule_rows,
-                                       _portfolio_concept_overview_data)
+    from looplab.engine.governance_health import observed_path_missing
+    from looplab.engine.governance_protocol import governed_projection
+    from looplab.engine.memory import (ConceptCapsuleStore, filter_capsule_rows,
+                                       portfolio_concept_overview_data)
     if _governance is None:
-        source_names = []
-        if lessons is None:
-            source_names.append("lessons.jsonl")
-        if research_claims is None:
-            source_names.append("research_claims.jsonl")
-        if capsules is None:
-            source_names.append("concept_capsules.jsonl")
-        return project_governed_sources(
+        return governed_projection(
             memory_dir,
             lambda governance: cross_run_retrieve(
                 memory_dir, query, k=k, lessons=lessons, capsules=capsules,
@@ -428,7 +422,9 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                 structured=structured, intent=intent, scope_receipt=scope_receipt,
                 _governance=governance,
             ),
-            include_concepts=True, source_names=source_names,
+            include_concepts=True,
+            unsupplied={"lessons.jsonl": lessons, "research_claims.jsonl": research_claims,
+                        "concept_capsules.jsonl": capsules},
         )
     base = Path(memory_dir) if memory_dir else None
     if capsules is None:
@@ -445,13 +441,13 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     research = _valid_claim_source_rows(research, research=True)
     research_source = _research_source_summary(research)
     governance = _governance
-    claims = _filter_claim_assessments(
+    claims = filter_claim_assessments(
         claim_assessments(lessons, research_claims=research,
                           decisions=governance["decisions"], structured=structured),
         lambda c: c.get("maturity") != "operator-rejected")
-    claim_source = (_safe_claim_source_summary(claims.claim_source)
+    claim_source = (safe_claim_source_summary(claims.claim_source)
                     or _claim_source_summary(lessons, research, research_source=research_source))
-    overview, concept_rows = _portfolio_concept_overview_data(
+    overview, concept_rows = portfolio_concept_overview_data(
         capsules, aliases=governance["aliases"], splits=governance["splits"])
     # source completeness is part of the retrieval corpus, even when a query happens to match
     # only claims or the same retained concept rows.  Aggregate it across every eligible capsule before
@@ -665,7 +661,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
                     decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
                     aliases: Optional[dict] = None, splits: Optional[dict] = None,
-                    structured: bool = False) -> dict:
+                    structured: bool = True) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured bounded observation/mixed-evidence
     view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -677,20 +673,20 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # DEFERRED: `claims.py` imports THIS module to re-export it, so importing back at module
     # scope would cycle. These names live in the ledger/store half of the split (EM-01).
     from looplab.engine.claims import claim_assessments
-    from looplab.engine.memory import _dedup_valid_capsules, _portfolio_concept_overview_data
+    from looplab.engine.memory import dedup_valid_capsules, portfolio_concept_overview_data
     max_items = max(1, min(int(max_items), 100))             # route/CLI-independent hard envelope
     source_capsules = capsules if isinstance(capsules, (list, tuple)) else []
-    capsules = _dedup_valid_capsules(source_capsules)
-    overview, full_concept_rows = _portfolio_concept_overview_data(
+    capsules = dedup_valid_capsules(source_capsules)
+    overview, full_concept_rows = portfolio_concept_overview_data(
         capsules, aliases=aliases, splits=splits)
     # Keep the complete internal sets for exact run totals and the governance evidence digest. Only the
     # outward contradictions/context projections are capped below.
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions,
                                structured=structured, bounded=False)
-    research_source = (_safe_research_source_summary(getattr(claims, "research_source", None))
+    research_source = (safe_research_source_summary(getattr(claims, "research_source", None))
                        or _research_source_summary(
                            _valid_claim_source_rows(research_claims, research=True)))
-    claim_source = (_safe_claim_source_summary(getattr(claims, "claim_source", None))
+    claim_source = (safe_claim_source_summary(getattr(claims, "claim_source", None))
                     or _claim_source_summary(lessons, research_claims,
                                              research_source=research_source))
     # A contradiction the operator REJECTED is no longer live, consistent with build_context_pack and
@@ -781,7 +777,7 @@ def render_context_pack(pack: dict) -> str:
         lines.append(
             f"  WARNING: {int(pack['n_pinned_omitted'])} operator-pinned claim(s) omitted by the "
             "hard context limit; consult the full claims ledger.")
-    research_source = _safe_research_source_summary(pack.get("research_source"))
+    research_source = safe_research_source_summary(pack.get("research_source"))
     if research_source is not None and research_source["source_complete"] is not True:
         lines.append(
             "  WARNING: D8 research-claim source is PARTIAL/UNKNOWN "
@@ -790,7 +786,7 @@ def render_context_pack(pack: dict) -> str:
             + (f"; {research_source['producer_unknown_runs']} legacy/malformed run receipt(s)"
                if research_source["producer_unknown_runs"] else "")
             + "); retained evidence is a lower bound and exact one-sided states are withheld.")
-    claim_source = _safe_claim_source_summary(pack.get("claim_source"))
+    claim_source = safe_claim_source_summary(pack.get("claim_source"))
     if claim_source is None and "claim_source" in pack:
         lines.append(
             "  WARNING: claim evidence source receipt is malformed/unknown; exact one-sided states and "
