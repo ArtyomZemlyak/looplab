@@ -260,6 +260,12 @@ const PHASE_TEXT = {
   'build|novelty': (r) => `Checking experiment${r.nodeId != null ? ` #${r.nodeId}` : ''} is not a repeat…`,
   'build|reserve': (r) => `Reserving experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
   'build|implement': (r) => `Writing code for experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
+  // The proposal was paid for and no experiment came of it: the reservation lost its CAS to a
+  // control/research/lifecycle row, which is the correct answer (minting a replacement for a
+  // just-dropped orphan would defeat an operator's stop intent) but used to happen in silence.
+  // Named here because the operator watching the strip is exactly who should see that a paid
+  // step produced nothing, rather than the strip skipping back to "Planning next experiment…".
+  'build|discarded': () => 'Discarded a proposal that lost its reservation…',
   // The EVAL cursor's own sentence. It defers to `evalStageLabel` so the strip and the node card
   // cannot come to describe the same running stage differently — the rule about what may be CLAIMED
   // (`role`) versus merely SHOWN (`name`) is stated once, there.

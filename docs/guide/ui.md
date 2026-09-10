@@ -315,7 +315,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   the chat's id), an expiry, and a **⤫ unshare** that revokes every link for that chat while keeping
   the conversation. A link is **frozen** at the messages that existed when it was created, so
   continuing the chat never retroactively publishes what you say next; pass `live: true` to the share
-  API for a link that follows the conversation instead.
+  API for a link that follows the conversation instead. The button carries a **create-recovery
+  envelope** (`request_id` + `token_secret`, the same contract the review links use): the browser
+  owns the identity, so a response lost in flight is recovered by clicking again — the retry answers
+  `200` with `replayed: true` and the identical URL instead of publishing a second live link nobody
+  holds. `201` means the link was created; `410 assistant_share_replay_terminal` means the recovered
+  link was already revoked or expired, and a new one has to be created. Send both fields or neither;
+  half an envelope is refused (`400 assistant_share_recovery_invalid`), and reusing one `request_id`
+  with different terms is `409 assistant_share_recovery_conflict` rather than a silent replacement.
 - **Comment threads** — event-sourced operator discussion pinned to a run or a specific node, with an
   edit history and a resolve/reopen state. The view is served as authenticated current + history
   projections (`GET /api/runs/{run_id}/comments`, `…/comments/{id}/history`); the operator writes the
@@ -742,7 +749,7 @@ is about. Each panel now says so in its own header; the full per-kind reference 
 
 | Surface | Holds | Written by | Editable there |
 |---|---|---|---|
-| **Lab → Authoring** | `prompts` (role system-prompt overrides), `skills` (techniques the Researcher can load), `knowledge` (free-form notes) | **you** — plus the assistant's `remember` tool for `knowledge` | root Markdown uses a CAS/receipt editor; nested skill packages are review-only |
+| **Lab → Authoring** | `prompts` (role system-prompt overrides), `skills` (techniques the Researcher can load), `knowledge` (free-form notes), `memory_skills` (the cards the runs distilled, `<memory_dir>/skills/`) | **you** — plus the assistant's `remember` tool for `knowledge`, and the runs themselves for `memory_skills` | root Markdown uses a CAS/receipt editor; nested skill packages and every `memory_skills` card are review-only |
 | **Lab → Memory** | Lessons, Cases, Notes, and a read-only view of the same `knowledge` notes | the **runs**, at run end | no |
 | **Lab → Claims & Curation** | Claims across every run in the shared memory dir, plus the steward proposals and their outcomes | derived at read time from what the runs wrote, plus your governance decisions | no — governance is CLI/HTTP only |
 
@@ -760,8 +767,12 @@ Consequences that have repeatedly been reported as bugs and are not:
   and are read-only; bounded traversal skips symlinks and path escapes, and a capped scan is disclosed
   separately from the known lower bound of omitted files. Save and recovery identities remain flat
   basenames and cannot contain `/`. Run-distilled skills under `<memory_dir>/skills/` are a different,
-  memory-owned store outside configured Authoring: candidates are hidden from production agents until
-  cross-task promotion, and neither panel yet provides a first-party candidate review workflow.
+  memory-owned store, and since 2026-09-08 they have their own Authoring tab: **memory_skills** lists
+  every `auto-*.md` card read-only, frontmatter included, so a `candidate` (which no run loads until a
+  different task family re-confirms it) can be judged by the one party who can judge it. Every write
+  route for that kind answers 405 — the lifecycle frontmatter is what the writer and the visibility
+  gate both key on, so promotion is not a word you type. Deleting a bad card is a file deletion on the
+  host, as it is for every other kind.
 
 **Deleting a run leaves all three panels untouched by default.** The Delete dialog offers an opt-in
 *“Also delete this run’s own cross-run memory”* that removes only what is attributable to that run

@@ -163,8 +163,11 @@ test('early run creation and uncertain share mutations cannot replay user intent
     }
   }
   assert.equal(shareActionFailure('revoke', { status: 502 }).notice, 'Revoke uncertain · retry to confirm')
+  // The mint's advice changed with the create-recovery contract (doc 25 SC-10) while the property
+  // above did not: the browser now holds the create identity, so the retry recovers the same link
+  // instead of publishing a second one, and "revoke before retrying" became the wrong instruction.
   assert.equal(shareActionFailure('snapshot', { status: 502 }).notice,
-    'Share uncertain · revoke before retrying')
+    'Share uncertain · try again to recover it')
   // ...and the component must ACT on `uncertain` rather than only announce it: an unknown link has to
   // reach the session list before the next mutation can be started against a stale local truth.
   assert.match(assistant, /const failure = shareActionFailure\(action, error\)\s*\n\s*if \(failure\.uncertain\) \{\s*\n\s*setShareUnknown\(shareSid, true\)\s*\n\s*refreshSessions\(\)/,

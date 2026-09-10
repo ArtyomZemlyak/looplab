@@ -199,3 +199,70 @@ def test_the_lane_spends_the_batch_capabilities_before_the_next_proposal(tmp_pat
     assert len(seen_at_entry) > 1, "only one proposal ran — the property is about the NEXT one"
     assert seen_at_entry[1:] == [0] * len(seen_at_entry[1:]), (
         f"a spent capability survived into a later proposal: {seen_at_entry}")
+
+
+def test_no_lane_ever_holds_the_PRIMARY_role_pair(tmp_path):
+    """The fourth invariant the barrier was protecting, and the one the lane forgot.
+
+    `_build_role_pairs` returns `[(self.researcher, self.developer)] + pool`, so pair 0 IS the
+    primary pair. Under the barrier that was safe — propose-all, build-all, join, so no proposal
+    ever ran while a build held those objects. This lane exists to remove that join, so from the
+    moment pair 0 is leased the main task's next `_await_batch_proposal` runs
+    `self.researcher.propose()` on an object a lane is building with, and under the shipped
+    `unified_agent` the same object is the developer too.
+
+    What that costs, driven before the fix: a build's own `last_foresight` read back as None
+    because a concurrent proposal's `finally` had nulled it — `foresight_selected` silently never
+    written for that node — and, in the mirror order, one node's ranking stamped onto the next.
+    That is exactly the mis-attribution the per-build pooled roles exist to prevent
+    (`engine/audit.py`: "read THIS build's pooled researcher so a concurrent sibling's prediction
+    is not cross-wired onto this node").
+
+    `speculation.py::_producer_role_pair` already refuses a pair equal to the primary and says why.
+    This asserts the same of every lane the steady path dispatches, by recording what each build
+    was actually handed.
+    """
+    task = ToyTask.load(TOY_TASK)
+    engine = make_engine(tmp_path / "run", task=task, n_seeds=4, max_nodes=4,
+                         steady_state_build=True)
+    engine.parallel_build = 2
+    engine.role_factory = task.build_roles
+
+    leased: list[tuple] = []
+    handed: list[list] = []
+    real = engine._create_node_guarded
+    real_lane = engine._steady_state_build_lane
+
+    def _record(action, pair, reservation, idea, telemetry=None):
+        leased.append(pair)
+        return real(action, pair, reservation, idea, telemetry)
+
+    async def _watch_lane(creates, state, pairs):
+        handed.append(list(pairs))
+        return await real_lane(creates, state, pairs)
+
+    engine._create_node_guarded = _record
+    engine._steady_state_build_lane = _watch_lane
+    anyio.run(engine.run)
+
+    assert leased, "no build ran — the fixture no longer drives the lane"
+    assert handed, "the steady lane never ran — the fixture no longer drives it"
+    for pair in leased:
+        assert pair is not None and isinstance(pair, tuple) and len(pair) == 2, pair
+        assert pair[0] is not engine.researcher, (
+            "a lane was handed the PRIMARY researcher while the main task keeps proposing on it")
+        assert pair[1] is not engine.developer, (
+            "a lane was handed the PRIMARY developer while the main task keeps proposing on it")
+
+    # …and the lane is still a LANE. The fix mints one extra POOLED pair rather than dropping one,
+    # so the width the operator asked for survives; simply excluding pair 0 would leave a single
+    # lane at the common `parallel_build=2` and silently turn the flag into the barrier it
+    # replaces. Asserted on what the lane was HANDED, not on what scheduling happened to use —
+    # `free_pairs` reuses a returned pair, so a short run can legitimately run every build on one.
+    for pairs in handed:
+        assert len(pairs) >= 2, (
+            f"the steady lane was handed {len(pairs)} pair(s) — it is the barrier again, and the "
+            "flag is inert at the width an operator most often sets")
+        for pair in pairs:
+            assert pair[0] is not engine.researcher and pair[1] is not engine.developer, (
+                "the primary pair reached the lane's leasable set")

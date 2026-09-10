@@ -199,8 +199,13 @@ def test_the_same_handoff_still_lifts_when_the_endpoint_answers(
     attempts: list = []
     monkeypatch.setattr(cmds, "_engine_singleton", _handoff_singleton(store, attempts))
     monkeypatch.setattr(cmds.time, "sleep", lambda _delay: None)
+    # Spelled with `_run_engine_guarded`'s own keyword-only `mlflow_uri` (the MLflow mirror,
+    # docs/BACKLOG.md §16) rather than a `**_kw` catch-all: this stand-in is what the command
+    # actually drives through, so it must accept exactly what `resume` passes, and a keyword that
+    # stops being passed — or starts being passed under another name — has to turn this red instead
+    # of being swallowed. The value is unused here; what is under test is the handoff, not the mirror.
     monkeypatch.setattr(cmds, "_run_engine_guarded",
-                        lambda eng: fold(eng.store.read_all()))
+                        lambda eng, *, mlflow_uri="": fold(eng.store.read_all()))
     monkeypatch.setattr(cmds, "_print_result", lambda _state: None)
 
     cmds.resume(run_dir, task_file=run_dir / "task.snapshot.json", max_nodes=None)
@@ -261,6 +266,15 @@ def test_a_wrap_up_engine_whose_boundary_moved_never_reaches_the_loop(tmp_path, 
     class _Eng:
         def __init__(self):
             self.store = EventStore(run_dir / "events.jsonl")
+            # `_run_engine_guarded` opens the MLflow mirror around the drive
+            # (`events/mlflow_export.py::autolog`, docs/BACKLOG.md §16) and reads `run_dir` off the
+            # engine to do it. It is a REAL directory here, not a placeholder, because that is what
+            # the attribute means; the mirror itself stays inert (no `tracking_uri`), so this stub
+            # answers the one thing the wrapper needs and the backstop below is still the only thing
+            # this test measures. Declared rather than defaulted at the reader: an engine without a
+            # `run_dir` is not a case production has, and a `getattr(..., None)` there would silently
+            # un-wire the mirror for a real run the day the attribute is renamed.
+            self.run_dir = run_dir
             self.wrap_up_only = True
             # The current header spelling. This string is the test's own INPUT (the refusal must
             # carry whatever warning the engine was annotated with, verbatim), but keeping it in

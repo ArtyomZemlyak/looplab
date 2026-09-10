@@ -252,9 +252,11 @@ def test_the_index_is_not_empty_and_not_a_single_file():
 # DECIDES its item, not at the sentence describing it; until then they can never go green, so they
 # are noise rather than evidence. Listed by name and bounded so the set can only shrink — the same
 # shape `test_file_identity_tiers` uses for its unconverted signatures.
-PROSE_ONLY_PROOFS = {
-    "claim-legacy-prompt-branches",
-}
+PROSE_ONLY_PROOFS: set[str] = set()
+# EMPTY since 2026-09-08, and it got there the way the bound intends: the last entry
+# (`claim-legacy-prompt-branches`) was not re-pointed but CLOSED — the off-switch stopped shipping
+# the false sentence, so the literal its proof watched for is gone from the tree entirely. An empty
+# set is the state to keep; a new entry here is a proof that needs re-pointing, not a slot to fill.
 
 
 def test_no_proof_is_satisfiable_only_by_prose():

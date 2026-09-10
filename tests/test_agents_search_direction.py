@@ -1,6 +1,6 @@
 """`agents` may reach `search` only through a deferred import (doc 25 AG-07).
 
-Five `search` modules import `looplab.agents` at MODULE level — `forward_hints`, `WrapsDeveloper`,
+Four `search` modules import `looplab.agents` at MODULE level — `forward_hints`, `WrapsDeveloper`,
 the speculation constants. That makes `search -> agents` the load-bearing direction, and leaves
 `agents -> search` with exactly one legal form: a function-local import. Today there is one, in
 `roles._state_brief`.
