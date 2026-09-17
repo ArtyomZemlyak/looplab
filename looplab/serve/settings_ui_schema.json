@@ -49,6 +49,13 @@
           "help": "0 is OFF and is the historical search. Above zero: when the node that just finished lands in the top 1-q of the nodes this run has evaluated, the next action is FORCED to be an improve on that node — the parent is pinned and draft/merge are off the table for that turn, whichever selector is otherwise in charge. 0.75 means \"the top quarter\". It exists because the same instruction written into the card was measured and did not pay: it moved behaviour (the run kept its kernel 15 times in 16 against 20 in 41) and not the score, while the loop proposed something other than its own winning kernel in 14 of 28 transitions. Needs at least four evaluated nodes before a quartile means anything. A search treatment: pinned at run start, so changing it here affects the next run you start."
         },
         {
+          "key": "regime_prior",
+          "label": "Show measured implementation regimes",
+          "type": "bool",
+          "default": false,
+          "help": "OFF by default. When on, the role that PROPOSES is shown what the shared regime ledger has measured: what this task's own runs scored per implementation regime (compiled kernel / JIT / plain), which regimes nobody has tried here, and what other tasks measured — each naming its own task and sample. Evidence, never an instruction: the block carries no recommendation, because \"write a compiled kernel\" is true on one task in this corpus and false on another (one task ran 17 of its 18 nodes as JIT and holds no comparison at all). The ledger itself is written whether this is on or off; this decides only whether a model is shown it. A prior is a prompt change, so it is pinned at run start."
+        },
+        {
           "key": "speculation_depth",
           "label": "Speculation depth",
           "type": "int",

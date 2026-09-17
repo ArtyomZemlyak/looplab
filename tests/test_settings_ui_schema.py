@@ -100,7 +100,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 212
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 213
+    # 212 -> 213 on 2026-09-17: `regime_prior`, the read side of docs/60 §60.9 B2 -- it shows the
+    # PROPOSING role what the regime ledger measured. A ROW rather than an uncurated omission
+    # because it is a PROMPT change an operator turns on for an arm and must be able to turn back
+    # off; the ledger it reads is written either way. Verified by INTERSECTION as every entry here
+    # prescribes: 212 keys common to the previous keyset plus exactly that one, none removed.
     # 211 -> 212 on 2026-09-17: `exploit_strong_node_quantile`, B1 of docs/60 §60.9 — after the node
     # that just finished lands in the top 1-q of this run's evaluated nodes, the next action is
     # FORCED to be an improve on it. A ROW rather than an uncurated omission because it is a SEARCH
@@ -367,7 +372,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # so BOTH counts move together) -- the forced exploitation of a node that just landed in the
     # top 1-q of this run's evaluated nodes. A row because it is a search treatment an operator
     # turns on for an arm and must be able to turn back off.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 247
+    # 247 -> 248 on 2026-09-17: `regime_prior` (docs/60 §60.9 B2; a curated row, so BOTH counts
+    # move together) -- the propose prior's measured-regime block.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 248
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

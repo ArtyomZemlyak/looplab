@@ -160,7 +160,18 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               under -- the digest binds the COMPLETE non-variant envelope -- and here that rule
 #               earns it: the ON path replaces the selector's choice, which is a different SEARCH
 #               on the same workload, which is exactly what a speculation receipt asserts about.
-_EXPECTED_DIGEST = "sha256:bedfc801e1270790371d547532e31a5efb9ffabf2c73259f5123f1c2f1267bfa"
+#   2026-09-17  + regime_prior (docs/60 §60.9 B2: the propose prior gains the measured regime block
+#               from `regime_contrast.jsonl`). The 'field set changed too' branch, verified the
+#               prescribed way rather than from the count: an AST scan of `Settings`' annotated
+#               assignments against the pre-change tree reports exactly `['regime_prior']` added and
+#               `[]` removed. `_EXPECTED_FIELD_COUNT` goes 244 -> 245 and both pins are re-set.
+#               INERT for a calibration replicate: the profile ships it False, `_pick_role_prior`
+#               skips the block on the first condition, and the replicate renders a byte-identical
+#               prior. Re-pinned anyway on the rule every inert knob above was re-pinned under --
+#               the digest binds the COMPLETE non-variant envelope -- and a PROMPT knob earns it
+#               twice over, since a prompt is a contract (doc 52) and the ON path changes what the
+#               proposing role reads before it proposes.
+_EXPECTED_DIGEST = "sha256:6f2580d19cd259deb9253841fd6f2a8e0f45070fddfbd422a255182a8813f587"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -639,7 +650,7 @@ _EXPECTED_DIGEST = "sha256:bedfc801e1270790371d547532e31a5efb9ffabf2c73259f5123f
 #               decides whether a run's params, metrics and champion CODE leave the box for an
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
-_EXPECTED_FIELD_COUNT = 244
+_EXPECTED_FIELD_COUNT = 245
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

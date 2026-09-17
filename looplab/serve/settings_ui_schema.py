@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 212
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 213
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -245,7 +245,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # they set, and 0 (off) is the shipped behaviour they must be able to get back to. Re-derived by
 # INTERSECTION and not by adding the integer: 210 keys are common to the previous catalogue and
 # exactly `eval_noise_seeds` is new, no duplicate and none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "7927d39a48606b33bf40e58a7a4b6d76f1e56cdcfbdad6f3250df8cbf3c08153"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "0f31d098257bf0cc80805fe185cb4a2387a726e732ded0f0e3160aac40ac5776"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

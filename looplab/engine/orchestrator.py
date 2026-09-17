@@ -1056,6 +1056,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         agent_drives_actions = _opt("agent_drives_actions")
         card_driven_selection = _opt("card_driven_selection")
         exploit_strong_node_quantile = _opt("exploit_strong_node_quantile")
+        regime_prior = _opt("regime_prior")
         speculation_depth = _opt("speculation_depth")
         speculation_gate_receipt = _opt("speculation_gate_receipt")
         inline_repair = _opt("inline_repair")
@@ -1372,6 +1373,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # is, which is the shape of defect this file keeps finding in its own knobs.
         self.exploit_strong_node_quantile = min(0.999, max(0.0, float(
             exploit_strong_node_quantile or 0.0)))
+        # B2's read side: the propose prior gains the measured regime block. The ledger is written
+        # either way; this decides only whether a model is shown it.
+        self.regime_prior = bool(regime_prior)
         # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
         # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
         # parallelize, each concurrent eval is pinned to a DISTINCT GPU via CUDA_VISIBLE_DEVICES (see

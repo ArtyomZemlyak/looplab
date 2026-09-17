@@ -186,7 +186,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   on it. A row because it is a search treatment an operator turns on for an arm and has to be
   //   able to turn back off; the Python half moved in the same change, as this tripwire's history
   //   demands.
-  assert.equal(Object.keys(schema.fieldByKey).length, 212)
+  //   212 -> 213 (2026-09-17): `regime_prior`, the read side of docs/60 §60.9 B2 — the propose
+  //   prior's measured-regime block. A row because it is a prompt change an operator turns on for
+  //   an arm; the Python half moved in the same change, as this tripwire's history demands.
+  assert.equal(Object.keys(schema.fieldByKey).length, 213)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

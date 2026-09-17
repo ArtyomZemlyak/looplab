@@ -2016,6 +2016,16 @@ class Settings(BaseSettings):
     # this one wins for that turn, and it can only ever pick an action `legal_actions` already
     # allowed — the pipeline invariants stay structural.
     exploit_strong_node_quantile: float = 0.0
+    # B2's read side (docs/60 §60.9, docs/56 §419). Show the PROPOSING role what the shared
+    # `regime_contrast.jsonl` ledger has measured about implementation regimes: what this task's own
+    # runs scored per regime, which regimes nobody has tried here, and what OTHER tasks measured,
+    # each naming its own sample. Evidence, never an instruction -- the block carries no
+    # recommendation clause, because "write a compiled kernel" would have been false on
+    # `pde_heat1d` the day it shipped (§110, §419: 17 of its 18 nodes are jit and it holds no
+    # comparison at all). OFF by default; the WRITE side of the ledger runs regardless, because a
+    # record that only exists once someone decided to act on it is never there when the question is
+    # first asked.
+    regime_prior: bool = False
     # Layer 5 bounded speculative Card buffer. Zero is a hard OFF switch and preserves the
     # historical alternating build/eval spine; positive values are pinned by run_started so a
     # resume cannot silently mix search treatments after a snapshot/default edit.
@@ -2975,6 +2985,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # -- the same rule as `card_driven_selection` two lines up, and for the same reason: mixing two
     # selectors inside one run makes its number a number about neither.
     "exploit_strong_node_quantile": 0.0,
+    # Same rule as the row above: a resumed run keeps the prompt it was launched with. A prior is
+    # a prompt change, and doc 52 says a prompt is a contract.
+    "regime_prior": False,
     # docs/29 F1. A run launched before the proposals could move its width never consented to the
     # engine re-pinning one mid-log, and re-entry must not add that treatment to it — the same reason
     # every other concurrency row here is pinned to its historical value.

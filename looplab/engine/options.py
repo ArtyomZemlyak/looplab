@@ -254,6 +254,8 @@ class EngineOptions:
     # B1 (docs/60 §60.9): force an `improve` on the node that just landed when it is in the top
     # `1 - q` of this run's evaluated nodes. 0.0 is OFF and is the historical search.
     exploit_strong_node_quantile: float = 0.0
+    # B2 (docs/60 §60.9): show the proposing role the measured regime contrast. Off = today's prompt.
+    regime_prior: bool = False
     # Layer 5: maximum request+committed speculative Card backlog. Zero keeps speculation fully off;
     # -1 is AUTO (Engine resolves it to the settled eval width — see `Engine._resolve_speculation_depth`).
     speculation_depth: int = 0

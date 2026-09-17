@@ -173,3 +173,56 @@ def test_a_malformed_ledger_row_is_skipped_not_fatal():
     assert set(got["here"]) == {REGIME_PLAIN}
     assert known_regimes([], "t")["here"] == {}
     assert known_regimes(None, "t")["untried_here"] == list(REGIMES)
+
+
+# ------------------------------------------------------------------ the propose prior's block
+from looplab.engine.regime_contrast import REGIME_PRIOR_LABEL, regime_prior_line  # noqa: E402
+
+
+def test_the_prior_states_the_sample_and_gives_no_instruction():
+    """§342 and §410 both end on the same rule: the wording IS the fix. This block hands the
+    proposer a measurement -- what was scored, over how many nodes, in how many runs -- and carries
+    no recommendation clause and no superlative, because the recommendation would be false on a
+    task in this very corpus."""
+    rows = [_row("t", {REGIME_COMPILED: {"n": 40, "median": 180.0},
+                       REGIME_PLAIN: {"n": 20, "median": 22.0}})]
+    text, receipt = regime_prior_line(rows, "t")
+    assert REGIME_PRIOR_LABEL in text and "40 node(s)" in text and "1 run(s)" in text
+    for word in ("should", "must", "try ", "recommend", "best practice"):
+        assert word not in text.lower(), (word, text)
+    assert receipt["here"][REGIME_COMPILED]["nodes"] == 40
+
+
+def test_the_prior_names_the_regimes_nobody_tried_here():
+    """§419: `pde_heat1d` has no comparison at all, and saying so invites a check. Saying "a
+    compiled kernel is worth 6x" instructs, and is false there."""
+    rows = [_row("pde_heat1d", {REGIME_JIT: {"n": 17, "median": 110.61}})]
+    text, receipt = regime_prior_line(rows, "pde_heat1d")
+    assert "Never tried here: compiled, plain" in text, text
+    assert receipt["untried_here"] == [REGIME_COMPILED, REGIME_PLAIN]
+
+
+def test_another_task_is_quoted_WITH_its_task_name():
+    """A number without its task is how §110 happened. The other-task clause always names the task
+    and its sample, so it can never be read as a law about this one."""
+    rows = [_row("pde_heat1d", {REGIME_JIT: {"n": 17, "median": 110.0}}),
+            _row("edge_expansion", {REGIME_COMPILED: {"n": 191, "median": 188.43},
+                                    REGIME_PLAIN: {"n": 102, "median": 22.5}},
+                 best=REGIME_COMPILED, worst=REGIME_PLAIN, ratio=8.38, nodes=352)]
+    text, _r = regime_prior_line(rows, "pde_heat1d")
+    assert "On edge_expansion: compiled over plain 8.38x (352 nodes)" in text, text
+
+
+def test_an_empty_ledger_renders_NOTHING():
+    """A header over "no data" spends a prompt slot to say nothing, and the five-slot budget one
+    module over is the record of what that costs."""
+    assert regime_prior_line([], "t") == ("", {})
+    assert regime_prior_line(None, "t") == ("", {})
+
+
+def test_the_block_is_off_unless_an_operator_asked(tmp_path):
+    """`regime_prior` defaults False at every layer, so today's prompt is byte-identical."""
+    from looplab.core.config import Settings
+    from looplab.engine.options import EngineOptions
+    assert Settings().regime_prior is False
+    assert EngineOptions.from_settings(Settings()).regime_prior is False

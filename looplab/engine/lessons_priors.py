@@ -558,6 +558,25 @@ class LessonPriorsMixin:
                      if role == LESSON_ROLE_DEVELOPER
                      else "Lessons from related runs (what did/didn't work)")
             out += "\n" + label + ": " + "; ".join(picked)
+        # THE REGIME CONTRAST (doc 56 §419, doc 60 §60.9 B2), for the role that PROPOSES.
+        #
+        # Off unless an operator asked (`regime_prior`), and never for the Developer: the block is
+        # about which implementation regime to reach for, which is a proposal-time question. It goes
+        # into the RECEIPT as well as the text, because `events/prior_citations.py` can only measure
+        # whether a proposal used what it was shown for rows the receipt names -- a prior appended
+        # outside the receipt is a prompt change nobody can count.
+        if role != LESSON_ROLE_DEVELOPER and getattr(self._e, "regime_prior", False):
+            try:
+                from looplab.engine.regime_contrast import regime_prior_line
+                rows, _health = read_memory_jsonl_window(
+                    Path(self._e.memory_dir) / "regime_contrast.jsonl")
+                line, rec = regime_prior_line([o for _i, o in rows], self._e.task.id)
+                if line:
+                    out += "\n" + line
+                    receipt["regime"] = rec
+            except Exception as exc:  # noqa: BLE001 — an advisory prior never fails a build
+                from looplab.core.containment import contain
+                contain("regime prior render", exc)
         text = cross_run_text(out, max_chars=8_000, single_line=False, entropy=True)
         receipt["chars"] = len(text)
         return text, receipt

@@ -179,3 +179,52 @@ def known_regimes(rows: list, task_id: str) -> dict:
     return {"task_id": task_id, "here": summary,
             "untried_here": [r for r in REGIMES if r not in summary],
             "elsewhere": sorted(elsewhere, key=lambda e: -(e.get("nodes") or 0))[:8]}
+
+
+# The label the propose prior carries. Named here rather than at the call site so the instrument
+# that counts whether a proposal CITED this block has one string to look for.
+REGIME_PRIOR_LABEL = "Implementation regimes measured"
+
+
+def regime_prior_line(rows: list, task_id: str, *, elsewhere_limit: int = 2) -> tuple:
+    """`(text, receipt)` for the propose prior — evidence about regimes, and never an instruction.
+
+    Empty text when the ledger says nothing about anything, because a prior that renders a header
+    over "no data" spends a slot to say so.
+
+    THE WORDING IS THE FIX, and this is the third time this bench has written that down (§342,
+    §410). Three clauses, in this order:
+
+      * what THIS task measured, with its sample -- the only part that is evidence about the task
+        the proposer is working on;
+      * what nobody has tried here -- §419's finding, because `pde_heat1d` ran 17 of 18 nodes as
+        `jit` and has no comparison at all, and "nobody has tried compiled here" invites a check
+        while "a compiled kernel is worth 6x" instructs and is false there;
+      * what OTHER tasks measured, each naming its own task and sample, so a number can never be
+        read as a general law. §110 is the record of that sentence being read as one.
+
+    There is no recommendation clause and there is no superlative. The proposer is being handed a
+    measurement, not a verdict, and the difference is the whole reason the module exists.
+    """
+    known = known_regimes(rows, task_id)
+    here, elsewhere = known["here"], known["elsewhere"]
+    if not here and not elsewhere:
+        return "", {}
+    parts = []
+    if here:
+        measured = "; ".join(
+            f"{regime} (median {stats['median_of_medians']:.4g} over {stats['nodes']} node(s) "
+            f"in {stats['runs']} run(s))"
+            for regime, stats in sorted(here.items(), key=lambda kv: -kv[1]["median_of_medians"]))
+        parts.append(f"{REGIME_PRIOR_LABEL} on this task: {measured}.")
+        if known["untried_here"]:
+            parts.append("Never tried here: " + ", ".join(known["untried_here"]) + ".")
+    else:
+        parts.append(f"{REGIME_PRIOR_LABEL} on this task: none yet.")
+    for other in elsewhere[:elsewhere_limit]:
+        ratio = other.get("ratio")
+        if other.get("best") and other.get("worst") and isinstance(ratio, (int, float)):
+            parts.append(f"On {other['task_id']}: {other['best']} over {other['worst']} "
+                         f"{ratio:.3g}x ({other.get('nodes', 0)} nodes).")
+    return " ".join(parts), {"here": here, "untried_here": known["untried_here"],
+                             "elsewhere": [e.get("task_id", "") for e in elsewhere[:elsewhere_limit]]}
