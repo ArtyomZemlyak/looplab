@@ -241,6 +241,73 @@ if [ -d "$SRC/looplab/.git" ]; then
   ( cd "$SRC/looplab" && git log --oneline -3 > "$OUT/looplab-HEAD.txt"
     git status --porcelain > "$OUT/looplab-dirty.txt"
     git diff HEAD > "$OUT/looplab-uncommitted.patch" ) 2>/dev/null
+  # AND THE FILES A PATCH CANNOT CARRY (doc 56 §412).
+  #
+  # `git diff HEAD` is a diff against tracked content: a file that has never been added has no
+  # diff, so it is not in the patch and not in the bundle. It IS in `looplab-dirty.txt`, as a `??`
+  # line -- a name with no bytes behind it anywhere in the snapshot.
+  #
+  # Measured from the 2026-09-10 restart. The patch restored §409, §410 and §411 in full, and the
+  # two test files those sections were written from -- `test_a_campaign_arm_is_not_an_abandoned_-
+  # probe.py` and `test_a_campaign_mints_its_own_ruler.py` -- came back as two `??` lines. Both
+  # instruments had shipped; their drivers had to be written again from the prose. A brand-new
+  # test is exactly the shape of file that is untracked at any given minute, and it is the half of
+  # a change whose absence is silent: the code still runs.
+  #
+  # `--exclude-standard` means the archive holds what git would let you add and nothing it has
+  # been told to ignore, so `runs/`, `.venv*/` and `node_modules/` stay out by the repo's own
+  # declaration rather than by a list kept here.
+  #
+  # AND WHAT IS STILL LEFT BEHIND IS NAMED, because a second silent omission is how this one was
+  # built: anything over $UNTRACKED_MAX_KB is listed in `looplab-untracked-SKIPPED.txt` instead of
+  # carried. A hand-written test is kilobytes; a file this script should not be quietly putting
+  # into an S3-backed archive every thirty minutes is not.
+  #
+  # The subshell reports a shortfall by EXIT CODE, because `SHORT=$((SHORT + 1))` inside one
+  # increments a copy the parent never sees -- the counter would stay clean while the archive was
+  # not, which is the exact failure mode `copy()` below was hardened against.
+  UNTRACKED_MAX_KB="${UNTRACKED_MAX_KB:-10240}"
+  archive_untracked() (
+    cd "$SRC/looplab" || return 0
+    : > "$OUT/looplab-untracked-SKIPPED.txt"
+    git ls-files --others --exclude-standard -z 2>/dev/null > "$OUT/.untracked.z" \
+      || : > "$OUT/.untracked.z"
+    : > "$OUT/.untracked-keep.z"
+    n=0
+    while IFS= read -r -d '' f; do
+      kb=$(du -k "$f" 2>/dev/null | cut -f1)
+      if [ -n "$kb" ] && [ "$kb" -gt "$UNTRACKED_MAX_KB" ]; then
+        echo "${kb}K  $f" >> "$OUT/looplab-untracked-SKIPPED.txt"
+      else
+        printf '%s\0' "$f" >> "$OUT/.untracked-keep.z"
+        n=$((n + 1))
+      fi
+    done < "$OUT/.untracked.z"
+    rm -f "$OUT/.untracked.z"
+    if [ -s "$OUT/looplab-untracked-SKIPPED.txt" ]; then
+      echo "  untracked SKIPPED    $(wc -l < "$OUT/looplab-untracked-SKIPPED.txt") file(s) over" \
+           "${UNTRACKED_MAX_KB}K, named in looplab-untracked-SKIPPED.txt"
+    else
+      rm -f "$OUT/looplab-untracked-SKIPPED.txt"
+    fi
+    if [ "$n" -eq 0 ]; then
+      rm -f "$OUT/looplab-untracked.tar.gz" "$OUT/.untracked-keep.z"
+      return 0
+    fi
+    if tar -czf "$OUT/looplab-untracked.tar.gz" --null -T "$OUT/.untracked-keep.z" 2>/dev/null \
+       && [ -s "$OUT/looplab-untracked.tar.gz" ]; then
+      echo "  looplab-untracked     $n file(s) no patch can carry," \
+           "$(du -h "$OUT/looplab-untracked.tar.gz" | cut -f1)"
+      rm -f "$OUT/.untracked-keep.z"
+      return 0
+    fi
+    # A NAME WITH NO BYTES IS THE DEFECT THIS BLOCK EXISTS FOR, so a failed tar is SHORT, not
+    # silent -- and whatever the failure left is removed, per section 1's lesson.
+    echo "  UNTRACKED FAILED     $n file(s) present and NOT archived -- see looplab-dirty.txt"
+    rm -f "$OUT/looplab-untracked.tar.gz" "$OUT/.untracked-keep.z"
+    return 3
+  )
+  archive_untracked </dev/null || SHORT=$((SHORT + 1))
 else
   echo "  MISSING              looplab.bundle -- $SRC/looplab/.git absent, so NO commit of ours is archived"
   SHORT=$((SHORT + 1))

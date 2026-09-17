@@ -59,6 +59,36 @@ for NAME in looplab AlgoTune; do
     echo "  $NAME: restored ${GOT:0:12} but the snapshot recorded $WANT -- WRONG TREE"; RC=1; continue
   fi
   echo "  $NAME: ${GOT:0:12} on $(cd "$OUT" && git branch --show-current)  ($(cd "$OUT" && git ls-tree -r HEAD --name-only | wc -l) tracked files)"
+
+  # THE WORKING TREE, NOT ONLY THE COMMITS (doc 56 §412). A bundle carries what was committed; the
+  # hour before a restart is the part that was not, and it is the part that cannot be written
+  # again from anywhere else. The snapshot puts it in two files beside the bundle -- the patch of
+  # tracked changes and the tarball of untracked ones -- and until this block they had no reader:
+  # restoring the 2026-09-10 snapshot by hand, the patch was found by listing the directory.
+  #
+  # Applied INTO THE FRESH CLONE, which is this script's whole safety argument (it never touches
+  # the live tree), and every outcome is said out loud: a patch that will not apply is a fact the
+  # restorer must have, not a silence. `RESTORE_COMMITTED_ONLY=1` skips both.
+  if [ "${RESTORE_COMMITTED_ONLY:-0}" != "1" ]; then
+    P="$PICK/$NAME-uncommitted.patch"
+    if [ -s "$P" ]; then
+      if ( cd "$OUT" && git apply --3way "$P" >/dev/null 2>&1 ); then
+        echo "      + uncommitted patch applied ($(grep -c '^diff --git' "$P") file(s))"
+      else
+        echo "      ! uncommitted patch WOULD NOT APPLY -- it is at $P, the clone is clean"; RC=1
+      fi
+    fi
+    U="$PICK/$NAME-untracked.tar.gz"
+    if [ -s "$U" ]; then
+      if ( cd "$OUT" && tar -xzf "$U" ); then
+        echo "      + $(tar -tzf "$U" | grep -cv '/$') untracked file(s) unpacked"
+      else
+        echo "      ! untracked archive WOULD NOT UNPACK -- it is at $U"; RC=1
+      fi
+    fi
+    S="$PICK/$NAME-untracked-SKIPPED.txt"
+    [ -s "$S" ] && echo "      ! $(wc -l < "$S") untracked file(s) were NEVER ARCHIVED (too large); named in $S"
+  fi
 done
 [ "$RC" = 0 ] && echo "restore OK into $DEST" || echo "restore INCOMPLETE -- see above"
 exit "$RC"
