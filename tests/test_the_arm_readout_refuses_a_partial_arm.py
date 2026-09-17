@@ -172,7 +172,7 @@ def _tree(root, name):
 
 
 def test_a_sound_design_has_nothing_to_say(tmp_path):
-    batches = [(["capA1", "capB1"], ["freeA1", "freeB1"]),
+    batches = [(["capX1", "capY1"], ["freeX1", "freeY1"]),
                (["capA2", "capB2"], ["freeA2", "freeB2"])]
     for t, c in batches:
         for n in t + c:
@@ -183,30 +183,30 @@ def test_a_sound_design_has_nothing_to_say(tmp_path):
 def test_one_probe_in_two_batches_is_one_probe_counted_twice(tmp_path):
     """`BATCHES` is hand-maintained and has been appended to five times. A repeated name changes the
     number silently -- nothing in the readout's own output could show it."""
-    said = arm_readout.design_problems([(["capA1", "capB1"], ["freeA1", "freeB1"]),
-                                        (["capA1", "capB2"], ["freeA2", "freeB2"])])
-    assert any("capA1" in s and "counted twice" in s for s in said), said
+    said = arm_readout.design_problems([(["capX1", "capY1"], ["freeX1", "freeY1"]),
+                                        (["capX1", "capB2"], ["freeA2", "freeB2"])])
+    assert any("capX1" in s and "counted twice" in s for s in said), said
 
 
 def test_a_batch_that_is_not_two_plus_two_is_named(tmp_path):
     """The test conditions on the within-batch margins; a 3+1 batch is not the design that was
     registered, and its permutation set is a different one."""
-    said = arm_readout.design_problems([(["capA1", "capB1", "capC1"], ["freeA1"])])
+    said = arm_readout.design_problems([(["capX1", "capY1", "capC1"], ["freeX1"])])
     assert any("3+1" in s for s in said), said
 
 
 def test_a_name_with_no_tree_is_a_typo_not_an_incomplete_batch(tmp_path):
     """Without this it reads as "batch N incomplete" and gets blamed on the bench."""
-    _tree(tmp_path, "capA1")
-    said = arm_readout.design_problems([(["capA1", "capB1"], ["freeA1", "freeB1"])],
+    _tree(tmp_path, "capX1")
+    said = arm_readout.design_problems([(["capX1", "capY1"], ["freeX1", "freeY1"])],
                                        str(tmp_path))
-    assert any("capB1" in s and "no probe tree" in s for s in said), said
+    assert any("capY1" in s and "no probe tree" in s for s in said), said
 
 
 def test_an_arm_shaped_tree_in_no_batch_must_be_explained(tmp_path):
-    for n in ("capA1", "capB1", "freeA1", "freeB1", "freeB99"):
+    for n in ("capX1", "capY1", "freeX1", "freeY1", "freeB99"):
         _tree(tmp_path, n)
-    said = arm_readout.design_problems([(["capA1", "capB1"], ["freeA1", "freeB1"])],
+    said = arm_readout.design_problems([(["capX1", "capY1"], ["freeX1", "freeY1"])],
                                        str(tmp_path))
     assert any("freeB99" in s and "EXCLUDED" in s for s in said), said
 
@@ -215,9 +215,9 @@ def test_a_probe_excluded_on_the_record_is_not_an_orphan(tmp_path):
     """§213: freeB3 was resumed past a ceiling the meter had already shown and ran on to $1.1056.
     Excluded at a criterion written before any contrast was read -- and the reason lives in the
     code, so nobody helpfully adds it back."""
-    for n in ("capA1", "capB1", "freeA1", "freeB1", "freeB3"):
+    for n in ("capX1", "capY1", "freeX1", "freeY1", "freeB3"):
         _tree(tmp_path, n)
-    said = arm_readout.design_problems([(["capA1", "capB1"], ["freeA1", "freeB1"])],
+    said = arm_readout.design_problems([(["capX1", "capY1"], ["freeX1", "freeY1"])],
                                        str(tmp_path))
     assert not any("freeB3" in s for s in said), said
     assert "§213" in arm_readout.EXCLUDED["freeB3"]
@@ -226,8 +226,8 @@ def test_a_probe_excluded_on_the_record_is_not_an_orphan(tmp_path):
 def test_the_readout_refuses_a_malformed_design_before_reading_anything(tmp_path, monkeypatch,
                                                                         capsys):
     monkeypatch.setattr(arm_readout, "BATCHES",
-                        [(["capA1", "capB1"], ["freeA1", "freeB1"]),
-                         (["capA1", "capB2"], ["freeA2", "freeB2"])])
+                        [(["capX1", "capY1"], ["freeX1", "freeY1"]),
+                         (["capX1", "capB2"], ["freeA2", "freeB2"])])
     monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
     def boom(*a, **k):
         raise AssertionError("admit() ran on a malformed design")
@@ -308,13 +308,13 @@ A1, A2, B1, B2 = "0-10,48-58", "11-21,59-69", "22-32,70-80", "33-43,81-91"
 
 
 def test_a_batch_on_the_original_lanes_is_mapping_a(tmp_path):
-    _instrument(tmp_path, "capA1", A1); _instrument(tmp_path, "capB1", A2)
-    assert arm_readout.mapping_of(["capA1", "capB1"], str(tmp_path)) == "A"
+    _instrument(tmp_path, "capX1", A1); _instrument(tmp_path, "capY1", A2)
+    assert arm_readout.mapping_of(["capX1", "capY1"], str(tmp_path)) == "A"
 
 
 def test_a_batch_on_the_swapped_lanes_is_mapping_b(tmp_path):
-    _instrument(tmp_path, "capA1", B1); _instrument(tmp_path, "capB1", B2)
-    assert arm_readout.mapping_of(["capA1", "capB1"], str(tmp_path)) == "B"
+    _instrument(tmp_path, "capX1", B1); _instrument(tmp_path, "capY1", B2)
+    assert arm_readout.mapping_of(["capX1", "capY1"], str(tmp_path)) == "B"
 
 
 def test_a_batch_with_one_lane_from_each_pair_is_mixed_not_unreadable(tmp_path):
@@ -322,8 +322,8 @@ def test_a_batch_with_one_lane_from_each_pair_is_mixed_not_unreadable(tmp_path):
     33-43. It is internally balanced against the lane pairs and carries no confound at all, so
     calling it "?" would report a failure to measure something that was measured and came out
     even."""
-    _instrument(tmp_path, "capA1", A1); _instrument(tmp_path, "capB1", B1)
-    assert arm_readout.mapping_of(["capA1", "capB1"], str(tmp_path)) == "mixed"
+    _instrument(tmp_path, "capX1", A1); _instrument(tmp_path, "capY1", B1)
+    assert arm_readout.mapping_of(["capX1", "capY1"], str(tmp_path)) == "mixed"
 
 
 def test_an_unreadable_instrument_is_a_question_mark(tmp_path):
@@ -333,9 +333,9 @@ def test_an_unreadable_instrument_is_a_question_mark(tmp_path):
 def test_the_contrast_is_reported_under_each_mapping(tmp_path):
     """§266 swapped the mapping for batches 10-12 so the lane confound became estimable. Registered
     here BEFORE any outcome was read, which is the only time such a check is worth writing."""
-    for n, lane in (("capA1", A1), ("capB1", A2), ("capA2", B1), ("capB2", B2)):
+    for n, lane in (("capX1", A1), ("capY1", A2), ("capA2", B1), ("capB2", B2)):
         _instrument(tmp_path, n, lane)
-    monkey = [(["capA1", "capB1"], ["x", "y"]), (["capA2", "capB2"], ["x", "y"])]
+    monkey = [(["capX1", "capY1"], ["x", "y"]), (["capA2", "capB2"], ["x", "y"])]
     old = arm_readout.BATCHES
     try:
         arm_readout.BATCHES = monkey
@@ -389,12 +389,12 @@ def test_the_interaction_test_is_two_sided_and_that_decides_cases_at_alpha():
 
 def _full_arm(tmp_path, monkeypatch, scores=None):
     """Two complete batches that `admit` lets through, with lanes on record."""
-    batches = [(["capA1", "capB1"], ["freeA1", "freeB1"]),
+    batches = [(["capX1", "capY1"], ["freeX1", "freeY1"]),
                (["capA2", "capB2"], ["freeA2", "freeB2"])]
-    for n, lane in (("capA1", A1), ("capB1", A2), ("freeA1", B1), ("freeB1", B2),
+    for n, lane in (("capX1", A1), ("capY1", A2), ("freeX1", B1), ("freeY1", B2),
                     ("capA2", B1), ("capB2", B2), ("freeA2", A1), ("freeB2", A2)):
         _instrument(tmp_path, n, lane)
-    table = scores or {"capA1": 200.0, "capB1": 210.0, "freeA1": 100.0, "freeB1": 110.0,
+    table = scores or {"capX1": 200.0, "capY1": 210.0, "freeX1": 100.0, "freeY1": 110.0,
                        "capA2": 150.0, "capB2": 160.0, "freeA2": 140.0, "freeB2": 130.0}
     monkeypatch.setattr(arm_readout, "BATCHES", batches)
     monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
@@ -405,9 +405,9 @@ def _full_arm(tmp_path, monkeypatch, scores=None):
 def test_a_refusal_writes_no_marker(tmp_path, monkeypatch, capsys):
     """The marker is what lifts §190 for `probe_summary`. A partial readout that left one behind
     would open the embargo over half an answer."""
-    monkeypatch.setattr(arm_readout, "BATCHES", [(["capA1", "capB1"], ["freeA1", "freeB1"])])
+    monkeypatch.setattr(arm_readout, "BATCHES", [(["capX1", "capY1"], ["freeX1", "freeY1"])])
     monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
-    for n in ("capA1", "capB1", "freeA1", "freeB1"):
+    for n in ("capX1", "capY1", "freeX1", "freeY1"):
         _instrument(tmp_path, n, A1)
     monkeypatch.setattr(arm_readout, "admit", lambda n, arm, ms: (None, "has not ended"))
     out = tmp_path / "marker.json"
@@ -424,7 +424,7 @@ def test_a_full_readout_records_what_it_used(tmp_path, monkeypatch, capsys):
     assert rc == 0, capsys.readouterr().out
     got = json.loads(out.read_text(encoding="utf-8"))
     assert got["batches"] == 2 and got["verdict"] in ("reject", "do not reject")
-    assert got["design"][0][0] == ["capA1", "capB1"], got["design"]
+    assert got["design"][0][0] == ["capX1", "capY1"], got["design"]
     assert got["scores"][0]["treat"] == [200.0, 210.0], got["scores"]
     assert "stratified_one_sided_p" in got and "lane_split" in got
     assert "freeB3" in got["excluded"], got["excluded"]
@@ -571,3 +571,32 @@ def test_the_interaction_survives_a_third_group():
 def test_the_interaction_still_needs_both_mappings_present():
     assert arm_readout.interaction_p({"A": {"contrast": 1.0, "rows": [], "n": 1},
                                       "mixed": {"contrast": 0.0, "rows": [], "n": 1}}) is None
+
+
+def test_the_discarded_first_batch_is_set_aside_by_name(tmp_path):
+    """§195, 2026-09-04: `capA1` was four minutes old with fifteen `run_probe` calls against a cap
+    of twelve -- the counter lived on the per-phase `DevProbeTools` instance, so a per-run cap of
+    12 permitted 36 to 48 and "the treatment and the control would have been very nearly the same
+    thing". The four were discarded and relaunched as the `*2` batch.
+
+    Their trees came BACK: the snapshot had already copied them to `runs-archive/model-probes`, and
+    the archive is the only corpus left after 2026-09-10. So an analysis pointed at it sees four
+    arm-shaped trees the design never listed, and the readout refuses -- correctly, because adding
+    them silently would add a batch whose treatment is known not to have bitten, and dropping them
+    silently would be a choice made with the corpus in hand. The reason lives in the code so that
+    neither can happen quietly.
+    """
+    for n in ("capA1", "capB1", "freeA1", "freeB1"):
+        _tree(tmp_path, n)
+    said = arm_readout.design_problems(arm_readout.BATCHES[:1], str(tmp_path))
+    assert not any(n in s for s in said for n in ("capA1", "capB1", "freeA1", "freeB1")), said
+    for n in ("capA1", "capB1", "freeA1", "freeB1"):
+        assert "§195" in arm_readout.EXCLUDED[n], n
+
+
+def test_a_probe_cannot_be_both_batched_and_excluded(tmp_path):
+    """`EXCLUDED` is consulted only for probes in NO batch, so a name in both lists would carry an
+    exclusion reason and be counted anyway -- silently. Writing §195's four into `EXCLUDED` would
+    have been wrong in exactly this way if one of them had been standing in a batch."""
+    said = arm_readout.design_problems([(["capA1", "capB2"], ["freeA2", "freeB2"])])
+    assert any("capA1" in s and "EXCLUDED" in s and "cannot be both" in s for s in said), said

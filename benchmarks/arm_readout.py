@@ -83,6 +83,30 @@ EXCLUDED = {
     "freeB3": "§213: the meter already showed it at $1.0308 when I resumed it, and the per-process "
               "accountant let it run on to $1.1056. Excluded at a criterion written down before any "
               "contrast had been read.",
+    # THE DISCARDED FIRST BATCH. §195, 2026-09-04: `capA1` was four minutes old with FIFTEEN
+    # `run_probe` calls against a cap of twelve, because the counter lived on the `DevProbeTools`
+    # instance and `_scout_tools` builds a fresh one per phase -- so a per-run cap of 12 permitted
+    # 36 to 48 and "the treatment and the control would have been very nearly the same thing".
+    # The four were discarded and relaunched as `capA2`/`capB2`/`freeA2`/`freeB2` with the counter
+    # shared across providers. The ground is that the TREATMENT DID NOT BITE, established by asking
+    # whether the knob had fired and explicitly before any score was read; §190's population clause
+    # ("its own `config.snapshot.json` records the cap its label claims") cannot express it, because
+    # their snapshots record the cap faithfully -- what failed was the code the cap ran through.
+    #
+    # They are named here now because the trees §195 removed came BACK: `snapshot.sh` had already
+    # copied them to `runs-archive/model-probes`, and an analysis pointed at the archive (which is
+    # the only corpus left after 2026-09-10) sees four probes the design has never listed. Reading
+    # the arm with them silently in would add a batch whose treatment is known not to have bitten;
+    # reading it with them silently out would be a choice made after the corpus was in hand. The
+    # entry is the same decision as 2026-09-04, transcribed rather than retaken.
+    "capA1": "§195: the discarded first batch -- the cap counted per PHASE, so a cap of 12 allowed "
+             "15 calls in four minutes and 36-48 across a run. Treatment did not bite; relaunched "
+             "as capA2. Decided on 2026-09-04 by asking whether the knob had fired, before any "
+             "score was read.",
+    "capB1": "§195: the discarded first batch, relaunched as capB2. See capA1.",
+    "freeA1": "§195: the discarded first batch's control, relaunched as freeA2. See capA1 -- a "
+              "control is discarded with its batch or the batch stops being paired.",
+    "freeB1": "§195: the discarded first batch's control, relaunched as freeB2. See capA1.",
 }
 
 
@@ -108,6 +132,15 @@ def design_problems(batches, root: str | None = None) -> list:
                             "counted twice")
             else:
                 seen[name] = i
+            # A NAME IN BOTH LISTS IS A CONTRADICTION, and it is silent: `EXCLUDED` is consulted
+            # only for probes that are in no batch, so a batched name could carry an exclusion
+            # reason and still be counted. Added 2026-09-17 while writing §195's discarded batch
+            # into `EXCLUDED` -- the edit would have been wrong in exactly this way if one of those
+            # four had been standing in a batch, and nothing would have said so.
+            if name in EXCLUDED:
+                said.append(f"{name} is in batch {i} AND in EXCLUDED ({EXCLUDED[name][:40]}...) "
+                            "-- a probe cannot be both counted and set aside; one of the two is a "
+                            "mistake and the design cannot say which")
     if root:
         for name in names:
             if not os.path.isdir(f"{root}/{name}"):

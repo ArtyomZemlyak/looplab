@@ -59,7 +59,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import events_read  # noqa: E402
 
-DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
+# WHERE THE PROBE TREES ARE, and it is no longer a literal (doc 56 §414-§415, doc 59 P0 item 3).
+# The stand lives on the container's local disk and does not survive a restart; the corpus does,
+# because the snapshot copies it to `runs-archive/model-probes` on the persistent mount. After
+# 2026-09-10 the literal below named an empty path, and every instrument keyed on it answered
+# "no probes" over a corpus of 161 that was sitting on disk -- which is how an instrument comes to
+# report an idle box instead of refusing. `BENCH_ROOT` is the variable the box profile and the
+# campaign already export, so pointing an analysis at the archive is one assignment and no edit.
+DEFAULT_ROOT = (os.environ.get("BENCH_ROOT") or "/var/tmp/looplab-bench") + "/model-probes"
 
 
 def probe_calls(root: str, name: str) -> dict:
