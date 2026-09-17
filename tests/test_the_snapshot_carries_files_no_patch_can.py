@@ -158,6 +158,27 @@ def test_nothing_untracked_leaves_no_empty_archive(bench, tmp_path):
     assert not (out / "looplab-untracked-SKIPPED.txt").exists()
 
 
+def test_a_failed_archive_is_a_SHORTFALL_and_not_a_silence(bench, tmp_path):
+    """The counter, not just the sentence.
+
+    `SHORT` is what decides whether `.complete` is written, and `.complete` is what the restore
+    refuses without -- so an archiving failure that prints a line and leaves the counter clean
+    produces a snapshot marked good over an incomplete archive, which is this script's own
+    named worst outcome. The subshell cannot increment the parent's counter, so it reports by
+    exit code; this drives that with a `tar` on PATH that refuses.
+    """
+    src, _repo = bench
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "tar").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (stub / "tar").chmod(0o755)
+    out, p = _snapshot(src, tmp_path / "snaps", PATH=f"{stub}:{os.environ['PATH']}")
+    assert "UNTRACKED FAILED" in p.stdout, p.stdout
+    assert not (out / "looplab-untracked.tar.gz").exists()      # nothing left looking like a backup
+    assert "INCOMPLETE SNAPSHOT" in p.stdout, p.stdout
+    assert not (out / ".complete").exists(), p.stdout           # and the restore will refuse it
+
+
 def test_the_restore_puts_the_working_tree_back(bench, tmp_path):
     """THE ROUND TRIP, which is the only form of this claim worth having.
 
