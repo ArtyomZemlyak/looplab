@@ -131,3 +131,51 @@ def run_contrast(state) -> Optional[dict]:
     return {**got, "task_id": getattr(state, "task_id", ""),
             "direction": getattr(state, "direction", ""),
             "run_id": getattr(state, "run_id", "")}
+
+
+def known_regimes(rows: list, task_id: str) -> dict:
+    """Fold the shared ledger into what is KNOWN about `task_id`, and what is known elsewhere.
+
+    The read side of docs/60 §60.9 B2, and the shape it returns is the whole argument. `here` is
+    what this task's own runs measured; `elsewhere` is one line per OTHER task, each naming its own
+    sample; `untried_here` is the regimes no run of this task has ever shipped.
+
+    That last field is the one §419 is about. `pde_heat1d` ran 17 of its 18 nodes as `jit` and never
+    once compiled, and 108 read that as a failure to carry the kernel finding. It is not: the task
+    found a regime and stayed in it, and what is actually missing there is a COMPARISON. "Nobody has
+    tried `compiled` on this task" is a true sentence that invites a check; "a compiled kernel is
+    worth 6x" is a false one that instructs, and 110 is the record of it being false.
+
+    Rows are ledger lines (`regime_contrast.jsonl`), so they are data from earlier runs and may be
+    anything; every access is defensive and a malformed row is skipped rather than failing a read
+    that is only ever advisory.
+    """
+    here: dict[str, list] = {}
+    elsewhere: list = []
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        regimes = row.get("regimes")
+        if not isinstance(regimes, dict):
+            continue
+        if row.get("task_id") == task_id:
+            for regime, stats in regimes.items():
+                if regime in REGIMES and isinstance(stats, dict):
+                    here.setdefault(regime, []).append(stats)
+        else:
+            elsewhere.append({"task_id": row.get("task_id", ""), "best": row.get("best", ""),
+                              "worst": row.get("worst", ""), "ratio": row.get("ratio"),
+                              "nodes": row.get("nodes", 0)})
+    summary = {}
+    for regime, seen in sorted(here.items()):
+        medians = [s["median"] for s in seen if isinstance(s.get("median"), (int, float))]
+        counts = [s["n"] for s in seen if isinstance(s.get("n"), int)]
+        if medians:
+            # The MEDIAN OF THE RUN MEDIANS, not a pooled median: the ledger holds one row per run
+            # and a run with forty nodes would otherwise speak forty times louder than one with two
+            # about a question -- "does this regime work here" -- that is asked once per run.
+            summary[regime] = {"runs": len(medians), "median_of_medians": round(
+                statistics.median(medians), 6), "nodes": sum(counts)}
+    return {"task_id": task_id, "here": summary,
+            "untried_here": [r for r in REGIMES if r not in summary],
+            "elsewhere": sorted(elsewhere, key=lambda e: -(e.get("nodes") or 0))[:8]}

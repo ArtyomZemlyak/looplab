@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-155 event types — 112 folded into `RunState`, 43 diagnostic; 928 declared payload keys; 26 types whose whole payload is stored by the fold.
+155 event types — 112 folded into `RunState`, 43 diagnostic; 929 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -139,7 +139,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `promote` | folded · whole | The operator promoted one node to an alias (`champion` by default). | `node_id` | `alias`, `attempt`, `generation` |
 | `proxy_scored` | folded | The pre-eval proxy's score for a candidate, or its abstention when the nearest neighbour is too far. | `abstained`, `generation`, `nearest`, `node_id`, `score`, `skipped` | `attempt` |
 | `readmodel_skipped` | diagnostic | The SQLite read-model sidecar could not be updated. | `error` | — |
-| `reflection_note` | diagnostic | The run-end distillation: the causal note, the lessons and the auto-skills it proposed. | `at_nodes`, `coverage_digest`, `fingerprint`, `finish_seq`, `lessons`, `n_lessons`, `n_skill_candidates`, `n_skills`, `n_skills_demoted`, `n_skills_promoted_earlier`, `note`, `prior_citations`, `skill_candidates`, `skills`, `skills_demoted`, `task_id` | — |
+| `reflection_note` | diagnostic | The run-end distillation: the causal note, the lessons and the auto-skills it proposed. | `at_nodes`, `coverage_digest`, `fingerprint`, `finish_seq`, `lessons`, `n_lessons`, `n_skill_candidates`, `n_skills`, `n_skills_demoted`, `n_skills_promoted_earlier`, `note`, `prior_citations`, `regime_contrast`, `skill_candidates`, `skills`, `skills_demoted`, `task_id` | — |
 | `repair_critic_verdict` | diagnostic | The critic's judgement on one repair round, over the durable repairs it could see. | `after`, `attempt`, `durable_repairs`, `generation`, `judged`, `node_id`, `rationale`, `source`, `verdict` | — |
 | `report_generated` | folded | A run report was written, at a node and for a stated trigger. | `at_node`, `content`, `trigger` | `finalize_scope`, `generation`, `refresh_id` |
 | `report_refresh_failed` | diagnostic | A paid report refresh failed before anything was written — sanitized, retry-safe. | — | `error_kind`, `generation`, `refresh_id` |

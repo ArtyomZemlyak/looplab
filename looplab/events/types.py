@@ -1940,7 +1940,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(
             "at_nodes", "coverage_digest", "fingerprint", "finish_seq", "lessons", "n_lessons",
             "n_skill_candidates", "n_skills", "n_skills_demoted", "n_skills_promoted_earlier",
-            "note", "prior_citations", "skill_candidates", "skills", "skills_demoted", "task_id"
+            "note", "prior_citations", "regime_contrast", "skill_candidates", "skills",
+            "skills_demoted", "task_id"
         ),
         optional=(),
     ),

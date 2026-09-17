@@ -20,8 +20,8 @@ Driven against the archive once (2026-09-17, 161 probes, 422 evaluated nodes) an
 """
 from __future__ import annotations
 
-from looplab.engine.regime_contrast import (REGIME_COMPILED, REGIME_JIT, REGIME_PLAIN, contrast,
-                                            node_regime, run_contrast)
+from looplab.engine.regime_contrast import (REGIME_COMPILED, REGIME_JIT, REGIME_PLAIN, REGIMES,
+                                            contrast, known_regimes, node_regime, run_contrast)
 
 
 def test_a_shipped_cython_source_is_a_compiled_kernel():
@@ -117,3 +117,59 @@ def test_the_row_names_the_task_it_is_about():
     got = run_contrast(_S())
     assert got["task_id"] == "algotune_edge_expansion" and got["run_id"] == "r1"
     assert got["nodes"] == 2 and got["best"] == REGIME_COMPILED
+
+
+# ------------------------------------------------------------------ the shared ledger's read side
+def _row(task, regimes, **extra):
+    return {"task_id": task, "regimes": regimes, **extra}
+
+
+def test_what_this_task_knows_is_kept_apart_from_what_others_do():
+    """A contrast from another task is evidence about that task. Merging the two is exactly how
+    "a compiled kernel is worth 6x" became a general law it is not (§110)."""
+    rows = [
+        _row("edge_expansion", {REGIME_COMPILED: {"n": 40, "median": 180.0},
+                                REGIME_PLAIN: {"n": 20, "median": 22.0}},
+             best=REGIME_COMPILED, worst=REGIME_PLAIN, ratio=8.18, nodes=60),
+        _row("pde_heat1d", {REGIME_JIT: {"n": 17, "median": 110.0}},
+             best=REGIME_JIT, worst=REGIME_JIT, ratio=None, nodes=17),
+    ]
+    got = known_regimes(rows, "pde_heat1d")
+    assert set(got["here"]) == {REGIME_JIT}
+    assert got["here"][REGIME_JIT]["median_of_medians"] == 110.0
+    assert [e["task_id"] for e in got["elsewhere"]] == ["edge_expansion"]
+
+
+def test_the_regimes_nobody_tried_here_are_NAMED():
+    """§419's point. `pde_heat1d` ran 17 of 18 nodes as jit and never compiled once; §108 read that
+    as a failure to carry the kernel finding, and it is not one -- the task found a regime and
+    stayed in it. What is missing there is a COMPARISON, and naming it invites a check instead of
+    instructing a rewrite."""
+    rows = [_row("pde_heat1d", {REGIME_JIT: {"n": 17, "median": 110.0}})]
+    got = known_regimes(rows, "pde_heat1d")
+    assert got["untried_here"] == [REGIME_COMPILED, REGIME_PLAIN], got
+    assert known_regimes(rows, "brand_new_task")["untried_here"] == list(
+        (REGIME_COMPILED, REGIME_JIT, REGIME_PLAIN))
+
+
+def test_a_run_with_forty_nodes_does_not_outvote_one_with_two():
+    """The ledger holds one row per RUN, and "does this regime work here" is asked once per run.
+    Pooling the nodes would let a single long run answer it forty times."""
+    rows = [_row("t", {REGIME_COMPILED: {"n": 40, "median": 10.0}}),
+            _row("t", {REGIME_COMPILED: {"n": 2, "median": 200.0}}),
+            _row("t", {REGIME_COMPILED: {"n": 2, "median": 300.0}})]
+    got = known_regimes(rows, "t")
+    assert got["here"][REGIME_COMPILED]["runs"] == 3
+    assert got["here"][REGIME_COMPILED]["median_of_medians"] == 200.0    # not the 40-node row
+    assert got["here"][REGIME_COMPILED]["nodes"] == 44
+
+
+def test_a_malformed_ledger_row_is_skipped_not_fatal():
+    """Rows are data written by earlier runs; a reader that dies on one of them takes a run with
+    it, and this read is only ever advisory."""
+    rows = ["not a dict", {"task_id": "t"}, {"task_id": "t", "regimes": "nope"},
+            _row("t", {REGIME_PLAIN: {"n": 1, "median": 1.0}})]
+    got = known_regimes(rows, "t")
+    assert set(got["here"]) == {REGIME_PLAIN}
+    assert known_regimes([], "t")["here"] == {}
+    assert known_regimes(None, "t")["untried_here"] == list(REGIMES)

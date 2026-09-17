@@ -419,6 +419,32 @@ class LessonDistillMixin:
             contain("lesson utility ledger at finalize", exc)
             prior_citations = {}
 
+        # THE REGIME CONTRAST (doc 56 §419, doc 60 §60.9 B2). What this run's own nodes say about
+        # the implementation regimes it tried, appended to a shared ledger so a later run can read
+        # what has been measured ON A TASK rather than be told what worked on another one.
+        #
+        # Written unconditionally and read by nothing yet, on the `lesson_utility.jsonl` precedent
+        # one block up: a row appended to a store changes no run's behaviour, and the flag belongs
+        # on whatever later puts it in front of a model. A record that only exists once someone has
+        # decided to act on it is a record that is never there when the question is first asked.
+        #
+        # Deterministic, model-free and free -- it reads nodes this run already has -- and contained
+        # like every other best-effort finalize step: a ledger never fails a finalization.
+        regime_row: dict = {}
+        try:
+            from looplab.engine.regime_contrast import run_contrast
+            regime_row = run_contrast(final) or {}
+            if regime_row:
+                _rpath = base / "regime_contrast.jsonl"
+                with interprocess_lock(Path(str(_rpath) + ".lock"), required=True):
+                    append_jsonl_bytes_locked(_rpath, orjson.dumps(
+                        {**regime_row, "run_uid": getattr(final, "run_uid", ""),
+                         "finish_seq": finish_seq}) + b"\n")
+        except Exception as exc:  # noqa: BLE001 — a ledger never fails a finalization
+            from looplab.core.containment import contain
+            contain("regime contrast ledger at finalize", exc)
+            regime_row = {}
+
         # Audit the run-end distillation in the event log (diagnostic sidecar — fold ignores it). These
         # LLM artifacts (the causal note, the generalizable lessons, the auto-promoted skills) shape
         # FUTURE runs' priors/skills yet otherwise leave no trace in THIS run's events.jsonl — only in
@@ -436,6 +462,8 @@ class LessonDistillMixin:
             "n_skills_promoted_earlier": len(promoted_earlier),
             "n_skills_demoted": len(skills_demoted), "skills_demoted": skills_demoted[:12],
             "prior_citations": prior_citations,
+            # What the regime ledger got this run, so "what this run concluded" covers it too.
+            "regime_contrast": regime_row,
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}
