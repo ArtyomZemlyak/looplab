@@ -102,6 +102,44 @@ def test_a_silent_session_is_named_and_its_turns_counted(tmp_path):
     assert "wrote NOTHING at all : 1/1" in text
 
 
+def test_the_turns_before_a_write_are_TURNS_and_not_measurements(tmp_path):
+    """A17 asks how many turns a session spends without writing a file, and until 2026-09-17 this
+    counted only the two kinds the file classifies -- so a session that read five files and then
+    wrote scored ZERO calls before its first write.
+
+    Over the 161-probe corpus the old metric read `p50 0, p90 1, max 1`: a true statement about
+    MEASUREMENTS, silent on the question, and a threshold picked from it would have been picked
+    from the wrong distribution. A maximum of one across 1,166 sessions is the signature of a
+    metric that cannot see what it claims to count.
+    """
+    path = _spans(tmp_path, [
+        _gen("s1"),
+        _tool("s1", 1.0, "read_file", '{"path": "a.py"}'),
+        _tool("s1", 2.0, "read_file", '{"path": "b.py"}'),
+        _tool("s1", 3.0, "reference", "{}"),
+        _measure("s1", 4.0, 3.0),
+        _write("s1", 5.0),
+    ])
+    row, = sm.sessions(path)
+    assert row["calls_before_first_write"] == 4, row      # three reads and one measurement
+    assert row["calls"] == 5 and row["measurements"] == 1 and row["writes"] == 1, row
+
+
+def test_a_third_kind_between_them_does_not_move_the_A16_answer(tmp_path):
+    """The other half of that change: A16 is an ORDER relation between a write and the best
+    measurement, so entries of a third kind shift every index and change no comparison."""
+    path = _spans(tmp_path, [
+        _gen("s1"),
+        _measure("s1", 1.0, 200.0),
+        _tool("s1", 2.0, "read_file", '{"path": "a.py"}'),
+        _write("s1", 3.0),
+        _measure("s1", 4.0, 20.0),
+    ])
+    row, = sm.sessions(path)
+    assert row["wrote_after_best"] is True and row["last_is_best"] is False, row
+    assert row["gap"] == 180.0, row
+
+
 def test_a_read_only_phase_is_not_a_session(tmp_path):
     """`plan`, `propose` and `stages` cannot commit a working set, so "the best edit" is not a
     thing that exists there and neither repair would touch them."""

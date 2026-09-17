@@ -114,12 +114,30 @@ def sessions(spans_path: str) -> list[dict]:
             phase_of.setdefault(parent, phase)
             tool = str(attrs.get("tool") or "")
             payload = str(attrs.get("input") or "")
+            # EVERY TOOL CALL GOES INTO THE SEQUENCE, not only the two kinds this file classifies.
+            #
+            # A17 asks how many TURNS a session spends without writing a file, and until 2026-09-17
+            # the sequence held only measurements and writes -- so `calls_before_first_write`
+            # counted MEASUREMENTS before the first write and the docstring said turns. Over the
+            # 161-probe corpus that reads `p50 0, p90 1, max 1`, which is a true statement about
+            # measurements and says nothing at all about the question: a session that reads eleven
+            # files and then writes scores 0 by that metric. A threshold set from it would have been
+            # set from the wrong distribution, and the reason it looks so tidy -- a maximum of ONE
+            # across 1,166 sessions -- is the signature of a metric that cannot see what it claims.
+            #
+            # A16 is unaffected: it asks whether any WRITE came after the best MEASUREMENT, which is
+            # an order relation between two kinds that are both still in the sequence, and inserting
+            # third-kind entries between them shifts every index without changing any comparison.
             if tool in MEASURE_TOOLS:
                 named = _DEV_NAME.search(payload)
                 if named and named.group(1) in MEASURE_NAMES:
                     calls[parent].append((started, "measure", str(attrs.get("output") or "")))
+                else:
+                    calls[parent].append((started, "other", tool))
             elif tool in WRITE_TOOLS:
                 calls[parent].append((started, "write", tool))
+            else:
+                calls[parent].append((started, "other", tool))
 
     rows = []
     for span_id, seq in calls.items():
@@ -135,7 +153,10 @@ def sessions(spans_path: str) -> list[dict]:
             "span": span_id, "phase": phase, "cost": round(cost.get(span_id, 0.0), 6),
             "calls": len(seq), "measurements": len(values), "unparsed": len(values) - len(seen),
             "writes": len(writes),
-            # A17: turns spent before the session wrote anything at all, and whether it ever did.
+            # A17: TOOL CALLS made before the session wrote anything at all, and whether it ever
+            # did. The index is into the full sequence (above), so this is the count of calls of
+            # every kind that preceded the first write -- which is the thing a mid-session stop
+            # would be counting when it decides a session is going nowhere.
             "calls_before_first_write": (writes[0] if writes else len(seq)),
             "wrote_nothing": not writes,
         }
