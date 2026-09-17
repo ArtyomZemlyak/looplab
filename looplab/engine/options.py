@@ -251,6 +251,9 @@ class EngineOptions:
     agent_drives_actions: bool = False   # agent picks the next macro action (within a legal gate)
     # Layer 3: opt-in Card queue owns macro-action selection; false preserves the legacy policy/pilot path.
     card_driven_selection: bool = False
+    # B1 (docs/60 §60.9): force an `improve` on the node that just landed when it is in the top
+    # `1 - q` of this run's evaluated nodes. 0.0 is OFF and is the historical search.
+    exploit_strong_node_quantile: float = 0.0
     # Layer 5: maximum request+committed speculative Card backlog. Zero keeps speculation fully off;
     # -1 is AUTO (Engine resolves it to the settled eval width — see `Engine._resolve_speculation_depth`).
     speculation_depth: int = 0

@@ -147,7 +147,20 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               non-variant envelope — and here that rule is doing real work: the ON path buys N
 #               extra FULL evaluations at the end of the run, which is a different amount of
 #               compute on the same search and exactly what a speculation receipt asserts about.
-_EXPECTED_DIGEST = "sha256:2a40f561a3df9d499821dd04528c26af24c3d5ad9c5ea4c23b8bbfb5ba4cb109"
+#   2026-09-17  + exploit_strong_node_quantile (docs/60 §60.9 B1: after the node that just finished
+#               lands in the top 1-q of this run's evaluated nodes, the next action is FORCED to be
+#               an improve on it). The 'field set changed too' branch, verified the prescribed way
+#               rather than from the count: an AST scan of `Settings`' annotated assignments
+#               against the pre-change tree reports exactly `['exploit_strong_node_quantile']`
+#               added and `[]` removed, so a +2/-1 cannot be hiding behind the +1.
+#               `_EXPECTED_FIELD_COUNT` goes 243 -> 244 and both pins are re-set.
+#               INERT for a calibration replicate: the profile ships it 0.0, `exploit_forced_action`
+#               returns None on the first line, and the replicate selects the same actions in the
+#               same order. Re-pinned anyway on the rule every inert knob above was re-pinned
+#               under -- the digest binds the COMPLETE non-variant envelope -- and here that rule
+#               earns it: the ON path replaces the selector's choice, which is a different SEARCH
+#               on the same workload, which is exactly what a speculation receipt asserts about.
+_EXPECTED_DIGEST = "sha256:bedfc801e1270790371d547532e31a5efb9ffabf2c73259f5123f1c2f1267bfa"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -626,7 +639,7 @@ _EXPECTED_DIGEST = "sha256:2a40f561a3df9d499821dd04528c26af24c3d5ad9c5ea4c23b8bb
 #               decides whether a run's params, metrics and champion CODE leave the box for an
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
-_EXPECTED_FIELD_COUNT = 243
+_EXPECTED_FIELD_COUNT = 244
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

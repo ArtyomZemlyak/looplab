@@ -2004,6 +2004,18 @@ class Settings(BaseSettings):
     # treatments in one run. When both this and agent_drives_actions are true, Card selection wins.
     # Default flipped 2026-08-04 (operator decision): the Card lane is the intended selector now.
     card_driven_selection: bool = True
+    # B1 (docs/60 §60.9, docs/56 §137/§418). After a node lands in the top `1 - q` of the breedable
+    # nodes this run has evaluated, the next action is forced to be an `improve` on THAT node: the
+    # parent is pinned, `draft` and `merge_idea` are off the table for that turn. 0.0 is OFF and is
+    # the historical behaviour; 0.75 is the policy the arm is registered against.
+    #
+    # It exists because the same instruction as a CARD CLAUSE was measured and did not pay: §137
+    # moved behaviour (kept the kernel 15/16 against 20/41, p = 0.0013) and not score (p = 0.0567),
+    # and §108 counted the loop proposing something other than its own winning kernel in 14 of 28
+    # transitions. A request the loop can decline is not a policy. Whichever selector is enabled,
+    # this one wins for that turn, and it can only ever pick an action `legal_actions` already
+    # allowed — the pipeline invariants stay structural.
+    exploit_strong_node_quantile: float = 0.0
     # Layer 5 bounded speculative Card buffer. Zero is a hard OFF switch and preserves the
     # historical alternating build/eval spine; positive values are pinned by run_started so a
     # resume cannot silently mix search treatments after a snapshot/default edit.
@@ -2958,6 +2970,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "max_eval_timeout": 24 * 3600.0,
     "watchdog_reflection": False,
     "card_driven_selection": False,
+    # B1's forced exploitation is a SEARCH TREATMENT, and a run already in flight never consented to
+    # one. A snapshot written before the field existed resumes with the search it was launched under
+    # -- the same rule as `card_driven_selection` two lines up, and for the same reason: mixing two
+    # selectors inside one run makes its number a number about neither.
+    "exploit_strong_node_quantile": 0.0,
     # docs/29 F1. A run launched before the proposals could move its width never consented to the
     # engine re-pinning one mid-log, and re-entry must not add that treatment to it — the same reason
     # every other concurrency row here is pinned to its historical value.

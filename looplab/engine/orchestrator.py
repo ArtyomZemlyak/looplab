@@ -143,7 +143,7 @@ from looplab.search.speculation_calibration import (
 )
 from looplab.search.operators import merge_idea
 from looplab.search.policy import (DEFAULT_MODEL_ARM, KIND_EXPAND, META_MODEL, SearchPolicy,
-                                   parse_model_arms)
+                                   exploit_forced_action, parse_model_arms)
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
 # / run_phase / operator_yields / NOVELTY_STANCES …) moved to engine/strategy.py (StrategyCadenceMixin),
 # which imports those symbols from their canonical sources — so they are no longer imported here.
@@ -1055,6 +1055,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         unified_agent = _opt("unified_agent")
         agent_drives_actions = _opt("agent_drives_actions")
         card_driven_selection = _opt("card_driven_selection")
+        exploit_strong_node_quantile = _opt("exploit_strong_node_quantile")
         speculation_depth = _opt("speculation_depth")
         speculation_gate_receipt = _opt("speculation_gate_receipt")
         inline_repair = _opt("inline_repair")
@@ -1364,6 +1365,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # The Card authority wins when both opt-in selectors are enabled. Letting the
         # free-form agent arm pre-empt it would silently bypass the atomic existing-work claim below.
         self.card_driven_selection = bool(card_driven_selection)
+        # B1's forced exploitation sits ABOVE the authority order rather than inside one selector:
+        # it is the same rule whichever picker is enabled, and an arm that measured it only on the
+        # Card path would be measuring the Card path. Clamped to [0, 1) -- a quantile of 1.0 would
+        # name an empty top slice and read as "off" while looking like the strongest setting there
+        # is, which is the shape of defect this file keeps finding in its own knobs.
+        self.exploit_strong_node_quantile = min(0.999, max(0.0, float(
+            exploit_strong_node_quantile or 0.0)))
         # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
         # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
         # parallelize, each concurrent eval is pinned to a DISTINCT GPU via CUDA_VISIBLE_DEVICES (see
@@ -3713,6 +3721,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         """Apply the explicit macro-selection authority order for one fresh fold."""
         # Receipt-backed Card selection is the narrowest authority and therefore wins when both opt-in
         # selectors are enabled. The default false flag takes the exact historical branches below.
+        forced = exploit_forced_action(
+            state, self.policy, max_nodes=self.policy.max_nodes,
+            quantile=self.exploit_strong_node_quantile)
+        if forced is not None:
+            # NO SELECTOR IS CONSULTED THIS TURN, and that is the point: the card-clause version of
+            # this instruction was declined fourteen times in twenty-eight (doc 56 §108, §137).
+            return forced
         if self.card_driven_selection:
             return card_next_actions(
                 state, self.policy, self.policy.max_nodes,

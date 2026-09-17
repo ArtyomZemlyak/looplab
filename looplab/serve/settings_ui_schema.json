@@ -42,6 +42,13 @@
           "help": "ON by default: the Card queue owns macro-action selection — the engine works the Kanban board's selection-ready cards instead of the search policy's or the pilot agent's next action, and it WINS over Agent drives actions when both are on. The choice is pinned at run start (recorded in run_started), so a resume can never mix two selectors inside one run — editing it here only affects the next run you start. Turn it OFF for the legacy policy/pilot action path."
         },
         {
+          "key": "exploit_strong_node_quantile",
+          "label": "Exploit a strong node",
+          "type": "float",
+          "default": 0.0,
+          "help": "0 is OFF and is the historical search. Above zero: when the node that just finished lands in the top 1-q of the nodes this run has evaluated, the next action is FORCED to be an improve on that node — the parent is pinned and draft/merge are off the table for that turn, whichever selector is otherwise in charge. 0.75 means \"the top quarter\". It exists because the same instruction written into the card was measured and did not pay: it moved behaviour (the run kept its kernel 15 times in 16 against 20 in 41) and not the score, while the loop proposed something other than its own winning kernel in 14 of 28 transitions. Needs at least four evaluated nodes before a quartile means anything. A search treatment: pinned at run start, so changing it here affects the next run you start."
+        },
+        {
           "key": "speculation_depth",
           "label": "Speculation depth",
           "type": "int",
@@ -324,28 +331,28 @@
           "label": "Diagnosis: competing hypotheses",
           "type": "bool",
           "default": false,
-          "help": "Ask the crash diagnostician for the OTHER explanations that fit what it read \u2014 each with its own confidence and with what would tell it apart from the primary answer. Recorded on the failure row; the repair still follows the one failure_kind. No extra provider call."
+          "help": "Ask the crash diagnostician for the OTHER explanations that fit what it read — each with its own confidence and with what would tell it apart from the primary answer. Recorded on the failure row; the repair still follows the one failure_kind. No extra provider call."
         },
         {
           "key": "novelty_literature",
           "label": "Novelty gates read the literature",
           "type": "bool",
           "default": false,
-          "help": "Let the novelty gates see the papers this run retrieved: the overlap rides on the novelty audit rows and is named in the re-proposal the gate was already buying. It never rejects \u2014 running an experiment a paper describes is often right."
+          "help": "Let the novelty gates see the papers this run retrieved: the overlap rides on the novelty audit rows and is named in the re-proposal the gate was already buying. It never rejects — running an experiment a paper describes is often right."
         },
         {
           "key": "mcts_cost_weight",
           "label": "MCTS cost weight",
           "type": "float",
           "default": 0.0,
-          "help": "Cost-constrained selection (mcts policy only): how much a subtree\u2019s measured expense counts against its UCB1 score, relative to this run\u2019s mean eval second. 0 = off; 0.5 = a subtree costing twice the average pays half a reward unit. An unmeasured subtree counts as average, never as free."
+          "help": "Cost-constrained selection (mcts policy only): how much a subtree’s measured expense counts against its UCB1 score, relative to this run’s mean eval second. 0 = off; 0.5 = a subtree costing twice the average pays half a reward unit. An unmeasured subtree counts as average, never as free."
         },
         {
           "key": "mcts_value_weight",
           "label": "MCTS value estimate weight",
           "type": "float",
           "default": 0.0,
-          "help": "LLM value estimate (mcts policy only): how much a model\u2019s opinion of a branch\u2019s REMAINING headroom counts in the UCB1 value term, so an unexpanded branch stops scoring like a spent one at the same metric. 0 = off and buys no calls; 0.4 = a once-visited branch the model calls spent loses 0.2 reward and one it calls wide open gains 0.2, decaying as the subtree is really measured."
+          "help": "LLM value estimate (mcts policy only): how much a model’s opinion of a branch’s REMAINING headroom counts in the UCB1 value term, so an unexpanded branch stops scoring like a spent one at the same metric. 0 = off and buys no calls; 0.4 = a once-visited branch the model calls spent loses 0.2 reward and one it calls wide open gains 0.2, decaying as the subtree is really measured."
         },
         {
           "key": "digest_char_cap",
@@ -696,7 +703,7 @@
           "label": "Eval noise-floor repeats",
           "type": "int",
           "default": 0,
-          "help": "Re-evaluate ONE candidate — the champion — this many times under the SEARCH's own protocol (its own eval profile, seeds 0..N-1) and record the spread of its metric: the run's evaluation NOISE FLOOR. 0 = off (and 1 is off too: one number has no spread). Not confirmation \u2014 confirm re-scores the top-k at the FULL profile from a DISJOINT seed base and its mean SELECTS; this repeats the same protocol on one node and selects nothing. The record (`eval_noise_floor`) carries the metrics, the mean, the sample std, the range and `sem`, the same quantity the >1-SE selection rule compares a margin against, so \u201cis this champion's margin bigger than the noise?\u201d becomes checkable. It spends real eval seconds \u2014 N full evaluations at the end of the run \u2014 which is why it is opt-in, and nothing that decides reads it."
+          "help": "Re-evaluate ONE candidate — the champion — this many times under the SEARCH's own protocol (its own eval profile, seeds 0..N-1) and record the spread of its metric: the run's evaluation NOISE FLOOR. 0 = off (and 1 is off too: one number has no spread). Not confirmation — confirm re-scores the top-k at the FULL profile from a DISJOINT seed base and its mean SELECTS; this repeats the same protocol on one node and selects nothing. The record (`eval_noise_floor`) carries the metrics, the mean, the sample std, the range and `sem`, the same quantity the >1-SE selection rule compares a margin against, so “is this champion's margin bigger than the noise?” becomes checkable. It spends real eval seconds — N full evaluations at the end of the run — which is why it is opt-in, and nothing that decides reads it."
         },
         {
           "key": "holdout_fraction",

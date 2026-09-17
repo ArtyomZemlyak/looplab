@@ -126,6 +126,7 @@ ATTR_BY_FIELD = {
     "unified_agent": "unified_agent",
     "agent_drives_actions": "agent_drives_actions",
     "card_driven_selection": "card_driven_selection",
+    "exploit_strong_node_quantile": "exploit_strong_node_quantile",
     "proposal_width": "_proposal_width",
     "gpu_footprint_cue": "_gpu_footprint_cue",
     "speculation_depth": "speculation_depth",

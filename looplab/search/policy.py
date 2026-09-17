@@ -960,6 +960,65 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
     return actions
 
 
+# A quartile computed over two nodes is not a quartile. Most runs in the corpus reach three or four
+# nodes (doc 56 §185: ten of ninety-one see a fourth), so this is deliberately the point at which
+# "top quarter of what this run has produced" starts meaning something, and not a knob: an arm that
+# could move it as well as the quantile would be measuring two things at once.
+EXPLOIT_MIN_NODES = 4
+
+
+def exploit_forced_action(state: RunState, policy: SearchPolicy, *, max_nodes: int,
+                          quantile: float, min_nodes: int = EXPLOIT_MIN_NODES) -> list | None:
+    """B1 (docs/60 §60.9): after a STRONG node, the next action is a variant of THAT node.
+
+    `None` means the gate does not apply and the ordinary selection authority runs; a list means
+    the search has no discretion this turn.
+
+    WHY THIS IS A POLICY AND NOT A SENTENCE IN THE CARD. The card-clause version was measured
+    (doc 56 §137, 9 against 9): it moved BEHAVIOUR — a treated run kept the kernel after a kernel
+    node 15 times in 16 against 20 in 41, p = 0.0013 — and did not move the SCORE, p = 0.0567.
+    Asking the model to stay on its win is a request; the loop still proposed something else
+    fourteen times out of twenty-eight (§108). This removes the choice instead of repeating it.
+
+    WHAT "STRONG" MEANS, exactly, because the phrase has to survive being read on another task.
+    The subject is the node that MOST RECENTLY finished (`terminal_event_seq`, the fold's own
+    order — not the highest id, which under concurrent builds is whichever was reserved last), and
+    it is strong when it stands in the top `1 - quantile` of the breedable nodes THIS RUN has
+    evaluated. Run-relative on purpose: an absolute cut would be a per-task constant, and the corpus
+    reads 200-ish on `edge_expansion` against 1.5 on `discrete_log`.
+
+    WHAT IT REFUSES TO OVERRIDE. Forced phases keep their force: pending nodes still evaluate (the
+    crash-resume re-entry invariant), a spent budget still finishes, the seed phase still drafts.
+    The gate reads `legal_actions` for exactly that reason rather than deciding it again, and it
+    can only ever return an action that was already in the envelope — so "the pipeline stays
+    correct" remains structural here too.
+    """
+    if quantile <= 0.0:                      # off, and off is the default
+        return None
+    legal = legal_actions(state, policy, max_nodes=max_nodes)
+    if len(legal) <= 1 or {a.get("kind") for a in legal} == {KIND_EVALUATE}:
+        return None                          # a forced phase is not the gate's to take
+    pool = [n for n in state.breedable_nodes() if n.metric is not None]
+    if len(pool) < max(2, min_nodes):
+        return None
+    latest = max((n for n in pool if n.terminal_event_seq is not None),
+                 key=lambda n: n.terminal_event_seq, default=None)
+    if latest is None:                       # a pool with no recorded terminal says nothing
+        return None
+    ranked = rank_by_metric(state, pool)
+    # `int()` truncates, so the top slice is the whole quarter and never a fraction of one: at
+    # four nodes a 0.75 quantile is the single best, at eight it is the best two.
+    top = {n.id for n in ranked[:max(1, int(len(ranked) * (1.0 - quantile)))]}
+    if latest.id not in top:
+        return None
+    if not any(a.get("kind") == KIND_IMPROVE and a.get("parent_id") == latest.id for a in legal):
+        return None                          # it is not breedable after all; say nothing
+    return [{"kind": KIND_IMPROVE, "parent_id": latest.id,
+             META_REASON: f"exploit: node {latest.id} is in the top {1.0 - quantile:.0%} of this "
+                          f"run's {len(pool)} evaluated nodes, so the next node is a variant of it "
+                          f"(docs/60 B1)"}]
+
+
 # Per-policy factories for the registry below. Uniform signature: the explicit make_policy
 # kwargs plus the resolved `depth` and the raw `params` overrides.
 def _make_greedy(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,

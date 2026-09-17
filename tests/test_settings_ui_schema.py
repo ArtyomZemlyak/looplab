@@ -100,7 +100,15 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 211
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 212
+    # 211 -> 212 on 2026-09-17: `exploit_strong_node_quantile`, B1 of docs/60 §60.9 — after the node
+    # that just finished lands in the top 1-q of this run's evaluated nodes, the next action is
+    # FORCED to be an improve on it. A ROW rather than an uncurated omission because it is a SEARCH
+    # TREATMENT an operator turns on for an arm and must be able to turn back off: 0.0 is the
+    # shipped search, and the same instruction as a card clause was already measured not to pay
+    # (doc 56 §137: behaviour moved, p = 0.0013; score did not, p = 0.0567). Verified by
+    # INTERSECTION as every entry here prescribes: 211 keys common to the previous keyset plus
+    # exactly that one, none removed.
     # 210 -> 211 on 2026-09-08: `eval_noise_seeds`, the eval NOISE FLOOR (doc 52 row 11) — the
     # number of times ONE candidate is re-evaluated so the run records the spread of its own metric.
     # A ROW rather than an uncurated omission for the reason the spend caps are rows: it buys N full
@@ -355,7 +363,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 245 -> 246 on 2026-09-08: `eval_noise_seeds` (doc 52 row 11; a curated row, so the two counts
     # move together). An AST scan of `Settings`' annotated assignments against the pre-change tree
     # reports exactly `['eval_noise_seeds']` added and `[]` removed, so a +2/-1 cannot hide here.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 246
+    # 246 -> 247 on 2026-09-17: `exploit_strong_node_quantile` (docs/60 §60.9 B1; a curated row,
+    # so BOTH counts move together) -- the forced exploitation of a node that just landed in the
+    # top 1-q of this run's evaluated nodes. A row because it is a search treatment an operator
+    # turns on for an arm and must be able to turn back off.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 247
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed
