@@ -676,7 +676,26 @@ def main(argv: list[str]) -> int:
         logs, attempts = campaign_evidence(p, campaign_out)
         if logs or attempts:
             campaign_arms[p] = (abandoned.pop(p), logs, attempts)
-    probes = sorted((set(s_calls) | set(k for k in m_calls if k != "?")) - set(abandoned))
+    # AND A CAMPAIGN ARM IS SUBTRACTED WHOLE TOO, so the rule above applies to it unchanged: it
+    # must not ALSO be decomposed into preflight/surplus/unnamed. §409 created the category and
+    # took it out of `abandoned` only -- this line kept it among the probes, and the consequence is
+    # not the $0.000002 the comment above weighs.
+    #
+    # An AlgoTuner arm writes NO generation spans, by construction. So its whole call volume lands
+    # in `surplus`, then in `extra`, then -- being neither non-200 nor an empty 200 -- in
+    # "STILL UNNAMED", and from there into `unnamed_live`, which prices the in-flight allowance at
+    # the ledger's p99 PER CALL. Driven on a 42-call stand with a 40-call arm A:
+    #
+    #     39 call(s) STILL UNNAMED -- neither killed nor empty
+    #     (allowing $0.195000: 39 unnamed call(s) on arms that are still calling ...)
+    #
+    # $0.195 of allowance on a stand that had spent $0.09 in total. Arm A of the real campaign
+    # makes thousands of calls, so the allowance would have run to tens of dollars for as long as
+    # the arm was up -- and `abs(residue) > allowance` is the ONLY thing standing between a real
+    # leak and a green exit. The direction is the expensive one: not a false alarm, a silenced one,
+    # during exactly the hours this tool exists to watch.
+    probes = sorted((set(s_calls) | set(k for k in m_calls if k != "?"))
+                    - set(abandoned) - set(campaign_arms))
     surplus = {p: m_calls.get(p, 0) - s_calls.get(p, 0) for p in probes}
     preflight = sum(1 for p in probes if surplus.get(p, 0) >= 1)
     extra = {p: n - 1 for p, n in surplus.items() if n > 1}
