@@ -168,3 +168,45 @@ def test_a_missing_or_unreadable_file_is_empty_not_an_exception(tmp_path):
     broken = tmp_path / "broken.jsonl"
     broken.write_text("not json\n{\n", encoding="utf-8")
     assert sm.sessions(str(broken)) == []
+
+
+def test_a_flat_run_that_improves_afterwards_is_a_FALSE_stop():
+    """B3's only real risk: the curve goes flat and then goes up. A rule that cuts those sessions
+    is not a saving, whatever it saves, so the instrument counts them separately rather than
+    reporting the saving alone."""
+    got = sm.curve_stop([[1.0, 1.0, 1.0, 9.0]], 2)
+    assert got == {"eligible": 1, "triggered": 1, "improved_after": 1, "saved_measurements": 1}
+
+
+def test_a_flat_run_that_stays_flat_is_a_clean_stop():
+    got = sm.curve_stop([[5.0, 4.0, 3.0, 2.0]], 2)
+    assert got["triggered"] == 1 and got["improved_after"] == 0 and got["saved_measurements"] == 1
+
+
+def test_a_session_too_short_to_trigger_is_in_no_denominator(tmp_path):
+    """Counting sessions the rule could never fire on would flatter every rate it prints."""
+    assert sm.curve_stop([[1.0, 2.0]], 3)["eligible"] == 0
+    assert sm.curve_stop([[1.0, 2.0, 3.0, 4.0]], 3)["eligible"] == 1
+
+
+def test_an_improvement_resets_the_run_of_flat_measurements():
+    """`1 1 2 1 1` holds four non-improving measurements in total and never three CONSECUTIVELY
+    without a new best, so a rule about a flat RUN must not fire on it; a counter that never reset
+    would stop it at the fourth. Add one more flat measurement and the run is genuinely three long,
+    which is how the reset shows itself rather than being asserted."""
+    assert sm.curve_stop([[1.0, 1.0, 2.0, 1.0, 1.0]], 3)["triggered"] == 0
+    assert sm.curve_stop([[1.0, 1.0, 2.0, 1.0, 1.0, 1.0]], 3)["triggered"] == 1
+
+
+def test_the_curve_carries_only_values_the_instrument_SAW(tmp_path):
+    """doc 58 §58.11 again: a measurement whose value was cut out of the span preview is left out
+    of the curve, never folded in as a zero -- a zero would read as a collapse and trigger a stop
+    the loop never earned."""
+    path = _spans(tmp_path, [
+        _gen("s1"),
+        _measure("s1", 1.0, 5.0),
+        _tool("s1", 2.0, "run_dev_command", '{"name": "eval_train"}', "speedup: (preview cut"),
+        _measure("s1", 3.0, 7.0),
+    ])
+    row, = sm.sessions(path)
+    assert row["curve"] == [5.0, 7.0] and row["unparsed"] == 1, row

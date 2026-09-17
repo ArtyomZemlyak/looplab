@@ -164,6 +164,12 @@ def sessions(spans_path: str) -> list[dict]:
             best_i, best_v = max(seen, key=lambda item: item[1])
             last_i, last_v = seen[-1]
             row.update({
+                # B3's whole question is the SHAPE of the curve, not its ends: "three `eval_train`
+                # without improvement and the session stops" can only be judged by asking how often
+                # a session that has gone k measurements without a new best goes on to find one.
+                # The values are carried in order, unparsed ones left out (58 §58.11: a value the
+                # instrument could not see is not a zero), so the reading is over what was SEEN.
+                "curve": [v for _i, v in seen],
                 "best": best_v, "last": last_v,
                 # A16: the state the session ENDED on is the last WRITE, so the question is whether
                 # any write followed the best measurement — that is what makes the shipped state
@@ -184,6 +190,43 @@ def scan(root: str) -> list[tuple[str, dict]]:
         for row in sessions(spans):
             out.append((name, row))
     return out
+
+
+def curve_stop(curves, k: int) -> dict:
+    """What a stop after `k` non-improving measurements would do, per session.
+
+    B3 (docs/60 §60.9) proposes ending a session once its measurement curve has gone flat: "three
+    `eval_train` without improvement". Whether that is a saving or a loss is one question about the
+    corpus -- how often a session that HAS gone k measurements without a new best goes on to find
+    one anyway -- and the corpus can answer it without an arm.
+
+    A session is judged only if it is long enough to trigger the rule at all; the rest are neither
+    saved nor cut and counting them in either denominator would flatter the answer. `improved_after`
+    is the FALSE STOP rate: the share of stopped sessions whose best was still ahead of them.
+    `saved` counts the measurements the rule would not have paid for, which is the only benefit
+    side there is -- a measurement is the expensive act in these sessions.
+    """
+    eligible = triggered = improved = saved = 0
+    for curve in curves:
+        if len(curve) < k + 1:
+            continue
+        eligible += 1
+        best = curve[0]
+        flat = 0
+        for i, v in enumerate(curve[1:], 1):
+            if v > best:
+                best, flat = v, 0
+                continue
+            flat += 1
+            if flat >= k:
+                triggered += 1
+                rest = curve[i + 1:]
+                saved += len(rest)
+                if any(later > best for later in rest):
+                    improved += 1
+                break
+    return {"eligible": eligible, "triggered": triggered, "improved_after": improved,
+            "saved_measurements": saved}
 
 
 def report(rows: list[tuple[str, dict]]) -> str:
@@ -219,6 +262,23 @@ def report(rows: list[tuple[str, dict]]) -> str:
                      f"max {before[-1]}")
         lines.append("  READ IT AS: a stop at N calls-without-a-write must sit ABOVE p90 or it cuts "
                      "healthy sessions.")
+    curves = [r["curve"] for _n, r in rows if r.get("curve")]
+    if curves:
+        lines.append("")
+        lines.append("B3 -- would stopping a session after k non-improving measurements lose "
+                     "anything?")
+        lines.append(f"  {'k':>2} {'eligible':>9} {'stopped':>8} {'improved after':>15} "
+                     f"{'false-stop':>11} {'measurements saved':>19}")
+        for k in (2, 3, 4, 5):
+            got = curve_stop(curves, k)
+            rate = (100.0 * got["improved_after"] / got["triggered"]) if got["triggered"] else 0.0
+            lines.append(f"  {k:>2} {got['eligible']:>9} {got['triggered']:>8} "
+                         f"{got['improved_after']:>15} {rate:>10.1f}% "
+                         f"{got['saved_measurements']:>19}")
+        lines.append("  READ IT AS: false-stop is the share of stopped sessions whose best was "
+                     "STILL AHEAD of them.")
+        lines.append("  A rule that stops sessions which would have improved is not a saving, "
+                     "whatever it saves.")
     unparsed = sum(r["unparsed"] for _n, r in rows)
     if unparsed:
         lines.append("")
