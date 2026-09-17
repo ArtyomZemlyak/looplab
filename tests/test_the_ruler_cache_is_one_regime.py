@@ -13,6 +13,7 @@ that and prints the provenance; these tests pin that it does not check the count
 from __future__ import annotations
 
 import json
+import glob
 import sys
 from pathlib import Path
 
@@ -72,12 +73,45 @@ def test_a_clean_cache_says_nothing(tmp_path):
     assert ruler_check.problems(ruler_check.entries(_cache(tmp_path, GOOD)), "w22x1r3") == []
 
 
+def _campaign_regimes(rows):
+    """Regimes a RUNNING campaign can account for, or an empty set.
+
+    §411. This test asserted the live cache holds one regime, and a campaign broke it honestly: the
+    2026-09-10 run slices the box into a 2-cpu lane per task and mints `w2x1r3`/`lane2r3` (§410
+    measured what that does to a score -- the reference runs faster, up to 0.58x on pagerank, so its
+    numbers must not be read beside the corpus's). An allowance is granted only against EVIDENCE:
+    a campaign directory with task logs, and the extra entries written after it started.
+    """
+    import os
+    import time
+    out = os.environ.get("CAMPAIGN_OUT", "")
+    if not out:
+        for guess in sorted(glob.glob("/home/jovyan/data/looplab-bench/campaign-final-*"),
+                            reverse=True):
+            out = guess
+            break
+    if not out or not os.path.isdir(out) or not glob.glob(os.path.join(out, "*-*.log")):
+        return set()
+    started = min((os.path.getmtime(f) for f in glob.glob(os.path.join(out, "*-*.attempts"))),
+                  default=time.time())
+    extra = set()
+    for row in rows:
+        if not row["ok_name"] or row["regime"] in ("w22x1r3", "lane22r3"):
+            continue
+        path = os.path.join(ruler_check.DEFAULT_DIR, row["file"])
+        if os.path.exists(path) and os.path.getmtime(path) >= started - 60:
+            extra.add(row["regime"])
+    return extra
+
+
 def test_the_live_cache_is_clean_and_in_one_regime():
-    """The bench's own cache, whatever its size today."""
+    """The bench's own cache, whatever its size today -- plus whatever a RUNNING campaign minted."""
     rows = ruler_check.entries(ruler_check.DEFAULT_DIR)
     if not rows:                      # a checkout without the bench tree
         return
-    assert ruler_check.problems(rows, "w22x1r3") == [], ruler_check.problems(rows, "w22x1r3")
+    allow = _campaign_regimes(rows)
+    said = ruler_check.problems(rows, "w22x1r3", allow_regimes=allow)
+    assert said == [], (said, sorted(allow))
 
 
 def test_a_second_regime_per_task_is_evidence_and_a_third_is_a_stray():

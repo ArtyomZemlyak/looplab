@@ -400,6 +400,35 @@ def abandoned_line(probe: str, cost: float, archive: str = ARCHIVE) -> tuple[str
             arch)
 
 
+def campaign_evidence(arm: str, campaign_out: str = "") -> tuple:
+    """`(logs, attempts)` a campaign directory holds for this arm -- its evidence, where a LoopLab
+    probe would have a tree.
+
+    §409. The abandoned-arm rule reads "an arm the METER knows and the probe trees do not", and its
+    comment states the premise: "a live probe always has a tree ... so 'meter rows, no tree' cannot
+    be a running probe". That premise held while every metered arm WAS a LoopLab probe. Arm A is
+    AlgoTuner: it never writes a probe tree, by design. Measured during the 2026-09-10 campaign, at
+    six minutes in, the reconciliation listed `A $0.0466` among "9 ABANDONED probe(s) -- no tree
+    under model-probes", in the same sentence whose next line says only the rest "has no evidence
+    anywhere". A running reference arm was being reported as deleted money, and over a full campaign
+    that is up to $20 in the loudest category the tool has.
+
+    Its evidence is `<arm>-<task>.log` and `<arm>-<task>.attempts` in `CAMPAIGN_OUT`, which is
+    exactly what `campaign.sh` writes before the arm's first call.
+    """
+    if not campaign_out or not os.path.isdir(campaign_out):
+        return 0, 0
+    logs = len(glob.glob(os.path.join(campaign_out, f"{arm}-*.log")))
+    attempts = len(glob.glob(os.path.join(campaign_out, f"{arm}-*.attempts")))
+    return logs, attempts
+
+
+def campaign_arm_line(arm: str, cost: float, logs: int, attempts: int, campaign_out: str) -> str:
+    """The sentence a campaign arm gets instead of the abandoned one (§342: the wording is the fix)."""
+    return (f"{arm} ${cost:.4f} -- a CAMPAIGN arm, not an abandoned probe: {logs} task log(s) and "
+            f"{attempts} attempt ledger(s) in {campaign_out}")
+
+
 def completed_at(row) -> float:
     """When a ledger row's call actually ENDED.
 
@@ -589,6 +618,10 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bench-root", default=os.environ.get("BENCH_ROOT", "/var/tmp/looplab-bench"))
     ap.add_argument("--port", type=int, default=8801)
+    # WHERE A CAMPAIGN ARM KEEPS ITS EVIDENCE (§409). Defaults to the environment the box
+    # profile already exports, so a campaign needs no extra flag to be read correctly.
+    ap.add_argument("--campaign-out", default=os.environ.get("CAMPAIGN_OUT", ""),
+                    help="campaign directory holding <arm>-<task>.log/.attempts")
     ap.add_argument("--max-residue", type=float, default=0.01,
                     help="unexplained dollars tolerated before this exits non-zero")
     # THE COUNTER IS NOT PERSISTENT ACROSS RESTARTS, so the sum has to be cut at the moment the
@@ -633,6 +666,16 @@ def main(argv: list[str]) -> int:
     # ledger, which is the more expensive of the two (§112).
     abandoned = {p: c for p, c in m_cost.items()
                  if p != "?" and p not in s_calls and m_calls.get(p, 0) > 0}
+    # A CAMPAIGN ARM LOOKS ABANDONED AND IS NOT (§409). Split here, not at print time, because the
+    # residue subtracts `abandoned` whole: taking an arm out of the dict without accounting for its
+    # money turns "reported as deleted" into "reported as unexplained", which is the same error
+    # wearing the other coat -- measured mid-campaign, arm A's $0.0466 moved straight into RESIDUE.
+    campaign_out = a.campaign_out or os.environ.get("CAMPAIGN_OUT", "")
+    campaign_arms = {}
+    for p in list(abandoned):
+        logs, attempts = campaign_evidence(p, campaign_out)
+        if logs or attempts:
+            campaign_arms[p] = (abandoned.pop(p), logs, attempts)
     probes = sorted((set(s_calls) | set(k for k in m_calls if k != "?")) - set(abandoned))
     surplus = {p: m_calls.get(p, 0) - s_calls.get(p, 0) for p in probes}
     preflight = sum(1 for p in probes if surplus.get(p, 0) >= 1)
@@ -695,6 +738,14 @@ def main(argv: list[str]) -> int:
     # probe trees do not. A live probe always has a tree (`run_probe.sh` writes INSTRUMENT.txt
     # before the first call), so "meter rows, no tree" cannot be a running probe -- it is a probe
     # whose tree was deleted, i.e. one abandoned.
+    for p, (c, logs, attempts) in sorted(campaign_arms.items()):
+        print("         " + campaign_arm_line(p, c, logs, attempts, campaign_out))
+    if abandoned and not campaign_out:
+        # SAY WHEN THE QUESTION WAS NOT ASKED. Without a campaign directory this tool cannot tell a
+        # reference arm from a deleted probe, and silently choosing the second is how a running arm
+        # is reported as lost money (§409).
+        print("         (no CAMPAIGN_OUT given, so a live campaign arm would appear above as "
+              "ABANDONED -- pass --campaign-out to tell them apart)")
     if abandoned:
         # AND WHAT THE ARCHIVE STILL HOLDS FOR EACH (§368). "No tree on disk" means no tree under
         # /var/tmp, which was wiped once; the persistent runs-archive is where the snapshot put it.
@@ -764,7 +815,8 @@ def main(argv: list[str]) -> int:
         # in-flight allowance already covers those arms; this category is for gaps that are final.
         # Seen live: `oldCK11` was credited $0.004579 while still running.
         still_calling = _still_calling(a.bench_root, p2, health["newest"])
-        if p2 in ("?", "__by_kind__") or p2 in abandoned or spent <= 0 or still_calling:
+        if p2 in ("?", "__by_kind__") or p2 in abandoned or p2 in campaign_arms \
+                or spent <= 0 or still_calling:
             continue
         arm_gap = m_cost.get(p2, 0.0) - s_cost.get(p2, 0.0)
         take = min(arm_gap, spent)
@@ -774,7 +826,8 @@ def main(argv: list[str]) -> int:
     if retry_arms:
         print(f"         ${retry_named:.6f} PAID RETRIES -- a body the arm had already sent, charged "
               f"again and not kept: " + ", ".join(sorted(retry_arms)))
-    residue = gap - preflight * 0.00000196 - sum(abandoned.values()) - retry_named
+    residue = (gap - preflight * 0.00000196 - sum(abandoned.values())
+               - sum(c for c, _l, _a in campaign_arms.values()) - retry_named)
     print(f"  RESIDUE ${residue:+.6f} after the named parts")
     # A CALL IN FLIGHT IS NOT A LEAK. The meter writes its row when the upstream request completes;
     # the `generation` span is written by the engine afterwards. This tool reads the spans first and

@@ -305,6 +305,31 @@ def _fake_algotune(tmp_path: Path) -> Path:
     return root
 
 
+def _a_campaign_is_running() -> str:
+    """The name of a live `campaign.sh`, or "" -- measured from /proc, never from `pgrep -f`.
+
+    §411. These tests drive the REAL `campaign.sh` against a stub AlgoTune, and that is right: a
+    copy of its logic would drift. What they cannot do is drive it while a real campaign owns the
+    box. Measured 2026-09-10 during the 20-task run: the fixture's arm came back "NO SUCCESSFUL
+    CALLS in 0s", no marker was written, and the test reported a driver defect that is not there --
+    it was green an hour earlier and green again with the changes stashed. §384 settled the shape:
+    a test that drives the real driver must REFUSE rather than mislead.
+    """
+    import os
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            cmd = open(f"/proc/{pid}/cmdline").read().replace("\0", " ")
+        except OSError:
+            continue
+        if "/proc" in cmd or "pytest" in cmd:
+            continue
+        if "algotune/campaign.sh" in cmd or "algotune/run_final.sh" in cmd:
+            return cmd.strip()[:80]
+    return ""
+
+
 def _run_campaign(tmp_path: Path, **extra) -> subprocess.CompletedProcess:
     """The REAL driver, one arm-A task, stubbed AlgoTune.
 
@@ -312,6 +337,10 @@ def _run_campaign(tmp_path: Path, **extra) -> subprocess.CompletedProcess:
     cores the test runner was given and can never land on a core a live campaign owns. Hardcoding a
     range would be both unsafe here and unportable everywhere else.
     """
+    live = _a_campaign_is_running()
+    if live:
+        pytest.skip(f"a real campaign is running ({live}); driving campaign.sh now measures the "
+                    "box's load, not the driver (§411)")
     cores = sorted(os.sched_getaffinity(0))
     env = dict(os.environ, ARM="A", ALGOTUNE_ROOT=str(_fake_algotune(tmp_path)),
                BUDGET_USD="1.0", ALGOTUNE_MODEL_KEY="gateway/deepseek-v4-flash",

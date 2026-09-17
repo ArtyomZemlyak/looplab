@@ -267,7 +267,8 @@ def scoring_regime(task: str, root=None) -> str:
     return SERIAL_REGIME if uses_cpsat(task, root=root) else CAMPAIGN_REGIME
 
 
-def problems(rows, expect_regime: str | None = None, min_instances: int = 100) -> list[str]:
+def problems(rows, expect_regime: str | None = None, min_instances: int = 100,
+             allow_regimes=()) -> list[str]:
     """What is WRONG with the cache, as sentences. Empty list = nothing to say.
 
     The count is deliberately not checked. Entries get added by legitimate work -- §193 added two by
@@ -303,7 +304,12 @@ def problems(rows, expect_regime: str | None = None, min_instances: int = 100) -
             # given task is JUDGED in is `scoring_regime`'s business, not this branch's -- keying
             # the allowance on it was the second version of this rule and it still flagged the four
             # serial rulers §318 had just measured with.
-            if row["regime"] in (CAMPAIGN_REGIME, SERIAL_REGIME):
+            # AND WHATEVER THE CALLER CAN JUSTIFY (§411). `CAMPAIGN_REGIME` is a frozen name and
+            # the campaign's lane width is a property of the RUN: the 2026-09-10 campaign slices the
+            # box into a 2-cpu lane per task and mints `w2x1r3`/`lane2r3`, which this branch called
+            # strays while the campaign that made them was running. The allowance is not widened by
+            # default -- a caller that knows a campaign is on passes its regimes and owns the claim.
+            if row["regime"] in (CAMPAIGN_REGIME, SERIAL_REGIME) or row["regime"] in allow_regimes:
                 continue
             stray[row["regime"]] += 1
         for reg, n in stray.items():

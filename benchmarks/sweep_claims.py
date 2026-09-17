@@ -65,6 +65,40 @@ def probe_span_cost(bench: str, name: str):
     return bool(found), total
 
 
+# Regimes the bench MINTS deliberately: the campaign's own lane width is not the corpus's, and a
+# reader who sees four regimes in the cache should be told which is which rather than left to guess
+# that two of them are junk (point 5 of the standing list says "a third is foreign").
+CORPUS_REGIMES = ("w22x1r3", "lane22r3")
+
+
+def regime_note(regimes) -> str:
+    """What to say when the cache holds more than the corpus's two regimes.
+
+    §410. A campaign slices the box into one small lane per task -- measured 2026-09-10, its
+    baselines were minted on `cpu_affinity: [0, 48]`, a TWO-cpu lane, keying `w2x1r3`, while the
+    156-probe corpus is all `w22x1r3` on 22-cpu lanes. The rulers are NOT the same ruler, and the
+    difference is one-directional: with fewer workers contending, the reference runs FASTER, so the
+    campaign's denominator is smaller and every score it produces is smaller than the corpus would
+    give the same solver.
+
+        task                      w22x1r3   w2x1r3   ratio
+        pagerank                   110.47    64.38   0.58x
+        rbf_interpolation           17.54    14.54   0.83x
+        edge_expansion              45.49    42.79   0.94x
+        count_riemann_zeta_zeros    75.11    73.32   0.98x
+
+    Both arms of one campaign share its ruler, so A against B inside the campaign is fair. What is
+    NOT fair is reading a campaign number beside a corpus number, and that is the sentence this adds.
+    """
+    extra = sorted(r for r in regimes if r not in CORPUS_REGIMES)
+    if not extra:
+        return ""
+    return ("; BESIDE THE CORPUS'S OWN: " + ", ".join(extra)
+            + " -- a campaign mints its ruler on ITS lane width, and a narrower lane makes the "
+              "reference faster (pagerank 0.58x), so campaign scores are smaller than corpus scores "
+              "for the same solver and the two must not be read side by side")
+
+
 def check_baseline_count(bench: str):
     """"В .baseline_times семь записей, все перемерены ЗДЕСЬ." """
     rows = ruler_check.entries(Path(bench) / "looplab" / "benchmarks" / "algotune" / ".baseline_times")
@@ -72,6 +106,7 @@ def check_baseline_count(bench: str):
     ok = len(rows) == 7
     return ok, (f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}, "
                 f"regime{'s' if len(regimes) != 1 else ''} {', '.join(sorted(regimes)) or '?'}"
+                + regime_note(regimes)
                 + ("" if ok else " -- the COUNT is not the invariant; one regime and a full set of "
                                 "per-instance timings is (see ruler_check.py)"))
 
