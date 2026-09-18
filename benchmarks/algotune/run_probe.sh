@@ -262,6 +262,26 @@ export ALGOTUNE_MIN_TIMEOUT_S=120
 # печатает «bounded at <N> s ... about 3 % of your session», проба — «bounded by a wall clock
 # nobody shows you». Одна и та же карточка, разные предложения, и число сравнивается как одно.
 export PYTHONPATH="$ROOT/looplab${PYTHONPATH:+:$PYTHONPATH}"
+
+# И ЭТОТ `python` ДОЛЖЕН УМЕТЬ ИМПОРТИРОВАТЬ ДВИЖОК. Строкой ниже проба зовёт
+# `python -m looplab.cli run`, беря `python` из PATH, — чей он, скрипт не выбирает.
+#
+# ЭТО НЕ УМОЗРЕНИЕ: 18.09 на восстановленном стенде им оказался `/opt/conda/bin/python` без
+# `typer`. Проба проверила забор, построила карточку, записала ПРИБОР — и умерла за 0 секунд на
+# `ModuleNotFoundError: No module named 'typer'`, после чего `extract_champion` сказал «no event
+# log», то есть пожаловался последний слой, а не первый. Четыре запуска подряд выглядели как
+# четыре разные поломки. Проверка стоит один импорт и снимает весь класс.
+#
+# ИМЕННО `-m looplab.cli`, а не `import looplab`: сломан был импорт ВНУТРИ CLI, а `looplab`
+# импортируется и без него. И тот же `PYTHONPATH`, что у прогона, иначе проверка подтвердит
+# другое дерево.
+if ! ENGINE_ERR=$(python -c 'import looplab.cli' 2>&1); then
+  say "ОТКАЗ: $(command -v python || echo python) не может импортировать движок стенда"
+  say "       $(echo "$ENGINE_ERR" | tail -1)"
+  say "       PYTHONPATH=$PYTHONPATH"
+  say "       venv стенда: $ROOT/looplab/.venv/bin (его ставит на PATH benchmarks/box-jhub-l40s.sh)"
+  exit 1
+fi
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET"
 # The Developer's stage-pipeline guidance block is OFF on this bench (docs/60 A6): measured over
 # the probe corpus, `declare_stages` was called 0 times while the block cost 4.8-6.0 % of every $1
@@ -308,6 +328,21 @@ python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/
     --task "$TASK" --out-dir "$OUT/ws" --deliver --one-card --enforce-rules \
     ${PROBE_MAKE_TASK_ARGS:-} >> "$LOG" 2>&1 \
   || { say "make_task ПРОВАЛИЛСЯ — см. $LOG"; exit 1; }
+
+# И КАРТОЧКА ДОЛЖНА НЕСТИ ТУ ЖЕ ЛИНЕЙКУ, что двадцать измеренных чисел. `make_task.py` строит
+# карточку и БЕЗ кэша эталона — молча заменив пункт о времени на «имя датасета обещает около
+# 100 мс», то есть на другую карточку (см. его же комментарий у этого предупреждения). Прогон
+# при этом проходит целиком и даёт число, которое не с чем сравнить.
+#
+# ЭТО НЕ УМОЗРЕНИЕ: 18.09 восстановленный стенд не нёс `.baseline_times` (каталог не в git), и
+# первая проба построила именно такую карточку. Заметить это можно было только прочитав stderr
+# `make_task` в логе — чего не делает никто, потому что строкой ниже уже пишется ПРИБОР.
+if grep -q "no per-instance reference timings" "$LOG" 2>/dev/null; then
+  say "ОТКАЗ: у карточки ДРУГАЯ линейка — кэша эталона нет под $ALGOTUNE_BASELINE_CACHE_DIR"
+  say "       нужен ключ ${TASK}__train__* (ALGOTUNE_EVAL_WORKERS=$ALGOTUNE_EVAL_WORKERS)"
+  say "       на диске: $(ls "$ALGOTUNE_BASELINE_CACHE_DIR" 2>/dev/null | grep -c . || echo 0) файл(ов)"
+  exit 1
+fi
 
 mkdir -p "$OUT"
 {

@@ -162,3 +162,26 @@ _algotune_ensure_pip() {
     || echo "[box] НЕ УДАЛОСЬ поставить pip — компиляция будет засчитываться как 0.0" >&2
 }
 _algotune_ensure_pip
+
+# КАКОЙ PYTHON ЗАПУСКАЕТ ДВИЖОК. Стенд несёт СВОЙ клон LoopLab (`$BENCH_ROOT/looplab`) и свой venv
+# рядом с ним; `run_probe.sh` ставит `PYTHONPATH="$ROOT/looplab"` и зовёт `python -m looplab.cli`.
+# Чей это `python` — профиль до 18.09 не говорил, и на голой коробке это был `/opt/conda/bin/python`
+# без `typer`: проба падала `ModuleNotFoundError: No module named 'typer'` за 0 секунд, УЖЕ построив
+# карточку и закрыв забор. 18.09 это стоило четырёх запусков подряд, каждый из которых выглядел как
+# новая поломка, потому что жаловался очередной слой.
+#
+# Venv стенда выбран не из вкуса: `/home/jovyan/data` — geesefs без бита x (venv там не живёт), а
+# редактируемая установка в `/opt/conda/envs/py311` указывает на КАТАЛОГ РЕПОЗИТОРИЯ, то есть на
+# другое дерево, чем то, чьи скрипты запускает проба. Venv стенда ставился `-e` из самого стенда,
+# так что интерпретатор и `PYTHONPATH` указывают на одни и те же байты.
+_looplab_engine_on_path() {
+  local venv="$BENCH_ROOT/looplab/.venv/bin"
+  if [ ! -x "$venv/python" ]; then
+    echo "[box] движка стенда нет по $venv/python — проба откажется стартовать" >&2
+    echo "[box]   uv venv --python 3.11 $BENCH_ROOT/looplab/.venv && (cd $BENCH_ROOT/looplab && uv pip install -e '.[proc]')" >&2
+    return 0
+  fi
+  case ":$PATH:" in *":$venv:"*) ;; *) export PATH="$venv:$PATH" ;; esac
+  echo "[box] движок: $venv/python"
+}
+_looplab_engine_on_path
