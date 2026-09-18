@@ -211,6 +211,86 @@ def power(scores, effect: float, n_batches: int, trials: int, alpha: float, seed
     return hits / trials
 
 
+def rate_power(control_rate: float, treat_rate: float, per_probe: int, n_batches: int,
+               trials: int, alpha: float, seed: int = 20260918):
+    """Power for a BEHAVIOUR outcome -- a per-probe RATE rather than a score.
+
+    WHY THIS MODE EXISTS (doc 56 §421). §137 measured the same treatment two ways over the same
+    nine-against-nine runs: the behaviour outcome reached p = 0.0013 and the SCORE outcome only
+    p = 0.0567. On a bimodal score distribution (§108: two clusters, sd 79.7 over the corpus) an
+    affordable arm cannot see an effect the size the loop plausibly produces -- §420's table --
+    while the behaviour it is supposed to change is a proportion with far less spread. So an arm
+    whose primary outcome is "did the run keep the regime of its strong node" needs ITS power
+    computed, not the score table's borrowed.
+
+    The test is the same one `power()` uses and the same one the arm will use: each probe
+    contributes ONE number and `stratified_p` permutes within batches. The only change is what the
+    number IS -- here a probe's own share of its own transitions, drawn as `Binomial(k, p) / k`.
+
+    `per_probe` is how many transitions one probe offers. It is a PARAMETER and not a corpus
+    reading on purpose: `node_created` records `parent_ids` in only 20 of 119 archived runs
+    (§422), so the corpus cannot say, and a preregistration that quoted a number the corpus does
+    not hold would be exactly the borrowed-table mistake §187 was written about.
+    """
+    rnd = random.Random(seed + n_batches * 100 + per_probe)
+    hits = 0
+    for _ in range(trials):
+        batches = []
+        for _b in range(n_batches):
+            control = [sum(rnd.random() < control_rate for _ in range(per_probe)) / per_probe
+                       for _ in range(2)]
+            treat = [sum(rnd.random() < treat_rate for _ in range(per_probe)) / per_probe
+                     for _ in range(2)]
+            batches.append((treat, control))
+        if stratified_p(batches) <= alpha:
+            hits += 1
+    return hits / trials
+
+
+def fisher_one_sided(a: int, b: int, c: int, d: int) -> float:
+    """One-sided Fisher exact p for the 2x2 `[[a, b], [c, d]]`, treatment-is-better.
+
+    Exact and dependency-free (`math.comb`): the bench has no scipy and a power tool that cannot run
+    where the arm runs is not a power tool.
+    """
+    from math import comb
+    n = a + b + c + d
+    row1, col1 = a + b, a + c
+    total = comb(n, row1)
+    return sum(comb(col1, k) * comb(n - col1, row1 - k)
+               for k in range(a, min(row1, col1) + 1)) / total
+
+
+def pooled_rate_power(control_rate: float, treat_rate: float, per_arm: int, trials: int,
+                      alpha: float, seed: int = 20260918):
+    """Power for a POOLED behaviour outcome: one 2x2 over every transition both arms produced.
+
+    §137 measured exactly this way -- 15 of 16 against 20 of 41, p = 0.0013 -- and THAT is the
+    reason to use it: a number computed by the same test lands beside the published one, and the
+    programme's question is whether the policy does what the card clause did not.
+
+    IT IS NOT MORE POWERFUL, and the first version of this docstring claimed it was. Measured, at
+    twelve batches and one transition per probe: pooled 0.89 against per-probe 0.90 at a 0.5 -> 0.9
+    gap, and 0.43 against 0.39 at 0.7 -> 0.9. The two tests see the same thing at this size, and the
+    binding constraint is neither of them -- it is that a probe offers about ONE transition (§422:
+    with the floor at three the gate fires at most once a run), so only a LARGE rate gap is
+    visible at any affordable size. A rationale the measurement does not support is worse than no
+    rationale, which is why this paragraph replaced it rather than standing beside it.
+
+    What pooling costs is the batch stratification, this bench's control for lane and time
+    confounds. Affordable HERE and only here: the outcome is a property of the run's own
+    transitions, not a timing, so a slow lane cannot move it the way it moves a speedup.
+    """
+    rnd = random.Random(seed + per_arm)
+    hits = 0
+    for _ in range(trials):
+        t = sum(rnd.random() < treat_rate for _ in range(per_arm))
+        c = sum(rnd.random() < control_rate for _ in range(per_arm))
+        if fisher_one_sided(t, per_arm - t, c, per_arm - c) <= alpha:
+            hits += 1
+    return hits / trials
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -222,7 +302,40 @@ def main(argv=None) -> int:
                     help="paired batches of four to simulate (2 per arm each)")
     ap.add_argument("--trials", type=int, default=400)
     ap.add_argument("--alpha", type=float, default=0.05)
+    # THE BEHAVIOUR MODE (§421). `--outcome rate` sizes an arm whose primary outcome is a per-probe
+    # proportion; the three rate flags are its parameters and the corpus is not consulted, because
+    # the corpus cannot answer them (§422).
+    ap.add_argument("--outcome", choices=("score", "rate"), default="score")
+    ap.add_argument("--control-rate", type=float, default=0.5,
+                    help="the share a CONTROL probe is assumed to reach (§108's coin flip)")
+    ap.add_argument("--treat-rate", type=float, default=0.9,
+                    help="the share a TREATED probe is assumed to reach")
+    ap.add_argument("--per-probe", type=int, default=2,
+                    help="how many transitions one probe offers the outcome")
+    ap.add_argument("--pooled", action="store_true",
+                    help="with --outcome rate: ONE 2x2 over every transition, Fisher exact (§137's "
+                         "own test) instead of a per-probe rate permuted within batches")
     args = ap.parse_args(argv)
+
+    if args.outcome == "rate":
+        # THE CORPUS IS NOT READ IN THIS MODE, and that is the honest thing rather than a shortcut:
+        # the rates are assumptions the preregistration states, and `parent_ids` reaches only 20 of
+        # 119 archived runs (§422), so a corpus reading here would be a number the corpus does not
+        # hold dressed as a measurement.
+        print(f"outcome: a per-probe RATE. control {args.control_rate:.2f} against treated "
+              f"{args.treat_rate:.2f}, {args.per_probe} transition(s) per probe, "
+              f"alpha {args.alpha}, {args.trials} trials per row")
+        print("these rates are ASSUMPTIONS the preregistration must state; the corpus cannot "
+              "supply them (§422)\n")
+        print(f'{"batches":>8s} {"probes":>7s} {"$":>6s} {"trans/arm":>10s} {"power":>7s}')
+        for nb in args.batches:
+            per_arm = nb * 2 * args.per_probe          # two probes an arm per batch
+            pw = (pooled_rate_power(args.control_rate, args.treat_rate, per_arm, args.trials,
+                                    args.alpha) if args.pooled
+                  else rate_power(args.control_rate, args.treat_rate, args.per_probe, nb,
+                                  args.trials, args.alpha))
+            print(f"{nb:8d} {nb * 4:7d} {nb * 4:6d} {per_arm:10d} {pw:7.2f}")
+        return 0
 
     scores = champions(args.root, args.task)
     if len(scores) < 10:

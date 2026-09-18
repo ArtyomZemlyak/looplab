@@ -71,3 +71,54 @@ def test_power_rises_with_batches_and_with_effect():
 def test_it_refuses_a_corpus_too_small_to_resample(tmp_path, capsys):
     assert arm_power.main(["--root", str(tmp_path)]) == 2
     assert "refusing to simulate" in capsys.readouterr().err
+
+
+# --------------------------------------------------------- the BEHAVIOUR outcome (docs/56 §421)
+def test_fisher_matches_the_worked_example_137_published():
+    """§137's own numbers: 15 of 16 against 20 of 41, reported as p = 0.0013. The tool has to
+    reproduce a published figure before it is allowed to size anything."""
+    got = arm_power.fisher_one_sided(15, 1, 20, 21)
+    assert 0.0010 <= got <= 0.0016, got
+
+
+def test_fisher_is_one_sided_in_the_direction_the_design_predicts():
+    """A two-sided p would forgive a treatment that made things WORSE at the same magnitude."""
+    better = arm_power.fisher_one_sided(10, 2, 3, 9)
+    worse = arm_power.fisher_one_sided(3, 9, 10, 2)
+    assert better < 0.05 < worse, (better, worse)
+    assert arm_power.fisher_one_sided(6, 6, 6, 6) > 0.4          # nothing happened
+
+
+def test_a_per_probe_rate_with_one_transition_cannot_see_much():
+    """Why §421's arm pools instead. With ONE transition a probe's rate is a single coin, and the
+    within-batch permutation has almost nothing to permute -- which is the situation the corpus
+    actually hands us, since with the floor at three the gate fires at most once a run (§422)."""
+    thin = arm_power.rate_power(0.5, 0.9, 1, 12, 120, 0.05)
+    fat = arm_power.rate_power(0.5, 0.9, 2, 12, 120, 0.05)
+    assert thin < fat, (thin, fat)
+
+
+def test_pooling_is_NOT_more_powerful_and_that_is_written_down():
+    """This test exists because the first version of the module's docstring claimed pooling would
+    see an effect the per-probe permutation could not, and the measurement says otherwise: at
+    twelve batches with one transition per probe the two agree to a point (0.89 against 0.90 at a
+    0.5 -> 0.9 gap; 0.43 against 0.39 at 0.7 -> 0.9).
+
+    §137's test is used for COMPARABILITY -- a number computed the same way lands beside the
+    published one -- and not for power. The binding constraint is that a probe offers about one
+    transition, so only a large rate gap is visible at any affordable size."""
+    per_probe = arm_power.rate_power(0.5, 0.9, 1, 12, 300, 0.05)
+    pooled = arm_power.pooled_rate_power(0.5, 0.9, 24, 300, 0.05)
+    assert abs(pooled - per_probe) < 0.10, (pooled, per_probe)
+    # ... and neither rescues a small gap at the same size.
+    assert arm_power.rate_power(0.7, 0.9, 1, 12, 300, 0.05) < 0.6
+    assert arm_power.pooled_rate_power(0.7, 0.9, 24, 300, 0.05) < 0.6
+
+
+def test_power_falls_when_the_control_is_already_good():
+    """The number that decides whether B1's arm is worth running at all: if the loop already keeps
+    its regime 70 % of the time, no affordable size reaches 0.8, and the preregistration has to say
+    so BEFORE the money rather than discover it after (§420)."""
+    generous = arm_power.pooled_rate_power(0.5, 0.9, 24, 400, 0.05)
+    pessimistic = arm_power.pooled_rate_power(0.7, 0.9, 24, 400, 0.05)
+    assert generous > 0.8 > pessimistic, (generous, pessimistic)

@@ -1,0 +1,50 @@
+primary_outcome: the POOLED share of transitions out of a strong node that keep its implementation
+  regime -- one 2x2 over every such transition both arms produced, Fisher exact, one-sided in the
+  direction the design predicts. `looplab/engine/regime_contrast.py::node_regime` classifies the
+  parent's and the child's files; a "strong node" is what the treatment's own gate calls one
+  (`search/policy.py::exploit_forced_action`, top `1 - q` of this run's evaluated nodes, floor
+  EXPLOIT_MIN_NODES).
+batches: 12
+power: 0.91
+arm_power: benchmarks/arm_power.py --outcome rate --pooled --control-rate 0.5 --treat-rate 0.9
+  --per-probe 1 --batches 6 9 12 --trials 2000
+
+--- everything below is the record, not the launcher's four lines -------------------------------
+
+TREATMENT           LOOPLAB_EXPLOIT_STRONG_NODE_QUANTILE=0.75 (docs/56 §418, §422)
+CONTROL             the shipped default, 0.0
+TASK                edge_expansion
+DESIGN              12 paired batches of four, two probes an arm, lanes alternating between the
+                    label and the lane mapping as §266 registered for the cap arm.
+
+WHY THE OUTCOME IS BEHAVIOUR AND NOT THE SCORE (docs/56 §421). §137 measured this same treatment as
+a card clause over nine runs against nine: behaviour p = 0.0013, score p = 0.0567, on the same
+runs. §420 recomputed the score arm against the corpus as it now is (71 champions, sd 79.7) and
+12 batches reach power 0.80 only at +60 points, 28 % of the median champion. And §421 measured why
+a score arm on this task cannot work at any size: the champion already carries a compiled kernel in
+108 of 119 runs, so the behaviour the treatment produces is behaviour the task already shows.
+
+WHY FISHER AND NOT THE STRATIFIED PERMUTATION. For comparability, and for nothing else: §137's
+number was computed this way and a new one computed the same way lands beside it. It is NOT more
+powerful -- measured, 0.89 against 0.90 at this size -- and the module says so. What pooling costs
+is the batch stratification; affordable here because the outcome is a property of a run's own
+transitions rather than a timing, so a slow lane cannot move it.
+
+THE ASSUMPTIONS, NAMED BECAUSE THE CORPUS CANNOT SUPPLY THEM (§422). Control 0.5 is §108's coin
+flip: of 28 transitions out of a kernel node, 14 proposed a kernel again. Treated 0.9 is the
+design's expectation, not a measurement. One transition per probe is the corpus's shape: no
+archived run exceeds four evaluated nodes, so with the floor at three the gate fires at most once.
+The corpus cannot give the control rate for THIS trigger, because `node_created` records
+`parent_ids` in only 20 of 119 runs -- a first pass read 8 of 9 and it is quoted nowhere as a rate.
+
+THE FALSIFICATION CLAUSE, written before the money (§420's lesson applied in advance). If the
+CONTROL arm's own pooled rate comes back at or above 0.8, this arm is underpowered by construction
+-- power falls to 0.43 at a 0.7 -> 0.9 gap even at twelve batches -- and it must report THAT, with
+the control rate it measured, instead of a p-value. "No effect detected at a power we can now see
+was 0.4" is the honest reading, and it is registered here so it cannot be chosen afterwards.
+
+SECONDARY, reported and never the headline: the final champion TEST speedup, printed with its own
+minimum detectable effect (+60 at this size, §420). A secondary outcome that becomes the headline
+when it happens to be significant is the degree of freedom §190 exists to close.
+
+READ ONCE, at twelve complete batches. No interim look.

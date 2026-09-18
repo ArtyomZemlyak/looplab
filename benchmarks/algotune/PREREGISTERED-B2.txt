@@ -1,0 +1,50 @@
+primary_outcome: whether a run ever ships a node in the UNTRIED regime -- one binary per run, a
+  2x2 over every run both arms produced, Fisher exact, one-sided in the direction the design
+  predicts. On `pde_heat1d` the untried regime is `compiled`
+  (`looplab/engine/regime_contrast.py::node_regime`).
+batches: 6
+power: 0.85
+arm_power: benchmarks/arm_power.py --outcome rate --pooled --control-rate 0.02 --treat-rate 0.5
+  --per-probe 1 --batches 3 4 6 --trials 2000
+
+--- everything below is the record, not the launcher's four lines -------------------------------
+
+TREATMENT           LOOPLAB_REGIME_PRIOR=1 (docs/56 §419.1)
+CONTROL             the shipped default, off
+TASK                pde_heat1d
+DESIGN              6 paired batches of four, two probes an arm.
+
+WHY THIS TASK AND NOT `edge_expansion` (docs/56 §421). B2 carries what has been measured about
+implementation regimes to a run that has not measured it. `edge_expansion` cannot ask the question:
+everything has been tried there and the champion is compiled in 108 of 119 runs. `pde_heat1d` is
+the corpus's only task where a regime was never tried AT ALL -- 17 of its 18 evaluated nodes are
+`jit`, none is `compiled`, and the single non-jit node scored 0.00 (§419). It therefore holds no
+evidence for compiled and none against, which is exactly the situation the prior's third clause is
+written for: "Never tried here: compiled, plain."
+
+`discrete_log` is excluded on the record: §188 named it the noisiest task relative to its scale and
+§419 measures its regime gap at 1.28x.
+
+WHAT THE TREATMENT ACTUALLY SHOWS THE PROPOSER, verbatim from the renderer:
+
+    Implementation regimes measured on this task: jit (median 110.6 over 17 node(s) in 1 run(s)).
+    Never tried here: compiled, plain.
+    On edge_expansion: compiled over plain 8.38x (352 nodes).
+
+No recommendation clause, by construction and by test. The point of the arm is whether stating what
+has NOT been measured is enough to get it measured -- not whether an instruction is obeyed.
+
+THE ASSUMPTIONS. Control 0.02 is the measured zero with room for one surprise: 0 of 11 archived
+`pde_heat1d` runs ever shipped a compiled node. Treated 0.5 is the design's expectation and not a
+measurement. One outcome per run, because the outcome IS the run.
+
+THE FALSIFICATION CLAUSE. If the control arm ships a compiled node in more than one run of twelve,
+the measured baseline is not the corpus's zero and the registered power does not describe this arm;
+report the control rate and the size it implies instead of a p-value. And if the TREATED arm never
+ships one either, the reading is "the prior did not move it", which is the question -- not a null
+to be explained away by the prior's wording, which is fixed above and may not be edited afterwards.
+
+SECONDARY, reported and never the headline: the final champion TEST speedup on `pde_heat1d`. The
+task's own spread is 5.5x (§110) and this arm is not sized for it.
+
+READ ONCE, at six complete batches. No interim look.
