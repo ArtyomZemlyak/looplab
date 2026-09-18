@@ -125,12 +125,33 @@ def run_contrast(state) -> Optional[dict]:
     weigh.
     """
     nodes = [n for n in getattr(state, "feasible_nodes", lambda: [])() if n.metric is not None]
-    got = contrast([(node_regime(getattr(n, "files", None)), n.metric) for n in nodes])
-    if got is None:
+    rows = [(node_regime(getattr(n, "files", None)), n.metric) for n in nodes]
+    if not rows:
         return None
-    return {**got, "task_id": getattr(state, "task_id", ""),
-            "direction": getattr(state, "direction", ""),
-            "run_id": getattr(state, "run_id", "")}
+    stamp = {"task_id": getattr(state, "task_id", ""),
+             "direction": getattr(state, "direction", ""),
+             "run_id": getattr(state, "run_id", "")}
+    got = contrast(rows)
+    if got is not None:
+        return {**got, **stamp}
+    # A RUN THAT TRIED ONE REGIME STILL WROTE DOWN WHAT IT MEASURED. `contrast` refuses to call one
+    # population a comparison and that refusal stands -- this row carries no `best`, no `worst` and
+    # no `ratio`. But the row itself is the evidence B2 exists to carry, and dropping it loses
+    # exactly the case §419 is about: seeded from the archive, the ledger held ONE `pde_heat1d` row
+    # (the single run that tried two regimes) and the prior read "jit, median 37.47 over 1 node"
+    # where the corpus says "17 nodes, median 110.61". Worse, on `discrete_log` the surviving subset
+    # REVERSED the ranking -- 1.49x for jit against the corpus's 1.28x for compiled -- so a prior
+    # built only from two-regime runs would have told the next run the opposite of what was measured.
+    by: dict = {}
+    for regime, metric in rows:
+        if regime in REGIMES and isinstance(metric, (int, float)):
+            by.setdefault(regime, []).append(float(metric))
+    if not by:
+        return None
+    return {"regimes": {r: {"n": len(v), "median": round(statistics.median(v), 6),
+                            "max": round(max(v), 6), "min": round(min(v), 6)}
+                        for r, v in sorted(by.items())},
+            "nodes": sum(len(v) for v in by.values()), **stamp}
 
 
 def known_regimes(rows: list, task_id: str) -> dict:
@@ -151,6 +172,7 @@ def known_regimes(rows: list, task_id: str) -> dict:
     that is only ever advisory.
     """
     here: dict[str, list] = {}
+    other: dict[str, list] = {}
     elsewhere: list = []
     for row in rows or ():
         if not isinstance(row, dict):
@@ -163,9 +185,14 @@ def known_regimes(rows: list, task_id: str) -> dict:
                 if regime in REGIMES and isinstance(stats, dict):
                     here.setdefault(regime, []).append(stats)
         else:
-            elsewhere.append({"task_id": row.get("task_id", ""), "best": row.get("best", ""),
-                              "worst": row.get("worst", ""), "ratio": row.get("ratio"),
-                              "nodes": row.get("nodes", 0)})
+            # ONE LINE PER TASK, NOT PER ROW. The ledger holds a row per RUN, so quoting rows
+            # verbatim quotes the same task as many times as it has runs -- rendered from a real
+            # 105-row seed it read "On edge_expansion: compiled over plain 5.62x (4 nodes). On
+            # edge_expansion: compiled over plain 13.7x (4 nodes)", two four-node "facts" in place
+            # of one task's 352-node picture. A reader counting sentences would have counted
+            # evidence. Pooled the same way `here` is: the median of the run ratios, and the nodes
+            # summed, so the sample beside a number is the sample behind it.
+            other.setdefault(row.get("task_id", ""), []).append(row)
     summary = {}
     for regime, seen in sorted(here.items()):
         medians = [s["median"] for s in seen if isinstance(s.get("median"), (int, float))]
@@ -176,6 +203,29 @@ def known_regimes(rows: list, task_id: str) -> dict:
             # about a question -- "does this regime work here" -- that is asked once per run.
             summary[regime] = {"runs": len(medians), "median_of_medians": round(
                 statistics.median(medians), 6), "nodes": sum(counts)}
+    for task, rows_of_task in other.items():
+        # AGGREGATED THE SAME WAY `here` IS, and that is not tidiness. The first version took the
+        # MEDIAN OF THE PER-RUN RATIOS and read `discrete_log: 4.68x` while `benchmarks/
+        # regime_table.py` publishes 1.28x for the same task -- two legitimate statistics (a median
+        # of ratios against a ratio of medians) contradicting each other inside one sentence. A
+        # prior whose second half cannot be reconciled with the table is worse than a shorter one.
+        per_regime: dict = {}
+        for r in rows_of_task:
+            for regime, stats in (r.get("regimes") or {}).items():
+                if regime in REGIMES and isinstance(stats, dict) \
+                        and isinstance(stats.get("median"), (int, float)):
+                    per_regime.setdefault(regime, []).append(stats["median"])
+        if len(per_regime) < 2:
+            continue
+        med = {k: statistics.median(v) for k, v in per_regime.items()}
+        best = max(med, key=lambda k: med[k])
+        worst = min(med, key=lambda k: med[k])
+        if med[worst] <= 0:
+            continue                       # no ratio, for the reason `contrast` gives
+        elsewhere.append({"task_id": task, "best": best, "worst": worst,
+                          "ratio": round(med[best] / med[worst], 4),
+                          "runs": len(rows_of_task),
+                          "nodes": sum(int(r.get("nodes") or 0) for r in rows_of_task)})
     return {"task_id": task_id, "here": summary,
             "untried_here": [r for r in REGIMES if r not in summary],
             "elsewhere": sorted(elsewhere, key=lambda e: -(e.get("nodes") or 0))[:8]}

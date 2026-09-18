@@ -25,14 +25,42 @@ written for: "Never tried here: compiled, plain."
 `discrete_log` is excluded on the record: §188 named it the noisiest task relative to its scale and
 §419 measures its regime gap at 1.28x.
 
-WHAT THE TREATMENT ACTUALLY SHOWS THE PROPOSER, verbatim from the renderer:
-
-    Implementation regimes measured on this task: jit (median 110.6 over 17 node(s) in 1 run(s)).
-    Never tried here: compiled, plain.
-    On edge_expansion: compiled over plain 8.38x (352 nodes).
+WHAT THE TREATMENT ACTUALLY SHOWS THE PROPOSER: the block is printed verbatim under the seeding
+clause below, from the seed this arm will actually run against. It is NOT reproduced twice -- an
+earlier draft of this file carried a hand-made rendering beside the real one and the two disagreed
+in their sample counts, which is the shape of contradiction `test_config_docs_sync.py` exists to
+catch one document over.
 
 No recommendation clause, by construction and by test. The point of the arm is whether stating what
 has NOT been measured is enough to get it measured -- not whether an instruction is obeyed.
+
+THE SEEDING CLAUSE, and the arm may not start without it (docs/audit/prior-injection-hit-rate.md,
+doc 56 §425). `regime_prior` reads `<memory_dir>/regime_contrast.jsonl`, which a run writes at
+FINALIZE. On a fresh stand that file does not exist, so the block would render "Implementation
+regimes measured on this task: none yet" and the treatment would be EMPTY -- the same shape as §422,
+where B1's floor sat above what 87 % of runs produce. This is not hypothetical: the citation audit
+of 2026-09-18 read 161 archived probes and found 32 prior injections carrying `rows: 0` apiece,
+because every probe read its own fresh store. A treatment that cannot fire cannot be measured.
+
+So before the first probe:
+
+    python benchmarks/regime_table.py --seed-ledger <memory_dir>/regime_contrast.jsonl
+
+which writes one row per ARCHIVED probe -- what each of those runs would have written itself. The
+seed is derived, never invented, and `seeded_from` marks every row it wrote. Both arms share the
+memory dir; only the treated one reads it, because only it has `regime_prior` on.
+
+What the treated prior then says on `pde_heat1d`, verbatim from the 155-row seed:
+
+    Implementation regimes measured on this task: jit (median 89.44 over 17 node(s) in 12 run(s));
+    plain (median 0 over 1 node(s) in 1 run(s)). Never tried here: compiled.
+    On algotune_edge_expansion: compiled over plain 8.22x (352 nodes).
+    On algotune_pagerank: compiled over plain 2.22x (28 nodes).
+
+AND THE CHECK THAT THE TREATMENT BIT, before any outcome is read: every treated probe's
+`prior_injected` rows must carry a `regime` key in their receipt. An arm whose treated probes show
+no such key measured nothing, whatever its p-value, and must report that instead. This is the field
+the audit above found at zero, and it is the first thing to look at.
 
 THE ASSUMPTIONS. Control 0.02 is the measured zero with room for one surprise: 0 of 11 archived
 `pde_heat1d` runs ever shipped a compiled node. Treated 0.5 is the design's expectation and not a

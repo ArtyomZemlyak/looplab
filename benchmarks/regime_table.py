@@ -103,12 +103,73 @@ def render(probes: int, by_task: dict, min_nodes: int) -> str:
     return "\n".join(out)
 
 
+def seed_rows(root: str) -> list:
+    """One ledger row per archived probe -- what each of those runs WOULD have written at finalize.
+
+    WHY SEEDING IS PART OF THE TOOL AND NOT A SCRIPT SOMEBODY REMEMBERS (docs/audit/prior-injection-
+    hit-rate.md). The citation audit of 2026-09-18 read 161 probes, 439 proposals and 32 prior
+    injections, and found ZERO (prior, proposal) pairs -- not because the priors were ignored but
+    because every one of them fired EMPTY: `rows: 0`, since each probe read its own fresh memory
+    dir. `regime_prior` reads `<memory_dir>/regime_contrast.jsonl`, written at finalize, so on a
+    fresh stand its first sentence would be "none yet" and the treatment of doc 60 60.9 B2 would be
+    empty for exactly that reason -- the same shape as doc 56 422, where B1's floor sat above what
+    87 % of runs produce.
+
+    The seed is DERIVED, never invented: each row is `contrast()` over one archived probe's own
+    nodes, stamped with that probe's task and run, which is byte-for-byte the shape
+    `engine/regime_contrast.py::run_contrast` emits. A row is skipped when that probe tried one
+    regime only -- the same refusal the live path makes, for the same reason.
+    """
+    out = []
+    for path in sorted(glob.glob(f"{root}/*/runs/*/run/events.jsonl")):
+        task, rows = read_probe(path)
+        if not task or not rows:
+            continue
+        stamp = {"task_id": task, "direction": "max",
+                 "run_id": path.split("/model-probes/")[1].split("/")[0], "seeded_from": path}
+        got = contrast(rows)
+        if got is not None:
+            out.append({**got, **stamp})
+            continue
+        # A ONE-REGIME PROBE STILL SAYS WHAT IT MEASURED -- the same rule the live writer follows
+        # (`engine/regime_contrast.py::run_contrast`), and the reason is in its comment: dropping
+        # these rows loses `pde_heat1d` almost entirely and REVERSES `discrete_log`.
+        by: dict = {}
+        for regime, metric in rows:
+            if regime in REGIMES and isinstance(metric, (int, float)):
+                by.setdefault(regime, []).append(float(metric))
+        if by:
+            out.append({"regimes": {r: {"n": len(v), "median": round(statistics.median(v), 6),
+                                        "max": round(max(v), 6), "min": round(min(v), 6)}
+                                    for r, v in sorted(by.items())},
+                        "nodes": sum(len(v) for v in by.values()), **stamp})
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("root", nargs="?", default=DEFAULT_ROOT)
     ap.add_argument("--min-nodes", type=int, default=10)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--seed-ledger", metavar="PATH",
+                    help="append one `regime_contrast.jsonl` row per archived probe to PATH, so an "
+                         "arm's first probe reads a prior that has something true to say")
     args = ap.parse_args(argv)
+    if args.seed_ledger:
+        rows = seed_rows(args.root)
+        # APPEND, and say how many. Not truncate: the ledger is shared and a live run may already
+        # have written to it, and a seed that silently replaced a real measurement would be worse
+        # than no seed. `seeded_from` marks every row this path wrote, so a reader can tell the
+        # corpus's history from this arm's own runs.
+        with open(args.seed_ledger, "a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+        tasks = sorted({r["task_id"] for r in rows})
+        print(f"seeded {len(rows)} row(s) from {len(tasks)} task(s) into {args.seed_ledger}")
+        for t in tasks:
+            n = sum(1 for r in rows if r["task_id"] == t)
+            print(f"  {t:<32} {n:>3} run(s)")
+        return 0
     probes, by_task = collect(args.root)
     if args.json:
         print(json.dumps({"probes": probes, "root": args.root,

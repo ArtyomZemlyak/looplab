@@ -894,16 +894,18 @@ The coverage snapshot shares the gate and takes one extra sample per rung.
 halves of the idempotence across a resume, the window's source and the other consumer. Rehearse's
 judge-decay trigger stays unbuilt — it needs the judge-quality record row 16 owns.*
 
-OPEN[prior-injection-hit-rate-unmeasured] the INSTRUMENT shipped on 2026-09-06 (row 17:
-`events/prior_citations.py`, `looplab prior-citations <run_dir>`, the two records it reads and the
-`lesson_utility.jsonl` ledger it feeds), but the NUMBER has not: nobody has run it over real runs on
-the box, so whether an injected prior (lesson, skill, capsule, claim) is CITED by the proposal that
-followed — or changes its outcome — is still unmeasured, and the read-side rank term and the
-forgetting rung ship on an unmeasured signal. The audit is `looplab prior-citations` over every run
-with `prior_injected` rows, the citation rate per role and per lesson, and one paired comparison of
-proposals with and without a cited prior; it also decides `lessons-are-not-operator-scoped` below.
-Named a CITATION rate to avoid HASTE's keep-fraction sense of "hit rate". Box-only.
-proof:missing:docs/audit/prior-injection-hit-rate.md
+*Closed 2026-09-18 (the number is taken): `prior-injection-hit-rate-unmeasured` stood here, and
+`docs/audit/prior-injection-hit-rate.md` is the reading — 161 archived probes, 439 proposals, 32
+injections, and **zero (prior, proposal) pairs**. The rate is UNDEFINED rather than low, for one
+reason the record states in a field: `rows: 0` on every injection. The priors fired empty, 227
+characters of header with no lesson in them, because each probe read its own fresh memory dir. The
+join is sound — checked by hand on `pgr2`, where the two `prior_injected` rows sit at event 7 and
+the first `node_created` at 161 — so it found no pair because none was shown. The row's question
+therefore cannot be answered from this corpus at all, and the audit closes it by saying so with the
+number that shows it instead of a 0 % that would read as "priors are ignored". What the row asked
+for survives as a PREREQUISITE, now written down: the measurement needs a seeded store, and any
+reader of a citation rate must check `rows` first. It also moved doc 60 §60.9 B2, whose own prior
+would have fired empty on a fresh stand for exactly this reason — see doc 56 §425.*
 
 *Closed 2026-09-06 (row 16 shipped): the marker `deep-research-plan-is-not-durable` stood here. The
 stage's plan is a RECORD now: the loop's `update_plan` hands its structured args to the caller's

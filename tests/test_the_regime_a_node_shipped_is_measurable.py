@@ -210,7 +210,11 @@ def test_another_task_is_quoted_WITH_its_task_name():
                                     REGIME_PLAIN: {"n": 102, "median": 22.5}},
                  best=REGIME_COMPILED, worst=REGIME_PLAIN, ratio=8.38, nodes=352)]
     text, _r = regime_prior_line(rows, "pde_heat1d")
-    assert "On edge_expansion: compiled over plain 8.38x (352 nodes)" in text, text
+    # 8.37x and not the row's own stored `ratio` of 8.38: the line RE-DERIVES it from the same
+    # per-regime medians `here` uses (188.43 / 22.5), so a row whose stored ratio disagrees with its
+    # own medians -- an older writer, a different aggregation -- cannot put the disagreement in
+    # front of a model. The two numbers differing in the last digit is that property visible.
+    assert "On edge_expansion: compiled over plain 8.37x (352 nodes)" in text, text
 
 
 def test_an_empty_ledger_renders_NOTHING():
@@ -226,3 +230,71 @@ def test_the_block_is_off_unless_an_operator_asked(tmp_path):
     from looplab.engine.options import EngineOptions
     assert Settings().regime_prior is False
     assert EngineOptions.from_settings(Settings()).regime_prior is False
+
+
+# ------------------------------------------------- what a ledger row carries, and what it costs
+def test_a_one_regime_run_still_writes_what_it_measured():
+    """`contrast` refuses to call one population a comparison, and that refusal stands -- the row
+    carries no `best`, `worst` or `ratio`. But the ROW is the evidence B2 exists to carry.
+
+    Measured on a ledger seeded from the archive: with one-regime runs dropped, `pde_heat1d` kept
+    ONE row of twelve and its prior read "jit, median 37.47 over 1 node" where the corpus says 17
+    nodes at 110.61 -- and on `discrete_log` the surviving two-regime subset REVERSED the ranking
+    (1.49x for jit against the corpus's 1.28x for compiled). A prior built from that subset would
+    have told the next run the opposite of what was measured.
+    """
+    class _N:
+        def __init__(self, metric, files):
+            self.metric, self.files = metric, files
+
+    class _S:
+        task_id, direction, run_id = "algotune_pde_heat1d", "max", "r7"
+
+        def feasible_nodes(self):
+            return [_N(110.0, {"solver.py": "@njit\ndef f(x): return x"}),
+                    _N(89.0, {"solver.py": "@njit\ndef g(x): return x"})]
+
+    row = run_contrast(_S())
+    assert row is not None and set(row["regimes"]) == {REGIME_JIT}
+    assert row["regimes"][REGIME_JIT]["n"] == 2 and row["nodes"] == 2
+    for absent in ("best", "worst", "ratio"):
+        assert absent not in row, (absent, row)
+    assert row["task_id"] == "algotune_pde_heat1d" and row["run_id"] == "r7"
+
+
+def test_another_task_is_ONE_line_however_many_runs_it_has():
+    """The ledger holds a row per RUN, so quoting rows verbatim quotes a task as often as it ran.
+    Rendered from a real 105-row seed that read: "On edge_expansion: compiled over plain 5.62x
+    (4 nodes). On edge_expansion: compiled over plain 13.7x (4 nodes)" -- two four-node "facts" in
+    place of one task's 352-node picture, and a reader counting sentences would have counted
+    evidence."""
+    rows = [_row("other", {REGIME_COMPILED: {"n": 2, "median": 180.0},
+                           REGIME_PLAIN: {"n": 2, "median": 20.0}}, nodes=4),
+            _row("other", {REGIME_COMPILED: {"n": 2, "median": 200.0},
+                           REGIME_PLAIN: {"n": 2, "median": 25.0}}, nodes=4),
+            _row("mine", {REGIME_JIT: {"n": 1, "median": 5.0}}, nodes=1)]
+    got = known_regimes(rows, "mine")
+    assert len(got["elsewhere"]) == 1, got["elsewhere"]
+    only = got["elsewhere"][0]
+    assert only["task_id"] == "other" and only["runs"] == 2 and only["nodes"] == 8
+    text, _r = regime_prior_line(rows, "mine")
+    assert text.count("On other:") == 1, text
+
+
+def test_the_other_task_line_uses_THE_SAME_statistic_as_this_one():
+    """Both halves of one sentence have to be reconcilable. The first version took the median of the
+    per-run RATIOS for other tasks while `here` takes the median of the per-run MEDIANS, and the two
+    disagreed in print: `discrete_log: jit over compiled 1.49x` beside a published table reading
+    `compiled over jit 1.28x`. Same aggregation now, so the direction cannot flip."""
+    rows = [_row("other", {REGIME_COMPILED: {"n": 1, "median": 10.0},
+                           REGIME_JIT: {"n": 3, "median": 2.0}}, nodes=4),
+            _row("other", {REGIME_COMPILED: {"n": 1, "median": 12.0},
+                           REGIME_JIT: {"n": 3, "median": 3.0}}, nodes=4),
+            _row("mine", {REGIME_PLAIN: {"n": 1, "median": 1.0}}, nodes=1)]
+    elsewhere = known_regimes(rows, "mine")["elsewhere"][0]
+    # medians of run medians: compiled 11.0, jit 2.5 -> 4.4x, compiled ahead.
+    assert elsewhere["best"] == REGIME_COMPILED and elsewhere["worst"] == REGIME_JIT
+    assert elsewhere["ratio"] == 4.4, elsewhere
+    here = known_regimes(rows, "other")["here"]
+    assert here[REGIME_COMPILED]["median_of_medians"] == 11.0
+    assert here[REGIME_JIT]["median_of_medians"] == 2.5
