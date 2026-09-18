@@ -461,7 +461,14 @@ def _arm_a_preflight(tmp_path: Path, key: str, meter: str) -> subprocess.Complet
     env = dict(os.environ, ARM="A", ALGOTUNE_ROOT=str(root), BUDGET_USD="1.0",
                ALGOTUNE_MODEL_KEY=key, METER_BASE=meter, TASKS="__none__", SNAPSHOT="0",
                CAMPAIGN_OUT=str(tmp_path / "out"), CAMPAIGN_WS=str(tmp_path / "ws"),
-               CAMPAIGN_RUNS=str(tmp_path / "runs"))
+               CAMPAIGN_RUNS=str(tmp_path / "runs"),
+               # A CAMPAIGN THAT IS EXPECTED TO START NEEDS A CREDENTIAL. Since 2026-09-18 the
+               # driver refuses an empty `LOOPLAB_LLM_API_KEY` rather than exporting one beside a
+               # non-empty base URL (the half pair that refused twenty task-arms on 2026-09-10),
+               # and that refusal sits AFTER the configuration checks these tests are about -- so
+               # the two that expect a refusal still get theirs, and the one that expects the
+               # driver to proceed needs this line to represent a runnable stand.
+               LOOPLAB_LLM_API_KEY="sk-fixture-not-a-real-key")
     return subprocess.run(["bash", str(CAMPAIGN)], capture_output=True, text=True, timeout=180,
                           env=env)
 

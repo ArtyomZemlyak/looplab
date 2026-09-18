@@ -352,6 +352,41 @@ export LOOPLAB_LLM_BASE_URL="${LOOPLAB_LLM_BASE_URL:-https://openrouter.ai/api/v
 export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
 export LOOPLAB_LLM_MODEL="${LOOPLAB_LLM_MODEL:-deepseek/deepseek-v4-flash-0731}"
 export LOOPLAB_LLM_API_KEY="${LOOPLAB_LLM_API_KEY:-${OPENROUTER_API_KEY:-}}"
+# AN EMPTY KEY IS WORSE THAN NO KEY, AND THIS DRIVER USED TO EXPORT ONE.
+#
+# The line above falls back to the empty string, while `LOOPLAB_LLM_API_KEY_BASE_URL` three lines up
+# is always set. That exports a HALF PAIR -- and the engine treats the two as ONE atomic credential
+# re-selected from a single source, so a half pair in the process environment does not merge with a
+# complete pair from `.env`, it REPLACES it. The driver was therefore capable of destroying a
+# working credential rather than merely failing to supply one.
+#
+# MEASURED, on 2026-09-10: the final campaign refused all twenty task-arms of arm B in one minute --
+# "LLM credential preflight failed: LOOPLAB_LLM_API_KEY_BASE_URL was set without
+# LOOPLAB_LLM_API_KEY ... this one cause is why all 7 of these fail" -- and arm A died the same
+# minute on its own half of it ("CRITICAL - API key not found"). Twenty task-arms, two arms, one
+# missing variable, and every one of them found out separately.
+#
+# So the driver refuses here instead, before the first token: exit 2, the code this file already
+# means by "refused before running anything". A refusal that costs four seconds and spends nothing
+# is the cheapest thing in this directory.
+require_llm_credentials() {   # 0 = both halves present; 2 = refuse before the first token
+  # THE SAME EXPRESSION THE EXPORT USES, not a stricter one. The line this guards falls back to
+  # `OPENROUTER_API_KEY`, and a guard that checked only the first spelling would refuse a stand where
+  # the second is set -- a guard stricter than the code it guards refuses working stands, which is a
+  # more expensive failure than the one it prevents. Caught by its own test before it shipped.
+  if [ -z "${LOOPLAB_LLM_API_KEY:-${OPENROUTER_API_KEY:-}}" ]; then
+    echo "REFUSED: LOOPLAB_LLM_API_KEY is empty, and this driver is about to export it that way" >&2
+    echo "  beside a non-empty LOOPLAB_LLM_API_KEY_BASE_URL ($LOOPLAB_LLM_BASE_URL)." >&2
+    echo "  The two are ONE credential: the engine re-selects the PAIR from a single source, so an" >&2
+    echo "  empty half in the environment REPLACES a complete pair in .env rather than merging." >&2
+    echo "  Looked in: the process environment, then $AT/.env (LOOPLAB_LLM_API_KEY, OPENROUTER_API_KEY)." >&2
+    echo "  Fix: export both halves, with the BASE_URL the key was issued for; or put both in .env" >&2
+    echo "  and export neither. On 2026-09-10 this exact gap refused 20 task-arms in one minute." >&2
+    exit 2
+  fi
+  return 0
+}
+# CALLED LOWER DOWN, not here: see the call site just above the task loop.
 export LOOPLAB_LLM_TEMPERATURE='0.0'
 # The provider pin and the effort level are OpenRouter controls. On an endpoint that serves one
 # deployment and exposes no reasoning channel they control nothing, and a box profile sets this to
@@ -1656,6 +1691,15 @@ reap_orphan_workers
 declare -a LANE_PID
 for L in $(seq 0 $((LANE_COUNT - 1))); do LANE_PID[$L]=""; done
 
+# THE CREDENTIAL GUARD FIRES HERE -- after every refusal that costs nothing and needs no key, and
+# before the first task-arm is launched.
+#
+# It was above the export block for one run of the tests, which put it ahead of the CONFIGURATION
+# refusals (an arm-A model entry that would bypass the meter, an unmetered campaign, the lane plan).
+# Those are cheaper and more specific than "you have no key", and requiring a live credential to
+# reach them makes a config check unrunnable offline -- three existing tests said so immediately.
+# The rule this settles: a guard belongs before the first thing that SPENDS, not before everything.
+require_llm_credentials || exit $?
 premint_serial_rulers
 
 for T in $TASKS; do
