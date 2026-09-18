@@ -79,6 +79,11 @@ spend: $1.0025` while this meter had it at $2.009.
     CEILING never trips on one either. Not fixed in the same change because the counter is also the
     ceiling's input: counting more deltas moves when a stream is cut, which is a behaviour change
     that belongs to its own measurement rather than riding in on a pricing fix.
+    SIZED 2026-09-18 so nobody spends a day on it by accident: over the 2026-08 campaign's 43,582
+    streamed 200s, exactly FOUR carry `deltas_seen: 0` with completion tokens (13,552 tokens,
+    $0.00 of $140.67). The hole is real and it is worth nothing on this traffic; it becomes worth
+    something only if the shape changes -- a model that answers purely in tool calls, or a loop that
+    stops interleaving content. Fix it then, or when the ceiling is next touched for its own sake.
     proof:absent:delta_counts_tool_calls@benchmarks/meter/proxy.py
 
 USAGE
