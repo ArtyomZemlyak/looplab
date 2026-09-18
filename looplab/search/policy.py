@@ -960,11 +960,21 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
     return actions
 
 
-# A quartile computed over two nodes is not a quartile. Most runs in the corpus reach three or four
-# nodes (doc 56 §185: ten of ninety-one see a fourth), so this is deliberately the point at which
-# "top quarter of what this run has produced" starts meaning something, and not a knob: an arm that
-# could move it as well as the quantile would be measuring two things at once.
-EXPLOIT_MIN_NODES = 4
+# A quartile computed over two nodes is not a quartile -- and the floor that follows from that is
+# what decides whether this gate can fire at all.
+#
+# It was 4 for one day, on §185's reading that runs reach three or four nodes. Measured properly
+# against the archive (doc 56 §422, 119 `edge_expansion` runs): the evaluated-node counts are 2 for
+# 21 runs, 3 for 82 and 4 for 16, and NOT ONE run exceeds four. A floor of 4 therefore sits above
+# what 87 % of runs ever produce, and the treatment would have been inert on the workload it was
+# written for -- an arm that cannot fire cannot answer.
+#
+# At three nodes the top slice is `max(1, int(3 * 0.25))` = the single best node, i.e. the top
+# THIRD and not the top quarter. That is the honest description of this treatment on this workload
+# and it is said here rather than implied: with two nodes "the best so far" is a coin the run has
+# already flipped once, with three it is a ranking. Still not a knob -- an arm that could move the
+# floor as well as the quantile would be measuring two things at once.
+EXPLOIT_MIN_NODES = 3
 
 
 def exploit_forced_action(state: RunState, policy: SearchPolicy, *, max_nodes: int,
