@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._bench_fixtures import stand_launch_env
+
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -130,7 +132,8 @@ def test_the_probe_records_which_card_it_ran(tmp_path):
         out = tmp_path / label
         if env_extra:
             _preregister(out)      # a card variant is an ARM, and an arm launches only preregistered
-        env = {**os.environ, "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path), **env_extra}
+        env = {**stand_launch_env(), "PROBE_DRY_RUN": "1",
+               "PROBE_OUT_ROOT": str(tmp_path), **env_extra}
         r = subprocess.run(
             ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
              "http://127.0.0.1:8801", "1.00"],
@@ -173,7 +176,7 @@ def test_the_probe_carries_its_own_credential(tmp_path):
     if not (root / "AlgoTune").exists():
         pytest.skip("bench root not on this box")
 
-    env = {k: v for k, v in os.environ.items()
+    env = {k: v for k, v in stand_launch_env().items()
            if k not in ("LOOPLAB_LLM_API_KEY", "LOOPLAB_LLM_API_KEY_BASE_URL", "OPENAI_API_KEY")}
     env["PROBE_DRY_RUN"] = "1"
     env["PROBE_OUT_ROOT"] = str(tmp_path)
@@ -243,7 +246,8 @@ def test_the_record_pins_the_card_itself_not_only_the_flags(tmp_path):
     def _hash(label, extra):
         if extra:
             _preregister(tmp_path / label)
-        env = {**os.environ, "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path), **extra}
+        env = {**stand_launch_env(), "PROBE_DRY_RUN": "1",
+               "PROBE_OUT_ROOT": str(tmp_path), **extra}
         r = subprocess.run(
             ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
              "http://127.0.0.1:8801", "1.00"],

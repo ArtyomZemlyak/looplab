@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._bench_fixtures import stand_launch_env
+
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "benchmarks" / "algotune" / "run_probe.sh"
 ROOT = Path("/var/tmp/looplab-bench")
@@ -42,7 +44,7 @@ def _dry_run(label, *, stream="1", lane="44-47,92-95", task="discrete_log", out_
     if out.exists():
         import shutil
         shutil.rmtree(out)
-    env = dict(os.environ)
+    env = stand_launch_env()
     env["PROBE_DRY_RUN"] = "1"
     env["PROBE_OUT_ROOT"] = str(base)
     if stream is None:
@@ -98,7 +100,7 @@ def test_a_stray_unstreamed_setting_is_overridden_and_the_record_says_what_RAN(t
 
 def test_a_deliberate_opt_out_is_recorded_as_the_other_instrument(tmp_path):
     """`LOOPLAB_ALLOW_UNSTREAMED=1` is the one way to reach the instrument that cost remEE 9 calls."""
-    env = dict(os.environ)
+    env = stand_launch_env()
     env["PROBE_DRY_RUN"] = "1"
     env["LOOPLAB_LLM_STREAM"] = "false"
     env["LOOPLAB_ALLOW_UNSTREAMED"] = "1"

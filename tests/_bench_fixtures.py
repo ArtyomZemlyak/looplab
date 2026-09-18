@@ -17,6 +17,7 @@ synthetic BENCH_ROOT with `AlgoTune/.git` deleted and every other source in plac
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -89,3 +90,31 @@ def bench_root(tmp_path) -> Path:
     (run / "events.jsonl").write_text('{"type": "llm_usage", "data": {"cost": 0.0717}}\n')
     (run / "spans.jsonl").write_text('{"name": "generation", "attributes": {"phase": "propose"}}\n')
     return src
+
+
+# ---------------------------------------------------------------------------------------------
+# THE ENVIRONMENT A LAUNCH HAS, for the tests that drive `run_probe.sh` on the real stand.
+
+STAND_ROOT = Path("/var/tmp/looplab-bench")
+
+
+def stand_launch_env(env: dict | None = None) -> dict:
+    """`env` with the stand's own interpreter first on PATH, the way a launch has it.
+
+    `run_probe.sh` calls `python -m looplab.cli run` and refuses when that `python` cannot import
+    the CLI (`test_the_probe_refuses_a_stand_that_cannot_run.py` — the guard that ends the
+    2026-09-18 failure where the probe checked the fence, built the card and wrote the instrument
+    record before dying on `No module named 'typer'`). A launch gets that interpreter from
+    `benchmarks/box-jhub-l40s.sh`; pytest does not source it, so a harness that drives the script
+    for its RECORD-writing must supply the same precondition or it tests the refusal instead.
+
+    ONE builder, because two would drift and the one that drifts is the one nobody runs -- the
+    rule this module's own docstring was written for. Sourcing the box profile instead was
+    rejected: it reads `$ALGOTUNE_ROOT/.env`, and three tests in this suite exist to prove that
+    no key from the operator's shell reaches the record.
+    """
+    out = dict(os.environ if env is None else env)
+    venv = STAND_ROOT / "looplab" / ".venv" / "bin"
+    if venv.is_dir():
+        out["PATH"] = f"{venv}{os.pathsep}" + out.get("PATH", "")
+    return out

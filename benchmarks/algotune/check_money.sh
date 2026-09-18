@@ -134,17 +134,25 @@ PY
 # это 26.08 и оно осталось верным, потому что НИКТО НЕ СВЕРЯЛ. Теперь сверяет.
 #
 # По /proc, а не через pkill: шаблон pkill матчит собственную командную строку.
+#
+# И СВЕРЯЕТСЯ С ТЕМ ФАЙЛОМ, КОТОРЫМ ПРОЦЕСС ЗАПУЩЕН, а не с тем, который скрипт угадал по корню.
+# 18.09 на восстановленном стенде это напечатало «стартовал на 0.5 ч РАНЬШЕ последней правки» про
+# метр, который был свежее своего кода на час: проверка брала mtime у КОПИИ `proxy.py` в стенде
+# (её тронул `git reset --hard` в 07:40), а метр запущен из РЕПОЗИТОРИЯ, где файл не менялся с
+# 06:03. Два дерева, и сверялось не то — ровно та же путаница двух копий, что этим же утром стоила
+# четырёх запусков пробы. Путь процесса лежит в его собственном argv, и это единственное место,
+# где он не угадан.
 python3 - "$ROOT" <<'PY' || RC=1
 import os, sys, time
 root = sys.argv[1]
-src = os.environ.get("PROXY_SRC_OVERRIDE") or os.path.join(root, "looplab", "benchmarks", "meter", "proxy.py")
-if not os.path.exists(src):
-    src = os.path.join(root, "benchmarks", "meter", "proxy.py")
-if os.path.exists(src):
-    mtime = os.path.getmtime(src)
+fallback = os.environ.get("PROXY_SRC_OVERRIDE") or os.path.join(root, "looplab", "benchmarks", "meter", "proxy.py")
+if not os.path.exists(fallback):
+    fallback = os.path.join(root, "benchmarks", "meter", "proxy.py")
+if True:
     boot = time.time() - float(open("/proc/uptime").read().split()[0])
     hz = os.sysconf("SC_CLK_TCK")
     stale = []
+    fresh = 0
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
             continue
@@ -168,13 +176,22 @@ if os.path.exists(src):
             i = parts.index("--port")
             if i + 1 < len(parts):
                 port = parts[i + 1]
+        # ЕГО СОБСТВЕННЫЙ ИСХОДНИК. `PROXY_SRC_OVERRIDE` (и корень) остаются запасным вариантом для
+        # процесса, чей файл удалён или назван относительным путём из каталога, которого уже нет.
+        own = next((a for a in parts if os.path.basename(a) == "proxy.py"), None)
+        src = own if own and os.path.exists(own) else fallback
+        if not os.path.exists(src):
+            continue
+        mtime = os.path.getmtime(src)
         if started < mtime:
-            stale.append((pid, port, (mtime - started) / 3600))
-    for pid, port, hours in sorted(stale, key=lambda r: -r[2]):
+            stale.append((pid, port, (mtime - started) / 3600, src))
+        else:
+            fresh += 1
+    for pid, port, hours, src in sorted(stale, key=lambda r: -r[2]):
         print(f"  УСТАРЕВШИЙ ПРОКСИ: pid={pid} порт={port} стартовал на {hours:.1f} ч РАНЬШЕ "
-              f"последней правки proxy.py — его числа считает код, которого в дереве нет")
+              f"последней правки {src} — его числа считает код, которого в дереве нет")
     if not stale:
-        print("  прокси: все процессы новее своего кода")
+        print(f"  прокси: все процессы ({fresh}) новее своего кода")
 PY
 
 # КОД ВОЗВРАТА ГОВОРИТ, ЧТО РАЗДЕЛ НЕ НАПЕЧАТАН. Скрипт не под `set -e` — и это правильно, второй
