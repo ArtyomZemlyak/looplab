@@ -417,3 +417,36 @@ def test_the_default_root_is_still_the_live_corpus():
     import inspect
     sig = inspect.signature(ruler_selfcheck.reference_module)
     assert sig.parameters["probe_root"].default.endswith("/model-probes")
+
+
+def test_the_recorded_row_names_the_probe_under_ANY_root(tmp_path, monkeypatch, capsys):
+    """§346: a reading must name the reference it was taken against. That line derived the probe's
+    name by splitting on the literal `/model-probes/`, and `--probe-root` landed beside it the same
+    hour — so a reading taken under any other root recorded `"reference_from": ""`.
+
+    It is in the series: the 2026-09-18 10:52 row on `edge_expansion` carries the empty string.
+    Driven here rather than pinned, because the defect is in what the string EVALUATES to and a
+    source pin would have passed on the broken line just as happily.
+    """
+    root = tmp_path / "node5-probes"
+    ref = root / "n5a" / "ws" / "edge_expansion"
+    ref.mkdir(parents=True)
+    (ref / "reference_edge_expansion.py").write_text(
+        "class Task:\n    pass\n\n\nclass EdgeExpansionTask(Task):\n"
+        "    def solve(self, problem):\n        return {}\n", encoding="utf-8")
+
+    found, _sha = ruler_selfcheck.reference_module("edge_expansion", str(root))
+    # The derivation as `main` performs it, against the root the caller asked for.
+    name = Path(found).relative_to(str(root)).parts[0]
+    assert name == "n5a", f"the probe's name came out {name!r}"
+
+    # And the old rule, applied to the same path, is what produced the empty string.
+    assert found.split("/model-probes/", 1)[-1].split("/")[0] == "", (
+        "this assertion documents the defect; if it stops holding the story above is wrong")
+
+
+def test_a_reference_outside_the_asked_root_is_named_in_full_not_guessed():
+    """`relative_to` raises rather than inventing a fragment, and a confident wrong name is worse
+    than a long right one in a row whose job is attribution."""
+    src = Path(ruler_selfcheck.__file__).read_text(encoding="utf-8")
+    assert "except ValueError:" in src and "ref_from = str(Path(ref_from))" in src

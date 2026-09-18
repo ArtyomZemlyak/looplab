@@ -704,7 +704,18 @@ def main(argv=None) -> int:
         # already unattributable, and a stale carried value would hide that.
         try:
             ref_from, ref_sha = reference_module(args.task, args.probe_root)
-            ref_from = ref_from.split("/model-probes/", 1)[-1].split("/")[0]
+            # THE PROBE'S NAME, DERIVED FROM THE ROOT WE ASKED -- not from the literal
+            # `/model-probes/`. That literal was here until 2026-09-18 and the `--probe-root` flag
+            # landed beside it the same hour: a root that is not the live corpus made the split
+            # find nothing, `[-1]` return the whole absolute path, and `.split("/")[0]` return the
+            # EMPTY STRING. The reading of 10:52 that day is in the series with
+            # `"reference_from": ""` -- §346's whole point (a reading must name the reference it
+            # was taken against) undone by a hardcoded path in the line that fills it.
+            try:
+                ref_from = Path(ref_from).relative_to(args.probe_root).parts[0]
+            except ValueError:
+                # Not under the root we asked: say the whole path rather than a confident fragment.
+                ref_from = str(Path(ref_from))
         except (FileNotFoundError, OSError):
             ref_from = ref_sha = None
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
