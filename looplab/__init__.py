@@ -334,6 +334,7 @@ _LAYOUT = {
     "readmodel": "events",
     "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",
+    "regime_contrast": "engine",   # what a run's nodes say about the implementation regimes it tried
     "regression": "adapters",
     "repair_verify": "engine",  # did a repair DO what its rationale said? (deterministic rung)
     "replay": "events",

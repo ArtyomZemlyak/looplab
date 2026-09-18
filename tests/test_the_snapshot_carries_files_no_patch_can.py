@@ -212,3 +212,36 @@ def test_the_restore_can_be_asked_for_committed_state_only(bench, tmp_path):
     assert (tree / TRACKED).is_file(), p.stdout + p.stderr
     assert EDITED not in (tree / TRACKED).read_text(encoding="utf-8"), p.stdout
     assert not (tree / NEW_TEST).exists(), p.stdout
+
+
+def test_a_dotenv_is_never_carried_even_when_git_would_let_it(bench, tmp_path):
+    """The header's oldest rule, and it had come to rest on `.gitignore`.
+
+    `snapshot.sh` says the live `.env` is never copied -- the store is S3 and the key is real. The
+    untracked archive reads `git ls-files --others --exclude-standard`, so the rule held only
+    because this repository carries the ignore entry (`.gitignore` lines 59-60). A checkout that
+    lost it, or a second dotenv under another name, would have put a live credential into the
+    archive on the next half-hourly run.
+
+    Found by reading `tests/_bench_fixtures.py`: its fixture repo has no `.gitignore` at all, and
+    the first version of the block duly archived its (fixture) key. Defence in depth now, the same
+    posture `core/redact.py` takes about the same secret.
+    """
+    src, repo = bench
+    (repo / ".env").write_text("OPENROUTER_API_KEY=sk-or-fixture-0000000000\n", encoding="utf-8")
+    (repo / ".env.local").write_text("OPENROUTER_API_KEY=sk-or-fixture-1111111111\n",
+                                     encoding="utf-8")
+    (repo / "conf" ).mkdir()
+    (repo / "conf" / ".env").write_text("OPENROUTER_API_KEY=sk-or-fixture-2222222222\n",
+                                        encoding="utf-8")
+    out, p = _snapshot(src, tmp_path / "snaps")
+    tarball = out / "looplab-untracked.tar.gz"
+    assert tarball.is_file(), p.stdout + p.stderr          # the ordinary untracked file still lands
+    with tarfile.open(tarball) as tf:
+        names = tf.getnames()
+        blob = b"".join((tf.extractfile(n) or open(os.devnull, "rb")).read()
+                        for n in names if tf.getmember(n).isfile())
+    assert NEW_TEST in names, names
+    for leaked in (".env", ".env.local", "conf/.env"):
+        assert leaked not in names, (leaked, names)
+    assert b"sk-or-fixture" not in blob, "a dotenv's CONTENT reached the archive under another name"

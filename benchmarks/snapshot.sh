@@ -270,19 +270,52 @@ if [ -d "$SRC/looplab/.git" ]; then
   archive_untracked() (
     cd "$SRC/looplab" || return 0
     : > "$OUT/looplab-untracked-SKIPPED.txt"
-    git ls-files --others --exclude-standard -z 2>/dev/null > "$OUT/.untracked.z" \
+    # `.env` IS EXCLUDED HERE AND NOT ONLY BY `.gitignore`. This file's own header says the live
+    # `.env` is never copied -- the store is S3 and the key is real -- and until this line that rule
+    # depended on the repository having the ignore entry. It does (`.gitignore` lines 59-60), so
+    # `--exclude-standard` already drops it; but a checkout that lost the entry, or a second dotenv
+    # under another name, would have carried a live credential into the archive on the next
+    # half-hourly run. Found by reading `tests/_bench_fixtures.py`, whose repo has no `.gitignore`
+    # at all and whose (fixture) key my first version duly archived. Defence in depth, the same
+    # posture `core/redact.py` takes about the same secret.
+    git ls-files --others --exclude-standard -z 2>/dev/null \
+      | grep -zv -E '(^|/)\.env(\..*)?$' > "$OUT/.untracked.z" 2>/dev/null \
       || : > "$OUT/.untracked.z"
+    # ONE PROCESS FOR EVERY SIZE, NOT ONE PER FILE. The first cut ran `du -k` inside the loop --
+    # a process per untracked path, so a tree carrying thousands of them cost thousands of forks and
+    # `snapshot.sh` went from seconds to minutes. Measured, not guessed:
+    # `tests/test_the_supersede_summary_says_the_real_rule.py` and two neighbours drive the real
+    # script and began timing out at 300 s. A script this box runs every thirty minutes may not be
+    # O(files) in processes.
+    #
+    # `du --files0-from` reads the NUL list and prints `size<TAB>path` for all of them at once. NOT
+    # `find` with the paths appended: `xargs` puts them AFTER the expression, which find rejects,
+    # and the `find` on this box is `bfs`, whose own list flag is spelled differently -- a portable
+    # snapshot may not depend on which find it met.
+    #
+    # THE ONE CASE THIS DOES NOT CARRY, said rather than hidden: a path containing a NEWLINE. `du`'s
+    # output is line-oriented, so such a file lands in neither list and is simply not archived. It
+    # is not in `git ls-files -z`'s output for any tree this bench has, and the alternative -- back
+    # to a fork per file -- is the defect that was just measured.
     : > "$OUT/.untracked-keep.z"
-    n=0
-    while IFS= read -r -d '' f; do
-      kb=$(du -k "$f" 2>/dev/null | cut -f1)
-      if [ -n "$kb" ] && [ "$kb" -gt "$UNTRACKED_MAX_KB" ]; then
-        echo "${kb}K  $f" >> "$OUT/looplab-untracked-SKIPPED.txt"
-      else
-        printf '%s\0' "$f" >> "$OUT/.untracked-keep.z"
-        n=$((n + 1))
-      fi
-    done < "$OUT/.untracked.z"
+    if du -k --files0-from=/dev/null >/dev/null 2>&1; then
+      while IFS="$(printf '\t')" read -r kb f; do
+        [ -n "$f" ] || continue
+        if [ -n "$kb" ] && [ "$kb" -gt "$UNTRACKED_MAX_KB" ]; then
+          echo "${kb}K  $f" >> "$OUT/looplab-untracked-SKIPPED.txt"
+        else
+          printf '%s\0' "$f" >> "$OUT/.untracked-keep.z"
+        fi
+      done <<EOF_DU
+$(du -k --files0-from="$OUT/.untracked.z" 2>/dev/null)
+EOF_DU
+    else
+      # A `du` without the flag: carry everything and SAY that the cap did not run, rather than
+      # silently reintroducing the fork-per-file loop this comment exists to forbid.
+      cp "$OUT/.untracked.z" "$OUT/.untracked-keep.z"
+      echo "  untracked cap SKIPPED  this du has no --files0-from; everything untracked is carried"
+    fi
+    n=$(tr -cd '\0' < "$OUT/.untracked-keep.z" | wc -c)
     rm -f "$OUT/.untracked.z"
     if [ -s "$OUT/looplab-untracked-SKIPPED.txt" ]; then
       echo "  untracked SKIPPED    $(wc -l < "$OUT/looplab-untracked-SKIPPED.txt") file(s) over" \
