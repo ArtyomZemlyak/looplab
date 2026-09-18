@@ -82,8 +82,8 @@ older binary can still load a snapshot a newer one wrote.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **211 of the 246 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 211 catalogued keys.
+server-owned curated catalogue with **213 of the 248 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 213 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,

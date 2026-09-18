@@ -13,9 +13,15 @@ The classifier is `looplab/engine/regime_contrast.py`, the same one a run uses o
 archive reading and the run-time reading can never drift into two different definitions of "wrote a
 kernel".
 
-IT READS THE EVENT LOG DIRECTLY and does not fold. `node_created` carries the files, `node_evaluated`
-carries the metric, and folding 161 runs to join two payload types would be slower and no truer --
-the fold's other work (status, terminals, cards) decides nothing here.
+IT READS THE EVENT LOG THROUGH `events_read.iter_events` and does not fold. `node_created` carries
+the files, `node_evaluated` carries the metric, and folding 161 runs to join two payload types would
+be slower and no truer -- the fold's other work (status, terminals, cards) decides nothing here.
+
+THE SHARED READER IS NOT A STYLE RULE. A line is not an event: a PACKET row carries a list of them
+inside its payload, and a naive `for line in open(...)` sees the packet and none of its contents.
+The first version of this file had exactly that loop and `tests/test_a_line_is_not_an_event_-
+everywhere.py` caught it -- the guard exists because the same omission has shipped before, and its
+cost is silent undercounting rather than an error.
 
 `BENCH_ROOT` points it at a live stand; the default is the persistent archive, because that is the
 corpus that survives a container restart (doc 56 §414-§416).
@@ -31,7 +37,9 @@ import statistics
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import events_read  # noqa: E402  (the shared reader: a line is not an event)
 from looplab.engine.regime_contrast import REGIMES, contrast, node_regime  # noqa: E402
 
 DEFAULT_ROOT = (os.environ.get("BENCH_ROOT")
@@ -43,26 +51,18 @@ def read_probe(path: str) -> tuple:
     files_by_id: dict = {}
     scored: list = []
     task = ""
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            kind, data = event.get("type"), (event.get("data") or {})
-            if kind == "run_started":
-                task = str(data.get("task_id") or data.get("task") or "")
-            elif kind == "node_created":
-                files = data.get("files")
-                if isinstance(files, dict):
-                    files_by_id[data.get("node_id", data.get("id"))] = files
-            elif kind == "node_evaluated":
-                metric = data.get("metric")
-                if isinstance(metric, (int, float)):
-                    scored.append((data.get("node_id", data.get("id")), float(metric)))
+    for event in events_read.iter_events(path):
+        kind, data = event.get("type"), (event.get("data") or {})
+        if kind == "run_started":
+            task = str(data.get("task_id") or data.get("task") or "")
+        elif kind == "node_created":
+            files = data.get("files")
+            if isinstance(files, dict):
+                files_by_id[data.get("node_id", data.get("id"))] = files
+        elif kind == "node_evaluated":
+            metric = data.get("metric")
+            if isinstance(metric, (int, float)):
+                scored.append((data.get("node_id", data.get("id")), float(metric)))
     return task, [(node_regime(files_by_id.get(nid) or {}), m) for nid, m in scored]
 
 
