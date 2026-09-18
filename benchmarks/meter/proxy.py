@@ -62,14 +62,24 @@ has to be that shape and not one combined chunk: measured 2026-08-26 against arm
 fire at twice the real spend -- `rbf_interpolation` logged `Spend limit of $1.0000 reached. Current
 spend: $1.0025` while this meter had it at $2.009.
 
-    OPEN[meter-delta-estimator-is-uncalibrated] `estimated_from_deltas` charges ONE token per
-    content delta; this proxy's own log says that is low by a length-dependent factor. Over 4,874
-    complete streams carrying both numbers, deltas/completion_tokens has median 0.156 (<100 tokens),
-    0.803 (1k-5k) and 0.996 (>20k), and the counter is blind to `delta.tool_calls` entirely.
-    DEFERRED: the 23 aborted streams on record are 6.9 % of a live campaign's $21.21 of metered
-    spend, so re-pricing them mid-campaign charges the tasks before and after the change by two
-    different instruments. The rate is derivable in-process from streams already priced.
-    proof:absent:tokens_per_delta@benchmarks/meter/proxy.py
+    *Closed 2026-09-18: `meter-delta-estimator-is-uncalibrated` stood here. The rate is now
+    measured in-process by `TokensPerDelta`, per LENGTH BUCKET because the log's own numbers are a
+    function of length (deltas/completion_tokens median 0.156 under 100 tokens, 0.803 at 1k-5k,
+    0.996 above 20k), learned only from streams the gateway itself priced, silent until a bucket
+    has `MIN_CALLS` of its own, and clamped so it can never price BELOW the one-token floor it
+    replaces. The deferral's reason expired with the stand: no campaign is running, which is exactly
+    the between-campaigns moment the item asked for. The synthesised frame now carries
+    `meter_completion_tokens_basis`, `meter_forwarded_deltas` and the ratio, and its prose is
+    conditional -- it used to say "completion_tokens is a FLOOR" whatever the basis said.*
+
+    OPEN[meter-delta-counter-is-blind-to-tool-calls] the other half of the item above, left open
+    rather than folded into its closure: `deltas += 1` fires only for `content` / `reasoning_content`
+    / `reasoning`, so a completion delivered as a TOOL CALL counts zero deltas -- an aborted
+    tool-call stream is priced at zero completion whatever the calibration says, and the delta
+    CEILING never trips on one either. Not fixed in the same change because the counter is also the
+    ceiling's input: counting more deltas moves when a stream is cut, which is a behaviour change
+    that belongs to its own measurement rather than riding in on a pricing fix.
+    proof:absent:delta_counts_tool_calls@benchmarks/meter/proxy.py
 
 USAGE
 -----
@@ -350,6 +360,81 @@ def _prompt_chars(body: bytes) -> int:
     parts = [json.dumps(payload[key], ensure_ascii=False)
              for key in ("messages", "tools", "functions", "system", "prompt") if key in payload]
     return sum(len(part) for part in parts) if parts else len(body)
+
+
+class TokensPerDelta:
+    """How many completion TOKENS one forwarded content delta is worth, by stream length.
+
+    WHY THIS EXISTS. A stream the gateway cuts carries no usage frame, so the proxy prices the
+    completion side from the deltas it forwarded and charged ONE token each. This module's own log
+    says that is low by a LENGTH-DEPENDENT factor: over 4,874 complete streams carrying both
+    numbers, `deltas / completion_tokens` has median 0.156 under 100 tokens, 0.803 at 1k-5k and
+    0.996 above 20k -- i.e. a short stream's delta is worth about six tokens and a very long one's
+    about one. Charging one flat is right for the runaways already on record (226k-238k deltas) and
+    roughly 5x low for a short tool-call stream, which is a different instrument from the one the
+    old comment described.
+
+    IT WAS DEFERRED FOR A REASON THAT HAS EXPIRED. The open item said re-pricing mid-campaign would
+    charge the tasks before and after the change by two different instruments. No campaign is
+    running (the stand went down with `/var/tmp` on 2026-09-10), so this is the moment the item
+    named: between campaigns, never inside one.
+
+    BUCKETED, BECAUSE A SCALAR WOULD BE WRONG IN BOTH DIRECTIONS. The ratio is a function of length
+    and the only length known at abort time is the delta count, so the buckets are cut on deltas.
+    A bucket speaks only once it has `MIN_CALLS` priced streams of its own; until then the estimate
+    is today's one-token floor and the basis says so, so a proxy restarted into a cut stream
+    under-reports rather than invents -- the same rule `PromptTokens` follows.
+
+    AND IT NEVER GOES BELOW THE FLOOR. `max(1.0, ratio)` keeps the calibrated number at or above
+    what this file charged before: a floor is the honest side to be wrong on for a budget, and a
+    calibration that could undercut it would trade a known bias for an unknown one.
+    """
+
+    # Cut on the delta count, the only length available when the stream is cut. The edges are the
+    # measurement's own (under 100 tokens / 1k-5k / over 20k) carried across at roughly the ratios
+    # it reports, so each bucket holds streams whose ratio the log shows to be similar.
+    EDGES = (100, 1_000, 5_000, 20_000)
+    MIN_CALLS = 8          # a ratio from fewer priced streams than this is a rumour
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._deltas = [0] * (len(self.EDGES) + 1)
+        self._tokens = [0] * (len(self.EDGES) + 1)
+        self._calls = [0] * (len(self.EDGES) + 1)
+
+    def _bucket(self, deltas: int) -> int:
+        for i, edge in enumerate(self.EDGES):
+            if deltas < edge:
+                return i
+        return len(self.EDGES)
+
+    def observe(self, deltas: int, completion_tokens: int) -> None:
+        """Fold one stream the GATEWAY priced into its bucket. Anything else is not evidence."""
+        if deltas <= 0 or completion_tokens <= 0:
+            return
+        b = self._bucket(deltas)
+        with self._lock:
+            self._deltas[b] += deltas
+            self._tokens[b] += completion_tokens
+            self._calls[b] += 1
+
+    def estimate(self, deltas: int) -> tuple[int, str, float | None, int]:
+        """`(completion_tokens, basis, tokens_per_delta, calibrating_calls)`.
+
+        `counted_from_forwarded_deltas` is the historical floor and stays the basis whenever this
+        process cannot do better, so a reader can tell a calibrated number from the old one without
+        consulting anything outside the frame.
+        """
+        if deltas <= 0:
+            return 0, "counted_from_forwarded_deltas", None, 0
+        b = self._bucket(deltas)
+        with self._lock:
+            d_sum, t_sum, calls = self._deltas[b], self._tokens[b], self._calls[b]
+        if calls < self.MIN_CALLS or d_sum <= 0 or t_sum <= 0:
+            return deltas, "counted_from_forwarded_deltas", None, calls
+        ratio = max(1.0, t_sum / d_sum)
+        return (int(round(deltas * ratio)), "estimated_from_calibrated_deltas", round(ratio, 4),
+                calls)
 
 
 class PromptTokens:
@@ -1308,6 +1393,10 @@ class Handler(BaseHTTPRequestHandler):
                             usage["meter_upstream_cost_refused"] = reported_cost
                             upstream_cost_refused = reported_cost
                         self.server.prompt_scale.observe(prompt_chars, pin)
+                        # ...and the completion side, from the same frame: this stream
+                        # carried BOTH the deltas this proxy forwarded and the tokens the
+                        # gateway charged, which is the only evidence the ratio has.
+                        self.server.tokens_per_delta.observe(deltas, pout)
                         prompt_basis = "reported_by_upstream"
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
                 emit(out)
@@ -1375,12 +1464,17 @@ class Handler(BaseHTTPRequestHandler):
                 # See `PromptTokens` for the ratio, its calibration and its measured error.
                 pin, prompt_basis, per_token, cal_calls = self.server.prompt_scale.estimate(
                     prompt_chars)
-                pout = deltas
-                cost = pin * rate_in + deltas * rate_out
+                # THE COMPLETION SIDE, CALIBRATED (open item closed 2026-09-18). One token per
+                # delta is a floor that is right for a runaway and ~5x low for a short stream; the
+                # ratio is learned in-process from streams the gateway priced, per length bucket,
+                # and falls back to that floor until a bucket has evidence of its own.
+                pout, completion_basis, tokens_per_delta, tpd_calls = \
+                    self.server.tokens_per_delta.estimate(deltas)
+                cost = pin * rate_in + pout * rate_out
                 basis = "estimated_from_deltas"
                 usage = {
-                    "prompt_tokens": pin, "completion_tokens": deltas,
-                    "total_tokens": pin + deltas,
+                    "prompt_tokens": pin, "completion_tokens": pout,
+                    "total_tokens": pin + pout,
                     "cost": cost, "cost_basis": basis,
                     "cost_source": self.server.pricing.fetched_at,
                     # EVERY NUMBER ABOVE NAMES WHERE IT CAME FROM, in the frame itself rather than
@@ -1388,15 +1482,30 @@ class Handler(BaseHTTPRequestHandler):
                     # client's accountant and it never sees the log.
                     "meter_prompt_tokens_basis": prompt_basis,
                     "meter_prompt_chars": prompt_chars,
-                    "meter_completion_tokens_basis": "counted_from_forwarded_deltas",
+                    "meter_completion_tokens_basis": completion_basis,
+                    # The deltas this proxy actually forwarded stay in the frame whatever the
+                    # estimate did with them: the reader that has to audit the number needs the
+                    # input as well as the output, and `completion_tokens` is no longer that input.
+                    "meter_forwarded_deltas": deltas,
+                    **({"meter_tokens_per_delta": tokens_per_delta,
+                        "meter_tokens_per_delta_calls": tpd_calls}
+                       if tokens_per_delta is not None else {}),
                     # ...AND SO DOES THE RATE THEY WERE MULTIPLIED BY: `estimated_from_deltas` says
                     # where the token counts came from and nothing said which table row priced
                     # them, so a `default` fallback rate reached the client's accountant looking
                     # exactly like the model's own pinned one.
                     "meter_rate_basis": est_basis,
+                    # THE NOTE MUST MATCH THE FIELD IT DESCRIBES. It read "completion_tokens is a
+                    # FLOOR counted from forwarded deltas" unconditionally, which stops being true
+                    # the moment a bucket calibrates -- a frame whose prose contradicts its own
+                    # `meter_completion_tokens_basis` is worse than one with no prose.
                     "meter_note": "upstream ended the stream without a usage frame; "
-                                  "completion_tokens is a FLOOR counted from forwarded deltas and "
-                                  f"prompt_tokens is {prompt_basis}",
+                                  + ("completion_tokens is a FLOOR counted from forwarded deltas"
+                                     if completion_basis == "counted_from_forwarded_deltas" else
+                                     f"completion_tokens is {deltas} forwarded deltas priced at "
+                                     f"{tokens_per_delta} token(s) each, calibrated in-process on "
+                                     f"{tpd_calls} stream(s) this gateway priced")
+                                  + f" and prompt_tokens is {prompt_basis}",
                 }
                 if per_token is not None:
                     usage["meter_chars_per_prompt_token"] = round(per_token, 4)
@@ -1626,6 +1735,9 @@ class Server(ThreadingHTTPServer):
         # Everything else on this object is assigned by `main()` (or by a test); this one is not,
         # because a missing calibrator would price an abort at zero prompt tokens in silence.
         self.prompt_scale = PromptTokens()
+        # The completion side's twin (open item closed 2026-09-18): one ratio per length
+        # bucket, learned from streams the gateway itself priced.
+        self.tokens_per_delta = TokensPerDelta()
         # OFF BY DEFAULT, and that is the decision: `DELTA_CEILING_DEFAULT` is 0, its own comment
         # says why (the ceiling is a CHANGE TO THE RULER, and the watchdog restarts this proxy
         # mid-campaign, so a default-on ceiling would price task-arms before and after a transient
