@@ -391,3 +391,29 @@ def test_nothing_else_in_one_eval_is_hard_coded_over_the_caller():
     hard = [k.arg for k in call.keywords
             if isinstance(k.value, ast.Constant) and k.arg != "DATA_DIR"]
     assert hard == [], f"hard-coded over the caller: {hard}"
+
+
+def test_the_probe_root_is_an_argument_and_reaches_BOTH_readers():
+    """Since 2026-09-18 a probe need not live in the live corpus.
+
+    A bridge check runs under `PROBE_OUT_ROOT` (`$BENCH/bridge-checks`) precisely so a non-$1
+    budget does not enter the corpus every reader assumes is uniform — and the self-check then
+    could not find a reference at all (`FileNotFoundError: no delivered reference module for
+    edge_expansion under /var/tmp/looplab-bench/model-probes`, measured that day).
+
+    Two call sites, and the second is the one that matters for the record: §346 re-reads the
+    reference AFTER the reps so the row says what was on disk then. A flag wired only to
+    `build_solver` would inline one module and attribute the reading to another.
+    """
+    src = Path(ruler_selfcheck.__file__).read_text(encoding="utf-8")
+    assert 'ap.add_argument("--probe-root"' in src
+    assert "build_solver(args.task, tmp, args.probe_root)" in src
+    assert "reference_module(args.task, args.probe_root)" in src
+    assert 'default=f"{BENCH}/model-probes"' in src, "the default must stay the live corpus"
+
+
+def test_the_default_root_is_still_the_live_corpus():
+    """A reading whose root moved silently is a reading nobody can compare to the ones before it."""
+    import inspect
+    sig = inspect.signature(ruler_selfcheck.reference_module)
+    assert sig.parameters["probe_root"].default.endswith("/model-probes")

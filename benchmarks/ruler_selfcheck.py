@@ -613,6 +613,13 @@ def main(argv=None) -> int:
                     help="append this reading to a dated series (default: %(default)s)"
                          f" [{DEFAULT_LOG}]")
     ap.add_argument("--stamp", help="ISO timestamp for the recorded row; the caller owns the clock")
+    # WHERE THE REFERENCE COMES FROM, because since 2026-09-18 not every probe lives in the live
+    # corpus: a bridge check runs under `PROBE_OUT_ROOT` (`$BENCH/bridge-checks`) precisely so a
+    # non-$1 budget does not enter the corpus every reader assumes is uniform. The default is
+    # unchanged, and §346's rule still holds -- the module and its sha go on the row either way,
+    # so a reading taken against another root says so rather than looking like the usual one.
+    ap.add_argument("--probe-root", default=f"{BENCH}/model-probes",
+                    help="where to find a delivered `ws/<task>/reference_<task>.py` [%(default)s]")
     args = ap.parse_args(argv)
     if not os.path.exists(bench_python()):
         print(f"REFUSING: the bench interpreter {bench_python()} is not on this box. A reading "
@@ -621,7 +628,7 @@ def main(argv=None) -> int:
         return 2
 
     with tempfile.TemporaryDirectory(prefix="ruler-selfcheck-") as tmp:
-        solver = build_solver(args.task, tmp)
+        solver = build_solver(args.task, tmp, args.probe_root)
         vals, secs, bad = [], [], []
         # SAMPLED BETWEEN THE REPS, not after the loop. By the time a reading is written the
         # neighbours have usually stopped, which is how the 06:38 rows came to say nothing about
@@ -696,7 +703,7 @@ def main(argv=None) -> int:
         # records what is on disk NOW; a mismatch with what was inlined would mean the reading is
         # already unattributable, and a stale carried value would hide that.
         try:
-            ref_from, ref_sha = reference_module(args.task)
+            ref_from, ref_sha = reference_module(args.task, args.probe_root)
             ref_from = ref_from.split("/model-probes/", 1)[-1].split("/")[0]
         except (FileNotFoundError, OSError):
             ref_from = ref_sha = None
