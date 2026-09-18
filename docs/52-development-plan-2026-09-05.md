@@ -489,10 +489,18 @@ separately. Below 60 % on a run that armed the kill, the command names `proxy_ki
 `tests/test_proxy_accuracy.py` drives it. The MEASUREMENT over the box's runs is the part that
 stays open, now as `proxy-accuracy-never-run-on-the-corpus`. Deleted per the index rule.*
 
-OPEN[proxy-accuracy-never-run-on-the-corpus] the instrument shipped (`looplab proxy-accuracy`,
-2026-09-07) and no run's number is recorded: the kill (`proxy_skipped`) is still armed on a scorer
-whose pairwise accuracy nobody has read on this box, which is the state the instrument exists to
-end. One command per preserved run, one table. proof:missing:docs/audit/proxy-accuracy.md
+*Closed 2026-09-18 with a CORRECTION to its own premise: `proxy-accuracy-never-run-on-the-corpus`
+stood here and said the kill was "still armed on a scorer whose pairwise accuracy nobody has read".
+It is not armed. `proxy_scoring` is False, `proxy_kill_fraction` is 0.0, `should_skip` returns on its
+first line at zero, the CLI builds no scorer unless one is set, and none of the three shipped
+profiles carries a proxy key — all four checked, and the corpus confirms the consequence: over 161
+archived probes the proxy scored ZERO candidates and killed none
+(`docs/audit/proxy-accuracy.md`). So the state the row feared has never existed on this box, and the
+accuracy cannot be measured until someone turns the knob on — a scorer that never scored leaves
+nothing to check. What survives is a precondition, now written down: whoever raises
+`proxy_kill_fraction` above zero owes the number first, and must read `scored`/`KILLED` before the
+accuracy line, because "not measurable" is not 0 %. Related: even switched on it would rarely fire
+here, since `abstains` needs neighbours and these runs produce 2-4 nodes (doc 56 §422).*
 
 OPEN[foresight-selective-accuracy-unmeasured] `search/foresight.py::foresight_scoreboard` reports the
 predict-before-execute hit rate as a prompt sentence; nothing records it by position in the run,
