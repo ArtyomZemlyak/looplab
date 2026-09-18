@@ -245,3 +245,61 @@ def test_a_dotenv_is_never_carried_even_when_git_would_let_it(bench, tmp_path):
     for leaked in (".env", ".env.local", "conf/.env"):
         assert leaked not in names, (leaked, names)
     assert b"sk-or-fixture" not in blob, "a dotenv's CONTENT reached the archive under another name"
+
+
+def test_the_restore_says_how_far_BEHIND_the_tree_it_hands_you_is(bench, tmp_path):
+    """Restoring the STAND is not restoring the CODE, and until 2026-09-18 the difference was a
+    caveat rather than a number.
+
+    Driven against the real 2026-09-10 snapshot that day: the checkout it hands back is **291
+    commits** behind this repository, including every fix of that week. An operator who swaps it in
+    reverts all of them silently. The header always said the swap was their decision; it did not say
+    what the decision costs.
+    """
+    src, repo = bench
+    snaps = tmp_path / "snaps"
+    _snapshot(src, snaps)
+    # The comparison repository moves ON, exactly as master does while a snapshot ages.
+    (repo / "later.py").write_text("print('after the snapshot')\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "a commit the snapshot never saw")
+
+    dest = tmp_path / "restored"
+    p = subprocess.run(["bash", str(RESTORE), str(dest), str(snaps)],
+                       capture_output=True, text=True, timeout=300,
+                       env={**os.environ, "RESTORE_COMPARE_REPO": str(repo)})
+    assert "1 commit(s) behind" in p.stdout, p.stdout
+    assert "restoring the STAND is not restoring the CODE" in p.stdout, p.stdout
+
+
+def test_an_unrelated_history_is_said_to_be_one_rather_than_measured(bench, tmp_path):
+    """A distance between two histories that never met is not a small number, it is no number. The
+    branch says so instead of printing one."""
+    src, _repo = bench
+    snaps = tmp_path / "snaps"
+    _snapshot(src, snaps)
+    stranger = tmp_path / "stranger"
+    (stranger / "x").mkdir(parents=True)
+    _git(stranger, "init", "-q")
+    (stranger / "unrelated.txt").write_text("nothing to do with the snapshot\n", encoding="utf-8")
+    _git(stranger, "add", "-A")
+    _git(stranger, "commit", "-qm", "another history entirely")
+
+    dest = tmp_path / "restored"
+    p = subprocess.run(["bash", str(RESTORE), str(dest), str(snaps)],
+                       capture_output=True, text=True, timeout=300,
+                       env={**os.environ, "RESTORE_COMPARE_REPO": str(stranger)})
+    assert "two histories, so no distance to report" in p.stdout, p.stdout
+    assert "commit(s) behind" not in p.stdout, p.stdout
+
+
+def test_a_current_tree_gets_no_warning_at_all(bench, tmp_path):
+    """A line that appears when nothing is wrong is a line the operator stops reading."""
+    src, repo = bench
+    snaps = tmp_path / "snaps"
+    _snapshot(src, snaps)
+    dest = tmp_path / "restored"
+    p = subprocess.run(["bash", str(RESTORE), str(dest), str(snaps)],
+                       capture_output=True, text=True, timeout=300,
+                       env={**os.environ, "RESTORE_COMPARE_REPO": str(repo)})
+    assert "commit(s) behind" not in p.stdout, p.stdout

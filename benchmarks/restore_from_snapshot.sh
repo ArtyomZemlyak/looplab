@@ -60,6 +60,32 @@ for NAME in looplab AlgoTune; do
   fi
   echo "  $NAME: ${GOT:0:12} on $(cd "$OUT" && git branch --show-current)  ($(cd "$OUT" && git ls-tree -r HEAD --name-only | wc -l) tracked files)"
 
+  # HOW FAR BEHIND, IN COMMITS, and it is not a detail. Restoring the STAND is not restoring the
+  # CODE: a snapshot's `looplab` is the tree as it was when the snapshot ran, and an operator who
+  # swaps it in reverts everything pushed since. Driven 2026-09-18 against the 2026-09-10 snapshot:
+  # the restored checkout is **291 commits** behind this repository, including every fix of that
+  # week. The header already said the swap is the operator's decision; it did not say what the
+  # decision costs, and a number is the difference between a caveat and a warning.
+  #
+  # Measured against THE REPOSITORY THIS SCRIPT CAME FROM, which needs no network and is the tree
+  # the operator is actually standing in. A sha the live repo has never heard of says so instead of
+  # printing a number about two unrelated histories.
+  # The repository to measure against: this script's own by default, overridable for the box where
+  # the script was copied out of the tree it belongs to -- and for the test that drives this branch.
+  HERE_REPO="${RESTORE_COMPARE_REPO:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
+  if [ "$NAME" = "looplab" ] && [ -n "$GOT" ] && [ -d "$HERE_REPO/.git" ]; then
+    if git -C "$HERE_REPO" cat-file -e "${GOT}^{commit}" 2>/dev/null; then
+      BEHIND=$(git -C "$HERE_REPO" rev-list --count "$GOT"..HEAD 2>/dev/null || echo "?")
+      if [ "$BEHIND" != "0" ] && [ "$BEHIND" != "?" ]; then
+        echo "      ! $BEHIND commit(s) behind $HERE_REPO ($(git -C "$HERE_REPO" rev-parse --short HEAD))" \
+             "-- restoring the STAND is not restoring the CODE; run the bench from the repository,"
+        echo "        not from this copy, unless you mean to revert those commits"
+      fi
+    else
+      echo "      ! $HERE_REPO does not have ${GOT:0:12} -- two histories, so no distance to report"
+    fi
+  fi
+
   # THE WORKING TREE, NOT ONLY THE COMMITS (doc 56 §412). A bundle carries what was committed; the
   # hour before a restart is the part that was not, and it is the part that cannot be written
   # again from anywhere else. The snapshot puts it in two files beside the bundle -- the patch of
