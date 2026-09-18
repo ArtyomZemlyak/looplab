@@ -73,7 +73,7 @@ def _stand(tmp_path: Path, pre: str = PRE) -> Path:
 
 
 def _run(here: Path, out_root: Path, **env_extra) -> subprocess.CompletedProcess:
-    env = dict(os.environ, ARM="T1", LOOPLAB_LLM_MODEL="stub-model",
+    env = dict(os.environ, ARM="T1", LOOPLAB_LLM_MODEL="stub-model", ARM_STAGGER="0",
                ARM_OUT_ROOT=str(out_root), METER_BASE="http://127.0.0.1:1")
     env.update(env_extra)
     return subprocess.run(["bash", str(here / "run_arm.sh")], capture_output=True, text=True,
@@ -177,9 +177,16 @@ def test_a_finished_probe_is_not_rerun(tmp_path):
 
 
 def test_the_driver_reads_no_outcome():
-    """Negative pins, because what must not come back is the TEXT: no p-value, no test, no score
-    arithmetic anywhere in a file that runs between batches."""
+    """Negative pins over the CODE, with the comments stripped first.
+
+    The first version ran them over the whole file and went red on the driver's own comment
+    explaining that it must not print a p-value between batches. A negative pin over prose is
+    exactly as vacuous as a positive one: the file can say "fisher" forever and never run it, and
+    it can run it while saying nothing. So the prose is removed and the remaining lines are what
+    the shell would execute.
+    """
     src = DRIVER.read_text(encoding="utf-8")
-    for forbidden in ("p_value", "p-value", "fisher", "compare_arms", "arm_power.py --outcome"):
-        assert forbidden not in src.lower().replace("p-value", "p-value"), forbidden
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#")).lower()
+    for forbidden in ("p_value", "p-value", "fisher", "compare_arms.py", "arm_power.py"):
+        assert forbidden not in code, forbidden
     assert "не считает исходов" in src, "the file should say so, where the next reader looks"
