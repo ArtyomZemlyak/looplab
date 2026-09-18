@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._bench_fixtures import stand_launch_env
+from tests._bench_fixtures import free_bench_lane, stand_launch_env
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -135,7 +135,7 @@ def test_the_probe_records_which_card_it_ran(tmp_path):
         env = {**stand_launch_env(), "PROBE_DRY_RUN": "1",
                "PROBE_OUT_ROOT": str(tmp_path), **env_extra}
         r = subprocess.run(
-            ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
+            ["bash", str(probe), "deepseek-v4-flash", label, free_bench_lane(pytest), "pde_heat1d",
              "http://127.0.0.1:8801", "1.00"],
             capture_output=True, text=True, timeout=1800, env=env,
         )
@@ -184,7 +184,7 @@ def test_the_probe_carries_its_own_credential(tmp_path):
     out = tmp_path / label
     try:
         subprocess.run(
-            ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
+            ["bash", str(probe), "deepseek-v4-flash", label, free_bench_lane(pytest), "pde_heat1d",
              "http://127.0.0.1:8801", "1.00"],
             capture_output=True, text=True, timeout=1800, env=env,
         )
@@ -249,7 +249,7 @@ def test_the_record_pins_the_card_itself_not_only_the_flags(tmp_path):
         env = {**stand_launch_env(), "PROBE_DRY_RUN": "1",
                "PROBE_OUT_ROOT": str(tmp_path), **extra}
         r = subprocess.run(
-            ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
+            ["bash", str(probe), "deepseek-v4-flash", label, free_bench_lane(pytest), "pde_heat1d",
              "http://127.0.0.1:8801", "1.00"],
             capture_output=True, text=True, timeout=1800, env=env,
         )

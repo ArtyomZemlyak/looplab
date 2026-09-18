@@ -118,3 +118,37 @@ def stand_launch_env(env: dict | None = None) -> dict:
     if venv.is_dir():
         out["PATH"] = f"{venv}{os.pathsep}" + out.get("PATH", "")
     return out
+
+
+# The four bench lanes of this box: eleven cores each plus their hyperthread siblings, 22 CPUs, so
+# `ALGOTUNE_EVAL_WORKERS=auto` keys `__w22x1r3` -- the regime the whole corpus was measured in.
+BENCH_LANES = ("0-10,48-58", "11-21,59-69", "22-32,70-80", "33-43,81-91")
+
+
+def free_bench_lane(pytest_module=None) -> str:
+    """A bench lane with no probe on it, or skip.
+
+    WHY A TEST THAT WRITES A PROBE RECORD MAY NOT USE THE SERVICE LANE. `run_probe.sh` refuses a
+    lane whose width keys a baseline the box does not have (2026-09-18: `0-10` is 11 CPUs and keys
+    `__w11x1r3`, which no cache answers, and the evaluation found out 50 minutes and $0.2176 in).
+    The service lane `44-47,92-95` is 8 CPUs and keys `__w8x1r3` -- so these tests used to write
+    their record on a lane no real probe could ever run on, and the day the launcher started
+    checking, seven of them went red at once.
+
+    A dry run still refuses there, deliberately: a rehearsal that passes on a lane a launch would
+    refuse is a rehearsal that lies. So the tests move onto the real lanes and say so when they
+    cannot -- a skip during a live campaign is honest, a record taken in an impossible regime is
+    not.
+    """
+    import subprocess as _sp
+    try:
+        out = _sp.run(["ps", "-eo", "args", "--no-headers"], capture_output=True, text=True,
+                      timeout=60).stdout
+    except (OSError, _sp.SubprocessError):
+        out = ""
+    for lane in BENCH_LANES:
+        if f"-c {lane}" not in out and f'"{lane}"' not in out and f" {lane} " not in out:
+            return lane
+    if pytest_module is not None:
+        pytest_module.skip("every bench lane is busy; a probe record cannot be taken on one")
+    raise RuntimeError("every bench lane is busy")

@@ -61,14 +61,14 @@ def test_the_lane_width_is_what_picks_the_ruler():
 
 @pytest.mark.skipif(not (STAND / "AlgoTune").is_dir(), reason="no bench stand on this box")
 def test_a_lane_with_no_cached_baseline_is_refused_at_launch(tmp_path):
-    from tests._bench_fixtures import stand_launch_env
+    from tests._bench_fixtures import free_bench_lane, stand_launch_env
     env = {**stand_launch_env(), "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path)}
     got = subprocess.run(
-        ["bash", str(SCRIPT), "deepseek-v4-flash", "lanecheck", "0-10", "edge_expansion",
+        ["bash", str(SCRIPT), "deepseek-v4-flash", "lanecheck", "44-47,92-95", "edge_expansion",
          "http://127.0.0.1:8801", "0.35"],
         capture_output=True, text=True, timeout=600, env=env)
     assert got.returncode == 1, got.stdout + got.stderr
-    assert "__w11x1r3" in got.stdout, "the refusal must name the ruler the lane would key"
+    assert "__w8x1r3" in got.stdout, "the refusal must name the ruler the lane would key"
     assert "0-10,48-58" in got.stdout, "and the lane that keys the one on disk"
     assert not (tmp_path / "lanecheck" / "INSTRUMENT.txt").exists(), \
         "it refused after writing the record, which is the ordering the guard exists to fix"
@@ -77,10 +77,11 @@ def test_a_lane_with_no_cached_baseline_is_refused_at_launch(tmp_path):
 @pytest.mark.skipif(not (STAND / "AlgoTune").is_dir(), reason="no bench stand on this box")
 def test_the_corpus_lane_passes_every_check(tmp_path):
     """A guard that refuses the lane the corpus was measured on would stop the bench dead."""
-    from tests._bench_fixtures import stand_launch_env
+    from tests._bench_fixtures import free_bench_lane, stand_launch_env
     env = {**stand_launch_env(), "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path)}
     got = subprocess.run(
-        ["bash", str(SCRIPT), "deepseek-v4-flash", "lanecheck2", "0-10,48-58", "edge_expansion",
+        ["bash", str(SCRIPT), "deepseek-v4-flash", "lanecheck2", free_bench_lane(pytest),
+         "edge_expansion",
          "http://127.0.0.1:8801", "0.35"],
         capture_output=True, text=True, timeout=600, env=env)
     assert got.returncode == 0, got.stdout + got.stderr

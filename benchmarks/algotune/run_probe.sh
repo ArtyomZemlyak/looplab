@@ -93,7 +93,7 @@
 require_preregistration() {   # $1 = probe dir. 0 = may start; 4 = an arm with no valid PREREGISTERED.txt
   local pre="$1/PREREGISTERED.txt" missing=""
   if [ -z "${PROBE_MAKE_TASK_ARGS:-}" ] && [ -z "${PROBE_LOOPLAB_SETTINGS:-}" ]; then
-    return 0                       # a control on the shipped card and settings
+    return 0                       # no card_args, no cli_settings -- see the looplab_env block
   fi
   if [ ! -s "$pre" ]; then
     echo "REFUSED: this is an ARM launch (card_args/cli_settings differ from the shipped default)" >&2
@@ -404,13 +404,51 @@ mkdir -p "$OUT"
   # `developer_probe_max_calls`) is unreadable afterwards without it -- §113 is the record of what a
   # probe whose inputs are not written down costs.
   echo "cli_settings:   ${PROBE_LOOPLAB_SETTINGS:-(none -- shipped defaults)}"
+  # И ВЕСЬ НАСТРОЕЧНЫЙ ENVIRONMENT, а не только флаги командной строки.
+  #
+  # Настройки движка плоские по замыслу: `LOOPLAB_<FIELD>` ложится на поле `Settings` один к одному
+  # (CLAUDE.md). Значит лечение арма можно задать ДВУМЯ способами, а лаунчер знал один: обе
+  # написанные предрегистрации называют лечением переменную среды
+  # (`LOOPLAB_EXPLOIT_STRONG_NODE_QUANTILE=0.75`, `LOOPLAB_REGIME_PRIOR=1`), а
+  # `require_preregistration` смотрит на `PROBE_LOOPLAB_SETTINGS`. Проба с таким лечением стартовала
+  # бы БЕЗ предрегистрации и записала бы про себя «cli_settings: (none -- shipped defaults)»,
+  # «preregistered: (not required -- a control...)» — то есть пролеченный прогон с записью, что он
+  # контроль. Это ровно форма §73/§80: число, сравнённое как одно, а измеренное как другое.
+  #
+  # Ловится не запретом, а ЗАПИСЬЮ: строки ниже диффятся между двумя пробами, и лечение видно даже
+  # когда его задали не тем способом. Печатаются только имена, которые ЕСТЬ поле `Settings`
+  # (248 полей), значения секретных имён маскируются `core/envsafe.py::is_secret_env` — тот же
+  # предикат, что у движка, а не второй список.
+  python3 - <<'PYEOF' 2>/dev/null || echo "looplab_env:    (не прочитан -- движок не импортируется)"
+import os, sys
+sys.path.insert(0, os.environ.get("PYTHONPATH", "").split(":")[0] or ".")
+from looplab.core.config import Settings
+from looplab.core.envsafe import is_secret_env
+fields = set(Settings.model_fields)
+rows = []
+for name, value in sorted(os.environ.items()):
+    if not name.startswith("LOOPLAB_"):
+        continue
+    if name[len("LOOPLAB_"):].lower() not in fields:
+        continue
+    rows.append(f"{name}={'<secret, masked>' if is_secret_env(name) else value}")
+print("looplab_env:    " + (rows[0] if rows else "(none)"))
+for row in rows[1:]:
+    print("                " + row)
+PYEOF
   # THE PREREGISTRATION, PINNED. An arm's tree carries the digest of the file it started under, so
   # an outcome edited after the numbers came in is a different digest from the one on record; a
   # control says positively that none was required, so the missing line cannot read as "unknown".
   if [ -n "${PROBE_MAKE_TASK_ARGS:-}" ] || [ -n "${PROBE_LOOPLAB_SETTINGS:-}" ]; then
     echo "preregistered:  $OUT/PREREGISTERED.txt sha256=$(sha256sum "$OUT/PREREGISTERED.txt" 2>/dev/null | cut -c1-16)"
   else
-    echo "preregistered:  (not required -- a control on the shipped card and settings)"
+    # ТОЧНО ТО, ЧТО ПРОВЕРЕНО, И НЕ БОЛЬШЕ. Прежняя формулировка называла прогон контролем «по
+    # карточке и НАСТРОЙКАМ» — утверждение, которого этот охранник не делал: он смотрит только на
+    # `PROBE_MAKE_TASK_ARGS` и `PROBE_LOOPLAB_SETTINGS`. Прогон с лечением через переменную среды
+    # (а именно так лечение записано в обеих предрегистрациях) получал эту строку и противоречил
+    # блоку `looplab_env` двумя строками выше на той же странице.
+    echo "preregistered:  (not required -- no card_args/cli_settings; the settings ENVIRONMENT is"
+    echo "                the looplab_env block above, and this line does not speak for it)"
   fi
   # ХЕШ САМОЙ КАРТОЧКИ, а не только флагов. Флаги называют вариант; хеш ловит любое
   # изменение текста -- новый пункт, поправленную формулировку, сдвинувшуюся константу.

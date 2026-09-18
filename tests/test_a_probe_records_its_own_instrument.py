@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from tests._bench_fixtures import stand_launch_env
+from looplab.core.envsafe import is_secret_env
+from tests._bench_fixtures import free_bench_lane, stand_launch_env
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "benchmarks" / "algotune" / "run_probe.sh"
@@ -37,8 +38,9 @@ pytestmark = pytest.mark.skipif(
 OUT_ROOT = Path(os.environ.get("PYTEST_PROBE_OUT_ROOT") or "")
 
 
-def _dry_run(label, *, stream="1", lane="44-47,92-95", task="discrete_log", out_root=None):
+def _dry_run(label, *, stream="1", lane=None, task="discrete_log", out_root=None):
     """PROBE_DRY_RUN=1: every refusal is checked, the record is written, nothing is spent."""
+    lane = lane or free_bench_lane(pytest)
     base = Path(out_root) if out_root else ROOT / "model-probes"
     out = base / label
     if out.exists():
@@ -109,7 +111,7 @@ def test_a_deliberate_opt_out_is_recorded_as_the_other_instrument(tmp_path):
     if out.exists():
         import shutil
         shutil.rmtree(out)
-    r = subprocess.run(["bash", str(SCRIPT), "deepseek-v4-flash", "t_instr_f", "44-47,92-95",
+    r = subprocess.run(["bash", str(SCRIPT), "deepseek-v4-flash", "t_instr_f", free_bench_lane(pytest),
                         "discrete_log", "http://127.0.0.1:8801", "1.00"],
                        capture_output=True, text=True, timeout=600, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -140,13 +142,32 @@ def test_it_pins_the_code_that_produced_the_run(tmp_path):
 
 
 def test_no_api_key_reaches_the_record(tmp_path):
-    """The probe tree goes into snapshots, and snapshots go to S3."""
+    """The probe tree goes into snapshots, and snapshots go to S3.
+
+    THE ASSERTION MOVED FROM THE NAME TO THE VALUE, and it is worth saying why rather than just
+    doing it. It read `"API_KEY" not in body` -- no line about the key at all, a cheap
+    over-approximation that was free while nothing wanted to mention the key. The `looplab_env:`
+    block (2026-09-18) does: `llm_api_key` IS a `Settings` field, so a block that lists the
+    settings environment either names it masked or silently drops the one variable most worth
+    knowing was set. It names it masked.
+
+    So the rule is now the one that was always the point: no secret VALUE in the record, and every
+    secret NAME that appears carries the mask instead of its value. That is strictly checkable,
+    unlike the old rule, which a single new line made false without anything being less safe.
+    """
     env_key = os.environ.get("LOOPLAB_LLM_API_KEY")
     r, rec = _dry_run("t_instr_e", out_root=tmp_path)
     body = rec.read_text()
-    assert "API_KEY" not in body, f"a key name reached the record:\n{body}"
     if env_key:
         assert env_key not in body, "the API key itself was written into the probe tree"
+    for line in body.splitlines():
+        name = line.strip().split("=", 1)[0]
+        if name.startswith("LOOPLAB_") and is_secret_env(name):
+            assert line.strip().endswith("=<secret, masked>"), (
+                f"a secret-named setting is on the record unmasked:\n{line}")
+    # And the masked name must actually be there, or the block is quietly dropping it.
+    if env_key:
+        assert "LOOPLAB_LLM_API_KEY=<secret, masked>" in body, body
 
 
 def test_the_record_is_written_before_anything_is_spent(tmp_path):
@@ -293,3 +314,68 @@ def test_the_guard_still_refuses_when_a_real_probe_holds_the_lane(tmp_path):
         "arm A's entry points lost their match; they are only ever started by this bench")
     assert 'os.sched_getaffinity' in guard, "the guard no longer looks at affinity at all"
     assert 'BUSY" != "0"' in src, "the refusal on a busy lane is gone"
+
+
+def test_the_record_carries_the_SETTINGS_ENVIRONMENT_not_only_the_flags(tmp_path):
+    """A treatment handed over as an env var was invisible to the record, and both preregistrations
+    name exactly that spelling.
+
+    Engine settings are flat by design -- `LOOPLAB_<FIELD>` maps 1:1 onto a `Settings` field -- so
+    `LOOPLAB_EXPLOIT_STRONG_NODE_QUANTILE=0.75` (B1's registered treatment) and
+    `LOOPLAB_REGIME_PRIOR=1` (B2's) change the run while setting neither `PROBE_MAKE_TASK_ARGS` nor
+    `PROBE_LOOPLAB_SETTINGS`. Before 2026-09-18 such a probe recorded `cli_settings: (none --
+    shipped defaults)` and `preregistered: (not required -- a control...)`: a treated run whose own
+    record says it was a control, which is the §73/§80 shape that cost a withdrawn conclusion.
+    """
+    env = stand_launch_env()
+    env["LOOPLAB_EXPLOIT_STRONG_NODE_QUANTILE"] = "0.75"
+    env["LOOPLAB_NOT_A_SETTING_AT_ALL"] = "should not appear"
+    env["PROBE_DRY_RUN"] = "1"
+    env["PROBE_OUT_ROOT"] = str(tmp_path)
+    r = subprocess.run(
+        ["bash", str(SCRIPT), "deepseek-v4-flash", "t_env", free_bench_lane(pytest), "discrete_log",
+         "http://127.0.0.1:8801", "1.00"],
+        capture_output=True, text=True, timeout=600, env=env)
+    rec = tmp_path / "t_env" / "INSTRUMENT.txt"
+    assert rec.is_file(), r.stdout + r.stderr
+    body = rec.read_text(encoding="utf-8")
+    assert "LOOPLAB_EXPLOIT_STRONG_NODE_QUANTILE=0.75" in body, (
+        "the treatment is not on the record:\n" + body)
+    assert "LOOPLAB_NOT_A_SETTING_AT_ALL" not in body, (
+        "the block lists every LOOPLAB_ var rather than the ones that ARE settings")
+
+
+def test_no_secret_value_reaches_the_settings_block(tmp_path):
+    """`llm_api_key` IS a `Settings` field, so the block would print the key unless it masks. The
+    same predicate the engine uses (`core/envsafe.py::is_secret_env`), never a second list."""
+    env = stand_launch_env()
+    env["LOOPLAB_LLM_API_KEY"] = "sk-or-v1-ThisMustNotBeWritten"
+    env["PROBE_DRY_RUN"] = "1"
+    env["PROBE_OUT_ROOT"] = str(tmp_path)
+    subprocess.run(
+        ["bash", str(SCRIPT), "deepseek-v4-flash", "t_secret", free_bench_lane(pytest), "discrete_log",
+         "http://127.0.0.1:8801", "1.00"],
+        capture_output=True, text=True, timeout=600, env=env)
+    body = (tmp_path / "t_secret" / "INSTRUMENT.txt").read_text(encoding="utf-8")
+    assert "ThisMustNotBeWritten" not in body, "the record carries an API key:\n" + body
+    assert "LOOPLAB_LLM_API_KEY=<secret, masked>" in body, body
+
+
+def test_the_preregistration_line_speaks_only_for_what_it_checked():
+    """It said "a control on the shipped card and settings" -- a claim about SETTINGS that the
+    guard does not make: it reads `PROBE_MAKE_TASK_ARGS` and `PROBE_LOOPLAB_SETTINGS` and nothing
+    else. On an env-var treatment that sentence contradicted the block two lines above it."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "a control on the shipped card and settings" not in src
+    assert "this line does not speak for it" in src
+
+
+def test_both_preregistrations_name_a_launch_form_the_launcher_can_SEE():
+    """An arm is gated on `PROBE_LOOPLAB_SETTINGS`; the env spelling is visible but not gated, and
+    an arm is gated. Checked here, one file over, because the cost of finding this out later is a
+    completed arm that has to be thrown away."""
+    here = SCRIPT.parent
+    for name, setting in (("PREREGISTERED-B1.txt", "exploit_strong_node_quantile=0.75"),
+                          ("PREREGISTERED-B2.txt", "regime_prior=1")):
+        text = (here / name).read_text(encoding="utf-8")
+        assert f'PROBE_LOOPLAB_SETTINGS="--set {setting}"' in text, name

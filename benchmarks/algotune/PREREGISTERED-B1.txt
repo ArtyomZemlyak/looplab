@@ -47,4 +47,18 @@ SECONDARY, reported and never the headline: the final champion TEST speedup, pri
 minimum detectable effect (+60 at this size, §420). A secondary outcome that becomes the headline
 when it happens to be significant is the degree of freedom §190 exists to close.
 
+HOW THIS ARM IS LAUNCHED, and it is not the env spelling above. `run_probe.sh` decides a launch is
+an ARM -- and so demands this file -- by `PROBE_MAKE_TASK_ARGS` / `PROBE_LOOPLAB_SETTINGS`. A
+treatment handed over as `LOOPLAB_<FIELD>=<value>` in the environment sets neither, so the probe
+would start UNPREREGISTERED and its record would read "cli_settings: (none -- shipped defaults)":
+a treated run saying it was a control, which is the shape of §73/§80. Measured 2026-09-18 on a dry
+run, before either arm started. Launch it as
+
+    PROBE_LOOPLAB_SETTINGS="--set exploit_strong_node_quantile=0.75"
+
+which is the same value reaching the same `Settings` field (flat `LOOPLAB_<FIELD>` env vars map 1:1
+onto it), through the one spelling the launcher and the instrument record both see. The record also
+carries the whole settings ENVIRONMENT now (`looplab_env:`), so a treatment handed over the other
+way is still visible -- but visible is not gated, and an arm is gated.
+
 READ ONCE, at twelve complete batches. No interim look.
