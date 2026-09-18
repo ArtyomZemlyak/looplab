@@ -282,6 +282,40 @@ if ! ENGINE_ERR=$(python -c 'import looplab.cli' 2>&1); then
   say "       venv стенда: $ROOT/looplab/.venv/bin (его ставит на PATH benchmarks/box-jhub-l40s.sh)"
   exit 1
 fi
+
+# И ПОЛОСА ДОЛЖНА ДАВАТЬ ТУ ЛИНЕЙКУ, ПОД КОТОРОЙ ЛЕЖИТ КЭШ. `ALGOTUNE_EVAL_WORKERS=auto` считает
+# воркеров ПО ШИРИНЕ ПОЛОСЫ, и ключ эталона — её функция: `0-10` (11 CPU) даёт `__w11x1r3`,
+# `0-10,48-58` (11 ядер плюс их гипертред-близнецы, 22 CPU) даёт `__w22x1r3`. Весь корпус измерен
+# на вторых: 141 архивная проба несёт полосу из двух диапазонов, ни одной — из одного.
+#
+# ЭТО НЕ УМОЗРЕНИЕ: 18.09 я запустил дымовую пробу на `0-10`. Отказались не сторожа, а ОЦЕНКА —
+# `no_speedup{reason: baseline_regime_mismatch}` на первом же узле, то есть после сборки, после
+# предложения и после $0.2176. Отказ сам по себе правильный (иначе прогон перемерил бы эталон и
+# поделил на другой знаменатель), но он приходит на 50 минут и пятую часть бюджета позже, чем
+# мог бы: ширина полосы известна в момент запуска, а кэш лежит на диске.
+#
+# КЛЮЧ СЧИТАЕТ САМ ОЦЕНЩИК, под тем же `taskset`, что и прогон: `looplab_eval.py::eval_regime` —
+# единственное место, где это правило записано, и копия здесь разошлась бы с ним первой же
+# правкой. Не сходится — значит проба измеряла бы не ту линейку; молчание значит, что сходится.
+# Имя файла — `<task>__train` плюс ключ: ключ несёт СВОИ подчёркивания (`__w22x1r3`), и третье
+# здесь дало бы путь, которого нет ни при какой полосе (проверено: отказ срабатывал на обеих).
+REGIME_KEY=$(ALGOTUNE_EVAL_WORKERS="$ALGOTUNE_EVAL_WORKERS" taskset -c "$LANE" python3 -c "
+import sys, json
+sys.path.insert(0, '$ROOT/looplab/benchmarks/algotune')
+from looplab_eval import eval_regime
+print(eval_regime().get('key') or '')" 2>/dev/null | tail -1)
+if [ -z "$REGIME_KEY" ]; then
+  say "ОТКАЗ: не удалось вывести ключ эталона для полосы $LANE (eval_regime вернул пусто)"
+  exit 1
+fi
+if [ ! -f "$ALGOTUNE_BASELINE_CACHE_DIR/${TASK}__train${REGIME_KEY}.json" ]; then
+  say "ОТКАЗ: полоса $LANE даёт линейку $REGIME_KEY, а кэша под неё нет"
+  say "       нужен: $ALGOTUNE_BASELINE_CACHE_DIR/${TASK}__train${REGIME_KEY}.json"
+  say "       есть:  $(ls "$ALGOTUNE_BASELINE_CACHE_DIR" 2>/dev/null | grep "^${TASK}__train__" | tr '\n' ' ')"
+  say "       корпус измерен на полосе из ДВУХ диапазонов (ядра плюс их гипертред-близнецы),"
+  say "       например 0-10,48-58 — она даёт __w22x1r3"
+  exit 1
+fi
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET"
 # The Developer's stage-pipeline guidance block is OFF on this bench (docs/60 A6): measured over
 # the probe corpus, `declare_stages` was called 0 times while the block cost 4.8-6.0 % of every $1
