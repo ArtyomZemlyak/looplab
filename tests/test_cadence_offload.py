@@ -280,3 +280,43 @@ def test_a_promise_the_buffer_cannot_keep_is_refused(tmp_path, kwargs):
     # …and a registered pass-through type keeps the real store's own semantics, untouched.
     view.append("phase_progress", {"phase": "report"}, **{k: v for k, v in kwargs.items()
                                                           if k == "require_durable"})
+
+
+# ------------------------------------------------------------------------ 7. no synthetic seq escapes
+
+def test_a_card_merge_receipt_names_the_hypothesis_merge_at_its_REAL_seq(tmp_path, monkeypatch):
+    """Review 2026-09-22, ENG1-06, driven through the REAL `_run_cadences` under the REAL sink.
+
+    `_run_cadences` ended its merge step with an in-block `_mirror_hypothesis_card_merges`, which
+    read the BUFFERED view — whose seqs are synthetic, "view-only: the publish assigns the real
+    ones" — and wrote `card_merged.source_event_seq` from it. A passthrough row landing first (the
+    merge's own paid call writes `llm_usage`, which is `BACKGROUND_APPENDABLE`) shifts the real seq,
+    so the receipt pointed at that `llm_usage` row, and the next loop turn's mirror — which runs on
+    a stable prefix, keyed by `source_event_seq` — found the merge unmirrored and wrote a SECOND
+    `card_merged`. Measured: `source_event_seq = 33 -> llm_usage`, two rows [33, 34]."""
+    from looplab.events.types import EV_CARD_MERGED, EV_HYPOTHESIS_MERGED
+
+    eng = make_engine(tmp_path / "merge-seq", n_seeds=1, max_nodes=1)
+    anyio.run(eng.run)
+
+    def _merge_with_a_paid_call(state):
+        # The merge decision is folded -> buffered; the paid call's ledger row passes through.
+        eng.store.append(EV_HYPOTHESIS_MERGED, {"canonical": "card-0", "aliases": ["card-9"],
+                                                "statement": "merged belief", "at_node": 1})
+        eng.store.append("llm_usage", {"model": "m", "prompt_tokens": 1,
+                                       "completion_tokens": 1, "cost": 0.0})
+        return fold(eng.store.read_all())
+
+    monkeypatch.setattr(eng, "_maybe_merge_hypotheses", _merge_with_a_paid_call)
+    state = fold(eng.store.read_all())
+    anyio.run(eng._offload_cadence, functools.partial(eng._run_cadences, state))
+    # The next loop turn: the decision-prefix mirror in `_run_with_llm_broker`.
+    eng._mirror_hypothesis_card_merges(fold(eng.store.read_all()))
+    eng._mirror_hypothesis_card_merges(fold(eng.store.read_all()))      # …and the one after
+
+    events = eng.store.read_all()
+    merge = [e for e in events if e.type == EV_HYPOTHESIS_MERGED]
+    receipts = [e.data for e in events if e.type == EV_CARD_MERGED]
+    assert len(merge) == 1
+    assert [r["source_event_seq"] for r in receipts] == [merge[0].seq], (
+        "one card_merged per merge, naming the hypothesis_merged row at the seq it was published at")

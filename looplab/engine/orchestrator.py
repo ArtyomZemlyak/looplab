@@ -5357,7 +5357,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # all phrasing the same idea). Hybrid-retrieve the near-dups + let the Researcher decide the
         # true merges, recorded as `hypothesis_merged` events the fold applies deterministically.
         state = self._maybe_merge_hypotheses(state)
-        state = self._mirror_hypothesis_card_merges(state)
+        # NO CARD MIRROR HERE (review 2026-09-22, ENG1-06). An in-block
+        # `_mirror_hypothesis_card_merges` stood on this line, and this whole block runs under the
+        # cadence sink: it read the BUFFERED view, whose seqs are synthetic ("view-only: the publish
+        # assigns the real ones"), and stamped `card_merged.source_event_seq` from it. Any
+        # passthrough row landing first — the merge's own `llm_usage` — shifted the real seq, so the
+        # receipt named the wrong row and the next turn's mirror, keyed on that seq, wrote a SECOND
+        # `card_merged` (measured: 33 -> `llm_usage`, then [33, 34]). The mirror at the top of every
+        # loop turn in `_run_with_llm_broker` runs on a stable, published prefix before any gate, so
+        # it records the merge at its real seq one turn later; `card_merged` is additive audit —
+        # replay already applies the merge from `hypothesis_merged` itself.
 
         # M6 comparative lessons, live-shared (doc 13 §7 items 2+5): on a node-count cadence,
         # distill credit-assigned PAIR lessons into the SHARED cross-run store DURING the run
