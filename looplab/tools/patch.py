@@ -297,13 +297,18 @@ def apply_patch(diff_text: str, repo_dir: str, allow: list[str],
             pf.write(diff_text)
         from looplab.runtime.sandbox import git_subprocess_env
         git_env = git_subprocess_env()
+        # git names a failing path in its raw UTF-8 bytes; decoded with the locale codec (cp1252 on
+        # Windows) a byte it leaves undefined raised out of this function instead of returning the
+        # refusal (review 2026-09-22). The message is diagnostic, so an undecodable byte is replaced.
         chk = subprocess.run(["git", "apply", "--check", patch_name],
-                             cwd=str(repo), capture_output=True, text=True, env=git_env)
+                             cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", env=git_env)
         if chk.returncode != 0:
             return {"applied": False, "paths": g["paths"], "rejected": [],
                     "error": chk.stderr.strip()}
         ap = subprocess.run(["git", "apply", patch_name],
-                            cwd=str(repo), capture_output=True, text=True, env=git_env)
+                            cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", env=git_env)
         return {"applied": ap.returncode == 0, "paths": g["paths"], "rejected": [],
                 "error": "" if ap.returncode == 0 else ap.stderr.strip()}
     finally:

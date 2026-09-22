@@ -13,9 +13,10 @@ These doubles reproduce exactly the rule each branch exists for, no more:
 * `windows_glob` — `glob.glob` keeps the pattern's literal prefix as written and joins every MATCHED
   component with `os.sep`, which is "\\" there: `C:\\...\\bench/model-probes\\p1\\runs\\...`. Code
   that splits such an answer on "/model-probes/" finds nothing to split.
-* `non_utf8_child_env` — text I/O given no `encoding=` decodes with the ANSI code page (cp1252 on
-  the runner), not UTF-8; a child Python under this environment decodes with a non-UTF-8 codec
-  too, the builtin `open()` included.
+* `windows_text_codec` — text I/O given no `encoding=` decodes with the ANSI code page (cp1252 on
+  the runner), not UTF-8: `subprocess.run(text=True)` through `locale.getencoding()`, and
+  `Path.read_text()`/`write_text()` through `io.text_encoding`. `non_utf8_child_env` is its
+  stand-in for a child process, where the builtin `open()` is reached too.
 
 A test switches `os.name` to "nt" only around the call under test (pathlib picks its flavour from
 it at construction time) and restores it before asserting.
@@ -24,6 +25,8 @@ from __future__ import annotations
 
 import errno
 import glob
+import io
+import locale
 import os
 import re
 import stat
@@ -110,6 +113,32 @@ def windows_glob(monkeypatch) -> list:
     monkeypatch.setattr(glob, "glob", _glob)
     monkeypatch.setattr(os, "sep", "\\")
     return handed
+
+
+def windows_text_codec(monkeypatch, codec: str = "cp1252") -> None:
+    """Make text I/O given no `encoding=` decode the way a Windows runner does: with its ANSI code
+    page (cp1252 there), not UTF-8.
+
+    `subprocess` resolves `text=True` through `locale.getencoding()` and `Path.read_text()` /
+    `write_text()` through `io.text_encoding`, so both seams are re-pointed. The builtin `open()`
+    resolves the locale in C and is NOT covered. A process in UTF-8 mode never asks the locale, so
+    the double first proves it fires -- a child's UTF-8 `é` must come back as cp1252 mojibake -- and
+    SKIPS where it cannot, rather than let a test pass without the Windows codec in play."""
+    import pytest
+
+    real_text_encoding = io.text_encoding
+
+    def _text_encoding(encoding, stacklevel=2):
+        return codec if encoding is None else real_text_encoding(encoding, stacklevel + 1)
+
+    monkeypatch.setattr(locale, "getencoding", lambda: codec)
+    monkeypatch.setattr(io, "text_encoding", _text_encoding)
+    probe = subprocess.run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xc3\\xa9')"],
+        capture_output=True, text=True, timeout=60)
+    if probe.stdout != b"\xc3\xa9".decode(codec):
+        pytest.skip(f"cannot emulate the Windows {codec} text codec in this interpreter "
+                    f"(UTF-8 mode: {sys.flags.utf8_mode}); got {probe.stdout!r}")
 
 
 def non_utf8_child_env() -> dict:

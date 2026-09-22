@@ -45,9 +45,14 @@ def seed_repo_tree(src, dst, ignore, mode: str = "auto") -> int:
         # larger git repo whose `.git` lives in a parent, so `(src/'.git').exists()` is False even
         # though `git -C src ls-files` correctly lists the files tracked under src. Use it whenever
         # git returns a non-empty tracked set; otherwise (non-git / nothing tracked) fall back.
+        # UTF-8, NOT THE LOCALE CODEC: `-z` turns git's path quoting off, so a non-ASCII path
+        # arrives as its raw UTF-8 bytes. Decoded as cp1252 (a Windows runner's codec) `données.csv`
+        # became `donnÃ©es.csv`, which does not exist, and the tracked file was silently left out of
+        # every candidate -- or a byte cp1252 leaves undefined (`с` is D1 81) raised, and the whole
+        # untracked tree was copied instead (review 2026-09-22).
         try:
             out = subprocess.run(["git", "-C", str(src), "ls-files", "-z"],
-                                 capture_output=True, text=True, timeout=120,
+                                 capture_output=True, text=True, encoding="utf-8", timeout=120,
                                  env=git_subprocess_env())
             if out.returncode == 0:
                 files = [p for p in out.stdout.split("\0") if p]
