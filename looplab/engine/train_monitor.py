@@ -3085,11 +3085,18 @@ class TrainingMonitorMixin:
                                 verdict, enabled=getattr(self, "_train_monitor_kill", False),
                                 threshold=threshold, log_role=log_role,
                                 broken_streak=broken_streak, trajectory=trajectory)
+                        # Both counterfactuals below are asked only when the monitor did NOT act —
+                        # `acted`, never `not stop_decided`. `stop_decided` is `(not repair_decided)
+                        # and ...`, so a REPAIR-stop left it False and both receipts armed: one row
+                        # then carried `repair_decided`, `kill: true` AND `kill_role_withheld`, the
+                        # node stopped and its record saying the role prevented it (review
+                        # 2026-09-22, ENG3-09 / EM-04, driven by `review/ENG3/em04.py`).
+                        acted = stop_decided or repair_decided
                         # The COUNTERFACTUAL, evaluated only when the measurement is what refused.
                         # Pure and cheap, and it is what makes "the monitor would have ended this
                         # node but for the curve it measured" a durable fact rather than something
                         # an auditor has to re-derive from a log that has since grown.
-                        trajectory_veto = (not stop_decided and kill_signal is not None
+                        trajectory_veto = (not acted and kill_signal is not None
                                            and trajectory_vetoes_kill(trajectory)
                                            and should_monitor_kill(
                                                verdict,
@@ -3107,7 +3114,7 @@ class TrainingMonitorMixin:
                         # Pure, cheap, and evaluated only when the role is what refused; asking the
                         # SAME predicate with the role swapped is what makes this a fact about the
                         # gate rather than a second opinion about the run.
-                        role_withheld = (not stop_decided and kill_signal is not None
+                        role_withheld = (not acted and kill_signal is not None
                                          and log_role not in _KILL_ELIGIBLE_ROLES
                                          and should_monitor_kill(
                                              verdict,
