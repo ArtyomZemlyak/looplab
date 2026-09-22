@@ -142,6 +142,23 @@ def test_the_stage_row_keeps_the_whole_answer(tmp_path):
     assert 300 < len(concern) <= 700, "a cap that truncates the answer is not a bound, it is a bug"
 
 
+def test_the_near_miss_is_named_in_the_manifests_spelling_on_a_windows_host(tmp_path, monkeypatch):
+    """`str()` of a path renders the HOST separator, so on Windows the near-miss read
+    `vectorsearch\\experiments\\...` beside a declared `vectorsearch/experiments/...` (CI run
+    35785582444: four reds here and in test_stage_input_contract) -- and `metric_salvage._relocated`
+    wrote that spelling into the salvaged metric spec. Driven with `Path` rendering as Windows'."""
+    from looplab.runtime import command_eval
+    from _windows_emulation import windows_path_rendering
+
+    windows_path_rendering(monkeypatch, command_eval)
+    _write(tmp_path, ACTUAL)
+    since = time.time() - 60
+    assert command_eval.artifacts_written_elsewhere(str(tmp_path), DECLARED, since) == [ACTUAL]
+    problem = command_eval.verify_stage_artifacts(
+        {"files": [DECLARED]}, str(tmp_path), since, stage="train")
+    assert ACTUAL in problem, problem
+
+
 def test_two_candidates_produce_a_stable_answer_rather_than_a_filesystem_order_one(tmp_path):
     """`os.walk` yields directories in FILESYSTEM order (`os.scandir`), so "the first match" was not
     a rule: with two fresh same-basename files the message — and, through

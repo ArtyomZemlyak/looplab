@@ -1376,7 +1376,10 @@ def _artifacts_written_elsewhere(workdir: str, rel: str, since: Optional[float])
             # `metric_salvage._relocated` would salvage from a single candidate becomes the ambiguous
             # pair it refuses (`len(found) != 1`), on the same run against the same workdir.
             if here != Path(str(rel or "")):
-                found.append(str(here))
+                # ...and it is REPORTED in the spec's own spelling too: `str(here)` wrote the near-miss
+                # as `sub\x` on Windows beside a declared `sub/x`, and `_relocated` put that spelling
+                # into the salvaged metric spec (review 2026-09-22).
+                found.append(here.as_posix())
     except Exception:  # noqa: BLE001 — a diagnostic must never be the thing that fails the eval
         return []
     return sorted(found)

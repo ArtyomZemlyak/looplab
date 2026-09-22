@@ -141,6 +141,30 @@ def windows_text_codec(monkeypatch, codec: str = "cp1252") -> None:
                     f"(UTF-8 mode: {sys.flags.utf8_mode}); got {probe.stdout!r}")
 
 
+def windows_path_rendering(monkeypatch, module) -> type:
+    """Make `module.Path` RENDER the way a `WindowsPath` does, and nothing else.
+
+    `str()` of a path uses the host separator, so on Windows a relative path a module formats into a
+    message or a spec reads `sub\\x`. This subclass renders `str()` with "\\" while `__fspath__` keeps
+    the POSIX form (so every stat/open still resolves here) and `as_posix()` answers "/" -- which is
+    what `WindowsPath.as_posix()` does there. Code that formats `str(path)` shows the Windows
+    spelling; code that asks for `as_posix()` does not. Returns the class."""
+    real_path = module.Path
+
+    class _WindowsRenderedPath(type(real_path())):
+        def __str__(self):
+            return super().__str__().replace("/", "\\")
+
+        def __fspath__(self):
+            return super().__str__()
+
+        def as_posix(self):
+            return super().__str__()
+
+    monkeypatch.setattr(module, "Path", _WindowsRenderedPath)
+    return _WindowsRenderedPath
+
+
 def non_utf8_child_env() -> dict:
     """An environment in which a CHILD Python's implicit text codec is not UTF-8.
 
