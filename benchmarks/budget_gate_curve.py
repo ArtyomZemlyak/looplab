@@ -48,8 +48,9 @@ def load(root: str, exclude=()) -> list[dict]:
     """One record per run: its budget, its priced calls, and when each node was evaluated."""
     out = []
     for path in sorted(glob.glob(f"{root}/*/runs/*/run/events.jsonl")):
-        name = path.split("/model-probes/")[-1].split("/")[0] if "/model-probes/" in path \
-            else path.split("/")[-5]
+        posix = path.replace(_os.sep, "/")        # a Windows glob answers with "\\" (WIN-SEPS)
+        name = posix.split("/model-probes/")[-1].split("/")[0] if "/model-probes/" in posix \
+            else posix.split("/")[-5]
         if name in exclude:
             continue
         # THROUGH THE SHARED READER (§361). Two defects lived in the four lines this replaces. The

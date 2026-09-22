@@ -24,6 +24,7 @@ import argparse
 import collections
 import glob
 import json
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -157,7 +158,8 @@ def late_share(corpus_firsts, spend: float) -> float:
 def probe_task(root: str, name: str):
     """The task a probe is actually running, from its own tree."""
     found = sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl"))
-    return found[0].split("/runs/")[1].split("/")[0] if found else None
+    # POSIX form first: a Windows glob answers with "\\" separators (review 2026-09-22, WIN-SEPS).
+    return found[0].replace(os.sep, "/").split("/runs/")[1].split("/")[0] if found else None
 
 
 def corpus_first_nodes(root: str, task: str, min_spend: float = 0.9) -> list:

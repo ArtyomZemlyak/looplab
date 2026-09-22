@@ -187,7 +187,7 @@ def test_a_missing_score_comes_with_the_probe_s_own_explanation(tmp_path):
         "[02:17:33] ===== start =====\n"
         "[04:02:54] прогон rc=0 за 6321с\n"
         "could not fold /x/runs/t/run: ModuleNotFoundError: No module named 'looplab'\n"
-        "[04:02:54] чемпион: НЕТ\n")
+        "[04:02:54] чемпион: НЕТ\n", encoding="utf-8")
     out = _run(tmp_path)
     assert "ModuleNotFoundError" in out, (
         "a probe with no test score gave no reason, and the reason was in its own log:\n" + out
@@ -204,9 +204,24 @@ def test_a_pause_is_reported_when_that_is_the_reason(tmp_path):
     (p / "run.log").write_text(
         "run=run task=t finished=False\n"
         "stop: PAUSED (node 2) — resumable, NOT finished\n"
-        "  pause reason: auto-paused: a Developer session crashed\n")
+        "  pause reason: auto-paused: a Developer session crashed\n", encoding="utf-8")
     out = _run(tmp_path)
     assert "PAUSED" in out, "a paused run's own stop line is not surfaced:\n" + out
+
+
+def test_a_reason_the_console_cannot_encode_does_not_kill_the_report(tmp_path):
+    """The reason is quoted from the probe's own log, and the harness logs in Russian. On Windows
+    stdout is cp1252, so the first unscored probe with a Russian reason killed the whole summary
+    with UnicodeEncodeError (review 2026-09-22). Driven in a child whose codec is narrower still."""
+    from _windows_emulation import non_utf8_child_env
+    p = _mk_probe(tmp_path, "ru", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5])
+    (p / "probe.log").write_text("[04:02:54] чемпион: НЕТ\n", encoding="utf-8")
+    r = subprocess.run([sys.executable, str(TOOL), str(tmp_path)], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=600,
+                       env=non_utf8_child_env())
+    assert r.returncode == 0, r.stdout + r.stderr
+    block = r.stdout.split("probes with NO test score", 1)[-1].split("per-probe detail")[0]
+    assert "ru " in block and "04:02:54" in block, r.stdout
 
 
 def test_a_scored_probe_gets_no_excuse_line(tmp_path):
@@ -226,7 +241,7 @@ def test_run_finished_is_not_used_as_the_discriminator(tmp_path):
     Reading its absence as "unfinished" would mark accPde, remDL3, remEE and remEE2 as failures.
     """
     import inspect
-    src = (REPO / "benchmarks" / "probe_summary.py").read_text()
+    src = (REPO / "benchmarks" / "probe_summary.py").read_text(encoding="utf-8")
     i = src.index("def _why_no_test")
     body = src[i:src.index("def summarise")]
     assert "run_finished" not in body.split('"""')[2:] or True  # docstring may mention it
@@ -548,7 +563,7 @@ def test_the_build_duration_comment_claims_no_gap_it_does_not_have():
     pde_heat1d. A guide that names a gap invites the next reader to treat a point inside it as a
     fault, which is precisely the investigation this column exists to prevent.
     """
-    src = (REPO / "benchmarks" / "probe_summary.py").read_text()
+    src = (REPO / "benchmarks" / "probe_summary.py").read_text(encoding="utf-8")
     i = src.index("first `plan_step` to first `node_evaluated`")
     block = src[i:i + 2000]
     assert "No point falls between" not in block, "the gap claim is back"

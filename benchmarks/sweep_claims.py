@@ -544,7 +544,7 @@ def _scores(bench: str, task: str) -> dict:
     """Every TEST score currently on this box for a task, by probe."""
     out = {}
     for path in glob.glob(f"{bench}/model-probes/*/final.json"):
-        name = path.split("/model-probes/")[1].split("/")[0]
+        name = path.replace(os.sep, "/").split("/model-probes/")[1].split("/")[0]   # WIN-SEPS
         try:
             rec = json.loads(open(path, encoding="utf-8").read())
         except (OSError, ValueError):
@@ -1207,7 +1207,7 @@ def check_every_node_was_graded_on_train(bench: str):
     wrong: list = []
     reasons: dict = {}
     for path in glob.glob(f"{bench}/model-probes/*/runs/*/*/events.jsonl"):
-        probe = path.split("/model-probes/", 1)[1].split("/")[0]
+        probe = path.replace(os.sep, "/").split("/model-probes/", 1)[1].split("/")[0]  # WIN-SEPS
         if probe == "_ruler":
             continue
         # THROUGH THE SHARED READER (§361). A line in `events.jsonl` is not an event: the engine

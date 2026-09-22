@@ -65,7 +65,7 @@ def stratified_p(strata: list[tuple[int, int, int, int]]) -> tuple[float, int, f
 def _first_node_kernel(run: str) -> bool | None:
     nid = None
     try:
-        with open(os.path.join(run, "events.jsonl"), errors="replace") as fh:
+        with open(os.path.join(run, "events.jsonl"), encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if '"node_evaluated"' not in line:
                     continue
@@ -88,11 +88,11 @@ def collect(root: str, task: str) -> list[tuple[str, str, bool]]:
     """(batch, card_args, kernel) per probe that has an instrument and an evaluated node."""
     rows = []
     for f in glob.glob(os.path.join(root, "model-probes/*/runs", task, "run/events.jsonl")):
-        probe = f.split("/model-probes/")[1].split("/")[0]
+        probe = f.replace(os.sep, "/").split("/model-probes/")[1].split("/")[0]   # WIN-SEPS
         inst = os.path.join(root, "model-probes", probe, "INSTRUMENT.txt")
         started = card = ""
         try:
-            for line in open(inst, errors="replace"):
+            for line in open(inst, encoding="utf-8", errors="replace"):
                 if line.startswith("started:"):
                     started = line.split(":", 1)[1].strip()
                 elif line.startswith("card_args:"):

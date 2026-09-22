@@ -101,7 +101,7 @@ def main(argv=None) -> int:
     root = f"{args.bench}/model-probes"
     paused = []
     for path in glob.glob(f"{root}/*/runs/*/run/events.jsonl"):
-        name = path.split("/model-probes/")[1].split("/")[0]
+        name = path.replace(os.sep, "/").split("/model-probes/")[1].split("/")[0]   # WIN-SEPS
         if name in {p["probe"] for p in paused}:
             continue
         try:
@@ -127,7 +127,7 @@ def main(argv=None) -> int:
         if args.dry_run:
             print(f'{p["probe"]}: WOULD resume ({p["resumes"]} so far, ${p["spend"]:.4f} held)')
             continue
-        task = p["run"].split("/runs/")[1].split("/")[0]
+        task = p["run"].replace(os.sep, "/").split("/runs/")[1].split("/")[0]   # WIN-SEPS
         url = f'{METER}/m/{p["probe"]}/{task}/p1/v1'
         env = {**os.environ, "LOOPLAB_LLM_STREAM": "1", "LOOPLAB_LLM_MODEL": "deepseek-v4-flash",
                "LOOPLAB_LLM_BASE_URL": url, "LOOPLAB_LLM_API_KEY_BASE_URL": url,

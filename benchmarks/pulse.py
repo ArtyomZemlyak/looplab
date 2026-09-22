@@ -354,7 +354,7 @@ def paused_probes(bench: str, now: float | None = None) -> list:
     now = time.time() if now is None else now
     out = []
     for path in glob.glob(f"{bench}/model-probes/*/runs/*/run/events.jsonl"):
-        name = path.split("/model-probes/")[1].split("/")[0]
+        name = path.replace(os.sep, "/").split("/model-probes/")[1].split("/")[0]   # WIN-SEPS
         try:
             if now - os.path.getmtime(path) > PAUSED_WINDOW_S:
                 continue

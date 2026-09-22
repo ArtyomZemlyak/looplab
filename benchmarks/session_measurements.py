@@ -36,6 +36,7 @@ import argparse
 import collections
 import glob
 import json
+import os
 import re
 
 # The Developer's own measurement command. `run_dev_command(name="eval_train")` is the operator-
@@ -185,8 +186,9 @@ def sessions(spans_path: str) -> list[dict]:
 def scan(root: str) -> list[tuple[str, dict]]:
     out = []
     for spans in sorted(glob.glob(f"{root}/*/runs/*/run/spans.jsonl")):
-        name = (spans.split("/model-probes/")[-1].split("/")[0]
-                if "/model-probes/" in spans else spans.split("/")[-5])
+        posix = spans.replace(os.sep, "/")        # a Windows glob answers with "\\" (WIN-SEPS)
+        name = (posix.split("/model-probes/")[-1].split("/")[0]
+                if "/model-probes/" in posix else posix.split("/")[-5])
         for row in sessions(spans):
             out.append((name, row))
     return out

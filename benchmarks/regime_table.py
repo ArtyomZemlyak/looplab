@@ -152,7 +152,9 @@ def seed_rows(root: str) -> list:
         # live writer stamps the run's objective, and a seed that claims another one would be
         # ranked backwards by every reader that now honours it.
         stamp = {"task_id": task, "direction": direction,
-                 "run_id": path.split("/model-probes/")[1].split("/")[0], "seeded_from": path}
+                 # POSIX form first: a Windows glob answers with "\\" (WIN-SEPS)
+                 "run_id": path.replace(os.sep, "/").split("/model-probes/")[1].split("/")[0],
+                 "seeded_from": path}
         got = contrast(rows, direction=direction)
         if got is not None:
             out.append({**got, **stamp})

@@ -130,6 +130,45 @@ def test_no_meter_is_an_error_and_not_a_clean_zero(tmp_path):
     assert "no meter" in r.stderr, r.stderr
 
 
+def test_a_box_with_no_proc_says_no_meter_and_how_to_state_one(tmp_path, monkeypatch, capsys):
+    """Windows has no `/proc`: `os.listdir("/proc")` raised there, and the graceful "no meter" exit
+    (2) died as a traceback at exit 1 (CI run 35785582444). Driven here by taking `/proc` away."""
+    import os
+    real_listdir, real_isdir = os.listdir, os.path.isdir
+
+    def listdir(path="."):
+        if str(path) == "/proc":
+            raise FileNotFoundError(2, "The system cannot find the path specified", "/proc")
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(os.path, "isdir", lambda p: False if str(p) == "/proc" else real_isdir(p))
+    root = _bench(tmp_path, probes={}, meter_rows=[])
+    assert cm.main(["--bench-root", str(root), "--port", "9"]) == 2
+    err = capsys.readouterr().err
+    assert "no meter" in err and "--since" in err, err
+
+
+def test_a_ledger_row_in_utf8_is_read_as_utf8_whatever_the_locale(tmp_path):
+    """The meter writes its ledger with `ensure_ascii=False`, and this tool opened it with the
+    LOCALE codec -- cp1252 on Windows, where a byte it cannot decode kills the whole reconciliation.
+    Driven in a child whose locale codec is not UTF-8."""
+    from _windows_emulation import non_utf8_child_env
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200",
+             "error": "ответ провайдера — пустой"}]
+    root = _bench(tmp_path, probes={"p1": [1.0]}, meter_rows=[])
+    (root / "meter" / "meter.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    port, _, srv = _serve({"cost_usd": 1.0, "calls": 1})
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--bench-root", str(root), "--port", str(port), "--since", "0"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+        env=non_utf8_child_env())
+    srv.close()
+    assert "UnicodeDecodeError" not in r.stderr, r.stderr
+    assert "meter   $1.000000" in r.stdout, r.stdout + r.stderr
+
+
 def test_an_empty_200_is_named_and_not_left_in_the_unnamed_pile(tmp_path):
     """The four calls this tool could not name, found by asking what they were.
 

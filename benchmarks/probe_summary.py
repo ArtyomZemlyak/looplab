@@ -53,7 +53,7 @@ def _meter_by_arm(path: str | None = None) -> dict:
     out: dict = {}
     if not p.is_file():
         return out
-    with open(p, errors="replace") as fh:
+    with open(p, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             if '"arm"' not in line:
                 continue
@@ -149,7 +149,7 @@ def _load_events(path: Path) -> list[dict]:
 def _load(path: Path) -> list[dict]:
     rows = []
     try:
-        with open(path, errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -170,7 +170,7 @@ def _test_score(probe_dir: Path) -> float | None:
         if not f.is_file():
             continue
         try:
-            j = json.loads(f.read_text(errors="replace"))
+            j = json.loads(f.read_text(encoding="utf-8", errors="replace"))
         except Exception:               # noqa: BLE001
             continue
         sp = j.get("speedup")
@@ -217,7 +217,7 @@ def _why_no_test(probe_dir: Path) -> str:
         f = probe_dir / name
         if not f.is_file():
             continue
-        lines = f.read_text(errors="replace").splitlines()
+        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
         for needle in hunt:
             # THE FIRST MATCH IS THE WRONG MATCH, and it was the first match for a long time.
             # `newCK7` and `oldCK8b` were reported as "STILL RUNNING ... answered HTTP 503
@@ -426,13 +426,16 @@ def summarise(run_dir: Path) -> dict | None:
         ref_pct = 100.0 * hit_i / len(probes)
         ref_call_pct = 100.0 * hit_c / len(probes)
 
-    probe_dir = Path(str(run_dir).split("/runs/", 1)[0]) if "/runs/" in str(run_dir) else run_dir
+    # POSIX FORM FIRST: on Windows `str(run_dir)` has "\\" separators, "/runs/" was never in it,
+    # and every probe was named after its run dir (review 2026-09-22, WIN-SEPS).
+    posix_run = str(run_dir).replace(os.sep, "/")
+    probe_dir = Path(posix_run.split("/runs/", 1)[0]) if "/runs/" in posix_run else run_dir
     champ = probe_dir / "champion_solver.py"
     kernel = False
     champ_lines = 0
     body = ""
     if champ.is_file():
-        body = champ.read_text(errors="replace")
+        body = champ.read_text(encoding="utf-8", errors="replace")
         champ_lines = body.count("\n")
         kernel = bool(re.search(r"import numba|@njit|cimport|import cython", body))
     shipped_pyx = probe_dir.is_dir() and any(p.suffix == ".pyx" for p in probe_dir.glob("*"))
@@ -1010,4 +1013,9 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    # A QUOTED LOG LINE MAY NOT KILL THE REPORT. `_why_no_test` prints a probe's own log line, and
+    # the harness writes Russian ("чемпион: НЕТ" is a needle) -- which a cp1252 console or pipe on
+    # Windows cannot encode, so the whole summary died at the first unscored probe (review
+    # 2026-09-22). The console keeps its codec; an unencodable character prints as "?".
+    sys.stdout.reconfigure(errors="replace")
     raise SystemExit(main(sys.argv[1:]))

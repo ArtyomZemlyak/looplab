@@ -41,8 +41,16 @@ import events_read  # noqa: E402  (§381: the archive is where crash packets lan
 
 
 def _meter_start(port: int) -> float | None:
-    """When the running meter started. Spend older than this is not in its counter."""
-    for pid in os.listdir("/proc"):
+    """When the running meter started. Spend older than this is not in its counter.
+
+    None when no meter process can be found -- including on a box with no `/proc` to look in
+    (Windows), where `--since` is the only way to state it. `os.listdir("/proc")` raised there, so
+    the graceful "no meter" exit (2) died as a traceback at exit 1 (review 2026-09-22)."""
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return None
+    for pid in pids:
         if not pid.isdigit():
             continue
         try:
@@ -96,8 +104,8 @@ def spans_by_probe(root: str, since: float) -> tuple[dict, dict]:
     cost: dict[str, float] = collections.defaultdict(float)
     calls: dict[str, int] = collections.Counter()
     for f in glob.glob(os.path.join(root, "model-probes/*/runs/*/run/spans.jsonl")):
-        probe = f.split("/model-probes/")[1].split("/")[0]
-        for line in open(f):
+        probe = f.replace(os.sep, "/").split("/model-probes/")[1].split("/")[0]   # WIN-SEPS
+        for line in open(f, encoding="utf-8", errors="replace"):   # not the locale's codec
             line = line.strip()
             if not line:
                 continue
@@ -556,7 +564,7 @@ def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict, dict]:
         # `ValueError: not enough values to unpack (expected 4, got 3)`. Found 2026-09-02 by a test
         # that pointed the tool at a root that does not exist, which no earlier test had done.
         return cost, calls, killed, empty
-    for line in open(path):
+    for line in open(path, encoding="utf-8", errors="replace"):   # not the locale's codec
         line = line.strip()
         if not line:
             continue
@@ -635,7 +643,10 @@ def main(argv: list[str]) -> int:
 
     since = a.since if a.since is not None else _meter_start(a.port)
     if since is None:
-        print(f"no meter on :{a.port} -- nothing to reconcile against", file=sys.stderr)
+        # A box with no `/proc` (Windows) cannot find a running meter at all -- say so, since
+        # "no meter" would be a guess there.
+        hint = "" if os.path.isdir("/proc") else " (no /proc on this box to find it by: pass --since)"
+        print(f"no meter on :{a.port} -- nothing to reconcile against{hint}", file=sys.stderr)
         return 2
     # SPANS FIRST, COUNTER SECOND -- the order this file's own header prescribes, and did not obey.
     #
