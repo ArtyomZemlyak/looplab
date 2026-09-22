@@ -30,6 +30,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional, Protocol
 
 from looplab.core.models import Idea, IdeaEmission, Node, RunState, developer_artifact_footprint
+from looplab.core.errors import LLMError
 from looplab.core.parse import LLMClient, ParseError, extract_code, parse_structured
 from looplab.core.prompts import PromptStore, render
 
@@ -714,6 +715,15 @@ class LLMResearcher:
                     f"Your last response could not be parsed ({str(e)[:180]}). Emit the Idea again with "
                     "NUMERIC `params` only (put any non-numeric/structural change in `rationale`), a "
                     "valid `operator`, and a `rationale`."}]
+            except LLMError as e:
+                # The TRANSPORT gave up — `parse_structured` re-raises an unreachable / throttled /
+                # overloaded / credential failure or a cancel instead of re-asking through the text
+                # parser (review 2026-09-22, CORE-04). The client's own retry ladder has already run;
+                # a second attempt here would run it again for nothing (this loop made an
+                # unreachable endpoint cost 36 provider attempts for one fallback). Degrade now, to
+                # the same sentinel fallback, naming the transport's own error.
+                last = e
+                break
         if idea is None:
             # Through the shared sentinel: the engine's proposal-path circuit breaker recognises this
             # exact prefix and refuses to turn a non-proposal into a Card/node. Byte-identical text.

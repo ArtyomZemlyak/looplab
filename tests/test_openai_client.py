@@ -802,9 +802,16 @@ def test_llm_transport_error_is_clean_and_falls_back(monkeypatch):
     monkeypatch.setattr(client, "_sdk_chat", refused)
     with pytest.raises(LLMError):                 # raw URLError no longer escapes
         client.complete_text([{"role": "user", "content": "hi"}])
-    # parse_structured treats it as a parse failure -> ParseError (the role layer then falls back)
-    with pytest.raises(ParseError):
+    # parse_structured RE-RAISES a transport failure the client already gave up on instead of
+    # re-asking through the text parser, which bought the client's whole retry ladder a second time
+    # (review 2026-09-22, CORE-04; tests/test_parse_does_not_compound_transport_retries.py) — and
+    # the role layer still falls back on it, exactly as it did on the ParseError this used to be.
+    with pytest.raises(LLMError) as raised:
         parse_structured(client, [{"role": "user", "content": "hi"}], Idea, "tool_call")
+    assert not isinstance(raised.value, ParseError)
+    from looplab.agents.roles import LLMResearcher, is_researcher_fallback
+    from looplab.core.models import RunState
+    assert is_researcher_fallback(LLMResearcher(client).propose(RunState(), None))
 
 
 def test_stream_idle_guard_kills_keepalive_trickle():

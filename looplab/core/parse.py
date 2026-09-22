@@ -18,7 +18,7 @@ from typing import Protocol, Type, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
-from looplab.core.errors import LLMError
+from looplab.core.errors import LLMCancelled, LLMError
 # Function-level in `parse_structured` would be per-call import overhead on a hot path;
 # module-level is safe because `core.tracing` imports only `core` siblings and never `parse`.
 from looplab.core.tracing import structured_parse as _structured_parse
@@ -328,6 +328,12 @@ def parse_structured(
 ) -> T:
     """Return a validated `model` instance, trying parsers in fallback order.
 
+    Raises `ParseError` (chained to the last parser's failure) when no parser produced a valid
+    object, and RE-RAISES the client's `LLMError` — a cancel, or a failure `classify_llm_failure`
+    calls unreachable / throttled / overloaded / credential — when the transport itself gave up,
+    because the next parser would only buy the client's whole retry ladder again (review
+    2026-09-22, CORE-04). Every caller that degrades on a `ParseError` degrades on those too.
+
     THE WALK IS RECORDED (2026-08-19). Which parser answered, and how many failed before it, used to
     be invisible: the caller gets a validated object either way, so a native function-call collapse
     that a second provider call rescued left no trace anywhere — no span, no counter, no event. That
@@ -383,13 +389,43 @@ def _walk_parsers(client, messages, model, schema, order, obs) -> T:
             # ArithmeticError/TypeError: belt-and-suspenders for a coercion path that raises on
             # pathological model output (e.g. an int field fed an infinite float) — fall over to the
             # next parser rather than crash, honoring the "returns validated or raises ParseError"
-            # contract. LLMError (a transient endpoint/transport failure) is treated like an unparseable
-            # response: try the next parser, then let the caller fall back — never crash the run.
-            last_err = e
+            # contract. An LLMError the endpoint ANSWERED with (it refused the tool request: a 400
+            # "tools are not supported", a response we could not read) is a parser-shaped failure and
+            # falls over too — the text parser exists for exactly that endpoint.
+            #
+            # …but NOT one the TRANSPORT gave up on (review 2026-09-22, CORE-04). The client raises
+            # only after its own retry ladder has run out, so re-asking through the next parser
+            # bought the whole ladder again: 18 provider attempts for one transient failure with
+            # `max_retries=8`, a request refused for its KEY sent twice, a cancelled ask re-asked.
+            # Those re-raise, for the caller to degrade on exactly as it degrades on a ParseError.
             obs.set(f"failed_{p}", type(e).__name__)
+            if isinstance(e, LLMError) and _transport_gave_up(e):
+                obs.set("attempts", attempts).set("failed", True)
+                raise
+            last_err = e
             continue
     obs.set("attempts", attempts).set("failed", True)
-    raise ParseError(f"all parsers failed (last: {last_err})")
+    raise ParseError(f"all parsers failed (last: {last_err})") from last_err
+
+
+# The `classify_llm_failure` causes a SECOND parser cannot fix: the request never got an HTTP answer
+# (`unreachable`), the endpoint said "not now" (`throttled` 429 / `overloaded` 5xx — the client has
+# already waited those out, with backoff and Retry-After), or it refused the KEY (`credential` 401).
+# `model`/`protocol` are the endpoint answering and refusing THIS request's shape, which the text
+# parser can route around; they fall over as before.
+_TRANSPORT_EXHAUSTED_CAUSES = frozenset({"unreachable", "throttled", "overloaded", "credential"})
+
+
+def _transport_gave_up(exc: LLMError) -> bool:
+    """Should `_walk_parsers` re-raise this LLMError instead of trying the next parser? A cancel
+    always (the caller's token fired; nothing may be re-asked), else by `classify_llm_failure`'s
+    reading of the SDK error the client raised `from` — never by message text."""
+    if isinstance(exc, LLMCancelled):
+        return True
+    # Function-local: `llm_transient` imports the openai SDK, which `core.parse` must not pay for
+    # on import (this runs only on a failed call).
+    from looplab.core.llm_transient import classify_llm_failure
+    return classify_llm_failure(exc) in _TRANSPORT_EXHAUSTED_CAUSES
 
 
 def forced_structured(client: LLMClient, messages: list[dict], model: Type[T], parser: str,
@@ -408,10 +444,11 @@ def forced_structured(client: LLMClient, messages: list[dict], model: Type[T], p
     rather than escape past the salvage.
 
     The exception posture is the part worth spelling ONCE, because it depends on a fact that is not
-    visible at any call site: `BudgetExceeded` is deliberately NOT an `LLMError`, so unlike a
-    transport failure it passes straight through `parse_structured` rather than arriving as a
-    `ParseError`. A hard budget stop must therefore END the run here, while everything else — an
-    unparseable answer, a dead endpoint, a coercion that blew up — degrades. Two of the three sites
+    visible at any call site: `BudgetExceeded` is deliberately NOT an `LLMError`, so it passes
+    straight through `parse_structured` as itself — and since review 2026-09-22 (CORE-04) so does a
+    transport failure the client already gave up on, as the client's own `LLMError`, rather than
+    arriving as a `ParseError`. A hard budget stop must therefore END the run here, while everything
+    else — an unparseable answer, a dead endpoint, a coercion that blew up — degrades. Two of the three sites
     re-stated that re-raise and one relied on a narrower catch to get the same effect by accident.
     """
     from looplab.core.errors import BudgetExceeded

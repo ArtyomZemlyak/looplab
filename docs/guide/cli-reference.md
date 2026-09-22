@@ -1031,7 +1031,11 @@ runs/demo: structured-output parser, per phase
 * **repaired** counts wins that only validated after schema-aligned coercion. A `tool_call` that
   needed repair is a native call that nearly collapsed; it is deliberately not counted as a clean
   first-try win, because that would hide exactly the signal the setting turns on.
-* **failed** is the whole walk failing — every parser in the order exhausted.
+* **failed** is the whole walk failing — every parser in the order exhausted, or the walk stopped
+  at a TRANSPORT failure no second parser could fix (the endpoint unreachable, throttled,
+  overloaded or refusing the key, or the ask cancelled). Those re-raise instead of re-asking
+  through `baml`, because the client raises them only after its own retry ladder ran out, and
+  re-asking bought that whole ladder a second time.
 
 Exit 2 when the run has no such observations: a run recorded before 2026-08-19, or one where
 nothing was traced. It says so rather than printing zeros, because "no data" and "the parser never
