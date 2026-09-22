@@ -52,9 +52,12 @@ Each is universal (no path list, no command list), and each closes a recorded in
        This is the rung that produces an ACTIONABLE message, in the one exception type
        `except OSError:` does not swallow. It sees only what CPython AUDITS, which is much less than
        "the ways a file can come into existence" — see the residual below. It is ALSO the only rung
-       covering METADATA and truncation: Landlock ABI 2 has no ownership or mode right and
-       `FS_TRUNCATE` is ABI 3, so `os.truncate`/`chmod`/`chown`/`utime` go through the kernel rung
-       and are refused here (driven, all three, with the victim file unchanged).
+       covering METADATA: Landlock has no ownership or mode right at any ABI, so
+       `chmod`/`chown`/`utime` go through the kernel rung and are refused here (driven, with the
+       victim file unchanged). TRUNCATION is covered by both rungs on a kernel with Landlock ABI >= 3
+       (`FS_TRUNCATE`, handled there since review 2026-09-22 RTA-07 — `truncate(2)` opens nothing,
+       so the `FS_WRITE_FILE` open right never saw a native caller) and by this hook alone below it,
+       where a native `truncate(2)` through `ctypes` is the stated residual.
      * a Landlock ruleset that HANDLES every filesystem-mutating access right and GRANTS NOTHING
        (`runtime/landlock.py::NO_MUTATION_HANDLED`, applied by the generated launcher before the
        program runs). This is the rung that covers a file's EXISTENCE for EVERY caller — a native
@@ -160,10 +163,12 @@ RESIDUALS, stated rather than papered over
   (`pyarrow`, `h5py`) is not. The launcher prints ONE line naming that when it happens, rather than
   running under a quieter version of the same sentence. Verified present here: Landlock ABI 2,
   kernel 6.1.0-22.
-* Landlock ABI 2 does not mediate `chmod`/`chown`/`utime`/`ftruncate`-on-an-open-fd — there are no
-  access bits for ownership or mode, and `FS_TRUNCATE` arrived in ABI 3. All four raise their own
-  audit event and are refused by the hook with the actionable message; the point is only that the
-  two rungs are complementary in BOTH directions, and neither is a superset.
+* Landlock does not mediate `chmod`/`chown`/`utime` at any ABI — there are no access bits for
+  ownership or mode — and mediates `truncate`/`ftruncate` only from ABI 3 (`FS_TRUNCATE`, which the
+  kernel rung handles wherever the kernel has it; an `ftruncate` on a descriptor opened BEFORE the
+  rung was applied is never mediated, because Landlock decides a file's rights at open). All four
+  raise their own audit event and are refused by the hook with the actionable message; the point is
+  only that the two rungs are complementary in BOTH directions, and neither is a superset.
 * WHICH READS ARE POLICED DEPENDS ON WHICH RUNG IS IN FORCE, and the two answers are opposite.
   Under the shipped default (`developer_probe_confine=true`) rule 1's KERNEL half is an ALLOW-LIST
   and a read IS policed: the probe reaches its own replica, the interpreter's tiers and the task's

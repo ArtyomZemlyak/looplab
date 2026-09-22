@@ -445,10 +445,12 @@ def test_the_audit_hook_is_still_the_only_rung_covering_metadata_and_truncation(
     """The complementarity runs in BOTH directions, which is why the kernel rung is added beside the
     hook and not instead of it.
 
-    Landlock ABI 2 has no ownership or mode access right and `FS_TRUNCATE` arrived in ABI 3, so
-    `os.truncate`/`chmod`/`utime` pass the ruleset untouched — measured directly against a bare
-    ruleset. All three raise their own audit event, so the hook refuses them with the actionable
-    message, and this is the assertion that the file really is unchanged."""
+    Landlock has no ownership or mode access right at any ABI, so `os.chmod`/`os.utime` pass the
+    ruleset untouched — measured directly against a bare ruleset — and `os.truncate` passes it on a
+    kernel below ABI 3, where `FS_TRUNCATE` cannot be handled (from ABI 3 the kernel refuses it too:
+    `tests/test_landlock_abi_rules.py`). All three raise their own audit event, so the hook refuses
+    them with the actionable message on EVERY kernel, and this is the assertion that the file really
+    is unchanged."""
     victim = outside / "existing.txt"
     for code in (f"import os; os.truncate({str(victim)!r}, 0)",
                  f"import os; os.chmod({str(victim)!r}, 0o600)",

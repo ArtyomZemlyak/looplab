@@ -118,10 +118,12 @@ FS_MAKE_FIFO = 1 << 10
 FS_MAKE_BLOCK = 1 << 11
 FS_MAKE_SYM = 1 << 12
 FS_REFER = 1 << 13          # ABI 2 — and it is ONLY grantable on a ruleset that handles it
+FS_TRUNCATE = 1 << 14       # ABI 3 — handled only where the kernel knows it (`abi_access`)
 
 # What each declared mode grants. A READ mount gets read+exec (an allow-listed site-packages or a
 # base-model cache must stay importable and, for a venv's `bin/`, executable); a READWRITE mount gets
-# the whole ABI-1 set. `FS_REFER` is deliberately NOT handled: it is the ABI-2 rename/link-across-
+# the whole ABI-1 set, plus `FS_TRUNCATE` on a kernel that has it (`allowlist_masks`). `FS_REFER` is
+# deliberately NOT handled: it is the ABI-2 rename/link-across-
 # directories right, and a ruleset that HANDLES it forbids every cross-directory rename that is not
 # explicitly re-granted — which would break `os.replace` in a checkpoint writer for no security we
 # are asking for here. Not handling a bit means the kernel does not police it at all.
@@ -129,7 +131,8 @@ _READ = FS_READ_FILE | FS_READ_DIR | FS_EXECUTE
 _WRITE = (_READ | FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR | FS_MAKE_DIR
           | FS_MAKE_REG | FS_MAKE_SOCK | FS_MAKE_FIFO | FS_MAKE_BLOCK | FS_MAKE_SYM)
 # The set the ruleset HANDLES — i.e. the set that is denied where it is not granted. Exactly the
-# union above, so `handled \ granted` is what a rule refuses and nothing else is policed.
+# union above, so `handled \ granted` is what a rule refuses and nothing else is policed. These three
+# are the ABI-1 BASE; what a launch actually hands the kernel is `allowlist_masks(abi)`.
 _HANDLED = _WRITE
 
 # THE SECOND RULESET SHAPE, and it is the INVERSE of the allow-list above: handle only the bits that
@@ -150,10 +153,14 @@ _HANDLED = _WRITE
 # training run, and this shape has no such unknown because it grants nothing and forbids nothing a
 # probe is allowed to do.
 #
-# `FS_TRUNCATE` (ABI 3) is absent because this box is ABI 2 and an unsupported bit in
-# `handled_access_fs` is EINVAL for the whole ruleset. It costs nothing here: truncating a file
-# through a path needs `FS_WRITE_FILE`, which IS handled, and `os.truncate`/`os.ftruncate` raise
-# their own audit event, which `dev_probe`'s hook refuses with the actionable message. `FS_REFER`
+# `FS_TRUNCATE` (ABI 3) is added by `no_mutation_handled(abi)` on a kernel that has it, and is
+# absent from this ABI-1 BASE because an unsupported bit in `handled_access_fs` is EINVAL for the
+# whole ruleset. This paragraph used to say the omission "costs nothing here", on two grounds, and
+# the first was false: `truncate(2)` takes a PATH and opens nothing, so `FS_WRITE_FILE` — an OPEN
+# right — never sees it (review 2026-09-22, RTA-07: a ctypes `libc.truncate` emptied a file under
+# this ruleset). The second holds and is why the gap is only the NATIVE caller: `os.truncate` and
+# `os.ftruncate` raise their own audit event, which `dev_probe`'s hook refuses with the actionable
+# message. On an ABI-2 kernel that native residual stands and is stated, not hidden. `FS_REFER`
 # is absent for the same reason it is absent above, and needs no second argument here: a rename
 # needs REMOVE on the source directory and MAKE on the destination, and neither is granted.
 NO_MUTATION_HANDLED = (FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR | FS_MAKE_DIR
@@ -260,10 +267,49 @@ def unavailable_reason() -> Optional[str]:
     return None
 
 
-def _grant(mode: str) -> int:
+def abi_access(abi: Optional[int]) -> int:
+    """The access bits BEYOND the ABI-1 set that a ruleset for a kernel of Landlock ABI `abi` handles.
+
+    Today that is `FS_TRUNCATE`, from ABI 3 (review 2026-09-22, RTA-07). Every mask here used to be
+    the ABI-1 set, justified in two comments by "this box is ABI 2" — true on the day it was
+    measured, and the reason a kernel bump changed nothing: the box the review ran on answers ABI 7,
+    and `truncate(2)` was still policed by no rule on any path, under `landlock=enforce` (the run
+    directory is granted READ precisely so a node cannot rewrite the record, and `truncate -s 0
+    events.jsonl` emptied it) and under the probe's "no write anywhere" ruleset alike. It is
+    CONDITIONAL because an unsupported bit in `handled_access_fs` is EINVAL for the whole ruleset:
+    an ABI-2 kernel must never be asked for it, and there the native-truncate residual stands.
+
+    `FS_REFER` (ABI 2) is still deliberately NOT here, for the `os.replace` reason stated at `_READ`.
+    """
+    return FS_TRUNCATE if isinstance(abi, int) and abi >= 3 else 0
+
+
+def allowlist_masks(abi: Optional[int]) -> tuple:
+    """`(read, readwrite, handled)` — the eval allow-list's three masks on a kernel of ABI `abi`.
+
+    ONE derivation for both spellings of the ruleset: `build_ruleset` (what `looplab landlock-check`
+    and `apply` run) and the generated `_LAUNCHER` (what the eval runs), which cannot import this
+    module and receives these values templated in. `FS_TRUNCATE` joins the READWRITE grant and the
+    handled set together — handled-but-not-granted under a writable rule would refuse every
+    `open(path, "w")` of an existing file in the node's own workdir, since `O_TRUNC` is a truncate —
+    and it is never part of the READ grant, which is the whole point of handling it."""
+    extra = abi_access(abi)
+    return _READ, _WRITE | extra, _HANDLED | extra
+
+
+def no_mutation_handled(abi: Optional[int]) -> int:
+    """`NO_MUTATION_HANDLED` on a kernel of ABI `abi`: the ABI-1 base plus `abi_access(abi)`.
+
+    Granting nothing, so every bit in here is refused on every path — and still no read bit, which
+    is what keeps the empty ruleset correct (see `NO_MUTATION_HANDLED`)."""
+    return NO_MUTATION_HANDLED | abi_access(abi)
+
+
+def _grant(mode: str, abi: Optional[int] = None) -> int:
     if mode not in MODES:
         raise ValueError(f"landlock mode {mode!r} is not one of {MODES!r}")
-    return _READ if mode == "read" else _WRITE
+    read, write, _handled = allowlist_masks(abi)
+    return read if mode == "read" else write
 
 
 def build_ruleset(allow) -> tuple:
@@ -281,7 +327,10 @@ def build_ruleset(allow) -> tuple:
     if reason is not None:
         raise LandlockUnavailable(reason)
     lib = _libc()
-    attr = _RulesetAttr(handled_access_fs=_HANDLED)
+    # The masks for THIS kernel (`allowlist_masks`), the same derivation `launcher_source` templates
+    # into the eval's launcher, so the check command and the launch police the same bits.
+    abi = abi_version()
+    attr = _RulesetAttr(handled_access_fs=allowlist_masks(abi)[2])
     ctypes.set_errno(0)
     fd = lib.syscall(ctypes.c_long(_SYS_LANDLOCK_CREATE_RULESET), ctypes.byref(attr),
                      ctypes.c_size_t(ctypes.sizeof(attr)), ctypes.c_uint32(0))
@@ -291,7 +340,7 @@ def build_ruleset(allow) -> tuple:
     added, skipped = [], []
     try:
         for path, mode in allow:
-            access = _grant(mode)
+            access = _grant(mode, abi)
             try:
                 pfd = os.open(str(path), os.O_PATH | os.O_CLOEXEC)   # type: ignore[attr-defined]
             except OSError as exc:
@@ -656,23 +705,40 @@ def read_confine_source() -> str:
                                    "restrict": _SYS_LANDLOCK_RESTRICT_SELF}
 
 
-def no_mutation_source() -> str:
+# "Render for the kernel this process is on" — the default of both source renderers below. A
+# sentinel rather than `None`, because `None` is a real answer (`abi_version()` on a box without
+# Landlock) and a caller asking for THAT rendering must get it.
+_THIS_KERNEL = object()
+
+
+def _resolve_abi(abi) -> Optional[int]:
+    return abi_version() if abi is _THIS_KERNEL else abi
+
+
+def no_mutation_source(abi=_THIS_KERNEL) -> str:
     """Source defining `NO_MUTATION_FUNCTION` — the deny-every-mutation kernel rung, self-contained.
 
     For a caller that generates its OWN child launcher and needs the rung inside it (`dev_probe`).
     The syscall numbers and the handled-bit mask are TEMPLATED IN from this module's constants for
     the reason `_LAUNCHER` states: a hand-copied bit here does not crash, it silently produces a
-    ruleset that polices something other than what was asked for."""
-    return _NO_MUTATION_SOURCE % {"handled": NO_MUTATION_HANDLED,
+    ruleset that polices something other than what was asked for.
+
+    The mask is `no_mutation_handled` for the kernel the child will run on — this one, since the
+    probe's launcher is generated and started on the same box — so `FS_TRUNCATE` is refused where
+    the kernel can police it and never asked for where it would EINVAL the whole rung."""
+    return _NO_MUTATION_SOURCE % {"handled": no_mutation_handled(_resolve_abi(abi)),
                                   "create": _SYS_LANDLOCK_CREATE_RULESET,
                                   "restrict": _SYS_LANDLOCK_RESTRICT_SELF}
 
 
-def launcher_source() -> str:
-    """The `-c` source for `launch_argv`, with this module's constants substituted in."""
+def launcher_source(abi=_THIS_KERNEL) -> str:
+    """The `-c` source for `launch_argv`, with this module's constants substituted in — the masks
+    are `allowlist_masks` for the kernel the launch runs on (`run_argv` builds and starts it on the
+    same box), the same derivation `build_ruleset` applies for `looplab landlock-check`."""
+    read, write, handled = allowlist_masks(_resolve_abi(abi))
     return _LAUNCHER % {"unit": _UNIT, "record": _RECORD, "create": _SYS_LANDLOCK_CREATE_RULESET,
                         "add": _SYS_LANDLOCK_ADD_RULE, "restrict": _SYS_LANDLOCK_RESTRICT_SELF,
-                        "read": _READ, "write": _WRITE, "handled": _HANDLED}
+                        "read": read, "write": write, "handled": handled}
 
 
 def launch_argv(python: str, spec: str, argv: list) -> list:
