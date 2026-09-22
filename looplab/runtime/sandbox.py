@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
 
-from looplab.core.errors import ConfigRefusal
+from looplab.core.errors import BudgetExceeded, ConfigRefusal
 from looplab.core.numeric import parse_mem_bytes  # noqa: F401 (re-export; moved to core, CORE-05)
 from looplab.runtime.read_fence import (FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath,
                                         reassert as _reassert_fence)
@@ -1006,10 +1006,23 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # in-memory tail): `communicate()` buffered the ENTIRE stdout/stderr before clamping, so an
     # adversarial/buggy fast printer on the untrusted solution.py path (which never sets log_path)
     # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
-    rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel,
-                                         health_check=health_check, stall_timeout=stall_timeout,
-                                         signals=signals, on_deadline=on_deadline,
-                                         deadline_grace_max_s=deadline_grace_max_s)
+    try:
+        rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel,
+                                             health_check=health_check, stall_timeout=stall_timeout,
+                                             signals=signals, on_deadline=on_deadline,
+                                             deadline_grace_max_s=deadline_grace_max_s)
+    except BudgetExceeded:
+        # The deadline judge met the operator's spend ceiling; `_tee_drain` has already tree-killed
+        # the client at its wall. The daemon-owned container is the timeout path's to remove and
+        # this is a timeout that is also a stop — remove it before the stop ends the eval (review
+        # 2026-09-22, RTA-04), exactly as the block below does for `timed_out`.
+        if docker_cidfile is not None:
+            try:
+                _remove_docker_container(str(argv[0]), docker_cidfile)
+                docker_cidfile.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     if docker_cidfile is not None:
         # Defense-in-depth: the cidfile now lives in the host temp dir (unreachable by the container),
         # but never let a cleanup hiccup (a FUSE OSError, or — pre-#5 — untrusted code having replaced
@@ -1218,11 +1231,18 @@ def _granted_grace(on_deadline, tail: str, cap) -> float:
     `cap`, `cap` and 0.0 respectively — the ACTION space widens by a bounded amount and the
     candidate's own log, which is what the judge reads, can buy time and nothing else. It cannot buy
     a metric: `read_metric` and the operator's `score` stage are untouched by this, and a graced run
-    that still misses the extended deadline reports `timed_out` exactly as before."""
+    that still misses the extended deadline reports `timed_out` exactly as before.
+
+    EXCEPT THE OPERATOR'S SPEND CEILING, which is not a non-answer (review 2026-09-22, RTA-04): the
+    judge re-raises `BudgetExceeded`, and so does this. It must never escape `_tee_drain`'s wait loop
+    with the child still running at its wall — `_tee_drain` catches it at the call, kills the tree
+    exactly as a declined grace would, and lets it through only once its drain is done."""
     if on_deadline is None or not cap or float(cap) <= 0:
         return 0.0
     try:
         asked = on_deadline(tail)
+    except BudgetExceeded:
+        raise
     except Exception:  # noqa: BLE001 — a judge that raises must not turn a timeout into a crash
         return 0.0
     try:
@@ -1281,6 +1301,11 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     # the caller can say so rather than silently reporting a longer stage.
     graced = [False]
     granted = [0.0]
+    # The operator's spend ceiling, if the deadline judge raised it. HELD, never raised from inside
+    # the wait loop: the judge is asked with the child still running at its wall, so the stop is let
+    # through only after the kill below has run and this drain has finished (review 2026-09-22,
+    # RTA-04) — a raise from the loop would leave the tree running and, under Docker, its container.
+    budget_stop: list = [None]
     # THE TWO CLOCKS MEET HERE. `deadline` bounds TOTAL wall time; `stall_timeout` bounds SILENCE.
     # A granted grace moves the first and says nothing about the second, and until 2026-08-14 the
     # stall branch below — evaluated FIRST in the same 250 ms tick — killed the child it had just
@@ -1438,7 +1463,12 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _grace = 0.0
                 if on_deadline is not None and not graced[0]:
                     graced[0] = True
-                    _grace = _granted_grace(on_deadline, _current_tail(), deadline_grace_max_s)
+                    try:
+                        _grace = _granted_grace(on_deadline, _current_tail(), deadline_grace_max_s)
+                    except BudgetExceeded as _stop:
+                        # No grace — the historical kill below runs — and the stop is HELD for the
+                        # end of this drain (see `budget_stop`).
+                        budget_stop[0] = _stop
                 if _grace > 0:
                     deadline = _time.monotonic() + _grace
                     granted[0] += _grace
@@ -1527,6 +1557,10 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
         # the child printed before it went quiet — the STALLED marker tells the agent what happened.)
         if rc == 0:
             rc = -1
+    if budget_stop[0] is not None:
+        # The tree was killed at its wall and the drain is complete: NOW the ceiling may end the
+        # eval. `run_argv` still owes a `docker run` its container removal on the way out.
+        raise budget_stop[0]
     return rc, out, err, timed_out
 
 

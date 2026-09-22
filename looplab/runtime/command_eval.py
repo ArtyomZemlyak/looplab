@@ -35,6 +35,9 @@ from looplab.core.atomicio import same_file_entry
 # where all three can reach it. Re-exported here because THIS is where the stage contract is read.
 from looplab.core.envsafe import (ENGINE_OWNED_ENV, MAX_ENV_VALUE_CHARS,  # noqa: F401 (re-export)
                                   MAX_STAGE_ENV_VARS, merge_env, validate_env_map)
+# The operator's spend ceiling, which the engine's PAID stage checker re-raises and this module
+# must let through (`_run_stages`). `core/errors.py` is the light half of the provider vocabulary.
+from looplab.core.errors import BudgetExceeded
 # The `extra_metrics` CHANNEL vocabulary. It lives in `core/models.py` beside
 # `normalize_extra_metrics` because the fold, the UI projections and this writer must all spell the
 # two channels the same way — `runtime` may import `core`, and this is the site that KNOWS which
@@ -3078,6 +3081,13 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         if (_stg.get("check") or _assertion) and check_fn is not None:
             try:
                 _concern = _call_stage_check(check_fn, _sname, run.out[-4000:], _assertion)
+            except BudgetExceeded:
+                # The checker is the engine's PAID judge and re-raises the operator's spend
+                # ceiling; contained below it read as "no concern" and the pipeline ran on to its
+                # next paid call (review 2026-09-22, RTA-04). Safe to let through HERE: the check
+                # runs between stages, so no child of this pipeline is alive to be orphaned, and the
+                # eval driver's terminal-first handling expects a stage check's stop to propagate.
+                raise
             except Exception:  # noqa: BLE001 — a checker failure must not crash the eval
                 _concern = None
             # THE VERDICT, not the string. `_stage_check_outcome` is the one rule that decides
