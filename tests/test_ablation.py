@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import anyio
+import pytest
 
 from looplab.events.eventstore import EventStore
 from factories import make_engine
@@ -157,7 +158,15 @@ def test_the_probe_reports_the_wall_clock_it_actually_measured(tmp_path, monkeyp
     _stub_ablation_clock(monkeypatch)
 
     class _Host(AblationMixin):
-        async def _run_ablation_probe(self, code, workdir, parent_id, generation):
+        # The probe's eval resource is reserved and released around the clock (ENG2-10); both are
+        # stubbed so the clock still brackets exactly one probe.
+        async def _reserve_ablation_probe(self, parent_id, generation):
+            return {"gpu_ids": []}
+
+        def _release_gpus(self, gpu_ids):
+            pass
+
+        async def _run_ablation_probe(self, code, workdir, parent_id, generation, *, reservation):
             return f"result:{code}"
 
         def _ablation_parent_current(self, parent_id, generation):
@@ -186,3 +195,147 @@ def test_ablation_event_budgets_the_probe_seconds(tmp_path, monkeypatch):
         assert secs >= PROBE_STEP * len(e.data["impacts"]), e.data
         assert secs == PROBE_STEP * round(secs / PROBE_STEP), (
             f"{secs}s is not a whole number of {PROBE_STEP}s probes", e.data)
+
+
+# --- a probe is an eval launch like any other (review 2026-09-22, ENG2-10) ----------------------
+#
+# `_run_ablation_probe` called `self.sandbox.run(code, workdir, timeout, cancel=...)` with NO env,
+# so every ablation probe ran without the read fence, the kernel rungs, the GPU pin and the
+# declared `eval_env` — and, since the fence's write rule is what keeps a candidate out of the run
+# RECORD, a probe could append to `events.jsonl` two directories above its workdir. These drive the
+# probe through `_timed_ablation_probe`, the one seam both ablation loops call, and through
+# `_ablate` itself.
+
+_DECLARED = {"ABLATION_DECLARED": "yes"}
+
+
+def _probe_source() -> str:
+    from looplab.runtime.read_fence import FENCE_DIR_ENV
+
+    return ("import json, os\n"
+            f"print('FENCE=' + str(bool(os.environ.get({FENCE_DIR_ENV!r}))))\n"
+            "print('DECLARED=' + os.environ.get('ABLATION_DECLARED', ''))\n"
+            "try:\n"
+            "    open(os.path.join('..', '..', 'events.jsonl'), 'a').write('{\"forged\": 1}\\n')\n"
+            "    print('RECORD=written')\n"
+            "except BaseException as exc:\n"
+            "    print('RECORD=refused ' + type(exc).__name__)\n"
+            "print(json.dumps({'metric': 1.0}))\n")
+
+
+def _probe_engine(rd, **overrides):
+    """A toy engine with a declared run-level `eval_env` and one parent: two numeric params and two
+    code blocks, so either ablation mode has MORE than one probe to run (which is what lets a test
+    see a pass that should have stopped at its first abstention keep going)."""
+    eng = make_engine(rd, eval_env=dict(_DECLARED), **overrides)
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 2.0}},
+        "code": "x = 1\n\nprint(x)\n"})
+    return eng
+
+
+def test_an_ablation_probe_runs_fenced_with_the_declared_env_and_cannot_write_the_record(tmp_path):
+    """A real subprocess: the fence marker and the declared env reach the probe, and the write to
+    the run record two directories up is REFUSED rather than landing in `events.jsonl`."""
+    rd = tmp_path / "run"
+    eng = _probe_engine(rd)
+    wd = rd / "ablate" / "probe"
+    wd.mkdir(parents=True)
+    res, seconds, current = anyio.run(
+        lambda: eng._timed_ablation_probe(_probe_source(), wd, 0, 0))
+    assert current is True and res is not None and res.exit_code == 0, (res and res.stderr)
+    lines = res.stdout.splitlines()
+    assert "FENCE=True" in lines, res.stdout
+    assert "DECLARED=yes" in lines, res.stdout
+    assert any(line.startswith("RECORD=refused") for line in lines), res.stdout
+    assert "forged" not in (rd / "events.jsonl").read_text(encoding="utf-8")
+    assert seconds > 0.0
+
+
+class _RecordingSandbox:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def run(self, code, workdir, timeout=30.0, env=None, cancel=None):
+        from looplab.runtime.sandbox import RunResult
+
+        self.calls.append(("run", dict(env or {})))
+        return RunResult(exit_code=0, stdout="", stderr="", metric=1.0, timed_out=False)
+
+
+def _pinned_host(eng, calls, *, grant=True):
+    """One GPU, physical id "7"; the reservation and release are RECORDED, as in
+    `tests/test_confirm_integration.py`'s pool test."""
+    eng._gpu_ids = [0]
+    eng._gpu_physical_ids = {0: "7"}
+    eng._gpu_mem = {0: 16_000}
+    eng._free_gpus = [0]
+
+    async def reserve(nd, *, resource_pin=None, wait_once=False):
+        calls.append(("reserve", nd.id))
+        if not grant:
+            return None
+        request = eng._resource_request_for_node(nd, resource_pin=resource_pin)
+        return {**request, "count": 1, "gpu_ids": [0]}
+
+    eng._wait_reserve_node_resources = reserve
+    eng._release_gpus = lambda ids: calls.append(("release", list(ids or [])))
+
+
+def test_an_ablation_probe_holds_a_pinned_reservation_released_once_and_the_wait_is_not_charged(
+        tmp_path, monkeypatch):
+    """The GPU pin and the reservation's lifetime, like `noise_floor.py::_run_noise_seed`: reserve
+    for the PARENT, launch pinned to that device with the declared env on top, release exactly once
+    — and start the probe clock only AFTER the reservation, because the `ablate` event's seconds
+    are charged against `max_eval_seconds` and a wait for a device is not evaluation."""
+    import types
+
+    import looplab.engine.ablation as ablation
+
+    calls: list = []
+    eng = _probe_engine(tmp_path / "run", sandbox=_RecordingSandbox(calls))
+    _pinned_host(eng, calls)
+    ticks = iter(range(10_000))
+
+    def _clock():
+        calls.append(("clock",))
+        return 1000.0 + PROBE_STEP * next(ticks)
+
+    monkeypatch.setattr(ablation, "time", types.SimpleNamespace(monotonic=_clock))
+    res, seconds, current = anyio.run(
+        lambda: eng._timed_ablation_probe("print(1)\n", tmp_path / "wd", 0, 0))
+    assert res is not None and res.metric == 1.0 and current is True
+    assert seconds == PROBE_STEP
+    kinds = [c[0] for c in calls]
+    assert kinds == ["reserve", "clock", "run", "clock", "release"], kinds
+    env = calls[2][1]
+    assert env.get("CUDA_VISIBLE_DEVICES") == "7"
+    assert env.get("ABLATION_DECLARED") == "yes"
+    assert calls[-1] == ("release", [0])
+
+
+@pytest.mark.parametrize("code_blocks", [False, True])
+def test_a_probe_that_never_got_its_resource_did_not_run_and_is_not_an_essential_block(
+        tmp_path, monkeypatch, code_blocks):
+    """The bounded wait ABSTAINS. A probe that never launched says nothing about its parameter or
+    its block: code-block ablation reads a probe with no metric as "removing this block broke the
+    run", so an abstention recorded that way would elect a block nobody measured. The pass stops at
+    the first abstention (every later probe would wait out the same bound), charges no seconds for
+    the wait, and never starts the sandbox."""
+    import looplab.engine.ablation as ablation
+
+    calls: list = []
+    eng = _probe_engine(tmp_path / "run", sandbox=_RecordingSandbox(calls))
+    eng._ablate_code_blocks = code_blocks
+    eng.store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0, "stdout_tail": "", "eval_seconds": 0.1})
+    _pinned_host(eng, calls, grant=False)
+    monkeypatch.setattr(ablation, "_ABLATION_RESOURCE_TICKS", 3)
+    anyio.run(eng._ablate, 0)
+    assert not any(c[0] == "run" for c in calls), "a probe launched without its resource"
+    assert [c[0] for c in calls] == ["reserve"] * 3, calls
+    events = [e for e in eng.store.read_all() if e.type == "ablate"]
+    assert len(events) == 1
+    assert events[0].data["impacts"] == {}, events[0].data
+    assert events[0].data["eval_seconds"] == 0.0

@@ -8,7 +8,8 @@ _emit_agent_report / _repo_spec / _eval_spec / _ablate_code_blocks), exactly as 
 inside the class.
 
 Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never serve — only
-events, core and stdlib."""
+events, core, `runtime.sandbox` (the `GpuPinUnenforceable` a probe launch can refuse with, the
+import `noise_floor.py` has for the same reason) and stdlib."""
 from __future__ import annotations
 
 import threading
@@ -18,11 +19,22 @@ from uuid import uuid4
 
 import anyio
 
+from looplab.core.containment import contain
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import Idea, durable_idea_payload
 from looplab.engine.card_reservation import scored_anchor
 from looplab.events.replay import fold
 from looplab.events.types import EV_ABLATE
+from looplab.runtime.sandbox import GpuPinUnenforceable
+
+
+# A BOUNDED wait for a probe's eval resource, per probe — the noise floor's bound
+# (`noise_floor.py::_NOISE_RESOURCE_TICKS`: 120 ticks of the 0.5 s resource condition) and for the
+# same reason. An ablation runs on the MAIN task, and the host GPU-pool lease is one file per OS
+# user (`engine/resources.py`), so a co-hosted run can hold it for hours; an unbounded wait here
+# would freeze the run loop behind it. A probe that does not get its device inside the bound
+# ABSTAINS (see `_timed_ablation_probe`), and the pass stops at the first abstention.
+_ABLATION_RESOURCE_TICKS = 120
 
 
 class AblationMixin:
@@ -35,14 +47,61 @@ class AblationMixin:
         return (parent is not None and parent.attempt == generation
                 and not parent.tombstoned and parent_id not in state.aborted_nodes)
 
-    async def _run_ablation_probe(self, code: str, workdir, parent_id: int, generation: int):
+    async def _reserve_ablation_probe(self, parent_id: int, generation: int) -> Optional[dict]:
+        """The eval resource ONE probe launches under, or None — the parent's lifecycle moved
+        during the wait, or the bounded wait (`_ABLATION_RESOURCE_TICKS`) ran out.
+
+        Reserved for the PARENT: a probe is the parent's own program with one parameter neutralised
+        or one block commented out, so it needs what the parent's eval needed, under the parent's
+        Card pin. The pin is read ONCE, as `noise_floor.py::_run_noise_seed` reads it and for its
+        reason — the wait is bounded, and a re-pin landing inside it is honoured by the next probe's
+        reservation instead of by a whole-log fold per tick.
+        """
+        state = fold(self.store.read_all())
+        parent = state.nodes.get(parent_id)
+        if parent is None:
+            return None
+        pin = self._card_resource_pin_for_node(state, parent)
+        for _ in range(_ABLATION_RESOURCE_TICKS):
+            if not self._ablation_parent_current(parent_id, generation):
+                return None
+            reservation = await self._wait_reserve_node_resources(
+                parent, resource_pin=pin, wait_once=True)
+            if reservation is not None:
+                return reservation
+        return None
+
+    async def _run_ablation_probe(self, code: str, workdir, parent_id: int, generation: int, *,
+                                  reservation: dict):
         """Run one off-tree probe while watching the parent lifecycle.
 
         Ablation used to check for reset/abort only *after* ``sandbox.run`` returned.  A stale
         result could not enter the tree, but an expensive subprocess kept consuming resources all
         the way to its timeout.  The normal evaluation path already has this cooperative kill
         seam; ablation needs the same guarantee because its probes are real sandbox executions.
+
+        FENCED LIKE EVERY OTHER EVAL LAUNCH (review 2026-09-22, ENG2-10). Until then this called
+        ``self.sandbox.run(code, workdir, timeout, cancel=…)`` with NO env, so a probe — the
+        candidate's own code, a real subprocess — ran without the read fence, the kernel rungs
+        (`landlock`, `syscall_fence`), the GPU pin and the declared `eval_env`; and because the
+        fence's WRITE rule is what keeps a candidate out of the run record, a probe could append to
+        the `events.jsonl` two directories above its workdir. The env is now built the way the
+        solution path's own eval builds it (`evaluate.py`'s `a.eval_env`, then
+        `eval_dispatch.py::_run_eval`'s `_declared_eval_env`): the reservation's pinned env
+        through `_resource_eval_env`, which stamps the fence markers, with the run- and task-level
+        declared environment on top. `reservation` is REQUIRED so no caller can launch a probe
+        without having decided what it runs on; `_timed_ablation_probe` owns it and releases it.
+
+        Returns None when the launch was REFUSED for a GPU pin the runtime cannot enforce: that
+        ends this probe, never the run (ablation runs on the main task, where a raise would abort
+        the loop and re-raise on every resume), and the caller reads None as "never ran".
         """
+        try:
+            env = self._declared_eval_env(
+                self._resource_eval_env(reservation, inherit_host=True), self._eval_spec)
+        except GpuPinUnenforceable as exc:
+            contain("ablation_probe_unpinnable", exc)
+            return None
         cancel = threading.Event()
 
         async def _watch_parent() -> None:
@@ -59,11 +118,19 @@ class AblationMixin:
 
         def _run():
             return self.sandbox.run(
-                code, str(workdir), self.timeout, cancel=cancel)
+                code, str(workdir), self.timeout, env, cancel=cancel)
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(_watch_parent)
-            result = await anyio.to_thread.run_sync(_run)
+            try:
+                result = await anyio.to_thread.run_sync(_run)
+            except GpuPinUnenforceable as exc:
+                # The Docker tiers refuse a pin they cannot enforce AT LAUNCH, i.e. here. Caught
+                # INSIDE the task group, around the await, for the reason `confirm_phase.py`
+                # records: a handler outside it would never match the ExceptionGroup anyio wraps a
+                # task-group body error in.
+                contain("ablation_probe_unpinnable", exc)
+                result = None
             cancel.set()
             tg.cancel_scope.cancel()
         return result
@@ -126,6 +193,11 @@ class AblationMixin:
                 abl_seconds += seconds
                 if not current:
                     superseded = True
+                if res is None:
+                    # The probe NEVER RAN (see `_timed_ablation_probe`): it says nothing about `p`,
+                    # and every later probe would wait out the same bound on the same pool. The
+                    # pass stops with what it measured (ENG2-10).
+                    break
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[p] = abs(res.metric - base)
                 if superseded:
@@ -168,11 +240,27 @@ class AblationMixin:
         `_write_assets` deliberately stays at the call sites: `_ablate` stages the workdir BEFORE
         asking its probe developer to implement the ablated idea, and pulling it in here would move
         that staging after an LLM call for no reason other than symmetry.
+
+        THE PROBE'S EVAL RESOURCE is reserved here, BEFORE the clock starts, and released exactly
+        once in a `finally` after it stops (review 2026-09-22, ENG2-10) — the order
+        `noise_floor.py::_run_noise_seed` has, because the seconds returned are charged against
+        `max_eval_seconds` and a wait for a device is not evaluation. `result` is None when the
+        probe NEVER RAN — no resource inside the bound, the parent moved during the wait, or a pin
+        the runtime cannot enforce — and `seconds` is then 0.0. That None is a different fact from
+        a probe that ran and printed no metric, and both loops keep them apart: code-block ablation
+        reads the second as "removing this block broke the run".
         """
-        started = time.monotonic()
-        res = await self._run_ablation_probe(source, workdir, parent_id, generation)
-        return (res, time.monotonic() - started,
-                self._ablation_parent_current(parent_id, generation))
+        res, seconds = None, 0.0
+        reservation = await self._reserve_ablation_probe(parent_id, generation)
+        if reservation is not None:
+            try:
+                started = time.monotonic()
+                res = await self._run_ablation_probe(source, workdir, parent_id, generation,
+                                                     reservation=reservation)
+                seconds = time.monotonic() - started
+            finally:
+                self._release_gpus(reservation.get("gpu_ids"))
+        return (res, seconds, self._ablation_parent_current(parent_id, generation))
 
     def _build_refine_block_child(self, parent, parent_id: int, generation: int, idea, state) -> None:
         """Reserve → implement → emit the ONE `refine_block` child an ablation produces.
@@ -303,6 +391,11 @@ class AblationMixin:
                 abl_seconds += seconds
                 if not current:
                     superseded = True
+                if res is None:
+                    # NEVER RAN — which is not "removing this block broke the run" (the None
+                    # impact below, ranked MOST essential). Recording it that way would elect a
+                    # block nobody measured; the pass stops with what it measured (ENG2-10).
+                    break
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[str(idx)] = round(abs(res.metric - base), 6)
                 else:
