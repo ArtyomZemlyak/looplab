@@ -51,6 +51,7 @@ from looplab.events.types import (
     EV_APPROVAL_GRANTED, EV_CARD_RESOURCE_PINNED, EV_HINT, EV_HYPOTHESIS_UPDATED, EV_PAUSE,
     EV_RESTART, EV_RUN_ABORT, EV_SPEC_APPROVED, standing_hint_dedup_key)
 from looplab.serve import control_validation
+from looplab.serve import engine_proc as _engine_proc   # `_PENDING_RECHECK_S`, read at call time
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
 from looplab.serve.control_validation import (
     CONTROL_SPECS, EnginePolicy, _error, _normalize_finalize_data, normalize_control,
@@ -391,6 +392,54 @@ SPAWN_CLAIM_HATCH = ClaimEscapeHatch(
     confirmation_message="Process identity is unavailable; automatic child-death proof is impossible.",
     age_keys=("quarantined_at", "created_at"),
 )
+
+
+# `_postcondition` kinds answered by an INDEX lookup (acks keyed by marker) rather than by reading the
+# folded `RunState`. Every other kind — and any ATTACHED record (`_attached_finalize_intact`) — reads
+# `CommandObservation.state()`: a fold of the whole log plus a deep copy of the result.
+_INDEX_ONLY_POSTCONDITIONS = frozenset({"engine_ack"})
+# `_postcondition(liveness=...)`'s default: probe `engine.lock` itself, as it always did.
+_PROBE_LIVENESS = object()
+
+
+class _PostconditionGate:
+    """WHEN `_monitor` may ask a record's postcondition again (review 2026-09-22, SRV1-05).
+
+    The monitor polls every `poll_interval` (50 ms) for up to the absolute deadline — twenty minutes
+    for a Finalize — and a state-reading postcondition costs a fold of the whole log (memoized per
+    revision) plus a DEEP COPY of the folded `RunState` (never memoized: it is a defensive copy).
+    Measured by the reviewer on an 874-event log: 9.9 ms a tick on an UNCHANGED log, 39.8 ms after
+    an append — to learn nothing new, every 50 ms, for as long as a finalization runs.
+
+    The verdict is a pure function of what `_postcondition` reads: the record (the monitor never
+    changes the fields it reads), the observed log revision, and — for `finished_and_stopped` — the
+    engine liveness, which the monitor probes once per tick and hands in. So:
+      * the same `(revision, liveness)` as the last ask cannot answer differently — skip it;
+      * a state-reading ask is rate-limited to `engine_proc._PENDING_RECHECK_S`, the interval the
+        resume tail waiter already applies to the same fold, because a finalization TAIL moves the
+        revision on every tick.
+    Skipping delays an observation by at most that interval and never decides one: the deadline exit
+    (`_terminalize_expired`) and every re-spawn branch still take their own fresh, serialized look.
+    """
+
+    __slots__ = ("reads_state", "min_interval", "_asked", "_state_read_at")
+
+    def __init__(self, record: dict, min_interval: float):
+        self.reads_state = bool(record.get("attached")) or (
+            record.get("postcondition") not in _INDEX_ONLY_POSTCONDITIONS)
+        self.min_interval = max(0.0, float(min_interval))
+        self._asked: Optional[tuple] = None
+        self._state_read_at = float("-inf")
+
+    def due(self, revision: str, liveness: Optional[bool], now: float) -> bool:
+        if (revision, liveness) == self._asked:
+            return False
+        return not self.reads_state or now - self._state_read_at >= self.min_interval
+
+    def asked(self, revision: str, liveness: Optional[bool], now: float) -> None:
+        self._asked = (revision, liveness)
+        if self.reads_state:
+            self._state_read_at = now
 
 
 class RunCommandService:
@@ -3013,7 +3062,11 @@ class RunCommandService:
 
     def _postcondition(
             self, rd: Path, record: dict,
-            observation: Optional[CommandObservation] = None) -> bool:
+            observation: Optional[CommandObservation] = None, *,
+            liveness: object = _PROBE_LIVENESS) -> bool:
+        # `liveness`: the monitor probes engine.lock once per tick, AFTER its observation exactly as
+        # this method would, and hands the value in so its gate's key and this verdict describe the
+        # same liveness (`_PostconditionGate`). Every other caller lets this method probe.
         observation = observation or self._observe(rd)
         kind = record.get("postcondition")
         if (record.get("attached")
@@ -3059,7 +3112,9 @@ class RunCommandService:
             state = observation.state()
             # A guarded-abort finish (`error` OR the ceiling's `budget_exhausted`) is not the
             # engine's own stopped terminal; the class predicate keeps both out.
-            if (not state.finished or self._engine_state(rd) is not False
+            if (not state.finished
+                    or (self._engine_state(rd) if liveness is _PROBE_LIVENESS
+                        else liveness) is not False
                     or is_guarded_abort(state.stop_reason)):
                 return False
             if not state.stop_requested:
@@ -3096,6 +3151,15 @@ class RunCommandService:
             event_seq = record.get("event_seq")
             return observation.has_ack(marker, event_seq)
         return False
+
+    def _monitor_postcondition(self, rd: Path, record: dict, observation: CommandObservation,
+                               liveness: Optional[bool], gate: _PostconditionGate) -> bool:
+        """One monitor tick's `_postcondition`, asked only when `gate` says it can have changed."""
+        now = time.monotonic()
+        if not gate.due(observation.revision, liveness, now):
+            return False
+        gate.asked(observation.revision, liveness, now)
+        return self._postcondition(rd, record, observation, liveness=liveness)
 
     def _try_restart_claim(self, rd: Path, path: Path, record: dict) -> bool:
         """Claim the RESTART_AFTER_EXIT replacement launch. False = TERMINALIZED, caller returns.
@@ -3478,10 +3542,14 @@ class RunCommandService:
             last_progress_seq = observation.max_non_control_seq
         else:
             last_progress_seq = int(record.get("last_progress_seq", -1))
+        # Asks the postcondition again only when its answer can have moved (review 2026-09-22,
+        # SRV1-05): this loop runs at the poll rate for up to the absolute deadline.
+        gate = _PostconditionGate(record, _engine_proc._PENDING_RECHECK_S)
         while True:
             self._heartbeat_execution(rd, command_id)
             observation = self._observe(rd)
-            if self._postcondition(rd, record, observation):
+            liveness = self._engine_state(rd)     # after the observation, as `_postcondition` probed
+            if self._monitor_postcondition(rd, record, observation, liveness, gate):
                 self._succeeded(rd, path, record)
                 return
             domain_error = (self._domain_failure(rd, record, observation)
@@ -3492,7 +3560,6 @@ class RunCommandService:
                 return
 
             now = time.time()
-            liveness = self._engine_state(rd)
             alive = liveness is True
             if (alive and record.get("spawned_by_command")
                     and not record.get("spawn_claim_released")):

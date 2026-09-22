@@ -413,7 +413,10 @@ The command service and engine acknowledgement monitor read the run log **increm
 observation (`serve/command_observation.py`) scans each recoverable event byte once and retains a
 bounded set of active-run indexes, so a long log's command volume no longer forces a full re-scan on
 each observation pass. The engine's own ack cursor is the same shape — it inspects only the appended
-suffix after bootstrapping the historical acknowledgement set.
+suffix after bootstrapping the historical acknowledgement set. While a command waits, its monitor
+asks the postcondition again only when the observed log revision or the engine's liveness has
+moved, and a postcondition that reads the folded run state (a Finalize waiting out its wrap-up) at
+most once per 0.25 s; the deadline's final look is always a fresh one.
 
 Each control type also has an explicit payload allowlist. Unknown fields and lossy coercions are
 rejected before append, so an ignored key cannot be persisted while the command reports success.
