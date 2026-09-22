@@ -249,6 +249,45 @@ def test_background_closes_handle_after_exit(tmp_path):
     assert mgr._tasks[tid].fh.closed
 
 
+def test_background_logs_are_private_to_the_server_user(tmp_path, monkeypatch):
+    """Review 2026-09-22, RTA-12 (doc 50 RA-15): the log of a background command — a test run's
+    output, a training script's stdout, whatever the assistant launched — was `open(log, "wb")` in
+    the SHARED temp dir, i.e. created at the default umask: 0644, readable by every local user. It is
+    now created 0600, and created EXCLUSIVELY without following a link, so nothing planted at the
+    name first can receive it."""
+    import os
+    import stat
+
+    import pytest
+
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits")
+    old = os.umask(0o022)                            # the permissive default the defect relied on
+    try:
+        mgr = BackgroundManager(watch_interval=0)
+        tid = mgr.start([sys.executable, "-c", "print('secret-ish output')"], str(tmp_path))
+    finally:
+        os.umask(old)
+    log = mgr._tasks[tid].log
+    assert stat.S_IMODE(os.stat(log).st_mode) == 0o600
+    _poll_read(mgr, tid, until=lambda text, s: s == "exited")
+
+    # A name taken before the start is REFUSED, never written through (a planted symlink here).
+    import looplab.runtime.bg_tasks as bg
+    monkeypatch.setattr(bg.secrets, "token_hex", lambda _n: "planted")
+    target = tmp_path / "victim.txt"
+    target.write_text("untouched", encoding="utf-8")
+    planted = Path(bg.tempfile.gettempdir()) / "looplab-bg-planted.log"
+    planted.unlink(missing_ok=True)
+    planted.symlink_to(target)
+    try:
+        with pytest.raises(OSError):
+            mgr.start([sys.executable, "-c", "print('x')"], str(tmp_path))
+    finally:
+        planted.unlink(missing_ok=True)
+    assert target.read_text(encoding="utf-8") == "untouched"
+
+
 def test_kill_background_stops_a_running_task(tmp_path):
     mgr = BackgroundManager()
     tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))

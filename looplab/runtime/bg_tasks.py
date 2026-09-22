@@ -145,7 +145,15 @@ class BackgroundManager:
         run_argv = wrap(argv, cwd) if wrap else list(argv)
         tid = secrets.token_hex(6)
         log = Path(tempfile.gettempdir()) / f"looplab-bg-{tid}.log"
-        f = open(log, "wb")
+        # 0600, EXCLUSIVE, and not through a link (review 2026-09-22, RTA-12; doc 50 RA-15). This is
+        # the SHARED temp dir and the log is whatever the command printed — a test run's output, a
+        # training script's stdout — and `open(log, "wb")` created it at the process umask, i.e.
+        # 0644 and readable by every local user. `O_EXCL|O_NOFOLLOW` refuse a name something else
+        # already holds (a planted symlink included) instead of writing through it; the name is a
+        # 48-bit random token, so the refusal is a raise for an event that should never happen.
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_BINARY", 0), 0o600)
+        f = os.fdopen(fd, "wb")
         kwargs = {}
         if os.name == "nt":
             # A process GROUP on Windows too (arch-review §4 P1-4): without it a child's grandchildren
