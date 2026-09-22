@@ -237,8 +237,14 @@ def test_roles_is_no_longer_a_god_module():
     envelope field of the same shape (a Developer output the engine read off the SHARED instance
     and that the registry cannot hold). An extraction happened and the residue is the contract — so these
     are the same kind of raise as the one above, not a waiver of it.
+
+    `roles.py` 803 -> 813 on 2026-09-22 (review CORE-04): `LLMResearcher.propose` now stops at an
+    `LLMError` the transport already gave up on instead of re-asking through the text parser (one
+    unreachable endpoint cost 36 provider attempts for one fallback). That is the LLM role's own
+    retry decision — the half of this module the docstring says it IS — so it stays, and the cap
+    moves to measured + 1.
     """
-    caps = {"agents/roles.py": 804, "agents/role_prompts.py": 302, "agents/state_brief.py": 463,
+    caps = {"agents/roles.py": 814, "agents/role_prompts.py": 302, "agents/state_brief.py": 463,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

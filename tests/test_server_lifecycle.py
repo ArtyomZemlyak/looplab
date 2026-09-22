@@ -90,9 +90,11 @@ def test_no_serve_module_registers_a_deprecated_lifecycle_hook():
     """NEGATIVE pin over `looplab/serve/`. An `on_event`/`add_event_handler` hook registered on an
     app that owns a `lifespan=` never runs, and nothing reports it, so one coming back is a hook
     silently switched off. AST, not text, so a comment explaining the migration cannot trip it."""
+    from _source_scan import iter_trees     # the shared walk: one decoding, checkpoints excluded
+
     offenders = []
-    for path in sorted((ROOT / "looplab" / "serve").rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for path, tree in iter_trees(ROOT / "looplab" / "serve"):
+        for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr in {"on_event", "add_event_handler"}):
                 offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
