@@ -56,7 +56,7 @@ def test_a_hostile_mapping_DEGRADES_it_does_not_raise():
     raise is a boundary that can drop a whole payload, so the guard is now universal — this is the
     one behaviour change here that is a DEFECT FIX rather than a tightening."""
     assert _walk(_HostileMapping({"a": 1})) == "<mapping unavailable>"
-    assert _tree(_HostileMapping({"a": 1}), [65_536], [256]) == "<mapping unavailable>"
+    assert _tree(_HostileMapping({"a": 1}), [65_536], [256], env=None) == "<mapping unavailable>"
     assert sanitize_trace_value(_HostileMapping({"a": 1})) == "<mapping unavailable>"
 
 
@@ -149,7 +149,7 @@ def test_the_advisory_boundary_caps_each_string_so_one_field_cannot_starve_the_p
     """An advisory payload is a LIST of rows a human reads; an oversized early statement must not
     consume the budget the later rows need."""
     budget = [65_536]
-    assert len(_tree("x" * 40_000, budget, [256])) <= 2_000
+    assert len(_tree("x" * 40_000, budget, [256], env=None)) <= 2_000
     assert budget[0] > 60_000, "the rest of the page budget must survive one huge field"
 
 
@@ -178,7 +178,7 @@ def test_both_callers_delegate_rather_than_keeping_their_own_walker():
 def test_the_two_boundaries_now_agree_on_everything_but_their_declared_caps(value):
     """The whole point of the collapse. They may differ on how much TEXT they keep — that is a
     declared constant — but never on what a value BECOMES."""
-    assert sanitize_trace_value(value) == _tree(value, [65_536], [256])
+    assert sanitize_trace_value(value) == _tree(value, [65_536], [256], env=None)
 
 
 # ------------------------------------------------------------------ the truncation receipt (SR-06)

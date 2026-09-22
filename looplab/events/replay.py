@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from types import MappingProxyType
 from typing import Iterable, Optional
 
 from looplab.core.concepts import (
@@ -4312,13 +4313,30 @@ def _on_research_attempted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
         "manual": bool(d.get("manual")),
     })
 
+# THE FOLD SCREENS NO ENVIRONMENT (review 2026-09-22, EVT-02). The three advisory handlers below
+# re-sanitize what their writers already sanitized, and that pass read the REPLAYING process's
+# `os.environ` (`core/redact.py::redact_persisted_text` -> `redact_env_values`): one log folded to
+# a different `RunState` on a box that happened to hold a matching secret — driven, a shapeless
+# `MY_DB_PASSWORD` value in a memo summary and a report headline folded verbatim in one process
+# and as `***REDACTED_ENV***` in the next, `model_dump_json()` unequal. Invariant 5 is that the
+# fold is a function of the log. So the writers keep the identity screen (their `env` is the
+# default: the process that owns the secret, at the moment the bytes become durable), and the fold
+# keeps every screen that IS a function of the bytes — shapes, entropy, controls, caps — and
+# passes an empty, read-only mapping for the one that is a property of the box. A log written
+# before 2026-09-08 (when that screen reached the memo writer) can therefore fold a raw env value
+# it always carried: the durable row holds it either way, and the fold was never the place that
+# could take it back.
+_FOLD_REDACTION_ENV = MappingProxyType({})
+
+
 def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Deep-Research memo: never re-ranks current nodes/best; later proposal context and cross-run
     # evidence may read it. `served_manual` also prevents replay from re-serving the request.
     from looplab.core.advisory_payloads import sanitize_research_memo_payload
     # old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
-    memo = sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False)
+    memo = sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False,
+                                          env=_FOLD_REDACTION_ENV)
     st.research.append(memo)
     # THE DURABLE RESEARCH RECORD (doc 52 row 16): the latest memo's plan is the run's current
     # ResearchPlan / ProgressLedger, and every memo's exact-span evidence accrues by id. Both are
@@ -4350,7 +4368,7 @@ def _on_literature_retrieved(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
     from looplab.core.advisory_payloads import sanitize_literature_items
     seen = {row.get("id") for row in st.literature if isinstance(row, dict)}
     at_node = d.get("at_node") if type(d.get("at_node")) is int else None
-    for item in sanitize_literature_items(d.get("items")):
+    for item in sanitize_literature_items(d.get("items"), env=_FOLD_REDACTION_ENV):
         if item["id"] not in seen:
             seen.add(item["id"])
             st.literature.append({**item, "at_node": at_node})
@@ -4368,14 +4386,14 @@ def _on_report_generated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
     # Agent-authored run report (selection-neutral; NEVER touches nodes/best). Latest wins; the cadence
     # and manual-refresh paths both append this, and the receipt also gates future regeneration.
     from looplab.core.advisory_payloads import sanitize_report_payload
-    content = sanitize_report_payload(d.get("content") or d)
+    content = sanitize_report_payload(d.get("content") or d, env=_FOLD_REDACTION_ENV)
     # The event envelope is the publication authority. Model/provider content must not forge which
     # node-count/trigger the writer bound, nor the physical receipt that made the narrative durable.
     # Preserve inner at_node/trigger only for historical events whose outer payload omitted them.
     if "at_node" in d or "trigger" in d:
         envelope = sanitize_report_payload({
             "at_node": d.get("at_node"), "trigger": d.get("trigger"),
-        })
+        }, env=_FOLD_REDACTION_ENV)
         if "at_node" in d:
             content["at_node"] = envelope["at_node"]
         if "trigger" in d:

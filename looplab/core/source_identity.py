@@ -57,12 +57,16 @@ def _credential_free_query(query: str) -> str:
     return "".join(joiner + field for joiner, field in kept)
 
 
-def canonical_source_ref(value: object, *, persisted_identity: object = None) -> Optional[SourceRef]:
+def canonical_source_ref(value: object, *, persisted_identity: object = None,
+                         env=None) -> Optional[SourceRef]:
     """Return a bounded stable identity and safe display URL, or ``None`` for invalid input.
 
     A syntactically valid persisted identity is accepted for idempotent writer/replay sanitization:
     the original opaque path may already have been display-redacted and cannot be reconstructed.
     New/raw records omit it and always receive an identity derived from their canonical URL.
+    ``env`` is the display redaction's secret-value source (`core/redact.py::
+    redact_persisted_text`): the replay fold passes ``{}`` so a URL folds the same on every box
+    (review 2026-09-22, EVT-02).
     """
     if not isinstance(value, str) or not value or len(value) > MAX_SOURCE_URL_INPUT:
         return None
@@ -98,7 +102,7 @@ def canonical_source_ref(value: object, *, persisted_identity: object = None) ->
     # Redact before bounding, then use a URL-safe marker. ``redact_persisted_text``'s prose
     # truncation marker contains whitespace/newlines and would not be parseable on the next replay.
     display = redact_persisted_text(
-        canonical, max_chars=MAX_SOURCE_URL_INPUT, entropy=True, single_line=True)
+        canonical, max_chars=MAX_SOURCE_URL_INPUT, entropy=True, single_line=True, env=env)
     if len(display) > 1_600:
         marker = f".~looplab-source-{identity.removeprefix('http-sha256:')}"
         display = display[:1_600 - len(marker)] + marker

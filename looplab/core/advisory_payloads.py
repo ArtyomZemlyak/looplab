@@ -434,12 +434,17 @@ def research_evidence_receipt(claim) -> dict | None:
     return expected
 
 
-def _text(value, cap: int, budget: list[int], *, single_line: bool = False) -> str:
+def _text(value, cap: int, budget: list[int], *, single_line: bool = False, env) -> str:
+    # `env` is REQUIRED on every private helper here, never defaulted: it is WHOSE secret values
+    # the identity screen masks (`core/redact.py::redact_persisted_text`), and the replay fold must
+    # pass `{}` while every writer passes its own process's `None`. A helper that defaulted it
+    # would let one new call site quietly put `os.environ` back into the fold (review 2026-09-22,
+    # EVT-02) — a missing keyword is a TypeError on the first test that reaches it instead.
     room = min(max(0, int(cap)), budget[0])
     if room <= 0:
         return ""
     clean = redact_persisted_text(
-        value, max_chars=room, entropy=True, single_line=single_line)
+        value, max_chars=room, entropy=True, single_line=single_line, env=env)
     budget[0] -= len(clean)
     return clean
 
@@ -448,24 +453,24 @@ def _items(value, maximum: int):
     return itertools.islice(value, maximum) if isinstance(value, (list, tuple)) else ()
 
 
-def _source_url(value, persisted_identity, budget: list[int]) -> tuple[str, str]:
+def _source_url(value, persisted_identity, budget: list[int], *, env) -> tuple[str, str]:
     """Project one URL as safe display text plus its stable opaque evidence identity."""
-    ref = canonical_source_ref(value, persisted_identity=persisted_identity)
+    ref = canonical_source_ref(value, persisted_identity=persisted_identity, env=env)
     if ref is None:
         # Backward compatibility for non-HTTP legacy labels: they remain visible but cannot become
         # verifier evidence merely by colliding with an HTTP source identity.
-        return _text(value, 1_600, budget, single_line=True), ""
+        return _text(value, 1_600, budget, single_line=True, env=env), ""
     if budget[0] <= len(ref.identity):
         return "", ""
     budget[0] -= len(ref.identity)
-    display = _text(ref.display_url, 1_600, budget, single_line=True)
+    display = _text(ref.display_url, 1_600, budget, single_line=True, env=env)
     if not display:
         budget[0] += len(ref.identity)
         return "", ""
     return display, ref.identity
 
 
-def _tree(value, budget: list[int], items: list[int], depth: int = 0):
+def _tree(value, budget: list[int], items: list[int], depth: int = 0, *, env):
     """Bound and redact one untrusted advisory subtree, spending the SHARED page budget.
 
     The walk is `core/redact.py::bounded_redacted_tree`, shared with the span/trace sanitizer (doc 25
@@ -474,10 +479,10 @@ def _tree(value, budget: list[int], items: list[int], depth: int = 0):
     not starve the later ones.
     """
     return bounded_redacted_tree(value, budget, items, max_items=64, max_depth=5,
-                                 str_cap=2_000, key_cap=128, depth=depth)
+                                 str_cap=2_000, key_cap=128, depth=depth, env=env)
 
 
-def _verification(value, budget: list[int], items: list[int]):
+def _verification(value, budget: list[int], items: list[int], *, env):
     """Project the verifier's indexed verdict contract without starving late rows.
 
     A generic depth-first tree projection lets a few oversized early statements consume the whole
@@ -486,7 +491,7 @@ def _verification(value, budget: list[int], items: list[int]):
     share instead; keep the generic legacy-tree behavior for non-contract verification payloads.
     """
     if not isinstance(value, dict) or not isinstance(value.get("verdicts"), (list, tuple)):
-        return _tree(value, budget, items)
+        return _tree(value, budget, items, env=env)
 
     raw_verdicts = value["verdicts"]
     raw_total = min(len(raw_verdicts), _MAX_ADVISORY_COUNT)
@@ -503,7 +508,8 @@ def _verification(value, budget: list[int], items: list[int]):
     )
     total_verdicts = declared_total if metadata_is_canonical else raw_total
     raw_rows = list(itertools.islice(raw_verdicts, _MAX_VERIFICATION_VERDICTS))
-    method = _text(value.get("method", "unknown"), 64, budget, single_line=True) or "unknown"
+    method = (_text(value.get("method", "unknown"), 64, budget, single_line=True, env=env)
+              or "unknown")
     verdicts = []
     for index, raw in enumerate(raw_rows):
         remaining_rows = len(raw_rows) - index
@@ -513,11 +519,12 @@ def _verification(value, budget: list[int], items: list[int]):
         row_budget = [allowance]
         row = raw if isinstance(raw, dict) else {}
         candidate = _text(row.get("verdict", "unclear"), 32, row_budget,
-                          single_line=True).lower()
+                          single_line=True, env=env).lower()
         verdict = candidate if candidate in _VERDICTS else "unclear"
         note = _text(row.get("note", ""), min(200, row_budget[0]), row_budget,
-                     single_line=True)
-        statement = _text(row.get("statement", ""), min(1_600, row_budget[0]), row_budget)
+                     single_line=True, env=env)
+        statement = _text(row.get("statement", ""), min(1_600, row_budget[0]), row_budget,
+                          env=env)
         budget[0] -= allowance - row_budget[0]
         raw_evidence = row.get("evidence")
         evidence = {"v": RESEARCH_RECEIPT_VERSION, "node_refs": [],
@@ -895,14 +902,19 @@ def memo_snapshot_cue(memo) -> str:
             "see them; the working set above is the current board]")
 
 
-def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dict:
-    """Canonicalize a model-, tool-, or legacy-event research memo."""
+def sanitize_research_memo_payload(payload, *, add_receipts: bool = True, env=None) -> dict:
+    """Canonicalize a model-, tool-, or legacy-event research memo.
+
+    ``env`` is WHOSE secret values the text is screened against (`core/redact.py::
+    redact_persisted_text`): ``None`` — this process's — at every writer, ``{}`` in the replay
+    fold, which must fold one log the same way on every box (review 2026-09-22, EVT-02).
+    """
     src = payload if isinstance(payload, dict) else {}
     budget = [_MAX_ADVISORY_TEXT]
     verification_items = [_MAX_TREE_ITEMS // 2]
     proposal_items = [_MAX_TREE_ITEMS // 2]
     out = {
-        "summary": _text(src.get("summary", ""), 4_000, budget),
+        "summary": _text(src.get("summary", ""), 4_000, budget, env=env),
         "reasoning": "",
         "findings": [],
         "claims": [],
@@ -915,7 +927,7 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
         "proposed_ideas": [],
         "at_node": (src.get("at_node") if type(src.get("at_node")) is int
                     and 0 <= src.get("at_node") <= (1 << 63) - 1 else None),
-        "trigger": _text(src.get("trigger", ""), 64, budget, single_line=True),
+        "trigger": _text(src.get("trigger", ""), 64, budget, single_line=True, env=env),
     }
     if valid_advisory_ref(src.get("memo_id"), "memo"):
         out["memo_id"] = src["memo_id"]
@@ -936,7 +948,7 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
         allowance = min(_MAX_VERIFICATION_TEXT, budget[0])
         verification_budget = [allowance]
         out["verification"] = _verification(
-            src["verification"], verification_budget, verification_items)
+            src["verification"], verification_budget, verification_items, env=env)
         budget[0] -= allowance - verification_budget[0]
     if "snapshot_superseded" in src:
         # Engine-derived and TINY (ids and one int), so it takes no slice of the shared text budget
@@ -947,7 +959,7 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     for claim in itertools.islice(raw_claims, MAX_RESEARCH_CLAIMS):
         if not isinstance(claim, dict):
             continue
-        statement = _text(claim.get("statement", ""), 1_600, budget)
+        statement = _text(claim.get("statement", ""), 1_600, budget, env=env)
         raw_nodes, node_total, node_shape_known = _bounded_source(claim.get("node_ids"))
         raw_urls_source, url_total, url_shape_known = _bounded_source(claim.get("urls"))
         raw_urls = list(itertools.islice(raw_urls_source, MAX_RESEARCH_URL_REFS))
@@ -956,7 +968,7 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
         url_identities = []
         for index, value in enumerate(raw_urls):
             persisted = raw_identities[index] if index < len(raw_identities) else None
-            display, identity = _source_url(value, persisted, budget)
+            display, identity = _source_url(value, persisted, budget, env=env)
             if display and identity:
                 urls.append(display)
                 url_identities.append(identity)
@@ -1000,17 +1012,18 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     for source in _items(src.get("sources"), MAX_RESEARCH_SOURCES):
         if not isinstance(source, dict):
             continue
-        title = _text(source.get("title", ""), 400, budget, single_line=True)
+        title = _text(source.get("title", ""), 400, budget, single_line=True, env=env)
         display_url, url_identity = _source_url(
-            source.get("url", ""), source.get("url_identity"), budget)
+            source.get("url", ""), source.get("url_identity"), budget, env=env)
         out["sources"].append({
             "title": title,
             "url": display_url,
             "url_identity": url_identity,
-            "snippet": _text(source.get("snippet", ""), 200, budget),
+            "snippet": _text(source.get("snippet", ""), 200, budget, env=env),
         })
-    out["reasoning"] = _text(src.get("reasoning", ""), 12_000, budget)
-    out["findings"] = [_text(v, 1_200, budget) for v in _items(src.get("findings"), 32)]
+    out["reasoning"] = _text(src.get("reasoning", ""), 12_000, budget, env=env)
+    out["findings"] = [_text(v, 1_200, budget, env=env)
+                       for v in _items(src.get("findings"), 32)]
     # The compat field and the two halves it was split into share ONE bound and one text rule: a
     # reader putting them side by side must not find one clipped where the other was not. See
     # `ResearchMemo.open_questions` for why the split exists — the old field's NAME contradicted its
@@ -1028,25 +1041,26 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     # statement or a board id, so both fit that bound. A row that empties out stays as "" rather
     # than vanishing, for the alignment reason spelled out for `question_concepts` above.
     out["question_parents"] = [
-        _text(v, 1_200, budget, single_line=True)
+        _text(v, 1_200, budget, single_line=True, env=env)
         for v in _items(src.get("question_parents"), 16)
     ]
     for _field in ("recommended_directions", "open_questions", "next_experiments"):
         out[_field] = [
-            _text(v, 1_200, budget, single_line=True)
+            _text(v, 1_200, budget, single_line=True, env=env)
             for v in _items(src.get(_field), 16)
         ]
     out["proposed_ideas"] = [
-        _tree(v, budget, proposal_items) for v in _items(src.get("proposed_ideas"), 16)
+        _tree(v, budget, proposal_items, env=env)
+        for v in _items(src.get("proposed_ideas"), 16)
     ]
     # THE DURABLE RESEARCH RECORD (doc 52 row 16). Additive: absent on every memo written before
     # 2026-09-06, and an absent key stays absent so an old row is not rewritten as "no plan".
     if "plan" in src:
-        out["plan"] = sanitize_research_plan(src.get("plan"), budget)
+        out["plan"] = sanitize_research_plan(src.get("plan"), budget, env=env)
     if "evidence" in src:
-        out["evidence"] = sanitize_evidence_items(src.get("evidence"), budget)
+        out["evidence"] = sanitize_evidence_items(src.get("evidence"), budget, env=env)
     if "literature" in src:
-        out["literature"] = sanitize_literature_items(src.get("literature"))
+        out["literature"] = sanitize_literature_items(src.get("literature"), env=env)
     return out
 
 
@@ -1067,7 +1081,7 @@ def _hex_digest(value) -> str:
     return value if valid_digest_ref(value) else ""
 
 
-def sanitize_research_plan(value, budget: list[int]) -> Optional[dict]:
+def sanitize_research_plan(value, budget: list[int], *, env=None) -> Optional[dict]:
     """The stage's last `update_plan` as `{plan, todos:[{item, status}], updates}`, bounded."""
     if not isinstance(value, dict):
         return None
@@ -1075,7 +1089,7 @@ def sanitize_research_plan(value, budget: list[int]) -> Optional[dict]:
     for row in _items(value.get("todos"), 40):
         if not isinstance(row, dict):
             continue
-        item = _text(row.get("item", ""), 200, budget, single_line=True)
+        item = _text(row.get("item", ""), 200, budget, single_line=True, env=env)
         if not item:
             continue
         status = row.get("status")
@@ -1083,13 +1097,13 @@ def sanitize_research_plan(value, budget: list[int]) -> Optional[dict]:
                       "status": status if status in _PLAN_STATUSES else "pending"})
     updates = value.get("updates")
     return {
-        "plan": _text(value.get("plan", ""), 1_200, budget),
+        "plan": _text(value.get("plan", ""), 1_200, budget, env=env),
         "todos": todos,
         "updates": updates if type(updates) is int and 0 <= updates <= _MAX_ADVISORY_COUNT else 0,
     }
 
 
-def sanitize_evidence_items(value, budget: list[int]) -> list[dict]:
+def sanitize_evidence_items(value, budget: list[int], *, env=None) -> list[dict]:
     """Exact-span evidence items (`core/research_record.py::evidence_item`), ids and digests exact."""
     from looplab.core.research_record import EVIDENCE_KINDS, MAX_EVIDENCE_ITEMS, QUOTE_CHARS
     out = []
@@ -1104,9 +1118,10 @@ def sanitize_evidence_items(value, budget: list[int]) -> list[dict]:
         size = row.get("bytes")
         item = {
             "id": row["id"], "kind": kind,
-            "tool": _text(row.get("tool", ""), 64, budget, single_line=True),
-            "locator": _text(row.get("locator", ""), 400, budget, single_line=True),
-            "quote": _text(row.get("quote", ""), QUOTE_CHARS, budget),
+            "tool": _text(row.get("tool", ""), 64, budget, single_line=True, env=env),
+            "locator": _text(row.get("locator", ""), 400, budget, single_line=True,
+                             env=env),
+            "quote": _text(row.get("quote", ""), QUOTE_CHARS, budget, env=env),
             "sha256": digest,
             "bytes": size if type(size) is int and 0 <= size <= _MAX_ADVISORY_COUNT else 0,
             "turn": turn if type(turn) is int and 0 <= turn <= _MAX_ADVISORY_COUNT else 0,
@@ -1121,7 +1136,7 @@ def sanitize_evidence_items(value, budget: list[int]) -> list[dict]:
     return out
 
 
-def sanitize_literature_items(value) -> list[dict]:
+def sanitize_literature_items(value, *, env=None) -> list[dict]:
     """Retrieved papers (`core/research_record.py::parse_literature`), ids and digests exact."""
     from looplab.core.research_record import MAX_LITERATURE_ITEMS
     out = []
@@ -1132,7 +1147,7 @@ def sanitize_literature_items(value) -> list[dict]:
         lit_id = row.get("id")
         if not (isinstance(lit_id, str) and lit_id.startswith("lit-") and _RECORD_ID.match(lit_id)):
             continue
-        title = _text(row.get("title", ""), 400, budget, single_line=True)
+        title = _text(row.get("title", ""), 400, budget, single_line=True, env=env)
         if not title:
             continue
         chars = row.get("abstract_chars")
@@ -1140,8 +1155,8 @@ def sanitize_literature_items(value) -> list[dict]:
             "id": lit_id, "title": title,
             "abstract_sha256": _hex_digest(row.get("abstract_sha256")),
             "abstract_chars": chars if type(chars) is int and 0 <= chars <= _MAX_ADVISORY_COUNT else 0,
-            "query": _text(row.get("query", ""), 200, budget, single_line=True),
-            "tool": _text(row.get("tool", ""), 64, budget, single_line=True),
+            "query": _text(row.get("query", ""), 200, budget, single_line=True, env=env),
+            "tool": _text(row.get("tool", ""), 64, budget, single_line=True, env=env),
         })
     return out
 
@@ -1157,24 +1172,25 @@ def _report_verdict(value):
     return value
 
 
-def sanitize_report_payload(payload) -> dict:
-    """Canonicalize a generated or legacy run-report payload."""
+def sanitize_report_payload(payload, *, env=None) -> dict:
+    """Canonicalize a generated or legacy run-report payload. ``env`` as in
+    `sanitize_research_memo_payload`: ``{}`` in the replay fold, ``None`` everywhere else."""
     src = payload if isinstance(payload, dict) else {}
     budget = [_MAX_ADVISORY_TEXT]
     out = {
-        "headline": _text(src.get("headline", ""), 800, budget, single_line=True),
+        "headline": _text(src.get("headline", ""), 800, budget, single_line=True, env=env),
         # Legacy report events used a single `summary` field. Preserve it bounded so older logs and
         # finalization receipts remain readable while modern structured fields stay canonical.
-        "summary": _text(src.get("summary", ""), 4_000, budget),
-        "verdict": _text(_report_verdict(src.get("verdict", "")), 4_000, budget),
-        "champion_summary": _text(src.get("champion_summary", ""), 4_000, budget),
+        "summary": _text(src.get("summary", ""), 4_000, budget, env=env),
+        "verdict": _text(_report_verdict(src.get("verdict", "")), 4_000, budget, env=env),
+        "champion_summary": _text(src.get("champion_summary", ""), 4_000, budget, env=env),
     }
     # Caveats are trust-significant narrative. Give them the shared budget before positive/ordinary
     # lists so a saturated report cannot durably erase its own warnings.
     for field in _REPORT_LIST_FIELDS:
-        out[field] = [_text(value, 1_200, budget, single_line=True)
+        out[field] = [_text(value, 1_200, budget, single_line=True, env=env)
                       for value in _items(src.get(field), 32)]
     out["at_node"] = (src.get("at_node") if type(src.get("at_node")) is int
                       and 0 <= src.get("at_node") <= (1 << 63) - 1 else None)
-    out["trigger"] = _text(src.get("trigger", ""), 64, budget, single_line=True)
+    out["trigger"] = _text(src.get("trigger", ""), 64, budget, single_line=True, env=env)
     return out

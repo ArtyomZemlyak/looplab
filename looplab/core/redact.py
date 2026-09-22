@@ -21,7 +21,8 @@ the ONE channel that skipped the screen the rest of the codebase applies. It no 
   and `bounded_redacted_tree`. It said this before it was true — the env screen had ONE caller until
   2026-09-08, so a SHAPELESS secret reached spans, the trace sidecar and a memo — which is why
   `tests/test_env_values_are_masked_at_every_persisted_boundary.py` now checks the word rather than
-  the sentence carrying it.
+  the sentence carrying it. The one reader that passes `env={}` is `replay.fold`, which persists
+  nothing and must not fold one log two ways on two boxes (review 2026-09-22, EVT-02).
 * **`redact_output` only** — the ENTROPY pass, the half that once had a real false-positive cost,
   which is why it is separable at all. It is **ON by default since 2026-08-15**, on the owner's
   ruling over the measurement in `_entropy_candidate` and `_ENTROPY_TOKEN_CHARS`: those false
@@ -391,12 +392,13 @@ def truncation_receipt_chars(text) -> int:
 
 
 def _redact_persisted(value, *, max_chars: int, entropy: bool = True,
-                      single_line: bool = False) -> tuple[str, bool]:
+                      single_line: bool = False, env=None) -> tuple[str, bool]:
     """:func:`redact_persisted_text`, plus the bounder's own "the cap shortened this" bit.
 
     Split out so a caller that owes its operator a truncation receipt (`bounded_redacted_tree`) can
     read the fact from the one place that knows it, instead of inferring it from lengths.  The
     public spelling stays a plain `str`: ~30 call sites persist that return value directly.
+    `env` is WHOSE secret values the identity screen masks — see `redact_persisted_text`.
     """
     text = _persisted_input(value)
     text = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
@@ -422,14 +424,23 @@ def _redact_persisted(value, *, max_chars: int, entropy: bool = True,
     # 0.6 us. NOT cached on purpose — the env is mutable (every `monkeypatch.setenv` in the suite), and
     # there is no cheap sound signal that it changed, so a cache keyed on a proxy would mask a secret
     # set after the first call. A persistence boundary writes to disk; 0.2 ms belongs to it.
-    text = redact_secrets(redact_env_values(text), entropy=entropy)
+    #
+    # WHOSE environment is the CALLER's to say (review 2026-09-22, EVT-02), and `None` — this
+    # process's — is right only where the bytes are about to become durable on the box that owns
+    # the secrets. `replay.fold` re-sanitizes every research memo, literature row and report it
+    # folds, and while this read `os.environ` there, the folded `RunState` of ONE log differed
+    # between two processes replaying it (driven: a shapeless `MY_DB_PASSWORD` value in a memo
+    # summary folded verbatim in one process and as `***REDACTED_ENV***` in another) — invariant 5
+    # says the fold is a function of the log. So the fold passes `env={}`; its writers screened
+    # the text already.
+    text = redact_secrets(redact_env_values(text, env), entropy=entropy)
     if single_line:
         text = " ".join(text.split())
     return _bounded_redacted_text(text, max_chars)
 
 
 def redact_persisted_text(value, *, max_chars: int, entropy: bool = True,
-                          single_line: bool = False) -> str:
+                          single_line: bool = False, env=None) -> str:
     # This always-on sanitizer belongs at durable boundaries, independent of UI settings.
     """Return a deterministic, display-safe string for an always-durable diagnostic field.
 
@@ -437,9 +448,14 @@ def redact_persisted_text(value, *, max_chars: int, entropy: bool = True,
     it only at explicit persistence boundaries (memos/traces), where credentials and terminal or
     bidi controls must never be retained.  The digest is over the already-redacted canonical text,
     so a truncation marker cannot become an oracle for the original secret.
+
+    ``env`` names WHOSE secret values the identity screen masks: ``None`` (every write boundary and
+    display surface) is this process's environment; a mapping screens exactly its own values, and
+    ``{}`` screens none. The last is the replay fold's, which must be a pure function of the log
+    (engine invariant 5) — shapes, entropy, control stripping and the cap still apply to it.
     """
     return _redact_persisted(value, max_chars=max_chars, entropy=entropy,
-                             single_line=single_line)[0]
+                             single_line=single_line, env=env)[0]
 
 
 def redact_persisted_identity(value, *, max_chars: int) -> str:
@@ -468,7 +484,7 @@ def redact_persisted_identity(value, *, max_chars: int) -> str:
 def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
                           max_items: int = 64, max_depth: int = 5,
                           str_cap: int | None = None, key_cap: int = 160, depth: int = 0,
-                          truncated: list[bool] | None = None):
+                          truncated: list[bool] | None = None, env=None):
     """Bound and redact an untrusted structured value into a small JSON-compatible shape.
 
     ONE walker for both durable boundaries that need this (doc 25 CO-06): the span/trace records in
@@ -514,6 +530,9 @@ def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
     `single_line` collapsing runs of whitespace: the value is all still there. What counts is the
     list above, and every member of it is decided by the code that does the omitting, never
     reconstructed afterwards from a length (`_bounded_redacted_text` records what that cost).
+
+    `env` is WHOSE secret values every string in the tree is screened against, with
+    `redact_persisted_text`'s meaning (`None` = this process's; `{}` = none, the fold's choice).
     """
     def cut():
         if truncated is not None:
@@ -525,7 +544,7 @@ def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
         # the output against `len(_persisted_input(item))`, which was wrong in BOTH directions
         # (`_bounded_redacted_text` records the two measurements). Take the signal alone.
         text, shortened = _redact_persisted(item, max_chars=allowed, entropy=True,
-                                            single_line=single_line)
+                                            single_line=single_line, env=env)
         if shortened:
             cut()
         budget[0] = max(0, budget[0] - len(text))
