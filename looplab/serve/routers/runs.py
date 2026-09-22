@@ -14,7 +14,7 @@ import stat
 import threading
 import time
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, NamedTuple, Optional
 
 import anyio
 import orjson
@@ -322,7 +322,35 @@ def _scan_span_tail(
     return None
 
 
-def _concept_event_file_identity(path: Path) -> Optional[tuple]:
+class _ConceptFileVersion(NamedTuple):
+    """The exact on-disk byte version a ConceptFrame core was folded from — read by NAME.
+
+    Review 2026-09-22, SRV2-07. This was the flat tuple `(path, *file_identity(status))`, i.e.
+    `(path, dev, ino, size, mtime_ns, ctime_ns, attrs)`, and the replay cache read the SIZE at
+    position [5] — which in that layout is `st_ctime_ns`. "Same size" therefore meant "same ctime"
+    (never true after a rewrite), and the tail prefix probe was anchored at a ctime-sized offset far
+    past EOF, so it always read `b""`: a same-size or shrinking in-place rewrite past the first 4 KiB
+    kept the OLD fold cursor and `/concepts` served concepts the log no longer held. A positional
+    read of a stat tuple is only as right as the reader's memory of a layout it does not own, so the
+    fields the cache reads are NAMED here and every one is derived from the stat by its owner:
+
+      * `identity` — `atomicio.file_identity`, the WHOLE "same file AND unchanged" tuple; equality of
+        two versions is equality of (path, identity), which is what every cache key compares;
+      * `lineage`  — `atomicio.same_file_entry`, the replacement tier: a new inode resets the cursor;
+      * `size`     — `st_size`, the durable prefix length the append test and the probes anchor on.
+
+    `lineage` and `size` are functions of the same `stat` that produced `identity`, so they add no
+    distinguishing power to equality — they only give the two reads their names.
+    `tests/test_file_identity_tiers.py::test_no_positional_read_lands_on_a_stat_identity_field`
+    refuses a numeric subscript on this record (or on any other identity-derived value in `serve/`).
+    """
+    path: str
+    identity: tuple
+    lineage: tuple
+    size: int
+
+
+def _concept_event_file_identity(path: Path) -> Optional[_ConceptFileVersion]:
     """Identity of the exact on-disk byte version a ConceptFrame core was folded from."""
     try:
         status = path.stat()
@@ -332,7 +360,8 @@ def _concept_event_file_identity(path: Path) -> Optional[tuple]:
     # is "same file AND unchanged", which is `file_identity`'s exact question, and the hand-rolled
     # five fields omitted `st_file_attributes` — so a concept event file that gained a reparse point
     # kept serving the core folded from the file that was validated (doc 25 SC-11/XP-02).
-    return (str(path.absolute()), *file_identity(status))
+    return _ConceptFileVersion(path=str(path.absolute()), identity=file_identity(status),
+                               lineage=same_file_entry(status), size=int(status.st_size))
 
 
 def _concept_relation_registry_identity(lens_pack: list[dict]) -> tuple[str, ...]:
@@ -354,16 +383,16 @@ class _ConceptCoreCache:
         self._entries: OrderedDict[tuple, dict] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get(self, identity: tuple, requested_seq: Optional[int],
+    def get(self, identity: _ConceptFileVersion, requested_seq: Optional[int],
             relation_registry: tuple[str, ...] = (),
             run_id: Optional[str] = None) -> Optional[dict]:
         with self._lock:
-            source = identity[0]
+            source = identity.path
             # an append, same-path replacement, or corruption changes at least one exact
             # stat field. Drop every old version for that path before lookup so generations and damaged
             # versus authoritative prefixes cannot coexist indefinitely in this bounded cache.
             for key in [key for key in self._entries
-                        if key[0][0] == source and key[0] != identity]:
+                        if key[0].path == source and key[0] != identity]:
                 del self._entries[key]
             for key in reversed(tuple(self._entries)):
                 # run_id is request identity echoed in the cached core. Two legal URL
@@ -376,7 +405,7 @@ class _ConceptCoreCache:
                     return core
         return None
 
-    def put(self, identity: tuple, requested_seq: Optional[int], core: dict,
+    def put(self, identity: _ConceptFileVersion, requested_seq: Optional[int], core: dict,
             relation_registry: tuple[str, ...] = ()) -> None:
         key = (identity, requested_seq, core.get(RUN_GENERATION_FIELD), relation_registry,
                core.get("run_id"))
@@ -384,7 +413,7 @@ class _ConceptCoreCache:
             self._entries[key] = core
             self._entries.move_to_end(key)
             source_keys = [existing for existing in self._entries
-                           if existing[0][0] == identity[0]]
+                           if existing[0].path == identity.path]
             while len(source_keys) > _CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE:
                 del self._entries[source_keys.pop(0)]
             while len(self._entries) > _CONCEPT_CORE_CACHE_MAX_ENTRIES:
@@ -399,7 +428,7 @@ class _ConceptReplaySource:
         self.lock = threading.RLock()
         self.store: Optional[EventStore] = None
         self.cursor = FoldCursor()
-        self.identity: Optional[tuple] = None
+        self.identity: Optional[_ConceptFileVersion] = None
         self.divergence: Optional[dict] = None
         self.first_event = None
         self.boundary_event = None
@@ -470,26 +499,27 @@ class _ConceptReplayCache:
             self._prune_unlocked()
 
     @staticmethod
-    def _identity_requires_reset(previous: Optional[tuple], current: tuple) -> bool:
+    def _identity_requires_reset(previous: Optional[_ConceptFileVersion],
+                                 current: _ConceptFileVersion) -> bool:
         if previous is None:
             return False
-        old_lineage = previous[1:3]
-        new_lineage = current[1:3]
-        if new_lineage != old_lineage or current[5] < previous[5]:
+        # By NAME (review 2026-09-22, SRV2-07): `[1:3]`/`[5]` of the old flat tuple were meant as
+        # (dev, ino) and size, and [5] was really `st_ctime_ns` — see `_ConceptFileVersion`.
+        if current.lineage != previous.lineage or current.size < previous.size:
             return True
         # An append changes size. A metadata change at the SAME size is an in-place rewrite and must
         # not inherit the previous cursor even when the filesystem preserves the inode.
-        return current[5] == previous[5] and current != previous
+        return current.size == previous.size and current != previous
 
-    def snapshot(self, path: Path, identity: tuple):
+    def snapshot(self, path: Path, identity: _ConceptFileVersion):
         """Return ``(events, deep-finalized-state, divergence, identity-after-read)``."""
         source = self._source(path)
         try:
             with source.lock:
                 reset = self._identity_requires_reset(source.identity, identity)
                 if (not reset and source.identity is not None
-                        and identity[5] > source.identity[5]
-                        and source.probes(source.identity[5]) != (source.head_probe, source.tail_probe)):
+                        and identity.size > source.identity.size
+                        and source.probes(source.identity.size) != (source.head_probe, source.tail_probe)):
                     # Same-inode growth is normally append. Constant-size prefix anchors catch an in-place
                     # rewrite/replacement that grew (a case stat size alone cannot distinguish) without
                     # re-reading the whole history and accidentally extending EventStore's stale bytes.
@@ -522,7 +552,7 @@ class _ConceptReplayCache:
                     source.divergence = divergence_copy
                     source.first_event = events[0] if events else None
                     source.boundary_event = events[source.cursor.event_count - 1] if events else None
-                    source.head_probe, source.tail_probe = source.probes(identity[5])
+                    source.head_probe, source.tail_probe = source.probes(identity.size)
                 else:
                     # The deep snapshot remains a coherent result of the bytes EventStore consumed, but
                     # it has no reusable stat identity. Discard every mutable cursor component so the
@@ -1117,7 +1147,9 @@ def build_router(srv) -> APIRouter:
         # answers the canonical weaker question: did this child pathname keep pointing at the same
         # filesystem entry while logs were read?
         identity = same_file_entry(before)
-        if not identity[1] or same_file_entry(after) != identity:
+        # `st_ino` by NAME, not `identity[1]`: a positional read of a stat identity is only as right
+        # as the reader's memory of a layout it does not own (review 2026-09-22, SRV2-07).
+        if not before.st_ino or same_file_entry(after) != identity:
             return None
         return identity
 

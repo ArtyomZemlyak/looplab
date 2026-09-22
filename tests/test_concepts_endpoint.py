@@ -1247,15 +1247,24 @@ def test_concept_core_cache_incrementally_replays_and_invalidates_every_file_ver
     assert "cache/append" not in replaced["tree"]["nodes"]
 
 
+def _file_version(path: str, ino: int, stamp: int = 100):
+    """A `_ConceptFileVersion` for the cache-only tests, which never stat a real file. Built by
+    NAME, like production (review 2026-09-22, SRV2-07): the record is read by its field names."""
+    import looplab.serve.routers.runs as runs_router
+
+    return runs_router._ConceptFileVersion(
+        path=path, identity=(1, ino, stamp, stamp, stamp, 0), lineage=(1, ino), size=stamp)
+
+
 def test_concept_core_cache_bounds_prefixes_and_total_entries(monkeypatch):
     import looplab.serve.routers.runs as runs_router
 
     monkeypatch.setattr(runs_router, "_CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE", 2)
     monkeypatch.setattr(runs_router, "_CONCEPT_CORE_CACHE_MAX_ENTRIES", 3)
     cache = runs_router._ConceptCoreCache()
-    source_a = ("a/events.jsonl", 1, 10, 100, 100, 100)
-    source_b = ("b/events.jsonl", 1, 20, 100, 100, 100)
-    source_c = ("c/events.jsonl", 1, 30, 100, 100, 100)
+    source_a = _file_version("a/events.jsonl", 10)
+    source_b = _file_version("b/events.jsonl", 20)
+    source_c = _file_version("c/events.jsonl", 30)
     for seq in (1, 2, 3):
         cache.put(source_a, seq, {"generation": "a"})
     assert len(cache._entries) == 2
@@ -1267,9 +1276,9 @@ def test_concept_core_cache_bounds_prefixes_and_total_entries(monkeypatch):
     assert all(key[0] != source_a or key[1] == 3 for key in cache._entries)
 
     # A new byte identity at the same path proactively retires the prior generation's entries.
-    replaced_a = ("a/events.jsonl", 1, 11, 101, 101, 101)
+    replaced_a = _file_version("a/events.jsonl", 11, 101)
     assert cache.get(replaced_a, None) is None
-    assert all(key[0][0] != source_a[0] for key in cache._entries)
+    assert all(key[0].path != source_a.path for key in cache._entries)
 
 
 def test_concept_live_replay_applies_each_append_once_under_concurrent_gets(tmp_path, monkeypatch):
@@ -1484,8 +1493,56 @@ def test_concept_core_cache_partitions_request_run_id_aliases():
     import looplab.serve.routers.runs as runs_router
 
     cache = runs_router._ConceptCoreCache()
-    identity = ("real/events.jsonl", 1, 10, 100, 100, 100)
+    identity = _file_version("real/events.jsonl", 10)
     first = {"generation": "g", "run_id": "first-alias"}
     cache.put(identity, None, first)
     assert cache.get(identity, None, run_id="second-alias") is None
     assert cache.get(identity, None, run_id="first-alias") is first
+
+
+def _padded_concept_run(root):
+    """A run whose concept row sits PAST the replay cache's 4 KiB prefix probes, and is not the
+    last row either — the exact placement the size-anchored probes exist to cover."""
+    rd = root / "demo"
+    rd.mkdir(parents=True, exist_ok=True)
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    for index in range(20):
+        s.append("hint", {"text": "pad-" + "x" * 300 + str(index)})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                       "concepts": ["loss/contrastive/dcl"]}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
+    s.append("hint", {"text": "tail"})
+    return rd
+
+
+@pytest.mark.parametrize("replacement", [b"loss/contrastive/xyz", b"loss/contrastive/x"],
+                         ids=["same-size", "shrinking"])
+def test_an_in_place_rewrite_past_the_prefix_probes_is_never_served_from_the_cursor(
+        tmp_path, replacement):
+    """Review 2026-09-22, SRV2-07: the replay cache read the file SIZE at position [5] of an identity
+    whose [5] is `st_ctime_ns` (`(path, dev, ino, size, mtime, ctime, attrs)`). So "same size" was
+    really "same ctime" — never true after a rewrite — and the tail probe was anchored at a ctime
+    offset far past EOF, i.e. always `b""`. A same-size rewrite, and a shrinking one that keeps the
+    first and last rows, beyond the first 4 KiB therefore kept the OLD fold cursor and the concept
+    map served a concept the log no longer contains, on every later GET until the next append.
+    MUTATION: read the size positionally at [5] again -> both cases serve `loss/contrastive/dcl`."""
+    rd = _padded_concept_run(tmp_path)
+    log = rd / "events.jsonl"
+    raw = log.read_bytes()
+    assert raw.find(b"loss/contrastive/dcl") > 4096, "the row must sit past both prefix probes"
+    client = TestClient(make_app(tmp_path))
+    assert "loss/contrastive/dcl" in client.get("/api/runs/demo/concepts").json()["tree"]["nodes"]
+
+    rewritten = raw.replace(b"loss/contrastive/dcl", replacement, 1)
+    prior = log.stat()
+    with log.open("r+b") as stream:                     # the SAME inode, rewritten in place
+        stream.write(rewritten)
+        stream.truncate()
+    os.utime(log, ns=(prior.st_atime_ns, prior.st_mtime_ns + 1_000_000))
+
+    for _poll in range(2):                              # and it stays fresh on the next poll too
+        nodes = client.get("/api/runs/demo/concepts").json()["tree"]["nodes"]
+        assert "loss/contrastive/dcl" not in nodes, "a concept the log no longer holds was served"
+        assert replacement.decode() in nodes

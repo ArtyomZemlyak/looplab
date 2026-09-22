@@ -17,6 +17,7 @@ consumer silently spells a third tuple, and pins the three real bugs the unifica
 """
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 
@@ -526,3 +527,246 @@ def test_each_declared_variant_names_the_canonical_it_departs_from(rel):
     source = (PKG / rel).read_text(encoding="utf-8-sig")
     assert "atomicio.file_identity" in source or "atomicio import" in source, (
         f"{rel} narrows the canonical signature without naming it")
+
+
+# ------------------------------------------------------------------ no positional read of a field
+#
+# Review 2026-09-22, SRV2-07 (and the `unconverted-stat-signature-ledger` open item in doc 25 SC-11,
+# whose drift this is the READ side of): `routers/runs.py::_ConceptReplayCache` read the SIZE at [5] of
+# `(path, *file_identity(status))` — where [5] is `st_ctime_ns`. The ledger above stops a NEW tuple
+# being spelled; nothing stopped a reader indexing the canonical one by a layout it does not own, so
+# a same-size rewrite served stale concepts with every signature "converted". The rule below is the
+# precise half of "read identity fields by name": a numeric subscript is refused wherever it LANDS on
+# a stat field of a value derived from an identity producer. Scoped to `serve/` (the finding's home);
+# `events/span_index.py` still reads `same_file_entry` positionally and is outside this sweep.
+
+#: The canonical producers — every position of their result is a stat field.
+_IDENTITY_PRODUCERS = frozenset({
+    "file_identity", "same_file_entry", "same_file_kind", "trace_file_identity"})
+
+
+class _IdentityFlow:
+    """Which values in ONE module carry a stat identity, and from which position on.
+
+    A value's PREFIX is the first position that is a stat field: 0 for a producer's own result (and
+    for a named record or `tuple()`/`list()` built from one — read those by attribute), N for a tuple
+    literal whose first splatted producer sits at N (`(str(path), *file_identity(st))` keeps [0], the
+    literal's own path). Flow is followed to a fixed point, module-locally and by NAME — precise for
+    the shapes `serve/` uses, and a missed flow only ever makes the rule quieter, never wrong:
+
+      * a function returning such a value is a producer at the same prefix;
+      * a local name (per function, nested bodies excluded) bound to one;
+      * an attribute NAME assigned one anywhere in the module (`source.identity = identity`), and a
+        FIELD of a named record constructed with one (`lineage=same_file_entry(st)` makes every
+        `<record>.lineage` one);
+      * a parameter of any same-module function or method of the called NAME that receives one
+        (`self` skipped for an instance method, not for a `@staticmethod`).
+    """
+
+    _NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+    def __init__(self, tree):
+        self.functions = [n for n in ast.walk(tree)
+                          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        self.records, self.instance_methods = set(), set()
+        for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+            if any(getattr(base, "id", getattr(base, "attr", None)) == "NamedTuple"
+                   for base in cls.bases):
+                self.records.add(cls.name)
+            for item in cls.body:
+                if (isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and not any(getattr(d, "id", None) == "staticmethod"
+                                    for d in item.decorator_list)):
+                    self.instance_methods.add(id(item))
+        self.producers: dict[str, int] = {}
+        self.params: dict[int, dict[str, int]] = {}
+        self.attrs: dict[str, int] = {}
+        self._solve()
+
+    @staticmethod
+    def _callee(node) -> "str | None":
+        if not isinstance(node, ast.Call):
+            return None
+        return getattr(node.func, "id", getattr(node.func, "attr", None))
+
+    def _body(self, func):
+        stack = [n for n in func.body if not isinstance(n, self._NESTED)]
+        while stack:
+            node = stack.pop()
+            yield node
+            stack.extend(c for c in ast.iter_child_nodes(node) if not isinstance(c, self._NESTED))
+
+    def prefix(self, expr, local) -> "int | None":
+        if isinstance(expr, ast.Call):
+            name = self._callee(expr)
+            if name in _IDENTITY_PRODUCERS:
+                return 0
+            if name in self.producers:
+                return self.producers[name]
+            if name in self.records or name in {"tuple", "list"}:
+                args = [*expr.args, *(k.value for k in expr.keywords)]
+                if any(self.prefix(arg, local) is not None for arg in args):
+                    return 0
+            return None
+        if isinstance(expr, ast.Tuple):
+            return next((index for index, element in enumerate(expr.elts)
+                         if isinstance(element, ast.Starred)
+                         and self.prefix(element.value, local) is not None), None)
+        if isinstance(expr, ast.Name):
+            return local.get(expr.id)
+        if isinstance(expr, ast.Attribute):
+            return self.attrs.get(expr.attr)
+        if isinstance(expr, ast.IfExp):
+            options = [p for p in (self.prefix(expr.body, local), self.prefix(expr.orelse, local))
+                       if p is not None]
+            return min(options) if options else None
+        return None
+
+    @staticmethod
+    def _lower(table: dict, key, value: int) -> bool:
+        if key in table and table[key] <= value:
+            return False
+        table[key] = value
+        return True
+
+    def locals_of(self, func) -> dict:
+        local = dict(self.params.get(id(func), {}))
+        changed = True
+        while changed:
+            changed = False
+            for node in self._body(func):
+                if isinstance(node, ast.Assign):
+                    targets, value = node.targets, node.value
+                elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                    targets, value = [node.target], node.value
+                else:
+                    continue
+                p = self.prefix(value, local)
+                if p is None:
+                    continue
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        changed |= self._lower(local, target.id, p)
+                    elif isinstance(target, ast.Attribute):
+                        changed |= self._lower(self.attrs, target.attr, p)
+        return local
+
+    def _solve(self) -> None:
+        by_name: dict[str, list] = {}
+        for func in self.functions:
+            by_name.setdefault(func.name, []).append(func)
+        changed = True
+        while changed:
+            changed = False
+            for func in self.functions:
+                local = self.locals_of(func)
+                for node in self._body(func):
+                    if isinstance(node, ast.Return) and node.value is not None:
+                        p = self.prefix(node.value, local)
+                        if p is not None:
+                            changed |= self._lower(self.producers, func.name, p)
+                    if self._callee(node) in self.records:
+                        # A record FIELD built from a producer is itself one: `version.lineage[1]`
+                        # is the same positional read one attribute further down.
+                        for keyword in node.keywords:
+                            p = self.prefix(keyword.value, local) if keyword.arg else None
+                            if p is not None:
+                                changed |= self._lower(self.attrs, keyword.arg, p)
+                    for callee in by_name.get(self._callee(node), ()):
+                        names = [a.arg for a in callee.args.posonlyargs + callee.args.args]
+                        if id(callee) in self.instance_methods:
+                            names = names[1:]
+                        bound = self.params.setdefault(id(callee), {})
+                        pairs = [*zip(names, node.args),
+                                 *((k.arg, k.value) for k in node.keywords if k.arg)]
+                        for name, arg in pairs:
+                            p = None if isinstance(arg, ast.Starred) else self.prefix(arg, local)
+                            if p is not None:
+                                changed |= self._lower(bound, name, p)
+
+    def positional_reads(self) -> list[tuple[int, str]]:
+        out = []
+        for func in self.functions:
+            local = self.locals_of(func)
+            for node in self._body(func):
+                if isinstance(node, ast.Subscript):
+                    p = self.prefix(node.value, local)
+                    if p is not None and _lands_on_a_field(node.slice, p):
+                        out.append((node.lineno, ast.unparse(node)))
+        return out
+
+
+def _int_literal(node) -> "int | None":
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    if (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub)
+            and isinstance(node.operand, ast.Constant) and type(node.operand.value) is int):
+        return -node.operand.value
+    return None
+
+
+def _lands_on_a_field(index, prefix: int) -> bool:
+    """Does a LITERAL index/slice reach a position at or past `prefix`? A computed index is not a
+    positional read this rule can judge, so it is left alone; a negative one depends on the width."""
+    if isinstance(index, ast.Slice):
+        lower = 0 if index.lower is None else _int_literal(index.lower)
+        upper = None if index.upper is None else _int_literal(index.upper)
+        if lower is None or (index.upper is not None and upper is None):
+            return False
+        if lower < 0 or (upper is not None and upper < 0):
+            return True
+        return upper is None or upper > prefix
+    value = _int_literal(index)
+    return value is not None and (value < 0 or value >= prefix)
+
+
+def _positional_identity_reads(source: str) -> list[tuple[int, str]]:
+    return sorted(set(_IdentityFlow(ast.parse(source)).positional_reads()))
+
+
+# The defect's own shape, condensed from the pre-fix `routers/runs.py`: the guard must see through a
+# local producer, a same-module call into a method, a staticmethod, and an attribute hop — and must
+# leave the literal's own [0] (the path) alone, or it would refuse the correct half of the code too.
+_SRV2_07_SHAPE = '''
+from looplab.core.atomicio import file_identity
+
+def _concept_event_file_identity(path):
+    return (str(path.absolute()), *file_identity(path.stat()))
+
+class _Cache:
+    @staticmethod
+    def _identity_requires_reset(previous, current):
+        return current[1:3] != previous[1:3] or current[5] < previous[5]
+
+    def snapshot(self, source, identity):
+        reset = self._identity_requires_reset(source.identity, identity)
+        grew = identity[5] > source.identity[5]
+        source.identity = identity
+        return reset or grew
+
+def read(cache, source, path):
+    identity = _concept_event_file_identity(path)
+    return identity[0], cache.snapshot(source, identity)
+'''
+
+
+def test_the_positional_guard_sees_the_srv2_07_shape_and_spares_the_literal_prefix():
+    flagged = {text for _line, text in _positional_identity_reads(_SRV2_07_SHAPE)}
+    assert flagged == {"current[1:3]", "previous[1:3]", "current[5]", "previous[5]",
+                       "identity[5]", "source.identity[5]"}, flagged
+
+
+def test_no_positional_read_lands_on_a_stat_identity_field():
+    """Every stat-identity field `serve/` reads, it reads by NAME (`.size`, `.st_ino`, …).
+
+    MUTATION: restore `current[5] < previous[5]` in `_ConceptReplayCache._identity_requires_reset`
+    (reading a `_ConceptFileVersion` positionally), or `identity[1]` in
+    `_legacy_node_log_dir_identity` -> this names the line."""
+    from _source_scan import PKG, iter_sources
+
+    offenders = [f"{path.relative_to(PKG).as_posix()}:{line}: {text}"
+                 for path, source in iter_sources(PKG / "serve")
+                 for line, text in _positional_identity_reads(source)]
+    assert not offenders, (
+        "a numeric subscript lands on a stat-identity field — read it by name instead:\n  "
+        + "\n  ".join(offenders))
