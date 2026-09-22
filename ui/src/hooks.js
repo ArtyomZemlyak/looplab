@@ -421,9 +421,11 @@ export function useRunState(runId, {
       }, failed)
     }
     // The degraded connection's read of a moved run: the same uncapped `/state` GET the initial probe
-    // makes, fenced like the probe (one request at a time, dropped once superseded or stopped).
+    // makes, fenced like the probe (one request at a time, dropped once superseded or stopped). Its
+    // deadline is a PROBE INTERVAL, not an ordinary read's 8 s: the runs that get here are the ones
+    // whose whole state is slowest to read, and at 8 s every retry of the ramp timed out.
     function refetchDegraded() {
-      const request = deadlineGet(runApiPath(runId, '/state'))
+      const request = deadlineGet(runApiPath(runId, '/state'), TERMINAL_PROBE_MS)
       terminalRequest = request
       request.promise.then(payload => {
         if (stopped || !terminalMode || terminalRequest !== request) return
@@ -449,6 +451,9 @@ export function useRunState(runId, {
       streamDegraded = true
       setDegraded(true)
       enterTerminalMode()
+      // Nothing on screen yet (`last` is still the initial identity: the first /state probe failed,
+      // as it may on exactly these runs) — read the run now, not a whole probe interval later.
+      if (last[0] === -2) { clearTimeout(timer); refetchDegraded() }
     }
 
     function connect() {

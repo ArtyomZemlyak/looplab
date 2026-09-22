@@ -175,3 +175,28 @@ test('a frame past the stream bound degrades to the lifecycle probe: one /events
     assert.equal(count('/events'), 1, 're-reading the moved run must not reopen the stream either')
   })
 })
+
+test('a run whose whole state outlasts the 8 s read still opens on the degraded path', async () => {
+  // The runs that reach the degraded path are the ones whose whole state is slowest to read, so the
+  // initial /state probe (8 s deadline) may already have failed. The degraded read then happens AT
+  // ONCE when nothing is on screen, and waits up to a probe interval rather than 8 s — otherwise it
+  // timed out on every retry of the ramp and the workspace stayed "Opening run…" for good.
+  await withRunStateHarness({
+    routes: {
+      // 25 s of the hook's clock (250 ms real): past the 8 s probe deadline, inside a probe interval.
+      '/state': () => new Promise(resolve => setTimeout(() => resolve(jsonResponse(snapshot(12))), 25000)),
+      '/lifecycle': () => jsonResponse(lifecycleOf(snapshot(12))),
+      '/events': options => ({
+        ok: true, status: 200, headers: { get: () => null },
+        body: stateStream(snapshot(12), RUN_STATE_MAX_FRAME_CHARS + MIB, options.signal).body,
+      }),
+    },
+  }, async ({ hook, count, waitFor }) => {
+    await waitFor(() => hook.latest?.status === 'ready', 'a slow whole-state read never landed')
+    assert.equal(hook.latest.seq, 12)
+    assert.equal(hook.latest.degraded, true)
+    assert.equal(count('/lifecycle'), 0, 'read at once, not a probe interval later')
+    assert.equal(count('/state'), 2, 'the timed-out initial probe, then the one degraded read')
+    assert.equal(count('/events'), 1)
+  })
+})
