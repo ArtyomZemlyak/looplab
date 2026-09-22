@@ -27,6 +27,9 @@ from looplab.serve.protocol import (PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINI
                                     PHASE_ONBOARDING, PHASE_PAUSED, PHASE_SEARCH,
                                     PHASE_SPEC_APPROVAL)
 from looplab.serve.tui_api import Api, ApiError
+# ...and the ONE environment name the autostarted server must not inherit (see `ensure_server`).
+# `serve/jupyter.py` imports nothing from looplab, so this adds no dependency either.
+from looplab.serve.jupyter import REAP_ON_EXIT_ENV
 
 # ----------------------------------------------------------------------------- pure formatting helpers
 # (kept side-effect-free so they're unit-testable without a live server or a terminal.)
@@ -412,6 +415,11 @@ def ensure_server(base_url: Optional[str], run_root: str, *, log=lambda m: None)
     url = f"http://127.0.0.1:{port}"
     log(f"no server found — launching one on {url} …")
     env = {**os.environ, "LOOPLAB_RUN_ROOT": run_root}
+    # This server is PRIVATE to the TUI and is stopped when the operator quits (`_stop_child`), so it
+    # must never inherit the hub launcher's reap-on-exit marker: a server carrying it kills the
+    # engines it started when it stops, and quitting the TUI would take every run started through
+    # it down too (review 2026-09-22, SRV1-02; `engine_proc._reap_on_exit`).
+    env.pop(REAP_ON_EXIT_ENV, None)
     child = subprocess.Popen(
         [sys.executable, "-m", "looplab.cli", "ui", "--no-build",
          "--host", "127.0.0.1", "--port", str(port), "--run-root", run_root],

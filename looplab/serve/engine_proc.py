@@ -1,8 +1,9 @@
 """Engine-process plumbing for the UI server: SPAWNING detached engine runs (`_spawn_engine`), the
-resume claim/reconcile machinery, the HTTP-shaped lock wrappers, and the JupyterHub-only reaper that
-stops spawned engines when the single-user server shuts down. Extracted verbatim from
-`serve/server.py` (BACKLOG §4); `looplab.serve.server` re-exports `_engine_alive`/`_kill_process_tree`
-so the historical `looplab.server._engine_alive` import path keeps working for tests and callers.
+resume claim/reconcile machinery, the HTTP-shaped lock wrappers, and the reaper that stops spawned
+engines when the server the JupyterHub Launcher started shuts down (`_reap_on_exit`). Extracted
+verbatim from `serve/server.py` (BACKLOG §4); `looplab.serve.server` re-exports `_engine_alive`/
+`_kill_process_tree` so the historical `looplab.server._engine_alive` import path keeps working for
+tests and callers.
 
 The run-directory LIFECYCLE FENCES themselves — `engine.lock` liveness, the per-run lifecycle lock,
 the launch-pending predicates and their launch marker — moved DOWN to
@@ -31,6 +32,7 @@ from typing import Any, Callable, Optional
 # functions still read them out of this module's globals, so such a patch still lands.
 from looplab.core.atomicio import file_identity
 from looplab.engine import run_lifecycle
+from looplab.serve.jupyter import REAP_ON_EXIT_ENV
 from looplab.engine.run_lifecycle import (  # noqa: F401 - re-exported for the historical import path
     RESUME_RECONCILE_GRACE_S as _RESUME_RECONCILE_GRACE_S,
     RUN_LAUNCH_MARKER as _RUN_LAUNCH_MARKER,
@@ -59,6 +61,20 @@ def _on_shared_hub() -> bool:
     every single-user server; absent on the default local single-user path."""
     return bool(os.environ.get("JUPYTERHUB_SERVICE_PREFIX")
                 or os.environ.get("JUPYTERHUB_API_TOKEN"))
+
+
+def _reap_on_exit() -> bool:
+    """True only for the UI server the JupyterHub Launcher tile started — the one whose stop is the
+    pod going away, so it must take the engines it spawned down with it (`_reap_spawned_engines`).
+
+    Deliberately NOT `_on_shared_hub()` (review 2026-09-22, SRV1-02). That predicate reads the
+    `JUPYTERHUB_*` environment, which EVERY process in the pod inherits — a hub terminal, the private
+    server `looplab tui` starts, a `looplab ui` typed by hand — so as the reaper's trigger it made
+    quitting the TUI, or Ctrl-C on a manual server, kill the operator's runs. It stays what decides
+    AUTH (a shared origin is a fact about where the page is served, whoever started the process); the
+    reaper keys on the marker the launcher alone sets (`jupyter.py::REAP_ON_EXIT_ENV`). An operator who
+    runs a pod-lifetime server by hand can opt it in with the same variable."""
+    return os.environ.get(REAP_ON_EXIT_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _spawn_liveness(rd: Path) -> Optional[bool]:
@@ -268,6 +284,9 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
     clean_parent = {key: value for key, value in os.environ.items()
                     if not is_secret_env(key, value)}
     kw["env"] = {**clean_parent, **(env or {})}
+    # Nor the reap-on-exit marker: it names the ONE server the JupyterHub launcher started
+    # (`_reap_on_exit`), and a child carrying it would hand that authority to whatever it starts.
+    kw["env"].pop(REAP_ON_EXIT_ENV, None)
     if os.name == "nt":
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # detached, survives request
     else:
@@ -768,9 +787,12 @@ def _reap_spawned_engines() -> None:
     # when the hub idle-culler stops the pod: it's orphaned (reparented to PID 1), keeps consuming
     # the GPU/CPU JupyterHub bills the user, AND keeps engine.lock held so the run shows "live"
     # forever (masking the zombie-detect / auto-resume recovery). Locally we must NOT do this — a
-    # detached engine is deliberately meant to outlive a UI restart — so we guard on the JH env.
+    # detached engine is deliberately meant to outlive a UI restart — and neither may any server in
+    # the pod whose stop is NOT the pod's: the TUI's private server, a `looplab ui` typed into a hub
+    # terminal. So we guard on the launcher's marker, not on the JH env every one of them inherits
+    # (`_reap_on_exit`, review 2026-09-22, SRV1-02).
     # _kill_process_tree re-checks each pid is still a looplab engine (PID-recycle safe).
-    if not _on_shared_hub():
+    if not _reap_on_exit():
         return
     with _engine_spawn_gate:
         for pid, proc in list(_spawned_engines.items()):
@@ -786,9 +808,9 @@ def _reap_spawned_engines() -> None:
 
 
 def install_reap_hooks(app) -> None:
-    """Wire the JupyterHub reaper to this app's lifecycle: an ASGI shutdown hook plus — on a shared
-    hub only — an atexit backstop. Called once per `make_app`, at the same construction point the
-    inline registration used to occupy."""
+    """Wire the JupyterHub reaper to this app's lifecycle: an ASGI shutdown hook plus — on the
+    server the hub launcher started only (`_reap_on_exit`) — an atexit backstop. Called once per
+    `make_app`, at the same construction point the inline registration used to occupy."""
     # OPEN[serve-lifecycle-uses-deprecated-on-event] the four `@app.on_event` hooks here and in
     # `server.py` are deprecated by FastAPI and go away in a future major. The replacement is one
     # `lifespan=` at `FastAPI(...)` construction, which is why this is not a rename: the hooks come
@@ -800,5 +822,5 @@ def install_reap_hooks(app) -> None:
     def _reap_on_shutdown():
         _reap_spawned_engines()
 
-    if _on_shared_hub():            # backstop for a hard exit where the ASGI shutdown hook doesn't fire
+    if _reap_on_exit():             # backstop for a hard exit where the ASGI shutdown hook doesn't fire
         atexit.register(_reap_spawned_engines)

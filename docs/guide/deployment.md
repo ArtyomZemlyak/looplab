@@ -235,9 +235,13 @@ LoopLab installed, the bundle baked + pinned, and `LOOPLAB_RUN_ROOT` set. Point 
 also allow the full origin in `LOOPLAB_UI_CORS`; otherwise unsafe-method requests correctly fail with
 403 even though the tile can render.
 
-**Resource lifecycle.** Under JupyterHub the UI server reaps the engines it spawned on shutdown (a
-hub cull would otherwise orphan a detached engine that keeps billing GPU/CPU and holds the run's
-lock); eval subprocesses cap their BLAS/OpenMP threads to the pod's CPU quota; and an OOM-killed eval
+**Resource lifecycle.** Under JupyterHub the UI server the Launcher tile starts reaps the engines it
+spawned on shutdown (a hub cull would otherwise orphan a detached engine that keeps billing GPU/CPU
+and holds the run's lock). Only that server does: the launcher marks it with
+`LOOPLAB_UI_REAP_ON_EXIT=1`, while a `looplab ui` you start by hand in a hub terminal — and the
+private server `looplab tui` starts — carry no marker, so stopping them leaves their runs running,
+exactly as on a local box (set the variable yourself to opt a hand-started, pod-lifetime server in).
+Eval subprocesses cap their BLAS/OpenMP threads to the pod's CPU quota; and an OOM-killed eval
 is recognised and repaired (reduce batch/model size) instead of dying silently. These are no-ops on a
 local box. On a local box, GPU-owning Engine processes running as the same OS user and sharing the
 same temporary-filesystem namespace instead coordinate through one crash-released, pool-wide lease:

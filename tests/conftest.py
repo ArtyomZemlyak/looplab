@@ -210,6 +210,10 @@ def _isolate_shared_origin_detection(_isolation_patch):
     leave them passing everywhere else. Tests that mean "shared hub" set the variable themselves."""
     for name in ("JUPYTERHUB_SERVICE_PREFIX", "JUPYTERHUB_API_TOKEN"):
         _isolation_patch.delenv(name, raising=False)
+    # The hub LAUNCHER's reap-on-exit marker (`serve/jupyter.py::REAP_ON_EXIT_ENV`), same reason: a
+    # suite run from inside that server's process tree would otherwise arm the kill-on-shutdown
+    # reaper in every `make_app` it builds. Tests that mean "the tile's server" set it themselves.
+    _isolation_patch.delenv("LOOPLAB_UI_REAP_ON_EXIT", raising=False)
     # Same reason in both directions: a developer who exports LOOPLAB_UI_TOKEN would token-gate every
     # anonymous-mode server test, and a test that lets the server MINT one would otherwise leak that
     # credential into every later test in the process (`resolve_owner_token` exports what it mints).

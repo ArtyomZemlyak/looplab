@@ -13,6 +13,14 @@ same process happened to reap it through `subprocess._cleanup`.
 
 Every test here waits for a child's exit with `os.waitid(..., WNOWAIT)`, which observes the exit
 WITHOUT reaping it — so the zombie the defect needs is still there when the code under test looks.
+
+WHO MAY REAP THEM AT EXIT (review 2026-09-22, SRV1-02). The kill-on-shutdown reaper exists for ONE
+server: the one the JupyterHub Launcher tile starts, whose lifetime IS the pod's, so an idle cull
+must not orphan its engines. It used to arm on `_on_shared_hub()` — the `JUPYTERHUB_*` environment —
+which every process in the pod inherits: quitting `looplab tui` (whose private child server started
+the run) or Ctrl-C on a hand-started `looplab ui` in a hub terminal killed the operator's runs. The
+launcher now marks the server it launches (`jupyter.py::REAP_ON_EXIT_ENV`) and the reaper keys on
+that marker; the hub environment stays what decides AUTH, never this.
 """
 from __future__ import annotations
 
@@ -31,6 +39,7 @@ pytest.importorskip("fastapi")   # `serve/run_commands.py` speaks HTTPException
 from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.serve import engine_proc  # noqa: E402
 from looplab.serve import run_commands as rc  # noqa: E402
+from looplab.serve.jupyter import REAP_ON_EXIT_ENV, setup_looplab  # noqa: E402
 
 _CAN_OBSERVE_EXIT_WITHOUT_REAPING = all(
     hasattr(os, name) for name in ("waitid", "P_PID", "WEXITED", "WNOWAIT", "WNOHANG"))
@@ -165,7 +174,7 @@ def test_a_registered_child_is_answered_by_its_own_popen_where_proc_is_unreadabl
 def test_the_reaper_signals_only_children_that_are_still_running(monkeypatch):
     """A reaped/exited child's pid belongs to whoever the kernel hands it to next; only an UNREAPED
     child's pid is still provably ours. So the reaper polls first and signals live children only."""
-    monkeypatch.setenv("JUPYTERHUB_SERVICE_PREFIX", "/user/alice/")
+    monkeypatch.setenv(REAP_ON_EXIT_ENV, "1")
     signalled = []
     monkeypatch.setattr(engine_proc, "_kill_process_tree", signalled.append)
     finished = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -182,3 +191,93 @@ def test_the_reaper_signals_only_children_that_are_still_running(monkeypatch):
         running.kill()
         running.wait(timeout=10)
         finished.wait(timeout=10)
+
+
+# ------------------------------------------------------------------ who may reap them (SRV1-02)
+
+_CAN_REAP_HERE = os.name != "nt" and (
+    Path("/proc/self/cmdline").exists() or __import__("importlib").util.find_spec("psutil"))
+
+
+@pytest.mark.skipif(not _CAN_REAP_HERE,
+                    reason="the reaper's pid-recycle guard needs /proc or psutil to find its engine")
+@pytest.mark.parametrize("launched_by_the_hub_tile", [False, True])
+def test_only_the_server_the_hub_launcher_started_reaps_its_engines_on_exit(
+        tmp_path, monkeypatch, launched_by_the_hub_tile):
+    """The reviewer's `hub_reap.py`, as a test. Both halves run under the environment EVERY process
+    in a JupyterHub pod has, so the hub env cannot be what decides; only the launcher's marker is.
+
+    Without it — `looplab tui`'s private server, a `looplab ui` typed into a hub terminal — stopping
+    the server must leave the run's engine running, exactly as on a laptop. With it — the server
+    the Launcher tile started, whose exit IS the pod going away — the engine goes with it."""
+    from fastapi.testclient import TestClient
+    from looplab.serve.server import make_app
+
+    monkeypatch.setenv("JUPYTERHUB_SERVICE_PREFIX", "/user/alice/")   # inherited pod-wide
+    if launched_by_the_hub_tile:
+        monkeypatch.setenv(REAP_ON_EXIT_ENV, setup_looplab()["environment"][REAP_ON_EXIT_ENV])
+    else:
+        monkeypatch.delenv(REAP_ON_EXIT_ENV, raising=False)
+    # A stand-in for an engine the server started through /api/start: detached into its own
+    # session, with `looplab` in its argv so the reaper's pid-recycle guard recognises it.
+    engine = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)", "looplab-engine-standin"],
+        start_new_session=True)
+    try:
+        engine_proc._register_spawned_engine(engine)
+        with TestClient(make_app(tmp_path / "runs")):
+            pass                                  # the server stops: ASGI lifespan shutdown
+        if launched_by_the_hub_tile:
+            assert engine.wait(timeout=30) is not None, "the tile's server took its engine down"
+        else:
+            assert engine.poll() is None, "stopping a private/manual server killed the run"
+    finally:
+        if engine.poll() is None:
+            engine.kill()
+        engine.wait(timeout=10)
+
+
+def test_the_launcher_marks_the_one_server_whose_exit_is_the_pods():
+    """The jupyter-server-proxy spec is where the marker comes from, and nowhere else sets it."""
+    assert setup_looplab()["environment"][REAP_ON_EXIT_ENV] == "1"
+
+
+def test_the_tui_private_server_never_inherits_the_reap_marker(tmp_path, monkeypatch):
+    """`looplab tui` stops the server it started when the operator quits. Were that server to
+    inherit the marker (a TUI launched from a process that carries it), quitting the TUI would kill
+    every run started through it — so its child environment drops the marker explicitly."""
+    from looplab.serve import tui_format
+
+    monkeypatch.setenv(REAP_ON_EXIT_ENV, "1")
+    launched = {}
+
+    class _ExitedAtOnce:
+        def poll(self):
+            return 1
+
+    def _record_popen(argv, **kwargs):
+        launched["argv"], launched["env"] = argv, kwargs["env"]
+        return _ExitedAtOnce()
+
+    monkeypatch.setattr(tui_format, "Api", lambda _url: SimpleNamespace(ping=lambda: False))
+    monkeypatch.setattr(tui_format.subprocess, "Popen", _record_popen)
+    with pytest.raises(tui_format.ApiError):     # our stand-in "server" exits before answering
+        tui_format.ensure_server(None, str(tmp_path))
+    assert launched["argv"][2:4] == ["looplab.cli", "ui"]
+    assert REAP_ON_EXIT_ENV not in launched["env"]
+    assert launched["env"]["LOOPLAB_RUN_ROOT"] == str(tmp_path)
+
+
+def test_an_engine_never_inherits_the_reap_marker(monkeypatch, tmp_path):
+    """The marker names the ONE process the launcher started. An engine carrying it would hand the
+    authority to anything that engine starts, so the spawner drops it with the secrets."""
+    monkeypatch.setenv(REAP_ON_EXIT_ENV, "1")
+    seen = {}
+
+    def _record_popen(cmd, **kwargs):
+        seen["env"] = kwargs["env"]
+        return SimpleNamespace()                 # pid-less: nothing is registered
+
+    monkeypatch.setattr(engine_proc.subprocess, "Popen", _record_popen)
+    assert engine_proc._spawn_engine(["resume", str(tmp_path / "r")]) is None
+    assert REAP_ON_EXIT_ENV not in seen["env"]

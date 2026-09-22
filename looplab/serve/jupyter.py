@@ -19,11 +19,26 @@ Design choices that make this robust on a typical JH pod:
 - ``root_path`` is NOT templated here: ``looplab ui`` auto-derives it from ``JUPYTERHUB_SERVICE_PREFIX``
   (inherited from the single-user server env), so it works behind both the prefix-stripping (default)
   and non-stripping proxy styles without a fragile ``{base_url}`` substitution.
+- the launched server alone carries ``REAP_ON_EXIT_ENV``: its stop (a pod cull) takes the engines it
+  spawned down with it, while a ``looplab ui``/``looplab tui`` server started by hand in the same pod
+  leaves its runs running when it stops, exactly as on a laptop.
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
+
+# The marker that makes a UI server take the engines IT spawned down with it when it stops
+# (`engine_proc._reap_spawned_engines`). Set by THIS launcher and nothing else (review 2026-09-22,
+# SRV1-02): the server jsp starts from the Launcher tile is the one whose lifetime IS the pod's, so an
+# idle cull that stops it must not orphan a detached engine that keeps billing GPU/CPU and holds its
+# run's lock. The reaper used to arm on the JupyterHub environment instead, which EVERY process in the
+# pod inherits — so quitting `looplab tui` (whose private child server started the run) or Ctrl-C on
+# a hand-started `looplab ui` in a hub terminal killed the operator's runs. `tui_format.ensure_server`
+# and `engine_proc._spawn_engine` drop the marker from their children's environment, so it stays with
+# the one process this spec launches. Defined here, not in `engine_proc`, because jupyter-server
+# imports this module at startup and it must stay as cheap to import as it is today.
+REAP_ON_EXIT_ENV = "LOOPLAB_UI_REAP_ON_EXIT"
 
 
 def _run_root() -> str:
@@ -59,5 +74,7 @@ def setup_looplab():
         "new_browser_tab": protected_shell,
         "launcher_entry": launcher,
         # Belt-and-suspenders so a manual `looplab ui` in this pod resolves the same run-root.
-        "environment": {"LOOPLAB_RUN_ROOT": run_root},
+        # REAP_ON_EXIT_ENV marks THIS server as the pod-lifetime one whose stop reaps its engines;
+        # a manual `looplab ui` in this pod does not get it, so stopping one leaves its runs running.
+        "environment": {"LOOPLAB_RUN_ROOT": run_root, REAP_ON_EXIT_ENV: "1"},
     }
