@@ -195,11 +195,15 @@ own currency) and `llm_token_limit` (total tokens; the one that holds against a 
 prices nothing) are checked at the broker's permit, BEFORE a request is queued
 (`core/llm_budget.py::RunBudget`): committed + reserved + this call's estimate — the run's own mean
 per committed call, so nothing is reserved before the first call lands — may not exceed the cap. A
-refusal raises `BudgetExceeded`, the same hard stop the accountant raises, through the same funnels
-(`tests/test_containment_census.py` pins them), so the run ends the way a tripped ceiling always
-has. The committed half is fed by the durable `llm_usage` ledger and seeded from it on a resume, so
-the cap survives a restart; `looplab tokens` reconciles against that same ledger. Both default to
-0 = no cap (doc 52 row 15).
+refusal raises `BudgetExceeded`, the same hard stop the accountant raises, through the same funnels,
+so the run ends the way a tripped ceiling always has. `tests/test_containment_census.py` pins the
+funnels as a CLOSURE over the call graph (since 2026-09-22; before that it keyed on eight callee
+names and missed 38 swallowing handlers): a blind `except` whose try-block reaches a provider call
+through any function lets the stop through, bar a shrink-only `FUNNEL_BACKLOG` — four build and
+producer-lane sites awaiting a deferred-stop sink, and one reviewed false positive. The committed
+half is fed by the durable `llm_usage` ledger and seeded from it on a resume, so the cap survives a
+restart; `looplab tokens` reconciles against that same ledger. Both default to 0 = no cap (doc 52
+row 15).
 
 **One ceiling, two halves (2026-09-08).** `llm_cost_limit` and `llm_budget_usd` were briefly two
 run-level USD caps enforced by two different halves — reserved before the call here, committed
