@@ -285,3 +285,33 @@ def test_emit_force_still_terminates_a_tool_less_loop_that_can_self_plan():
                           finalize=lambda a: ("emit", a), fallback=lambda m: ("fb", None))
     assert out == ("emit", {"forced": True}), out
     assert client.turns <= 6, f"the force ceiling did not bite until turn {client.turns}"
+
+
+def test_emit_force_terminates_an_emit_only_loop_whose_model_invents_tools():
+    """Review 2026-09-22, TAT-13 (doc 50 AG-17). The gate above keyed on "is there a callable tool"
+    — `tools is not None or self_plan` — so an EMIT-ONLY loop (no tools, `self_plan` off) never
+    counted a turn toward `emit_force`. A model that answers such a loop with tool calls anyway —
+    INVENTED names, each one different so the StuckDetector's identical-pair check never fires —
+    was answered "(unknown tool: …)" turn after turn, a paid call each, with the hard ceiling
+    silently disabled: measured at 700 turns. The ceiling now counts every turn that carried calls."""
+    from looplab.agents.tool_loop import drive_tool_loop
+
+    class _InventTools:
+        def __init__(self):
+            self.turns = 0
+
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.turns += 1
+            if self.turns > 60:                     # the safety net for THIS test, not for the loop
+                raise AssertionError("drive_tool_loop never terminated")
+            return _tool_call(f"read_file_{self.turns}", {"path": f"src/mod_{self.turns}.py"})
+
+        def complete_tool(self, messages, json_schema):
+            return {"forced": True}
+
+    client = _InventTools()
+    out = drive_tool_loop(client, None, [{"role": "user", "content": "go"}], _EMIT,
+                          self_plan=False, emit_force=5,
+                          finalize=lambda a: ("emit", a), fallback=lambda m: ("fb", None))
+    assert out == ("emit", {"forced": True}), out
+    assert client.turns <= 6, f"the force ceiling did not bite until turn {client.turns}"

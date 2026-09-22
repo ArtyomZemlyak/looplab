@@ -1354,7 +1354,16 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # UnifiedAgent's pilot/triage pass pilot_tools=None when researcher_tools=False, both with
         # self_plan on. (DeepResearcher only dodged it by passing a `_NoTools()` sentinel instead of
         # None, which is precisely the accident this makes unnecessary.)
-        if (emit_after or emit_force) and (tools is not None or self_plan):
+        #
+        # AND "IS THERE A CALLABLE TOOL" WAS STILL THE WRONG QUESTION (review 2026-09-22, TAT-13 /
+        # doc 50 AG-17): an EMIT-ONLY loop (tools=None, self_plan off) has none, yet its model can
+        # answer with tool calls anyway — INVENTED names, varied so the StuckDetector's
+        # identical-pair check never fires — and each was answered "(unknown tool: …)" and paid for,
+        # with the ceiling switched off: measured at 700 turns. The ceiling now counts every turn
+        # that carried calls — which every turn reaching this line did (a call-less turn salvaged,
+        # nudged or stalled above) — so the termination guarantee no longer depends on what the
+        # caller happened to wire.
+        if emit_after or emit_force:
             call_turns += 1
             tool_turns += int(investigated)
             if emit_force and call_turns >= emit_force:
