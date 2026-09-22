@@ -2128,7 +2128,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 #
                 # Two things make this a LIFETIME change and not a WRITER change, which is why it
                 # needs no new exception to engine invariant #1: the children are anyio tasks on
-                # this same event loop (never threads), and every one of the eight node-terminal
+                # this same event loop (never threads), and every one of the nine node-terminal
                 # appends in `engine/evaluate.py` is lexically inside `async with self._write_lock`.
                 # `_record_eval_start_boundary` stays on the main task at the dispatch decision,
                 # exactly where the invariant says to keep it.
