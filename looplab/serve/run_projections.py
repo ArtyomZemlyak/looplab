@@ -18,7 +18,8 @@ import stat
 
 from looplab.core.atomicio import file_identity
 from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
-                                       load_run_deletion_fence, run_deletion_snapshot_token)
+                                       load_run_deletion_fence, run_deletion_fence_path,
+                                       run_deletion_snapshot_token)
 from looplab.engine.champion_caveats import champion_metric_caveats, mislead_gap
 from looplab.engine.comparability import record_of
 from looplab.events.trajectory import running_best
@@ -28,6 +29,22 @@ from looplab.events.replay import fold
 from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
 from looplab.serve.run_commands import run_generation_token
+
+
+def _listed_fence_holds(rd, fence_names: set) -> bool:
+    """Does `rd` carry a deletion fence, given the fence names its root's listing holds?
+
+    A BATCH answer, for a caller that has just listed the root itself: no name in the listing means
+    no load at all (the common case — a fence exists only while a delete is in flight), and a run
+    whose own fence name is listed gets `load_run_deletion_fence`, the authority, which raises
+    `RunDeletionStorageError` on a fence it cannot read. A fence published after the listing is
+    seen by the next list; every per-run route still answers it through `AppState.run_dir`.
+    """
+    if not fence_names:
+        return False
+    if run_deletion_fence_path(rd).name.lower() not in fence_names:
+        return False
+    return load_run_deletion_fence(rd) is not None
 
 
 def run_summaries(srv, only=None) -> list:
@@ -46,7 +63,17 @@ def run_summaries(srv, only=None) -> list:
     """
     out = []
     root = srv.root
-    for rd in sorted(root.iterdir()) if root.exists() else []:
+    entries = sorted(root.iterdir()) if root.exists() else []
+    # The deletion fences present in THIS listing (review 2026-09-22, SRV2-02). A fence lives in the
+    # run ROOT, and `load_run_deletion_fence` warms its lookup by `scandir`-ing that directory first
+    # (`core/fence.py::_warm_directory_lookup`) — right for one lookup, but called once per run here
+    # it re-read the root listing N times: O(N²) in directory entries, 2.33 s for a warm list over
+    # 2,000 runs. The listing the loop walks already names every fence file, so only a run whose own
+    # fence name appears in it gets the authoritative load — which still decides, and still fails
+    # closed on a fence it cannot read.
+    fence_names = {entry.name.lower() for entry in entries
+                   if entry.name.lower().startswith(RUN_DELETION_FENCE_PREFIX)}
+    for rd in entries:
         if only is not None and rd.name not in only:
             continue
         # IMPORTED from the writers rather than respelled: a hand-copied prefix does not fail when
@@ -63,7 +90,7 @@ def run_summaries(srv, only=None) -> list:
             reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
             if (not stat.S_ISDIR(entry.st_mode) or stat.S_ISLNK(entry.st_mode)
                     or bool(attributes & reparse_flag)
-                    or load_run_deletion_fence(rd) is not None):
+                    or _listed_fence_holds(rd, fence_names)):
                 continue
         except (OSError, RunDeletionStorageError):
             continue
