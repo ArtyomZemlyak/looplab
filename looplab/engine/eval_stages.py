@@ -419,7 +419,16 @@ class EvalStagesMixin:
                 # The candidate's `cmd` keeps running, as the self-report stage — when the task has
                 # one; a host scorer alone appends nothing empty — and the host scorer is the score
                 # stage and takes the `needs` derivation.
-                final["name"] = "self_score"
+                #
+                # Named by the SAME free-name walk `_rename_candidate_score` uses (review 2026-09-22,
+                # RTA-09): `materialized_stages` reserves only `score` for a Developer manifest, so a
+                # manifest stage already named `self_score` met this one and the pipeline carried two
+                # — one `self_score.log`, one row in the per-NAME projection, and a stage-scoped
+                # re-run from `self_score` that restarted at the Developer's stage. The ENGINE's
+                # stage takes the suffix, so no manifest that exists today is renamed; the runtime
+                # reads `self_metric` off the stage BEFORE the host one by position, not by name.
+                final["name"] = self._free_self_score_name(
+                    {str(s.get("name") or "") for s in preceding})
                 candidate = [final] if final.get("command") else []
                 return _expand(preceding) + candidate + [self._with_final_needs(es, host)]
             return _expand(preceding) + [self._with_final_needs(es, final)]
@@ -460,12 +469,20 @@ class EvalStagesMixin:
             if str(stage.get("name") or "").lower() != "score":
                 out.append(stage)
                 continue
-            name, suffix = "self_score", 1
-            while name in taken:
-                name, suffix = f"self_score_{suffix}", suffix + 1
+            name = EvalStagesMixin._free_self_score_name(taken)
             taken.add(name)
             out.append(dict(stage, name=name))
         return out
+
+    @staticmethod
+    def _free_self_score_name(taken) -> str:
+        """The first of `self_score`, `self_score_1`, `self_score_2`, … not in `taken` — the ONE walk
+        both sites that name a candidate-side scoring stage beside a host scorer use, so neither can
+        hand the pipeline a second stage of an existing name."""
+        name, suffix = "self_score", 1
+        while name in taken:
+            name, suffix = f"self_score_{suffix}", suffix + 1
+        return name
 
     def _candidate_then_host(self, es, params, score_cmd, score_timeout, host):
         """The pipeline for a task with a host scorer and no usable preceding stages: the

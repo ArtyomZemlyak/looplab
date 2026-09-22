@@ -360,3 +360,38 @@ def test_the_host_stage_is_the_pipelines_only_score_stage(tmp_path):
              "host_scorer": host, "command": ["python", "s.py"]}
     collided = [s["name"] for s in _Stages()._resolve_stages(tmp_path, taken, params={})]
     assert collided == ["self_score", "self_score_1", "score"], collided
+
+
+def test_a_developer_manifest_naming_self_score_does_not_collide_with_the_candidate_stage(tmp_path):
+    """Review 2026-09-22, RTA-09 — the SINGLE-COMMAND twin of the operator-stages case above. With a
+    host scorer declared, the engine appends the candidate's own `command` as `self_score` after the
+    Developer's `looplab_stages.json`; `validate_stages` reserves only `score` for a manifest, so a
+    manifest naming its own stage `self_score` produced TWO — one `self_score.log`, one row in the
+    per-NAME projection, and a stage-scoped re-run from `self_score` that silently restarted at the
+    Developer's stage. The ENGINE-built stage takes the suffix, so no existing manifest is renamed."""
+    from looplab.engine.eval_stages import EvalStagesMixin
+    from looplab.runtime import command_eval
+
+    class _Stages(EvalStagesMixin):
+        metric_subject = "audit"
+
+    (tmp_path / "looplab_stages.json").write_text(json.dumps({"stages": [
+        {"name": "train", "command": ["python", "train.py"]},
+        {"name": "self_score", "command": ["python", "my_eval.py"]}]}), encoding="utf-8")
+    es = {"command": ["python", "score.py"], "timeout": 600.0,
+          "host_scorer": {"command": ["python", str(tmp_path / "host.py"), "%subject%"],
+                          "timeout": 1800.0},
+          "metric": {"kind": "stdout_json", "key": "metric"}}
+    chain = _Stages()._resolve_stages(str(tmp_path), es, params={},
+                                      score_cmd=["python", "score.py"], score_timeout=600.0)
+    names = [s["name"] for s in chain]
+    assert names == ["train", "self_score", "self_score_1", "score"], names
+    assert chain[1]["command"] == ["python", "my_eval.py"]         # the manifest's stage, unrenamed
+    assert chain[2]["command"] == ["python", "score.py"]           # the candidate's `command`
+    assert chain[-1].get(command_eval.HOST_STAGE_KEY) is True      # …and the host is the one `score`
+    # The resolved chain is itself a valid pipeline again (it was refused as a duplicate before).
+    _clean, err = command_eval.validate_stages(
+        [{k: v for k, v in s.items() if k != command_eval.HOST_STAGE_KEY} for s in chain])
+    assert err is None, err
+    # A stage-scoped re-run named after the candidate stage starts AT the candidate stage.
+    assert command_eval.reused_stage_count(chain, "self_score_1") == 2
