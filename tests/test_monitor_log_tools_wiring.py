@@ -70,10 +70,12 @@ def test_the_source_map_carries_the_attempt_floor_the_digest_uses(tmp_path):
     a dead attempt's curve as the live one's — which is the whole reason `attempt_byte_floor` was
     lifted out of `read_training_tail_raw` rather than copied."""
     log = tmp_path / "train.log"
-    log.write_text("PREVIOUS ATTEMPT\n")
+    # BYTES: the floor is a byte offset, and a text-mode write is 18 bytes on Windows (CI run
+    # 35785582444: 18 == 17), where "\n" is written as "\r\n".
+    log.write_bytes(b"PREVIOUS ATTEMPT\n")
     snapshot = tm.snapshot_training_logs(tmp_path)
-    with log.open("a") as fh:
-        fh.write("this attempt loss: 1.0\n")
+    with log.open("ab") as fh:
+        fh.write(b"this attempt loss: 1.0\n")
     plan = tm.EvalLogPlan(roles={tm._log_name_key("train.log"): (None, LOG_ROLE_TRAINING)})
     source = tm.monitor_log_sources(tmp_path, plan, snapshot)[0]
     assert source.floor == len("PREVIOUS ATTEMPT\n")

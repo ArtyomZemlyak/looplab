@@ -110,8 +110,11 @@ def _oom_solution() -> str:
         f"_tb = {_TRACEBACK!r}\n"
         f"_bar = {_BAR!r}\n"
         "pathlib.Path('train.log').write_text('epoch 0 loss 8.85\\n' + _tb + _bar)\n"
-        "sys.stderr.write(_tb)\n"
-        "sys.stderr.write(_bar)\n"
+        # Through the BUFFER, so the child's stderr carries exactly the corpus's bytes: a text-mode
+        # write is "\r\n" on Windows, and the prompt below is held to them byte for byte (CI run
+        # 35785582444).
+        "sys.stderr.buffer.write(_tb.encode())\n"
+        "sys.stderr.buffer.write(_bar.encode())\n"
         "sys.exit(1)\n")
 
 

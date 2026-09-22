@@ -27,7 +27,9 @@ import sweep_claims  # noqa: E402
 def _staged(root: Path, probe: str, task: str, body: str) -> Path:
     p = root / probe / "ws" / task / f"reference_{task}.py"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body, encoding="utf-8")
+    # BYTES, not text mode: the hash below is over the file's bytes, and a text-mode write puts
+    # "\r\n" on disk on Windows (CI run 35785582444: 81949bb729f7 != 399f52b20255).
+    p.write_bytes(body.encode("utf-8"))
     return p
 
 
@@ -54,7 +56,7 @@ def test_the_choice_is_deterministic_not_filesystem_order(tmp_path):
     _staged(tmp_path, "zzz", "pde_heat1d", BODY + "# zzz\n")
     _staged(tmp_path, "aaa", "pde_heat1d", BODY + "# aaa\n")
     first, _ = ruler_selfcheck.reference_module("pde_heat1d", str(tmp_path))
-    assert "/aaa/" in first, first
+    assert "aaa" in Path(first).parts, first          # a path's parts, whatever its separator
 
 
 def test_the_row_carries_both_fields(tmp_path):

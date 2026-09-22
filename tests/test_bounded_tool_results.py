@@ -311,7 +311,9 @@ def test_read_note_pages_instead_of_amputating_the_tail(tmp_path):
     from looplab.tools.knowledge_tools import KnowledgeTools
 
     body = "intro\n" + "x" * 9000 + "\nCONCLUSION: use params lr=3e-4"
-    (tmp_path / "a.md").write_text(body, encoding="utf-8")
+    # `newline=""`: the offsets below are into `body` itself, and a text-mode write puts "\r\n" on
+    # disk on Windows (CI run 35785582444 read "of 9039" for a 9037-char body).
+    (tmp_path / "a.md").write_text(body, encoding="utf-8", newline="")
     kb = KnowledgeTools(knowledge_dir=str(tmp_path))
 
     first = kb.execute("read_note", {"name": "a.md"})
