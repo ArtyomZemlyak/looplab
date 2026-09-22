@@ -24,7 +24,8 @@ from typing import Callable, Optional
 
 from looplab.core import _pathsafe
 from looplab.tools._base import fn_spec
-from looplab.tools.patch import SurfacePolicy, apply_patch as _apply_patch, gate as _gate
+from looplab.tools.patch import (SurfacePolicy, apply_patch as _apply_patch, gate as _gate,
+                                 symlink_paths as _symlink_paths)
 from looplab.tools.perm_modes import (
     DEFAULT_PROTECT, DEFAULT_PROTECT_EXCEPTIONS, authorize, default_approver)
 from looplab.core.jsonutil import valid_digest_ref
@@ -1263,6 +1264,16 @@ class WriteTools:
         secret = [rp for rp in g["paths"] if _pathsafe.looks_secret(Path(rp))]
         if secret:
             return f"(refused: patch touches secret/credential paths: {', '.join(secret)})"
+        # A `120000` mode plants a LINK, and every path proof this class makes afterwards resolves
+        # through it (review 2026-09-22, TAT-10): `git apply` created one pointing at `/etc` from a
+        # patch the approval card called "apply patch (1 file)" at reversible risk. Refused BEFORE
+        # the approver is asked — the same place the secret refusal above sits — rather than shown
+        # to a human who would have to read the mode line to notice.
+        links = _symlink_paths(diff)
+        if links:
+            return (f"(refused: this patch creates or retargets a symbolic link — "
+                    f"{', '.join(links)} (git mode 120000). A link is not a file edit; write the "
+                    "file's contents instead.)")
         def capture_preimages() -> list[dict]:
             captured = []
             for rp in sorted(g["paths"]):
@@ -1311,7 +1322,7 @@ class WriteTools:
                         saved.append(rp)
                     else:
                         for done in reversed(saved):
-                            self.backups.revert(self.repo_root / done)
+                            self._pop_patch_snapshot(done)
                         return ("(refused: could not create every recovery snapshot; "
                                 "no patch was applied)")
             res = _apply_patch(
@@ -1320,10 +1331,22 @@ class WriteTools:
             )
             if not res.get("applied"):
                 for rp in reversed(saved):
-                    self.backups.revert(self.repo_root / rp)
+                    self._pop_patch_snapshot(rp)
                 return f"(patch failed: {res.get('error', 'unknown')})"
             self.applied.append(action)
         return f"(applied patch to {', '.join(res.get('paths', []))})"
+
+    def _pop_patch_snapshot(self, rp: str) -> None:
+        """Discard the snapshot a patch that never landed pushed for `rp` — restored THROUGH the
+        approved root's descriptor walk, like every other publish in this class (doc 52 row 27).
+
+        It was the one restore that passed no `root` (review 2026-09-22, TAT-10), so its publish
+        reopened the pathname by name: an approved root REPLACED inside the patch's window — renamed
+        away, a fresh directory at the same path — received the pre-image, where the walk refuses on
+        the root's identity. A refused pop leaves its snapshot on the stack, the fail-closed side."""
+        target = self.repo_root / rp
+        root, root_identity = self._root_of(target)
+        self.backups.revert(target, root=root, root_identity=root_identity)
 
     def _delete(self, path: str) -> str:
         p, rel, err = self._check(path)
@@ -1359,10 +1382,15 @@ class WriteTools:
         return f"(deleted {rel})"
 
     def _revert_tool(self, path: str) -> str:
-        """The MODEL-invocable revert: same disk mutation as `revert`, but gated by the permission
-        mode/approver like every other mutation (a revert overwrites the file from a snapshot —
-        possibly clobbering manual fixes the user made since) and recorded in `applied` so the turn
-        shows it. The bare `revert` below stays un-gated for the server's explicit user-clicked undo."""
+        """The MODEL-invocable revert: gated by the permission mode/approver like every other
+        mutation (a revert overwrites the file from a snapshot — possibly clobbering manual fixes the
+        user made since), published through the approved root's descriptor walk, and recorded in
+        `applied` so the turn shows it.
+
+        The server's user-clicked Undo is NOT an ungated twin of this: it is `revert_exact` below,
+        bound to one recovery receipt and its exact post-image. This docstring used to name a bare,
+        ungated by-name `revert` "for the server's explicit user-clicked undo"; the server never
+        called it, only tests did, and it was deleted (review 2026-09-22, TAT-10)."""
         p, rel, err = self._check(path)
         if err:
             return err
@@ -1381,15 +1409,6 @@ class WriteTools:
             self.applied.append(action)
             return f"(reverted {rel})"
         return f"(no snapshot to revert for {rel})"
-
-    def revert(self, path: str) -> str:
-        p, rel, err = self._check(path)
-        if err:
-            return err
-        if not self.backups:
-            return "(no snapshots available to revert)"
-        ok = self.backups.revert(p)
-        return f"(reverted {rel})" if ok else f"(no snapshot to revert for {rel})"
 
     def revert_exact(self, path: str, recovery_id: str, expected_postimage: dict,
                      expected_postimage_mode) -> Optional[dict]:

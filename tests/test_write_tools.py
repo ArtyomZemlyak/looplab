@@ -219,7 +219,9 @@ def test_failed_patch_does_not_leave_a_phantom_snapshot_that_breaks_undo(tmp_pat
     assert target.read_text() == "v1\n"          # git apply is atomic: the file is untouched
 
     # 3) undo the edit → must restore "v0". A leftover phantom would pop first and leave "v1".
-    assert "reverted" in w.revert(str(target))
+    # Through the GATED model tool: the ungated by-name `WriteTools.revert` this used to call had
+    # no production caller and was deleted (review 2026-09-22, TAT-10).
+    assert "reverted" in w.execute("revert_file", {"path": str(target)})
     assert target.read_text() == "v0\n"
 
 
@@ -252,8 +254,91 @@ def test_failed_snapshot_midway_rolls_back_earlier_snapshots(tmp_path, monkeypat
     monkeypatch.setattr(FileBackups, "save", real_save)
 
     # a.txt got a phantom snapshot that was rolled back: reverting it now finds nothing to pop.
-    assert "no snapshot to revert" in w.revert(str(tmp_path / "a.txt"))
+    assert "no snapshot to revert" in w.execute("revert_file", {"path": str(tmp_path / "a.txt")})
     assert (tmp_path / "a.txt").read_text() == "a0\n"
+
+
+# --- review 2026-09-22, TAT-10: the by-name revert, the patch rollback, and symlink modes -------
+
+def test_the_ungated_by_name_revert_is_gone():
+    """`WriteTools.revert(path)` restored a file from its newest snapshot with no permission mode,
+    no approver and no receipt — an ungated by-name publish on the object every mutation is gated
+    on, whose only callers were tests. The two supported restores are the gated model tool
+    (`revert_file`) and the receipt-bound operator Undo (`revert_exact`)."""
+    assert not hasattr(WriteTools, "revert")
+    assert callable(WriteTools.revert_exact)
+
+
+_LINK_DIFF = ("diff --git a/link b/link\nnew file mode 120000\nindex 0000000..1111111\n"
+              "--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+/etc\n\\ No newline at end of file\n")
+_RETYPE_DIFF = ("diff --git a/a.txt b/a.txt\nold mode 100644\nnew mode 120000\n"
+                "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+/etc/passwd\n"
+                "\\ No newline at end of file\n")
+
+
+def test_apply_patch_refuses_to_create_or_retype_a_symlink(tmp_path):
+    """A `120000` mode is not a file edit: it plants a LINK, and every later path proof in the
+    workspace resolves through it. `git apply` creates it happily and the approval card said "apply
+    patch (1 file)" at reversible risk. Refused before the approver is ever asked."""
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "a.txt").write_text("one\n", encoding="utf-8")
+    asked = []
+    w = WriteTools([tmp_path], mode="auto", repo_root=tmp_path,
+                   approver=lambda action: asked.append(action) or "allow_once")
+    for diff in (_LINK_DIFF, _RETYPE_DIFF):
+        out = w.execute("apply_patch", {"diff": diff})
+        assert "symbolic link" in out and "refused" in out, out
+    assert not (tmp_path / "link").is_symlink() and not (tmp_path / "link").exists()
+    assert not (tmp_path / "a.txt").is_symlink()
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "one\n"
+    assert asked == [], "the approver must never be shown a patch that plants a link"
+    # ...and the shared applier itself refuses, for any caller that skips the tool's own check.
+    from looplab.tools.patch import apply_patch, symlink_paths
+    assert symlink_paths(_LINK_DIFF) == ["link"] and symlink_paths(_RETYPE_DIFF) == ["a.txt"]
+    res = apply_patch(_LINK_DIFF, str(tmp_path), ["**/*"])
+    assert res["applied"] is False and not (tmp_path / "link").exists()
+
+
+def test_a_symlink_mode_inside_hunk_text_is_not_a_mode_line(tmp_path):
+    """Only the git extended HEADER sets a mode; the same words as a context/added line are content."""
+    from looplab.tools.patch import symlink_paths
+    diff = ("diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n"
+            "@@ -1 +1,2 @@\n one\n+new file mode 120000\n")
+    assert symlink_paths(diff) == []
+    deleted = ("diff --git a/old b/old\ndeleted file mode 120000\nindex 1111111..0000000\n"
+               "--- a/old\n+++ /dev/null\n@@ -1 +0,0 @@\n-/etc\n\\ No newline at end of file\n")
+    assert symlink_paths(deleted) == []            # removing a link plants nothing
+
+
+def test_a_failed_patch_rolls_back_through_the_approved_root(tmp_path, monkeypatch):
+    """The rollback of a patch that did not land re-published every snapshot BY NAME (no `root`),
+    the one restore path in the class that skipped the descriptor walk every other publish takes
+    since doc 52 row 27. Driven: the approved root is REPLACED (renamed away, a fresh directory
+    at the same path) inside the patch's window; the by-name rollback wrote the pre-image into the
+    stranger's directory, the root-walk refuses on the root's identity."""
+    import shutil
+
+    import looplab.tools.write_tools as wt
+
+    root = tmp_path / "ws"
+    (root / "sub").mkdir(parents=True)
+    target = root / "sub" / "a.txt"
+    target.write_text("v0\n", encoding="utf-8")
+    w = WriteTools([root], mode="auto", repo_root=root, backup_dir=tmp_path / "backups",
+                   approver=ALLOW)
+
+    def _swap_then_fail(diff, repo, allow, protect=None, allow_exceptions=None):
+        shutil.move(str(root), str(tmp_path / "ws.orig"))
+        (root / "sub").mkdir(parents=True)             # same path, a different directory
+        return {"applied": False, "paths": ["sub/a.txt"], "rejected": [], "error": "boom"}
+
+    monkeypatch.setattr(wt, "_apply_patch", _swap_then_fail)
+    diff = ("diff --git a/sub/a.txt b/sub/a.txt\n--- a/sub/a.txt\n+++ b/sub/a.txt\n"
+            "@@ -1 +1 @@\n-v0\n+v1\n")
+    assert "patch failed" in w.execute("apply_patch", {"diff": diff})
+    assert not (root / "sub" / "a.txt").exists(), "the rollback wrote into the replaced root"
+    assert (tmp_path / "ws.orig" / "sub" / "a.txt").read_text(encoding="utf-8") == "v0\n"
 
 
 def test_every_xlsx_cell_is_pipe_safe_not_just_the_notes_column():

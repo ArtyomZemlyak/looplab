@@ -65,6 +65,39 @@ def changed_paths(diff_text: str) -> list[str]:
     return sorted(paths)
 
 
+# A git extended-header line that makes a target a SYMBOLIC LINK with new contents: a new link, a
+# regular file re-typed as one (`new mode`), or an existing link's target rewritten (the `index` line
+# carries the mode when it did not change). Anchored at column 0: every line of a hunk starts with
+# ' ', '+', '-' or '\', so hunk CONTENT that merely spells these words is never read as a mode.
+# `deleted file mode 120000` is deliberately absent — removing a link plants nothing.
+_SYMLINK_MODE_LINE = re.compile(
+    r"^(?:new file mode|new mode) 120000\s*$|^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ 120000\s*$")
+
+
+def symlink_paths(diff_text: str) -> list[str]:
+    """Target paths a git diff would make — or keep — a symbolic link with new contents (`120000`).
+
+    A link is not a file edit (review 2026-09-22, TAT-10). The surface gate proves each PATH is inside
+    the allow-list, and `git apply` then creates the link at that path pointing ANYWHERE; every later
+    path in the workspace resolves through it. The assistant's `apply_patch` put such a patch in front
+    of its approver as "apply patch (1 file)" at reversible risk. Per `diff --git` block, so a mode in
+    one block never taints another's paths."""
+    found: set[str] = set()
+    block: list[str] = []
+
+    def _flush() -> None:
+        if any(_SYMLINK_MODE_LINE.match(line) for line in block):
+            found.update(changed_paths("\n".join(block)))
+
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git ") and block:
+            _flush()
+            block = []
+        block.append(line)
+    _flush()
+    return sorted(found)
+
+
 def _escapes(path: str) -> bool:
     pp = path.replace("\\", "/")
     # leading slash = POSIX-absolute (os.path.isabs misses this on Windows); drive =
@@ -242,11 +275,18 @@ def apply_patch(diff_text: str, repo_dir: str, allow: list[str],
     """Gate, then `git apply --check` then apply, inside `repo_dir`. Never applies a
     patch that fails the surface gate or the dry-run. `protect` (reject, don't strip — for the
     eval/metric/adapter/grader files) MUST be threaded through so this entry point can't be used to
-    overwrite the score source; the live cli_agent path passes it and so should every caller."""
+    overwrite the score source; the live cli_agent path passes it and so should every caller.
+
+    A patch that creates or retargets a SYMBOLIC LINK (`symlink_paths`) is refused here too, for any
+    caller that skipped its own check (review 2026-09-22, TAT-10): this is the function that writes."""
     g = gate(diff_text, allow, protect, prefixes, allow_exceptions)
     if not g["ok"]:
         return {"applied": False, "paths": g["paths"], "rejected": g["rejected"],
                 "error": "out-of-surface" if g["rejected"] else "empty patch"}
+    links = symlink_paths(diff_text)
+    if links:
+        return {"applied": False, "paths": g["paths"], "rejected": links,
+                "error": "a symbolic link (git mode 120000) is not a file edit"}
     repo = Path(repo_dir)
     # Unique temp name so two concurrent apply_patch calls on the same repo can't clobber each other's
     # patch between --check and apply (or unlink a sibling's file mid-apply).
