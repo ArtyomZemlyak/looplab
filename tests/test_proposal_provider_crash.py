@@ -272,3 +272,75 @@ def test_a_mechanical_operator_over_a_legacy_fallback_node_does_not_raise_a_fals
         prospective_node_id=2, source="researcher")
     assert idea is not None, "the mechanical path was refused as if it were a degraded proposal"
     assert fold(engine.store.read_all()).paused is False
+
+
+# ------------------------------------------------------------------ the node-reset re-proposal
+
+_CREDENTIAL = "sk-live-" + "4f9aQ" * 5          # a provider that quotes the request's own key back
+
+
+class _DeadProviderWithCredential:
+    """The fallback a Researcher hands back when its provider refused the request AND quoted the
+    `Authorization` header back in its error body — an ordinary shape (see
+    `_refuse_degraded_proposal`'s redaction note)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def propose(self, _state, _parent) -> Idea:
+        self.calls += 1
+        if self.calls > 4:
+            # A refusal that queues no pause leaves the reset pending, and the loop then proposes
+            # (paid) every turn. Fail loudly instead of hanging the suite.
+            raise AssertionError("the reset branch is re-proposing against a dead provider")
+        return Idea(operator="draft", params={"x": 0.5, "y": 0.5},
+                    rationale=researcher_fallback_rationale(
+                        "propose", f"ConnectionError: 401 bearer {_CREDENTIAL}"))
+
+
+def test_a_node_reset_repropose_against_a_dead_provider_pauses_and_keeps_its_card(tmp_path):
+    """Review 2026-09-22, ENG1-02, driven through the REAL loop (a resumed run, its reset served by
+    the loop's own `_offload_build(_rerun_node)` + `_drain_create_pause` pair).
+
+    `node_reset from_stage=propose` re-runs the Researcher in `_rerun_node`, which called
+    `researcher.propose` directly and never crossed the breaker every other proposal lane crosses.
+    Measured on the reviewer's reproduction: the node's live Card was auto-dropped, a replacement
+    Card minted whose STATEMENT was the provider's error text — the credential verbatim three times
+    in `events.jsonl` — a node built from the non-proposal, and the run never paused."""
+    from looplab.events.types import EV_CARD_AUTO_DROPPED, EV_NODE_BUILDING, EV_NODE_RESET
+
+    run_dir = tmp_path / "reset-dead-provider"
+    first = anyio.run(make_engine(run_dir, n_seeds=2, max_nodes=4, require_approval=True).run)
+    assert first.awaiting_approval and not first.finished and first.nodes
+    target = first.best()
+    engine = make_engine(run_dir, n_seeds=2, max_nodes=4, require_approval=True,
+                         researcher=_DeadProviderWithCredential())
+    engine.store.append(EV_NODE_RESET, {"node_id": target.id, "from_stage": "propose",
+                                        "generation": target.attempt})
+    before = len(engine.store.read_all())
+    anyio.run(engine.run)
+
+    assert engine.researcher.calls == 1, "the reset proposed once and the run then froze"
+    tail = engine.store.read_all()[before:]
+    assert not [e for e in tail if e.type in (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED)], (
+        "a degraded FALLBACK dropped the node's Card or minted one from the provider's error text")
+    assert not [e for e in tail if e.type in (EV_NODE_BUILDING, EV_NODE_CREATED)], (
+        "a node was rebuilt from a non-proposal")
+    state = fold(engine.store.read_all())
+    assert state.paused is True and not state.finished
+    node = state.nodes[target.id]
+    assert node.rerun_from == "propose", "the reset must survive to be retried once the provider is back"
+    assert node.idea.card_id == target.idea.card_id
+    pauses = [e.data for e in tail if e.type == EV_PAUSE]
+    assert len(pauses) == 1 and "node_id" not in pauses[0], pauses
+    assert "Researcher's LLM provider failed" in pauses[0]["reason"]
+    raw = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+    assert _CREDENTIAL not in raw, "the provider's credential reached the durable log"
+
+    # …and the SAME engine re-entered after the operator resumes (still a dead provider) gates
+    # again, instead of refusing silently on the flag the first pass left set.
+    engine.store.append(EV_RESUME, {})
+    anyio.run(engine.run)
+    assert engine.researcher.calls == 2
+    assert fold(engine.store.read_all()).paused is True
+    assert len([e for e in engine.store.read_all()[before:] if e.type == EV_PAUSE]) == 2

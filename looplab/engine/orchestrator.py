@@ -2437,6 +2437,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # abort can change the rest while it is building; never process a stale whole batch.
                 # OFF the loop thread (doc 52 row 12), like every other build: the rebuild is a paid
                 # Developer call and its own-node appends are the worker seam's.
+                # A FRESH GATE PER REBUILD, exactly as `_handle_create_actions` opens every create
+                # turn (review 2026-09-22, ENG1-02). `_refuse_degraded_proposal` answers "already
+                # gated" without queuing anything while `_create_paused` is set, so a flag left True
+                # by an earlier invocation of this engine would make a dead provider's re-proposal
+                # refuse SILENTLY — no pause, the reset still pending, and this branch proposing
+                # (paid) again every turn.
+                self._create_paused = False
+                self._pending_create_pause = []
                 await self._offload_build(functools.partial(self._rerun_node, _resets[0], state))
                 self._drain_create_pause()
                 continue
@@ -7629,6 +7637,19 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     # about to drop, and stamping it would file this re-proposal under the card it
                     # REPLACED. See `stamp_proposal_span`.
                     stamp_proposal_span(_span, None, node_id=node.id)
+                # THE PROPOSAL PATH'S PROVIDER CIRCUIT BREAKER, which every other proposal lane
+                # crosses and this one did not (review 2026-09-22, ENG1-02): it called
+                # `researcher.propose` directly, so a dead provider's degraded FALLBACK dropped this
+                # node's live Card for good, minted a replacement whose STATEMENT was the provider's
+                # error text (a credential it quoted back landed verbatim, three times, in
+                # `events.jsonl`) and built a node from the non-proposal — and the run never paused.
+                # Refused BEFORE `_id_lock`, so nothing is dropped, minted or reserved: the node keeps
+                # its Card and its `rerun_from`, and a `resume` once the endpoint is back retries the
+                # reset. QUEUED (`main_task=False`): this runs in an `_offload_build` worker, and the
+                # loop drains the queue right after the offload returns.
+                if self._refuse_degraded_proposal(proposed, main_task=False):
+                    self._discard_node_build_telemetry()
+                    return
                 idea = self._canonicalize_idea_operator(proposed, node.operator)
                 if idea is None:
                     self._fail_reserved_build(
