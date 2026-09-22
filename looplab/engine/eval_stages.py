@@ -658,8 +658,10 @@ class EvalStagesMixin:
     # module-entry rule below must never key on a token that is not a module name. A wrapper the list
     # does not name (`bash -c "… python -m pkg.mod"` — the shape 10 of the 39 corpus rows have) keeps
     # the historical OPAQUE answer: the module travels inside ONE shell-string token, and parsing a
-    # shell is not something this predicate may guess at.
-    _PY_INTERPRETER_RE = re.compile(r"^(python|pypy)[\d.]*$", re.I)
+    # shell is not something this predicate may guess at. The `.exe` is Windows' spelling of the same
+    # interpreter (`sys.executable` is `...\python.exe` there): without it every `python -m` stage on
+    # a Windows host read as OPAQUE and the widening below never applied (review 2026-09-22).
+    _PY_INTERPRETER_RE = re.compile(r"^(python|pypy)[\d.]*(\.exe)?$", re.I)
 
     @staticmethod
     def _module_entry_candidates(cmd: list) -> list:

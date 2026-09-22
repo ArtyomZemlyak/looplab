@@ -447,6 +447,28 @@ def test_a_dash_m_the_PROGRAM_consumes_is_not_an_entry_point(tmp_path):
     assert Engine._module_entry_candidates(["python", "-X", "utf8", "-m", "trainer"]) == []
 
 
+def test_a_windows_interpreter_path_still_names_its_module_entry_point(tmp_path):
+    """`sys.executable` is `...\\python.exe` on Windows, and the interpreter rule read only a bare
+    `python`: every `python -m` stage there was OPAQUE, so `_safe_reuse_start` refused the reuse the
+    widening exists for (Windows CI run 35785582444, test_command_eval's end-to-end `python -m` case
+    answered None). Nothing else about the stage differs, so nothing else may change the answer."""
+    exe = r"C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
+    assert Engine._module_entry_candidates([exe, "-m", "pkg.train"]) == ["pkg.train"]
+    assert Engine._module_entry_candidates([r"C:\py\python3.12.exe", "-u", "-m", "t"]) == ["t"]
+    assert Engine._module_entry_candidates([r"C:\tools\make.exe", "-m", "pkg.train"]) == []
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "losses.py").write_text("SCALE = 1\n", encoding="utf-8")
+    (tmp_path / "pkg" / "train.py").write_text("from pkg import losses\n", encoding="utf-8")
+    (tmp_path / "pkg" / "index.py").write_text("K = 10\n", encoding="utf-8")
+    stages = [{"name": "train", "command": [exe, "-m", "pkg.train"]},
+              {"name": "score", "command": [exe, "evaluate.py"]}]
+    e = Engine.__new__(Engine)
+    assert e._safe_reuse_start(stages, "score", {"pkg/index.py"}, tmp_path) == "score"
+    assert e._safe_reuse_start(stages, "score", {"pkg/losses.py"}, tmp_path) is None
+
+
 def test_stage_reachable_files_transitive_and_subdir_imports(tmp_path):
     # The reachable set must follow TRANSITIVE + dotted + subdir-sibling imports, else a repair that
     # edits a training dependency two hops down (or in a package submodule) escapes and a stale
