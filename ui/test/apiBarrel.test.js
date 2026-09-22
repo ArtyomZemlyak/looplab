@@ -232,6 +232,19 @@ test('the review read-only refusal still fires before a command reaches the wire
   })
 })
 
+test('an unfenced control in a review tab is refused before its generation read reaches the wire', async () => {
+  // The generation read moved to `/lifecycle` (review 2026-09-22, UI-11), which the review namespace
+  // does not serve — and never needed to: a review tab submits nothing, so the read that exists only
+  // to fence a submission is refused where the submission itself would be. A run id nothing has
+  // observed, so the read cannot be skipped through the observed-generation registry.
+  const { CONTROL } = await import('../src/api.js')
+  await withReviewTab(async calls => {
+    await assert.rejects(CONTROL.stop('never-observed-review-run'),
+      error => error.code === 'REVIEW_READ_ONLY')
+    assert.equal(calls.length, 0, 'not even the generation read may reach fetch from a review tab')
+  })
+})
+
 test('the action vocabulary still speaks the one command lifecycle after leaving api.js', async () => {
   // CONTROL is a MAP OF PAYLOADS over `runCommand`; extracting it must not have turned any entry
   // into its own transport or dropped a fence. Driven, not read: every control below goes to fetch

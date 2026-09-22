@@ -10,7 +10,7 @@
 
 import { assertRunMutationAllowed } from './runMode.js'
 import {
-  _authHeaders, _throw, apiUrl, assertNotReviewMutation, get, reviewReadPath, runApiPath,
+  _authHeaders, _throw, apiUrl, assertNotReviewMutation, deadlineGet, reviewReadPath, runApiPath,
 } from './apiClient.js'
 import {
   COMMAND_FAILED, COMMAND_REQUEST_TIMEOUT_MS, COMMAND_STATUSES, COMMAND_SUCCEEDED,
@@ -32,8 +32,16 @@ function commandProtocolError(path, message, record = null) {
   return error
 }
 
-export async function getRunGeneration(runId) {
-  const payload = await get(runApiPath(runId, '/state'))
+// The generation an unfenced command binds to (review 2026-09-22, UI-11). This read the WHOLE
+// folded state — 668 KB at 149 toy nodes, far more on a real run — with no deadline, for one 64-hex
+// token, so a control could hang on it indefinitely. `/lifecycle` carries the same `generation`
+// (`serve/appstate.py::state_probe`) in a few hundred bytes, read under the command timeout. The
+// review namespace serves no `/lifecycle` and needs none: a review tab submits nothing, so the read
+// that exists only to fence a submission is refused where the submission itself would be.
+export async function getRunGeneration(runId, { requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS } = {}) {
+  assertNotReviewMutation(runApiPath(runId, '/commands'))
+  const timeout = Number(requestTimeoutMs) > 0 ? Number(requestTimeoutMs) : COMMAND_REQUEST_TIMEOUT_MS
+  const payload = await deadlineGet(runApiPath(runId, '/lifecycle'), timeout).promise
   if (payload?.generation == null) {
     throw runGenerationError(
       'run_generation_unavailable',
@@ -266,7 +274,7 @@ export async function runCommand(runId, type, data = {}, {
   // New intent: bind once to the current event-log generation. Transport retries and id-less
   // recovery pass this exact token back; they never silently substitute a generation observed later.
   const generation = expectedGeneration === undefined
-    ? (getObservedRunGeneration(runId) || await getRunGeneration(runId))
+    ? (getObservedRunGeneration(runId) || await getRunGeneration(runId, { requestTimeoutMs }))
     : expectedGeneration
   if (!validRunGeneration(generation)) {
     throw runGenerationError(

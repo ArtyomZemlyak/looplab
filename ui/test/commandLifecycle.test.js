@@ -43,7 +43,7 @@ const stalledJsonResponse = (status = 200) => ({
   headers: { get: () => null },
 })
 
-const withHttpGlobals = async (fetchImpl, fn) => {
+const withRawHttpGlobals = async (fetchImpl, fn) => {
   const previous = { location: globalThis.location, fetch: globalThis.fetch, sessionStorage: globalThis.sessionStorage }
   globalThis.location = { pathname: '/proxy/app/', hash: '' }
   // A real `Storage` answers `null` for a key nobody set. Returning one value for EVERY key made
@@ -51,9 +51,7 @@ const withHttpGlobals = async (fetchImpl, fn) => {
   // under test, and `getRunAccess` fails that closed into a run-wide destructive lock — so every
   // mutation below was refused with START_OVER_RECOVERY_LOCK instead of exercising its own path.
   globalThis.sessionStorage = { getItem: () => null }
-  globalThis.fetch = (url, options = {}) => String(url).endsWith('/state') && options.method == null
-    ? Promise.resolve(jsonResponse({ state: {}, seq: 0, generation: GEN_A }))
-    : fetchImpl(url, options)
+  globalThis.fetch = fetchImpl
   try { return await fn() }
   finally {
     for (const [name, value] of Object.entries(previous)) {
@@ -62,6 +60,14 @@ const withHttpGlobals = async (fetchImpl, fn) => {
     }
   }
 }
+// An unfenced command reads its generation from the run's `/lifecycle` probe (review 2026-09-22,
+// UI-11); these tests are about what happens AFTER that read, so it answers GEN_A.
+const withHttpGlobals = (fetchImpl, fn) => withRawHttpGlobals((url, options = {}) =>
+  String(url).endsWith('/lifecycle') && options.method == null
+    ? Promise.resolve(jsonResponse({
+      schema: 1, seq: 0, event_count: 1, generation: GEN_A, engine_running: false,
+    }))
+    : fetchImpl(url, options), fn)
 
 test('run command posts once with an idempotency key and polls by command id', async () => {
   const calls = []
@@ -84,6 +90,49 @@ test('run command posts once with an idempotency key and polls by command id', a
   assert.equal(calls[1].url, '/proxy/app/api/runs/demo%20run/commands/cmd-1')
   assert.equal(calls[1].options.headers['Idempotency-Key'], undefined)
   assert.equal(calls[1].options.cache, 'no-store')
+})
+
+test('an unfenced command binds to the generation /lifecycle names, never downloading the whole state', async () => {
+  // `getRunGeneration` fetched the COMPLETE folded state (668 KB at 149 toy nodes, tens of MB on a
+  // large run) with NO deadline, to read one 64-hex token (review 2026-09-22, UI-11). `/lifecycle`
+  // carries the same `generation` (`serve/appstate.py::state_probe`) in a few hundred bytes.
+  const calls = []
+  await withRawHttpGlobals(async (url, options = {}) => {
+    calls.push({ url: String(url), options })
+    if (String(url).endsWith('/state')) throw new Error('the whole state must not be read for one token')
+    if (String(url).endsWith('/lifecycle')) {
+      return jsonResponse({ schema: 1, seq: 3, event_count: 4, generation: GEN_B, engine_running: true })
+    }
+    return calls.length === 2
+      ? jsonResponse({ id: 'cmd-1', status: 'accepted', event_type: 'resume' }, 202)
+      : jsonResponse({ id: 'cmd-1', status: 'succeeded', event_type: 'resume' })
+  }, async () => {
+    const result = await runCommand('lifecycle-bound-run', 'resume', {},
+      { waitMs: 50, pollMs: 0, submitRetries: 0 })
+    assert.equal(result.status, 'succeeded')
+  })
+  assert.equal(calls[0].url, '/proxy/app/api/runs/lifecycle-bound-run/lifecycle')
+  assert.equal(calls[0].options.method, undefined)
+  assert.equal(calls[0].options.cache, 'no-store')
+  assert.ok(calls[0].options.signal instanceof AbortSignal, 'the read is abortable: it has a deadline')
+  assert.equal(calls[1].options.method, 'POST')
+  assert.equal(JSON.parse(calls[1].options.body).expected_generation, GEN_B)
+})
+
+test('a stalled generation read fails at the command deadline instead of hanging the control', async () => {
+  const calls = []
+  const started = Date.now()
+  await withRawHttpGlobals((url, options = {}) => {
+    calls.push(String(url))
+    return new Promise(() => {})   // a proxy that accepted the request and never answers
+  }, async () => {
+    await assert.rejects(
+      runCommand('stalled-generation-run', 'resume', {}, { requestTimeoutMs: 40, submitRetries: 0 }),
+      error => error.name === 'TimeoutError' && isTransientCommandReadError(error))
+  })
+  assert.ok(Date.now() - started < 5000, 'the read is bounded by the command timeout')
+  assert.deepEqual(calls, ['/proxy/app/api/runs/stalled-generation-run/lifecycle'],
+    'nothing is submitted without a generation')
 })
 
 test('a command binds to the displayed generation and never substitutes a newer server generation', async () => {

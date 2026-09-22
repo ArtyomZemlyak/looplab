@@ -24,8 +24,11 @@ const withHttpGlobals = async (fetchImpl, fn) => {
   // under test, and `getRunAccess` fails that closed into a run-wide destructive lock — so every
   // mutation below was refused with START_OVER_RECOVERY_LOCK instead of exercising its own path.
   globalThis.sessionStorage = { getItem: () => null }
-  globalThis.fetch = (url, options = {}) => String(url).endsWith('/state') && options.method == null
-    ? Promise.resolve(jsonResponse({ state: {}, seq: 0, generation: GEN_A }))
+  // An unfenced command reads its generation from `/lifecycle` (review 2026-09-22, UI-11).
+  globalThis.fetch = (url, options = {}) => String(url).endsWith('/lifecycle') && options.method == null
+    ? Promise.resolve(jsonResponse({
+      schema: 1, seq: 0, event_count: 1, generation: GEN_A, engine_running: false,
+    }))
     : fetchImpl(url, options)
   try { return await fn() } finally {
     for (const [name, value] of Object.entries(previous)) {
