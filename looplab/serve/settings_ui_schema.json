@@ -1710,7 +1710,7 @@
           "label": "Structured claim identity",
           "type": "bool",
           "default": true,
-          "help": "Part IV: use task-scoped, polarity-aware claim identity for advisory projections. Enable consistently for readers of the same portfolio; this changes grouping, not the immutable source records."
+          "help": "Retired and ignored: claims always use the task-scoped, polarity-aware structured identity (the lean projection was deleted 2026-09-08, and since 2026-09-22 no engine reads this field). Kept only so older config snapshots and LOOPLAB_CROSS_RUN_STRUCTURED_CLAIMS stay valid."
         },
         {
           "key": "cross_run_read_tools",
