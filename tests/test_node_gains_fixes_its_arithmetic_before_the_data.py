@@ -109,3 +109,20 @@ def test_a_root_with_no_runs_refuses_instead_of_printing_zeros(tmp_path):
 
 def test_a_missing_root_refuses(tmp_path):
     assert ng.main([str(tmp_path / "nope")]) == 2
+
+
+def test_a_terminal_inside_a_crash_atomic_packet_is_counted_in_its_place(tmp_path):
+    """The engine writes some terminals inside a batch PACKET (`type` = the sentinel, the events in
+    `data.events`). A line filter on `"type" == "node_evaluated"` never sees them, so the k-th
+    terminal of the run silently became the (k+1)-th — Δk read off the wrong node."""
+    d = tmp_path / "p" / "runs" / "t" / "run"
+    d.mkdir(parents=True)
+    rows = [
+        {"v": 1, "seq": 0, "type": "node_evaluated", "data": {"node_id": 1, "metric": 10.0}},
+        {"v": 1, "seq": 1, "type": ["__looplab_event_batch_v1__"],
+         "data": {"events": [{"type": "node_evaluated", "data": {"node_id": 2, "metric": 30.0}}]}},
+        {"v": 1, "seq": 2, "type": "node_evaluated", "data": {"node_id": 3, "metric": 20.0}},
+    ]
+    (d / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    series, salvaged = ng.run_series(d / "events.jsonl")
+    assert series == [10.0, 30.0, 20.0] and salvaged == 0

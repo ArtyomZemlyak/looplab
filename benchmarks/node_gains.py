@@ -31,33 +31,35 @@ from __future__ import annotations
 
 import argparse
 import collections
-import json
 import statistics
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import events_read  # noqa: E402
+
 
 def run_series(path: Path) -> tuple[list[float], int]:
-    """`(metrics of the evaluated nodes in terminal order, salvaged nodes skipped)`."""
+    """`(metrics of the evaluated nodes in terminal order, salvaged nodes skipped)`.
+
+    Through `events_read.iter_events`, not a line filter: the engine writes crash-atomic PACKETS
+    whose `type` is a sentinel and whose events ride in `data.events`, so a `node_evaluated` inside
+    one never matches a per-line `"type" == "node_evaluated"` test — and a terminal read out of
+    order is a wrong Δk, not a missing row. The first version of this file read lines directly and
+    `tests/test_a_line_is_not_an_event_everywhere.py` went red the commit it landed.
+    """
     out: list[float] = []
     salvaged = 0
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if '"node_evaluated"' not in line:
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if row.get("type") != "node_evaluated":
-                continue
-            data = row.get("data") or {}
-            if data.get("metric_salvaged"):
-                salvaged += 1
-                continue
-            v = data.get("metric")
-            if isinstance(v, (int, float)):
-                out.append(float(v))
+    for row in events_read.iter_events(str(path)):
+        if row.get("type") != "node_evaluated":
+            continue
+        data = row.get("data") or {}
+        if data.get("metric_salvaged"):
+            salvaged += 1
+            continue
+        v = data.get("metric")
+        if isinstance(v, (int, float)):
+            out.append(float(v))
     return out, salvaged
 
 

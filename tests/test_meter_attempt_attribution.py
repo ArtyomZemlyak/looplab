@@ -348,6 +348,12 @@ def _run_campaign(tmp_path: Path, **extra) -> subprocess.CompletedProcess:
                LANES="1", CORES_PER_LANE="1", CORE_OFFSET=str(cores[0]),
                CAMPAIGN_OUT=str(tmp_path / "out"), CAMPAIGN_WS=str(tmp_path / "ws"),
                CAMPAIGN_RUNS=str(tmp_path / "runs"))
+    # A PLACEHOLDER key, because the driver now refuses before the first task without one
+    # (`campaign.sh::require_llm_credentials`, exit 2) and the stubbed AlgoTune never calls a model.
+    # Without it these tests were green only where the environment or `.env` happened to hold a real
+    # key -- the bench box -- and red on every clean checkout, CI included. `setdefault`, so a box
+    # that exports its own key still drives the driver with it.
+    env.setdefault("LOOPLAB_LLM_API_KEY", "placeholder-key-for-a-stub-that-calls-no-model")
     env.update(extra)
     return subprocess.run(["bash", str(CAMPAIGN)], capture_output=True, text=True, timeout=300,
                           env=env)
