@@ -854,6 +854,17 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 for step, steward in stewards:
                     try:
                         outcome = steward(final)
+                    except BudgetExceeded as exc:
+                        # THE CEILING IS NOT ONE STEWARD'S FAILURE (review 2026-09-22, found by the
+                        # transitive census's own write-up). Contained as one, it moved the loop on
+                        # and each remaining steward bought one more paid call against a ceiling
+                        # already reached. Same `error` receipt, then STOP: no further steward runs.
+                        # Not re-raised — this is finalization, and a raise here would skip the
+                        # `llm_cost` roll-up and `run_finished` that the remaining steps write
+                        # without calling a model (the same decision `ensure_finalize_reflection`'s
+                        # handler below records).
+                        _steward_receipt(step, outcome="error", error=str(exc)[:300])
+                        break
                     except Exception as exc:  # noqa: BLE001 — steward failure must not prevent
                         _steward_receipt(     # terminal completion
                             step, outcome="error", error=str(exc)[:300])

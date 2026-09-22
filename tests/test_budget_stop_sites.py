@@ -319,3 +319,33 @@ def test_lesson_hygiene_lets_the_paid_merge_ceiling_through_and_keeps_the_store(
         LessonMemory.consolidate_lessons_file(path, client, None)
     assert client.calls == 1, "the paraphrase pair must reach the paid adjudication"
     assert path.read_bytes() == before
+
+
+def test_a_ceiling_in_one_finalize_steward_buys_no_call_from_the_next(tmp_path):
+    """The finalize steward loop contained a `BudgetExceeded` like any steward failure and moved
+    on, so each remaining steward bought one more paid call against a ceiling already reached (the
+    gap the transitive census's write-up named; a name graph cannot see `steward(final)`). The loop
+    now records the same `error` receipt and STOPS — and finalization still completes, because the
+    steps after it write records and call no model."""
+    import anyio
+
+    from factories import make_engine
+    from looplab.events.replay import fold
+
+    engine = make_engine(tmp_path / "run", n_seeds=2, max_nodes=2)
+    engine._cross_run_curation = True
+    engine._task_facets_finalize = True
+    later: list[str] = []
+
+    def over_ceiling(_final):
+        raise BudgetExceeded("run spend ceiling reached")
+
+    engine._store_concept_curation = over_ceiling
+    engine._store_claim_curation = lambda _final: later.append("claim_curation") or "completed"
+    engine._store_task_facets = lambda _final: later.append("task_facets") or "completed"
+    state = anyio.run(engine.run)
+    assert later == [], f"stewards after the ceiling still ran: {later}"
+    assert state.finished and fold(engine.store.read_all()).finished
+    steps = [e.data for e in engine.store.read_all() if e.type == "finalize_step"
+             and e.data.get("step") == "concept_curation"]
+    assert steps and steps[-1].get("outcome") == "error", steps
