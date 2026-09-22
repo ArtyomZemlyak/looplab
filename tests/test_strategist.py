@@ -78,6 +78,22 @@ def test_rule_explore_prefers_asha_when_available():
     assert s["policy"] == "asha"
 
 
+def test_the_rule_asha_is_built_with_the_runs_own_eta(tmp_path):
+    """The rule's ASHA arm used to carry `policy_params: {"eta": 3}`, and an explicit params entry
+    wins over the run's knob — so the FIRST rule consult (the fallback for every LLM failure, too)
+    silently reset an operator's `asha_eta=5` to 3 (review 2026-09-22, SCJ-01). Driven: the
+    rule's own decision, applied to an engine holding `asha_eta=5` / `asha_rung_nodes=6`."""
+    from tests.factories import make_engine
+
+    decision = RuleStrategist().decide(
+        RunState(), _ctx(phase="explore", failure_rate=0.1, improves_since_best=0))
+    assert decision["policy"] == "asha" and "policy_params" not in decision
+    eng = make_engine(tmp_path / "run", n_seeds=4, max_nodes=20, asha_eta=5, asha_rung_nodes=6)
+    eng._apply_strategy(decision)
+    assert isinstance(eng.policy, ASHAPolicy)
+    assert (eng.policy.eta, eng.policy.rung0) == (5, 6)
+
+
 def test_rule_healthy_exploit_keeps_current():
     # exploit, numeric, no stall, asha not in menu -> nothing to change
     s = RuleStrategist().decide(

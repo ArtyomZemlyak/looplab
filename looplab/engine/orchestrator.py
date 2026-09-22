@@ -1112,6 +1112,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         select_verifier_samples = _opt("select_verifier_samples")
         debug_depth = _opt("debug_depth")
         operator_bandit = _opt("operator_bandit")
+        asha_eta = _opt("asha_eta")
+        asha_rung_nodes = _opt("asha_rung_nodes")
+        mcts_cost_weight = _opt("mcts_cost_weight")
+        mcts_value_weight = _opt("mcts_value_weight")
         novelty_semantic = _opt("novelty_semantic")
         novelty_semantic_threshold = _opt("novelty_semantic_threshold")
         digest_char_cap = _opt("digest_char_cap")
@@ -1316,6 +1320,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._idea_vecs: dict[tuple, list] = {}  # (len, prefix) of idea text -> embedding (in-memory)
         self._debug_depth = max(1, int(debug_depth))
         self._operator_bandit = bool(operator_bandit)
+        # The other run-level POLICY knobs, held here so a Strategist rebuild hands the new policy
+        # the values the launch did (`search/policy.py::policy_knobs`, review 2026-09-22 SCJ-01).
+        # Raw on purpose: the policy factories coerce and clamp, as they do for the launch's kwargs.
+        self._asha_eta = asha_eta
+        self._asha_rung_nodes = asha_rung_nodes
+        self._mcts_cost_weight = mcts_cost_weight
+        self._mcts_value_weight = mcts_value_weight
         # M5: the Researcher's always-on digest budget (0 = auto-scale with run size).
         try:
             setattr(researcher, "_digest_cap", int(digest_char_cap))

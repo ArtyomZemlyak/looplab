@@ -44,7 +44,7 @@ from looplab.engine.orchestrator import (
     Engine,
     SPECULATION_CALIBRATION_PROFILE_SETTINGS,
 )
-from looplab.search.policy import make_policy, parse_model_arms
+from looplab.search.policy import make_policy, parse_model_arms, policy_knobs
 from looplab.search.speculation_calibration import speculation_runtime_scope_digest
 from looplab.runtime.sandbox import docker_tier_kwargs, make_sandbox
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles
@@ -981,19 +981,21 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         sandbox=make_sandbox(settings.trust_mode, **docker_tier_kwargs(settings),
                              mem_local=settings.sandbox_memory_local,
                              fsize_local=settings.sandbox_fsize_local),
-        policy=make_policy(settings.policy, n_seeds=settings.n_seeds,
-                           max_nodes=settings.max_nodes, ablate_every=settings.ablate_every,
-                           eta=settings.asha_eta,     # forwarded to ASHA (greedy/mcts/evo ignore it)
-                           rung_nodes=settings.asha_rung_nodes,
-                           debug_depth=settings.debug_depth,
-                           operator_bandit=settings.operator_bandit,
-                           cost_weight=settings.mcts_cost_weight,   # doc 52 row 31: MCTS only
-                           # docs/BACKLOG.md §0.1 row 17: also MCTS only, and also the
-                           # gate on the paid estimate — 0 buys nothing.
-                           value_weight=settings.mcts_value_weight,
-                           # doc 52 row 19: the arms' relative costs; the engine holds the models
-                           model_arms={arm: cost for arm, (_m, cost)
-                                       in parse_model_arms(settings.model_arms).items()}),
+        # The ONE builder of a policy's run-level knobs, shared with every Strategist rebuild
+        # (`engine/strategy.py::_apply_strategy`), which used to spell a shorter list of its own and
+        # dropped the rest on a switch (review 2026-09-22, SCJ-01). `asha_*` reach ASHA only
+        # (greedy/mcts/evo ignore them); `mcts_cost_weight` (doc 52 row 31) and `mcts_value_weight`
+        # (docs/BACKLOG.md §0.1 row 17, also the gate on the paid estimate — 0 buys nothing) reach
+        # MCTS only; `model_arms` hands the policy the arms' relative costs (doc 52 row 19) — the
+        # engine holds the models.
+        policy=make_policy(settings.policy, **policy_knobs(
+            n_seeds=settings.n_seeds, max_nodes=settings.max_nodes,
+            ablate_every=settings.ablate_every, debug_depth=settings.debug_depth,
+            operator_bandit=settings.operator_bandit, asha_eta=settings.asha_eta,
+            asha_rung_nodes=settings.asha_rung_nodes,
+            mcts_cost_weight=settings.mcts_cost_weight,
+            mcts_value_weight=settings.mcts_value_weight,
+            model_arms=parse_model_arms(settings.model_arms))),
         options=EngineOptions.from_settings(settings),
         crash_after=crash_after,
         # Maintainer-only bootstrap path for producing the paired evidence that the public positive

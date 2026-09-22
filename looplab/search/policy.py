@@ -1131,3 +1131,44 @@ def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
                             + ", ".join(available_policies()))
     return factory(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
                    depth=depth, params=params)
+
+
+# THE RUN-LEVEL KNOBS A POLICY IS BUILT WITH, spelled ONCE (review 2026-09-22, SCJ-01). A policy is
+# built at launch (`cli/__init__.py::_engine`) and REBUILT on every Strategist switch
+# (`engine/strategy.py::_apply_strategy`), and the two used to be two spellings of one decision that
+# disagreed: the launch passed ten keywords and the rebuild five, reading two more back off the
+# policy it was replacing. A run launched `greedy` with `mcts_cost_weight`/`mcts_value_weight` set
+# therefore lost both on its first switch to `mcts` (GreedyTree has no such attribute to read back),
+# the router's `model_arms` were gone after ANY rebuild, and `asha_eta`/`asha_rung_nodes` never
+# reached a rebuilt ASHA at all — while `docs/guide/configuration.md` said a switch carried the
+# weight forward.
+#
+# Keyword-only with NO defaults on purpose: a knob added here is a TypeError at both callers until
+# both pass it, instead of a value one of them silently leaves at the factory's default. The names
+# are the `Settings`/`EngineOptions` field names; the returned keys are `make_policy`'s.
+def policy_knobs(*, n_seeds, max_nodes, ablate_every, debug_depth, operator_bandit, asha_eta,
+                 asha_rung_nodes, mcts_cost_weight, mcts_value_weight, model_arms) -> dict:
+    """Every `make_policy` keyword a run holds, from the run's own values. Pure; no coercion — the
+    factories above coerce and clamp, exactly as they did for the launch's literal kwargs.
+
+    `model_arms` is the PARSED table `parse_model_arms` returns (`{arm: (model, cost)}`, what the
+    engine holds as `_model_arms`); the policy is handed only each arm's relative cost, without the
+    implicit default arm, which `GreedyTree` adds itself (so no declared arm keeps the router off).
+    """
+    return {"n_seeds": n_seeds, "max_nodes": max_nodes, "ablate_every": ablate_every,
+            "debug_depth": debug_depth, "operator_bandit": operator_bandit,
+            "eta": asha_eta, "rung_nodes": asha_rung_nodes,
+            "cost_weight": mcts_cost_weight, "value_weight": mcts_value_weight,
+            "model_arms": {arm: cost for arm, (_model, cost) in (model_arms or {}).items()}}
+
+
+# The `policy_knobs` keys a Strategist's `policy_params` may NOT restate: the run owns them. The
+# node budget and seed count are the engine's (a live `add_nodes` extends them), `ablate_every` is
+# the Strategist's own OPERATOR knob with its own grant, `debug_depth`/`operator_bandit` are
+# run-wide settings, and `model_arms` names models only the engine can resolve
+# (`Engine._model_arms`) — a params-supplied table could route a build to an arm with no model
+# behind it. Every other key (`eta`, `rung_nodes`, `cost_weight`, `value_weight`, `c`) is a
+# per-strategy choice, and an explicit `policy_params` entry for it wins over the run's value for
+# the rebuild that carries it.
+RUN_OWNED_POLICY_KNOBS: frozenset[str] = frozenset({
+    "n_seeds", "max_nodes", "ablate_every", "debug_depth", "operator_bandit", "model_arms"})

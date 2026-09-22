@@ -108,12 +108,64 @@ def test_the_setting_reaches_the_policy_and_only_that_policy():
         assert not hasattr(policy, "cost_weight")
 
 
-def test_a_strategy_switch_carries_the_weight_forward():
+def test_every_policy_rebuild_keeps_the_run_level_knobs_the_launch_wired(tmp_path):
     """A run launched with a cost constraint must not lose it because the Strategist switched
-    policies — the same shape as the `ablation_capable` re-stamp beside it."""
-    import inspect
+    policies — and neither may it lose any other RUN-level knob (review 2026-09-22, SCJ-01).
 
-    from looplab.engine import strategy
+    A switch rebuilds the policy (`engine/strategy.py::_apply_strategy` -> `make_policy`). The
+    rebuild read `cost_weight`/`value_weight` back off the policy it was REPLACING, so a run
+    launched `greedy` (which has no such attribute) lost both on its first switch to `mcts`; it
+    never passed `model_arms`, so the router's arms were gone after ANY rebuild, greedy -> greedy
+    included; and it never passed `asha_eta`/`asha_rung_nodes` at all. What this file pinned in
+    their place was the TEXT of the carry-forward line (`pp.setdefault("cost_weight",
+    getattr(self.policy, …))`), which stayed green while the property it named was false.
 
-    source = inspect.getsource(strategy)
-    assert 'pp.setdefault("cost_weight", getattr(self.policy, "cost_weight", 0.0))' in source
+    DRIVEN through the real launch (`cli/__init__.py::_engine`) and a greedy -> mcts -> greedy ->
+    asha -> mcts walk. Each rebuilt policy must equal, attribute for attribute, the policy the
+    LAUNCH builds from the same Settings for that name — which holds only while both are made by
+    the one builder (`search/policy.py::policy_knobs`), whatever knob it grows next.
+    """
+    import looplab.cli as cli
+    from looplab.adapters.toytask import ToyTask
+    from looplab.search.policy import ASHAPolicy, GreedyTree
+
+    settings = Settings(backend="toy", policy="greedy", n_seeds=2, max_nodes=10,
+                        operator_bandit=True, model_arms={"cheap": "small-model@0.2"},
+                        asha_eta=5, asha_rung_nodes=6, mcts_cost_weight=0.5,
+                        mcts_value_weight=0.4)
+    engine = cli._engine(tmp_path / "run", ToyTask(), settings, None)
+    assert isinstance(engine.policy, GreedyTree)
+    assert engine.policy.model_arms == {"cheap": 0.2} and engine.policy.operator_bandit is True
+
+    launched = {}
+    for name in ("greedy", "mcts", "asha"):
+        launched[name] = vars(cli._engine(tmp_path / f"launch-{name}", ToyTask(),
+                                          settings.model_copy(update={"policy": name}),
+                                          None).policy)
+
+    for name in ("mcts", "greedy", "asha", "mcts"):
+        engine._apply_strategy({"policy": name})
+        assert engine._policy_name == name
+        rebuilt = engine.policy
+        if name == "mcts":
+            assert isinstance(rebuilt, MCTSPolicy)
+            assert (rebuilt.cost_weight, rebuilt.value_weight) == (0.5, 0.4)
+        elif name == "asha":
+            assert isinstance(rebuilt, ASHAPolicy)
+            assert (rebuilt.eta, rebuilt.rung0) == (5, 6)
+        else:
+            assert isinstance(rebuilt, GreedyTree)
+            assert rebuilt.model_arms == {"cheap": 0.2} and rebuilt.operator_bandit is True
+        assert vars(rebuilt) == launched[name], name
+
+    # An explicit Strategist `policy_params` entry still wins over the run's value for the one
+    # rebuild that carries it, and the run's value comes back on the next rebuild that does not.
+    engine._apply_strategy({"policy": "mcts", "policy_params": {"cost_weight": 0.1}})
+    assert engine.policy.cost_weight == 0.1 and engine.policy.value_weight == 0.4
+    engine._apply_strategy({"policy": "greedy"})
+    engine._apply_strategy({"policy": "mcts"})
+    assert engine.policy.cost_weight == 0.5
+    # …but never for a knob the RUN owns: the arms name models only the engine can resolve.
+    engine._apply_strategy({"policy": "greedy", "policy_params": {"model_arms": 3,
+                                                                  "operator_bandit": False}})
+    assert engine.policy.model_arms == {"cheap": 0.2} and engine.policy.operator_bandit is True

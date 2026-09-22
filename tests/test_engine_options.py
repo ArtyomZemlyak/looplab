@@ -143,6 +143,12 @@ ATTR_BY_FIELD = {
     "holdout_top_k": "_holdout_top_k",
     "debug_depth": "_debug_depth",
     "operator_bandit": "_operator_bandit",
+    # The rest of the run-level policy knobs a Strategist rebuild hands the new policy
+    # (`search/policy.py::policy_knobs`, review 2026-09-22 SCJ-01).
+    "asha_eta": "_asha_eta",
+    "asha_rung_nodes": "_asha_rung_nodes",
+    "mcts_cost_weight": "_mcts_cost_weight",
+    "mcts_value_weight": "_mcts_value_weight",
     "novelty_mode": "_novelty_mode",
     "novelty_semantic": "_novelty_semantic",
     "novelty_semantic_threshold": "_novelty_semantic_threshold",
@@ -281,6 +287,11 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         novelty_literature=True,
         steady_state_build=True,
         syscall_fence="mutators",
+        # The four run-level policy knobs a Strategist rebuild now reads off the engine (SCJ-01).
+        asha_eta=5,
+        asha_rung_nodes=6,
+        mcts_cost_weight=0.5,
+        mcts_value_weight=0.4,
     )
 
     # (a) the OLD explicit-kwarg style: the literal Settings->Engine mapping cli.py::_engine used
@@ -413,6 +424,10 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         novelty_literature=settings.novelty_literature,
         steady_state_build=settings.steady_state_build,
         syscall_fence=settings.syscall_fence,
+        asha_eta=settings.asha_eta,
+        asha_rung_nodes=settings.asha_rung_nodes,
+        mcts_cost_weight=settings.mcts_cost_weight,
+        mcts_value_weight=settings.mcts_value_weight,
     )
 
     # (b) the NEW single-bundle style.

@@ -345,12 +345,40 @@ def test_the_cadence_runs_before_the_strategist_can_rebuild_the_policy():
     assert src.index("_maybe_estimate_node_values") < src.index("_maybe_consult_strategist")
 
 
-def test_a_policy_switch_carries_the_weight_forward():
-    """A run-level knob the engine does not hold: a Strategist switch to `mcts` that dropped it would
-    silently stop BUYING the estimates as well as stop reading them."""
-    import inspect
+def test_a_policy_switch_keeps_buying_the_estimates_the_operator_asked_for(tmp_path, monkeypatch):
+    """A run-level knob: a Strategist switch to `mcts` that dropped it would silently stop BUYING
+    the estimates as well as stop reading them (review 2026-09-22, SCJ-01).
 
-    from looplab.engine.strategy import StrategyCadenceMixin
+    This used to be a pin on the TEXT of the carry-forward line, which read the weight back off the
+    policy being replaced — so a run launched `greedy` (no such attribute) lost it on its first
+    switch while the pin stayed green. Driven now: an engine holding `mcts_value_weight=0.6` under a
+    greedy policy buys nothing (greedy cannot use the number), switches to `mcts` and buys, and
+    stops again once the Strategist switches back — the weight follows the POLICY, the value
+    follows the RUN."""
+    from tests.factories import make_engine
 
-    src = inspect.getsource(StrategyCadenceMixin._apply_strategy)
-    assert 'pp.setdefault("value_weight", getattr(self.policy, "value_weight", 0.0))' in src
+    client = _ValueClient(answers=(0.05, 0.95))
+    eng = make_engine(tmp_path / "run", mcts_value_weight=0.6)       # launched greedy
+    monkeypatch.setattr(type(eng), "_reflect_client", lambda self: client, raising=True)
+    for nid, metric in ((0, 0.5), (1, 0.5)):
+        eng.store.append("node_created", {
+            "node_id": nid, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "rationale": f"exp {nid}"}})
+        eng.store.append("node_evaluated", {"node_id": nid, "metric": metric})
+
+    eng._maybe_estimate_node_values(fold(eng.store.read_all()))
+    assert client.calls == 0
+
+    eng._apply_strategy({"policy": "mcts"})
+    assert isinstance(eng.policy, MCTSPolicy) and eng.policy.value_weight == 0.6
+    state = eng._maybe_estimate_node_values(fold(eng.store.read_all()))
+    assert client.calls == 2
+    assert (state.nodes[0].value_prior, state.nodes[1].value_prior) == (0.05, 0.95)
+
+    eng._apply_strategy({"policy": "greedy"})
+    eng.store.append("node_created", {
+        "node_id": 2, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "exp 2"}})
+    eng.store.append("node_evaluated", {"node_id": 2, "metric": 0.5})
+    eng._maybe_estimate_node_values(fold(eng.store.read_all()))
+    assert client.calls == 2

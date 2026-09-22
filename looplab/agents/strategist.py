@@ -581,8 +581,13 @@ class RuleStrategist:
         # `policy_fills_width` is the predicate that brief already cites, asked here rather than
         # re-derived: it is False ONLY for a racing schedule asked to fill more than one slot, and
         # answers True for an unknown name, so this arm keeps exactly the behaviour it had at width 1.
+        #
+        # NO `policy_params` (review 2026-09-22, SCJ-01): this arm used to say `{"eta": 3}`, and an
+        # explicit params entry WINS over the run's own `asha_eta` — so the first rule consult
+        # silently reset an operator's `asha_eta=5` to 3. The ASHA it asks for is built from the
+        # run's knobs (`search/policy.py::policy_knobs`), whose default IS 3.
         if "asha" in avail and ctx.phase == "explore" and policy_fills_width("asha", width):
-            return {"policy": "asha", "policy_params": {"eta": 3}, "fidelity": "adaptive",
+            return {"policy": "asha", "fidelity": "adaptive",
                     "rationale": "exploring breadth: race candidates with ASHA "
                                  "(smoke rung -> promote survivors to full)",
                     "source": "rule"}

@@ -44,7 +44,8 @@ from looplab.events.replay import fold
 from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
 from looplab.search.coverage import (already_covered_at, analytics_projection_token, coverage_signal,
                                      latest_live_snapshot)
-from looplab.search.policy import available_policies, make_policy, operator_yields
+from looplab.search.policy import (RUN_OWNED_POLICY_KNOBS, available_policies, make_policy,
+                                   operator_yields, policy_knobs)
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
 
@@ -691,28 +692,31 @@ class StrategyCadenceMixin:
                 # arch-review §4 P1-11: name and params are gated independently, so the MUTATION must
                 # also consume only the authorized fields).
                 raw_pp = (strat.get("policy_params") or {}) if params_ok else {}
-                # Strip the names make_policy takes as explicit kwargs: a policy_params entry like
-                # {"n_seeds": 4} would otherwise raise "multiple values for keyword argument",
-                # silently dropping the whole switch (recorded decision diverging from live policy).
-                pp = {k: v for k, v in raw_pp.items()
-                      if k not in ("n_seeds", "max_nodes", "ablate_every",
-                                   "debug_depth", "operator_bandit")}
-                # The cost weight travels with the SWITCH, read off the policy being replaced.
-                # It is a run-level knob (`Settings.mcts_cost_weight`), not a per-strategy one, and
-                # the engine does not hold it — so a switch to `mcts` that did not carry it forward
-                # would silently drop a cost constraint the operator set at launch, the same shape
-                # as the `ablation_capable` re-stamp below. An explicit `policy_params` entry wins.
-                pp.setdefault("cost_weight", getattr(self.policy, "cost_weight", 0.0))
-                # The value-estimate weight travels the same way and for the same reason
-                # (docs/BACKLOG.md §0.1 row 17): it is a run-level knob
-                # (`Settings.mcts_value_weight`) the engine does not hold, so a switch
-                # to `mcts` that dropped it would silently stop BUYING the estimates as
-                # well as stop reading them.
-                pp.setdefault("value_weight", getattr(self.policy, "value_weight", 0.0))
-                self.policy = make_policy(base, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
-                                          ablate_every=self._ablate_every,
-                                          debug_depth=self._debug_depth,
-                                          operator_bandit=self._operator_bandit, **pp)
+                # Strip the names the RUN owns (`search/policy.py::RUN_OWNED_POLICY_KNOBS`). When
+                # they were explicit kwargs a policy_params entry like {"n_seeds": 4} raised
+                # "multiple values for keyword argument", silently dropping the whole switch
+                # (recorded decision diverging from live policy); merged into the knob map below it
+                # would instead OVERRIDE the run's value — the same hole by another route.
+                pp = {k: v for k, v in raw_pp.items() if k not in RUN_OWNED_POLICY_KNOBS}
+                # EVERY run-level knob travels with the SWITCH, from the values the ENGINE holds and
+                # through the builder the launch used (`policy_knobs`, review 2026-09-22 SCJ-01). A
+                # switch that did not carry them would silently drop a constraint the operator set
+                # at launch, the same shape as the `ablation_capable` re-stamp below — and that is
+                # what the old carry-forward did: it read `cost_weight`/`value_weight` back off the
+                # policy being REPLACED (a greedy run has neither, so its first switch to `mcts`
+                # lost both, and with `value_weight` stopped BUYING the estimates as well as
+                # reading them), and never passed `model_arms` or `asha_eta`/`asha_rung_nodes` at
+                # all. A resumed run regains them too: `_reentry_repin` re-applies the recorded
+                # strategy through this method. An explicit `policy_params` entry for a
+                # per-strategy knob (`eta`, `c`, `cost_weight`, …) still wins for this rebuild.
+                self.policy = make_policy(base, **{**policy_knobs(
+                    n_seeds=self.n_seeds, max_nodes=self.max_nodes,
+                    ablate_every=self._ablate_every, debug_depth=self._debug_depth,
+                    operator_bandit=self._operator_bandit, asha_eta=self._asha_eta,
+                    asha_rung_nodes=self._asha_rung_nodes,
+                    mcts_cost_weight=self._mcts_cost_weight,
+                    mcts_value_weight=self._mcts_value_weight,
+                    model_arms=self._model_arms), **pp})
                 self.policy.ablation_capable = getattr(self, "_ablation_capable", True)  # re-stamp: a repo/eval-spec run must not propose ablate (see orchestrator init)
                 self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
                 # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing

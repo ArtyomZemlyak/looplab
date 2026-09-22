@@ -296,6 +296,15 @@ class EngineOptions:
     # rebuild policies with the same run-wide settings.
     debug_depth: int = 1                 # T10: debug-lineage bound for every policy
     operator_bandit: bool = False        # P4: deterministic UCB over operator yields (GreedyTree)
+    # The rest of the run-level policy knobs, held for the same reason (review 2026-09-22, SCJ-01):
+    # a Strategist rebuild read them off the policy it replaced, or not at all, so a switch dropped
+    # them. Every value equals its `Settings` default — no divergence row — and each is inert until
+    # a policy that reads it is built: ASHA's reduction factor and rung-0 width, MCTS's cost term
+    # and value-estimate weight (0.0 = off, and the latter is also the gate on the paid estimate).
+    asha_eta: int = 3
+    asha_rung_nodes: int = 0
+    mcts_cost_weight: float = 0.0
+    mcts_value_weight: float = 0.0
     # T5 embedding-similarity dedup inside the "algo" gate. False matches the Settings default
     # and the documented rationale (novelty is the agentic Researcher's job by default): the old
     # True made a direct `Engine(novelty_gate=True)` behave differently from the identical
