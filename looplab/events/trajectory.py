@@ -14,8 +14,11 @@ cross-run overlay and the single-run chart cannot disagree about which node move
   * the x population is every evaluated, non-tombstoned, non-aborted node with a usable metric
     (`RunState.evaluated_nodes()` minus `aborted_nodes` — the chart's `nodeIsActive`), so an
     infeasible node still occupies an x slot: it was an experiment the run paid for;
-  * only a FEASIBLE node may advance the best (`RunState.feasible_nodes()`, the set `best()` selects
-    from), so the line never claims a best the engine rejected;
+  * only a node that COUNTS TOWARD THE BEST may advance it — `core/fitness.py::counts_toward_best`,
+    the champion's own filter (feasible, not trust-flagged, not aborted, usable robust metric) — so
+    the line never claims a best the engine rejected. It read `RunState.feasible_nodes()` until
+    review 2026-09-22 (EVT-03), which let a node hard-flagged under `trust_gate=gate` — feasible,
+    and barred only from WINNING — move the frontier to a number the champion refuses;
   * the value is `confirmed_mean` when the node was re-measured, else `metric` — the chart's rule.
 
 WHAT IS CARRIED, AND WHY IT IS SMALL. A running best is a STEP function, so the series is exact as its
@@ -33,7 +36,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from looplab.core.fitness import is_usable_metric
+from looplab.core.fitness import counts_toward_best, is_usable_metric
 from looplab.core.models import RunState
 
 TRAJECTORY_VERSION = 1
@@ -68,7 +71,8 @@ def running_best(state: RunState, *, cap: int = TRAJECTORY_CAP) -> Optional[dict
     aborted = set(state.aborted_nodes)
     drawn = sorted((n for n in state.evaluated_nodes()
                     if n.id not in aborted and _node_value(n) is not None), key=lambda n: n.id)
-    advancers = {n.id for n in state.feasible_nodes()}
+    flagged = set(state.breed_excluded or ())
+    advancers = {n.id for n in drawn if counts_toward_best(n, flagged, aborted)}
     points: list = []
     best: Optional[float] = None
     best_id: Optional[int] = None

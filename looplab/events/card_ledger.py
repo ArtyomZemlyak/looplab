@@ -34,6 +34,7 @@ from looplab.core.concepts import (
     concept_materialization_receipt,
     normalized_concept_materialization_receipt,
 )
+from looplab.core.fitness import counts_toward_best, is_usable_metric
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
                      CARD_CHILD_LIMIT, CARD_CONCEPT_TAG_LIMIT, CARD_LINEAGE_MAX_DEPTH,
@@ -425,7 +426,8 @@ def _bounded_card_drop_receipt(d: dict) -> dict | None:
     return rec
 
 
-def _sota_eligible(n: Node) -> bool:
+def _sota_eligible(n: Node, excluded: Collection[int] = frozenset(),
+                   aborted: Collection[int] = frozenset()) -> bool:
     """May this node's metric take part in the run's SOTA at all?
 
     ONE spelling, because `_record_setter_ids` and `_record_establisher_id` both answer "which node
@@ -439,12 +441,32 @@ def _sota_eligible(n: Node) -> bool:
     run `supported` with `best_delta=None` — with nothing red.
 
     §6.3: a deleted node must not set the board's SOTA.
+
+    THE EXCLUSION RULE IS THE CHAMPION'S OWN (review 2026-09-22, EVT-03): `core/fitness.py::
+    counts_toward_best`, which `SearchFitness.eligible` — the champion's filter — now IS. `excluded`
+    is the trust gate's set (`RunState.breed_excluded`, published by `replay._apply_trust_gate`
+    before `_derive_cards` runs) and `aborted` the operator's; both default EMPTY so a hand-built
+    ledger reads exactly as before. Until this, the board counted what the champion refused: an
+    operator abort after evaluation, or a hard trust flag under `trust_gate=gate`, left the
+    excluded node's card `supported` (a record the run will never call a record) and the real
+    champion's card `tested` (it beat only that ineligible record). `n.metric` stays required and
+    usable on top, because it — not `robust_metric` — is the scalar this ledger orders by.
+
+    IT CHANGES VERDICTS ON A PRESERVED LOG, stated here like `replay.py`'s
+    `_FAILURE_SPIKE_IGNORED_REASONS` note: any log with a node aborted AFTER its evaluation, or a
+    hard-flagged node under `gate`/`block`, re-folds with that node's card reading `open` (no usable
+    evidence — the class a failed or infeasible node was already in) instead of `supported`/
+    `tested`, and the champion's card may move from `tested` to `supported`. Under `trust_gate=
+    audit` (the default) nothing is flagged, so only the abort half moves there. Not measured over a
+    corpus: no preserved run directory was on the box this landed from.
     """
-    return (n.status is NodeStatus.evaluated and n.feasible and n.metric is not None
-            and not n.tombstoned)
+    return (n.status is NodeStatus.evaluated and not n.tombstoned
+            and counts_toward_best(n, excluded, aborted) and is_usable_metric(n.metric))
 
 
-def _record_setter_ids(nodes: dict[int, Node], direction: str) -> set[int]:
+def _record_setter_ids(nodes: dict[int, Node], direction: str, *,
+                       excluded: Collection[int] = frozenset(),
+                       aborted: Collection[int] = frozenset()) -> set[int]:
     """The run-global set of node ids that ADVANCED the run's SOTA — sticky evidence.
 
     Pure helper (Layer 1a) extracted VERBATIM from `_derive_hypotheses` so `_derive_cards` reuses the
@@ -457,14 +479,16 @@ def _record_setter_ids(nodes: dict[int, Node], direction: str) -> set[int]:
     setters: set[int] = set()
     running: float | None = None
     for n in sorted(nodes.values(), key=lambda x: x.id):
-        if _sota_eligible(n):
+        if _sota_eligible(n, excluded, aborted):
             if running is None or better(n.metric, running):
                 setters.add(n.id)                   # first node ESTABLISHES the SOTA, or a later node
                 running = n.metric                  # BEATS the standing record — either is a real advance
     return setters
 
 
-def _record_establisher_id(nodes: dict[int, Node]) -> int | None:
+def _record_establisher_id(nodes: dict[int, Node], *,
+                           excluded: Collection[int] = frozenset(),
+                           aborted: Collection[int] = frozenset()) -> int | None:
     """The ONE node in `_record_setter_ids` that beat nothing — the run's first SOTA, or None.
 
     `_record_setter_ids` folds two different events into one set: a node that ESTABLISHES the first
@@ -480,15 +504,18 @@ def _record_establisher_id(nodes: dict[int, Node]) -> int | None:
     first" is how the two come to disagree about it — and a docstring saying so beside a duplicated
     predicate is not what stops that. Takes no
     `direction`: which node is FIRST is a fact about creation order, and the comparison that needs a
-    direction is the one this node is defined by not having made.
+    direction is the one this node is defined by not having made. `excluded`/`aborted` are
+    `_record_setter_ids`' and mean the same, for the same reason.
     """
     for n in sorted(nodes.values(), key=lambda x: x.id):
-        if _sota_eligible(n):
+        if _sota_eligible(n, excluded, aborted):
             return n.id
     return None
 
 
-def _usable_evidence(evidence_ids: Iterable[int], nodes: Mapping) -> tuple[list, list]:
+def _usable_evidence(evidence_ids: Iterable[int], nodes: Mapping, *,
+                     excluded: Collection[int] = frozenset(),
+                     aborted: Collection[int] = frozenset()) -> tuple[list, list]:
     """One spelling of a card's evidence populations: (present & non-tombstoned, usable evaluated).
 
     `_evidence_verdict` (the `best_delta`/`supported` half of a card's verdict) and
@@ -496,15 +523,20 @@ def _usable_evidence(evidence_ids: Iterable[int], nodes: Mapping) -> tuple[list,
     record) both filter evidence through this. They were two hand-spelled copies ~2,500 lines
     apart, which is how the two halves of one record come to be computed over different
     populations when the predicate moves.
+
+    "Usable" is `_sota_eligible` — the record setters' own predicate, and through it the
+    champion's (review 2026-09-22, EVT-03) — rather than a third spelling of it: an aborted or
+    trust-flagged node is no more a card's usable evidence than it is a record.
     """
     ev = [nodes[i] for i in evidence_ids if i in nodes and not nodes[i].tombstoned]
-    return ev, [n for n in ev if n.status is NodeStatus.evaluated and n.feasible
-                and n.metric is not None]
+    return ev, [n for n in ev if _sota_eligible(n, excluded, aborted)]
 
 
 def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direction: str,
                       record_setters: set[int], is_abandoned: bool,
                       *, record_establisher: int | None,
+                      excluded: Collection[int] = frozenset(),
+                      aborted: Collection[int] = frozenset(),
                       ) -> tuple[float | None, str, bool]:
     """Compute (best_delta, status, supported) for one hypothesis/card from its evidence nodes.
 
@@ -513,9 +545,11 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
     stamps onto Node/Hypothesis/Card — it only reads. `record_setters` is `_record_setter_ids(...)`;
     `is_abandoned` is the caller's "id in <abandoned set>" check. Supported if an experiment IMPROVED
     over its parent (or set a run record); tested if evaluated without improvement; testing while
-    evidence still runs; open with no (usable) evidence; abandoned overrides all."""
+    evidence still runs; open with no (usable) evidence; abandoned overrides all. `excluded` and
+    `aborted` must be the sets `record_setters` was derived with — the usable-evidence half and the
+    record half of one verdict read one population (review 2026-09-22, EVT-03)."""
     better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
-    ev, evaluated = _usable_evidence(evidence_ids, nodes)
+    ev, evaluated = _usable_evidence(evidence_ids, nodes, excluded=excluded, aborted=aborted)
     supported = False
     best_delta: float | None = None
     for n in evaluated:
@@ -2083,13 +2117,20 @@ def _apply_card_verdicts(
         st: RunState, ledger: _CardLedger, control_ids: dict[str, set[str]]) -> None:
     cards = ledger.cards
 
+    # THE CHAMPION'S EXCLUSIONS (review 2026-09-22, EVT-03): the trust gate's set and the operator's
+    # aborts, both folded before `_derive_cards` runs (`replay._apply_trust_gate` publishes the
+    # first as `breed_excluded`). One pair, handed to every helper below, so the record setters,
+    # the establisher and the usable evidence of every card read the population the champion does.
+    _excluded = frozenset(st.breed_excluded or ())
+    _aborted = frozenset(st.aborted_nodes or ())
     # 3) record-setters (sticky SOTA advancers) — the SAME pure helper the hypotheses use, so a card's
     #    verdict is byte-identical to its hash-joined hypothesis.
-    _record_setters = _record_setter_ids(st.nodes, st.direction)
+    _record_setters = _record_setter_ids(st.nodes, st.direction,
+                                         excluded=_excluded, aborted=_aborted)
     # …and the ONE of them that beat nothing. Derived once per fold beside the set it partitions,
     # never per card: the two must be read off the same `st.nodes` or they disagree about which
     # node was first.
-    _record_establisher = _record_establisher_id(st.nodes)
+    _record_establisher = _record_establisher_id(st.nodes, excluded=_excluded, aborted=_aborted)
 
     # 4) verdict per card via the SHARED helper (open/testing/supported/tested/abandoned). `is_abandoned`
     #    mirrors the hypothesis: a shadow card keyed by the hypothesis id inherits the abandoned override.
@@ -2098,7 +2139,7 @@ def _apply_card_verdicts(
             c.evidence, st.nodes, st.direction, _record_setters,
             any(control_id in st.hypotheses_abandoned
                 for control_id in control_ids.get(c.id, {c.id})),
-            record_establisher=_record_establisher)
+            record_establisher=_record_establisher, excluded=_excluded, aborted=_aborted)
 
 
 def _drop_author(receipt: dict) -> str:
@@ -2987,7 +3028,9 @@ def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: 
 
 def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases, *,
                         nodes: Mapping | None = None, direction: str = "max",
-                        champion_metric: float | None = None) -> None:
+                        champion_metric: float | None = None,
+                        excluded: Collection[int] = frozenset(),
+                        aborted: Collection[int] = frozenset()) -> None:
     """Publish the DIRECTION -> EXPERIMENT forest: `card_kind`, `parent_card_id`, `child_card_ids`,
     `child_rollup`.
 
@@ -3137,7 +3180,10 @@ def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases, *,
         # passed down from the fold's own `_select_best` rather than derived here.
         _child_metrics: dict[str, float] = {}
         for k in kids:
-            _, _usable = _usable_evidence(getattr(cards[k], "evidence", None) or [], node_map)
+            # The champion's exclusions (review 2026-09-22, EVT-03): a child whose only better
+            # number is an aborted or trust-flagged one did not beat the champion either.
+            _, _usable = _usable_evidence(getattr(cards[k], "evidence", None) or [], node_map,
+                                          excluded=excluded, aborted=aborted)
             _best = None
             for _n in _usable:
                 _best = _n.metric if _best is None else (
@@ -3233,5 +3279,7 @@ def derive_cards(
     _best_node = st.nodes.get(getattr(st, "best_node_id", None))
     _apply_card_lineage(ledger, aliases, nodes=st.nodes,
                         direction=str(getattr(st, "direction", "max") or "max"),
-                        champion_metric=getattr(_best_node, "metric", None))
+                        champion_metric=getattr(_best_node, "metric", None),
+                        excluded=frozenset(st.breed_excluded or ()),
+                        aborted=frozenset(st.aborted_nodes or ()))
     _publish_visible_cards(st, ledger, control_ids)

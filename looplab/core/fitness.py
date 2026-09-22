@@ -107,6 +107,30 @@ def is_better(direction: str, a: float, b: float) -> bool:
     return a < b if direction == "min" else a > b
 
 
+def counts_toward_best(node, flagged, aborted) -> bool:
+    """May this node's measurement COUNT toward the run's best — the champion, the card board's
+    record setters and usable evidence, the trajectory's running best?
+
+    Feasible, not trust-flagged (`flagged`: the gate/block exclusion set, which the fold publishes as
+    `RunState.breed_excluded`), not operator-aborted (`aborted`), and carrying a usable
+    `robust_metric`. WHICH nodes are candidates at all — evaluated, not tombstoned — is the caller's
+    population (`RunState.evaluated_nodes()` already filters both); this is the exclusion rule
+    applied to it.
+
+    ONE predicate because three readers asked the question and only one of them asked it fully
+    (review 2026-09-22, EVT-03). `replay._select_best` excluded aborted and trust-flagged nodes
+    through `SearchFitness.eligible`; `events/card_ledger.py::_sota_eligible` spelled "evaluated &
+    feasible & metric & not tombstoned" and `events/trajectory.py::running_best` read
+    `feasible_nodes()`, neither consulting the flag set. Driven: an operator abort after evaluation
+    and a `reward_hack_suspected` under `trust_gate=gate` each left the EXCLUDED node's card reading
+    `supported` (it "set a record" the champion rule refuses) and the actual champion's card
+    `tested` (it "beat nothing", because the record it beat was never eligible). `SearchFitness.
+    eligible` now IS this function, so the champion and the board cannot disagree about it again.
+    """
+    return (node.feasible and node.id not in flagged and node.id not in aborted
+            and is_usable_metric(node.robust_metric))
+
+
 def standard_error_difference(std: float, n: int, incumbent_std: float, incumbent_n: int) -> float:
     """Pooled SE of two independent mean estimates; shared by confirm and verifier CI selection."""
     def _se(value, count):
@@ -371,6 +395,6 @@ class SearchFitness:
         feasible, not trust-flagged, not aborted, and carrying a usable `robust_metric`. (`holdout_topk`
         expresses the same eligibility through a different-but-agreeing base — `feasible_nodes()` + the
         flagged filter — and ranks by `promotion_key` (the plain `(robust_metric, id)` when the verifier
-        tie-break is off), not this predicate.)"""
-        return (node.feasible and node.id not in flagged and node.id not in aborted
-                and is_usable_metric(node.robust_metric))
+        tie-break is off), not this predicate.) It IS `counts_toward_best`, the one spelling the card
+        board and the trajectory share with it (review 2026-09-22, EVT-03)."""
+        return counts_toward_best(node, flagged, aborted)
