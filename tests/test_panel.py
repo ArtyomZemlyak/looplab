@@ -66,8 +66,11 @@ def test_a_nan_param_abstains_instead_of_winning_the_panel():
     hist = [({"x": 3.0, "y": -1.0}, 0.1), ({"x": -4.0, "y": 4.0}, 50.0)]
     assert _predict({"x": float("nan"), "y": 0.0}, hist, BOUNDS) is None   # abstain, not NaN
 
-    nan_idea = Idea(operator="improve", params={"x": float("nan"), "y": 0.0},
-                    rationale="nan idea")
+    # `model_construct`, not `Idea(...)`: a validated Idea DROPS a non-finite param since review
+    # 2026-09-22 (SCJ-04), so `Idea(...)` here would hand the panel `{"y": 0.0}` and silently test
+    # the finite path. What can still reach `propose` with a NaN is an unvalidated idea.
+    nan_idea = Idea.model_construct(operator="improve", params={"x": float("nan"), "y": 0.0},
+                                    rationale="nan idea")
     good = Idea(operator="improve", params={"x": 3.0, "y": -1.0}, rationale="good idea")
     # NaN proposed FIRST is the losing order: it would seize best_pred before `good` is scored.
     panel = PanelResearcher(_SeqResearcher([nan_idea, good]), k=2, warmup=2)

@@ -694,6 +694,23 @@ _REGISTERED_QUESTION_LIMIT = 8
 _REGISTERED_QUESTION_CHARS = 500
 
 
+def _non_finite_number(value) -> bool:
+    """Is `value` a number no finite double can hold — NaN, ±inf, or a value that overflows one
+    (`1e309`, `"inf"`, a 400-digit int)? Pure; never raises on a JSON-shaped value.
+
+    False for anything that is not a number at all (`None`, `"linear"`, a list): whether THAT is an
+    acceptable param stays the field's own decision, exactly as before `Idea`'s non-finite rule
+    existed. See `Idea._drop_non_finite_params` for why the rule is needed (review 2026-09-22,
+    SCJ-04).
+    """
+    try:
+        return not math.isfinite(float(value))
+    except OverflowError:
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 class Idea(BaseModel):
     """A proposed experiment: which operator, what parameters, why."""
     operator: str
@@ -1105,6 +1122,48 @@ class Idea(BaseModel):
             return None
         return f if math.isfinite(f) and f > 0 else None
 
+    @field_validator("params", mode="before")
+    @classmethod
+    def _drop_non_finite_params(cls, value):
+        # A NON-FINITE param cost the WHOLE NODE (review 2026-09-22, SCJ-04). `Idea.params` is
+        # `dict[str, float]` and pydantic's float admits NaN/±inf; a tool-call argument decoded with
+        # `json.loads` delivers all of `NaN`, `Infinity` and `1e309`; the event store's orjson writes
+        # a non-finite float as `null`; and the fold's `Idea(**d["idea"])` then refuses `null`, so
+        # `replay._on_node_created` skipped the event — the node, built, evaluated and paid for live,
+        # was absent from every fold, view and resume. DROP the value here, on the way IN, so no
+        # constructed Idea can carry one: the parameter is lost, never the node (the strict writer,
+        # `IdeaEmission`, refuses it instead so the model is asked again).
+        #
+        # This cannot change any existing fold, which is why it is safe in the tolerant reader too:
+        # orjson refuses to READ `NaN`/`Infinity`/`1e309`, so no log the store can read hands this
+        # validator a non-finite number. A stored `null` is NOT touched — it is not a number, and it
+        # still fails as it always did; healing those old logs would be a separate invariant-5
+        # decision, not a side effect of this one. A healed idea is a fixed point of its own
+        # validation (Card action digests are re-derived by rebuilding the idea).
+        if not isinstance(value, dict):
+            return value
+        return {k: v for k, v in value.items() if not _non_finite_number(v)}
+
+    @field_validator("space", mode="before")
+    @classmethod
+    def _drop_non_finite_grid_points(cls, value):
+        # The same defect one level down: a sweep grid point is the same float, serialized the same
+        # way, and vanished the node the same way. A non-finite POINT is dropped from its grid; a
+        # dimension whose every point was non-finite is dropped whole, because an empty grid would
+        # enumerate no trials at all (an originally EMPTY grid is left exactly as it was).
+        if not isinstance(value, dict):
+            return value
+        out = {}
+        for k, grid in value.items():
+            if isinstance(grid, (list, tuple)):
+                kept = [v for v in grid if not _non_finite_number(v)]
+                if grid and not kept:
+                    continue
+                out[k] = kept
+            else:
+                out[k] = grid
+        return out
+
 
 class IdeaEmission(Idea):
     """Strict modern producer schema; durable replay intentionally continues to use ``Idea``."""
@@ -1159,6 +1218,31 @@ class IdeaEmission(Idea):
         canonical = [normalize_concept_id(item) for item in value]
         if len(set(canonical)) != len(canonical):
             raise ValueError("concept fields cannot contain duplicates")
+        return value
+
+    @field_validator("params", mode="before")
+    @classmethod
+    def _refuse_non_finite_params(cls, value):
+        # The strict twin of `Idea._drop_non_finite_params` (review 2026-09-22, SCJ-04), for the same
+        # reason `_strict_concept_list` is the twin of the concept drop: the tolerant reader heals,
+        # but a LIVE producer must be asked again rather than silently lose the value it chose. This
+        # runs BEFORE the inherited drop (a subclass's before-validator wraps its parent's), so the
+        # drop never gets to heal a value this boundary exists to refuse.
+        if isinstance(value, dict):
+            bad = sorted(str(k) for k, v in value.items() if _non_finite_number(v))
+            if bad:
+                raise ValueError(f"params must be finite numbers; not finite: {', '.join(bad)}")
+        return value
+
+    @field_validator("space", mode="before")
+    @classmethod
+    def _refuse_non_finite_grid_points(cls, value):
+        if isinstance(value, dict):
+            bad = sorted(str(k) for k, grid in value.items() if isinstance(grid, (list, tuple))
+                         and any(_non_finite_number(v) for v in grid))
+            if bad:
+                raise ValueError(
+                    f"space grid points must be finite numbers; not finite in: {', '.join(bad)}")
         return value
 
     @model_validator(mode="after")

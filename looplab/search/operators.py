@@ -19,6 +19,8 @@ operator fires; these functions decide *what* the resulting Idea is.
 """
 from __future__ import annotations
 
+import math
+
 from looplab.core.models import Idea, Node
 
 
@@ -36,11 +38,27 @@ def merge_idea(parents: list[Node]) -> Idea:
         for p in parents:
             if k in p.idea.params:
                 try:
-                    vals.append(float(p.idea.params[k]))
-                except (TypeError, ValueError):
+                    v = float(p.idea.params[k])
+                except (TypeError, ValueError, OverflowError):
                     continue
+                # A NON-FINITE parent value is skipped like a non-numeric one (review 2026-09-22,
+                # SCJ-04): averaged in, it makes the mean NaN/inf, which the event store writes as
+                # `null` and the fold then refuses — the merge node vanished from every fold. A
+                # validated Idea no longer carries one (`Idea._drop_non_finite_params`), but an
+                # in-memory parent can (`model_construct`, a mutation after validation).
+                if math.isfinite(v):
+                    vals.append(v)
         if vals:
-            params[k] = round(sum(vals) / len(vals), 4)
+            # `fsum`, and the per-value fallback, because the mean of FINITE values can still
+            # overflow on the way: two parents at 1e308 summed to inf before the division. For two
+            # parents (the top-2 merge) `fsum` is the same single correctly-rounded addition `sum`
+            # made, so an ordinary merge is unchanged.
+            try:
+                mean = math.fsum(vals) / len(vals)
+            except OverflowError:
+                mean = math.fsum(v / len(vals) for v in vals)
+            if math.isfinite(mean):
+                params[k] = round(mean, 4)
     pids = ",".join(str(p.id) for p in parents)
     # a merge inherits the UNION of every parent. A bare durable Idea has unknown/absent
     # membership; an explicit zero delta is the only unambiguous way to preserve that union unchanged.

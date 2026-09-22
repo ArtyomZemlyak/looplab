@@ -60,15 +60,21 @@ def test_niche_buckets_non_finite_and_non_numeric_params_without_crashing():
 
 
 def test_archive_build_tolerates_a_non_finite_param_node():
-    # A feasible, finitely-evaluated node whose idea.params holds a non-finite value (a `1e309` param
-    # folds to inf) must not crash `build`/`summary` on the main run loop's coverage cadence.
+    # A feasible, finitely-evaluated node whose idea.params holds a non-finite value must not crash
+    # `build`/`summary` on the main run loop's coverage cadence. DEFENSE IN DEPTH (review 2026-09-22,
+    # SCJ-04): this premise used to read "a `1e309` param folds to inf", which was false — the store
+    # writes a non-finite float as `null` and the fold dropped the whole node — and a validated
+    # `Idea` now DROPS a non-finite param at construction. So the only way to hand the archive one is
+    # an unvalidated idea (`model_construct`, or a mutation after validation), which is what this
+    # builds; a plain `Idea(...)` here would silently test the finite path instead.
     st = RunState(direction="min")
+    inf_idea = Idea.model_construct(operator="improve", params={"lr": float("inf"), "depth": 5.0})
+    nan_idea = Idea.model_construct(operator="improve", params={"lr": float("nan")})
+    assert Idea(operator="improve", params={"lr": float("inf")}).params == {}   # the live rule
     st.nodes = {
         0: _n(0, 0.1, 0.1, 1.0),                                          # a normal niche
-        1: Node(id=1, operator="improve", metric=2.0, status=NodeStatus.evaluated,
-                idea=Idea(operator="improve", params={"lr": float("inf"), "depth": 5.0})),
-        2: Node(id=2, operator="improve", metric=3.0, status=NodeStatus.evaluated,
-                idea=Idea(operator="improve", params={"lr": float("nan")})),
+        1: Node(id=1, operator="improve", metric=2.0, status=NodeStatus.evaluated, idea=inf_idea),
+        2: Node(id=2, operator="improve", metric=3.0, status=NodeStatus.evaluated, idea=nan_idea),
     }
     arch = DiversityArchive(resolution=1.0).build(st)         # pre-fix: OverflowError / ValueError
     assert {n.id for n in arch.values()} == {0, 1, 2}         # every feasible node bucketed, none lost

@@ -991,8 +991,13 @@ def test_a_genuinely_invalid_idea_still_fails_closed_at_the_mint(tmp_path, label
     genuine ownership receipt.
     """
     engine = _nudging_engine(tmp_path / f"failclosed-{abs(hash(label))}")
-    idea = Idea(operator="draft", rationale=label, hypothesis=f"{label} improves the objective",
-                **idea_kwargs)
+    idea = Idea(operator="draft", rationale=label, hypothesis=f"{label} improves the objective")
+    # ASSIGNED AFTER VALIDATION — the root-cause shape the population test below names — rather than
+    # passed to the constructor: a validated Idea DROPS a non-finite param or grid point since review
+    # 2026-09-22 (SCJ-04), so the four non-finite cases built through `Idea(...)` would reach the mint
+    # already healed and test nothing. For every other case the two spellings build the same object.
+    for field_name, value in idea_kwargs.items():
+        setattr(idea, field_name, value)
     disposition, outcome = _mint_and_claim(engine, idea)
     assert (disposition, outcome) == ("invalid", "no-card")
     assert not [event for event in engine.store.read_all() if event.type == EV_CARD_ADDED]

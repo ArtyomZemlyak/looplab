@@ -20,13 +20,20 @@ class DiversityArchive:
 
         def _bucket(v):
             # Discretize only a FINITE numeric coordinate. `round(v / r)` on a non-finite value —
-            # inf/NaN (a `1e309` param JSON-folds straight to inf; NaN is agent-supplied) or a huge int
-            # whose float conversion overflows — raises (OverflowError/ValueError) and, because `build`
-            # only skips aborted/null-metric/infeasible nodes (never guards the param VALUES), that crash
-            # reaches the main run loop at the default-on coverage cadence and aborts the whole run. Every
-            # other param consumer already guards this (digest.numeric_params, operators.merge_idea, the
-            # surrogate). Bucket a non-bucketable coordinate under a stable token so the degenerate node
-            # gets its own niche in the diversity/audit view instead of crashing.
+            # inf/NaN or a huge int whose float conversion overflows — raises (OverflowError/
+            # ValueError) and, because `build` only skips aborted/null-metric/infeasible nodes (never
+            # guards the param VALUES), that crash reaches the main run loop at the default-on
+            # coverage cadence and aborts the whole run. Every other param consumer already guards
+            # this (digest.numeric_params, operators.merge_idea, the surrogate). Bucket a
+            # non-bucketable coordinate under a stable token so the degenerate node gets its own
+            # niche in the diversity/audit view instead of crashing.
+            #
+            # DEFENSE IN DEPTH, not the live path (review 2026-09-22, SCJ-04). This used to say a
+            # `1e309` param "JSON-folds straight to inf"; it never did — the event store's orjson
+            # writes a non-finite float as `null` and refuses to read `1e309` at all, and the fold
+            # then dropped the WHOLE node rather than hand this function an inf. No validated `Idea`
+            # carries one now (`core/models.py::Idea._drop_non_finite_params`), so what reaches this
+            # guard is an idea built with `model_construct` or mutated after validation.
             try:
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     q = v / r
