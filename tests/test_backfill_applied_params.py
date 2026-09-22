@@ -29,15 +29,14 @@ modules, none of them this one.
 """
 from __future__ import annotations
 
-import errno
 import json
 import os
 import sys
-import types
 from pathlib import Path
 
 import pytest
 
+from _windows_emulation import FakeMsvcrt
 from looplab.events.eventstore import EventStore, interprocess_lock
 from looplab.events.replay import fold
 from looplab.events.types import EV_APPLIED_PARAMS_BACKFILLED, EV_NODE_EVALUATED
@@ -288,28 +287,6 @@ def test_a_run_a_live_engine_holds_is_refused(tmp_path):
     assert bf._lock_is_live(run) is False           # released again
 
 
-class _Msvcrt(types.ModuleType):
-    """Windows byte-range locking, as far as the probe can see it: a byte held through one handle
-    refuses every OTHER handle with EACCES (what `msvcrt.locking` raises for a held region)."""
-
-    LK_UNLCK, LK_LOCK, LK_NBLCK = 0, 1, 2
-
-    def __init__(self):
-        super().__init__("msvcrt")
-        self.held: dict = {}
-
-    def locking(self, fd, mode, nbytes):
-        info = os.fstat(fd)
-        key = (info.st_dev, info.st_ino)
-        if mode == self.LK_UNLCK:
-            if self.held.get(key) == fd:
-                del self.held[key]
-            return
-        if self.held.get(key, fd) != fd:
-            raise OSError(errno.EACCES, "Permission denied")
-        self.held[key] = fd
-
-
 def test_the_liveness_probe_contends_the_way_the_engine_locks_on_windows(tmp_path, monkeypatch):
     """On Windows the engine takes `engine.lock` with `msvcrt.locking` and there is no `fcntl` at all.
     Driven on this box with exactly that platform — `fcntl` unimportable, a byte-lock `msvcrt`,
@@ -320,7 +297,7 @@ def test_the_liveness_probe_contends_the_way_the_engine_locks_on_windows(tmp_pat
     run.mkdir()
     lock = run / "engine.lock"
     lock.touch()
-    msvcrt = _Msvcrt()
+    msvcrt = FakeMsvcrt()
     with monkeypatch.context() as m:
         m.setitem(sys.modules, "fcntl", None)
         m.setitem(sys.modules, "msvcrt", msvcrt)

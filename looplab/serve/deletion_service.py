@@ -11,7 +11,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from looplab.core.atomicio import durable_no_replace_rename, strict_fsync_parent
+from looplab.core.atomicio import (
+    durable_no_replace_rename, rmtree_readonly_aware, strict_fsync_parent)
 from looplab.core.pathsafe import is_reparse, run_child_name_defect, validate_run_child
 from looplab.core.run_deletion import (
     RUN_DELETION_FENCE_PREFIX, RUN_DELETION_OPERATION_RE, RunDeletionStorageError,
@@ -443,7 +444,9 @@ def _purge_quarantine(path: Path) -> bool:
         return False
     except EventStoreLockError as exc:
         raise DeletionReceiptError("quarantine engine ownership cannot be verified") from exc
-    shutil.rmtree(path)
+    # Read-only-aware: the quarantine holds the read fence's own hardened `sitecustomize.py`, which
+    # Windows refuses to unlink — a plain `rmtree` left every deletion at `purging` there, forever.
+    rmtree_readonly_aware(path)
     strict_fsync_parent(path)
     return not os.path.lexists(path)
 

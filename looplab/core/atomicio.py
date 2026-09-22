@@ -721,3 +721,51 @@ def append_jsonl_bytes_locked(path: str | os.PathLike, payload: bytes) -> None:
         f.write(normalized)
         f.flush()
         best_effort_fsync(f.fileno())
+
+
+def rmtree_readonly_aware(path: str | os.PathLike) -> None:
+    """`shutil.rmtree`, except that a READ-ONLY entry does not stop it on Windows.
+
+    Windows refuses to unlink a file carrying FILE_ATTRIBUTE_READONLY (`[WinError 5] Access is
+    denied`), where POSIX consults only the parent directory's permissions — and the trees this
+    removes carry such files BY CONSTRUCTION: the read fence hardens its own `sitecustomize.py` to
+    0444 (`runtime/read_fence.py::_harden`, i.e. the read-only attribute there), and every git clone
+    a repo workspace is seeded from writes its pack files read-only. Measured on the Windows CI leg
+    (GitHub Actions run 35785582444, review 2026-09-22, WIN-RMTREE): every run deletion stopped at
+    `purging` with a 202 that no retry could move, because `deletion_service._purge_quarantine`
+    could not remove the fence file the engine itself had hardened.
+
+    The retry is NARROW on purpose: only on Windows, only for a `PermissionError`, and only when
+    the refused entry is a plain (non-link, non-reparse) entry that lacks the write bit — i.e. the
+    one refusal the attribute causes. The attribute is cleared on that entry alone and the same
+    operation is retried once; anything else is re-raised exactly as `shutil.rmtree` raised it, so a
+    file held open by another process (the other Windows refusal) is still a failure the caller
+    sees. POSIX behaviour is `shutil.rmtree` unchanged.
+    """
+    import shutil
+    import stat as _stat
+    import sys
+
+    from looplab.core.pathsafe import is_reparse
+
+    def _clear_readonly_and_retry(func, name, error):
+        exc = error[1] if isinstance(error, tuple) else error
+        # Only the two REMOVALS are retried: re-calling a failed `os.scandir`/`os.open` here would
+        # hand back an iterator or a descriptor nobody closes, and neither is refused by the
+        # attribute anyway.
+        if (os.name != "nt" or not isinstance(exc, PermissionError)
+                or func not in (os.unlink, os.remove, os.rmdir)):
+            raise exc
+        try:
+            info = os.lstat(name)
+        except OSError:
+            raise exc from None
+        if is_reparse(info) or info.st_mode & _stat.S_IWRITE:
+            raise exc
+        os.chmod(name, _stat.S_IWRITE | _stat.S_IREAD)
+        func(name)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly_and_retry)
+    else:
+        shutil.rmtree(path, onerror=_clear_readonly_and_retry)

@@ -415,7 +415,7 @@ class WorkspaceSeeder:
         before the extraction. Order is load-bearing (see `_write_node_files`): node edits go on
         top of the seeded tree, and task assets win any name collision, last. Routed through the
         Engine's delegators so an instance-level monkeypatch of any step still intercepts it."""
-        import shutil
+        from looplab.core.atomicio import rmtree_readonly_aware
 
         wd = Path(workdir).resolve()
         run_dir = Path(self._e.run_dir).resolve()
@@ -425,7 +425,9 @@ class WorkspaceSeeder:
         # on files left by a previous generation. Stage-scoped reuse deliberately bypasses this method
         # in EvaluateMixin; every actual materialization is therefore safe to rebuild from scratch.
         if wd.exists():
-            shutil.rmtree(wd)
+            # Read-only-aware: a workdir seeded from a git clone holds read-only pack files, which
+            # Windows refuses to unlink — a second materialization of the same node failed there.
+            rmtree_readonly_aware(wd)
         self._e._seed_workspace(wd)                # RepoTask: editable repo tree (ADR-7) …
         self._e._write_node_files(node, wd)         # … agent edits on top …
         self._e._write_assets(wd)                   # … task assets win any name collision
