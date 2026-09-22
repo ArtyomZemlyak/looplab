@@ -1153,6 +1153,20 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED,
 })
 
+# ROWS THAT CANNOT MOVE A DECISION FENCE — one named predicate, because each fence spelling its own
+# set is how the finalize fence went wrong (review 2026-09-22, EVT-01). A fence compares "the log
+# since my claim" against "nothing that changes my decision", and three kinds of row qualify:
+#   * every DIAGNOSTIC type: fold-ignored, so its splice position has no folded meaning by
+#     construction (invariant #1 already says these are "excluded wholesale from every seq-equality
+#     fence" — `finalize_scope_quiescent` did not do it, and the phase sink added 2026-09-09 put
+#     `agent_phase_*` rows INSIDE the finalize window: a finish report driven by a tool loop then
+#     abandoned its own scope, bought another report on the next turn, and never finished);
+#   * `llm_usage`: the cost delta of the paid call made INSIDE the window;
+#   * EXCEPT `finalize_step`: diagnostic, but it names a SCOPE, and another finalization's step is a
+#     competing decision the fence must still see (the own-scope row is filtered by scope first).
+FENCE_NEUTRAL_EVENTS: frozenset[str] = frozenset(
+    (DIAGNOSTIC_EVENTS - {EV_FINALIZE_STEP}) | {EV_LLM_USAGE})
+
 # --------------------------------------------------------------- THE PAYLOAD CONTRACT (doc 52 row 30)
 #
 # Everything above states the ENVELOPE and the evolution rules and nothing about what any type

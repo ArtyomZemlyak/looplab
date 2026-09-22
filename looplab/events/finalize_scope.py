@@ -31,6 +31,7 @@ from looplab.events.types import (
     EV_REFLECTION_NOTE,
     EV_REPORT_GENERATED,
     EV_RUN_FINISHED,
+    FENCE_NEUTRAL_EVENTS,
 )
 
 
@@ -89,6 +90,15 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
         if event.type == EV_FINALIZE_STEP and data.get("scope") == scope:
             continue
         if event.type == EV_REPORT_GENERATED and data.get("finalize_scope") == scope:
+            continue
+        if event.type in FENCE_NEUTRAL_EVENTS:
+            # Rows that cannot move this decision (`events/types.py::FENCE_NEUTRAL_EVENTS`): every
+            # diagnostic but a FOREIGN `finalize_step` (the own-scope one was admitted just above),
+            # plus `llm_usage`. Without this, the `agent_phase_*` rows the engine's phase sink
+            # writes around a tool-loop FINISH REPORT read as foreign: the scope was abandoned, the
+            # next loop turn bought another report, and the run never finished (review 2026-09-22,
+            # EVT-01: 122 reports and 0 `run_finished` in 20 s) — and a crash after such a report
+            # made the scope unrecoverable through `incomplete_finalize_scope`.
             continue
         if event.type in {EV_LLM_USAGE, EV_COMMAND_ACK, EV_READMODEL_SKIPPED,
                           EV_REFLECTION_NOTE, EV_LESSONS_DISTILLED, EV_CARD_ENRICHED}:

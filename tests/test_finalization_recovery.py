@@ -1151,3 +1151,88 @@ def test_a_budget_exhausted_terminal_writes_it_too(tmp_path):
     assert incomplete_finalize_scope(events) is None
     st = fold(events)
     assert st.finished and not st.finalization_pending()
+
+
+def test_every_fence_neutral_row_keeps_the_scope_recoverable_and_a_foreign_step_does_not():
+    """The truth table behind `events/types.py::FENCE_NEUTRAL_EVENTS` (review 2026-09-22, EVT-01).
+
+    A fence asks "did anything that changes my decision land since my claim?", and a row the fold
+    ignores cannot change it. Every diagnostic type (plus `llm_usage`) inside an open scope must
+    therefore leave both quiescence and crash-recovery intact — `agent_phase_*` rows from a
+    tool-loop finish report used to make a crash after the report unrecoverable — while a FOREIGN
+    scope's `finalize_step`, the one diagnostic that names a competing decision, still breaks it."""
+    from looplab.engine.finalize import finalize_scope_quiescent, incomplete_finalize_scope
+    from looplab.events.eventstore import Event
+    from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_FINALIZE_STEP, EV_LLM_USAGE,
+                                      FENCE_NEUTRAL_EVENTS)
+
+    assert FENCE_NEUTRAL_EVENTS == (DIAGNOSTIC_EVENTS - {EV_FINALIZE_STEP}) | {EV_LLM_USAGE}
+
+    def _log(extra_type, extra_data):
+        return [
+            Event(v=1, seq=0, ts=1.0, type="run_started",
+                  data={"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"}),
+            Event(v=1, seq=1, ts=2.0, type="run_finished",
+                  data={"reason": "done", "finalize_scope": "done:1"}),
+            Event(v=1, seq=2, ts=3.0, type=EV_FINALIZE_STEP,
+                  data={"scope": "done:1", "step": "begun", "after_seq": 1}),
+            Event(v=1, seq=3, ts=4.0, type=extra_type, data=extra_data),
+        ]
+
+    for kind in sorted(FENCE_NEUTRAL_EVENTS):
+        events = _log(kind, {})
+        assert finalize_scope_quiescent(events, "done:1") is True, kind
+        assert incomplete_finalize_scope(events) == "done:1", kind
+
+    foreign = _log(EV_FINALIZE_STEP, {"scope": "abort:9", "step": "begun"})
+    assert finalize_scope_quiescent(foreign, "done:1") is False
+
+
+def test_a_tool_loop_finish_report_finishes_the_run_once(tmp_path):
+    """EVT-01, driven through the REAL `serve/report.py::ReportWriter` and the real tool loop.
+
+    The engine installs a phase sink for the whole run, so `drive_tool_loop` writes
+    `agent_phase_started` / `agent_phase_completed` INSIDE the finalize window. The finalize fence
+    read them as foreign: the scope was abandoned ("decision_snapshot_changed_during_report"), the
+    next loop turn bought another report, and the run never wrote `run_finished` — 154 provider
+    calls and 154 abandoned scopes in 45 s when it was measured. The default config reaches it: the
+    CLI wires a report writer for every `backend == "llm"` run."""
+    import anyio
+
+    from looplab.serve.report import ReportWriter
+    from tests.factories import make_engine
+
+    class _EmitClient:
+        def __init__(self):
+            self.chats = 0
+
+        def chat(self, messages, tools, tool_choice="auto", **kw):
+            self.chats += 1
+            args = {"headline": "done", "verdict": "fine", "champion_summary": "c"}
+            return {"content": "", "tool_calls": [{
+                "id": f"c{self.chats}", "type": "function",
+                "function": {"name": "emit", "arguments": json.dumps(args)}}]}
+
+        def complete_tool(self, messages, schema):
+            return {"headline": "fallback"}
+
+        def complete_text(self, messages):
+            return "x"
+
+    client = _EmitClient()
+    eng = make_engine(tmp_path / "run", report_writer=ReportWriter(client), report_every=1000,
+                      max_nodes=3, n_seeds=2)
+
+    async def _go():
+        with anyio.move_on_after(60):
+            return await eng.run()
+
+    final = anyio.run(_go)
+    events = EventStore(tmp_path / "run" / "events.jsonl").read_all()
+    assert final is not None and final.finished
+    assert sum(e.type == "run_finished" for e in events) == 1
+    assert not [e for e in events if e.type == "finalize_step"
+                and (e.data or {}).get("step") == "abandoned"]
+    assert client.chats == 1, "one finish report, not one per loop turn"
+    assert any(e.type == "agent_phase_started" for e in events), (
+        "non-vacuity: the phase rows that used to break the fence were written")
