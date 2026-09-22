@@ -27,7 +27,7 @@ import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
-import { DataTable } from './accessibility.jsx'
+import { DataTable, downloadBlob } from './accessibility.jsx'
 import { normalizeResearchMemos } from './researchMemoModel.js'
 import ResearchMemoCard from './ResearchMemoCard.jsx'
 import { deadlineRequest } from './requestDeadline.js'
@@ -2360,6 +2360,7 @@ export function MemoryPanel({ onClose }) {
 
 export function RegistryPanel({ state, onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
+  const [provError, setProvError] = useState('')
   const runs = resource.data || []
   // Rank through the list view's own comparator instead of a raw descending sort. A raw sort put the
   // BEST run last on a `direction: 'min'` task, and ranked runs of different tasks / objectives /
@@ -2387,13 +2388,22 @@ export function RegistryPanel({ state, onClose }) {
         <b>{OBJECTIVE_SOURCE_LABEL[champSource.channel]}</b>. {objectiveSourceHelp(champSource)}
       </div>}
       <div className="toolbar" style={{ marginTop: 6 }}>
+        {/* Saved through `accessibility.jsx::downloadBlob` (review 2026-09-22, UI-08). This clicked a
+            DETACHED anchor and revoked its URL on the same tick — the two things that helper exists
+            to avoid, because Firefox then saves nothing — and had no catch, so a failed read was an
+            unhandled rejection and the button silently did nothing. The failure is said beside it. */}
         <button className="btn sm" onClick={async () => {
-          const p = await get(runApiPath(state.run_id, '/prov'))
-          const blob = new Blob([JSON.stringify(p, null, 2)], { type: 'application/json' })
-          const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
-          a.download = `${state.run_id}_prov.json`; a.click(); URL.revokeObjectURL(a.href)
+          setProvError('')
+          try {
+            const p = await get(runApiPath(state.run_id, '/prov'))
+            if (!downloadBlob(`${state.run_id}_prov.json`, [JSON.stringify(p, null, 2)], 'application/json')) {
+              throw new Error('this browser cannot save a file from the page')
+            }
+          } catch (error) { setProvError(error?.message || 'unknown error') }
         }}><OpIcon name="download" size={12} /> W3C-PROV graph (JSON)</button>
       </div>
+      {provError && <div className="report-inline-state error" role="alert">
+        <OpIcon name="alert" size={14} /><span>W3C-PROV download failed: {provError}</span></div>}
       <div className="section-h">Promotions</div>
       {(state.promotions || []).length
         ? <DataTable caption="Promoted solution nodes" card={false}><table className="tbl"><thead><tr><th>node</th><th>alias</th></tr></thead><tbody>{state.promotions.map((p, i) => <tr key={i}><td>#{p.node_id}</td><td>{p.alias || 'champion'}</td></tr>)}</tbody></table></DataTable>
