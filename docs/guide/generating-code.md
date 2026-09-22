@@ -501,9 +501,15 @@ Notes:
 **Execution.** Every command — `eval.command`, `eval.setup`, `onboard_command` — runs as an **argv
 list, executed directly with no shell**. There is no `sh -c`, so no shell injection, no `&&`/pipes/
 redirection/globbing — a token like `"x; rm -rf /"` is passed as one literal argument, not
-interpreted. Each run gets its **own timeout, whole-process-tree kill on timeout/cancel, and capped
-stdout/stderr** (~64 KB). `setup` runs first (at the repo root); if it exits non-zero or times out the
-node fails and its stderr is fed back to the agent's repair.
+interpreted. Each run gets its **own timeout, a process-tree kill on timeout/cancel, and capped
+stdout/stderr** (~64 KB). The kill is one atomic `SIGKILL` to the run's process group plus, on POSIX,
+every descendant that was alive and had left that group (a `setsid`/`start_new_session` worker, the
+shape `torch.distributed.elastic` uses) — found by parentage (psutil, else `/proc` on Linux) just
+before the group kill. What it cannot reach: a process that escapes the group in the instant between
+that walk and the kill, any escapee on a POSIX box with neither psutil nor `/proc`, and a `setsid`
+descendant of a run that EXITS on its own (the exit sweep kills the group only; the leader's children
+have already been reparented). `setup` runs first (at the repo root); if it exits non-zero or times
+out the node fails and its stderr is fed back to the agent's repair.
 
 **Two actors — only one is trusted to name commands.** This is the core trust boundary:
 
@@ -531,7 +537,7 @@ node fails and its stderr is fed back to the agent's repair.
 
 | `trust_mode` | What runs the command | Boundary |
 |---|---|---|
-| `trusted_local` (default) | direct subprocess | process isolation + timeout + tree-kill + output caps. **No Docker, no network/FS isolation** — it's your own code on your box. |
+| `trusted_local` (default) | direct subprocess | process isolation + timeout + tree-kill (the process group plus its live escaped descendants — see above) + output caps. **No Docker, no network/FS isolation** — it's your own code on your box. |
 | `untrusted` | `docker run --rm --network none --pids-limit 1024 --cap-drop ALL --security-opt no-new-privileges --memory 4g -v workspace:/work` | no network, fork-bomb guard, all Linux capabilities dropped, no privilege escalation, memory-capped (`sandbox_memory`; optional `--cpus` via `sandbox_cpus`), only the workspace mounted; metric read from the bind mount on the host. |
 | `hostile` | the above **+ gVisor** (`--runtime runsc`) | kernel-level isolation for actively hostile code. |
 

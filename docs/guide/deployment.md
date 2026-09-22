@@ -11,7 +11,7 @@ The sandbox tier is chosen by **trust mode**, not your environment:
 
 | `trust_mode` | Sandbox | When |
 |---|---|---|
-| `trusted_local` (default) | `SubprocessSandbox` | Your own research on your own box — process isolation, timeout, tree-kill, output caps. No Docker. |
+| `trusted_local` (default) | `SubprocessSandbox` | Your own research on your own box — process isolation, timeout, tree-kill (the run's process group plus the live descendants that left it; [what it cannot reach](generating-code.md#how-the-commands-run-and-whats-safe)), output caps. No Docker. |
 | `untrusted` | `DockerSandbox` (`--network none`) | Executing code on infrastructure that must protect other users (hosted / multi-tenant UI) |
 | `hostile` | `DockerSandbox` (`--network none` + gVisor `--runtime runsc`) | Actively hostile code — kernel-level isolation on top of the untrusted tier (`make_sandbox` sets `runtime=runsc`) |
 

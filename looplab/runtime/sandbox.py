@@ -1614,6 +1614,10 @@ def _reap_process_group(proc: "subprocess.Popen") -> None:
     the GPU the scheduler is about to hand to the next node. Correct ONLY while the leader is still a
     zombie: its pid, and therefore the group id, cannot be recycled until it is collected, which is
     exactly what `_wait_without_reaping` guarantees at the one call site.
+
+    The GROUP only: a descendant that called `setsid` is not in it, and by the time the leader has
+    exited its children are already reparented, so no walk can find it from here — the residual
+    `_kill_tree`'s RTA-03 paragraph states (review 2026-09-22).
     """
     pid = getattr(proc, "pid", None)
     if os.name == "nt" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
@@ -1638,14 +1642,126 @@ def _reap_process_group(proc: "subprocess.Popen") -> None:
         pass
 
 
+def _proc_stat_fields(pid: int) -> Optional[tuple[int, int]]:
+    """`(ppid, starttime)` from `/proc/<pid>/stat`, or None (no such process, or no `/proc`).
+
+    Parsed after the LAST `)`, because `comm` is the process's own choice of name and may contain
+    spaces and parentheses. `starttime` (field 22, clock ticks since boot) is what makes a pid an
+    IDENTITY: a pid the kernel recycles comes back with a different one — psutil's own test."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            raw = fh.read()
+        fields = raw[raw.rindex(b")") + 2:].split()
+        return int(fields[1]), int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _signal_escapee(pid: int, spare: set) -> None:
+    """SIGKILL one enumerated descendant — its WHOLE group when it leads one of its own.
+
+    A `setsid` worker (torch.distributed.elastic's `start_new_session=True`) is the leader of a new
+    group, and killing only its pid would leave whatever it forks between the enumeration and this
+    kill — a DataLoader worker — running in that group. So a descendant that leads a group which is
+    neither the eval's (already signalled) nor the engine's own (`spare`) gets the same one atomic
+    `killpg` the eval's group got. The caller has just re-identified the process, and a live group
+    leader keeps its group id reserved, so the group cannot be a stranger's."""
+    try:
+        pgid = os.getpgid(pid)
+        if pgid == pid and pgid not in spare:
+            os.killpg(pgid, 9)
+        else:
+            os.kill(pid, 9)
+    except (OSError, ValueError):
+        pass                           # gone already — routine for a churning worker pool
+
+
+def _descendant_killers(pid: int, spare: set) -> list:
+    """One zero-argument killer per descendant of `pid` ALIVE NOW, enumerated by PARENTAGE.
+
+    Taken BEFORE the group kill, while the leader still lives: the moment it dies its children are
+    reparented to init or a subreaper and the parent/child link this walk follows is gone for good —
+    which is exactly why a `setsid` descendant survived every kill path (review 2026-09-22, RTA-03).
+    psutil when it is installed (the `proc` extra; every platform), else a `/proc` walk on Linux,
+    where the base install has no psutil and the GPU evals run. Each killer re-identifies its process
+    first (psutil's create time; `/proc`'s starttime), so a pid recycled since the walk is never
+    signalled. Neither available (psutil-less macOS) -> `[]`, and the residual is the one stated at
+    the call site.
+    """
+    try:
+        import psutil  # optional (extras: proc)
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        # psutil's own error family (NoSuchProcess/AccessDenied/ZombieProcess) — named, not blind:
+        # enumeration is best-effort, the group kill runs either way.
+        errors = (getattr(psutil, "Error", OSError), OSError, ValueError)
+        try:
+            children = psutil.Process(pid).children(recursive=True)
+        except errors:
+            return []
+
+        def _psutil_killer(child):
+            def _kill():
+                try:
+                    running = child.is_running()   # False once exited OR its pid names another
+                except errors:
+                    return                         # one vanished/denied child spares no other
+                if running:
+                    _signal_escapee(child.pid, spare)
+            return _kill
+        return [_psutil_killer(child) for child in children]
+    if not sys.platform.startswith("linux"):
+        return []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    kids: dict = {}
+    for name in names:
+        if name.isdigit():
+            fields = _proc_stat_fields(int(name))
+            if fields is not None:
+                kids.setdefault(fields[0], []).append((int(name), fields[1]))
+    found, frontier = [], [pid]
+    while frontier:
+        for child_pid, start in kids.pop(frontier.pop(), ()):
+            found.append((child_pid, start))
+            frontier.append(child_pid)
+
+    def _proc_killer(child_pid, start):
+        def _kill():
+            fields = _proc_stat_fields(child_pid)
+            if fields is not None and fields[1] == start:
+                _signal_escapee(child_pid, spare)
+        return _kill
+    return [_proc_killer(child_pid, start) for child_pid, start in found]
+
+
 def _kill_tree(proc: "subprocess.Popen") -> None:
     # POSIX: kill the whole SESSION/process group in ONE atomic syscall. The child was spawned with
     # start_new_session=True (see run_argv), so it is its own session/group leader — os.getpgid(pid) ==
     # pid, so killpg targets ONLY the eval's group, never the engine — and SIGKILL to the group reaps
-    # every descendant, INCLUDING one forked DURING the kill, with no race. The psutil path snapshots
+    # every descendant IN THAT GROUP, INCLUDING one forked DURING the kill, with no race. The psutil
+    # path snapshots
     # parent.children() then kills each, which races a late fork: a DataLoader/worker spawned after the
     # snapshot escapes and keeps using a GPU the scheduler then releases. So on POSIX do the group kill
     # first and reserve psutil for Windows / a fallback if the group kill itself fails.
+    #
+    # "EVERY DESCENDANT" WAS FALSE FOR ONE SHAPE, and it is the shape distributed training uses
+    # (review 2026-09-22, RTA-03): a descendant that calls `setsid` — torch.distributed.elastic
+    # starts its workers with `start_new_session=True` — leaves the eval's group, so this signal
+    # never reached it and the old `killpg; return` left it running on the GPU after the deadline,
+    # the stall watchdog, the divergence kill and a cancel alike. The group kill stays FIRST and
+    # stays the primary (the late-fork argument above is unchanged); the escapees are enumerated
+    # by parentage just BEFORE it (`_descendant_killers` — after it they are orphans and no walk
+    # can find them) and killed just after. RESIDUALS, stated: a process forked into the eval's own
+    # group is covered by the killpg whenever it was born, but a NEW escape — a setsid performed
+    # between the enumeration and the killpg — is not; and with neither psutil nor `/proc`
+    # (psutil-less macOS) there is no enumeration at all, so an escapee there survives as before.
+    # The ordinary-exit sweep `_reap_process_group` cannot enumerate either: its leader has already
+    # EXITED, so its children were reparented before this code ran — a setsid descendant of an eval
+    # that exits 0 outlives it. Closing that needs a subreaper or a cgroup at SPAWN time, not a sweep.
     # NEVER signal an already-REAPED process: once `wait()`/`communicate()` has collected the child,
     # its PID is free for the OS to reuse, and `os.getpgid(reused_pid)` then names a STRANGER's group.
     # Callers really do reach here post-reap (`agents/cli_agent.py`'s `except BaseException: _kill_tree(p)`
@@ -1691,11 +1807,16 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
             pgid = own = None
         same_group = pgid is not None and pgid == own
         if pgid is not None and not same_group:
+            # Enumerated BEFORE the group kill (see the RTA-03 paragraph above), killed AFTER it.
+            escapees = _descendant_killers(proc.pid, {pgid, own})
             try:
                 os.killpg(pgid, 9)
-                return
             except (OSError, ValueError):
                 pass
+            else:
+                for kill in escapees:
+                    kill()
+                return
     try:
         import psutil  # optional (extras: proc) — Windows tree kill, or a POSIX fallback if killpg failed
 

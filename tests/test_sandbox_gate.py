@@ -291,9 +291,15 @@ def test_run_argv_force_removes_daemon_container_after_stall_or_diverge(tmp_path
 
 def test_kill_tree_prefers_atomic_group_kill_over_racy_psutil_snapshot_on_posix(monkeypatch):
     # MED (fork-during-kill race): on POSIX _kill_tree must kill the whole process group in one atomic
-    # syscall (killpg), NOT snapshot psutil `children()` then kill each — the snapshot races a late fork
-    # (a DataLoader worker spawned after the snapshot escapes and keeps a GPU the scheduler then
-    # releases). Verify the atomic path is primary and the racy per-child snapshot is never consulted.
+    # syscall (killpg), NOT snapshot psutil `children()` then kill each INSTEAD — the snapshot races a
+    # late fork (a DataLoader worker spawned after the snapshot escapes and keeps a GPU the scheduler
+    # then releases). The group kill stays primary.
+    #
+    # The snapshot IS taken now, and this test used to pin that it never was — which pinned the
+    # defect (review 2026-09-22, RTA-03): a `setsid` descendant is outside the group, so after
+    # `killpg; return` nothing reached it. The contract is ORDER: the parentage snapshot is taken
+    # BEFORE the group kill (after it the escapees are orphans no walk can find), the one atomic
+    # killpg still happens, and the snapshot's members are signalled AFTER it — never instead of it.
     import os
     import sys
     import types
@@ -301,34 +307,39 @@ def test_kill_tree_prefers_atomic_group_kill_over_racy_psutil_snapshot_on_posix(
         pytest.skip("POSIX process-group kill")
     import looplab.runtime.sandbox as sb
 
-    seen = {"killpg": [], "children": 0}
+    order: list = []
     monkeypatch.setattr(sb.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(sb.os, "killpg", lambda pgid, sig: seen["killpg"].append((pgid, sig)))
+    monkeypatch.setattr(sb.os, "killpg", lambda pgid, sig: order.append(("killpg", pgid, sig)))
+    monkeypatch.setattr(sb.os, "kill", lambda pid, sig: order.append(("kill", pid, sig)))
+
+    class _Child:                             # a snapshotted descendant, killed through its handle
+        pid = 5555
+
+        def is_running(self):
+            return True
 
     class _FakeProc:                          # stand in for psutil.Process so nothing real is killed
         def __init__(self, _pid):
             pass
 
         def children(self, recursive=False):
-            seen["children"] += 1             # the RACY snapshot — must NOT be reached on the happy path
-            return []
+            order.append(("children", recursive))
+            return [_Child()]
 
-        def kill(self):
-            pass
-
-    # Inject a fake `psutil` so the racy branch is exercised even where the `[proc]` extra isn't
-    # installed (as in this env): pre-fix `_kill_tree` imports it and snapshots children() without ever
-    # calling killpg; post-fix killpg runs first and returns before psutil is imported.
     fake_psutil = types.ModuleType("psutil")
     fake_psutil.Process = _FakeProc
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 
     class _P:
         pid = 4321
+        returncode = None
 
     sb._kill_tree(_P())
-    assert seen["killpg"] == [(4321, 9)]      # one atomic SIGKILL to the whole group…
-    assert seen["children"] == 0             # …and the racy per-child snapshot was never taken
+    assert order[0] == ("children", True)                  # the walk BEFORE the group kill…
+    assert order[1] == ("killpg", 4321, 9)                 # …the one atomic SIGKILL to the group…
+    # …and the escapee after it: `getpgid` is faked to answer its own pid, i.e. it leads a group of
+    # its own (the setsid shape), so it gets that group's atomic kill too.
+    assert order[2:] == [("killpg", 5555, 9)], order
 
 
 def test_kill_tree_reaps_a_grandchild_process(tmp_path):
@@ -364,6 +375,82 @@ def test_kill_tree_reaps_a_grandchild_process(tmp_path):
     except Exception:
         pass
     assert gone, f"grandchild {grandchild_pid} survived _kill_tree (process group not reaped)"
+
+
+def _still_runs(pid: int) -> bool:
+    """A process that still EXECUTES. A zombie does not (no GPU, no code) — it only waits for a
+    reaper — so it counts as dead here, and reading `/proc` keeps that distinction where it exists."""
+    import os
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return fh.read().rsplit(b")", 1)[1].split()[0] not in (b"Z", b"X")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _can_enumerate_descendants() -> bool:
+    import importlib.util
+    import sys
+    return importlib.util.find_spec("psutil") is not None or sys.platform.startswith("linux")
+
+
+# The eval shape torch.distributed.elastic's SubprocessHandler has: a worker spawned with
+# `start_new_session=True` — its OWN session and process group — that keeps running (holding a GPU in
+# real life) while the parent hangs.
+_SETSID_EVAL = (
+    "import subprocess, sys, time\n"
+    "w = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+    " start_new_session=True)\n"
+    "open('worker.pid', 'w').write(str(w.pid))\n"
+    "print('worker started', flush=True)\n"
+    "time.sleep(60)\n")
+
+
+@pytest.mark.parametrize("path", ["deadline", "stall"])
+def test_a_start_new_session_descendant_dies_with_the_tree(tmp_path, path):
+    """Review 2026-09-22, RTA-03. `_kill_tree` did `killpg(pgid, 9); return`: one atomic signal to
+    the EVAL's process group — and a descendant that called `setsid` is not in that group. The
+    reviewer's reproduction: the worker was alive (state S) after both the deadline kill and the
+    stall-watchdog kill, i.e. after every kill path, still holding whatever it held. The fix
+    enumerates descendants by PARENTAGE before the group kill (psutil, else `/proc`) and kills the
+    ones the group signal cannot reach."""
+    import os
+    import signal
+    import sys
+    import time
+    if os.name == "nt":
+        pytest.skip("POSIX sessions")
+    if not _can_enumerate_descendants():
+        pytest.skip("neither psutil nor /proc: the setsid residual is stated in _kill_tree")
+    from looplab.runtime.sandbox import run_argv
+
+    (tmp_path / "train.py").write_text(_SETSID_EVAL, encoding="utf-8")
+    if path == "deadline":
+        _rc, _out, _err, timed_out = run_argv([sys.executable, "train.py"], str(tmp_path), 3.0)
+        assert timed_out
+    else:
+        sig: dict = {}
+        run_argv([sys.executable, "train.py"], str(tmp_path), 60.0,
+                 log_path=str(tmp_path / "train.log"), health_check=True, stall_timeout=2.0,
+                 signals=sig)
+        assert sig.get("stalled") is True, sig
+    worker = int((tmp_path / "worker.pid").read_text())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _still_runs(worker):
+        time.sleep(0.05)
+    alive = _still_runs(worker)
+    if alive:
+        os.kill(worker, signal.SIGKILL)            # never leak the escapee out of the test
+    assert not alive, f"the setsid worker {worker} survived the {path} tree-kill"
 
 
 def test_run_argv_cidfile_lives_outside_the_bind_mounted_workdir(tmp_path, monkeypatch):
