@@ -289,6 +289,25 @@ def test_a_kind_that_is_not_a_string_fails_the_node_not_the_run(tmp_path, kind):
     assert read_metric('{"metric": 2.0}', str(workdir), {"kind": kind, "path": "m.json"}) is None
 
 
+@pytest.mark.parametrize("kind", [["file_json"], {"a": 1}, {"file_json"}, 42, 1.5, b"file_json",
+                                  None, True])
+def test_the_submit_refusal_names_a_non_string_kind_instead_of_crashing_on_it(kind):
+    """Review 2026-09-22, RTA-10 (doc 50 RA-14): the THIRD entry point, and the one the operator
+    meets first. `EvalSpec._valid_metric_kind` still did `k not in set(METRIC_READERS)` on the raw
+    value, so `{"kind": ["file_json"]}` raised `TypeError: unhashable type: 'list'` out of the
+    validator — which pydantic does not convert — instead of the ValidationError that names the
+    field. It now looks the kind up through `command_eval.spec_kind`, like the two entry points
+    above, and the refusal quotes what the operator actually wrote."""
+    from pydantic import ValidationError
+
+    from looplab.adapters.repo_task import EvalSpec
+
+    with pytest.raises(ValidationError) as refused:
+        EvalSpec(command=["python", "s.py"], metric={"kind": kind, "path": "m.json", "key": "m"})
+    assert "is not a metric reader" in str(refused.value)
+    assert repr(kind) in str(refused.value)
+
+
 # ------------------------------------------------------------------ the reader table is the registry
 
 def test_the_submit_validator_reads_the_reader_table_not_a_local_copy():

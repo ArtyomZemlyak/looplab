@@ -1292,13 +1292,19 @@ class EvalSpec(BaseModel):
         # copy is how the kinds came to be enumerated in three places (doc 25 RA-04/RA-05).
         # A KNOWN kind is not yet a USABLE spec — the `path` half of that moved to `_readers_usable`
         # below, which applies it to ALL FOUR reader slots instead of only this one.
-        from looplab.runtime.command_eval import METRIC_READERS
+        # The lookup goes through `command_eval.spec_kind`, like every other `kind` lookup (review
+        # 2026-09-22, RTA-10): the raw value is operator-authored JSON, and `{"kind": ["file_json"]}`
+        # raised `TypeError: unhashable type` out of `k not in _KINDS` — which pydantic does not turn
+        # into a ValidationError — so the refusal that exists to name a malformed spec crashed on
+        # this one. The message still quotes what the operator WROTE, not the sentinel.
+        from looplab.runtime.command_eval import METRIC_READERS, spec_kind
         _KINDS = set(METRIC_READERS)
         if isinstance(v, dict):
-            k = v.get("kind", "stdout_json")
+            k = spec_kind(v)
             if k not in _KINDS:
                 raise ValueError(
-                    f"eval.metric.kind {k!r} is not a metric reader. Use one of {sorted(_KINDS)} (HOW to "
+                    f"eval.metric.kind {v.get('kind', 'stdout_json')!r} is not a metric reader. Use "
+                    f"one of {sorted(_KINDS)} (HOW to "
                     "read the printed metric, e.g. stdout_json). The max/min DIRECTION belongs in the "
                     "task's `direction`, not here.")
         # THE ONE PLACE A `direction` KEY IS MEANINGFUL, stated here because this message is where a
