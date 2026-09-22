@@ -623,6 +623,7 @@ _NT = %(nt)r
 _abspath = os.path.abspath
 _normpath = os.path.normpath
 _realpath = os.path.realpath
+_split = os.path.split
 _realcache = {}
 _seen = set()
 
@@ -1018,6 +1019,18 @@ def _mutation_path(path, dir_fd):
     r = _as_str(path)
     if r is None:
         return None
+    if _NT:
+        # WINDOWS, the same defect `_resolve` records for `open` and one branch over. An absolute
+        # spelling there is drive-letter/UNC, never separator-leading, so the test below read EVERY
+        # absolute path as relative and joined it onto the cwd -- a spelling no root prefixes. The
+        # mutation rung, the record rung and `_SELF` (which read this resolution, the `open` write
+        # rungs included) were therefore inert on Windows while the read rung refused: measured on
+        # the Windows CI leg (GitHub Actions run 35785582444, review 2026-09-22, WIN-FENCE), a
+        # fenced child deleted, renamed, truncated and chmod-ed the operator's tree and printed
+        # THROUGH. `abspath` joins a relative name to the cwd exactly as the call will, Win32
+        # itself collapses `..` lexically (so normalizing first is the OS's own reading), and
+        # Windows `os` functions take no `dir_fd`.
+        return _resolve_links(_normpath(_abspath(r)))
     if r[:1] != _SEP:
         if dir_fd is None:
             base = _real(os.getcwd())      # rare-path only; `open`'s bail never pays for this
@@ -1046,6 +1059,11 @@ def _resolve_links(r):
     DIRECTORY, so a loop writing 10,000 files into one directory pays one call. The final component
     stays verbatim for the reason `_mutation_path` records: these calls act on the LINK.
     """
+    if _NT:
+        # `rpartition` leaves 'C:' for a child of a drive root, and `realpath('C:')` is that drive's
+        # CURRENT DIRECTORY, not its root; `split` keeps the anchor ('C:\\', a UNC share) whole.
+        head, tail = _split(r)
+        return _join(_real(head), tail)
     head, _sep, tail = r.rpartition(_SEP)
     return _join(_real(head or _SEP), tail)
 
@@ -1481,6 +1499,25 @@ def _harden(target: Path) -> None:
         pass
 
 
+def _unharden_for_rewrite(target: Path) -> None:
+    """Windows only: take back `_harden`'s bit so the ENGINE's own atomic rewrite can land.
+
+    On POSIX `os.replace` onto a 0444 destination is a DIRECTORY operation and succeeds (see
+    `install`), so this is a no-op there. On Windows the mode IS the read-only attribute and
+    `MoveFileEx` refuses to replace a read-only destination (`[WinError 5] Access is denied`) —
+    measured on the Windows CI leg (GitHub Actions run 35785582444, review 2026-09-22, WIN-FENCE):
+    the first re-render of a hardened fence raised out of `install`, and `reassert`'s repair of a
+    tampered one could never succeed ("could NOT be repaired"). The caller hardens the new file at
+    once, so the old one is writable only between this call and the replace, inside this process.
+    A failure here is left to the replace, which then fails exactly where and how it did before."""
+    if os.name != "nt":
+        return
+    try:
+        os.chmod(target, 0o666)
+    except OSError:
+        pass
+
+
 def _dac_override() -> str:
     """Why this process's file-mode checks are advisory, or "" when the kernel really enforces them.
 
@@ -1633,6 +1670,7 @@ def reassert(fence_dir) -> Optional[str]:
         return None
     what = "content" if found != src else "mode"
     try:
+        _unharden_for_rewrite(target)
         atomic_write_text(target, src)
         _harden(target)
     except OSError as exc:
@@ -1676,7 +1714,9 @@ def install(run_dir, *, roots, allow, policy: str, record: bool = True) -> Optio
     # leave a permanent multi-KB `.tmp` in the run dir with nothing to reclaim it.
     # `os.replace` onto a 0444 destination is a DIRECTORY operation and succeeds — the mode of the
     # file being replaced is not consulted — so re-installing over a hardened fence needs no unlock,
-    # and the new inode arrives at `mkstemp`'s 0600 and is hardened below.
+    # and the new inode arrives at `mkstemp`'s 0600 and is hardened below. On POSIX. On Windows the
+    # mode is the read-only attribute and the replace IS refused, hence `_unharden_for_rewrite`.
+    _unharden_for_rewrite(target)
     atomic_write_text(target, src)
     _harden(target)
     # The ENGINE's own copy of what it wrote, for `reassert` at every later launch. Recorded after

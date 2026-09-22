@@ -30,6 +30,7 @@ import pytest
 from looplab.core.config import Settings
 from looplab.runtime import read_allowlist, read_fence
 from looplab.runtime.sandbox import run_argv
+from _posix_gates import FENCE_POSIX_PATHS, MODE_BITS, POSIX_ONLY_OS_CALLS, SHEBANG
 
 # The fixture the whole file shares: an editable SOURCE tree holding the operator's checkpoint, a
 # `data:` mount source that lives INSIDE it (the legal read channel, and the one shape a naive
@@ -164,9 +165,13 @@ def test_a_grandchild_process_is_fenced_too(tmp_path):
     src, _sib, run_dir, wd, _models = _world(tmp_path)
     target = src / "experiments" / "baseline" / "final" / "model.safetensors"
     fence = _install(run_dir, src)
+    # The grandchild's program is a string INSIDE the child's program, so it is quoted twice. One
+    # `!r` spliced into a double-quoted literal read a Windows path's `\U…` as an escape and the
+    # grandchild died of a SyntaxError before it opened anything.
+    grandchild = f"print(open({str(target)!r}).read())"
     rc, out, err, _to = _run(f"""
         import subprocess, sys
-        r = subprocess.run([sys.executable, "-c", "print(open({str(target)!r}).read())"],
+        r = subprocess.run([sys.executable, "-c", {grandchild!r}],
                            capture_output=True, text=True)
         print("GRANDCHILD_RC", r.returncode)
         print(r.stderr)
@@ -276,11 +281,13 @@ def _predicate(roots, allow=()):
     ("./x.txt", False),
     ("/tmp/x", False),
 ])
+@FENCE_POSIX_PATHS
 def test_predicate_truth_table(path, refused):
     fenced = _predicate(("/src/repo/",), ("/src/repo/data/",))
     assert (fenced(path) is not None) is refused
 
 
+@FENCE_POSIX_PATHS
 def test_predicate_normalizes_the_shapes_open_actually_receives():
     fenced = _predicate(("/src/repo/",))
     assert fenced(b"/src/repo/x") == "/src/repo/x"          # os.open takes bytes
@@ -291,6 +298,7 @@ def test_predicate_normalizes_the_shapes_open_actually_receives():
     assert fenced(object()) is None                         # not a path at all -> never our problem
 
 
+@FENCE_POSIX_PATHS
 def test_the_directory_predicate_catches_the_root_itself():
     """`open` names a file INSIDE a root; `os.chdir` names the root, which carries no trailing
     separator and therefore misses the prefix test the hot path uses."""
@@ -332,6 +340,7 @@ def test_the_two_spellings_of_the_boundary_agree_about_the_declared_mounts(tmp_p
     assert os.path.realpath(str(src)) not in grants
 
 
+@FENCE_POSIX_PATHS
 def test_a_root_too_broad_to_fence_is_dropped_not_accepted():
     """Fencing `$HOME` or `/` would refuse reads the interpreter itself needs, so a run with such an
     editable is left UNFENCED rather than made unable to start python at all — and it is reported."""
@@ -354,6 +363,7 @@ def test_run_argv_prepends_the_fence_and_keeps_an_existing_pythonpath(tmp_path):
     assert out.strip().splitlines()[-1] == os.pathsep.join([fence, "/opt/theirs"])
 
 
+@SHEBANG
 def test_run_argv_leaves_a_docker_argv_alone(tmp_path, monkeypatch):
     """A `docker run` argv launches the CLI on the HOST; that PYTHONPATH would name a directory the
     container cannot see. The untrusted tiers are fenced by construction instead — the source tree
@@ -387,7 +397,7 @@ def test_install_is_atomic_and_rewrites_only_on_change(tmp_path):
     assert _install(run_dir, src) == str(d)
     assert (d / "sitecustomize.py").stat().st_mtime_ns == first     # unchanged policy -> no rewrite
     _install(run_dir, src, policy="warn")
-    assert "'warn'" in (d / "sitecustomize.py").read_text()
+    assert "'warn'" in (d / "sitecustomize.py").read_text(encoding="utf-8")
     assert not list(d.glob("*.tmp"))                                # no partial file left behind
 
 
@@ -420,7 +430,8 @@ def test_engine_stamps_the_marker_for_every_run_and_the_roots_for_a_repo_task_on
     toy = make_engine(tmp_path / "toy")
     env = toy._resource_eval_env(None)
     assert env == {read_fence.FENCE_DIR_ENV: toy._read_fence_dir()}
-    generated = (Path(toy.run_dir) / read_fence.FENCE_DIRNAME / "sitecustomize.py").read_text()
+    generated = (Path(toy.run_dir) / read_fence.FENCE_DIRNAME / "sitecustomize.py").read_text(
+        encoding="utf-8")
     assert "_ROOTS = ()" in generated                       # nothing to fence on the read side…
     assert f"_RECORD = {os.path.realpath(str(toy.run_dir)) + os.sep!r}" in generated   # …the record is
 
@@ -431,9 +442,12 @@ def test_engine_stamps_the_marker_for_every_run_and_the_roots_for_a_repo_task_on
     env = repo._resource_eval_env(None)
     assert env is not None and env[read_fence.FENCE_DIR_ENV] == repo._read_fence_dir()
     assert "CUDA_VISIBLE_DEVICES" not in env          # the unpinned branch is otherwise untouched
-    generated = (Path(repo.run_dir) / read_fence.FENCE_DIRNAME / "sitecustomize.py").read_text()
-    assert str(src) + os.sep in generated
-    assert str(src / "corpus") + os.sep in generated  # the data mount is allow-listed, not fenced
+    generated = (Path(repo.run_dir) / read_fence.FENCE_DIRNAME / "sitecustomize.py").read_text(
+        encoding="utf-8")
+    # As REPRS, the way the template bakes them (`%(roots)r`): a Windows path's separators are
+    # doubled in the source text, so the bare string is not a substring of it there.
+    assert repr(str(src) + os.sep) in generated
+    assert repr(str(src / "corpus") + os.sep) in generated  # the data mount is allow-listed
 
 
 def test_engine_policy_off_stamps_nothing(tmp_path):
@@ -630,7 +644,18 @@ def test_the_probe_table_covers_exactly_the_registry():
     assert set(_MUTATION_PROBES) == set(read_fence.MUTATION_EVENTS)
 
 
-@pytest.mark.parametrize("event", sorted(_MUTATION_PROBES))
+# Registered events whose `os` function exists only on POSIX: on Windows a row for one of them is
+# about that function's absence (`AttributeError`), not about the fence.
+_POSIX_ONLY_MUTATIONS = frozenset({"os.chown", "os.setxattr", "os.removexattr"})
+
+
+def _mutation_param(event):
+    if event in _POSIX_ONLY_MUTATIONS:
+        return pytest.param(event, marks=POSIX_ONLY_OS_CALLS)
+    return event
+
+
+@pytest.mark.parametrize("event", [_mutation_param(e) for e in sorted(_MUTATION_PROBES)])
 def test_every_registered_mutation_event_is_refused(tmp_path, event):
     """Each registered event, driven through a real fenced child against the operator's tree."""
     src, _sib, run_dir, wd, _models = _world(tmp_path)
@@ -682,8 +707,13 @@ def test_mutation_arg_shapes_match_the_interpreter(tmp_path):
         sub = os.path.join(D, "sub")
         os.mkdir(sub)
         RECORDING[0] = True
-        os.chmod(A, 0o600); os.chown(A, -1, -1); os.utime(A, (0, 0))
-        os.truncate(A, 1); os.setxattr(A, "user.p", b"1"); os.removexattr(A, "user.p")
+        os.chmod(A, 0o600); os.utime(A, (0, 0)); os.truncate(A, 1)
+        # POSIX-only functions (absent on Windows) can raise no event there, so there is no slot
+        # to check; everywhere they exist they are driven exactly as before.
+        if hasattr(os, "chown"):
+            os.chown(A, -1, -1)
+        if hasattr(os, "setxattr"):
+            os.setxattr(A, "user.p", b"1"); os.removexattr(A, "user.p")
         os.symlink(A, os.path.join(D, "sym")); os.link(A, os.path.join(D, "hard"))
         os.mkdir(os.path.join(D, "made")); os.rmdir(sub)
         os.rename(A, B); os.remove(B)
@@ -699,10 +729,15 @@ def test_mutation_arg_shapes_match_the_interpreter(tmp_path):
     assert res.returncode == 0, res.stderr
     seen = json.loads(res.stdout.strip().splitlines()[-1])
 
-    assert set(read_fence.MUTATION_EVENTS) <= set(seen), (
+    # Every registered event whose function THIS interpreter has — on POSIX, all of them.
+    raisable = {event for event in read_fence.MUTATION_EVENTS
+                if hasattr(os, event.split(".", 1)[1])}
+    assert raisable <= set(seen), (
         "this interpreter did not raise every registered event: "
-        f"{sorted(set(read_fence.MUTATION_EVENTS) - set(seen))}")
+        f"{sorted(raisable - set(seen))}")
     for event, slots in read_fence.MUTATION_EVENTS.items():
+        if event not in raisable:
+            continue
         args = seen[event][0]
         assert len(slots) <= len(args)
         for path_i, fd_i in slots:
@@ -1036,7 +1071,13 @@ def test_the_hook_rung_refuses_a_mutation_of_the_fences_own_file_at_any_uid(tmp_
     # A crash, a swallowed argv or an unfenced world fails here rather than passing quietly.
     assert "STAGE1 refused LoopLabSourceReadRefused" in out, out
     assert "STAGE2 ESCAPED" not in out, out
-    for label in ("chmod", "unlink", "unlink-dir-fd", "rename-away", "truncate", "symlink-over"):
+    hook_refused = ("chmod", "unlink", "rename-away", "truncate", "symlink-over")
+    # A `dir_fd` removal exists only where the platform supports one (not on Windows, where the
+    # attempt is refused by `os` itself before any audit event); where it exists, the HOOK must be
+    # what refuses it.
+    if os.remove in os.supports_dir_fd:
+        hook_refused += ("unlink-dir-fd",)
+    for label in hook_refused:
         assert f"STAGE2 blocked {label} LoopLabSourceReadRefused" in out, out
 
     # …and the file the hook was protecting is still the fence, byte-wise and mode-wise. The MODE
@@ -1167,7 +1208,10 @@ def test_the_kernel_rung_reports_whether_it_binds_and_a_real_child_agrees(tmp_pa
     if reduced is not None:
         # …and it names WHICH half is missing, because "advisory" without the reason is the
         # unstated precondition the marker was about…
-        assert "ADVISORY" in reduced and ("CAP_DAC_OVERRIDE" in reduced or "euid 0" in reduced)
+        # (`_dac_override` has three answers: the capability, euid 0, and a platform with no
+        # effective uid at all — Windows, where the mode bit is only the read-only attribute.)
+        assert "ADVISORY" in reduced and ("CAP_DAC_OVERRIDE" in reduced or "euid 0" in reduced
+                                          or "no effective-uid check" in reduced)
         # …and WHAT is left open, which is the native writer this child is not: a sentence that
         # still said "a node's eval code can overwrite the generated fence" would be describing the
         # call the box just refused, one line above.
@@ -1176,6 +1220,7 @@ def test_the_kernel_rung_reports_whether_it_binds_and_a_real_child_agrees(tmp_pa
 
 @pytest.mark.parametrize("mode, named", [(0o444, False), (0o644, True), (0o666, True),
                                          (0o400, False), (0o200, True)])
+@MODE_BITS
 def test_a_hardening_that_did_not_take_is_reported_whatever_the_uid(tmp_path, mode, named):
     """The OTHER half of the kernel rung, and this half is uid-independent: `_harden` is
     best-effort by design (a raise there would be turned into an entirely unfenced run), so a
@@ -1390,9 +1435,11 @@ def test_a_FAILED_chdir_out_of_a_root_does_not_disable_the_fence(tmp_path):
         "a read the fence stopped resolving is a read nobody can review afterwards")
 
     # The plain outside-the-tree case still works, so the monotonic flag costs correctness nothing.
-    rc3, out3, _err3, _to3 = _run("""
+    # Into this test's own tmp dir, outside the fenced tree and present on every platform (a literal
+    # "/tmp" is a missing directory on Windows, and the child died of it before reading anything).
+    rc3, out3, _err3, _to3 = _run(f"""
         import os
-        os.chdir("/tmp")
+        os.chdir({str(tmp_path)!r})
         try:
             print(open('x-not-here.txt').read())
         except FileNotFoundError:
@@ -1415,6 +1462,7 @@ def test_settings_vocabulary_matches_the_module(tmp_path):
 
 
 @pytest.mark.parametrize("root,target", [("/repo/", "/repo"), ("/home/x/repo/", "/home/x/repo")])
+@FENCE_POSIX_PATHS
 def test_a_mutation_of_the_root_itself_is_refused_at_every_depth(root, target):
     """`shutil.rmtree(<the source root>)` reaches `os.rename`/`os.rmdir` on the ROOT's own name, and
     that name rpartitions to an EMPTY head — so the parent is `/` for a root one level down.
@@ -1432,6 +1480,7 @@ def test_a_mutation_of_the_root_itself_is_refused_at_every_depth(root, target):
     assert ns["_fenced_target"](target + "/final/model.safetensors", None) is not None
 
 
+@FENCE_POSIX_PATHS
 def test_a_relative_mutation_through_a_dir_fd_on_the_root_directory_is_refused(tmp_path):
     """The same join from the other side: `os.remove('repo', dir_fd=<fd of />)`.
 
@@ -1493,8 +1542,16 @@ def test_a_malformed_reference_entry_degrades_to_no_declaration_rather_than_rais
         {"editables": [{"name": ".", "path": "/src/repo"}],
          "data": {"legacy": "/src/repo/corpus"},
          "references": ["/src/repo/docs", None, 7]})
-    assert roots == ["/src/repo" + os.sep]
-    assert allowed == ["/src/repo/corpus" + os.sep], "a malformed row changed what the fence allows"
+
+    def _root(path):
+        # The shape `fence_inputs` itself produces — absolute, resolved, separator-terminated — so
+        # the expectation is the same statement on Windows, where '/src/repo' is a drive-relative
+        # spelling that resolves onto the current drive.
+        resolved = os.path.realpath(path)
+        return resolved if resolved.endswith(os.sep) else resolved + os.sep
+
+    assert roots == [_root("/src/repo")]
+    assert allowed == [_root("/src/repo/corpus")], "a malformed row changed what the fence allows"
 
 
 def test_this_module_owns_the_only_refusal_sentence_the_boundary_can_deliver():
@@ -1624,6 +1681,7 @@ def test_a_grant_under_a_root_is_kept_because_that_is_the_sanctioned_carve_out(t
     assert refused == () and grants == (str(root / "corpus") + os.sep,)
 
 
+@FENCE_POSIX_PATHS
 def test_the_open_branch_uses_the_same_rule_as_every_other_event():
     """THE MERGE LOST CONFINEMENT ON THE READ PATH, and only on the read path.
 
@@ -1687,6 +1745,7 @@ def test_the_open_branch_uses_the_same_rule_as_every_other_event():
             "with a second copy of the policy again")
 
 
+@FENCE_POSIX_PATHS
 def test_the_hook_refuses_a_mutation_of_the_fences_own_file_whatever_the_uid():
     """THE RUNG THE ROOT SKIP RETIRED, and it is uid-INDEPENDENT.
 
@@ -1738,6 +1797,7 @@ def test_the_hook_refuses_a_mutation_of_the_fences_own_file_whatever_the_uid():
     ("os.rename", ("/tmp/outside.py", "/src/repo/b.py", None, None), 1),
     ("os.remove", ("/src/repo/a.py", None), 1),
 ])
+@FENCE_POSIX_PATHS
 def test_warn_records_every_fenced_slot_of_a_two_sided_mutation(event, args, fenced):
     """Under `warn` the violations log is the WHOLE product, and it was losing a rename's other end.
 
@@ -1779,6 +1839,7 @@ def test_warn_records_every_fenced_slot_of_a_two_sided_mutation(event, args, fen
         "mutation must put BOTH ends in the log, since under warn the log is all there is")
 
 
+@FENCE_POSIX_PATHS
 def test_deny_still_raises_on_the_first_fenced_slot_and_examines_no_further():
     """The other half of the `continue`: under deny NOTHING changes, and that is the whole safety
     argument for the change. The hook must still raise out of slot 0 — a mutation fence that
