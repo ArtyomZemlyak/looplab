@@ -234,20 +234,30 @@ class _DeferredBudgetStop:
     Only `start_soon` is intercepted.  Everything else -- `cancel_scope` above all, which
     `_dispatch_evals`'s `finally` uses to stop the repeating research loop -- is the real group's.
 
-    *Closed 2026-09-08 (`eval-raised-ceiling-still-cancels-sibling-terminals`): the drain hook no
-    longer keys only on the escaping exception's leaf -- `accountant_over_ceiling` asks the LEDGERS
-    whether the run is already past its ceiling, which is the fact a cancelled sibling cannot carry
-    -- and `evaluate.py::_land_terminal_before_ceiling` lands a measured node's terminal before a
-    ceiling raised by its own post-score bookkeeping propagates. The two lesser hardenings below
-    landed with it: `start_soon` forwards anyio's `name=`, and `start()` is REFUSED rather than
-    passed through uncaptured.*
+    THE SAME LOSS FROM INSIDE AN EVALUATION (`eval-raised-ceiling-still-cancels-sibling-terminals`,
+    doc 57). A ceiling crossed by an evaluation's OWN paid bookkeeping -- its triage, repair, stage
+    check or critic; clause (c) above is also the mechanism, since a repeat-research capture leaves
+    the run pinned over ceiling for hours of eval -- leaves an eval CHILD task, not the research, and
+    this facade never saw it. A note here recorded that seam as closed on 2026-09-08 by two changes,
+    and it was not (review 2026-09-22, ENG2-02): `accountant_over_ceiling` lets
+    `Engine._drain_inflight_evaluation` answer for an escaping exception that carries no ceiling, and
+    `evaluate.py::_land_terminal_before_ceiling` lands the RAISING node's own terminal -- but a child's
+    raise cancels the eval group ITSELF, so every sibling is cancelled at its next checkpoint and the
+    drain, entered inside that cancelled scope, cannot wait for one of them. The test that proved the
+    closure raised from the HOST body, where the scope is still live; driven in the child shape, the
+    sibling's score was on disk and its terminal was gone.
 
-    REVIEW 2026-08-30 (money): under Card mode that raise comes from an `eval_tg` CHILD -- the
-    group cancels `_run_with_llm_broker`, the outer handler catches the Cancelled (whose
-    `budget_stop_leaf` is None), the drain no-ops, and siblings mid-score lose their terminals:
-    the five-runs-measured loss, one seam over. Clause (c) above is true and is also the
-    mechanism -- a repeat-research capture leaves the run pinned over ceiling for hours of eval,
-    so the NEXT paid call inside any eval raises.
+    WHAT CLOSES IT is this facade's own move, one level down: an eval-child wrapper DEFERS a pure
+    spend ceiling instead of raising it into its group (`core/errors.py::deferrable_budget_stop`) --
+    `_dispatch_evals`' `_eval_in_slot` into this same `budget_stop` sink, the Card path's
+    `speculation.py::_card_eval_one` into the run-level `_eval_budget_stop` -- admission refuses
+    while one is held, and the owner re-raises it after the siblings have landed: `_dispatch_evals`
+    after its join, `_run_with_llm_broker` after `_drain_adopted_evals`
+    (`speculation.py::_raise_deferred_eval_budget_stop`). Driven by
+    `tests/test_budget_ceiling_drains_the_inflight_eval.py` (the child shape through the real
+    wrappers) and `tests/test_card_eval_ceilings.py` (a real Card-mode `Engine.run`). The two lesser
+    hardenings that landed on 2026-09-08 stand: `start_soon` forwards anyio's `name=`, and `start()`
+    is REFUSED rather than passed through uncaptured.
     """
 
     __slots__ = ("_tg", "_sink")
@@ -2365,6 +2375,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # below then reaches its CAS over a log with no evaluation in flight.
             if self._eval_drain_requested:
                 await self._drain_adopted_evals()
+            # A SPEND CEILING AN ADOPTED EVALUATION DEFERRED is paid HERE, at the head of the turn
+            # and after any drain above (review 2026-09-22, ENG2-02): every sibling still burning
+            # lands its terminal first, then the run stops with the accountant's own exception.
+            # See `speculation.py::_raise_deferred_eval_budget_stop` and `_card_eval_one`.
+            await self._raise_deferred_eval_budget_stop()
             # Before the decision prefix is read, so a published row is part of THIS turn's fold
             # and cannot move the tail under the seq recheck below.
             self._record_trace_export_health()
@@ -2429,6 +2444,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # stable abort scope unconditionally — so its drain is spelled out here rather than
                 # delegated to `_refuse_finish_over_adopted_evals`.
                 await self._drain_adopted_evals()
+                # …and a ceiling an evaluation deferred DURING that drain still ends the run as the
+                # ceiling, before the abort's terminal — the disposition it had when the child's
+                # raise cancelled this drain outright (ENG2-02), minus the siblings it cost.
+                await self._raise_deferred_eval_budget_stop()
                 self._finish_run({"reason": "aborted"}, scope=abort_scope)
                 break
             if state.finished:
@@ -2668,6 +2687,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # diversity archive, case store. Draining here — not at the task group's join, which happens
         # after `finalize_run` has already returned — is what keeps that read complete.
         await self._drain_adopted_evals()
+        # A ceiling an evaluation deferred during that drain (ENG2-02) must not be swallowed into a
+        # clean finish: before this, the child's raise cancelled the drain and the run ended on the
+        # ceiling, and it still does — after the siblings have landed, before `finalize_run`.
+        await self._raise_deferred_eval_budget_stop()
         # WHY THE LOOP STOPPED, exactly once — the receipt rule, the `finished` skip and the
         # exactly-once latch all live on `_record_run_loop_exit`. This fall-through covers the
         # thirteen `break`s; `Engine.run`'s outer `finally` calls the same helper so the RAISING
@@ -5750,6 +5773,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # below holds a background `BudgetExceeded` until the evaluations it overlaps have landed
         # their terminals, and this method re-raises it the moment they have.  See
         # `_DeferredBudgetStop` for why that does not weaken the hard stop.
+        #
+        # The SAME sink holds a ceiling crossed INSIDE a parallel lane (ENG2-02, `_eval_in_slot`),
+        # so one set of admission gates and one re-raise serve both producers. Imported here, not at
+        # module level, to keep this change inside the method it guards.
+        from looplab.core.errors import deferrable_budget_stop
         budget_stop: list[BaseException] = []
         async with anyio.create_task_group() as bg_tg:
             self._spawn_research(_DeferredBudgetStop(bg_tg, budget_stop), state)
@@ -5914,6 +5942,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             # A private single-token limiter -> `_evaluate`'s `async with limiter` is a
                             # no-op; the outer semaphore is what bounds fan-out and drives the refill.
                             await self._evaluate(nid, anyio.CapacityLimiter(1), max_es)
+                        except BaseException as exc:  # noqa: BLE001 — re-raised unless a pure ceiling
+                            # A SPEND CEILING THIS EVALUATION CROSSED is deferred into the same sink
+                            # the overlapped research uses (review 2026-09-22, ENG2-02), never raised
+                            # into `tg`, where it cancelled every sibling lane mid-score. The refill
+                            # gate below then admits nothing more, and the method re-raises the stop
+                            # once the batch has joined. See `core/errors.py::deferrable_budget_stop`.
+                            stop = deferrable_budget_stop(exc)
+                            if stop is None:
+                                raise
+                            budget_stop.append(stop)
                         finally:
                             # The eval-second allowance this lane committed at admission goes back
                             # BEFORE the slot does: the producer wakes on `slots.release()` and

@@ -435,8 +435,14 @@ def test_the_parallel_dispatcher_stops_admitting_at_the_refill_point(monkeypatch
     producer loop would admit one more evaluation for every slot a finishing sibling frees, which is
     the worst place to be lenient — the ceiling has already been recorded by then."""
     host = _DispatchHost(width=2, queued=3)
-    for ev in host.evals[1:]:
-        ev.release.set()                    # only node 0 is held open, to pin the ceiling's timing
+    host.evals[2].release.set()
+    # Node 1 frees its slot only AFTER the ceiling has fired. It used to be released up front, and
+    # then it could finish — and its slot be refilled with node 2, correctly — BEFORE the research
+    # task raised: a race the assertion below read as a refill past the ceiling (measured 4 in 20 on
+    # a loaded box, review 2026-09-22). The research raises and THEN arms node 0's release timer, so
+    # "node 0 released" is the observable "the ceiling has fired".
+    threading.Thread(target=lambda: (host.evals[0].release.wait(5.0),
+                                     host.evals[1].release.set()), daemon=True).start()
     with pytest.raises(BaseException) as caught:    # noqa: PT011 - both halves asserted below
         anyio.run(_dispatch(host, monkeypatch))
     assert isinstance(caught.value, BudgetExceeded)
@@ -703,3 +709,149 @@ def test_a_lifecycle_that_is_already_terminal_is_not_written_twice():
     with pytest.raises(BudgetExceeded):
         anyio.run(_drive_eval(host))
     assert host.terminals == []
+
+
+# ------------------------- the ceiling raised by an eval CHILD, through the real wrappers (2026-09-22)
+#
+# REVIEW 2026-09-22, ENG2-02. The section above ("the ceiling raised INSIDE an evaluation") claimed
+# this seam closed, and its proof raised from the HOST body (`_OverCeilingHost` fails the SESSION),
+# where the run-scoped `eval_tg` is still live when the drain runs. The real shape raises from an
+# `eval_tg` CHILD: the child's exception cancels the group ITSELF, so every sibling is cancelled at
+# its next checkpoint and the drain — running inside that cancelled scope — cannot wait for
+# anything. Driven on the pre-fix tree: `terminals == []` with the score on disk.
+#
+# What closes it is the move `_DeferredBudgetStop` makes for research, one level down: the eval-child
+# wrappers DEFER a pure spend ceiling instead of raising it into their group, admission refuses while
+# one is held, and the owner raises it once the siblings have landed.
+
+class _ChildCeilingHost(_RunHost):
+    """`Engine.run` with two adopted children admitted through the REAL `_card_eval_one`: node 0 the
+    sibling burning in its shielded worker thread, node 1 an eval whose own post-score bookkeeping
+    crosses the ceiling. The session stand-in then turns the run loop's HEAD, which is where the
+    real `_run_with_llm_broker` pays a deferred stop (pinned by the AST test below)."""
+
+    _card_eval_one = Engine._card_eval_one
+    _raise_deferred_eval_budget_stop = Engine._raise_deferred_eval_budget_stop
+    _eval_boundary_owed = False
+    _eval_notify = None
+    _eval_budget_stop = None
+
+    def __init__(self):
+        super().__init__(ValueError("unused: the ceiling comes from a child, not the host"))
+
+    async def _evaluate(self, node_id, _limiter, _max_es) -> None:
+        if node_id == 0:
+            await self.eval.run(0)
+            return
+        await anyio.sleep(0.05)
+        # the campaign's own ordering: the ceiling fires WHILE the sibling sits in its worker thread,
+        # and the sibling finishes (score on disk) only afterwards
+        threading.Timer(0.05, self.eval.release.set).start()
+        raise BudgetExceeded(CEILING)
+
+    async def _run_with_llm_broker(self):
+        for node_id in (0, 1):
+            self._eval_inflight.add((node_id, 0))    # `_card_phase_admit_evals`' order
+        self._eval_task_group.start_soon(self._card_eval_one, 0, 0, None, None)
+        await anyio.to_thread.run_sync(self.eval.entered.wait, abandon_on_cancel=True)
+        self._eval_task_group.start_soon(self._card_eval_one, 1, 0, None, None)
+        with anyio.fail_after(10):
+            while True:
+                await self._raise_deferred_eval_budget_stop()
+                await anyio.sleep(0.01)
+
+
+def test_a_ceiling_raised_by_an_eval_child_keeps_its_siblings_terminal_and_still_stops_the_run():
+    """THE PROPERTY, in the shape `review/ENG2/repro_drain_child.py` drove: the sibling's terminal
+    lands, and `Engine.run` still ends with the accountant's own exception — same class, same
+    sentence — so the CLI still records `run_finished {"reason": "budget_exhausted"}`."""
+    host = _ChildCeilingHost()
+    with pytest.raises(BudgetExceeded) as caught:
+        anyio.run(Engine.run, host)
+    assert str(caught.value) == CEILING
+    assert host.eval.score_on_disk
+    assert host.eval.terminals == ["node_evaluated:0"], (
+        "a ceiling raised inside one evaluation cancelled its sibling's terminal")
+    assert host._eval_inflight == set()
+    assert host._eval_budget_stop is None, "a raised stop must not outlive the run that raised it"
+
+
+class _ChildRaisingDispatchHost(_DispatchHost):
+    """The speculation-off twin: `_dispatch_evals`' parallel branch at width 2 with a third node
+    queued. Node 1's evaluation raises the ceiling while node 0 is in its worker thread."""
+
+    def __init__(self):
+        super().__init__(raise_ceiling=False, width=2, queued=3)
+
+    def _spawn_research(self, tg, state) -> bool:
+        return False                               # nothing overlapped: the ceiling is the eval's
+
+    async def _evaluate(self, node_id, _limiter, _max_es) -> None:
+        self.started.append(node_id)
+        if node_id == 1:
+            await anyio.to_thread.run_sync(self.evals[0].entered.wait, abandon_on_cancel=True)
+            threading.Timer(0.05, self.evals[0].release.set).start()
+            raise BudgetExceeded(CEILING)
+        await self.evals[node_id].run(node_id)
+
+
+def test_dispatch_evals_keeps_a_siblings_terminal_when_an_eval_raises_the_ceiling(monkeypatch):
+    host = _ChildRaisingDispatchHost()
+    with pytest.raises(BaseException) as caught:               # noqa: PT011 - both halves asserted
+        anyio.run(_dispatch(host, monkeypatch))
+    assert host.evals[0].terminals == ["node_evaluated:0"], (
+        "the eval that crossed the ceiling cancelled its sibling's terminal")
+    # the accountant's own exception, unwrapped, exactly as a research-raised ceiling arrives
+    assert isinstance(caught.value, BudgetExceeded) and str(caught.value) == CEILING
+    assert host.started == [0, 1], "a slot freed by the ceiling was refilled after it"
+
+
+def test_only_a_pure_spend_ceiling_is_deferred():
+    """`core/errors.py::deferrable_budget_stop` — the truth table. Deferring is safe only for the
+    run's own ENDING: a cancellation must propagate (swallowing one breaks structured concurrency,
+    and `budget_stop_leaf` alone would find a ceiling in a Cancelled's `__context__`), and any other
+    leaf beside the ceiling keeps today's propagation rather than being dropped on the floor."""
+    import asyncio
+
+    from looplab.core.errors import deferrable_budget_stop
+
+    leaf = BudgetExceeded(CEILING)
+    assert deferrable_budget_stop(leaf) is leaf
+    assert deferrable_budget_stop(_wrapped(_wrapped(leaf))) is leaf
+    assert deferrable_budget_stop(BaseExceptionGroup("g", [leaf, BudgetExceeded("x")])) is leaf
+    assert deferrable_budget_stop(BaseExceptionGroup("g", [leaf, ValueError("disk")])) is None
+    assert deferrable_budget_stop(ValueError("x")) is None
+    assert deferrable_budget_stop(KeyboardInterrupt()) is None
+    cancelled = asyncio.CancelledError()
+    cancelled.__context__ = leaf
+    assert budget_stop_leaf(cancelled) is leaf              # why `budget_stop_leaf` is not enough
+    assert deferrable_budget_stop(cancelled) is None
+    wrapped = RuntimeError("provider wrapped it")
+    wrapped.__cause__ = leaf
+    assert deferrable_budget_stop(wrapped) is None          # `_evaluate` contains that shape itself
+
+
+def test_the_run_loop_pays_a_deferred_eval_ceiling_every_turn_and_before_finalizing():
+    """The host above stands in for `_run_with_llm_broker`, so the wiring is pinned on the real
+    method's AST (comments are not calls): the stop is asked inside the turn loop, and again after
+    the final drain and BEFORE `finalize_run` — a stop captured during that last drain would
+    otherwise be swallowed and a ceiling-ended run would finish as a clean one."""
+    import ast
+
+    from _source_scan import function_tree
+
+    fn = function_tree(Engine._run_with_llm_broker)
+    loop = next(node for node in ast.walk(fn) if isinstance(node, ast.While))
+
+    def _calls(nodes, name):
+        return sorted(call.lineno for tree in nodes for call in ast.walk(tree)
+                      if isinstance(call, ast.Call) and ast.unparse(call.func) == name)
+
+    assert _calls([loop], "self._raise_deferred_eval_budget_stop"), (
+        "the run loop never pays a ceiling an adopted evaluation deferred")
+    after_loop = [stmt for stmt in fn.body[0].body if stmt.lineno > loop.end_lineno]
+    stops = _calls(after_loop, "self._raise_deferred_eval_budget_stop")
+    finalize = _calls(after_loop, "finalize_run")
+    drains = _calls(after_loop, "self._drain_adopted_evals")
+    assert stops and finalize and drains and drains[-1] < stops[0] < finalize[0], (
+        "the final drain must be followed by the deferred-stop check before finalize_run")

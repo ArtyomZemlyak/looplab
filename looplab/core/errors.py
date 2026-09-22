@@ -223,3 +223,34 @@ def budget_stop_leaf(exc: BaseException | None, _depth: int = 0) -> BaseExceptio
             if found is not None:
                 return found
     return None
+
+
+def deferrable_budget_stop(exc: BaseException | None) -> BaseException | None:
+    """The `BudgetExceeded` an evaluation's CHILD TASK may DEFER instead of raising it into its
+    task group — or None, meaning "raise it exactly as before".
+
+    WHY A CHILD DEFERS AT ALL (review 2026-09-22, ENG2-02). An evaluation runs as a child of a task
+    group it shares with its siblings (`speculation.py::_card_eval_one` in the run-scoped eval group,
+    `_dispatch_evals`' `_eval_in_slot` in its batch group). A spend ceiling crossed by one
+    evaluation's own paid bookkeeping — its triage, repair, stage check or critic — used to leave that
+    child into the group, and the group then CANCELLED every sibling at its next checkpoint: after its
+    sandbox had written the score, before its terminal. The ceiling is the run's ENDING, not a failure
+    of the group, so the child parks it for its owner to raise once the siblings have landed.
+
+    STRICTER THAN `budget_stop_leaf`, ON PURPOSE. That one answers "is there a ceiling in here
+    anywhere", walking `__cause__`/`__context__` too, which is right for recording the run's
+    disposition and wrong for deciding what may be SWALLOWED: a cancellation raised while a
+    `BudgetExceeded` was being handled carries the ceiling in its `__context__`, and swallowing a
+    cancellation breaks structured concurrency. So a child may defer only an exception whose every
+    LEAF is a `BudgetExceeded` — the accountant's own exception, bare or wrapped by nested task
+    groups. Anything else beside it (a cancellation, an interrupt, an invariant violation, an
+    environment fault) keeps today's propagation rather than being dropped on the floor, and a
+    ceiling some library WRAPPED in its own exception is not deferred either (`_evaluate` contains
+    that shape as a node failure before a wrapper ever sees it).
+    """
+    if exc is None:
+        return None
+    leaves = list(exception_leaves(exc))
+    if not leaves or not all(isinstance(leaf, BudgetExceeded) for leaf in leaves):
+        return None
+    return leaves[0]

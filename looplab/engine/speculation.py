@@ -18,6 +18,7 @@ import anyio
 
 from looplab.core import tracing
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
+from looplab.core.errors import deferrable_budget_stop
 from looplab.core.models import (
     Idea,
     NodeStatus,
@@ -692,10 +693,15 @@ class SpeculationMixin:
     #                          (`_finish_if_quiescent`, `_finish_with_report_if_quiescent`) reached
     #                          from five call sites, and making them async to hold one `await`
     #                          would move the finish contract instead of guarding it.
+    #   `_eval_budget_stop`    the spend ceiling an adopted evaluation DEFERRED instead of raising it
+    #                          into the run-scoped group (review 2026-09-22, ENG2-02) — the FIRST one;
+    #                          admission refuses while it is held and `_raise_deferred_eval_budget_stop`
+    #                          raises it once every sibling has landed.  `None`: nothing captured.
     _eval_task_group: Any = None
     _eval_notify: Any = None
     _eval_boundary_owed: bool = False
     _eval_drain_requested: bool = False
+    _eval_budget_stop: Optional[BaseException] = None
     #   `_outer_boundary_served_tail`  the log seq at which a session last handed back for a
     #                          RECURRING producer yield, so the same unchanged condition cannot hand
     #                          back again — see `_card_phase_decide_exit`'s last clause.
@@ -731,6 +737,33 @@ class SpeculationMixin:
         self._eval_drain_requested = False
         while self._evals_inflight():
             await anyio.sleep(0.05)
+
+    async def _raise_deferred_eval_budget_stop(self) -> None:
+        """Raise the spend ceiling an adopted evaluation DEFERRED — once every sibling has landed.
+
+        THE OWNER'S HALF of the eval-child deferral (review 2026-09-22, ENG2-02); the child's half is
+        `_card_eval_one`.  A ceiling crossed by one evaluation's own paid bookkeeping used to leave
+        its child task into the RUN-scoped eval group, which cancels every sibling at its next
+        checkpoint — after the sandbox wrote the score, before the terminal — and `Engine.run`'s
+        drain, entered inside that already-cancelled scope, could not wait for any of them.  The
+        child now parks the stop on `_eval_budget_stop` and returns; `_card_phase_admit_evals`
+        admits nothing while it is held; and the run loop calls this at the head of every turn and
+        after its final drain, so the stop is raised AFTER `_drain_adopted_evals` and the siblings
+        the run had already paid for are in the log it stops over.
+
+        THE STOP IS UNCHANGED in class and sentence — the accountant's own exception object — so
+        `cli/run_cmds.py` still records `run_finished {"reason": "budget_exhausted"}`.  Nothing new
+        can be bought while it waits: admission is refused, and a paid call inside a draining
+        evaluation raises against the same ceiling and is deferred the same way, so the wait is
+        bounded by work already started.  Cleared as it is raised, so an Engine that is run again
+        does not inherit the stop of a run that already ended on it.
+        """
+        stop = self._eval_budget_stop
+        if stop is None:
+            return
+        await self._drain_adopted_evals()
+        self._eval_budget_stop = None
+        raise stop
 
     def _producer_role_pair(self) -> Optional[tuple[Any, Any]]:
         """Lease one non-primary pair from the Layer-2 role pool.
@@ -2479,10 +2512,28 @@ class SpeculationMixin:
         set a flag nobody reads and post its wake-up into a closed stream — the successor session
         would never learn that a slot had come free.  Everything it has to publish is therefore
         engine-level: the inflight set, the boundary debt, and the CURRENT session's wake-up stream.
+
+        A SPEND CEILING IS DEFERRED, never raised into the run-scoped group (review 2026-09-22,
+        ENG2-02).  `_evaluate` re-raises a `BudgetExceeded` crossed by this node's own post-score
+        bookkeeping (after landing the node's own terminal, `_land_terminal_before_ceiling`), and a
+        child that let it escape cancelled EVERY sibling in the group at its next checkpoint — the
+        measured loss `Engine._drain_inflight_evaluation` documents, which that drain cannot repair
+        from inside the scope the child just cancelled.  So the child parks it on
+        `_eval_budget_stop` (the first one wins) and returns normally; the `finally` below still
+        runs, and the boundary debt it owes is what hands the session back to the run loop, whose
+        head raises the stop once the siblings have landed (`_raise_deferred_eval_budget_stop`).
+        Everything else — a cancellation above all — propagates exactly as before
+        (`core/errors.py::deferrable_budget_stop` says what may be deferred and why).
         """
 
         try:
             await self._evaluate(node_id, anyio.CapacityLimiter(1), max_eval_seconds)
+        except BaseException as exc:  # noqa: BLE001 — re-raised unless it is a pure spend ceiling
+            stop = deferrable_budget_stop(exc)
+            if stop is None:
+                raise
+            if self._eval_budget_stop is None:
+                self._eval_budget_stop = stop
         finally:
             # This is the resolution of the `CODEX AGENT` TODO that used to sit here: "this
             # session-wide first-completion fence prevents the Card path from refilling a freed GPU
@@ -2697,6 +2748,13 @@ class SpeculationMixin:
             return False
         selection_changed = False
         while len(session.eval_inflight) < max(1, int(self._eval_parallel)):
+            # A SPEND CEILING an adopted evaluation deferred (review 2026-09-22, ENG2-02) admits
+            # nothing more: the deferral only lets evaluations ALREADY paid for finish, and the run
+            # loop raises the stop once they have (`_raise_deferred_eval_budget_stop`).  Asked every
+            # fill, because the stop is set by a child task on this loop and can land across any
+            # `await` a previous admission took.
+            if self._eval_budget_stop is not None:
+                break
             current = self._session_state()
             # `.stopping` and `open_for_admission` are now the SAME predicate, and the asymmetry
             # this comment used to describe is gone with the defect: re-reading the terminal latch
