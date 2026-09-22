@@ -874,8 +874,16 @@ _ESCAPE = """
         print("STAGE1 read ALLOWED")
     except Exception as exc:
         print("STAGE1 refused", type(exc).__name__)
+    def _native_write():
+        # A writer NO audit hook sees: a shell child. Only the kernel's write bit stands between it
+        # and the fence, which is exactly the rung this attempt exists to name.
+        r = subprocess.run(["sh", "-c", 'printf "# neutralised" > "$1"', "sh", fence],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise PermissionError(r.stderr.strip())
     for label, attempt in (
         ("open-w", lambda: open(fence, "w").write("# neutralised")),
+        ("open-w-native", _native_write),
         ("chmod", lambda: os.chmod(fence, 0o644)),
         ("unlink", lambda: os.remove(fence)),
         ("unlink-dir-fd", lambda: os.remove("sitecustomize.py",
@@ -929,8 +937,9 @@ def test_a_node_cannot_rewrite_the_fence_that_fences_it(tmp_path):
     # whose kernel refuses, not about the capability, which the sibling control test demonstrates
     # from OUTSIDE. Skip with the reason named; the production half of the same precondition is
     # the marker on `read_fence._harden`.
-    if os.geteuid() == 0:
-        pytest.skip("running as root: the fence's kernel write-bit rung is ignored by DAC-override")
+    if not hasattr(os, "geteuid") or os.geteuid() == 0:
+        pytest.skip("running as root (or off POSIX): the fence's kernel write-bit rung is ignored "
+                    "by DAC-override")
     src, _sib, run_dir, wd, _models = _world(tmp_path)
     target = src / "experiments" / "baseline" / "final" / "model.safetensors"
     fence = _install(run_dir, src)
@@ -944,11 +953,17 @@ def test_a_node_cannot_rewrite_the_fence_that_fences_it(tmp_path):
 
     assert "STAGE1 refused LoopLabSourceReadRefused" in out, out
     assert "STAGE2 ESCAPED" not in out, out
-    # The kernel rung by name: the plain overwrite must die in the kernel, before any Python runs,
-    # because that is the rung that also covers the writers no audit hook sees.
-    assert "STAGE2 blocked open-w PermissionError" in out, out
-    # …and the hook rung guarding it, on every call that could hand the write bit back.
-    for label in ("chmod", "unlink", "unlink-dir-fd", "rename-away", "truncate", "symlink-over"):
+    # The kernel rung by name, driven by a writer no audit hook sees (a shell child), because that
+    # is the rung that also covers those writers. It used to be named through Python's own
+    # `open(fence, "w")` — until 2026-09-08 the hook let that call through to the kernel; since the
+    # open branch consults `_SELF` on write flags the HOOK refuses it first, and this assertion
+    # went red on the one place it runs (a non-root box: CI), which had not finished a run in
+    # weeks. Found by the 2026-09-22 review's first green-able CI.
+    assert "STAGE2 blocked open-w-native PermissionError" in out, out
+    # …and the hook rung, on the Python overwrite and on every call that could hand the write bit
+    # back.
+    for label in ("open-w", "chmod", "unlink", "unlink-dir-fd", "rename-away", "truncate",
+                  "symlink-over"):
         assert f"STAGE2 blocked {label} LoopLabSourceReadRefused" in out, out
     assert "STAGE3 refused" in out, out
 

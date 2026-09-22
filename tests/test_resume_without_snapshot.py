@@ -149,6 +149,10 @@ def test_resume_refuses_end_to_end(tmp_path):
     result = CliRunner().invoke(app, ["resume", str(rd)])
     assert result.exit_code != 0
     # Click renders a BadParameter inside a box that wraps and pads every line, so compare on the
-    # text with all whitespace and box drawing removed rather than on the raw output.
-    flat = "".join(ch for ch in result.output if not ch.isspace() and ch not in "|\u2502")
+    # text with all whitespace and box drawing removed rather than on the raw output — and with
+    # ANSI colour codes removed too: where Rich decides to colour (GitHub Actions does), the escape
+    # sequences sit between the halves of a wrapped word, and this assertion was red on CI alone.
+    import re
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    flat = "".join(ch for ch in plain if not ch.isspace() and ch not in "|\u2502")
     assert "config.snapshot.jsonismissing" in flat, result.output
