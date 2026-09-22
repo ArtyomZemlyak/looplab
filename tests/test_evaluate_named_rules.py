@@ -20,8 +20,10 @@ import ast
 from types import SimpleNamespace
 
 from _source_scan import called_names, function_tree
-from looplab.core.models import DEVELOPER_ERROR_PREFIX
-from looplab.engine.evaluate import (EvaluateMixin, _repair_change_set,
+from looplab.core.models import DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
+from looplab.engine.evaluate import (_REPAIR_ANSWER_EDIT, _REPAIR_ANSWER_PROVIDER_FAILURE,
+                                     _REPAIR_ANSWER_STUCK, EvaluateMixin,
+                                     _classify_repair_answer, _repair_change_set,
                                      _repair_forces_full_retrain, _repair_provider_failure)
 
 
@@ -126,6 +128,58 @@ def test_this_repairs_own_deletion_does_veto_it():
         {}, {"old.py"}, {}, ["old.py", "just_now.py"])
     assert new_deleted == ["just_now.py"]
     assert changed == {"just_now.py"}, "a deletion is a change to the reachability closure"
+
+
+# ----------------------------------------- ONE "was this a repair?" ladder, two callers (ENG2-07)
+#
+# `_classify_repair_answer` is the ladder the attempt loop and the salvage-cause fix both read. The
+# salvage path had re-spelled it and drifted three ways (no stuck rung; the cumulative deletions in
+# its no-change exit; a `changed` column keyed on "non-empty" rather than "moved"), so the truth
+# table is pinned here and the two call sites are pinned below to REACH it.
+
+def test_a_stuck_declaration_is_classified_before_the_provider_rung_and_charges_nothing():
+    """The declaration is not Python: past the provider rung it would count `unparseable` and, three
+    in, pause the run over a provider answering perfectly. So it is answered FIRST and the per-node
+    counter comes back untouched."""
+    ans = _classify_repair_answer("print(1)", f"{DEVELOPER_STUCK_PREFIX} no idea left)",
+                                  {}, set(), {}, [], 2)
+    assert ans.kind == _REPAIR_ANSWER_STUCK and ans.detail == "no idea left"
+    assert ans.unparseable_repairs == 2
+    assert not ans.moved and ans.changed_column == []
+
+
+def test_a_provider_failure_carries_its_message_and_the_round_tripped_counter():
+    ans = _classify_repair_answer("print(1)", f"{DEVELOPER_ERROR_PREFIX} 402 out of credits)",
+                                  {}, set(), {}, [], 0)
+    assert ans.kind == _REPAIR_ANSWER_PROVIDER_FAILURE and "402" in ans.detail
+    assert ans.unparseable_repairs == 1          # `_repair_provider_failure`'s own count, carried
+
+
+def test_an_edit_is_measured_in_deltas_and_its_column_names_only_what_moved():
+    # the repo shape: the node's whole unchanged file set, and deletions seeded from node.deleted
+    ans = _classify_repair_answer("", "", {"a.py": "x"}, {"old.py"}, {"a.py": "x"}, ["old.py"], 0)
+    assert ans.kind == _REPAIR_ANSWER_EDIT and not ans.moved
+    assert ans.new_deleted == [] and ans.changed_column == []
+    ans = _classify_repair_answer("", "", {"a.py": "x"}, set(), {"a.py": "y"}, [], 0)
+    assert ans.moved and ans.changed == {"a.py"} and ans.changed_column == ["a.py"]
+    # the whole-file shape: handing back the artifact it was given moved nothing…
+    ans = _classify_repair_answer("print(1)\n", "print(1)\n", {}, set(), {}, [], 0)
+    assert not ans.moved and ans.changed_column == []
+    # …and a real rewrite is the whole-file marker
+    ans = _classify_repair_answer("print(1)\n", "print(2)\n", {}, set(), {}, [], 0)
+    assert ans.moved and ans.changed_column == ["<whole-file solution>"]
+
+
+def test_the_one_way_the_two_callers_commit_differently_is_a_stated_argument():
+    """An EMPTY reply over a non-empty whole-file artifact, from a repair that shipped its work in
+    files: the attempt loop writes `code` unconditionally, so the artifact IS replaced; the cause
+    fix omits the key (the fold's "leave it alone"), so the artifact stays and the code did not
+    move."""
+    args = ("print(1)\n", "", {"a.py": "x"}, set(), {"a.py": "x"}, [], 0)
+    loop = _classify_repair_answer(*args)
+    cause_fix = _classify_repair_answer(*args, empty_code_keeps_artifact=True)
+    assert loop.moved and loop.changed_column == ["<whole-file solution>"]
+    assert not cause_fix.moved and cause_fix.changed_column == []
 
 
 # ------------------------------------------------------- which repairs count against the cap
@@ -309,7 +363,9 @@ def test_the_attempt_loop_reaches_every_rule_it_no_longer_inlines():
 
     calls = eval_attempt_called_names()      # the driver and its phases, in driver order
     for rule in ("self._eval_failure_text", "self._repaired_footprint",
-                 "_repair_provider_failure", "_repair_change_set",
+                 # the "was this a repair?" ladder — stuck, provider failure, change set — reached
+                 # through the ONE classifier the salvage-cause fix shares (ENG2-07; pinned below)
+                 "_classify_repair_answer",
                  "_repair_forces_full_retrain",
                  # The 2026-08-06 durability pair. `_durable_repair_ledger` is the one whose absence
                  # is INVISIBLE — drop the call and every counter silently reverts to a process-local
@@ -331,3 +387,18 @@ def test_the_attempt_loop_reaches_every_rule_it_no_longer_inlines():
     assert [[ast.unparse(arg) for arg in call.args] for call in retrain] == [["a.res", "a.next_start"]], (
         "the retrain rule must judge the eval RESULT this attempt produced, never a stage list "
         "resolved after the repair")
+
+
+def test_both_repair_call_sites_reach_the_one_ladder_and_neither_re_spells_it():
+    """Review 2026-09-22, ENG2-07. The classifier reaches the three rungs IN LADDER ORDER (stuck
+    before the provider rung is load-bearing — see its docstring), and the salvage-cause fix calls
+    it rather than growing a second copy: the copy it had was where all three drifts lived. The
+    NEGATIVE half names the rungs, because what must not come back is a direct call to them."""
+    ladder = called_names(_classify_repair_answer)
+    rungs = ["is_developer_stuck", "_repair_provider_failure", "_repair_change_set"]
+    assert [name for name in ladder if name in rungs] == rungs, ladder
+
+    salvage = called_names(EvaluateMixin._repair_salvaged_cause)
+    assert salvage.count("_classify_repair_answer") == 1, salvage
+    for rung in rungs:
+        assert rung not in salvage, f"the salvage-cause fix re-grew its own `{rung}` call"

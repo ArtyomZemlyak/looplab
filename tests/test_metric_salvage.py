@@ -768,6 +768,134 @@ def test_a_cause_fix_that_changed_nothing_is_still_receipted_so_a_resume_cannot_
 
 
 # --------------------------------------------------------------------------------------------
+# ONE "WAS THIS A REPAIR?" LADDER (review 2026-09-22, ENG2-07). `_repair_salvaged_cause` had
+# re-implemented the attempt loop's ladder and drifted three ways: (a) no developer-stuck rung, so a
+# "(developer stuck: …)" declaration was COMMITTED as the node's code; (b) the no-change exit read
+# the CUMULATIVE deletions a repo Developer hands back (seeded from `node.deleted`), so a node whose
+# implement had ever deleted a file could never be a no-op; (c) the `changed` column fell back on
+# `if new_code`, so a repair that handed back the very artifact it was given read as a whole-file
+# change. Each shape reported `cause_repaired` True for a fix nobody made. Driven directly, like the
+# reviewer's repro scripts: the Developer's answer is the only input that varies.
+# --------------------------------------------------------------------------------------------
+
+class _AnswerDev:
+    """Answers the cause-fix call with a FIXED reply and a FIXED per-call footprint."""
+
+    def __init__(self, reply, files=None, deleted=None):
+        self.reply = reply
+        self.last_files = dict(files or {})
+        self.last_deleted = list(deleted or [])
+        self.errors: list[str] = []
+
+    def implement(self, idea):
+        return ""
+
+    def repair(self, idea, code, error):
+        self.errors.append(error)
+        return self.reply
+
+
+_NODE_FILES = {"looplab_stages.json": _manifest(DECLARED), "train.py": "print(1)\n"}
+_WHOLE_FILE = "print('the experiment')\n"
+
+
+def _cause_fix(tmp_path, dev, *, code="", files=None, deleted=None, name="cf"):
+    """Seed one node and ask `_repair_salvaged_cause` for its cause fix, as salvage does."""
+    from types import SimpleNamespace
+
+    eng = Engine(tmp_path / name, task=ToyTask.load(TASK), researcher=_Researcher(),
+                 developer=dev, sandbox=SubprocessSandbox(),
+                 policy=GreedyTree(n_seeds=1, max_nodes=1), auto_install_deps=False,
+                 inline_repair=True, metric_salvage_repair=True,
+                 inline_repair_reasons=("expect_failed",))
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
+                                     "direction": "max"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": "seed"},
+        "code": code, "files": dict(files or {}),
+        **({"deleted": list(deleted)} if deleted else {})})
+    node = fold(eng.store.read_all()).nodes[0]
+    wd = tmp_path / name / "nodes" / "node_0"
+    wd.mkdir(parents=True)
+    salvaged = SimpleNamespace(source="declared_reader", metric=0.7)
+    stamps: list = []
+
+    async def _ask():
+        return await eng._repair_salvaged_cause(
+            node, fold(eng.store.read_all()), wd, 0, salvaged,
+            "stage 'train' failed its artifact contract", "expect_failed", 0, stamps.append)
+
+    _node, _attempt, repaired, fix = anyio.run(_ask)
+    evs = list(eng.store.read_all())
+    rows = [e.data for e in evs if e.type == "node_repaired"]
+    return repaired, fix, rows, fold(evs).nodes[0], stamps
+
+
+@pytest.mark.parametrize("shape", ["stuck", "noop_after_an_earlier_deletion", "identical_code"])
+def test_a_cause_fix_that_repaired_nothing_is_receipted_and_never_committed(tmp_path, shape):
+    from looplab.core.models import DEVELOPER_STUCK_PREFIX
+    from looplab.engine.metric_salvage import SALVAGE_CAUSE_TRIAGE_ACTION
+
+    if shape == "stuck":
+        # the whole-file shape `repro_salvage_stuck.py` drove: the declaration IS the reply
+        dev = _AnswerDev(f"{DEVELOPER_STUCK_PREFIX} I cannot see how the manifest is wrong)")
+        seed = dict(files=_NODE_FILES)
+    elif shape == "noop_after_an_earlier_deletion":
+        # what a repo Developer's `repair_from` hands back when it changed nothing: the node's whole
+        # (unchanged) file set and its CUMULATIVE deletions, seeded from `node.deleted`
+        dev = _AnswerDev("", files=_NODE_FILES, deleted=["old.py"])
+        seed = dict(files=_NODE_FILES, deleted=["old.py"])
+    else:
+        # a whole-file Developer that hands back the artifact it was given, byte for byte
+        dev = _AnswerDev(_WHOLE_FILE)
+        seed = dict(code=_WHOLE_FILE)
+    repaired, fix, rows, node, stamps = _cause_fix(tmp_path, dev, **seed)
+
+    assert len(dev.errors) == 1, "the cause fix is asked for exactly once"
+    assert repaired is False, "`metric_provenance.cause_repaired` would claim a fix nobody made"
+    assert fix == {} and stamps == [], "nothing was committed, so nothing may be re-checked"
+    # the node carries exactly what it carried before the call
+    assert node.code == seed.get("code", "")
+    assert node.files == seed["files"] if "files" in seed else not node.files
+    # ONE receipt for the billed call, fold-NEUTRAL: no `code` key, nothing it asserts as an edit
+    assert len(rows) == 1 and rows[0]["triage_action"] == SALVAGE_CAUSE_TRIAGE_ACTION
+    assert "code" not in rows[0]
+    assert rows[0]["changed"] == [] and rows[0]["files"] == {} and rows[0]["deleted"] == []
+    if shape == "stuck":
+        # the Developer's own words are kept on the receipt, where an operator can read why
+        assert "I cannot see how the manifest is wrong" in rows[0]["rationale"]
+
+
+@pytest.mark.parametrize("shape", ["manifest_fix_after_an_earlier_deletion", "whole_file_fix"])
+def test_a_cause_fix_that_did_change_something_is_committed_with_its_own_delta(tmp_path, shape):
+    """The control: the ladder lets a real correction through, and what it reports is THIS fix's
+    delta — a deletion the node made at implement time is not something the cause fix touched, and
+    reporting it made `declaration_only_repair` refuse the F1e re-check for the node's whole
+    life."""
+    fixed_manifest = _manifest(ACTUAL)
+    if shape == "manifest_fix_after_an_earlier_deletion":
+        dev = _AnswerDev("", files={**_NODE_FILES, "looplab_stages.json": fixed_manifest},
+                         deleted=["old.py"])
+        seed = dict(files=_NODE_FILES, deleted=["old.py"])
+    else:
+        dev = _AnswerDev("print('the corrected experiment')\n")
+        seed = dict(code=_WHOLE_FILE)
+    repaired, fix, rows, node, stamps = _cause_fix(tmp_path, dev, **seed)
+
+    assert repaired is True and len(rows) == 1 and len(stamps) == 1
+    if shape == "manifest_fix_after_an_earlier_deletion":
+        assert rows[0]["changed"] == ["looplab_stages.json"]
+        assert fix == {"changed": ["looplab_stages.json"], "deleted": [], "code": ""}
+        assert node.files["looplab_stages.json"] == fixed_manifest
+        assert node.deleted == ["old.py"]            # the row stays cumulative: the fold REPLACES
+    else:
+        assert rows[0]["changed"] == ["<whole-file solution>"]
+        assert fix["code"] == "print('the corrected experiment')\n"
+        assert node.code == "print('the corrected experiment')\n"
+
+
+# --------------------------------------------------------------------------------------------
 # THE RE-CHECK (backlog F1e) — after a manifest-only cause fix, the artifact CHECK is re-asked
 # against the CORRECTED declaration (never the stage: no re-evaluation). A node that passes is
 # recorded as MEASURED, with no `metric_salvaged` violation and no salvage provenance.

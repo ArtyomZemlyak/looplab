@@ -911,6 +911,83 @@ def _repair_change_set(prev_files, prev_deleted, repaired_files,
     return changed, new_deleted
 
 
+# What ONE repair call answered. Three kinds, and the ladder that tells them apart is ORDERED.
+# Process-local (never written to a row), so deliberately NOT a registered vocabulary.
+_REPAIR_ANSWER_STUCK = "stuck"                      # the Developer's own "(developer stuck: …)"
+_REPAIR_ANSWER_PROVIDER_FAILURE = "provider_failure"  # `_repair_provider_failure` fired
+_REPAIR_ANSWER_EDIT = "edit"                        # an artifact — which may still move nothing
+
+
+@dataclass(frozen=True)
+class _RepairAnswer:
+    """`_classify_repair_answer`'s verdict on one repair call — see it for why there is ONE ladder.
+
+    The collections keep the exact types the attempt loop always computed (a `set`, two `list`s):
+    the in-process judge row and the one `_durable_repair_ledger` rebuilds from the log must render
+    identically, and a tuple where a list was would not compare equal to `[]`."""
+    kind: str
+    # The Developer's stuck reason, or the provider-failure message; "" for an edit.
+    detail: str = ""
+    # The per-NODE not-Python counter, carried back (a stuck answer leaves it untouched).
+    unparseable_repairs: int = 0
+    # THIS repair's change set: files whose bytes moved + its own deletions (`_repair_change_set`).
+    changed: set = field(default_factory=set)
+    # THIS repair's own deletions — the delta, never the cumulative set the Developer hands back.
+    new_deleted: list = field(default_factory=list)
+    # Does the whole-file code the node will CARRY differ from the code it carried?
+    code_changed: bool = False
+    # The durable `changed` column: the change set, capped, else the whole-file marker when the
+    # code moved, else [] — which is the spelling every reader already takes for "changed nothing".
+    changed_column: list = field(default_factory=list)
+
+    @property
+    def moved(self) -> bool:
+        """Did the repair change ANYTHING the node carries? False is the byte-anchored no-op."""
+        return bool(self.changed) or self.code_changed
+
+
+def _classify_repair_answer(node_code, new_code, prev_files, prev_deleted, repaired_files,
+                            repaired_deleted, unparseable_repairs: int, *,
+                            empty_code_keeps_artifact: bool = False) -> _RepairAnswer:
+    """WAS THIS A REPAIR AT ALL — the ONE ladder both repair call sites read.
+
+    Hoisted (review 2026-09-22, ENG2-07) because the salvage-cause fix had re-implemented the
+    attempt loop's ladder and drifted from it three ways, each of which let a fix nobody made read
+    as `cause_repaired`: it had NO stuck rung, so a "(developer stuck: …)" declaration was
+    committed as the node's code; its no-change exit read the CUMULATIVE deletions, so a node whose
+    implement once deleted a file could never be a no-op; and its `changed` column fell back on
+    "the reply is non-empty" instead of "the code moved". One function is what keeps the two from
+    drifting again. The rungs, in order — and the order is the rule:
+
+      1. STUCK first: the declaration is not Python, so `_repair_provider_failure` would count it
+         `unparseable` and, three in, pause the RUN over a provider that is answering perfectly
+         (`core/models.py::DEVELOPER_STUCK_PREFIX` says why the two sentinels differ).
+      2. PROVIDER FAILURE: `_repair_provider_failure`'s four answers, counter round-tripped.
+      3. an EDIT, measured as DELTAS against the pre-repair node (`_repair_change_set`) plus
+         whether the whole-file code moved. `moved` False is a repair that changed nothing.
+
+    `empty_code_keeps_artifact` states the ONE way the two callers commit differently. The attempt
+    loop writes `code` unconditionally, so an empty reply over a non-empty artifact IS a change to
+    the code; the cause fix omits the key when the reply is empty (the fold's "leave it alone"
+    spelling), so the node keeps its artifact and the code has not moved.
+    """
+    if is_developer_stuck(new_code):
+        return _RepairAnswer(_REPAIR_ANSWER_STUCK, developer_stuck_reason(new_code),
+                             unparseable_repairs)
+    dev_err, unparseable_repairs = _repair_provider_failure(
+        node_code, new_code, repaired_files, repaired_deleted, unparseable_repairs)
+    if dev_err is not None:
+        return _RepairAnswer(_REPAIR_ANSWER_PROVIDER_FAILURE, dev_err, unparseable_repairs)
+    changed, new_deleted = _repair_change_set(prev_files, prev_deleted, repaired_files,
+                                              repaired_deleted)
+    carried = (node_code if empty_code_keeps_artifact and not (new_code or "").strip()
+               else new_code)
+    code_changed = (carried or "") != (node_code or "")
+    column = sorted(changed)[:12] or (["<whole-file solution>"] if code_changed else [])
+    return _RepairAnswer(_REPAIR_ANSWER_EDIT, "", unparseable_repairs, changed, new_deleted,
+                         code_changed, column)
+
+
 def _repair_forces_full_retrain(res, next_start, *, rolled_back: bool = False) -> bool:
     """Does this repair discard completed EARLIER-stage work, i.e. does it count against the cap?
 
@@ -2032,8 +2109,9 @@ class EvaluateMixin:
         same reason — otherwise a resumed node silently lost one repair to a fix it never re-ran.
 
         Returns `(node, attempt, repaired, fix)`, where `fix` describes WHAT was committed —
-        `{"changed": [...], "deleted": [...], "code": "..."}`, and `{}` on every path that committed
-        nothing. The caller needs all three because which files a cause fix touched decides whether
+        `{"changed": [...], "deleted": [...], "code": "..."}`, with `changed`/`deleted` THIS call's
+        own deltas against the pre-fix node — and `{}` on every path that committed nothing. The
+        caller needs all three because which files a cause fix touched decides whether
         its artifact contract may be re-CHECKED or must be re-RUN (`metric_salvage
         .declaration_only_repair`), and because a declared artifact that is itself a file the REPAIR
         wrote must be refused (`metric_salvage.recheckable_expect`). It is returned rather than
@@ -2089,20 +2167,25 @@ class EvaluateMixin:
         # below is a checkpoint, so a read off the instance here could be a sibling's repair.
         repaired_files = dict(repaired.last_files)
         repaired_deleted = list(repaired.last_deleted)
-        # WAS THIS A REPAIR AT ALL? The same four answers as the attempt loop's, through the same
-        # rule. A dead provider must not be committed as the node's code here either — but unlike
-        # the loop, it does not pause the run: the node HAS its metric, the terminal is about to be
-        # written, and a run-level circuit breaker fired from a path that is not asking for a
-        # re-evaluation would stop a run over a fix it did not need.
-        _dev_err, _ = _repair_provider_failure(node.code, new_code, repaired_files,
-                                               repaired_deleted, 0)
-        if _dev_err is not None:
+        # WAS THIS A REPAIR AT ALL? The attempt loop's ladder, CALLED rather than re-spelled: a
+        # second copy here had drifted from it three ways (review 2026-09-22, ENG2-07) — see
+        # `_classify_repair_answer`. A dead provider must not be committed as the node's code here
+        # either — but unlike the loop, it does not pause the run: the node HAS its metric, the
+        # terminal is about to be written, and a run-level circuit breaker fired from a path that is
+        # not asking for a re-evaluation would stop a run over a fix it did not need.
+        _answer = _classify_repair_answer(
+            node.code, new_code, dict(getattr(node, "files", {}) or {}),
+            set(getattr(node, "deleted", []) or []), repaired_files, repaired_deleted, 0,
+            empty_code_keeps_artifact=True)
+        if _answer.kind == _REPAIR_ANSWER_PROVIDER_FAILURE:
             return node, attempt, False, {}
-        prev_files = dict(getattr(node, "files", {}) or {})
-        prev_deleted = set(getattr(node, "deleted", []) or [])
-        changed, _new_deleted = _repair_change_set(prev_files, prev_deleted,
-                                                   repaired_files, repaired_deleted)
-        if not changed and not repaired_deleted and not (new_code or "").strip():
+        if _answer.kind == _REPAIR_ANSWER_STUCK or not _answer.moved:
+            # A STUCK DECLARATION TAKES THIS EXIT TOO. The Developer answered — and was billed — to
+            # say it has no fix; committing that sentence as the node's code (which is what the
+            # drifted copy did) replaced a working artifact with prose and reported the cause as
+            # repaired. Its words go on the receipt, the one place a salvaged node can carry them:
+            # the terminal it is about to get is a success, with no triage outcome to hold them.
+            #
             # THE MODEL CHANGED NOTHING — but the call was answered and BILLED, so this exit still
             # owes a durable receipt. Without one, `_durable_salvage_cause_fix` had nothing to read
             # and a process that died before the terminal made the resume re-salvage and buy the
@@ -2118,6 +2201,15 @@ class EvaluateMixin:
             # no attempt either, because `_durable_repair_ledger` excludes `salvage_cause_fix` rows
             # from the attempt count while still passing them to the judge history — where
             # `changed: []` is already the spelling that reads as "proposed nothing".
+            if _answer.kind == _REPAIR_ANSWER_STUCK:
+                # The model's own words, so through the redaction funnel and capped like every
+                # rationale the attempt loop writes (`_eval_apply_repair`'s `[:300]`).
+                _rationale = self._redact(
+                    f"metric salvaged ({salvaged.source}); the Developer declared it cannot fix "
+                    f"the failing declaration — {_answer.detail or 'no reason given'}")[:300]
+            else:
+                _rationale = (f"metric salvaged ({salvaged.source}); the Developer "
+                              f"proposed no change to the failing declaration")
             try:
                 async with self._write_lock:
                     if fold(self.store.read_all()).nodes[node.id].attempt == generation:
@@ -2125,8 +2217,7 @@ class EvaluateMixin:
                             "node_id": node.id, "generation": generation, "attempt": attempt,
                             "files": {}, "deleted": [], "error_in": err,
                             "triage_action": SALVAGE_CAUSE_TRIAGE_ACTION,
-                            "rationale": (f"metric salvaged ({salvaged.source}); the Developer "
-                                          f"proposed no change to the failing declaration"),
+                            "rationale": _rationale,
                             "changed": [], "stages_passed": None,
                             "salvaged_metric": salvaged.metric})
             except Exception as exc:  # noqa: BLE001 — see the tail's containment below
@@ -2148,17 +2239,20 @@ class EvaluateMixin:
         try:
             return await self._commit_salvaged_cause_fix(
                 node, workdir, attempt, generation, err, salvaged, new_code,
-                repaired_files, repaired_deleted, changed, stamp)
+                repaired_files, repaired_deleted, _answer, stamp)
         except Exception:  # noqa: BLE001
             return node, attempt, False, {}
 
     async def _commit_salvaged_cause_fix(self, node, workdir, attempt, generation, err, salvaged,
-                                         new_code, repaired_files, repaired_deleted, changed,
+                                         new_code, repaired_files, repaired_deleted, answer,
                                          stamp):
         """The durable half of `_repair_salvaged_cause`: receipt the edits, refold, restage.
 
         Split out only so its caller can contain it as ONE unit — see the paragraph at the call
-        site. It appends `node_repaired`, never a terminal (invariant #2)."""
+        site. It appends `node_repaired`, never a terminal (invariant #2). `answer` is the
+        `_classify_repair_answer` verdict its caller already reached: the row's `changed` column and
+        the returned `fix` are read off it, so neither can re-derive a second answer to the question
+        that verdict settled (review 2026-09-22, ENG2-07)."""
         async with self._write_lock:
             # A reset that landed while the repair call was in flight owns the next lifecycle. Skip
             # the commit rather than adopting it — the caller's terminal is already stale-generation
@@ -2180,7 +2274,10 @@ class EvaluateMixin:
                 "triage_action": SALVAGE_CAUSE_TRIAGE_ACTION,
                 "rationale": (f"metric salvaged ({salvaged.source}); fixing the declaration that "
                               f"failed, without re-evaluating"),
-                "changed": sorted(changed)[:12] or (["<whole-file solution>"] if new_code else []),
+                # The whole-file marker only when the code MOVED — it fell back on "the reply is
+                # non-empty" here, so a fix that handed back the artifact it was given asserted a
+                # change the bytes disprove (ENG2-07; the attempt loop's own column never did).
+                "changed": list(answer.changed_column),
                 "stages_passed": None,
                 "salvaged_metric": salvaged.metric}
             # `code` is OMITTED when the repair shipped its work in `files` — the multi-file/repo
@@ -2198,8 +2295,14 @@ class EvaluateMixin:
             return node, attempt, False, {}
         self._write_node_files(node, workdir)
         stamp(node)                      # the workdir now IS the corrected manifest
-        return node, attempt, True, {"changed": sorted(changed),
-                                    "deleted": list(repaired_deleted),
+        # `deleted` is THIS fix's own deletions, not the cumulative set the ROW above carries (the
+        # fold REPLACES `node.deleted` with the row's list, so the row must stay cumulative). The
+        # re-check reads this dict as "what the cause fix touched", and a deletion the node made at
+        # implement time — before the stage ever ran — is not that: reporting it made
+        # `declaration_only_repair` refuse the re-check for the rest of the node's life, the same
+        # cumulative read `_repair_change_set` exists to refuse for stage reuse (ENG2-07).
+        return node, attempt, True, {"changed": sorted(answer.changed),
+                                    "deleted": list(answer.new_deleted),
                                     "code": new_code or ""}
 
     def _repaired_footprint(self, node, new_code, repaired_files, reservation):
@@ -3850,8 +3953,15 @@ class EvaluateMixin:
         # NO REPAIR IS SPENT and no `node_repaired` is written: nothing was repaired. The
         # node terminalizes below carrying the eval's own authenticated `reason` — this is a
         # stop, not a re-classification of what failed.
-        if is_developer_stuck(new_code):
-            _stuck_why = developer_stuck_reason(new_code) or "no reason given"
+        #
+        # The ladder — this rung, the provider rung below and the change set — is ONE pure rule,
+        # `_classify_repair_answer`, which the salvage-cause fix calls too: its hand-spelled copy
+        # had drifted from this one three ways (review 2026-09-22, ENG2-07).
+        _answer = _classify_repair_answer(
+            a.node.code, new_code, prev_files, prev_deleted, repaired_files, repaired_deleted,
+            a.unparseable_repairs)
+        if _answer.kind == _REPAIR_ANSWER_STUCK:
+            _stuck_why = _answer.detail or "no reason given"
             a.triage_outcome = ("abandon", "the Developer declared it does not know how to fix "
                                          f"this — {_stuck_why}"[:400])
             return PHASE_SETTLED
@@ -3859,8 +3969,8 @@ class EvaluateMixin:
         # each one was retrofitted for live in `_repair_provider_failure`. The unparseable
         # counter round-trips through the return value — it is per-NODE, not per-attempt, so
         # losing it here would silently restore the unbounded loop it bounds.
-        _dev_err, a.unparseable_repairs = _repair_provider_failure(
-            a.node.code, new_code, repaired_files, repaired_deleted, a.unparseable_repairs)
+        a.unparseable_repairs = _answer.unparseable_repairs
+        _dev_err = _answer.detail if _answer.kind == _REPAIR_ANSWER_PROVIDER_FAILURE else None
         if _dev_err is not None:
             a.triage_outcome = ("abandon", "the repair CALL failed at the provider — no "
                                          "repaired code was produced")
@@ -3887,16 +3997,15 @@ class EvaluateMixin:
         # judge reads a history with the evidence column blank. Both halves are DELTAS
         # against the pre-repair node, never the cumulative sets the developer hands back —
         # see `_repair_change_set`. `new_deleted` is consumed by the reuse predicate below.
-        changed, new_deleted = _repair_change_set(
-            prev_files, prev_deleted, repaired_files, repaired_deleted)
+        # (All three come off `_answer`, computed above from these same locals.)
+        changed, new_deleted = _answer.changed, _answer.new_deleted
         # The whole-file fallback is gated on the code having actually MOVED, not merely on
         # it being non-empty. A repair that hands back the artifact it was given rendered
         # `it changed: <whole-file solution>` to the judge — the column asserting a change
         # the bytes disprove, on exactly the rows where the truth matters most. `node` is
         # still the pre-repair fold here, so `node.code` is what `new_code` replaced.
-        _code_changed = (new_code or "") != (a.node.code or "")
-        _changed_col = sorted(changed)[:12] or (["<whole-file solution>"] if _code_changed
-                                                else [])
+        _code_changed = _answer.code_changed
+        _changed_col = _answer.changed_column
         # DID IT DO WHAT IT SAID? The change set above is what the repair DID; the rationale
         # a line below is what it SAID. Nothing ever compared them, and on the shipped corpus
         # ~25 % of explained repairs named a change their diff does not contain — 13 of them
