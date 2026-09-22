@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-155 event types — 112 folded into `RunState`, 43 diagnostic; 936 declared payload keys; 22 types whose whole payload is stored by the fold.
+155 event types — 112 folded into `RunState`, 43 diagnostic; 937 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -61,7 +61,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `comment_edited` | folded | A new revision of one comment, compare-and-swapped against the version the author saw. | `comment_id` | `actor_kind`, `base_version`, `node_generation`, `node_id`, `text`, `version` |
 | `comment_resolution_changed` | folded | One comment's resolved flag moved, compare-and-swapped against the version the author saw. | `comment_id` | `actor_kind`, `base_version`, `node_generation`, `node_id`, `resolved`, `version` |
 | `concept_consolidation` | folded | A concept-vocabulary consolidation: which ids were renamed into which. | `mode`, `rename` | — |
-| `concept_coverage_snapshot` | folded | The concept-coverage gate's snapshot at one node, and which of its rules fired. | — | `at_node`, `current_streak`, `directive`, `experiments`, `fired`, `locked_axis`, `projection_token`, `recent_axis`, `streak`, `tag_mode`, `top_concept`, `top_concept_frac`, `uncovered_axes`, `uncovered_key` |
+| `concept_coverage_snapshot` | folded | The concept-coverage gate's snapshot at one node, and which of its rules fired. | — | `at_node`, `current_axis`, `current_streak`, `directive`, `experiments`, `fired`, `locked_axis`, `projection_token`, `recent_axis`, `streak`, `tag_mode`, `top_concept`, `top_concept_frac`, `uncovered_axes`, `uncovered_key` |
 | `concept_edge` | folded | Edges added to the concept graph, and the mode that derived them. | `edges`, `mode` | — |
 | `concept_lens_completed` | diagnostic | A paid concept-lens projection's terminal: the validated spec, or an authoritative decline. | `generation`, `lens_request_id`, `outcome`, `reason`, `request_digest`, `resolution`, `resolution_id` | — |
 | `concept_lens_failed` | diagnostic | A concept-lens attempt that failed before any provider call — retry-safe, no projection written. | — | `error_kind`, `generation`, `lens_request_id`, `request_digest` |

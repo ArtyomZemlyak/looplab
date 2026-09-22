@@ -2568,10 +2568,11 @@ def _materialize_concept_deltas(
 
 # The only fields any consumer reads off a coverage snapshot, with the shape each one is read AS:
 # `at_node`/`projection_token` gate liveness (`snapshot_matches_analytics_projection`), `fired` +
-# `directive` drive the pivot cue, `current_streak`/`recent_axis`/`locked_axis` drive
+# `directive` drive the pivot cue, `current_streak`/`current_axis` (else `recent_axis`/`locked_axis`,
+# on a row recorded before `current_axis` existed — review 2026-09-22, SCJ-10) drive
 # capability-expansion, and the rest is display/diagnostic. Anything else on the row is dropped.
 _COVERAGE_SNAPSHOT_STR = ("projection_token", "directive", "top_concept", "locked_axis",
-                          "recent_axis", "tag_mode")
+                          "recent_axis", "current_axis", "tag_mode")
 _COVERAGE_SNAPSHOT_INT = ("at_node", "experiments", "streak", "current_streak")
 _COVERAGE_SNAPSHOT_FLOAT = ("top_concept_frac",)
 _COVERAGE_SNAPSHOT_LIST = ("uncovered_key", "uncovered_axes")

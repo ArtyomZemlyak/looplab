@@ -1476,8 +1476,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The concept-coverage gate's snapshot at one node, and which of its rules fired.",
         required=(),
         optional=(
-            "at_node", "current_streak", "directive", "experiments", "fired", "locked_axis",
-            "projection_token", "recent_axis", "streak", "tag_mode", "top_concept",
+            "at_node", "current_axis", "current_streak", "directive", "experiments", "fired",
+            "locked_axis", "projection_token", "recent_axis", "streak", "tag_mode", "top_concept",
             "top_concept_frac", "uncovered_axes", "uncovered_key"
         ),
     ),

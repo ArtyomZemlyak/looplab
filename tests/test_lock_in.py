@@ -131,6 +131,55 @@ def test_capability_expansion_reverse_scans_past_a_stale_last_snapshot():
     assert capability_expansion_due(st, streak_threshold=5) == (False, None, 0)
 
 
+def test_capability_expansion_names_the_axis_the_current_streak_is_on(tmp_path):
+    """`capability_expansion_due` paired the CURRENT streak (the same-lever run ending at the latest
+    experiment) with `recent_axis` (the axis most of the last 8 experiments touch) — two different
+    axes whenever the run just moved (review 2026-09-22, SCJ-10). Here the loss lever ran 7 deep,
+    then the last node moved to dropout: the current streak is 5 on REGULARIZATION (nodes 5-9), while
+    `recent_axis` is still loss (7 of the last 8). The cue then told the Researcher "the search is
+    still confined to 'loss': 5 consecutive experiments there — do NOT propose another variant of the
+    'loss' lever", about a streak that was not on loss.
+
+    DRIVEN end to end: the engine's own snapshot producer (deterministic skeleton fallback, no
+    client) appends the row, the fold re-binds it, and the shared gate reads it back."""
+    from tests.factories import make_engine
+    from looplab.search.lock_in import capability_expansion_due
+
+    rationales = ["data augmentation", "teacher distillation from cross-encoder"]
+    rationales += ["triplet loss"] * 3                          # nodes 2-4: loss
+    rationales += ["decoupled contrastive r-drop"] * 4          # nodes 5-8: loss + regularization
+    rationales += ["dropout"]                                   # node 9: regularization only
+    engine = make_engine(tmp_path / "run", concept_pivot=True, capability_expansion=True)
+    engine.store.append("run_started", {"run_id": "t", "task_id": "dense-retrieval", "goal": "g",
+                                        "direction": "max"})
+    for i, rationale in enumerate(rationales):
+        engine.store.append("node_created", {
+            "node_id": i, "parent_ids": [], "operator": "improve",
+            "idea": {"operator": "improve", "params": {"seed": float(i)}, "rationale": rationale}})
+        engine.store.append("node_evaluated", {"node_id": i, "metric": 0.8 + i * 0.001})
+    state = engine._maybe_snapshot_concept_coverage(fold(engine.store.read_all()))
+    rows = [e.data for e in engine.store.read_all() if e.type == "concept_coverage_snapshot"]
+    assert len(rows) == 1
+    assert (rows[0]["current_streak"], rows[0]["current_axis"]) == (5, "regularization")
+    assert rows[0]["recent_axis"] == "loss" and rows[0]["locked_axis"] == "loss"
+    assert capability_expansion_due(state, streak_threshold=5) == (True, "regularization", 5)
+
+    # A snapshot recorded BEFORE the field existed carries no `current_axis`; it keeps the historical
+    # reading rather than losing the cue, so a resumed pre-fix run steers exactly as it did.
+    legacy = {key: value for key, value in rows[0].items() if key != "current_axis"}
+    state.concept_coverage_snapshots = [legacy]
+    assert capability_expansion_due(state, streak_threshold=5) == (True, "loss", 5)
+
+
+def test_the_current_streak_axis_ties_break_to_the_smaller_name(tmp_path):
+    nodes = [(f"loss-{i}", "decoupled contrastive r-drop") for i in range(6)]
+    st = fold(_store(tmp_path, nodes).read_all())
+    sig = lock_in_signal(st, dense_retrieval_skeleton())
+    # every node touches loss AND regularization: both streaks are 6, and the name tie-break pins loss
+    assert (sig["current_streak"], sig["current_axis"]) == (6, "loss")
+    assert lock_in_signal(RunState(), dense_retrieval_skeleton())["current_axis"] is None
+
+
 def test_pure_analytics_are_hash_seed_stable():
     """The order-stability invariant (no set/frozenset/dict iteration order leaking into a returned
     value) can only be caught ACROSS hash seeds — a same-process f(x)==f(x) iterates every set the SAME

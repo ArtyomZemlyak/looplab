@@ -56,7 +56,14 @@ def capability_expansion_due(state, *, streak_threshold: int) -> tuple:
         streak = int(cs.get("current_streak", 0) or 0)
     except (TypeError, ValueError):
         streak = 0
-    axis = cs.get("recent_axis") or cs.get("locked_axis")
+    # The axis the CURRENT streak is on (review 2026-09-22, SCJ-10). This read `recent_axis` — the
+    # axis most of the last few experiments touch — which is a different axis whenever the run has
+    # just moved: a 7-deep loss run followed by five regularization nodes reported "still confined to
+    # 'loss': 5 consecutive experiments", and the cue told the Researcher to stop varying a lever the
+    # streak was not on. `current_axis` is recorded beside `current_streak` by the same producer;
+    # a snapshot written before it existed falls back to the historical reading, so a resumed pre-fix
+    # run steers exactly as it did.
+    axis = cs.get("current_axis") or cs.get("recent_axis") or cs.get("locked_axis")
     return (bool(axis) and streak >= streak_threshold, axis, streak)
 
 
@@ -82,6 +89,8 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
       recent_frac      - in [0,1], share of the last `recent` experiments on `recent_axis` (narrowing NOW)
       current_streak   - the run's same-lever streak ENDING at the latest experiment (0 if the last is
                          untagged) — how locked-in the search is right now
+      current_axis     - the axis THAT streak is on (None when it is 0); on a tie the smaller axis name.
+                         Not `recent_axis`: the two differ whenever the run has just moved (SCJ-10)
     """
     nodes = experiment_nodes(state)
     if tags is None:
@@ -90,7 +99,7 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
     tagged = sum(1 for nd in nodes if tags.get(nd.id))
     base = {"experiments": n, "tagged": tagged, "locked_axis": None, "streak": 0,
             "streak_start_node": None, "fired": False, "recent_axis": None,
-            "recent_frac": 0.0, "current_streak": 0}
+            "recent_frac": 0.0, "current_streak": 0, "current_axis": None}
     if n == 0:
         return base
 
@@ -126,9 +135,11 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
                 run_start = None
 
     # current streak: the same-lever run ending at the LAST experiment (which axis it is on, extended back)
-    current = 0
+    current, current_axis = 0, None
     if axis_sets and axis_sets[-1]:
-        # pick the axis of the last node that extends furthest back
+        # pick the axis of the last node that extends furthest back — and KEEP it: the capability-
+        # expansion cue names this axis beside this length (SCJ-10). Strict `>` over sorted axes, so an
+        # equal-length tie keeps the smaller name, as every other tie in this module does.
         for ax in sorted(axis_sets[-1]):
             c = 0
             for s in reversed(axis_sets):
@@ -136,7 +147,8 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
                     c += 1
                 else:
                     break
-            current = max(current, c)
+            if c > current:
+                current, current_axis = c, ax
 
     # recent-window concentration on one axis (deterministic tie-break: most experiments, then smallest
     # axis name — Counter.most_common ties follow insertion order, which we must not depend on).
@@ -159,6 +171,7 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
         "recent_axis": recent_axis,
         "recent_frac": round(recent_count / len(win), 4) if win else 0.0,
         "current_streak": current,
+        "current_axis": current_axis,
     }
 
 

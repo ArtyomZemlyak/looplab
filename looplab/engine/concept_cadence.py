@@ -286,6 +286,11 @@ class ConceptCadenceMixin:
             # the search is STILL locked in right now, not forever after a past lock-in.
             "current_streak": lock["current_streak"],
             "recent_axis": lock["recent_axis"],
+            # …and the axis the current streak is ON, which the directive names since review
+            # 2026-09-22 (SCJ-10): `recent_axis` is a different axis whenever the run just moved, and
+            # pairing it with `current_streak` named a lever the streak was not on. Additive; a row
+            # without it keeps the historical reading (`search/lock_in.py::capability_expansion_due`).
+            "current_axis": lock["current_axis"],
             "tag_mode": mode,
         }
 
