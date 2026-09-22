@@ -946,9 +946,21 @@ class AshaMonitorMixin:
                                 return self._asha_verdict(
                                     context, monitor_log_tools(self, workdir, log_plan, log_snapshot))
 
-                            verdict = await anyio.to_thread.run_sync(
-                                _judge, abandon_on_cancel=False)
-                            judge_calls += 1
+                            # COUNTED IN `finally`, and the spend ceiling ENDS the watch (review
+                            # 2026-09-22, ENG3-02). The count was committed only after the await
+                            # returned, and the tick's blind handler swallowed a judge that raised —
+                            # so a budget-stopped judge was re-asked every tick for as long as the
+                            # rank flag held, never reaching `_MAX_ASHA_JUDGE_CALLS`. Return rather
+                            # than re-raise, for the training monitor's reason: this task shares the
+                            # eval's group, and the next paid call on the main path raises the stop.
+                            try:
+                                verdict = await anyio.to_thread.run_sync(
+                                    _judge, abandon_on_cancel=False)
+                            except BudgetExceeded:
+                                sp.set("budget_stop", True)
+                                return
+                            finally:
+                                judge_calls += 1
                         conf, confidence_valid = _normalize_monitor_confidence(
                             getattr(verdict, "confidence", None))
                         # LLM text derived from the run's own log — redact it before it lands in the
@@ -1039,5 +1051,7 @@ class AshaMonitorMixin:
                     under_streak = 0
             except anyio.get_cancelled_exc_class():
                 raise                           # cooperative cancellation — must propagate
+            except BudgetExceeded:
+                return                          # the ceiling ends the watch, never a skipped tick (ENG3-02)
             except Exception:  # noqa: BLE001 — a transient per-tick hiccup skips this tick, never disables
                 continue

@@ -2781,6 +2781,21 @@ class TrainingMonitorMixin:
             nonlocal broken_streak, armed_at, arm_looks
             broken_streak, armed_at, arm_looks = 0, None, 0
 
+        def unjudged(digest: str) -> bool:
+            """Count one UNANSWERED look at `digest` toward `_MONITOR_SAME_DIGEST_RETRIES`; True when
+            that retires it (quiet until the log actually changes). One spelling for the two ways a
+            look goes unanswered — a verdict that did not parse, and a judge that RAISED — because
+            the second used to commit nothing at all (review 2026-09-22, ENG3-02)."""
+            nonlocal failed_digest, failed_digest_tries, last_digest
+            if digest == failed_digest:
+                failed_digest_tries += 1
+            else:
+                failed_digest, failed_digest_tries = digest, 1
+            if failed_digest_tries >= _MONITOR_SAME_DIGEST_RETRIES:
+                last_digest = digest     # retire it: quiet until the log actually changes
+                return True
+            return False
+
         while True:
             await anyio.sleep(next_sleep)    # only cancellation (eval finished) unwinds the task, from here
             if cancel.is_set():
@@ -2934,9 +2949,31 @@ class TrainingMonitorMixin:
                                 monitor_tools(self, workdir, log_plan, log_snapshot),
                                 contract_text=contract_text)
 
-                        verdict = await anyio.to_thread.run_sync(
-                            _judge, abandon_on_cancel=False)
-                        llm_calls += 1
+                        # BOTH BOUNDS ARE COMMITTED IN `finally` (review 2026-09-22, ENG3-02). They
+                        # were committed only after the await RETURNED, and the tick's blind handler
+                        # below swallowed whatever did not: a judge that raised counted toward
+                        # neither `_MAX_MONITOR_LLM_CALLS` nor the same-digest retry, and was asked
+                        # again next tick — 300 times in 5 s on a frozen log in the reproduction
+                        # (`review/ENG3/budget_swallow.py`), each one a provider call.
+                        attempt = "raised"
+                        try:
+                            verdict = await anyio.to_thread.run_sync(
+                                _judge, abandon_on_cancel=False)
+                            attempt = "answered"
+                        except BudgetExceeded:
+                            # The operator's spend ceiling, not a tick hiccup: say so on this tick's
+                            # span and stop watching. RETURN, not re-raise — this watcher shares the
+                            # eval's task group, and tearing down the stage whose training the run is
+                            # already paying for is not the watchdog's decision to make. The
+                            # accountant is sticky, so the run's next paid call raises the same stop
+                            # on the main path, which is where it ends the run.
+                            attempt = "budget_stop"
+                            sp.set("budget_stop", True)
+                            return
+                        finally:
+                            llm_calls += 1
+                            if attempt == "raised" and unjudged(tail):
+                                sp.set("digest_retired", True)
                     if verdict is None:
                         # NO PARSEABLE ANSWER this tick — an endpoint failure, model output that failed
                         # schema validation (`unknown` is not a `TrainingVerdict.status`), or the
@@ -2951,12 +2988,7 @@ class TrainingMonitorMixin:
                         # Bounded same-digest retry (see `_MONITOR_SAME_DIGEST_RETRIES`): `last_digest`
                         # is otherwise committed only on a usable verdict, so an endpoint that never
                         # answers re-sent a byte-identical prompt every cadence until the LLM cap.
-                        if tail == failed_digest:
-                            failed_digest_tries += 1
-                        else:
-                            failed_digest, failed_digest_tries = tail, 1
-                        if failed_digest_tries >= _MONITOR_SAME_DIGEST_RETRIES:
-                            last_digest = tail   # retire it: quiet until the log actually changes
+                        if unjudged(tail):
                             sp.set("digest_retired", True)
                     else:
                         conf, confidence_valid = _normalize_monitor_confidence(verdict.confidence)
@@ -3276,5 +3308,10 @@ class TrainingMonitorMixin:
                             return           # won or lost, this attempt is ending — stop watching it
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation — must propagate, never be swallowed
+            except BudgetExceeded:
+                # The tick-level half of the rule above: whatever in a tick reaches the spend
+                # ceiling, it ends the watch rather than becoming a skipped tick that is re-paid on
+                # the next one (review 2026-09-22, ENG3-02).
+                return
             except Exception:  # noqa: BLE001 — a transient per-tick hiccup (disk/LLM/tracer) SKIPS this tick;
                 continue                     # it must never disable the watcher for the rest of a long eval
