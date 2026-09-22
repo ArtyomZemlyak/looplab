@@ -597,6 +597,60 @@ def test_an_unbound_metric_is_counted_and_visible_but_never_selectable(tmp_path)
     assert unbound.metric_provenance["unbound_reason"] == "not_declared"
 
 
+@pytest.mark.parametrize("host_scored", [True, False], ids=["host_scored", "candidate_scored"])
+@pytest.mark.parametrize("mode,bound,feasible", [
+    ("require", False, False),       # the enforcement: unbound under `require` is never selectable
+    ("require", True, True),         # the control: a BOUND subject is untouched by the rung
+    ("audit", False, True),          # `audit` records and does not enforce
+])
+def test_the_terminal_enforces_require_on_every_scored_node_not_only_host_scored_ones(
+        tmp_path, host_scored, mode, bound, feasible):
+    """Review 2026-09-22, ENG2-03: the `require` row was minted only inside the terminal's
+    `if isinstance(_host_prov, dict)` branch, so a node scored by its OWN command (no host scorer —
+    the shape of every task that has not declared one) with an unbound subject kept its metric AND
+    stayed in `feasible_nodes()`. Driven through `_evaluate` itself — the one `node_evaluated` writer
+    — and then a real fold, because "the row is minted" is only interesting if selection reads it."""
+    import anyio
+
+    from factories import make_engine
+    from looplab.runtime.command_eval import RunResult
+
+    engine = make_engine(tmp_path / "run")
+    engine.metric_subject = mode
+    engine.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": "r"}, "code": "print(1)"})
+    subject = ({"subject_bound": True, "subjects": [{"path": "out/model.bin"}]} if bound
+               else {"subject_bound": False, "unbound_reason": "not_declared", "subjects": []})
+
+    def fake_run_eval(node, workdir, env=None, profile=None, cancel=None, start_stage=None):
+        res = RunResult(exit_code=0, stdout='{"metric": 0.99}', metric=0.99, timed_out=False,
+                        stderr="")
+        res.metric_subject = dict(subject)
+        if host_scored:
+            res.host_scorer = {"argv": ["python", "score.py"], "program": "score.py"}
+        return res
+
+    engine._run_eval = fake_run_eval
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    st = fold(engine.store.read_all())
+    node = st.nodes[0]
+    # counted and visible either way: the rung never costs a node its terminal or its number
+    assert node.status == "evaluated" and node.metric == 0.99
+    assert node.feasible is feasible
+    assert ([n.id for n in st.feasible_nodes()] == [0]) is feasible
+    names = [v.get("name") for v in (node.violations or [])]
+    if feasible:
+        assert names == []
+    else:
+        # the EXISTING vocabulary, with the condition that says which of the two claims it is
+        assert names == [SALVAGE_VIOLATION]
+        assert node.violations[0]["salvage"]["condition"] == "metric_subject_unbound"
+    # the subject record rides on provenance in every cell, host-scored or not
+    assert node.metric_provenance["subject_bound"] is bound
+    assert ("host_scorer" in node.metric_provenance) is host_scored
+
+
 def test_the_record_is_additive_so_a_log_with_no_provenance_still_folds(tmp_path):
     """Invariant #5, and it is not optional here: EVERY existing run's log has no provenance."""
     from looplab.events.eventstore import EventStore

@@ -4408,6 +4408,29 @@ class EvaluateMixin:
                 if isinstance(_subject_prov, dict):
                     _eval_payload["metric_provenance"] = {
                         **(_eval_payload.get("metric_provenance") or {}), **_subject_prov}
+                # THE ENFORCEMENT, under `require`: an UNBOUND metric gets the EXISTING
+                # `metric_salvaged` violation row, so the fold's `feasible = not violations`
+                # keeps it out of `feasible_nodes()` — counted, in the budget, in the UI and
+                # the lineage, and never champion and never bred from. A provenance field
+                # alone would satisfy "the selection path CAN tell" and not "does": nothing
+                # on that path reads an unknown event key. No second exclusion vocabulary is
+                # minted — see `unbound_subject_violation_rows` for why the row is the same
+                # name and what a new slug would silently cost.
+                #
+                # ON EVERY SCORED NODE, and not inside the host-scorer branch below, where it
+                # sat until review 2026-09-22 (ENG2-03): there it fired only for a node whose
+                # number a HOST scorer produced, so a node scored by its own command with an
+                # unbound subject — every task that declares no host scorer — kept its metric
+                # AND its place in `feasible_nodes()` under the very rung that exists to refuse
+                # it. The subject record is set on every eval-spec path that reads a metric
+                # (`eval_dispatch.py` records the absent declaration itself), and a path with no
+                # record — a toy/dataset eval, the `off` rung — reaches here with None, which
+                # `unbound_subject_violation_rows` answers with no row.
+                _eval_payload["violations"] = (
+                    list(_eval_payload["violations"])
+                    + unbound_subject_violation_rows(
+                        _subject_prov, a.res.metric,
+                        str(getattr(self, "metric_subject", "audit") or "audit")))
                 # THE HOST SCORER'S RECEIPT (doc 52 row 10a) — WHAT PRODUCED the number, beside
                 # what it is ABOUT: `{argv, program, program_sha256, program_size}`, digested at
                 # the score stage's start, merged onto the same provenance dict for the reason
@@ -4418,19 +4441,6 @@ class EvaluateMixin:
                     _eval_payload["metric_provenance"] = {
                         **(_eval_payload.get("metric_provenance") or {}),
                         "host_scorer": _host_prov}
-                    # THE ENFORCEMENT, under `require`: an UNBOUND metric gets the EXISTING
-                    # `metric_salvaged` violation row, so the fold's `feasible = not violations`
-                    # keeps it out of `feasible_nodes()` — counted, in the budget, in the UI and
-                    # the lineage, and never champion and never bred from. A provenance field
-                    # alone would satisfy "the selection path CAN tell" and not "does": nothing
-                    # on that path reads an unknown event key. No second exclusion vocabulary is
-                    # minted — see `unbound_subject_violation_rows` for why the row is the same
-                    # name and what a new slug would silently cost.
-                    _eval_payload["violations"] = (
-                        list(_eval_payload["violations"])
-                        + unbound_subject_violation_rows(
-                            _subject_prov, a.res.metric,
-                            str(getattr(self, "metric_subject", "audit") or "audit")))
                 # THE COMPARABILITY KEY — what this number may be RANKED AGAINST. Merged onto the
                 # same `metric_provenance` dict as the subject, for the reason recorded one branch
                 # up: the fold ignores unknown TOP-LEVEL keys, so a second event key would be
