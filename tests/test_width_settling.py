@@ -137,3 +137,49 @@ def test_an_operator_control_settles_through_the_shared_rule(tmp_path):
     state.budget_overrides = {"eval_parallel": 9999}
     engine._apply_control_overrides(state)
     assert engine._eval_parallel == 1, "an out-of-range width must be refused, not clamped"
+
+
+# ------------------------------------------------------------------ the broker's own copy of the rule
+
+# `(raw, the broker total after it, starting from 4)` — written out rather than derived from
+# `settle_width`, so a drift in EITHER spelling is red here instead of cancelling out.
+_BROKER_TABLE = [
+    (True, 4), (False, 4), (2.5, 4), (float("nan"), 4), (float("inf"), 4),   # poison: untouched
+    (65, 4), (-1, 4), (None, 4), ("x", 4), ([], 4),                          # out of range / junk
+    (0, 1),                                  # a LIVE zero is the serial floor, never AUTO
+    (1, 1), (64, 64), (3.0, 3), ("8", 8),
+]
+
+
+@pytest.mark.parametrize("raw,expected", _BROKER_TABLE)
+def test_the_broker_total_settles_by_the_one_rule(tmp_path, raw, expected):
+    """Review 2026-09-22, ENG1-10: `_reconfigure_llm_broker` wrote `settle_width` out a fifth time
+    (the bool, the non-integral float, the int() failure, the `0 <= v <= 64` refusal, the `max(1,
+    …)` floor). It now calls `settle_width(value, LLM_WIDTH_MAX)`. The table is the proof that the
+    live broker behaves identically: it passed against the inline copy before the change and
+    passes against the shared rule after it, for every poison value the review named."""
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "run")
+    engine._reconfigure_llm_broker(4)
+    assert engine._llm_broker.snapshot()["total"] == 4
+    engine._reconfigure_llm_broker(raw)
+    assert engine._llm_broker.snapshot()["total"] == expected
+    # …and the rule the broker applies is the shared one, value for value.
+    settled = settle_width(raw, LLM_WIDTH_MAX)
+    assert expected == (4 if settled is None else settled)
+
+
+@pytest.mark.parametrize("raw,expected", _BROKER_TABLE)
+def test_a_poison_value_never_builds_a_broker_from_nothing(tmp_path, raw, expected):
+    """The other branch: with NO broker yet, a refused value must leave it absent rather than
+    building one at some default total."""
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "run")
+    engine._llm_broker = None
+    engine._reconfigure_llm_broker(raw)
+    if settle_width(raw, LLM_WIDTH_MAX) is None:
+        assert engine._llm_broker is None
+    else:
+        assert engine._llm_broker.snapshot()["total"] == expected

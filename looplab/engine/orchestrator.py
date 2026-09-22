@@ -1458,7 +1458,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             speculation_depth)
         # Keep a settled, bounded scalar for the Layer-5 producer/consumer seam. Zero is a hard
         # off-switch; no task group/request event is allowed to infer a non-zero depth from hardware.
-        self.speculation_depth = max(0, min(64, int(speculation_depth or 0)))
+        self.speculation_depth = max(0, min(LLM_WIDTH_MAX, int(speculation_depth or 0)))
         self.speculation_gate_receipt = (
             str(Path(speculation_gate_receipt).expanduser().resolve())
             if speculation_gate_receipt is not None else None
@@ -1517,7 +1517,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # with or without a total, because the producers they bound (both live-log watchdogs, per eval)
         # multiply with the eval width, which AUTO is precisely what derives from the box.
         try:
-            _startup_llm_total = (min(64, int(_llm_parallel_opt))
+            _startup_llm_total = (min(LLM_WIDTH_MAX, int(_llm_parallel_opt))
                                   if _llm_parallel_opt is not None
                                   and int(_llm_parallel_opt) > 0 else None)
         except (TypeError, ValueError, OverflowError):
@@ -6581,7 +6581,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # eagerly instantiate >64 wired role pairs); the operator budget-override path is otherwise
         # unvalidated. The explicit Settings/Strategist paths are already bounded 0..64.
         resolved = self._eval_parallel if value == 0 else value
-        return min(64, max(1, resolved))
+        return min(LLM_WIDTH_MAX, max(1, resolved))
 
     def _resolve_speculation_depth(self, value) -> tuple[int, bool]:
         """Resolve startup ``speculation_depth`` to a settled backlog cap plus its AUTO flag.
@@ -6644,26 +6644,22 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # here rather than silently adopting it into a policy or a role set the treatment was
             # never measured on.
             return 0, False
-        return min(64, max(1, int(self._eval_parallel))), True
+        return min(LLM_WIDTH_MAX, max(1, int(self._eval_parallel))), True
 
     def _reconfigure_llm_broker(self, value) -> None:
         """Apply one live canonical total without replacing a broker held by active borrowers."""
-        if isinstance(value, bool):
+        # THE ONE SETTLING RULE, not a fifth spelling of it (review 2026-09-22, ENG1-10): this body
+        # wrote out `widths.py::settle_width` clause for clause — the bool, the non-integral or
+        # non-finite float, the `int()` failure, the `0..64` refusal and the `max(1, …)` floor —
+        # which is exactly how the four control-path copies had drifted before they were folded
+        # (`tests/test_width_settling.py`). Live Strategist/operator zero is a finite safety floor
+        # (1), not startup AUTO: that matches the canonical runtime contract and avoids surprising
+        # GPU-count re-resolution. This method is also a defensive resume boundary for manually-
+        # constructed or forward-version state, so an invalid/huge value is REFUSED (None) and
+        # never turned into a different valid paid-call cap.
+        total = settle_width(value, LLM_WIDTH_MAX)
+        if total is None:
             return
-        if isinstance(value, float) and (
-                not math.isfinite(value) or not value.is_integer()):
-            return
-        try:
-            # Live Strategist/operator zero is a finite safety floor (1), not startup AUTO. This
-            # matches the canonical runtime contract and avoids surprising GPU-count re-resolution.
-            raw_total = int(value)
-        except (TypeError, ValueError, OverflowError):
-            return
-        # this method is also a defensive resume boundary for manually-constructed or
-        # forward-version state. Never turn an invalid/huge value into a different valid paid-call cap.
-        if not 0 <= raw_total <= 64:
-            return
-        total = max(1, raw_total)
         broker = getattr(self, "_llm_broker", None)
         if broker is None:
             self._llm_broker = LLMConcurrencyBroker(
