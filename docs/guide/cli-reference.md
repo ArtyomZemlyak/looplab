@@ -984,7 +984,9 @@ eval occupancy (from events.jsonl, not spans):
 **The bootstrap is separated and that is the whole point.** No run can evaluate before its first
 build finishes, so that stretch is not a starved lane — and folding it into one percentage is how
 the same question got two wrong answers on this box before this block existed. `dead` is a share of
-the span **since the first evaluation began**, never of the whole run.
+the span **since the first evaluation began**, never of the whole run. An evaluation interval is one
+node LIFECYCLE — `(node_id, generation)` — so a node reset and re-evaluated counts busy twice rather
+than having its second evaluation reported as dead time (fixed 2026-09-22).
 
 Measured across the two runs here, same engine and the same `eval_parallel: 2`:
 
