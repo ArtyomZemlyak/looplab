@@ -136,3 +136,19 @@ def test_a_shell_or_a_tool_in_the_probe_tree_is_not_the_engine(tmp_path):
 def test_a_process_outside_the_probe_tree_is_ignored(tmp_path):
     proc, aff = _fake_proc(tmp_path, {11: ("/opt/conda/bin/python -m looplab.cli run /tmp/x", {11})})
     assert ruler_selfcheck.probes_alive_outside_lane(proc, aff, mine={0, 1}) == 0
+
+
+def test_a_box_that_cannot_read_affinity_answers_none_rather_than_crashing(monkeypatch, tmp_path):
+    """`None` is these readers' word for "not answerable here", and a box with no affinity API or no
+    /proc is exactly that box. Windows has neither, and the default spelling raised AttributeError
+    there instead (review 2026-09-22, WIN-RULER; measured on the Windows CI leg as the crash of
+    `test_a_probe_on_our_own_lane_is_not_a_neighbour`). Driven here by taking the API away."""
+    import os
+
+    monkeypatch.delattr(os, "sched_getaffinity", raising=False)
+    assert ruler_selfcheck.probes_alive_outside_lane() is None
+    assert ruler_selfcheck.busy_cpus_outside_lane_set() is None
+    assert ruler_selfcheck.busy_cpus_outside_lane() is None
+    # ...and a box whose affinity is readable but which has no process table to walk.
+    assert ruler_selfcheck.probes_alive_outside_lane(
+        proc=str(tmp_path / "no-proc"), affinity=lambda _pid: {0, 1}) is None

@@ -204,7 +204,14 @@ def probes_alive_outside_lane(proc: str = "/proc", affinity=None, mine=None) -> 
     # INJECTABLE, for `lanes.probes`' reason: the scan is only testable against a fake `/proc`, and
     # the two mutations that matter -- counting our own probe as a neighbour, and counting a shell
     # or a tool as the engine -- cannot go red without one.
-    affinity = affinity or os.sched_getaffinity
+    #
+    # A BOX WITH NO AFFINITY API OR NO /proc CANNOT ANSWER, and `None` is this function's word for
+    # that. Windows has neither: the default spelling raised AttributeError there (review
+    # 2026-09-22, WIN-RULER, measured on the Windows CI leg), which turned "not answerable here"
+    # into a crash of the self-check that records it.
+    affinity = affinity or getattr(os, "sched_getaffinity", None)
+    if affinity is None:
+        return None
     try:
         mine = affinity(0) if mine is None else mine
     except OSError:
@@ -213,7 +220,11 @@ def probes_alive_outside_lane(proc: str = "/proc", affinity=None, mine=None) -> 
         return None
     root = f"{BENCH}/model-probes"
     alive = 0
-    for pid in sorted(os.listdir(proc)):
+    try:
+        pids = sorted(os.listdir(proc))
+    except OSError:
+        return None
+    for pid in pids:
         if not pid.isdigit():
             continue
         try:
@@ -389,6 +400,8 @@ def busy_cpus_outside_lane_set() -> set | None:
     held perfectly. With the set, the claim is testable directly: the idle child's own CPUs must not
     appear, whatever else the box is doing.
     """
+    if not hasattr(os, "sched_getaffinity"):
+        return None        # no affinity API (Windows): not answerable here -- see the note below
     try:
         mine = os.sched_getaffinity(0)
         total = os.cpu_count() or 0
