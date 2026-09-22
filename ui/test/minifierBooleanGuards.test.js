@@ -124,3 +124,24 @@ test('the emitted-chunk check accepts a build that kept its booleans and refuses
   // `!0` inside an identifier or a longer numeric literal is not a boolean and must not rescue it.
   assert.equal(findIntegerBooleanChunks(new Map([['assets/a.js', 'let o=0;if(a!==!05)x();']])).length, 1)
 })
+
+// The shipped build of 2026-09-22 has 46 JS chunks, and three of them — a 261-byte payload validator
+// among them — have NO boolean in their source, so they carry no `!0`/`!1` in the correct build
+// either. Per-chunk, that read as "this chunk was rewritten" and held CI red over a correct build.
+// The option is build-global, so the evidence is too: one chunk that kept its booleans clears the
+// build, and a build where none did names every chunk.
+test('a boolean-free helper chunk beside a chunk that kept its booleans is not a rewrite', () => {
+  const helper = 'var e=()=>{throw Error(`Invalid panel payload`)},i=15e3;export{e as r,i as t};'
+  assert.deepEqual(findIntegerBooleanChunks(new Map([
+    ['assets/app.js', 'let o=!1;o&&x();'], ['assets/helper.js', helper],
+  ])), [])
+
+  // CONTROL: the same build with the app chunk rewritten has no evidence of a kept boolean anywhere,
+  // and every JS chunk is named — the helper included, since nothing in the build vouches for it.
+  const violations = findIntegerBooleanChunks(new Map([
+    ['assets/app.js', 'let o=0;o&&x();'], ['assets/helper.js', helper], ['assets/s.css', '.a{}'],
+  ]))
+  assert.deepEqual(violations.map(v => v.code), ['integer_booleans', 'integer_booleans'])
+  assert.match(violations[0].message, /assets\/app\.js/)
+  assert.match(violations[1].message, /assets\/helper\.js/)
+})

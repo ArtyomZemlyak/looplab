@@ -140,7 +140,10 @@ def test_a_torn_final_line_is_not_a_divergence_and_still_costs_nothing(tmp_path,
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX mode bits")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file anyway")
+# `hasattr` first: skipif conditions are evaluated at IMPORT time, so an unguarded `os.geteuid()`
+# (POSIX-only) crashed COLLECTION on Windows even with the platform skip right above it.
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads a mode-000 file anyway")
 def test_a_log_we_could_not_read_refuses_instead_of_reading_as_healthy(tmp_path):
     """`read_all` treats an OSError on the region read as "no new bytes", so an unreadable log looks
     exactly like an empty one from the cache alone — and `cli::log_integrity_from` would then print

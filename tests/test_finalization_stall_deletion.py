@@ -19,7 +19,10 @@ call was made; every case reads what the run's record and the HTTP answer actual
 """
 from __future__ import annotations
 
-import fcntl
+try:  # POSIX-only; only `_HeldEngineLock` needs it, so its absence skips THAT fixture, not the
+    import fcntl  # module — `test_stalled_finalization_affordance.py` imports a helper from here.
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 import os
 import uuid
 from pathlib import Path
@@ -113,6 +116,8 @@ class _HeldEngineLock:
         self._fd = None
 
     def __enter__(self):
+        if fcntl is None:
+            pytest.skip("flock is POSIX-only; the engine-lock liveness fixture cannot be held here")
         self._fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

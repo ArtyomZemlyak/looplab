@@ -12,9 +12,19 @@ on:
   pull_request:
 
 jobs:
+  # FOUR SHARDS, not one process. This job used to run the whole suite in ONE `python -m pytest`
+  # under `timeout-minutes: 20`, and the suite outgrew that ceiling: on 2026-09-18 (run 1961) it
+  # was CANCELLED at 20:00 having reached 63 % — and every master push back to at least 2026-08-04
+  # (run 1260) ended red the same way. A gate that cannot pass is a gate nobody reads, so for seven
+  # weeks the only evidence a push was sound was a local run. The Windows leg below already shards
+  # the same way; `--splits`/`--group` are pytest-split's (a `[dev]` dependency).
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,7 +39,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e ".[dev,ui]"
-      - run: python -m pytest
+      - run: python -m pytest --splits 4 --group ${{ matrix.group }}
 
   # A small second platform leg is deliberate: subprocess/path/locking behavior is materially
   # different on Windows, and Linux-only CI previously missed both a path assertion and a network

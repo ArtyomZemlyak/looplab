@@ -89,6 +89,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import sys
 from typing import Iterable, Optional
 
 # syscall numbers, x86_64/aarch64 (the only architectures this engine runs on). Landlock's three
@@ -223,7 +224,15 @@ def abi_version() -> Optional[int]:
 
     `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` is the documented probe and
     it allocates nothing, so this is safe to call anywhere (the CLI check, a test skip guard).
+
+    OFF LINUX THE ANSWER IS None BEFORE ANY libc IS TOUCHED. "Safe to call anywhere" was false on
+    Windows: `ctypes.CDLL(None)` there raises `TypeError` (it tests the name for a path separator),
+    which no clause below catches — so the four test modules that compute a skip reason from this
+    at import time crashed pytest COLLECTION, and every Windows CI shard stopped at "8 errors during
+    collection" having run zero tests. Landlock is a Linux LSM; asking a libc elsewhere is the bug.
     """
+    if not sys.platform.startswith("linux"):
+        return None
     try:
         lib = _libc()
         rc = lib.syscall(ctypes.c_long(_SYS_LANDLOCK_CREATE_RULESET), None,
@@ -240,6 +249,8 @@ def unavailable_reason() -> Optional[str]:
     ABI too old for the bits we grant, and `no_new_privs` unset (which `restrict_self` requires and
     which we set ourselves in the child, so it is informational rather than fatal).
     """
+    if not sys.platform.startswith("linux"):
+        return f"Landlock is a Linux LSM and this platform is {sys.platform!r}"
     abi = abi_version()
     if abi is None:
         return ("this kernel has no Landlock support (landlock_create_ruleset returned no version); "

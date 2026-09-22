@@ -273,7 +273,9 @@ def test_a_destination_that_cannot_hold_a_lock_file_is_a_failure_not_a_skip(tmp_
     _assert_it_refused_without_claiming_busy(r, dest)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the write bit, so there is no refusal")
+# `hasattr` first: an unguarded `os.geteuid()` in a decorator crashes COLLECTION off POSIX.
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores the write bit, so there is no refusal")
 def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
     """THE PERMISSION SPELLING of the same rung — kept, but no longer the only one.
 
