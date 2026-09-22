@@ -26,7 +26,7 @@ import orjson
 
 from looplab.core.atomicio import atomic_write_bytes
 from looplab.core.llm import inferred_priced_calls
-from looplab.events.types import EV_LLM_USAGE
+from looplab.events.types import EV_LLM_COST, EV_LLM_USAGE
 
 
 _MAX_COUNTER = (1 << 63) - 1
@@ -451,6 +451,55 @@ def _event_usage_deltas(events: Iterable[object]) -> dict[str, dict[str, int | f
     return deltas
 
 
+def persisted_usage_deltas(events: Iterable[object]) -> list[dict[str, int | float]]:
+    """What the durable ledger says this run already spent, as the deltas a RESUME must count.
+
+    THE FOLD'S RULE, spelled once for the engine (review 2026-09-22, CORE-01). The two seeders below
+    used to read the same rows two different ways, and neither agreed with `fold`: on a log holding
+    one row appended twice under the same `usage_id` (outbox recovery after a crash between the
+    append and the forget) plus one legacy id-less row, `seed_prior_spend` charged the accountants
+    $0.70 (every row, no dedupe), `seed_run_budget` committed $0.20 (id-bearing rows only) and the
+    fold — what `inspect`, the UI and the budget summary report — said $0.50. The ceiling a resumed
+    run enforced was therefore neither the number it showed nor the same number twice.
+
+    `events/replay.py::_on_llm_usage` / `_on_llm_cost` are the rule, and this mirrors them:
+
+      * a row with a `usage_id` counts ONCE, the first time it is seen (the id is the physical
+        call's identity; a repeat is the same call re-recorded, not a second call);
+      * a row without one (a log written before ids existed) counts every time;
+      * the latest legacy `llm_cost` SUMMARY seen before the first usage row is the base — a
+        pre-ledger log has nothing else — and every summary after it is a derived snapshot the
+        fold ignores, so this does too.
+
+    `tests/test_resume_spend_seeding.py` holds this to `fold(...).llm_cost` over generated logs, so
+    the mirror cannot drift away from the rule it copies (the fold is incremental per event and
+    cannot call a batch function; `events` may not import `engine`).
+    """
+    deltas: list[dict[str, int | float]] = []
+    base: dict[str, int | float] | None = None
+    usage_seen = False
+    seen_ids: set[str] = set()
+    for event in events:
+        kind = getattr(event, "type", None)
+        data = getattr(event, "data", None)
+        if not isinstance(data, dict):
+            data = {}
+        if kind == EV_LLM_COST:
+            if not usage_seen:
+                base = sanitize_usage_delta(data)
+            continue
+        if kind != EV_LLM_USAGE:
+            continue
+        usage_seen = True
+        usage_id = data.get("usage_id")
+        if isinstance(usage_id, str) and usage_id:
+            if usage_id in seen_ids:
+                continue
+            seen_ids.add(usage_id)
+        deltas.append(sanitize_usage_delta(data))
+    return ([base] if base is not None else []) + deltas
+
+
 # TWO SEEDERS, KEPT APART ON PURPOSE. `seed_prior_spend` (this branch) charges the resumed run's
 # ACCOUNTANTS for what the events already record; `seed_run_budget` (master) seeds the reserve-commit
 # BUDGET from the same rows. Different objects, both idempotent through their own flags -- but they
@@ -487,19 +536,8 @@ def seed_prior_spend(engine: object) -> float:
         events = list(read_all())
     except Exception:  # noqa: BLE001 - an unreadable log must not stop a run from starting
         return 0.0
-    prior = 0.0
-    for event in events:
-        if getattr(event, "type", None) != EV_LLM_USAGE:
-            continue
-        data = getattr(event, "data", None)
-        if not isinstance(data, dict):
-            continue
-        try:
-            cost = float(data.get("cost") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if cost > 0:
-            prior += cost
+    # The fold's reading of the ledger, not a third one — see `persisted_usage_deltas`.
+    prior = sum(float(delta["cost"]) for delta in persisted_usage_deltas(events))
     if prior <= 0:
         return 0.0
     seeded = 0.0
@@ -539,10 +577,13 @@ def seed_run_budget(engine: object) -> bool:
     if budget is None or store is None or getattr(budget, "seeded", True):
         return False
     try:
-        persisted = _event_usage_deltas(store.read_all())
+        # The fold's reading, the same one `seed_prior_spend` charges the accountants with: the id-
+        # keyed map below (`_event_usage_deltas`) is the OUTBOX's question — "is this exact call
+        # durable?" — and it drops every id-less legacy row, which a budget must still count.
+        persisted = persisted_usage_deltas(store.read_all())
     except Exception:  # noqa: BLE001 — an unreadable log is the resume path's own refusal, not the budget's
         return False
-    return bool(budget.seed(persisted.values()))
+    return bool(budget.seed(persisted))
 
 
 def adopt_accountant_ceilings(engine: object, accountants: Iterable[object]) -> None:
