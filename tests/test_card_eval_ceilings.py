@@ -8,6 +8,11 @@ cancelled scope. `tests/test_budget_ceiling_drains_the_inflight_eval.py` drives 
 a host; here it is driven through a real `Engine.run` in Card mode, and the admission half — no new
 evaluation while a deferred stop is held — through the real session.
 
+ENG2-05 — THE EVAL-SECOND CEILING. `_dispatch_evals` reserves each lane's worst-case charge before
+it starts (`resources.py::eval_time_admission_blocked`), but the Card session's admission never
+asked, so N speculative lanes could each start on the last second of `max_eval_seconds` — the exact
+"a ceiling times N" the reservation was built to refuse, on the path speculation runs.
+
 Tier 1 in CLAUDE.md's ladder throughout: a real `Engine`, real Cards, real admission and real
 `node_eval_started` rows. The only sentinel is `_evaluate`, as in every Card refill test.
 """
@@ -119,3 +124,69 @@ def test_a_held_spend_ceiling_admits_no_new_evaluation(tmp_path, monkeypatch):
     assert admitted == [] and _started(engine) == [], (
         "a new evaluation was admitted while a captured spend ceiling was waiting to be raised")
 
+
+# --------------------------------------------------------------------------- ENG2-05
+
+@pytest.mark.parametrize("max_es,second_admitted", [
+    (61.0, False),     # one 60 s lane in flight leaves 1 s: the second lane cannot be covered
+    (500.0, True),     # the control: two worst cases fit, so the refusal above is the allowance's
+])
+def test_a_card_session_reserves_eval_time_and_refuses_a_lane_the_allowance_cannot_cover(
+        tmp_path, monkeypatch, max_es, second_admitted):
+    engine, _producer = _engine(tmp_path / f"card-time-{int(max_es)}", depth=2)
+    engine._eval_parallel = 2
+    engine.timeout = 60.0                       # one lane's worst-case charge
+    _start(engine)
+    _three_ready_cards(engine)
+    _without_research(monkeypatch, engine)
+    admitted: list[int] = []
+    reserved_at_entry: list[float] = []
+    release = anyio.Event()
+
+    async def _held_eval(node_id, _limiter, _max_es):
+        admitted.append(node_id)
+        reserved_at_entry.append(engine._reserved_eval_seconds())
+        with anyio.move_on_after(20):
+            await release.wait()
+        _terminalize(engine, node_id)
+
+    monkeypatch.setattr(engine, "_evaluate", _held_eval)
+    observed: dict = {}
+
+    async def _outer_loop():
+        async with anyio.create_task_group() as eval_tg:
+            engine._eval_task_group = eval_tg
+
+            async def _observe():
+                # Wait until a SECOND node is ready beside the running first one, give the session
+                # several turns to admit it, then record what it decided and let the lane settle.
+                with anyio.move_on_after(15):
+                    while len(fold(engine.store.read_all()).pending_nodes()) < 2:
+                        await anyio.sleep(0.02)
+                    await anyio.sleep(1.2)
+                observed["admitted"] = list(admitted)
+                observed["reserved"] = engine._reserved_eval_seconds()
+                release.set()
+
+            eval_tg.start_soon(_observe)
+            with anyio.move_on_after(25):
+                for _turn in range(8):
+                    await engine._run_card_session([], fold(engine.store.read_all()), max_es)
+                    if release.is_set() and not engine._eval_inflight:
+                        break
+            release.set()
+
+    anyio.run(_outer_loop)
+
+    assert observed and observed["admitted"], f"the precondition never happened: {observed}"
+    if second_admitted:
+        assert len(observed["admitted"]) == 2, observed
+    else:
+        assert observed["admitted"] == observed["admitted"][:1], (
+            f"a second lane started on the last second of the allowance: {observed}")
+        assert observed["reserved"] == 60.0
+    assert reserved_at_entry[0] == 60.0, (
+        "the first lane must enter holding its own worst-case charge, taken at admission")
+    # released on settle, in `_card_eval_one`'s `finally`: a leaked reservation stops the run
+    # admitting anything for the rest of its life
+    assert engine._eval_time_reservations == {}

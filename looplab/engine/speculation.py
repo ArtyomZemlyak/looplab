@@ -2565,6 +2565,12 @@ class SpeculationMixin:
             # does not currently have.  Driven by
             # `test_two_terminals_in_one_window_owe_one_turn_and_still_refill_every_freed_slot`.
             self._eval_boundary_owed = True
+            # The eval-second allowance this lane committed at admission (ENG2-05) goes back FIRST,
+            # before the inflight entry and the wake-up below: the next admission fill asks whether
+            # one more lane fits, and it must ask with this lane's worst case already handed back —
+            # its REAL cost is in the log by now and `total_eval_seconds` charges it.
+            from looplab.engine.orchestrator import _release_eval_time
+            _release_eval_time(self, node_id, generation)
             if reservation is not None:
                 self._clear_eval_resource_reservation(node_id, generation)
                 self._release_gpus(reservation.get("gpu_ids"))
@@ -2846,6 +2852,18 @@ class SpeculationMixin:
                         session.progressed = True
                         selection_changed = True
                     break
+            # THE EVAL-SECOND ALLOWANCE, asked here exactly as `_dispatch_evals` asks it (review
+            # 2026-09-22, ENG2-05): the SAME `orchestrator.py::_eval_time_admission_refused` over the
+            # same in-flight reservation ledger. This path used to ask nothing, so with one second of
+            # `max_eval_seconds` left every free speculative lane read "there is time" and started —
+            # the "ceiling times N" `resources.py::eval_time_admission_blocked` was written to refuse,
+            # on the path speculation runs. The first lane with nothing in flight is still admitted
+            # whatever its worst case (that rule's deadlock guard). Deferred import: the helpers live
+            # beside the dispatcher that owns them, and this mixin is imported by the orchestrator.
+            from looplab.engine.orchestrator import _eval_time_admission_refused
+            if _eval_time_admission_refused(self, current, chosen, session.max_eval_seconds):
+                self._release_gpus(reservation.get("gpu_ids"))
+                break
             if not session.research_spawned:
                 # Latch on the SPAWN, never on the ask. `_spawn_research` answers "was research due
                 # AND started?", and a session that asked at n=1 and got NO (as it did under the
@@ -2869,6 +2887,12 @@ class SpeculationMixin:
             # `_record_eval_start_boundary`).
             self._record_eval_start_boundary(chosen)
             session.eval_inflight.add((chosen.id, chosen.attempt))
+            # …and the TIME this lane will charge, committed at the admission decision so the NEXT
+            # fill of this loop is asked against it (ENG2-05). Taken after the durable boundary, so
+            # a store error there cannot leak it; released in `_card_eval_one`'s `finally` beside
+            # the devices, or on the failed-spawn path below, where nothing ran to release it.
+            from looplab.engine.orchestrator import _release_eval_time, _reserve_eval_time
+            _reserve_eval_time(self, chosen.id, chosen.attempt, chosen)
             try:
                 # The RUN-scoped group (`session.eval_task_group`), not the session-owned one.
                 # `_record_eval_start_boundary` above is unchanged and still runs HERE, on the main
@@ -2879,6 +2903,7 @@ class SpeculationMixin:
                     session.max_eval_seconds,
                 )
             except BaseException:
+                _release_eval_time(self, chosen.id, chosen.attempt)
                 session.eval_inflight.discard((chosen.id, chosen.attempt))
                 self._clear_eval_resource_reservation(
                     chosen.id, chosen.attempt,
