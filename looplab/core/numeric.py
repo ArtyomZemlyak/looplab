@@ -1,4 +1,5 @@
-"""Shared numeric primitives: the median, the numeric subset of a param dict, and the IDW k-NN core.
+"""Shared numeric primitives: the median, the numeric subset of a param dict, the IDW k-NN core,
+and the human SIZE grammar (`parse_mem_bytes` / `size_bytes_or_error`, see the block above them).
 
 Neither has anything to do with the event log, yet both lived in `events/digest.py` (doc 25 XP-12),
 and `runtime/proxy.py` imported `events` for the sole purpose of reaching a math function — the one
@@ -87,3 +88,66 @@ def euclidean(a: dict, b: dict, keys) -> float:
     silently change what `knn_idw` weights.
     """
     return math.sqrt(sum((a[key] - b[key]) ** 2 for key in keys))
+
+
+# THE HUMAN SIZE GRAMMAR ("8g", "512m", "1073741824", 4096), in core since review 2026-09-22 (CORE-05)
+# because two layers must read it the SAME way: `core/config.py::Settings` REFUSES a size it cannot
+# read, and `runtime/sandbox.py` (which re-exports `parse_mem_bytes`) ENFORCES what it reads. Before,
+# only the runtime read it — after `Settings` had accepted anything — and an unreadable value such as
+# `sandbox_memory_local="8GB"` (docker's own spelling) turned the RLIMIT_AS host-OOM guard OFF with no
+# word anywhere. Suffixes k/m/g/t are powers of 1024, matching `docker run --memory`; case and
+# surrounding whitespace are ignored. Deliberately NOT widened to "gb"/"gib": a spelling this grammar
+# does not read is refused where the operator typed it, not silently reinterpreted.
+_SIZE_UNITS = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3, "t": 1024 ** 4}
+
+
+def size_bytes_or_error(spec) -> int:
+    """STRICT: the byte count `spec` names — 0 for an explicit OFF (`None`, `""`, `0`) — or
+    ValueError for anything that is not a size under the grammar above: an unknown suffix ("8GB",
+    "2 GiB"), a negative, a non-finite or overflowing value, words."""
+    if spec is None:
+        return 0
+    if isinstance(spec, (int, float)):
+        # `int(True)` was always 1 here; kept so the tolerant reader below stays byte-identical.
+        if isinstance(spec, float) and not math.isfinite(spec):
+            raise ValueError(f"{spec!r} is not a finite size")
+        n = int(spec)
+        if n < 0:
+            raise ValueError(f"{spec!r} is a negative size")
+        return n
+    s = str(spec).strip().lower()
+    if not s:
+        return 0
+    mult = 1
+    if s[-1] in _SIZE_UNITS:
+        mult = _SIZE_UNITS[s[-1]]
+        s = s[:-1].strip()
+    try:
+        value = float(s) * mult
+    except ValueError:
+        raise ValueError(
+            f"{spec!r} is not a size: use a byte count or a k/m/g/t suffix, e.g. '8g'") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{spec!r} is not a finite size")
+    if value < 0:
+        raise ValueError(f"{spec!r} is a negative size")
+    return int(value)
+
+
+def parse_mem_bytes(spec) -> int | None:
+    """Parse a human memory size ("8g", "512m", "1073741824", 4096) to a positive int byte count, or
+    None for "" / 0 / an unparseable value (cap disabled). Suffixes k/m/g/t are powers of 1024, matching
+    `docker run --memory`.
+
+    TOTAL on purpose — it never raises, because a live eval must not crash on a value that got past
+    its boundary. The boundary is where the REFUSAL lives: `Settings` refuses an unreadable
+    `sandbox_memory_local`/`sandbox_fsize_local` at construction (via `size_bytes_or_error`, the
+    same grammar), and `runtime/sandbox.py::readonly_rootfs_argv` refuses its own. So None here now
+    means "the operator asked for no cap", not "the operator's cap was unreadable"."""
+    try:
+        n = size_bytes_or_error(spec)
+    except (ValueError, OverflowError):
+        # OverflowError: `int(float("1e308") * 1024**3)`-scale products are caught as non-finite
+        # above; this is the belt for anything `int()` still refuses.
+        return None
+    return n if n > 0 else None

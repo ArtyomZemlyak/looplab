@@ -791,6 +791,28 @@ class Settings(BaseSettings):
     # SIGXFSZ instead of filling the host disk. POSIX only. Default "" = OFF (large model checkpoints
     # need big files); set it for tasks that write only small artifacts.
     sandbox_fsize_local: str = ""
+
+    @field_validator("sandbox_memory_local", "sandbox_fsize_local")
+    @classmethod
+    def _refuse_an_unreadable_local_size_cap(cls, value: str, info):
+        # An UNREADABLE size is refused here, where the operator typed it (review 2026-09-22,
+        # CORE-05). The only reader, `parse_mem_bytes`, is total — it returns None for anything it
+        # cannot read, and `make_sandbox` passes None on as "no cap" — so `"8GB"` (docker's own
+        # spelling) or `"2 GiB"` validated, was snapshotted, and ran every eval with NO limit while
+        # the operator believed the host was guarded. The same repository already refuses that typo
+        # for `sandbox_readonly_rootfs`; these two are boundaries too. Read through the SAME grammar
+        # the runtime enforces with (`core/numeric.py::size_bytes_or_error`), so accepted == enforced.
+        # "" and "0" stay the two OFF spellings. A run RECORDED with an unreadable value resumes
+        # with the cap it actually had — none — via `_canonicalize_snapshot_size_caps`.
+        from looplab.core.numeric import size_bytes_or_error
+        try:
+            size_bytes_or_error(value)
+        except (ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"{info.field_name}={value!r} is not a size this cap can enforce ({exc}). Use a byte "
+                "count or a k/m/g/t suffix (powers of 1024, e.g. '8g'), or '' to leave the cap off — "
+                "an unreadable value used to switch the cap OFF without a word.") from None
+        return value
     # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha" | "bohb".
     # `bohb` is a registered policy (`search/policy.py::_REGISTRY` aliases it to the ASHA factory,
     # which BOHB reuses as its racing half) and is advertised by `appconfig.render_template` and the
@@ -3354,6 +3376,40 @@ def _canonicalize_snapshot_reasoning(data: dict) -> dict:
     return effective
 
 
+_LOCAL_SIZE_CAP_FIELDS = ("sandbox_memory_local", "sandbox_fsize_local")
+
+
+def _canonicalize_snapshot_size_caps(data: dict) -> dict:
+    """Resume a run recorded with an UNREADABLE local size cap with the cap it actually had: none.
+
+    `Settings` refuses such a value since review 2026-09-22 (CORE-05) — `sandbox_memory_local="8GB"`
+    used to validate and then switch the RLIMIT_AS guard off in silence. The reload side of that is
+    the asymmetry `_canonicalize_snapshot_reasoning` draws: strict at submit, canonicalizing on
+    reload, never by skipping the check. The only reader (`parse_mem_bytes`) read every such value
+    as None and `make_sandbox` ran uncapped, so the HISTORICAL behaviour is "no cap", spelled `""`.
+    Resuming it CAPPED would change the run's semantics mid-history (invariant #6), and refusing it
+    would make a healthy run unresumable, unfinalizable and unreadable by the server's config route.
+    So: `""`, a warning that names the value and says the cap was never on, and the snapshot
+    evidence left untouched (this edits the effective copy only).
+    """
+    from looplab.core.numeric import size_bytes_or_error
+
+    effective = dict(data)
+    for field in _LOCAL_SIZE_CAP_FIELDS:
+        raw = effective.get(field)
+        if not isinstance(raw, str):
+            continue
+        try:
+            size_bytes_or_error(raw)
+        except (ValueError, OverflowError):
+            effective[field] = ""
+            _LOG.warning(
+                f"config snapshot {field}={raw!r} is not a size this build accepts; the run always "
+                "ran with no cap (the reader read it as none), so it resumes with no cap (''). Set "
+                "a valid size (e.g. '8g') to enforce one; snapshot evidence was not rewritten")
+    return effective
+
+
 def _filter_unknown_snapshot_agent_stages(data: dict) -> dict:
     """Filter obsolete stage keys/values from an effective resume copy, warning in stable order.
 
@@ -3425,8 +3481,8 @@ def settings_from_snapshot(data: dict) -> Settings:
             f"this run's config.snapshot.json declares format v{found}, but this build understands "
             f"at most v{CONFIG_SNAPSHOT_SCHEMA}. It was written by a newer LoopLab; resuming here "
             "would silently drop settings this build does not know. Upgrade LoopLab to resume it.")
-    migrated = _canonicalize_snapshot_reasoning(
-        _filter_unknown_snapshot_agent_stages(migrate_config_snapshot(data)))
+    migrated = _canonicalize_snapshot_size_caps(_canonicalize_snapshot_reasoning(
+        _filter_unknown_snapshot_agent_stages(migrate_config_snapshot(data))))
     migrated.pop("llm_api_key", None)
     migrated.pop("llm_api_key_base_url", None)
     migrated.pop(CONFIG_SNAPSHOT_SCHEMA_KEY, None)   # a document marker, never a Settings field

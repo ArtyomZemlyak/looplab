@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from looplab.core.errors import ConfigRefusal
+from looplab.core.numeric import parse_mem_bytes  # noqa: F401 (re-export; moved to core, CORE-05)
 from looplab.runtime.read_fence import (FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath,
                                         reassert as _reassert_fence)
 from looplab.runtime import landlock as _landlock
@@ -735,29 +736,11 @@ def json_line_trials(text: str) -> Optional[list]:
 _json_line_trials = json_line_trials
 
 
-def parse_mem_bytes(spec) -> Optional[int]:
-    """Parse a human memory size ("8g", "512m", "1073741824", 4096) to a positive int byte count, or
-    None for "" / 0 / an unparseable value (cap disabled). Suffixes k/m/g/t are powers of 1024, matching
-    `docker run --memory`. Best-effort: a bad value silently disables the cap rather than crashing eval."""
-    if spec is None:
-        return None
-    if isinstance(spec, (int, float)):
-        n = int(spec)
-        return n if n > 0 else None
-    s = str(spec).strip().lower()
-    if not s:
-        return None
-    mult = 1
-    if s[-1] in "kmgt":
-        mult = {"k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}[s[-1]]
-        s = s[:-1].strip()
-    try:
-        n = int(float(s) * mult)
-    except (ValueError, OverflowError):
-        # OverflowError: `int(float("inf"))` / `int(float("1e400"))` — a non-finite operator value must
-        # SILENTLY DISABLE the cap (as the docstring promises), not crash make_sandbox on engine setup.
-        return None
-    return n if n > 0 else None
+# `parse_mem_bytes` was defined here. It moved to `core/numeric.py` (review 2026-09-22, CORE-05) so
+# `Settings` can REFUSE an unreadable `sandbox_memory_local`/`sandbox_fsize_local` with the very
+# grammar this tier enforces with — `runtime` may import `core`, not the reverse. It is re-exported
+# at the top of this module under its old name (tests and `tools/dev_commands.py` import it from
+# here) as the SAME object, not a copy.
 
 
 # Fresh single-threaded launcher for the POSIX rlimit caps — see the call site in `run_argv` for why
