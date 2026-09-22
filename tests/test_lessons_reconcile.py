@@ -380,6 +380,73 @@ def test_reconcile_leaves_other_runs_lessons_untouched(tmp_path, monkeypatch):
     assert "MINE stale" not in stmts                                    # only this run's stale row rewritten
 
 
+# --------------------------------------------------------------------------- #
+# reconcile: "this run" is an INCARNATION in BOTH halves (review 2026-09-22, ENG3-01)
+# --------------------------------------------------------------------------- #
+# The pre-lock scan decided WHETHER to rewrite with `row_belongs_to_run`, while the in-lock
+# `_is_stale` decided WHAT to drop by `run_id` — the directory NAME. So the moment THIS
+# incarnation had a stale row, a previous incarnation's valid lesson under the same name was
+# judged against this run's nodes and deleted from the shared store. The predicate-level test in
+# `tests/test_run_incarnation_identity.py` could not see it: the drop happens inside the locked
+# rewrite, so these drive `reconcile_lessons` itself. MUTATION: restore
+# `o.get("run_id") != state.run_id` in `_is_stale` -> both `OLD` cases below lose the row.
+
+@pytest.mark.parametrize("prev_uid,survives,why", [
+    ("OLD", True, "another incarnation of the same NAME is another run's lesson"),
+    (None, False, "a uid-LESS row of the same name is still this run's (the documented legacy "
+                  "fallback), so the reflect sweep still replaces it — pre-lock and in-lock agree"),
+])
+def test_the_reflect_sweep_spares_a_previous_incarnations_lesson(tmp_path, prev_uid, survives,
+                                                                 why):
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=False)
+    previous = {"task_id": "toy_quadratic", "run_id": "run_me", "statement": "PREVIOUS lesson",
+                "outcome": "supported", "evidence": [1], "fingerprint": [], "kind": "quadratic",
+                "evidence_sig": {"1": "evaluated:4.0"}}
+    if prev_uid is not None:
+        previous["run_uid"] = prev_uid
+    _seed(mem, [
+        previous,
+        # THIS incarnation's reflect lesson, drifted: node 2 was a false failure.
+        {"task_id": "toy_quadratic", "run_id": "run_me", "run_uid": "NEW",
+         "statement": "STALE failures dominate", "outcome": "failed", "evidence": [1, 2],
+         "fingerprint": [], "kind": "quadratic",
+         "evidence_sig": {"1": "evaluated:4.0", "2": "failed:no_metric"}},
+    ])
+    st = _state([_node(1, metric=4.0), _node(2, metric=3.0)])
+    st.run_uid = "NEW"
+    eng._reflect_client = lambda: FakeClient("[GOOD] node 2 in fact trained fine")
+    eng.lessons.reconcile_lessons(st)
+    stmts = [r["statement"] for r in _rows(mem)]
+    assert "STALE failures dominate" not in stmts, "this incarnation's own drifted row is replaced"
+    assert ("PREVIOUS lesson" in stmts) is survives, why
+
+
+def test_a_previous_incarnations_lesson_is_not_judged_against_this_runs_nodes(tmp_path):
+    """No sweep at all here: the other incarnation's lesson cites node 7, which THIS incarnation
+    does not have, so judging it against this run's nodes proves it "stale" and deletes it."""
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [
+        {"task_id": "toy_quadratic", "run_id": "run_me", "run_uid": "OLD",
+         "statement": "PREVIOUS lesson", "outcome": "supported", "evidence": [7],
+         "fingerprint": [], "kind": "quadratic", "evidence_sig": {"7": "evaluated:1.0"}},
+        {"run_id": "run_me", "run_uid": "NEW", "source": "comparative", "statement": "MINE stale",
+         "outcome": "supported", "evidence": [1, 0],
+         "evidence_sig": {"1": "evaluated:4.0", "0": "evaluated:9.0"}, "fingerprint": [],
+         "kind": "quadratic"},
+    ])
+    st = _state([_node(0, metric=9.0, op="draft", params={"x": 1.0}, code="x=1\n"),
+                 _node(1, metric=6.0, parent_ids=[0], params={"x": 3.0}, code="x=3\n")])
+    st.run_uid = "NEW"
+    eng._reflect_client = lambda: FakeClient("P1 [BAD] regressed\n")
+    eng.lessons.reconcile_lessons(st)
+    stmts = [r["statement"] for r in _rows(mem)]
+    assert "MINE stale" not in stmts, "this incarnation's stale comparative row is rewritten"
+    assert "PREVIOUS lesson" in stmts, (
+        "the previous incarnation's lesson was judged against THIS run's nodes and deleted")
+
+
 def test_reconcile_preserves_concurrent_append_during_rederivation(tmp_path, monkeypatch):
     """M5 regression: reconcile RE-READS the lessons file inside the interprocess lock, so a lesson a
     CONCURRENT run O_APPENDs during the (seconds-long) LLM re-derivation window survives. Before the

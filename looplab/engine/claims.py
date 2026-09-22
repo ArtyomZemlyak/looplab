@@ -585,6 +585,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     """
     from pathlib import Path
 
+    from looplab.core.run_identity import row_belongs_to_run
     from looplab.events.eventstore import (
         interprocess_lock, replace_jsonl_rows_atomic_preserving_quarantine,
     )
@@ -704,13 +705,24 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
             # claims_retained == len(claim_members) again (no more perpetual producer-unknown for the run).
             # Cross-run legacy rows are untouched (the `== rid` guard): a genuinely old run that never
             # re-finalized keeps its claims — they are the latest for THAT run, not superseded.
+            #
+            # "SAME RUN" IS `core/run_identity.py::row_belongs_to_run` (review 2026-09-22, ENG3-01),
+            # the rule the cascade deletes research claims on
+            # (`serve/memory_cascade.py::RunIdentity.owns`), over the SAME `_identity_text`
+            # normalization this predicate always applied — so a row that carries a `run_uid` is
+            # matched exactly as before, on that uid alone. The ONE difference is the one
+            # `ConceptCapsuleStore.add` accepted in the same words: a uid-bearing re-finalize now
+            # also retires a UID-LESS row of the same directory name (the hand-rolled rule kept it),
+            # because a row written before `run_uid` existed is attributed to that name everywhere
+            # else, and a writer that disagrees with the purge about which rows are this run's is
+            # the second, quieter rule the unification removed. (An empty name never reaches here:
+            # `not rid` returned above, and the attribution rule refuses an empty name anyway.)
             replace_if=lambda row: (
                 _valid_claim_source_row(row, research=True)
-                and (
-                    (_identity_text(row.get("run_uid"), _MAX_SOURCE_ID) == ruid if ruid
-                     else (not row.get("run_uid")
-                           and _identity_text(row.get("run_id"), _MAX_SOURCE_ID) == rid))
-                )
+                and row_belongs_to_run(
+                    {"run_uid": _identity_text(row.get("run_uid"), _MAX_SOURCE_ID),
+                     "run_id": _identity_text(row.get("run_id"), _MAX_SOURCE_ID)},
+                    run_uid=ruid, run_id=rid)
             ),
             loads=json.loads,
             dumps=json.dumps,

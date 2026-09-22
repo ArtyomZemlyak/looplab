@@ -186,8 +186,11 @@ class StrategyCadenceMixin:
                     lambda governance: self._cross_run_note_for_ctx(state, _governance=governance))
             lessons, caps, research = ctx.load_governed_sources(base)
             run_id, task_id = ctx.scoped_identity(state)
+            # The incarnation, not only the name (review 2026-09-22, ENG3-01): another run root's
+            # same-named rows are prior evidence, as the bound `cross_run_*` tools already treat them.
             _visible = ctx.visible_row_predicate(
-                current_direction, task_id=task_id, excluded_run=run_id)
+                current_direction, task_id=task_id, excluded_run=run_id,
+                excluded_run_uid=str(getattr(state, "run_uid", "") or ""))
             lessons = filter_claim_source_rows(lessons, _visible, research=False)
             caps = filter_capsule_rows(caps, _visible)
             research = filter_claim_source_rows(research, _visible, research=True)

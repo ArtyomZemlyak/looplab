@@ -468,8 +468,19 @@ class LessonReconcileMixin:
                 # Identify a stale row of THIS run by IDENTITY (evidence pair / staleness), NOT raw line
                 # index — so the drop survives a RE-READ inside the lock. A concurrent run's O_APPEND
                 # during the LLM window shifts line numbers, and it only ever appends OTHER runs' lessons
-                # (run_id != ours), which _is_stale never matches, so they are preserved.
-                if not isinstance(o, dict) or o.get("run_id") != state.run_id:
+                # (not `row_belongs_to_run`), which _is_stale never matches, so they are preserved.
+                #
+                # "THIS RUN" IS THE SAME PREDICATE AS THE PRE-LOCK SCAN ABOVE (review 2026-09-22,
+                # ENG3-01). This line compared `run_id` — the directory NAME — after the scan had
+                # moved to `row_belongs_to_run`, so the scan decided WHETHER to rewrite by incarnation
+                # and this decided WHAT to drop by name: once this incarnation's reflect batch was
+                # replaced (`drop_all_reflect`) or any of its rows was stale, a PREVIOUS incarnation's
+                # valid lesson under the same name was judged against THIS run's nodes and deleted
+                # from the shared lessons.jsonl — driven both ways in `tests/test_lessons_reconcile.py`
+                # (the reflect sweep, and a cited node this incarnation does not have); a different
+                # NAME was always safe.
+                if not isinstance(o, dict) or not row_belongs_to_run(
+                        o, run_uid=getattr(state, "run_uid", ""), run_id=state.run_id):
                     return False
                 # Gate the comparative branch on SOURCE ALONE — matching the old expansion's
                 # `source != "comparative"` exclusion. An UNATTRIBUTED comparative row (no valid

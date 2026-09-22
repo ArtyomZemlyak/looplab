@@ -282,6 +282,12 @@ class LessonDistillMixin:
             # can swallow the next valid record for every line-oriented reader.
             with interprocess_lock(Path(str(npath) + ".lock")):
                 run_uid = getattr(final, "run_uid", "")
+                # NOT `core/run_identity.py::row_belongs_to_run`, deliberately (review 2026-09-22,
+                # ENG3-01 folded the other uid-first spellings). This key must also de-dup the
+                # crash-retry of a run that recorded NO name — a log with no `run_started`, which
+                # the crash-retry test in `tests/test_lessons_fingerprint.py` drives — and the
+                # attribution rule refuses to attribute on an empty name, so folding it re-appended
+                # that note on every retry (measured: 2 notes for one finish, where 1 is pinned).
                 _dup = _has_finish_seq and any(
                     o.get("finish_seq") == finish_seq and (
                         o.get("run_uid") == run_uid if run_uid

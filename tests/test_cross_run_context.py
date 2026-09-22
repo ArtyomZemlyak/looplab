@@ -103,15 +103,49 @@ def test_an_incomplete_empty_read_is_not_an_authoritative_absence():
     ({"direction": "max", "task_id": "t", "run_id": "live"}, False),    # this run never sees itself
 ])
 def test_row_scoping_rejects_every_uninterpretable_row(row, visible):
-    predicate = ctx.visible_row_predicate("max", task_id="t", excluded_run="live")
+    predicate = ctx.visible_row_predicate("max", task_id="t", excluded_run="live",
+                                          excluded_run_uid="")
     assert predicate(row) is visible
 
 
 def test_a_row_is_invisible_when_the_run_has_no_task_scope():
     """No task id means no exact scope, and a portfolio-wide projection is not a substitute — it
     would apply another task's outcomes to this one."""
-    predicate = ctx.visible_row_predicate("max", task_id="", excluded_run="live")
+    predicate = ctx.visible_row_predicate("max", task_id="", excluded_run="live",
+                                          excluded_run_uid="")
     assert predicate({"direction": "max", "task_id": "t", "run_id": "other"}) is False
+
+
+@pytest.mark.parametrize("row_identity,visible,why", [
+    ({"run_id": "live", "run_uid": "U-OTHER"}, True,
+     "another run ROOT that shares this run's directory name is prior evidence, not this run"),
+    ({"run_id": "live", "run_uid": "U-LIVE"}, False, "this incarnation never sees itself"),
+    ({"run_id": "renamed", "run_uid": "U-LIVE"}, False, "the uid decides, whatever the name says"),
+    ({"run_id": "live"}, False,
+     "a uid-LESS row of the same name falls back to the name (`LessonScope.is_current_run`)"),
+    ({"run_id": "other"}, True, "a different name is a different run"),
+])
+def test_not_this_run_is_the_incarnation_not_the_directory_name(row_identity, visible, why):
+    """Review 2026-09-22, ENG3-01. Keyed on `run_id` alone, a row written by ANOTHER run root that
+    merely shares this run's directory name (`demo`, `run_local`, a deleted-and-recreated run) was
+    withheld from the Strategist note and the Researcher pack as "this run" — while the agent's own
+    bound `cross_run_*` tools, which apply `LessonScope.is_current_run`, showed it one call away.
+    MUTATION: compare `run_id` again in `visible_row_predicate` -> the first case flips."""
+    predicate = ctx.visible_row_predicate("max", task_id="t", excluded_run="live",
+                                          excluded_run_uid="U-LIVE")
+    assert predicate({"direction": "max", "task_id": "t", **row_identity}) is visible, why
+
+
+def test_a_legacy_run_keeps_the_name_rule_and_the_uid_cannot_be_omitted():
+    """A run with no recorded incarnation (a pre-`run_uid` log) can only exclude itself by name —
+    `is_current_run`'s own legacy fallback. And the uid is a REQUIRED keyword, so a new caller
+    cannot silently reintroduce the name-only rule by leaving it out."""
+    legacy = ctx.visible_row_predicate("max", task_id="t", excluded_run="live",
+                                       excluded_run_uid="")
+    assert legacy({"direction": "max", "task_id": "t", "run_id": "live",
+                   "run_uid": "U-OTHER"}) is False
+    with pytest.raises(TypeError):
+        ctx.visible_row_predicate("max", task_id="t", excluded_run="live")
 
 
 def test_the_receipt_shape_is_one_schema_for_both_agents():

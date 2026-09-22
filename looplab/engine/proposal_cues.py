@@ -13,7 +13,7 @@ from looplab.core.models import NodeStatus, RunState, normalize_steering_context
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.events.types import EV_NODE_CREATED
 from looplab.search.coverage import latest_live_snapshot
-from looplab.trust.cross_run import (cross_run_text, same_live_direction,
+from looplab.trust.cross_run import (LessonScope, cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
 from looplab.core.jsonutil import valid_digest_ref
 
@@ -998,13 +998,20 @@ class ProposalCuesMixin:
             # lesson priors and never includes this run.
             from looplab.engine.memory import fingerprint_similarity
             rid, tid = str(state.run_id or ""), str(state.task_id or "")
+            ruid = str(getattr(state, "run_uid", "") or "")
+            # "Never this run" is the INCARNATION (review 2026-09-22, ENG3-01): the same
+            # `LessonScope.is_current_run` the bound `cross_run_*` tools apply to these stores. Both
+            # checks below compared `run_id` — the directory NAME — so another run root's rows that
+            # merely share this run's name were withheld from the Researcher's pack as "this run".
+            # A legacy (uid-less) side still falls back to the name, as `is_current_run` documents.
+            current_run = LessonScope(bound=True, run_uid=ruid, run_id=rid)
             fp_fn = getattr(self, "_task_fingerprint", None)
             fp = ([t for t in fp_fn(state, state.best()) if not str(t).startswith("param:")]
                   if callable(fp_fn) else [])
 
             scope_unknown = fingerprint_unknown = fingerprint_omitted = direction_unknown = 0
             for row in capsules:
-                if rid and str(row.get("run_id") or "") == rid:
+                if current_run.is_current_run(row):
                     continue
                 persisted_direction = row.get("direction")
                 if not valid_live_direction(persisted_direction):
@@ -1033,7 +1040,7 @@ class ProposalCuesMixin:
             }
 
             def _scoped(row, *, capsule: bool = False):
-                if rid and str(row.get("run_id") or "") == rid:
+                if current_run.is_current_run(row):
                     return False
                 # Direction is a hard semantic boundary even for an exact task id: support for a
                 # minimisation objective can mean the opposite thing when that id is later reused for
@@ -1067,7 +1074,8 @@ class ProposalCuesMixin:
             # performed here before, now done once with the other two governed stores.
             research = filter_claim_source_rows(
                 _unscoped_research,
-                ctx.visible_row_predicate(current_direction, task_id=tid, excluded_run=rid),
+                ctx.visible_row_predicate(current_direction, task_id=tid, excluded_run=rid,
+                                          excluded_run_uid=ruid),
                 research=True,
             )
             # Freeze all three operator-policy ledgers together. The live prompt must never combine

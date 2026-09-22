@@ -228,3 +228,211 @@ def test_the_concept_shelf_inherits_from_the_incarnation_that_wrote_the_row():
     assert gone == ([], None), "a deleted incarnation's row must not inherit the live run's tags"
     legacy = attribute_row({"statement": "s", "run_id": "demo"}, index)
     assert legacy == (["loss/contrastive"], ATTRIBUTION_RUN), "a uid-less row still falls back to the name"
+
+
+# --- the live builders and the D8 writer (review 2026-09-22, ENG3-01) ----------------------------
+
+def _lesson_row(uid: str) -> dict:
+    return {"statement": "hard negatives help recall", "outcome": "supported", "evidence": [1],
+            "run_id": "demo", "run_uid": uid, "task_id": "t", "direction": "max"}
+
+
+@pytest.mark.parametrize("row_uid,expected", [
+    (_UID_B, 1),   # another run ROOT that shares this run's directory name: prior evidence
+    (_UID_A, 0),   # this incarnation's own row: never "prior"
+])
+def test_both_live_builders_exclude_this_incarnation_not_this_name(tmp_path, row_uid, expected):
+    """The Strategist note and the Researcher pack both excluded "this run" by `run_id` — the
+    directory NAME — so another root's `demo` was withheld from both prompts while the agent's own
+    bound `cross_run_*` tools (`LessonScope.is_current_run`) showed it one call away. MUTATION:
+    compare `run_id` again in `cross_run_context.visible_row_predicate` (Strategist) or in
+    `proposal_cues._cross_run_advisory_text` (Researcher) -> the `_UID_B` case reads 0.
+
+    This is the one prompt-content change the fix makes, and ONLY in the name-collision case: a
+    row with its own uid under this run's name used to be hidden and is now shown."""
+    import orjson
+
+    from looplab.core.models import RunState
+    from looplab.engine.proposal_cues import ProposalCuesMixin
+    from looplab.engine.strategy import StrategyCadenceMixin
+
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(_lesson_row(row_uid)) + b"\n")
+
+    class _Proposal(ProposalCuesMixin):
+        _cross_run_advisory = True
+
+        def __init__(self):
+            self.memory_dir = str(tmp_path)
+
+    class _Strategy(StrategyCadenceMixin):
+        _cross_run_advisory = True
+
+        def __init__(self):
+            self.memory_dir = str(tmp_path)
+
+    state = RunState(run_id="demo", run_uid=_UID_A, task_id="t", direction="max")
+    proposal, strategy = _Proposal(), _Strategy()
+    proposal._cross_run_advisory_text(state)
+    strategy._cross_run_note_for_ctx(state)
+
+    assert proposal._cross_run_advisory_receipt.get("n_lessons", 0) == expected, (
+        proposal._cross_run_advisory_receipt)
+    assert strategy._cross_run_note_receipt.get("n_lessons", 0) == expected, (
+        strategy._cross_run_note_receipt)
+
+
+def _research_rows(path) -> list[dict]:
+    import json
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def test_a_d8_refinalize_replaces_only_its_own_incarnations_claims(tmp_path):
+    """`record_research_claims` retires "this run's" rows before writing the new snapshot. Folded
+    onto `row_belongs_to_run`, a row carrying a uid is matched on that uid alone — the behaviour the
+    hand-rolled predicate already had, which this pins across the fold. MUTATION: match the name
+    for a uid-bearing row -> incarnation A's claim is retired by B's re-finalize."""
+    from looplab.engine.claims import record_research_claims
+
+    def _write(uid, statement):
+        return record_research_claims(
+            tmp_path, run_id="demo", run_uid=uid, task_id="t", direction="max",
+            claims=[{"statement": statement, "node_ids": [1]}])
+
+    assert _write(_UID_A, "incarnation A found X") == 1
+    assert _write(_UID_B, "incarnation B found Y") == 1
+    assert _write(_UID_B, "incarnation B re-finalized: Z") == 1
+    rows = _research_rows(tmp_path / "research_claims.jsonl")
+    by_uid = {(r.get("run_uid"), r.get("statement")) for r in rows}
+    assert (_UID_A, "incarnation A found X") in by_uid, "another incarnation's claim was retired"
+    assert (_UID_B, "incarnation B re-finalized: Z") in by_uid
+    assert (_UID_B, "incarnation B found Y") not in by_uid, "B's own superseded claim must go"
+
+
+def test_a_uid_less_d8_row_of_the_same_name_is_attributed_to_the_uid_bearing_run(tmp_path):
+    """THE ONE STATED DIFFERENCE of the fold. The hand-rolled predicate never let a uid-bearing
+    re-finalize retire a UID-LESS row; `row_belongs_to_run` attributes such a row to its directory
+    name — the rule `serve/memory_cascade.py` already DELETES research claims on, and the widening
+    `ConceptCapsuleStore.add` accepted in the same words. A different name is still untouched."""
+    import json
+
+    from looplab.engine.claims import record_research_claims
+
+    legacy = {"statement": "pre-uid claim", "run_id": "demo", "task_id": "t",
+              "direction": "max", "node_ids": [1]}
+    elsewhere = {**legacy, "statement": "another run's pre-uid claim", "run_id": "other"}
+    path = tmp_path / "research_claims.jsonl"
+    path.write_text(json.dumps(legacy) + "\n" + json.dumps(elsewhere) + "\n", encoding="utf-8")
+
+    record_research_claims(tmp_path, run_id="demo", run_uid=_UID_A, task_id="t",
+                           direction="max", claims=[{"statement": "current", "node_ids": [1]}])
+    statements = {r.get("statement") for r in _research_rows(path)}
+    assert "pre-uid claim" not in statements
+    assert {"another run's pre-uid claim", "current"} <= statements
+
+
+# --- ONE attribution rule, and nothing re-spells it by name (review 2026-09-22, ENG3-01) ---------
+#
+# "Is this row this run's?" was decided in nine places and three compared only `run_id`, the
+# directory NAME — one of them deleted another incarnation's lessons from the shared store. The rule
+# has two homes: `core/run_identity.py::row_belongs_to_run` (attribution) and
+# `trust/cross_run.py::LessonScope.is_current_run` (the read-side scope). This guard refuses a new
+# comparison of a row's `run_id` in `engine/`, `core/` or `trust/` outside the entries below, each of
+# which says why it may still spell the name itself; a fixed site must LEAVE the list (shrink-only).
+# AST, not substrings: a comment cannot satisfy or trip it.
+
+_NAME_COMPARISON_ALLOWED = {
+    ("core/run_identity.py", "row_belongs_to_run"):
+        "the attribution rule's home: the uid-less legacy fallback to the name IS the rule",
+    ("trust/cross_run.py", "LessonScope.is_current_run"):
+        "the read-side scope's home: the legacy fallback when either side names no incarnation",
+    ("engine/lessons.py", "LessonMemory.store_concept_capsule"):
+        "NOT folded: its uid-less-caller branch matches uid-BEARING rows by name, so "
+        "`row_belongs_to_run` would change behaviour for rows that carry a run_uid",
+    ("engine/concept_capsules.py", "ConceptCapsuleStore.prior_capsules"):
+        "NOT folded, same reason: a uid-less caller excludes uid-BEARING rows of its name",
+    ("engine/lessons_distill.py", "LessonDistillMixin.write_reflection_note"):
+        "NOT folded: the meta-note crash-retry de-dup must also match a run that recorded NO name "
+        "(a log with no `run_started`), which `row_belongs_to_run` refuses to attribute",
+    ("engine/curation_protocol.py", "CurationProtocolMixin._legacy_curation_terminal"):
+        "curation rows carry no run_uid in any generation; the v1 bridge's name is its only key",
+}
+_SCANNED = ("engine", "core", "trust")
+
+
+def _reads_row_run_id(node) -> bool:
+    import ast
+
+    for sub in ast.walk(node):
+        if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "get" and sub.args
+                and isinstance(sub.args[0], ast.Constant) and sub.args[0].value == "run_id"):
+            return True
+        if (isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Constant)
+                and sub.slice.value == "run_id"):
+            return True
+    return False
+
+
+def _name_comparisons(pkg) -> dict[tuple[str, str], list[int]]:
+    """`{(path under the package, enclosing qualname): [line, ...]}` for every `==`/`!=`/`in`/
+    `not in` comparison one of whose operands reads a row's `run_id`."""
+    import ast
+
+    from tests._source_scan import iter_trees
+
+    found: dict[tuple[str, str], list[int]] = {}
+
+    def visit(node, scope, rel):
+        for child in ast.iter_child_nodes(node):
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                inner = (*scope, child.name)
+            if (isinstance(child, ast.Compare)
+                    and any(isinstance(op, (ast.Eq, ast.NotEq, ast.In, ast.NotIn))
+                            for op in child.ops)
+                    and any(_reads_row_run_id(side) for side in (child.left, *child.comparators))):
+                found.setdefault((rel, ".".join(scope)), []).append(child.lineno)
+            visit(child, inner, rel)
+
+    for sub in _SCANNED:
+        if not (pkg / sub).is_dir():
+            continue
+        for path, tree in iter_trees(pkg / sub):
+            visit(tree, (), path.relative_to(pkg).as_posix())
+    return found
+
+
+def test_no_reader_or_writer_re_spells_run_attribution_by_name():
+    from tests._source_scan import PKG
+
+    found = _name_comparisons(PKG)
+    unexpected = {site: lines for site, lines in found.items()
+                  if site not in _NAME_COMPARISON_ALLOWED}
+    assert not unexpected, (
+        "a row's `run_id` is compared directly — the directory NAME deciding which run a row is. "
+        "Use `core/run_identity.py::row_belongs_to_run` (attribution) or "
+        f"`trust/cross_run.py::LessonScope.is_current_run` (read-side scope): {unexpected}")
+    stale = sorted(set(_NAME_COMPARISON_ALLOWED) - set(found))
+    assert not stale, f"these sites no longer compare a name; delete their allow-list rows: {stale}"
+
+
+def test_the_name_comparison_guard_sees_the_shape_it_refuses(tmp_path):
+    """The guard's own teeth, on a throwaway tree: the exact line ENG3-01 found, plus the two
+    respellings a fix could drift to, are each reported; the fixed spelling is not."""
+    engine = tmp_path / "engine"
+    engine.mkdir()
+    (engine / "m.py").write_text(
+        "def stale(o, state):\n"
+        "    return o.get('run_id') != state.run_id\n"
+        "def wrapped(row, rid):\n"
+        "    return str(row.get('run_id') or '') == rid\n"
+        "def member(row, names):\n"
+        "    return row['run_id'] in names\n"
+        "def fixed(row, state):\n"
+        "    # o.get('run_id') != state.run_id  -- a comment cannot trip it\n"
+        "    from looplab.core.run_identity import row_belongs_to_run\n"
+        "    return row_belongs_to_run(row, run_uid=state.run_uid, run_id=state.run_id)\n",
+        encoding="utf-8")
+    assert set(_name_comparisons(tmp_path)) == {
+        ("engine/m.py", "stale"), ("engine/m.py", "wrapped"), ("engine/m.py", "member")}

@@ -124,20 +124,32 @@ def unavailable_receipt(exc) -> dict:
     return {"v": 2, "status": "unavailable", "complete": False, "governance": exc.public_receipt()}
 
 
-def visible_row_predicate(current_direction, *, task_id: str,
-                          excluded_run: str) -> Callable[[dict], bool]:
+def visible_row_predicate(current_direction, *, task_id: str, excluded_run: str,
+                          excluded_run_uid: str) -> Callable[[dict], bool]:
     """Row scoping shared by the Strategist note: same live direction, exact task, not this run.
 
     Direction is checked through `same_live_direction` rather than `==` because a persisted row with
     an invalid or absent direction cannot be interpreted against the current objective at all — it
     is unknown, not merely different.
+
+    "Not this run" is an INCARNATION, not a directory name (review 2026-09-22, ENG3-01): it is
+    `trust/cross_run.py::LessonScope.is_current_run`, the predicate the bound agent tools already
+    apply to the same stores. Compared on `run_id` alone, a row written by ANOTHER run root that
+    happens to share this run's directory name (`demo`, `run_local`, a deleted-and-recreated run)
+    was hidden from both live builders while the agent's own `cross_run_*` tools showed it. The
+    uid is a REQUIRED keyword so a caller cannot fall back to the name-only rule by omission; an
+    empty uid (a legacy run) keeps the name rule, exactly as `is_current_run` does. `excluded_run`
+    stays the display name the receipt records.
     """
-    from looplab.trust.cross_run import same_live_direction
+    from looplab.trust.cross_run import LessonScope, same_live_direction
+
+    current = LessonScope(bound=True, run_uid=str(excluded_run_uid or ""),
+                          run_id=str(excluded_run or ""))
 
     def visible(row: dict) -> bool:
         return (same_live_direction(current_direction, row.get("direction"))
                 and bool(task_id) and str(row.get("task_id") or "") == task_id
-                and (not excluded_run or str(row.get("run_id") or "") != excluded_run))
+                and not current.is_current_run(row))
 
     return visible
 
