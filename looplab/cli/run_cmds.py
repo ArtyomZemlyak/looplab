@@ -730,6 +730,121 @@ def _refuse_held_out_labels_inside_the_workspace(task, out) -> None:
         typer.echo(f"refusing to start: {error}", err=True)
     raise typer.Exit(2)
 
+
+def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=None,
+                    speculation_gate_calibration: bool = False):
+    """THE RUN LIFECYCLE, from a resolved task + settings + run dir to a driven terminal: the startable
+    checks, the healthy-log gate, the `engine.lock` singleton, the prior-run classification (refuse a
+    different task, reopen a finished run, lift a stopped one), the engine build, the published
+    `config.snapshot.json`/`task.snapshot.json` (the task in its adapter's canonical form), and the
+    guarded drive that turns a fatal abort into a terminal event.
+
+    Returns `(state, eng, prior_kind)`, or None when another engine already holds `out` (the notice
+    is printed here). Everything that is `run`'s ALONE stays in `run`: resolving the task and the
+    settings from a file and flags, Genesis, the submit notes, and what is printed or exited with
+    after the drive.
+
+    A FUNCTION because it has a second caller (review 2026-09-22, SCJ-05). `looplab/bench.py`
+    called `_engine(...).run` directly, skipping all of the above: a bench task dir had no
+    snapshots (so `resume` refused it), no lock, no terminal on a fatal abort, and nothing to stop
+    two suites driving one log. Spelled once, `run` and the bench cannot drift apart again.
+    """
+    # the task adapters own comparison-contract validation and identity.  Persist their
+    # canonical value (including contract_id), never the pre-validation authoring dict, so CLI and
+    # Web/TUI/API launches produce the same scientific provenance in task.snapshot.json.
+    comparison_contract = getattr(task, "comparison_contract", None)
+    if comparison_contract is not None:
+        task_dict["comparison_contract"] = comparison_contract.model_dump(
+            mode="json", by_alias=True, exclude_none=True)
+    else:
+        task_dict.pop("comparison_contract", None)
+    _assert_run_startable(task, out)
+    out.mkdir(parents=True, exist_ok=True)
+    store = EventStore(out / "events.jsonl")
+    _require_healthy_log(store, out)   # fail closed on a mid-file corruption before appending (P0-4)
+    with _engine_singleton(out) as ok:
+        if not ok:
+            typer.echo(f"engine already running on {out} — not starting a second loop")
+            return None
+        # Fold the EXISTING log FIRST (before writing any snapshot): a `run` on a dir that already
+        # belongs to a DIFFERENT task must REFUSE rather than overwrite its task/config snapshot and
+        # then reopen the old event log — that silently mixed two experiments (a reproduced
+        # task.snapshot=poly_regression while run_started.task_id=toy_quadratic — arch-review §3 P0-5).
+        # Continuing the SAME task is fine; an empty/fresh dir has no prior run_started.
+        prior_events = store.read_all()
+        prior = fold(prior_events)
+        if speculation_gate_calibration:
+            _assert_calibration_dir_is_fresh(out, prior_events)
+        prior_kind = classify_prior_run(prior, prior_events)
+        finalization_pending = prior_kind == "finalization_pending"
+        if prior.run_id and prior.task_id and prior.task_id != task.id:
+            typer.echo(
+                f"run dir {out} already holds task {prior.task_id!r}, not {task.id!r} — refusing to "
+                f"mix experiments in one event log. Use a new --out for a fresh run, or "
+                f"`looplab resume {out}` to continue the existing one.", err=True)
+            raise typer.Exit(2)
+        # Write the run snapshots only AFTER winning the singleton lock AND passing the identity check —
+        # a second `run` on a dir a live engine already owns must NOT clobber config.snapshot.json /
+        # task.snapshot.json. A later `resume` reads them, so a stale overwrite would re-enter the run
+        # with the wrong settings/task.
+        if finalization_pending:
+            # The exact/scoped terminal boundary belongs to the ORIGINAL task/settings. Loading the
+            # old snapshots before Engine construction prevents same-id changed flags from altering a
+            # paid report/cost wrap-up. Missing or corrupt snapshots fail closed without rewriting them.
+            engine_task, engine_settings = _pending_finalization_inputs(out, prior.task_id)
+            eng = _engine(out, engine_task, engine_settings, crash_after=None, wrap_up_only=True)
+            # No WIDTH preflight on this wrap-up branch — see `_preflight_settled_widths`.
+            _preflight_speculation_authority(eng, prior_events)
+        else:
+            # Construction initializes roles/clients and can fail. Preserve the prior run's provenance
+            # until the new Engine is viable; only then publish the new epoch's input snapshots.
+            eng = _engine(
+                out,
+                task,
+                settings,
+                crash_after,
+                # A `run` on a dir whose log already carries a wrap-up (a pending finalize) only
+                # completes that boundary — `announce_wrap_up` below refuses to lift it — so the
+                # endpoint preflight warns there instead of refusing, exactly as on the branch above.
+                wrap_up_only=is_wrap_up(prior_kind),
+                **({"speculation_gate_calibration": True}
+                   if speculation_gate_calibration else {}),
+            )
+            # This existing prefix is still the authority until the new snapshots are published:
+            # refuse a stale receipt, or a width this log never pinned, BEFORE the publish below.
+            _preflight_speculation_authority(eng, prior_events)
+            _preflight_settled_widths(eng, prior_events, surface="run")
+            _publish_run_snapshots(out, task_dict, settings)
+        # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
+        # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
+        # no-ops a re-run with a bigger --max-nodes, and (worse) makes a run that finished with
+        # reason=error un-retryable: fixing the cause and re-running the same command does nothing.
+        # Reopen it (the same event the Web UI/TUI append to continue a finished run) so the loop
+        # processes the new budget / retries the failure, and SAY so — never silently no-op.
+        # Both wrap-up states are RESPECTED, never lifted: let the loop finish the existing
+        # boundary rather than reopening or resuming behind it.
+        if announce_wrap_up(prior_kind):
+            pass
+        elif prior_kind == "finished":
+            typer.echo(
+                f"run dir {out} already finished"
+                + (f" (reason={prior.stop_reason})" if prior.stop_reason else "")
+                + " — reopening to continue with the current task/settings "
+                  "(use a new --out for a fresh run).")
+            eng.store.append(EV_RUN_REOPENED, {})
+        elif prior_kind == "paused":
+            # a STOPped (paused) run: the loop would fold paused=True and break at once, printing the
+            # STALE best and doing no work — the exact silent no-op the finished branch guards against.
+            # Lift the pause and continue, mirroring `resume` (whose paused branch appends EV_RESUME).
+            typer.echo(f"run dir {out} is stopped — resuming to continue with the current task/settings.")
+            eng.store.append(EV_RESUME, {})
+        # ``run`` can recover an incomplete process with no resume intent; the helper still records
+        # this exact lock-owner change when an old eval admission needs retiring.
+        _record_engine_owner_boundary(eng)
+        state = _run_engine_guarded(eng, mlflow_uri=settings.mlflow_tracking_uri)
+    return state, eng, prior_kind
+
+
 @app.command()
 def run(
     task_file: Optional[Path] = typer.Argument(
@@ -928,101 +1043,13 @@ def run(
         raise typer.BadParameter(f"invalid task: {e}")
     if speculation_gate_calibration:
         task_dict = _calibration_envelope_task_dict(task, settings)
-    # the task adapters own comparison-contract validation and identity.  Persist their
-    # canonical value (including contract_id), never the pre-validation authoring dict, so CLI and
-    # Web/TUI/API launches produce the same scientific provenance in task.snapshot.json.
-    comparison_contract = getattr(task, "comparison_contract", None)
-    if comparison_contract is not None:
-        task_dict["comparison_contract"] = comparison_contract.model_dump(
-            mode="json", by_alias=True, exclude_none=True)
-    else:
-        task_dict.pop("comparison_contract", None)
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
     _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)
-    _assert_run_startable(task, out)
-    out.mkdir(parents=True, exist_ok=True)
-    store = EventStore(out / "events.jsonl")
-    _require_healthy_log(store, out)   # fail closed on a mid-file corruption before appending (P0-4)
-    with _engine_singleton(out) as ok:
-        if not ok:
-            typer.echo(f"engine already running on {out} — not starting a second loop")
-            return
-        # Fold the EXISTING log FIRST (before writing any snapshot): a `run` on a dir that already
-        # belongs to a DIFFERENT task must REFUSE rather than overwrite its task/config snapshot and
-        # then reopen the old event log — that silently mixed two experiments (a reproduced
-        # task.snapshot=poly_regression while run_started.task_id=toy_quadratic — arch-review §3 P0-5).
-        # Continuing the SAME task is fine; an empty/fresh dir has no prior run_started.
-        prior_events = store.read_all()
-        prior = fold(prior_events)
-        if speculation_gate_calibration:
-            _assert_calibration_dir_is_fresh(out, prior_events)
-        prior_kind = classify_prior_run(prior, prior_events)
-        finalization_pending = prior_kind == "finalization_pending"
-        if prior.run_id and prior.task_id and prior.task_id != task.id:
-            typer.echo(
-                f"run dir {out} already holds task {prior.task_id!r}, not {task.id!r} — refusing to "
-                f"mix experiments in one event log. Use a new --out for a fresh run, or "
-                f"`looplab resume {out}` to continue the existing one.", err=True)
-            raise typer.Exit(2)
-        # Write the run snapshots only AFTER winning the singleton lock AND passing the identity check —
-        # a second `run` on a dir a live engine already owns must NOT clobber config.snapshot.json /
-        # task.snapshot.json. A later `resume` reads them, so a stale overwrite would re-enter the run
-        # with the wrong settings/task.
-        if finalization_pending:
-            # The exact/scoped terminal boundary belongs to the ORIGINAL task/settings. Loading the
-            # old snapshots before Engine construction prevents same-id changed flags from altering a
-            # paid report/cost wrap-up. Missing or corrupt snapshots fail closed without rewriting them.
-            engine_task, engine_settings = _pending_finalization_inputs(out, prior.task_id)
-            eng = _engine(out, engine_task, engine_settings, crash_after=None, wrap_up_only=True)
-            # No WIDTH preflight on this wrap-up branch — see `_preflight_settled_widths`.
-            _preflight_speculation_authority(eng, prior_events)
-        else:
-            # Construction initializes roles/clients and can fail. Preserve the prior run's provenance
-            # until the new Engine is viable; only then publish the new epoch's input snapshots.
-            eng = _engine(
-                out,
-                task,
-                settings,
-                crash_after,
-                # A `run` on a dir whose log already carries a wrap-up (a pending finalize) only
-                # completes that boundary — `announce_wrap_up` below refuses to lift it — so the
-                # endpoint preflight warns there instead of refusing, exactly as on the branch above.
-                wrap_up_only=is_wrap_up(prior_kind),
-                **({"speculation_gate_calibration": True}
-                   if speculation_gate_calibration else {}),
-            )
-            # This existing prefix is still the authority until the new snapshots are published:
-            # refuse a stale receipt, or a width this log never pinned, BEFORE the publish below.
-            _preflight_speculation_authority(eng, prior_events)
-            _preflight_settled_widths(eng, prior_events, surface="run")
-            _publish_run_snapshots(out, task_dict, settings)
-        # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
-        # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
-        # no-ops a re-run with a bigger --max-nodes, and (worse) makes a run that finished with
-        # reason=error un-retryable: fixing the cause and re-running the same command does nothing.
-        # Reopen it (the same event the Web UI/TUI append to continue a finished run) so the loop
-        # processes the new budget / retries the failure, and SAY so — never silently no-op.
-        # Both wrap-up states are RESPECTED, never lifted: let the loop finish the existing
-        # boundary rather than reopening or resuming behind it.
-        if announce_wrap_up(prior_kind):
-            pass
-        elif prior_kind == "finished":
-            typer.echo(
-                f"run dir {out} already finished"
-                + (f" (reason={prior.stop_reason})" if prior.stop_reason else "")
-                + " — reopening to continue with the current task/settings "
-                  "(use a new --out for a fresh run).")
-            eng.store.append(EV_RUN_REOPENED, {})
-        elif prior_kind == "paused":
-            # a STOPped (paused) run: the loop would fold paused=True and break at once, printing the
-            # STALE best and doing no work — the exact silent no-op the finished branch guards against.
-            # Lift the pause and continue, mirroring `resume` (whose paused branch appends EV_RESUME).
-            typer.echo(f"run dir {out} is stopped — resuming to continue with the current task/settings.")
-            eng.store.append(EV_RESUME, {})
-        # ``run`` can recover an incomplete process with no resume intent; the helper still records
-        # this exact lock-owner change when an old eval admission needs retiring.
-        _record_engine_owner_boundary(eng)
-        state = _run_engine_guarded(eng, mlflow_uri=settings.mlflow_tracking_uri)
+    driven = _open_and_drive(task, task_dict, settings, out, crash_after=crash_after,
+                             speculation_gate_calibration=speculation_gate_calibration)
+    if driven is None:
+        return
+    state, eng, prior_kind = driven
     _print_result(state)
     _note = wrap_up_degradation_note(eng)
     if _note:

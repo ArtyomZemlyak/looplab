@@ -2409,6 +2409,15 @@ looplab bench TASK.json [TASK2.json ...] [OPTIONS]
 | `--backend toy\|llm` | `toy` | Role backend |
 | `--max-nodes N` | `8` | Node budget per task |
 
+Each task runs exactly as `looplab run TASK.json --out DIR/<task>` would: through `run`'s own
+lifecycle (`cli/run_cmds.py::_open_and_drive`), so every task dir holds `config.snapshot.json` +
+`task.snapshot.json`, is locked by `engine.lock` while it is driven, gets a terminal event if the
+task dies mid-run, and can be continued with `looplab resume DIR/<task>`. Each task also runs under
+its **own copy** of the settings, so `llm_budget_usd` is a ceiling per task, never one ceiling
+shared by the whole suite. A task that errors is recorded with its `error` in `benchmark.json` and
+the suite carries on; the command then **exits `1`** (after printing every result), so a CI step or
+an `&&` chain reads a suite with a broken task as a failure.
+
 What is reproducible on the toy backend: every **scientific** field (`best_metric`, `best_node`,
 `nodes`/`evaluated`/`failed`, `reward_hack_flags`, `stop_reason`) and the folded `RunState`.
 `benchmark.json` is never byte-identical — it records `eval_seconds`/`wall_seconds` — and the event

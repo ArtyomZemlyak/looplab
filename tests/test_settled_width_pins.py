@@ -516,8 +516,10 @@ def test_the_width_preflight_runs_before_every_write_its_command_owns():
         return lambda node: (isinstance(node.func, ast.Attribute) and node.func.attr == "append"
                              and any(isinstance(a, ast.Name) and a.id == event for a in node.args))
 
+    # `run`'s side is read in `_open_and_drive`, the lifecycle `run` (and `looplab bench`) delegate
+    # to since review 2026-09-22 (SCJ-05): the preflight and the snapshot publish moved there together.
     for command, write_name, write_predicate in (
-            ("run", "_publish_run_snapshots", named("_publish_run_snapshots")),
+            ("_open_and_drive", "_publish_run_snapshots", named("_publish_run_snapshots")),
             ("resume", "the EV_RESUME append", appends("EV_RESUME"))):
         guards = lines_of(command, named("_preflight_settled_widths"))
         writes = lines_of(command, write_predicate)

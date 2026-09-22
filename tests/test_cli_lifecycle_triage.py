@@ -127,9 +127,15 @@ def test_the_two_shared_notices_are_owned_in_one_place():
         assert source.count(notice) == 1, f"{notice!r} is spelled more than once"
 
 
+# `run`'s lifecycle — the prior-run ladder, the reopen/resume branches, the snapshot publish — lives in
+# `run_cmds._open_and_drive` since review 2026-09-22 (SCJ-05), because `looplab bench` drives it too.
+# The pins below read `run` THROUGH that helper, so they still hold of what `run` executes.
+_COMMAND_LIFECYCLE = {"run": "_open_and_drive", "resume": "resume"}
+
+
 @pytest.mark.parametrize("command", ["run", "resume"])
 def test_no_command_re_derives_the_ladder_it_replaced(command):
-    source = inspect.getsource(getattr(run_cmds, command))
+    source = inspect.getsource(getattr(run_cmds, _COMMAND_LIFECYCLE[command]))
     assert "classify_prior_run(" in source
     assert "incomplete_finalize_scope(prior_events)" not in source, (
         f"{command} re-derives the scope half of the predicate the classifier owns")
@@ -148,7 +154,10 @@ def test_the_surface_differences_that_legitimately_remain_are_still_there():
     """The classification is shared; the ACTION is not. `run` reopens a finished dir so the loop
     processes a new budget, while `resume` appends the universal resume event. Collapsing those
     would be the wrong kind of deduplication, so they are pinned as intentionally different."""
-    run_source = inspect.getsource(run_cmds.run)
+    from tests._source_scan import called_names
+
+    run_source = inspect.getsource(getattr(run_cmds, _COMMAND_LIFECYCLE["run"]))
+    assert "_open_and_drive" in called_names(run_cmds.run)     # an AST call, not a comment
     resume_source = inspect.getsource(run_cmds.resume)
     assert "EV_RUN_REOPENED" in run_source and "EV_RUN_REOPENED" not in resume_source
     assert 'prior_kind == "finished"' in run_source and 'prior_kind == "paused"' in run_source
@@ -160,7 +169,10 @@ def test_the_surface_differences_that_legitimately_remain_are_still_there():
 def test_run_no_longer_inlines_the_maintainer_only_calibration_lane():
     """~100 lines of one-purpose validation that most readers of `run` never need. Each block is now
     a named helper, so the command reads as the pipeline it is."""
-    source = inspect.getsource(run_cmds.run)
+    # `run` plus the lifecycle it delegates to (`_open_and_drive`, SCJ-05): the last two helpers
+    # moved there with the lock/snapshot block they belong to.
+    source = (inspect.getsource(run_cmds.run)
+              + inspect.getsource(getattr(run_cmds, _COMMAND_LIFECYCLE["run"])))
     for helper in ("_pin_offline_speculation_profile(", "_calibration_envelope_task_dict(",
                    "_assert_calibration_dir_is_fresh(", "_publish_run_snapshots("):
         assert helper in source, f"{helper} is not called from run()"

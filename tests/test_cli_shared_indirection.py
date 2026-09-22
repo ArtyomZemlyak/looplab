@@ -34,7 +34,6 @@ from looplab.core.latebind import late_bound
     (run_cmds, "_engine", "_engine"),
     (run_cmds, "make_llm_client", "make_llm_client"),
     (export_cmds, "make_llm_client", "make_llm_client"),
-    (bench, "_engine", "_engine"),
 ])
 def test_every_shim_resolves_the_package_attribute_at_call_time(holder, attr, target,
                                                                 monkeypatch):
@@ -43,6 +42,15 @@ def test_every_shim_resolves_the_package_attribute_at_call_time(holder, attr, ta
     test that believed it was offline — passing, having tested nothing."""
     monkeypatch.setattr(cli, target, lambda *a, **k: ("patched", a, k))
     assert getattr(holder, attr)(1, x=2) == ("patched", (1,), {"x": 2})
+
+
+def test_the_bench_shim_resolves_the_run_lifecycle_at_call_time(monkeypatch):
+    """The bench's row used to be `(bench, "_engine", "_engine")`: it held the engine builder and
+    drove `.run` on it directly, skipping the run lifecycle (review 2026-09-22, SCJ-05). It holds
+    that lifecycle now, which lives in `run_cmds`, and still builds through the `cli._engine` seam."""
+    monkeypatch.setattr(run_cmds, "_open_and_drive", lambda *a, **k: ("patched", a, k))
+    assert bench._open_and_drive(1, x=2) == ("patched", (1,), {"x": 2})
+    assert not hasattr(bench, "_engine"), "the bench drives the lifecycle, never the bare engine"
 
 
 def test_the_shim_forwards_arguments_verbatim_including_none_and_keywords():

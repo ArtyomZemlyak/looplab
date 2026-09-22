@@ -88,6 +88,15 @@ def bench(
         else:
             typer.echo(f"  {r['task']}: best={r['best_metric']} nodes={r['nodes']} "
                        f"eval_s={r['eval_seconds']} hacks={r['reward_hack_flags']}")
+    # A suite in which a task ERRORED is a failed suite, and must not exit 0 (review 2026-09-22,
+    # SCJ-05): it did, even when EVERY task errored, so a CI step or an `&&` chain around
+    # `looplab bench` read a broken suite as a pass. Exit 1, the code `run` uses for a run that
+    # produced nothing; each error is already printed above and recorded in benchmark.json.
+    errored = [r["task"] for r in results if r.get("error")]
+    if errored:
+        typer.echo(f"benchmark FAILED: {len(errored)}/{len(results)} task(s) errored: "
+                   + ", ".join(errored), err=True)
+        raise typer.Exit(1)
 
 
 @app.command(name="export-mlflow")
