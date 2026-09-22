@@ -22,7 +22,7 @@ import threading
 from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from fastapi import HTTPException
 
@@ -143,6 +143,26 @@ _REQUEST_FOLD_MEMO_MAX = 8
 #: above the runs a single session touches, far below "every run this server has ever served".
 _EVENT_STORE_CACHE_MAX = 64
 
+# THE PUBLIC-STATE PAYLOAD CACHE'S BOUNDS (review 2026-09-22, SRV2-01). A payload is the whole trimmed
+# public projection — 9.3 MB measured for an 11 MB, 4k-event log — so what the cache may RETAIN is
+# the property, not only what it may serve. The cache was keyed by the whole file identity with FIFO
+# eviction past 256 entries: a live run appends on every provider call, so each SSE tick left the
+# superseded payload behind (20 appends -> 21 entries, 185.7 MB; ~2.4 GB at the cap from one tab).
+#: LIVE payloads: ONE slot per (run dir, audience) holding (identity, payload) — the next identity
+#: REPLACES it. LRU across runs, since only the runs someone has open are worth a slot.
+_STATE_LIVE_SLOTS_MAX = 32
+#: HISTORICAL (`?seq=`) payloads: a small LRU of its own, so scrubbing a timeline cannot evict the
+#: live slots every open tab's SSE stream reads, nor keep more than this many old prefixes.
+_STATE_HISTORY_MAX = 8
+#: Stripes of the miss-path build lock (see `AppState._state_build_lock`).
+_STATE_BUILD_STRIPES = 64
+
+
+class _StateSlot(NamedTuple):
+    """One cached payload: the exact identity key it answers for, and the entry built for it."""
+    identity_key: tuple
+    entry: tuple
+
 
 @contextmanager
 def request_fold_scope():
@@ -191,18 +211,28 @@ class AppState:
         # claim that equivalence while `run_projections` spelled the tuple by hand minus `st_dev` and
         # the Windows reparse field, which is how the two drifted apart unnoticed (doc 25 SC-11).
         self.summary_cache: dict[str, tuple] = {}  # run_id -> (file_identity(events.jsonl), summary)
-        # Per-run folded-state cache keyed by (size, mtime, upto_seq): state_payload re-read + re-folded
-        # the WHOLE events.jsonl on every SSE tick (every ~0.4s per client), O(n²) for a repo run whose
-        # node_created events embed full file sets. The live-only `engine_running` is re-stamped on a hit.
-        self._state_cache: dict[tuple, tuple] = {}
+        # Per-run folded-state cache: state_payload re-read + re-folded the WHOLE events.jsonl on every
+        # SSE tick (every ~0.4s per client), O(n²) for a repo run whose node_created events embed full
+        # file sets. The live-only `engine_running` is re-stamped on a hit.
+        # TWO maps since review 2026-09-22, SRV2-01 (see `_STATE_LIVE_SLOTS_MAX`): the LIVE payload
+        # is one slot per (run dir, audience) holding (identity key, entry), so an append REPLACES the
+        # run's payload instead of leaving the superseded one behind, and `?seq=` payloads live in a
+        # small LRU of their own, one slot per (run dir, audience, seq) of the same shape.
+        self._state_live: "OrderedDict[tuple[str, str], tuple]" = OrderedDict()
+        self._state_history: "OrderedDict[tuple, tuple]" = OrderedDict()
+        # SINGLE FLIGHT on the miss path: four readers arriving after one append ran four folds
+        # (3.28 s measured), because nothing made the second wait for the first one's build. Striped
+        # rather than one lock per run (a lock table would itself need bounding) or one global lock
+        # (a slow build of one run would stall every other run's first read).
+        self._state_build_locks = tuple(threading.RLock() for _ in range(_STATE_BUILD_STRIPES))
         # Guards the state-cache insert+evict for the same reason as the trace-view lock below: /state,
         # the SSE stream, and the /trace + /nodes routes (via trace_scalars -> state_payload) all reach
         # state_payload concurrently on the threadpool, and `pop(next(iter(dict)))` on a dict another
         # thread is inserting into raises "dictionary changed size during iteration" (a 500).
         self._state_cache_lock = threading.Lock()
         # Per-run event-log INTEGRITY receipt, keyed by the same `file_identity` (see `log_integrity`).
-        # Deliberately a separate map from `_state_cache`: that one is keyed by (run, identity, seq,
-        # audience) and holds four entries per run, while this answers ONE question about the file and
+        # Deliberately a separate map from the state payload cache: that one holds a slot per
+        # (run, audience) plus historical prefixes, while this answers ONE question about the file and
         # is read by the run LIST too — which never builds a state payload at all. Shares
         # `_state_cache_lock` because both are small dict ops under the same reader fan-out.
         self._integrity_cache: dict[str, tuple] = {}
@@ -382,8 +412,8 @@ class AppState:
         a fourth does not appear, and `eventstore.log_integrity` is the one derivation all of them
         can reach.)
 
-        Keyed by `file_identity` exactly like `summary_cache`/`_state_cache`, so a finished run pays
-        the scan once and a live run pays it on the same ticks it already re-folds on. Cost, measured
+        Keyed by `file_identity` exactly like `summary_cache` and the payload slots, so a finished run
+        pays the scan once and a live run pays it on the same ticks it already re-folds on. Cost, measured
         on the corpus: 62 ms for the 12 MB rubertlite log and 33 ms for the 5.2 MB `rubert-dr-0807` —
         at or below the `iter_event_jsonl` + `Event(**o)` pass this sits beside (3.5 ms / 44 ms), and
         a divergent log stops the scan at its boundary rather than reading on.
@@ -472,11 +502,78 @@ class AppState:
         projection is narrowed so nothing describing sibling runs rides along (see
         `REVIEW_OMITTED_CARD_FIELDS`). Narrowing happens at projection time so the completeness
         receipt describes what the response actually carries — a scrub applied to a finished DTO
-        would leave the receipt certifying data that is no longer there."""
+        would leave the receipt certifying data that is no longer there.
+
+        ONE LIVE PAYLOAD PER (RUN, AUDIENCE), BUILT ONCE (review 2026-09-22, SRV2-01): an append
+        REPLACES the run's cached payload instead of leaving the superseded one behind (see
+        `_STATE_LIVE_SLOTS_MAX`), and concurrent readers of one new identity share one build (see
+        `_state_build_lock`). Every serve — a hit or the build that just ran — stamps the same
+        present-time facts onto a COPY of the cached body, below."""
         omit_fields = REVIEW_OMITTED_CARD_FIELDS if audience == "review" else frozenset()
-        # Cache the expensive fold+dump+trim by (events.jsonl size, mtime, upto_seq): unchanged log ->
-        # reuse the trimmed payload, only re-stamping the live `engine_running` (a lock probe, not the
-        # log). Bounds the SSE hot path from O(events) per tick to a stat() + a dict copy.
+        # Cache the expensive fold+dump+trim by the log's file identity: unchanged log -> reuse the
+        # trimmed payload, only re-stamping the live `engine_running` (a lock probe, not the log).
+        # Bounds the SSE hot path from O(events) per tick to a stat() + a dict copy.
+        ckey = self._state_payload_key(rd, upto_seq, audience)
+        entry = self._cached_state_entry(rd, upto_seq, audience, ckey)
+        if entry is None and ckey is None:
+            # No stat, no key: answer uncached rather than not answering (as it always has).
+            entry = self._build_state_entry(rd, upto_seq, omit_fields)
+        elif entry is None:
+            with self._state_build_lock(rd):
+                # SINGLE FLIGHT. A reader that waited here behind another's build re-checks before
+                # building — against a FRESH stat, so four readers after one append run ONE fold, and
+                # a reader whose log moved again while it waited builds for the identity that is
+                # there now rather than serving the one it arrived with.
+                ckey = self._state_payload_key(rd, upto_seq, audience)
+                entry = self._cached_state_entry(rd, upto_seq, audience, ckey)
+                if entry is None:
+                    entry = self._build_state_entry(rd, upto_seq, omit_fields)
+                    if ckey is not None:     # cache the trimmed payload for the next unchanged tick
+                        self._store_state_entry(rd, upto_seq, audience, ckey, entry)
+        d, last_seq, max_seq, generation, event_count = entry
+        out = dict(d)
+        # Liveness: is a real engine process driving this run RIGHT NOW? (lock probe, not the event log).
+        # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
+        # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
+        # Liveness is a present-time fact. Stamping it into an old prefix fold creates a
+        # hybrid object that is neither historical nor live.
+        out["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
+        # MIRRORED into the projection as well as onto the envelope, and stamped on every serve
+        # exactly like `engine_running`. The envelope is the canonical position (it is a
+        # fact about the RECORD), but `state` is the object every browser consumer actually receives —
+        # `useRunState` publishes the folded snapshot and not the frame around it — and a receipt that
+        # does not travel with the thing it qualifies is a receipt nobody reads. Not stored in the
+        # cache tuple: the receipt is keyed on the FILE, so a repair must be observed on the next tick
+        # rather than inherited from a cached body.
+        out["source_integrity"] = self.log_integrity(rd)
+        # WHOSE CODE BUILT THIS PAYLOAD. A `looplab ui` process pins its own modules at import, so a
+        # fold fix merged afterwards is absent from every answer it gives — silently, since a stale
+        # server returns 200 with a smaller truth. Mirrored into `state` as well as onto the envelope
+        # for the same reason `source_integrity` is: `useRunState` publishes the folded snapshot and
+        # not the frame around it. See `serve/code_freshness.py` for the case that produced it.
+        # Present-time, and re-stamped on every serve for the same reason liveness is: a server that
+        # went stale WHILE an entry sat in the cache would otherwise keep answering "current" out of a
+        # body built before the merge.
+        # ONE READ, two places. It is a fact about THIS payload, so asking twice can only
+        # produce a payload whose `state` mirror and envelope disagree — and each ask is a
+        # cache lookup that may become a tree walk at the 30-second boundary.
+        server_code = cached_code_freshness()
+        out["server_code"] = server_code
+        # The receipt rides on the ENVELOPE beside `event_count`, not inside the folded `state`: it is
+        # a fact about the RECORD, not about the run, and it must stay true for a historical
+        # `upto_seq` fold too — an operator scrubbed to seq 12 of a truncated log is looking at a
+        # prefix of a prefix. It is re-read on every serve rather than stored in the cache
+        # tuple for the same reason `engine_running` is: it is keyed on the file, not on (file, seq,
+        # audience), so one map answers every entry and a repair between ticks is observed.
+        return {"state": out, "seq": last_seq, "max_seq": max_seq,
+                "event_count": event_count,
+                "source_integrity": self.log_integrity(rd),
+                "server_code": server_code,
+                RUN_GENERATION_FIELD: generation or None}
+
+    def _state_payload_key(self, rd: Path, upto_seq: Optional[int],
+                           audience: str) -> Optional[tuple]:
+        """The exact identity a cached payload answers for, or None when the log cannot be stat'ed."""
         try:
             stt = (rd / "events.jsonl").stat()
             # Include file identity/creation time, not only mutable content metadata. Reset archives
@@ -486,31 +583,52 @@ class AppState:
             # log, and serving it from the owner entry (or vice versa) would leak across the boundary.
             # `file_identity`, not a hand-rolled tuple: this one used to omit `st_dev`, so two
             # runs whose logs shared an inode number across devices could collide on one key.
-            ckey = (str(rd), *file_identity(stt), upto_seq, audience)
+            return (str(rd), *file_identity(stt), upto_seq, audience)
         except OSError:
-            ckey = None
-        if ckey is not None:
-            hit = self._state_cache.get(ckey)
-            if hit is not None:
-                d, last_seq, max_seq, generation, event_count = hit
-                out = dict(d)
-                # Liveness is a present-time fact. Stamping it into an old prefix fold creates a
-                # hybrid object that is neither historical nor live.
-                out["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
-                out["source_integrity"] = self.log_integrity(rd)
-                # Present-time, and re-stamped on the hit path for the same reason liveness is: a
-                # server that went stale WHILE this entry sat in the cache would otherwise keep
-                # answering "current" out of a body built before the merge.
-                # ONE READ, two places. It is a fact about THIS payload, so asking twice can only
-                # produce a payload whose `state` mirror and envelope disagree — and each ask is a
-                # cache lookup that may become a tree walk at the 30-second boundary.
-                server_code = cached_code_freshness()
-                out["server_code"] = server_code
-                return {"state": out, "seq": last_seq, "max_seq": max_seq,
-                        "event_count": event_count,
-                        "source_integrity": self.log_integrity(rd),
-                        "server_code": server_code,
-                        RUN_GENERATION_FIELD: generation or None}
+            return None
+
+    def _state_build_lock(self, rd: Path):
+        """The miss-path lock for `rd`'s payloads: one stripe of `_STATE_BUILD_STRIPES`, by run dir.
+
+        Re-entrant, so a build that ever reached `state_payload` again on its own thread would
+        re-check rather than deadlock. Two runs that share a stripe serialize their first reads —
+        the cost of not keeping a per-run lock table that would itself need bounding."""
+        return self._state_build_locks[hash(str(rd)) % len(self._state_build_locks)]
+
+    def _state_slots(self, rd: Path, upto_seq: Optional[int], audience: str):
+        """(map, slot key) for one payload. A slot holds `_StateSlot(identity_key, entry)`, so the
+        next identity for the same (run, audience[, seq]) REPLACES the superseded payload."""
+        if upto_seq is None:
+            return self._state_live, (str(rd), audience)
+        return self._state_history, (str(rd), audience, upto_seq)
+
+    def _cached_state_entry(self, rd: Path, upto_seq: Optional[int], audience: str,
+                            ckey: Optional[tuple]) -> Optional[tuple]:
+        """The cached entry for exactly `ckey`, or None — never for a None key."""
+        if ckey is None:
+            return None
+        slots, slot_key = self._state_slots(rd, upto_seq, audience)
+        with self._state_cache_lock:
+            slot = slots.get(slot_key)
+            if slot is None or slot.identity_key != ckey:
+                return None
+            slots.move_to_end(slot_key)
+            return slot.entry
+
+    def _store_state_entry(self, rd: Path, upto_seq: Optional[int], audience: str,
+                           ckey: tuple, entry: tuple) -> None:
+        slots, slot_key = self._state_slots(rd, upto_seq, audience)
+        bound = _STATE_LIVE_SLOTS_MAX if upto_seq is None else _STATE_HISTORY_MAX
+        with self._state_cache_lock:          # only the dict ops; the build ran outside this lock
+            slots[slot_key] = _StateSlot(identity_key=ckey, entry=entry)
+            slots.move_to_end(slot_key)
+            while len(slots) > bound:
+                slots.popitem(last=False)
+
+    def _build_state_entry(self, rd: Path, upto_seq: Optional[int], omit_fields) -> tuple:
+        """`(payload body, last_seq, max_seq, generation, event_count)` — everything `state_payload`
+        caches for one identity. The present-time facts (`engine_running`, `source_integrity`,
+        `server_code`) are NOT in the body: `state_payload` stamps them onto a copy on every serve."""
         all_evs = self.events(rd)
         generation = run_generation_token(all_evs)
         # This is the count of the full recoverable folded projection, even for a historical
@@ -635,41 +753,7 @@ class AppState:
         # `upto_seq` fold reports what was in flight THEN, and so it caches with the rest of the
         # payload.
         d["card_authoring"] = card_authoring(evs, st)
-        # Liveness: is a real engine process driving this run RIGHT NOW? (lock probe, not the event log).
-        # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
-        # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
-        d["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
-        # MIRRORED into the projection as well as onto the envelope, and stamped in both the miss and
-        # the hit path exactly like `engine_running`. The envelope is the canonical position (it is a
-        # fact about the RECORD), but `state` is the object every browser consumer actually receives —
-        # `useRunState` publishes the folded snapshot and not the frame around it — and a receipt that
-        # does not travel with the thing it qualifies is a receipt nobody reads. Not stored in the
-        # cache tuple: the receipt is keyed on the FILE, so a repair must be observed on the next tick
-        # rather than inherited from a cached body.
-        d["source_integrity"] = self.log_integrity(rd)
-        # WHOSE CODE BUILT THIS PAYLOAD. A `looplab ui` process pins its own modules at import, so a
-        # fold fix merged afterwards is absent from every answer it gives — silently, since a stale
-        # server returns 200 with a smaller truth. Mirrored into `state` as well as onto the envelope
-        # for the same reason `source_integrity` is: `useRunState` publishes the folded snapshot and
-        # not the frame around it. See `serve/code_freshness.py` for the case that produced it.
-        server_code = cached_code_freshness()   # one read, mirrored below — see the hit path
-        d["server_code"] = server_code
-        if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
-            with self._state_cache_lock:      # only the dict ops; the fold/trim above ran lock-free
-                self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
-                if len(self._state_cache) > 256:  # bound the cache (many runs / seq points / session)
-                    self._state_cache.pop(next(iter(self._state_cache)))
-        # The receipt rides on the ENVELOPE beside `event_count`, not inside the folded `state`: it is
-        # a fact about the RECORD, not about the run, and it must stay true for a historical
-        # `upto_seq` fold too — an operator scrubbed to seq 12 of a truncated log is looking at a
-        # prefix of a prefix. It is re-read on the cache hit above rather than stored in the cache
-        # tuple for the same reason `engine_running` is: it is keyed on the file, not on (file, seq,
-        # audience), so one map answers every entry and a repair between ticks is observed.
-        return {"state": d, "seq": last_seq, "max_seq": max_seq,
-                "event_count": event_count,
-                "source_integrity": self.log_integrity(rd),
-                "server_code": server_code,
-                RUN_GENERATION_FIELD: generation or None}
+        return d, last_seq, max_seq, generation, event_count
 
     def state_probe(self, rd: Path) -> dict:
         """Small current-lifecycle envelope for idle terminal clients.
@@ -794,10 +878,11 @@ class AppState:
         key = str(rd)
         self.summary_cache.pop(rd.name, None)
         with self._state_cache_lock:
-            stale = [cache_key for cache_key in self._state_cache
-                     if cache_key and cache_key[0] == key]
-            for cache_key in stale:
-                self._state_cache.pop(cache_key, None)
+            # Both payload maps, by slot key (review 2026-09-22, SRV2-01): the live slots per
+            # audience AND the historical prefixes, each of which can be a whole projected state.
+            for slots in (self._state_live, self._state_history):
+                for slot_key in [slot_key for slot_key in slots if slot_key[0] == key]:
+                    slots.pop(slot_key, None)
         self.invalidate_trace_view(rd)
         from looplab.events.span_index import invalidate
         invalidate(rd / "spans.jsonl")

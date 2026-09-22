@@ -188,16 +188,34 @@ def test_ONE_WALK_PER_WINDOW_even_when_every_reader_misses_together(monkeypatch)
 def test_the_payload_reads_the_freshness_ONCE(tmp_path, monkeypatch):
     """It is a fact about THIS payload, and `state_payload` asked for it twice on both the hit and
     the miss path — so the `state` mirror and the envelope could disagree, and each ask is a cache
-    lookup that becomes a tree walk at the window boundary."""
-    import inspect
+    lookup that becomes a tree walk at the window boundary.
 
+    DRIVEN since review 2026-09-22 (SRV2-01), which merged the hit and the miss into ONE serve path.
+    This counted the literal `cached_code_freshness()` in the method's source (two branches, two
+    reads) — a pin one comment away from vacuous, and wrong the moment the branches merged. Every
+    read below returns a FRESH object, so a serve that asked twice would publish two different ones
+    and a serve that asked per use would count more than one read."""
+    pytest.importorskip("fastapi")                        # [ui] extra
     from looplab.serve import appstate
+    from looplab.serve.server import make_app
 
-    body = inspect.getsource(appstate.AppState.state_payload)
-    assert body.count("cached_code_freshness()") == 2, (
-        "once per branch (hit and miss), never once per USE — got "
-        f"{body.count('cached_code_freshness()')}")
-    assert body.count('"server_code": server_code') == 2, "both envelopes reuse that one read"
+    reads: list = []
+
+    def fresh_each_time():
+        receipt = {"stale": False, "changed_count": 0, "changed": [], "read": len(reads)}
+        reads.append(receipt)
+        return receipt
+
+    monkeypatch.setattr(appstate, "cached_code_freshness", fresh_each_time)
+    rd = tmp_path / "demo"
+    _log(rd)
+    srv = make_app(tmp_path).state.looplab
+    for serve in ("miss", "hit"):
+        before = len(reads)
+        payload = srv.state_payload(rd)
+        assert len(reads) == before + 1, f"the {serve} read the freshness {len(reads) - before}x"
+        assert payload["server_code"] is payload["state"]["server_code"], (
+            "the envelope and the `state` mirror must carry the ONE read")
 
 
 # --- the shipped HTTP surface ---------------------------------------------------------------------
