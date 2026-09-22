@@ -2091,25 +2091,30 @@ def build_router(srv) -> APIRouter:
         # expansion; measuring the retained dicts is the response's own serialization cost.
         out: list = []
         budget = _LEGACY_LOG_MAX_BYTES
-        for o in iter_event_jsonl(candidate):
-            if not (isinstance(o, dict) and o.get("seq", -1) > since):
-                continue
-            # MEASURE BEFORE RETAINING. Charging the budget after the append made this a soft
-            # ceiling: the worst case was budget + one unbounded row, so a single imported/legacy
-            # envelope larger than the whole budget was still materialized and returned whole. The
-            # current writer's event cap bounds what WE write; it cannot prove an imported log obeys
-            # it. An oversize row is replaced by a bounded marker that keeps its `seq`, so a paging
-            # caller advancing `since` steps over it instead of stalling on it forever.
-            size = len(json.dumps(o, default=str))
-            if size > budget:
-                if not out:
-                    out.append({"seq": o.get("seq"), "type": o.get("type"), "ts": o.get("ts"),
-                                "data": {"omitted": "event_too_large", "bytes": size}})
-                break
-            out.append(o)
-            budget -= size
-            if len(out) >= _LEGACY_LOG_MAX_ROWS:
-                break
+        try:
+            for o in iter_event_jsonl(candidate):
+                if not (isinstance(o, dict) and o.get("seq", -1) > since):
+                    continue
+                # MEASURE BEFORE RETAINING. Charging the budget after the append made this a soft
+                # ceiling: the worst case was budget + one unbounded row, so a single imported/legacy
+                # envelope larger than the whole budget was still materialized and returned whole. The
+                # current writer's event cap bounds what WE write; it cannot prove an imported log obeys
+                # it. An oversize row is replaced by a bounded marker that keeps its `seq`, so a paging
+                # caller advancing `since` steps over it instead of stalling on it forever.
+                size = len(json.dumps(o, default=str))
+                if size > budget:
+                    if not out:
+                        out.append({"seq": o.get("seq"), "type": o.get("type"), "ts": o.get("ts"),
+                                    "data": {"omitted": "event_too_large", "bytes": size}})
+                    break
+                out.append(o)
+                budget -= size
+                if len(out) >= _LEGACY_LOG_MAX_ROWS:
+                    break
+        except OSError as exc:
+            # The same refusal `AppState.events` answers (review 2026-09-22, SRV2-04): this route
+            # reads the RAW envelopes itself, so an existing-but-unreadable log was its bare 500.
+            raise refusal("event_log_unreadable") from exc
         return out
 
     @router.get("/api/runs/{run_id}/log-page")

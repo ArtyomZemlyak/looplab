@@ -274,6 +274,9 @@ def _event_log_raises_eio(monkeypatch, rd) -> None:
     f"/api/runs/{RUN}/state", f"/api/runs/{RUN}/nodes/0", f"/api/runs/{RUN}/cost",
     f"/api/runs/{RUN}/prov", f"/api/runs/{RUN}/config", f"/api/runs/{RUN}/comments",
     f"/api/runs/{RUN}/nodes/0/trace",
+    # The legacy raw-envelope route reads `iter_event_jsonl` itself (its rows are the RAW envelopes,
+    # which `AppState.events` re-validates into `Event`s), so it names the same refusal on its own.
+    f"/api/runs/{RUN}/log",
 ])
 def test_an_unreadable_event_log_is_a_coded_503_on_every_per_run_read(tmp_path, monkeypatch, path):
     """Review 2026-09-22, SRV2-04: an `events.jsonl` that exists but cannot be read answered a bare
