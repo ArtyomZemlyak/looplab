@@ -10,7 +10,8 @@ Nothing here trusts the table. Every assertion re-derives its side:
 
 * the fold's reads and the writers' keys come from `tests/_source_scan.py`, by AST, following the
   helpers a handler forwards the payload to and the variables a writer builds it in;
-* `stored_whole` is re-derived, never read from the row;
+* `stored_whole` is re-derived, never read from the row — by FOLDING a marker key and looking for
+  it in the raw state, with the AST scan demoted to nominating which types need a valid probe;
 * the additive-only rule is DRIVEN, not scanned — every registered type is folded with an EMPTY
   payload, and a real recorded run is folded twice, once with every undeclared key stripped out of
   every payload. A key the fold consumes but the table omits changes the second state.
@@ -231,13 +232,93 @@ def test_required_keys_are_written_by_every_literal_writer(writers):
         f"`required` keys some writer does not write unconditionally: {broken}")
 
 
-def test_stored_whole_is_re_derived_from_the_fold():
-    """Declared `stored_whole` must equal what `replay.py` actually does with the payload."""
-    derived = fold_stores_payload_whole()
+# ------------------------------------------------------------------ `stored_whole`, DRIVEN
+#
+# THE STORE PROBE (review 2026-09-22, EVT-05). `stored_whole` was re-derived by an AST scan
+# (`_source_scan.fold_stores_payload_whole`) that counts a payload handed to any call it cannot
+# follow as STORED — `set(d)`, a local `dict(d)` copy, a bounded receipt builder — and the table
+# had been made to agree with it: `card_added`, `card_enriched`, `llm_usage` and `node_concepts`
+# were published "whole" while an unknown key folded into any of them reaches no state at all
+# (driven by `review/EVT/repro_stored_whole.py`). A scan that over-approximates can NOMINATE; the
+# fold decides. Each folded type is folded once with a marker key, and it stores its payload whole
+# iff the marker reaches the raw accumulated state (`FoldCursor._state`, before any post-pass).
+_MARKER_KEY, _MARKER = "zz_store_probe_key", "zz-store-probe-9c1e"
+
+# Minimal VALID payloads for handlers that validate before they keep anything: an empty payload is
+# refused there, and a refused row says nothing about storage. The set is DERIVED by the test below
+# — exactly the types the scan nominates and an empty probe cannot decide — so a row that is not
+# needed, or a needed type with no row, is red.
+_STORE_PROBE_PAYLOADS = {
+    "ablate": {"parent_id": 0, "generation": 0, "impacts": []},
+    "card_added": {"id": "card-probe", "statement": "a probe statement"},
+    "card_enriched": {"id": "card-probe", "confidence": 0.5},
+    "fork": {"from_node_id": 0, "generation": 0},
+    "llm_usage": {"usage_id": "u-probe", "calls": 1, "cost": 0.25},
+    "node_concepts": {"node_id": 0, "generation": 0, "concepts": ["loss/focal"]},
+    "plan": {"phases": []},
+}
+
+
+def _raw_state_after(etype=None, payload=None) -> str:
+    """The RAW accumulated state (no post-pass) after a one-node prefix plus one probe row."""
+    from looplab.core.models import Event
+    from looplab.events.replay import FoldCursor
+
+    rows = [("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+            ("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": "",
+                              "files": {}, "generation": 0})]
+    if etype is not None:
+        rows.append((etype, payload))
+    cursor = FoldCursor()
+    cursor.extend(Event(seq=i, ts=float(i + 1), type=t, data=d) for i, (t, d) in enumerate(rows))
+    return cursor._state.model_dump_json()
+
+
+def _stores_marker(etype: str, payload: dict) -> bool:
+    dump = _raw_state_after(etype, {**payload, _MARKER_KEY: _MARKER})
+    return _MARKER in dump or _MARKER_KEY in dump
+
+
+@pytest.fixture(scope="module")
+def store_probe():
+    folded = sorted(ALL_EVENT_TYPES - DIAGNOSTIC_EVENTS)
+    bare = {etype for etype in folded if _stores_marker(etype, {})}
+    derived = bare | {etype for etype, payload in _STORE_PROBE_PAYLOADS.items()
+                      if _stores_marker(etype, payload)}
+    return {"bare": bare, "derived": derived}
+
+
+def test_stored_whole_is_re_derived_by_folding_a_marker(store_probe):
+    """Declared `stored_whole` must equal what the fold DOES with a key it was never told about.
+    MUTATION: put `stored_whole=True` back on `card_added` (the scan's verdict) and this is red."""
     declared = {t for t, c in EVENT_PAYLOAD_KEYS.items() if c.stored_whole}
+    derived = store_probe["derived"]
     assert declared == derived, (
-        f"declared but does not store the payload: {sorted(declared - derived)}; "
-        f"stores the payload but not declared: {sorted(derived - declared)}")
+        f"declared whole but an unknown key reaches no state: {sorted(declared - derived)}; "
+        f"an unknown key reaches RunState but not declared whole: {sorted(derived - declared)}")
+
+
+def test_every_type_the_scan_nominates_is_decided_by_an_informative_probe(store_probe):
+    """The scan can only OVER-count a payload as stored, so it nominates; a type it nominates that
+    the empty probe cannot show storing needs a valid probe row, and that row must be one the
+    handler ACCEPTS — a refused probe decides nothing and would read as "not whole" by default.
+
+    What neither half can see, stated rather than hidden: a handler that keeps the payload only
+    AFTER validating it, through a shape the scan does not recognise (`st.x = d.copy()`), is
+    nominated by nothing and refused by the empty probe. The bare probe still catches every
+    handler that stores unconditionally, for every folded type, whatever the scan thinks."""
+    needed = fold_stores_payload_whole() - store_probe["bare"]
+    assert set(_STORE_PROBE_PAYLOADS) == needed, (
+        f"nominated but undecided — add a minimal valid probe row: "
+        f"{sorted(needed - set(_STORE_PROBE_PAYLOADS))}; probe rows nothing needs: "
+        f"{sorted(set(_STORE_PROBE_PAYLOADS) - needed)}")
+    reference = _raw_state_after()
+    refused = sorted(etype for etype, payload in _STORE_PROBE_PAYLOADS.items()
+                     if _raw_state_after(etype, payload) == reference)
+    assert not refused, (
+        f"these probe payloads are refused by their handler, so they cannot decide storage: "
+        f"{refused}")
 
 
 def test_every_registered_type_folds_from_an_empty_payload():
@@ -282,21 +363,115 @@ def test_stripping_undeclared_keys_from_a_real_log_changes_nothing():
         "a key the fold actually consumes")
 
 
+def _consumed_request_fields() -> dict[str, frozenset[str]]:
+    """REQUEST fields a control normalizer CONSUMES — turns into other stored keys, or pops — and
+    never writes itself. `data_fields` is what a CALLER may send; the contract is what the LOG
+    carries, and for these two they differ by design (review 2026-09-22, EVT-05): the comment
+    revisions turn `expected_version` into `base_version`/`version`, and `inject_node`'s cross-run
+    import pops its two inputs into `origin`. Declaring them as carried is the misreading this
+    table exists to refuse, so they are named here and must NOT be in the contract."""
+    from looplab.serve.control_validation import _INJECT_IMPORT_FIELDS
+
+    return {
+        "comment_edited": frozenset({"expected_version"}),
+        "comment_resolution_changed": frozenset({"expected_version"}),
+        "inject_node": frozenset(_INJECT_IMPORT_FIELDS),
+    }
+
+
 def test_control_event_payloads_stay_inside_their_allow_list():
     """`serve/control_validation.py` normalizes a control intent's payload against `data_fields`, so
     that table and this one are two spellings of the same vocabulary: the allow-list must be
-    declared here, and nothing may be `required` that the intake does not accept."""
+    declared here — less the fields the normalizer CONSUMES, which must not be — and nothing may
+    be `required` that the intake does not accept."""
     pytest.importorskip("fastapi")
     from looplab.serve.control_validation import CONTROL_SPECS
 
+    consumed_by_type = _consumed_request_fields()
+    assert set(consumed_by_type) <= set(CONTROL_SPECS)
     for etype, spec in CONTROL_SPECS.items():
         contract = EVENT_PAYLOAD_KEYS[etype]
-        assert set(spec.data_fields) <= contract.keys, (
+        consumed = consumed_by_type.get(etype, frozenset())
+        assert consumed <= set(spec.data_fields), (
+            f"{etype}: listed as consumed but the intake does not even accept "
+            f"{sorted(consumed - set(spec.data_fields))}")
+        assert set(spec.data_fields) - consumed <= contract.keys, (
             f"{etype}: control allow-list fields missing from the payload contract: "
-            f"{sorted(set(spec.data_fields) - contract.keys)}")
+            f"{sorted(set(spec.data_fields) - consumed - contract.keys)}")
+        assert not (consumed & contract.keys), (
+            f"{etype}: declares request field(s) its normalizer consumes and never stores: "
+            f"{sorted(consumed & contract.keys)}")
         assert set(contract.required) <= set(spec.data_fields), (
             f"{etype}: `required` names a key the control intake never accepts: "
             f"{sorted(set(contract.required) - set(spec.data_fields))}")
+
+
+def test_a_real_comment_log_stripped_to_the_contract_keeps_every_comment(tmp_path):
+    """THE COMMENT ROWS, DRIVEN (review 2026-09-22, EVT-05). All three were written from the request
+    allow-list: `comment_edited` declared `expected_version`, which no stored row carries, and none
+    declared `comment_id`/`actor_kind`/`version`/`base_version`, which the reducer requires — so
+    stripping the undeclared keys from a real comment log folded to NO comments. Nothing saw it:
+    `_on_comment` hands `apply_comment_event` the EVENT rather than `d`, so the AST read scan is
+    blind here, and the golden log carries no comment. So the payloads are built by the REAL
+    normalizers, appended as the command service appends them, stripped to the contract and folded.
+    MUTATION: restore the old three rows and the stripped fold has no comment at all."""
+    pytest.importorskip("fastapi")
+    from looplab.events.comment_projection import project_comments
+    from looplab.serve.control_validation import normalize_control
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "run", "task_id": "t", "goal": "g",
+                                 "direction": "max"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}},
+                                  "code": "print(1)", "files": {}})
+
+    class _Srv:
+        root = rd.parent
+
+        def state(self, path):
+            return fold(EventStore(path / "events.jsonl").read_all())
+
+    srv = _Srv()
+    created = normalize_control(srv, rd, "comment_created",
+                                {"node_id": 0, "node_generation": 0, "text": "first note"})
+    store.append("comment_created", created)
+    comment_id = created["comment_id"]
+    edited = normalize_control(srv, rd, "comment_edited", {
+        "comment_id": comment_id, "node_id": 0, "node_generation": 0, "expected_version": 1,
+        "text": "second note"})
+    store.append("comment_edited", edited)
+    resolved = normalize_control(srv, rd, "comment_resolution_changed", {
+        "comment_id": comment_id, "node_id": 0, "node_generation": 0, "expected_version": 2,
+        "resolved": True})
+    store.append("comment_resolution_changed", resolved)
+
+    for etype, payload in (("comment_created", created), ("comment_edited", edited),
+                           ("comment_resolution_changed", resolved)):
+        undeclared = set(payload) - EVENT_PAYLOAD_KEYS[etype].keys
+        assert not undeclared, f"{etype}: the normalizer stores undeclared {sorted(undeclared)}"
+        assert "expected_version" not in payload, "a consumed request field reached the log"
+
+    events = store.read_all()
+    stripped = []
+    for event in events:
+        clone = copy.deepcopy(event)
+        declared = EVENT_PAYLOAD_KEYS[event.type].keys
+        clone.data = {k: v for k, v in clone.data.items() if k in declared}
+        stripped.append(clone)
+    full, thin = fold(events), fold(stripped)
+    comment = full.comments.get(comment_id)
+    assert comment is not None and comment.version == 3, "precondition: the real log folds"
+    assert comment.text == "second note" and comment.resolved is True
+    # `RunState.comments` is excluded from `model_dump`, so compare the projection itself.
+    assert ({cid: c.model_dump(mode="json") for cid, c in thin.comments.items()}
+            == {cid: c.model_dump(mode="json") for cid, c in full.comments.items()}), (
+        "stripping the keys EVENT_PAYLOAD_KEYS does not declare lost comment state")
+    assert thin.comments_revision == full.comments_revision
+    assert (project_comments(stripped, include_history=True)
+            == project_comments(events, include_history=True)), "…or its audit history"
 
 
 def test_the_phase_event_module_spells_registered_types():

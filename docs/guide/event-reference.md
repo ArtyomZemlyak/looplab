@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-155 event types — 112 folded into `RunState`, 43 diagnostic; 929 declared payload keys; 26 types whose whole payload is stored by the fold.
+155 event types — 112 folded into `RunState`, 43 diagnostic; 934 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -43,23 +43,23 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `best_confirmed` | folded | The champion the run confirmed by re-evaluation, and whether that confirmation was significant. | `generations`, `node_id`, `search_epoch`, `significant` | `attempt`, `generation` |
 | `budget` | diagnostic | The finalization budget receipt: wall clock, in-process seconds, evaluation seconds and node count. | — | `elapsed_s`, `eval_s`, `finalize_scope`, `finish_seq`, `nodes`, `process_s`, `speculation` |
 | `budget_extend` | folded | An operator raising a live run's node, time or parallelism budget. | — | `add_nodes`, `eval_parallel`, `llm_parallel`, `max_eval_seconds`, `max_parallel`, `max_seconds`, `parallel_build`, `timeout` |
-| `card_added` | folded · whole | A research Card minted into durable inventory: its id, statement and the action it owns. | — | `action`, `at_node`, `concepts`, `footprint`, `generation`, `id`, `idea`, `node_id`, `ownership_receipt`, `parent_card_id`, `parent_generations`, `parent_id`, `parent_ids`, `rationale`, `scored_against`, `scored_against_empty`, `scored_against_generation`, `source`, `statement`, `steering_context` |
+| `card_added` | folded | A research Card minted into durable inventory: its id, statement and the action it owns. | — | `action`, `at_node`, `concepts`, `footprint`, `generation`, `id`, `idea`, `node_id`, `ownership_receipt`, `parent_card_id`, `parent_generations`, `parent_id`, `parent_ids`, `rationale`, `scored_against`, `scored_against_empty`, `scored_against_generation`, `source`, `statement`, `steering_context` |
 | `card_auto_dropped` | folded | The engine dropped a Card as a lifecycle effect, with the reason (`dropped_by=engine`). | `dropped_by`, `id`, `reason` | `by` |
 | `card_build_attempted` | folded | One dispatch attempt for a Card's build, indexed so a repeat is visible instead of silently re-issued. | `card_id`, `generation`, `index` | — |
 | `card_build_done` | folded | A Card's build finished: the node it produced, or the reason it was skipped. | `card_id`, `generation` | `node_id`, `skipped`, `skipped_reason`, `speculative` |
 | `card_build_requested` | folded | The durable selection-and-compute gate for one Card's build. | `card_id`, `generation` | — |
 | `card_dropped` | folded | The operator stopped a Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_edited` | folded | The operator rewrote a Card's statement. | `id` | `source`, `statement` |
-| `card_enriched` | folded · whole | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `claim_refs`, `concept_tags`, `confidence`, `cross_run_prior`, `footprint`, `foresight_rank`, `generation`, `id`, `lesson_refs`, `node_id`, `novelty_verdict`, `proposal_ref`, `research_origin`, `steering_context` |
+| `card_enriched` | folded | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `claim_refs`, `concept_tags`, `confidence`, `cross_run_prior`, `footprint`, `foresight_rank`, `generation`, `id`, `lesson_refs`, `node_id`, `novelty_verdict`, `proposal_ref`, `research_origin`, `steering_context` |
 | `card_merged` | folded | Alias Cards folded into a canonical one, with the seq that decided the edge. | `aliases`, `canonical`, `merged_by`, `source_event_seq` | `statement` |
 | `card_ranked` | folded | The board's priority order over the Cards, with per-Card confidence and reason. | — | `at_node`, `confidence`, `order`, `ranked`, `reason` |
 | `card_reopened` | folded | The operator resumed a dropped Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_reprioritized` | folded | The operator moved one Card's priority. | `id` | `pinned`, `priority`, `source` |
 | `card_resource_pinned` | folded | The operator pinned one Card's GPU footprint. | `id` | `gpu_mem_mib`, `gpus`, `pinned`, `source` |
 | `command_ack` | diagnostic | The engine folded one server command intent — the causal ack that closes it. | `command_id`, `event_seq` | — |
-| `comment_created` | folded | An operator comment on one node, at that node's generation. | `node_id` | `node_generation`, `text` |
-| `comment_edited` | folded | A new revision of one comment, compare-and-swapped against the version the author saw. | `comment_id` | `expected_version`, `node_generation`, `node_id`, `text` |
-| `comment_resolution_changed` | folded | One comment's resolved flag moved, compare-and-swapped against the version the author saw. | `comment_id` | `expected_version`, `node_generation`, `node_id`, `resolved` |
+| `comment_created` | folded | An operator comment on one node, at that node's generation. | `node_id` | `actor_kind`, `comment_id`, `node_generation`, `text`, `version` |
+| `comment_edited` | folded | A new revision of one comment, compare-and-swapped against the version the author saw. | `comment_id` | `actor_kind`, `base_version`, `node_generation`, `node_id`, `text`, `version` |
+| `comment_resolution_changed` | folded | One comment's resolved flag moved, compare-and-swapped against the version the author saw. | `comment_id` | `actor_kind`, `base_version`, `node_generation`, `node_id`, `resolved`, `version` |
 | `concept_consolidation` | folded | A concept-vocabulary consolidation: which ids were renamed into which. | `mode`, `rename` | — |
 | `concept_coverage_snapshot` | folded | The concept-coverage gate's snapshot at one node, and which of its rules fired. | — | `at_node`, `current_streak`, `directive`, `experiments`, `fired`, `locked_axis`, `projection_token`, `recent_axis`, `streak`, `tag_mode`, `top_concept`, `top_concept_frac`, `uncovered_axes`, `uncovered_key` |
 | `concept_edge` | folded | Edges added to the concept graph, and the mode that derived them. | `edges`, `mode` | — |
@@ -105,20 +105,20 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `hypothesis_updated` | folded | One hypothesis's status moved. | `id` | `status` |
 | `inject_done` | folded | The fulfillment receipt for one `inject_node` request. | `idx` | — |
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
-| `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `source_node`, `source_run` |
+| `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `origin`, `parent_generations`, `parent_id`, `parent_ids` |
 | `lessons_distilled` | folded · whole | The lessons one distillation pass drew from this run's node pairs. | `at_node`, `count`, `lessons`, `pairs`, `trigger` | — |
 | `lessons_reconciled` | diagnostic | A re-evaluation changed an outcome, so this run's lessons were re-derived. | `at_node`, `derivation`, `lessons`, `n_added`, `n_retired`, `pairs`, `reflect` | — |
 | `lessons_refreshed` | folded · whole | The cross-run lesson store was re-read at a node, and whether it changed. | `at_node` | `changed`, `chars`, `error`, `skipped` |
 | `lessons_store_unavailable` | diagnostic | The lesson store could not be read this cadence; the next one retries the same unread store. | `error`, `mode` | `count`, `phase` |
 | `literature_retrieved` | folded | The papers one deep-research pass READ, beside the memo it produced. | `at_node`, `items` | `memo_id` |
 | `llm_cost` | folded · whole | The finalization roll-up of the run's provider spend. | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens` | `finalize_scope`, `finish_seq` |
-| `llm_usage` | folded · whole | One sanitized provider-call delta, folded cumulatively into the run's durable ledger. | — | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens`, `usage_id` |
+| `llm_usage` | folded | One sanitized provider-call delta, folded cumulatively into the run's durable ledger. | — | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens`, `usage_id` |
 | `log_repaired` | diagnostic | The `looplab repair-log` receipt for a rewritten torn log: what was dropped, and where the backup is. | `backup`, `corrupt_line`, `dropped_lines`, `good_records`, `ts` | — |
 | `memory_read` | diagnostic | One memory / cross-run / skill tool call: the rows it showed and the digest of the exact bytes the role saw. | `args`, `invocation_id`, `result_chars`, `result_sha256`, `rows`, `tool` | `source` |
 | `node_abort` | folded | The operator aborted one node. | `node_id` | `attempt`, `generation`, `reason` |
 | `node_build_delta` | diagnostic | A build byte-identical to another node's — the duplicate is surfaced, never refused. | `generation`, `identical_to`, `node_id`, `parent_ids`, `source_digest` | — |
 | `node_building` | folded | A node id was reserved and its build started; `node_created` clears the marker. | `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `card_id`, `generation`, `speculative` |
-| `node_concepts` | folded · whole | The concept ids one node was tagged with, by which mode, against a named vocabulary. | `at_vocab`, `concepts`, `generation`, `mode`, `node_id` | `at_pending`, `attempt` |
+| `node_concepts` | folded | The concept ids one node was tagged with, by which mode, against a named vocabulary. | `at_vocab`, `concepts`, `generation`, `mode`, `node_id` | `at_pending`, `attempt` |
 | `node_confirmed` | folded | A node's confirmation statistics over its seeds (mean, std). | `generation`, `mean`, `node_id`, `seeds`, `std` | `attempt` |
 | `node_created` | folded | A node exists: its idea, the code and files the Developer wrote, and its parents. | `code`, `files`, `idea`, `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `deleted`, `eval_start_boundary`, `footprint_finalized`, `forked_from`, `generation`, `materialize_aborted_intent`, `model_arm`, `origin`, `parent_generations`, `research_origin`, `seed`, `speculative` |
 | `node_eval_started` | folded | A node's evaluation was dispatched — the promise `node_created`'s eval-start boundary made. | `generation`, `node_id` | `attempt` |

@@ -1191,7 +1191,9 @@ FENCE_NEUTRAL_EVENTS: frozenset[str] = frozenset(
 #   * `stored_whole` marks the types whose handler keeps the payload OBJECT (`st.archive = d`,
 #     `st.novelty_events.append(d)`). For those the fold has no key contract at all: whatever a
 #     writer puts in the dict reaches `RunState` and every projection over it, so a key added there
-#     is a new field of the UI's data model, not a private note. It is re-derived by the guard.
+#     is a new field of the UI's data model, not a private note. It is re-derived by the guard —
+#     by FOLDING each type with a marker key and looking for the marker in the raw accumulated
+#     state, since the AST scan it used to trust over-approximated (review 2026-09-22, EVT-05).
 #
 # THE CHEAP MECHANICAL VERSION — join "keys the fold reads" against "keys a writer writes", convict
 # the difference — was tried 2026-09-02 and does not answer this, which is why this table is
@@ -1212,7 +1214,8 @@ class PayloadContract:
 
     ``summary`` is the one-line description the generated reference prints; ``required`` and
     ``optional`` partition the declared vocabulary (a key may never be in both). ``stored_whole`` is
-    re-derived from ``replay.py`` by the guard rather than trusted from here.
+    re-derived by the guard — a marker key folded through ``replay.py`` — rather than trusted from
+    here.
     """
 
     summary: str
@@ -1345,7 +1348,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "parent_ids", "rationale", "scored_against", "scored_against_empty",
             "scored_against_generation", "source", "statement", "steering_context"
         ),
-        stored_whole=True,
+        # NOT whole (review 2026-09-22, EVT-05): `_on_card_added` keeps the BOUNDED receipt
+        # `card_ledger._bounded_card_added_receipt` builds, and an unknown key reaches no state —
+        # the store probe in `tests/test_event_payload_contract.py` folds one and looks.
     ),
     "card_auto_dropped": PayloadContract(
         "The engine dropped a Card as a lifecycle effect, with the reason (`dropped_by=engine`).",
@@ -1399,7 +1404,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=("claim_refs", "concept_tags", "confidence", "cross_run_prior", "footprint",
                   "foresight_rank", "generation", "id", "lesson_refs", "node_id",
                   "novelty_verdict", "proposal_ref", "research_origin", "steering_context"),
-        stored_whole=True,
+        # NOT whole (review 2026-09-22, EVT-05): the handler copies the allow-list above into one
+        # bounded candidate per field; an unknown key is never kept.
     ),
     "card_merged": PayloadContract(
         "Alias Cards folded into a canonical one, with the seq that decided the edge.",
@@ -1431,20 +1437,32 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("command_id", "event_seq"),
         optional=(),
     ),
+    # THE THREE COMMENT ROWS DESCRIBE WHAT THE LOG CARRIES, not what a caller may send (review
+    # 2026-09-22, EVT-05). `serve/control_validation.py::_normalize_comment_created` and
+    # `_normalize_comment_revision` BUILD the stored payload — minting `comment_id`, `actor_kind`
+    # and `version`, and turning the request's `expected_version` into `base_version`/`version` —
+    # and `events/comment_projection.py::apply_comment_event` reads exactly those. These rows had
+    # been written from the request allow-list, so `expected_version` was declared on two types
+    # that never carry it while the five keys the reducer requires were missing: stripping the
+    # undeclared keys from a real comment log folded to NO comments. The static read scan could
+    # not see it (the handler hands the reducer the EVENT, not `d`), so the check is driven:
+    # `tests/test_event_payload_contract.py` builds the payloads with the real normalizers,
+    # strips them to these rows and folds.
     "comment_created": PayloadContract(
         "An operator comment on one node, at that node's generation.",
         required=("node_id",),
-        optional=("node_generation", "text"),
+        optional=("actor_kind", "comment_id", "node_generation", "text", "version"),
     ),
     "comment_edited": PayloadContract(
         "A new revision of one comment, compare-and-swapped against the version the author saw.",
         required=("comment_id",),
-        optional=("expected_version", "node_generation", "node_id", "text"),
+        optional=("actor_kind", "base_version", "node_generation", "node_id", "text", "version"),
     ),
     "comment_resolution_changed": PayloadContract(
         "One comment's resolved flag moved, compare-and-swapped against the version the author saw.",
         required=("comment_id",),
-        optional=("expected_version", "node_generation", "node_id", "resolved"),
+        optional=("actor_kind", "base_version", "node_generation", "node_id", "resolved",
+                  "version"),
     ),
     "concept_consolidation": PayloadContract(
         "A concept-vocabulary consolidation: which ids were renamed into which.",
@@ -1710,9 +1728,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "inject_node": PayloadContract(
         "An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node.",
         required=(),
+        # `source_run`/`source_node` are NOT here although a caller may send them: they are the
+        # cross-run import's INPUTS, popped by `_normalize_inject_node` and resolved into `origin`
+        # (`control_validation._INJECT_IMPORT_FIELDS`), so no inject_node row carries them. They
+        # were declared from the request allow-list, the same misreading as the comment rows
+        # (review 2026-09-22, EVT-05).
         optional=(
             "code", "deleted", "files", "forked_from", "idea", "origin", "parent_generations",
-            "parent_id", "parent_ids", "source_node", "source_run"
+            "parent_id", "parent_ids"
         ),
         stored_whole=True,
     ),
@@ -1763,7 +1786,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # establishes that a log written before a counter existed omits it.
         optional=("calls", "completion_tokens", "cost", "priced_calls", "prompt_tokens",
                   "total_tokens", "usage_id"),
-        stored_whole=True,
+        # NOT whole (review 2026-09-22, EVT-05): only the six sanitized counters are added into the
+        # ledger (`replay.py::_on_llm_usage`). It is `llm_cost`, the legacy SUMMARY row, whose
+        # extra keys ride into `RunState.llm_cost` — that row stays whole.
     ),
     "log_repaired": PayloadContract(
         "The `looplab repair-log` receipt for a rewritten torn log: what was dropped, and where the backup is.",
@@ -1794,7 +1819,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The concept ids one node was tagged with, by which mode, against a named vocabulary.",
         required=("at_vocab", "concepts", "generation", "mode", "node_id"),
         optional=("at_pending", "attempt"),
-        stored_whole=True,
+        # NOT whole (review 2026-09-22, EVT-05): the fold keeps a bounded membership plus two
+        # receipts; the payload object itself reaches no state.
     ),
     "node_confirmed": PayloadContract(
         "A node's confirmation statistics over its seeds (mean, std).",

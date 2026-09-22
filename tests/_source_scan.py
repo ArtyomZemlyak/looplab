@@ -603,9 +603,14 @@ def fold_payload_reads() -> dict[str, set[tuple[str, str]]]:
 
 
 def fold_stores_payload_whole() -> set[str]:
-    """Event types whose handler keeps the payload OBJECT — assigned, appended, spread, or handed to
-    something `replay.py` does not define. For those the fold has no key contract at all: whatever a
-    writer puts in the dict reaches `RunState` and every projection over it."""
+    """Event types whose handler MAY keep the payload OBJECT — assigned, appended, spread, or handed
+    to something `replay.py` does not define. For those the fold has no key contract at all:
+    whatever a writer puts in the dict reaches `RunState` and every projection over it.
+
+    AN OVER-APPROXIMATION, and used as one since review 2026-09-22 (EVT-05): a payload handed to
+    `set(d)`, a local `dict(d)` copy or a bounded receipt builder counts as stored, which declared
+    four types whole that keep nothing of an unknown key. `tests/test_event_payload_contract.py`
+    now DECIDES by folding a marker; this only nominates the types that need a valid probe row."""
     funcs, handlers = _fold_handler_functions()
 
     def stores(fn: ast.AST, payload: set[str], seen: frozenset[str]) -> bool:
