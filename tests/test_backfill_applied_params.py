@@ -29,12 +29,16 @@ modules, none of them this one.
 """
 from __future__ import annotations
 
+import errno
 import json
+import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
-from looplab.events.eventstore import EventStore
+from looplab.events.eventstore import EventStore, interprocess_lock
 from looplab.events.replay import fold
 from looplab.events.types import EV_APPLIED_PARAMS_BACKFILLED, EV_NODE_EVALUATED
 from looplab.maintenance import backfill_applied_params as bf
@@ -266,21 +270,70 @@ def test_a_run_a_live_engine_holds_is_refused(tmp_path):
     """A workdir being written to cannot be read as what ran. Asked by CONTENDING for the lock,
     because `engine.lock` is an EMPTY file holding an flock — a first version parsed it for a pid,
     failed on every run, and (failing closed) reported all eight runs as live, including seven
-    finished for days."""
-    import fcntl
+    finished for days.
 
+    Held here through `interprocess_lock`, the primitive that takes the same byte the engine takes
+    on THIS platform (flock on POSIX, msvcrt on Windows) — a raw `fcntl.flock` holder made the test
+    itself a POSIX-only test of a rule that must hold on both."""
     run = tmp_path / "r"
     run.mkdir()
     (run / "events.jsonl").write_text("", encoding="utf-8")
     lock = run / "engine.lock"
     lock.touch()
     assert bf._lock_is_live(run) is False           # exists, unheld
-    with open(lock, "a+") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with interprocess_lock(lock, required=True):
         assert bf._lock_is_live(run) is True
         out = bf.backfill(tmp_path, dry_run=True)
         assert "SKIPPED" in out and "live engine" in out
     assert bf._lock_is_live(run) is False           # released again
+
+
+class _Msvcrt(types.ModuleType):
+    """Windows byte-range locking, as far as the probe can see it: a byte held through one handle
+    refuses every OTHER handle with EACCES (what `msvcrt.locking` raises for a held region)."""
+
+    LK_UNLCK, LK_LOCK, LK_NBLCK = 0, 1, 2
+
+    def __init__(self):
+        super().__init__("msvcrt")
+        self.held: dict = {}
+
+    def locking(self, fd, mode, nbytes):
+        info = os.fstat(fd)
+        key = (info.st_dev, info.st_ino)
+        if mode == self.LK_UNLCK:
+            if self.held.get(key) == fd:
+                del self.held[key]
+            return
+        if self.held.get(key, fd) != fd:
+            raise OSError(errno.EACCES, "Permission denied")
+        self.held[key] = fd
+
+
+def test_the_liveness_probe_contends_the_way_the_engine_locks_on_windows(tmp_path, monkeypatch):
+    """On Windows the engine takes `engine.lock` with `msvcrt.locking` and there is no `fcntl` at all.
+    Driven on this box with exactly that platform — `fcntl` unimportable, a byte-lock `msvcrt`,
+    `os.name == "nt"` for the probe's calls only: an unheld lock must read IDLE and a held one LIVE.
+    The probe that asked `fcntl` alone answered "live" for both, i.e. every run was skipped
+    (review 2026-09-22, WIN-BACKFILL; measured on the Windows CI leg as a ModuleNotFoundError)."""
+    run = tmp_path / "r"
+    run.mkdir()
+    lock = run / "engine.lock"
+    lock.touch()
+    msvcrt = _Msvcrt()
+    with monkeypatch.context() as m:
+        m.setitem(sys.modules, "fcntl", None)
+        m.setitem(sys.modules, "msvcrt", msvcrt)
+        m.setattr(os, "name", "nt")
+        idle = bf._lock_is_live(run)
+        with open(lock, "a+") as engine:             # the engine's own hold: byte 0, one byte
+            engine.seek(0)
+            msvcrt.locking(engine.fileno(), msvcrt.LK_NBLCK, 1)
+            live = bf._lock_is_live(run)
+            msvcrt.locking(engine.fileno(), msvcrt.LK_UNLCK, 1)
+        released = bf._lock_is_live(run)
+    assert (idle, live, released) == (False, True, False)
+    assert msvcrt.held == {}, "the probe must release the byte it took"
 
 
 def test_a_dry_run_writes_nothing(tmp_path):

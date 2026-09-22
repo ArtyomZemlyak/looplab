@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from looplab.events.eventstore import EventStore
+from looplab.events.eventstore import EventStore, InterprocessLockContended, interprocess_lock
 from looplab.events.replay import fold
 from looplab.events.types import EV_APPLIED_PARAMS_BACKFILLED
 from looplab.runtime.applied_params import bind_applied_params
@@ -248,18 +248,23 @@ def _lock_is_live(run_dir: Path) -> bool:
     unopenable or unlockable path reads as LIVE, because the cost of a false "live" is that the
     operator runs the command again, and the cost of a false "idle" is a reading taken from a
     directory being written to.
+
+    CONTENDED WITH THE ENGINE'S OWN PRIMITIVE ON EACH PLATFORM (review 2026-09-22, WIN-BACKFILL).
+    This asked through `fcntl` alone, and on Windows — where the engine takes the same byte with
+    `msvcrt.locking` (`cli/__init__.py`) — `import fcntl` raised, the fail-closed handler answered
+    "live", and every run with an `engine.lock` was SKIPPED: the total refusal the paragraph above
+    records, reached by a different road (measured on the Windows CI leg, GitHub Actions run
+    35785582444: `ModuleNotFoundError: No module named 'fcntl'`). `events/eventstore.py::
+    interprocess_lock` is the shared contender — `msvcrt` there, `flock` here, contention typed as
+    `InterprocessLockContended` and a capability gap as `EventStoreLockError` under `required=True`.
     """
     lock = run_dir / "engine.lock"
     if not lock.exists():
         return False
     try:
-        import fcntl
-        with open(lock, "a+") as fh:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                return True                      # someone holds it — a live engine
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        with interprocess_lock(lock, required=True, blocking=False):
             return False
-    except Exception:  # noqa: BLE001 — no flock on this mount, or no permission: fail closed
+    except InterprocessLockContended:
+        return True                              # someone holds it — a live engine
+    except Exception:  # noqa: BLE001 — no lock backend on this mount, or no permission: fail closed
         return True
