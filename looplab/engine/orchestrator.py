@@ -5212,7 +5212,21 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # order-tolerant (invariant #3 — the side effect is gated on its event).
             self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
             try:
-                self._create_injected_node(req)
+                # OFF THE LOOP THREAD, like every other build (review 2026-09-22, ENG1-07). An inject
+                # with no ready-made code runs a paid Developer session, and this call used to run it
+                # ON the event loop: measured, the inject's `implement` ticked the loop ZERO times
+                # during a 0.3 s call while the ordinary builds beside it ticked 28-30 — no eval
+                # watcher, abort/reset detection, train-monitor kill or control ACK for as long as
+                # the session spends. The writes stay where invariant #1 wants them: the reservation
+                # is marshalled back here by `_reserve_on_main_task`, `node_created` is the node's
+                # own licensed worker append, and a crash pause is QUEUED and drained below.
+                # `_create_injected_node(req)` stays the one seam this branch calls (tests patch it).
+                await self._offload_build(functools.partial(self._create_injected_node, req))
+            except BudgetExceeded:
+                # The run's stop, not a request that failed to materialize: the handler below used
+                # to record the spend ceiling as `materialization_failed` and let the run go on
+                # spending. The materializer has already closed its own reservation.
+                raise
             except Exception as e:  # noqa: BLE001 - a malformed operator/API inject must not
                 # crash-loop the engine: the gate has already advanced, so this only records WHY the
                 # (already-spent) request produced nothing. Terminalize any surviving build marker
@@ -5232,6 +5246,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     "error": str(e)[:500],
                     "reason": "materialization_failed",
                 })
+            # A Developer crash inside the offloaded materializer queued its run-global pause
+            # (`_request_create_pause`); THIS task appends it, and the caller's re-fold then sees it.
+            self._drain_create_pause()
             return True
         forced_ablate = self._pending_forced_ablation(state)
         if forced_ablate is not None:
@@ -7996,7 +8013,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         parent_generations = prepared.parent_generations
         code = prepared.code
         implementation_ref = prepared.implementation_ref
-        reservation = self._reserve_node_build(
+        # `_reserve_on_main_task`, not `_reserve_node_build` itself: `_serve_forced_requests` runs
+        # this method in an `_offload_build` worker since review 2026-09-22 (ENG1-07), and the
+        # `card_added` + `node_building` CAS is the main task's (see `_reserve_on_main_task`). A
+        # direct call on the loop thread reserves in place, exactly as before.
+        reservation = self._reserve_on_main_task(
             {
                 "kind": idea.operator,
                 "parent_ids": parents,
@@ -8108,7 +8129,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # Same split as `_rerun_node`: the terminal always, the pause at the threshold.
                 self.store.append(*crash_terminal)
                 if self._developer_crash_pause_due(fold(self.store.read_all()), node_id):
-                    self.store.append(*crash_pause)
+                    # QUEUED, as `_rerun_node`'s is (review 2026-09-22, ENG1-07): offloaded, this is
+                    # a worker, and EV_PAUSE is FOLDED and run-GLOBAL; `_serve_forced_requests`
+                    # drains it after the await. A direct call on the loop thread (no offload) is
+                    # already the main task, so it drains in place and keeps its historical order.
+                    self._request_create_pause(node_id, crash_pause[1]["reason"])
+                    if not getattr(_OFFLOADED_BUILD, "value", False):
+                        self._drain_create_pause()
         if developer_called:
             # `_inj` is bound by the same `if developer_called` above; a build that never called the
             # Developer does not reach this line at all.
