@@ -156,7 +156,8 @@ def _process_alive(pid: Optional[int]) -> Optional[bool]:
       3. without psutil, the kernel's own state letter in `/proc/<pid>/stat`, so a zombie reads as
          dead — `kill(pid, 0)` alone answers "exists" for one, which is how a pre-lock engine crash
          wedged its run's spawn claim for as long as the server lived;
-      4. ``kill(pid, 0)``, the dependency-free fallback.
+      4. ``kill(pid, 0)``, the dependency-free fallback ON POSIX ONLY — on Windows that call is not a
+         probe at all (see `_windows_process_alive`), so Windows asks a process handle instead.
     """
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
@@ -178,6 +179,8 @@ def _process_alive(pid: Optional[int]) -> Optional[bool]:
         pass
     if _proc_stat_state(pid) in _DEAD_PROC_STATES:
         return False
+    if os.name == "nt":
+        return _windows_process_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -186,10 +189,67 @@ def _process_alive(pid: Optional[int]) -> Optional[bool]:
     except PermissionError:
         return None
     except OSError as exc:
-        # Windows reports a missing PID as ERROR_INVALID_PARAMETER (87); POSIX uses ESRCH.
-        if exc.errno == errno.ESRCH or getattr(exc, "winerror", None) == 87:
+        if exc.errno == errno.ESRCH:
             return False
         return None
+
+
+# Win32 values `_windows_process_alive` needs (winnt.h / winbase.h / winerror.h).
+_WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_WIN_SYNCHRONIZE = 0x00100000
+_WIN_ERROR_INVALID_PARAMETER = 87
+_WIN_WAIT_OBJECT_0 = 0x00000000
+_WIN_WAIT_TIMEOUT = 0x00000102
+
+
+def _windows_process_alive(pid: int) -> Optional[bool]:
+    """Windows liveness by process HANDLE — never by ``os.kill(pid, 0)``.
+
+    On Windows signal 0 is not a probe: ``signal.CTRL_C_EVENT == 0``, and CPython's ``os.kill``
+    hands that value to ``GenerateConsoleCtrlEvent``. For a pid that is not a console process-group
+    leader the console delivers Ctrl+C to EVERY process attached to it — this server included.
+    Measured on the Windows CI leg (GitHub Actions run 35785582444, review 2026-09-22, WIN-ABORT):
+    three of four shards died of a ``KeyboardInterrupt`` nobody pressed, each shortly after a test
+    that drives a command or execution claim, whose owner pid is this very process
+    (``os.getpid()``) — and ``_owner_definitely_gone`` / ``_owner_exactly_alive`` probe exactly that
+    pid, from request threads as well as the loop. Outside a test the same probe interrupted
+    ``looplab ui`` itself every time it checked a claim's owner.
+
+    ``OpenProcess`` + a zero-timeout wait is the side-effect-free probe. A handle can outlive its
+    process (any holder keeps the kernel object, and this server holds one for every child it
+    spawned), so opening one is not proof of life — the wait answers that. ERROR_INVALID_PARAMETER
+    is how Windows names a pid with no process. Everything else — access denied to a foreign
+    process, an unloadable kernel32 — stays None, the same fail-closed "unknown" the POSIX
+    ``PermissionError`` branch answers.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(
+            _WIN_PROCESS_QUERY_LIMITED_INFORMATION | _WIN_SYNCHRONIZE, False, pid)
+        if not handle:
+            if ctypes.get_last_error() == _WIN_ERROR_INVALID_PARAMETER:
+                return False
+            return None
+        try:
+            state = kernel32.WaitForSingleObject(handle, 0)
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if state == _WIN_WAIT_TIMEOUT:
+        return True
+    if state == _WIN_WAIT_OBJECT_0:
+        return False
+    return None
 
 
 def _lock_identity(path: Path) -> str:
