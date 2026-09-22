@@ -236,6 +236,43 @@ def test_validate_strategy_whitelists_resource_budgets():
     assert "timeout" not in (validate_strategy({"timeout": float("inf")}, ctx) or {})
 
 
+def test_a_strategist_timeout_is_clamped_by_the_operators_ceiling_AT_VALIDATION():
+    """Review 2026-09-22, TAT-06. `validate_strategy` accepted `timeout: 1e308` (finite, positive)
+    and `_apply_strategy` set `self.timeout` to it — an eval that could never time out, chosen by a
+    model reading candidate-authored evidence — while its Researcher twin clamps the same kind of
+    agent request to `max_eval_timeout`. Clamped HERE, where the decision is cleaned, so the recorded
+    `strategy_decision` carries the value the engine applies and a resume replays it verbatim."""
+    ctx = StrategyContext(available_policies=["greedy"], max_eval_timeout=900.0)
+    assert validate_strategy({"timeout": 1e308}, ctx)["timeout"] == 900.0
+    assert validate_strategy({"timeout": 120.0}, ctx)["timeout"] == 120.0   # under the ceiling
+    # The SAME rule as the Researcher's: a context that carries no usable ceiling (a bare
+    # StrategyContext, a NaN, a non-positive) fails safe to the shipped one-hour default.
+    for ceiling in (None, float("nan"), 0.0, -1.0):
+        bare = StrategyContext(available_policies=["greedy"], max_eval_timeout=ceiling)
+        assert validate_strategy({"timeout": 1e308}, bare)["timeout"] == 3600.0, ceiling
+
+
+def test_non_finite_policy_params_are_dropped_at_validation():
+    """The second half of TAT-06. A NaN survived the scalar filter, was recorded, came back as
+    `null` through the event log's JSON, and on resume `make_policy` raised on `float(None)` — the
+    TypeError was swallowed and the resumed run kept its LAUNCH policy while the log said otherwise."""
+    ctx = StrategyContext(available_policies=["greedy", "mcts"])
+    out = validate_strategy({"policy": "mcts", "policy_params": {
+        "c": float("nan"), "cost_weight": float("inf"), "value_weight": float("-inf"),
+        "eta": 3, "keep": 0.5, "flag": True}}, ctx)
+    assert out["policy_params"] == {"eta": 3, "keep": 0.5, "flag": True}
+
+
+def test_the_engine_hands_the_strategist_context_its_own_ceiling(tmp_path):
+    """The wiring: `_strategy_ctx` is where a live run's `max_eval_timeout` reaches the whitelist."""
+    eng = _engine(tmp_path, max_eval_timeout=450.0)
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
+                                     "direction": "min"})
+    ctx = eng._strategy_ctx(fold(eng.store.read_all()))
+    assert ctx.max_eval_timeout == 450.0
+    assert validate_strategy({"timeout": 1e308}, ctx)["timeout"] == 450.0
+
+
 # ----------------------------------------------------- boss budget_extend fold
 def test_budget_extend_folds_timeout_and_parallel(tmp_path):
     p = tmp_path / "events.jsonl"

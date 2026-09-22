@@ -20,6 +20,7 @@ import math
 import time
 from typing import Optional
 
+from looplab.core.config import governed_eval_timeout
 from looplab.engine.cadence import cadence_due
 from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PHASE_PROGRESS, assert_progress_phase
 
@@ -71,22 +72,15 @@ def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
     may = getattr(engine, "_agent_may", None)
     if not callable(may) or not may("researcher", "timeout"):
         return None
-    try:
-        timeout = float(getattr(idea, "eval_timeout", None))
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if not math.isfinite(timeout) or timeout <= 0:
-        return None
     # Settings validates this boundary, but Engine is also a public library seam and may be built
     # directly. Missing/invalid direct-construction state therefore fails safe to the shipped one-hour
     # ceiling instead of letting an untrusted Idea disable the bound with NaN/inf/a typo.
-    try:
-        ceiling = float(getattr(engine, "max_eval_timeout", 3600.0))
-    except (TypeError, ValueError, OverflowError):
-        ceiling = 3600.0
-    if not math.isfinite(ceiling) or ceiling <= 0:
-        ceiling = 3600.0
-    return min(timeout, ceiling)
+    #
+    # The finite/positive/clamp rule itself is `core/config.py::governed_eval_timeout` since review
+    # 2026-09-22 (TAT-06): the Strategist's `timeout` is the same kind of agent request and was the
+    # one that skipped the ceiling, so the rule moved to where both agents' seams can reach it.
+    return governed_eval_timeout(getattr(idea, "eval_timeout", None),
+                                 getattr(engine, "max_eval_timeout", 3600.0))
 
 
 def effective_eval_time_budget(engine) -> Optional[float]:

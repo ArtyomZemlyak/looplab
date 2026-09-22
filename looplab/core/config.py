@@ -8,6 +8,7 @@ reproducibility. (No real secrets in P0, but the masking discipline is in place.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import types
 import typing
@@ -351,6 +352,37 @@ def default_agent_control() -> dict[str, list[str]]:
     default — so "Engine() == shipped defaults" can't drift if the copy depth ever needs to change
     (e.g. nested values requiring copy.deepcopy), instead of two verbatim copy expressions."""
     return {k: list(v) for k, v in DEFAULT_AGENT_CONTROL.items()}
+
+
+def governed_eval_timeout(requested, ceiling) -> float | None:
+    """An AGENT-requested eval timeout as it may be ACCEPTED: a finite positive number, clamped to the
+    operator's `max_eval_timeout` — or None when the request is not a usable number at all.
+
+    ONE rule for both agents that may ask for one (review 2026-09-22, TAT-06). The Researcher's
+    per-node `Idea.eval_timeout` was clamped here (`engine/shared.py::
+    effective_researcher_eval_timeout`) and the Strategist's run-level `timeout` was not: its
+    whitelist accepted `1e308` — finite, positive — and `_apply_strategy` set it, i.e. an eval that
+    can never time out, chosen by a model that reads candidate-authored evidence. The Strategist's
+    copy is applied at `agents/strategist.py::validate_strategy`, where the decision is cleaned, so
+    the recorded `strategy_decision` carries exactly the value the engine applies and a resume
+    replays it verbatim (never clamped again at apply time, which would split the two).
+
+    A ceiling that is missing or unusable (a directly-built engine, a bare `StrategyContext`, NaN,
+    non-positive) fails SAFE to the shipped `Settings.max_eval_timeout` default rather than letting
+    an untrusted request disable the bound through a typo."""
+    try:
+        timeout = float(requested)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(timeout) or timeout <= 0:
+        return None
+    try:
+        cap = float(ceiling)
+    except (TypeError, ValueError, OverflowError):
+        cap = 3600.0
+    if not math.isfinite(cap) or cap <= 0:
+        cap = 3600.0
+    return min(timeout, cap)
 
 
 # The closed set of `developer_backend` values: "default" (the in-house Developer) plus the external

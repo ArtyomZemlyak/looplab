@@ -139,6 +139,9 @@ class StrategyCadenceMixin:
             llm_lane_limits=llm_lane_limits,
             card_driven_selection=card_driven,
             card_scoring=current_card_scoring,
+            # The ceiling `validate_strategy` clamps a Strategist `timeout` to (review 2026-09-22,
+            # TAT-06) — the same operator-owned bound the Researcher's override meets.
+            max_eval_timeout=self.max_eval_timeout,
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,

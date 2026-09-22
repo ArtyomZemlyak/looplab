@@ -32,7 +32,8 @@ from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.loop_options import LoopOptions
 from looplab.agents.roles import _attention_points
 from looplab.core.evidence import EVIDENCE_LABEL, envelope_enabled, untrusted_evidence_guard
-from looplab.core.config import PARALLELISM_ALIASES, canonicalize_parallelism_source
+from looplab.core.config import (PARALLELISM_ALIASES, canonicalize_parallelism_source,
+                                 governed_eval_timeout)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import LLM_LANES
 from looplab.core.models import NodeStatus, RunState
@@ -145,6 +146,11 @@ class StrategyContext(BaseModel):
     card_scoring: dict = Field(default_factory=lambda: {
         "stance": "balanced", "novelty_weight": 0.5, "coverage_weight": 0.5,
     })
+    # The operator's ceiling on an AGENT-chosen eval timeout (`Settings.max_eval_timeout`), carried so
+    # `validate_strategy` can clamp the Strategist's `timeout` by the same rule the Researcher's is
+    # clamped by (`core/config.py::governed_eval_timeout`; review 2026-09-22, TAT-06). Not rendered
+    # into any prompt and not in the recorded `ctx` subset. None = unknown -> the rule's safe default.
+    max_eval_timeout: Optional[float] = None
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
     defaults: dict = Field(default_factory=dict)   # the static config Strategy (fallback/start)
@@ -309,9 +315,13 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
         out["policy"] = pol
     pp = strat.get("policy_params")
     if isinstance(pp, dict):
-        # keep only scalar numeric/bool params (defense against arbitrary payloads)
+        # keep only scalar numeric/bool params (defense against arbitrary payloads) — and only FINITE
+        # ones (review 2026-09-22, TAT-06): a NaN passed the scalar filter, was recorded, came back
+        # from the event log's JSON as `null`, and on resume `make_policy` raised on `float(None)` —
+        # swallowed, so the resumed run kept its LAUNCH policy while the log recorded another.
         out["policy_params"] = {str(k): v for k, v in pp.items()
-                                if isinstance(v, (int, float, bool))}
+                                if isinstance(v, (int, float, bool))
+                                and (not isinstance(v, float) or math.isfinite(v))}
     # `developer` is the one whitelisted field whose DROP is invisible downstream, and that is worth
     # knowing before adding a producer. Driven: a decision naming an unregistered backend keeps its
     # policy/fidelity and its RATIONALE ("switch developer to agentless") and is recorded with no
@@ -372,10 +382,17 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
         out["card_scoring"] = card_scoring
     # Resource budgets (bounds match config: timeout>0, eval parallelism >=0). Whitelisted here for shape;
     # the engine's _apply_strategy applies them ONLY if the governance matrix grants the strategist.
+    # CLAMPED to the operator's `max_eval_timeout` here, at validation (review 2026-09-22, TAT-06):
+    # `1e308` is finite and positive and used to be applied as the run's eval timeout. The same rule
+    # as the Researcher's per-node override (`core/config.py::governed_eval_timeout`), applied where
+    # the decision is cleaned so the recorded `strategy_decision` IS the applied value — clamping at
+    # `_apply_strategy` instead would record one number and run another, and a resume replays the
+    # record. `getattr`: a caller-built context predating the field fails safe to the default.
     tmo = strat.get("timeout")
-    if (isinstance(tmo, (int, float)) and not isinstance(tmo, bool)
-            and math.isfinite(tmo) and tmo > 0):
-        out["timeout"] = float(tmo)
+    if isinstance(tmo, (int, float)) and not isinstance(tmo, bool):
+        governed = governed_eval_timeout(tmo, getattr(ctx, "max_eval_timeout", None))
+        if governed is not None:
+            out["timeout"] = governed
     # Layer-2 canonical parallelism names (docs/23) + their legacy aliases. Bounds match config
     # (eval_parallel 0..1024, llm_parallel 0..64). Live 0 settles to serial width 1 in
     # _apply_strategy; only startup Settings resolve AUTO from hardware/the settled eval width.
