@@ -313,3 +313,135 @@ def test_kb_search_refreshes_when_a_source_file_changes(tmp_path):
     out = tools.execute("kb_search", {"query": "beta-only"})
     assert "beta-only refreshed" in out
     assert "KB_INDEX: revision=" in out
+
+
+# --- the WRITE side (review 2026-09-22, ENG3-11 = doc 50 EK-04 / EK-05) ---------------------------
+
+def _case_rows(path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def _base_case(**kw) -> dict:
+    return {"task_id": "repo_task", "direction": "max", "params": {"lr": 1e-3}, "goal": "g", **kw}
+
+
+def test_a_uid_less_case_write_never_erases_the_groups_uid_keyed_contributions(tmp_path):
+    """EK-04, driven. The legacy (uid-less) branch replaced every row of its (task, direction) —
+    across comparability partitions and over every modern per-run contribution — so one legacy
+    finalize left `[('legacy', 0.9, None)]` where three runs' cases stood. MUTATION: drop the
+    `run_uid`/`_case_scale` clauses from the legacy `replace_if` -> only the legacy row survives."""
+    from looplab.engine.memory import JsonlCaseLibrary
+
+    path = tmp_path / "cases.jsonl"
+    lib = JsonlCaseLibrary(path)
+    lib.add(_base_case(run_uid="u1", metric=0.7))
+    lib.add(_base_case(run_uid="u2", metric=0.8))
+    lib.add(_base_case(run_uid="u3", metric=0.5, comparability="measured:aaaa"))
+    assert lib.add(_base_case(metric=0.9)) is True, "a better legacy case still takes its slot"
+
+    rows = {(r.get("run_uid"), r["metric"]) for r in _case_rows(path)}
+    assert rows == {("u1", 0.7), ("u2", 0.8), ("u3", 0.5), (None, 0.9)}, rows
+
+
+def test_a_legacy_case_must_beat_the_standing_champion_not_the_groups_first_row(tmp_path):
+    """With the modern rows no longer erased, comparing against the group's FIRST row (here u1's
+    inactive 0.7) would let 0.75 land beside u2's elected 0.8 as a second active row — and the case
+    prior, where the LAST admitted active row wins, would hand the next run the losing params."""
+    from looplab.engine.memory import JsonlCaseLibrary
+
+    path = tmp_path / "cases.jsonl"
+    lib = JsonlCaseLibrary(path)
+    lib.add(_base_case(run_uid="u1", metric=0.7))
+    lib.add(_base_case(run_uid="u2", metric=0.8))
+    before = _case_rows(path)
+    assert lib.add(_base_case(metric=0.75)) is False
+    assert _case_rows(path) == before, "a losing legacy case must change nothing"
+
+
+def test_the_pure_legacy_slot_elects_exactly_as_it_did(tmp_path):
+    """The inertness half: a group of uid-less rows is still ONE retain-on-improvement slot, and a
+    legacy write replaces only uid-less rows of ITS OWN comparability partition."""
+    from looplab.engine.memory import JsonlCaseLibrary
+
+    path = tmp_path / "cases.jsonl"
+    lib = JsonlCaseLibrary(path)
+    assert lib.add(_base_case(metric=0.5)) is True
+    assert lib.add(_base_case(metric=0.6)) is True
+    assert lib.add(_base_case(metric=0.55)) is False
+    assert lib.add(_base_case(metric=None)) is False, "an unmeasured case never displaces a measured"
+    assert lib.add(_base_case(metric=0.4, comparability="measured:bbbb")) is True
+    assert lib.add(_base_case(metric=0.7)) is True
+    assert sorted((r.get("comparability", ""), r["metric"]) for r in _case_rows(path)) == [
+        ("", 0.7), ("measured:bbbb", 0.4)]
+
+
+def _finished_state(goal: str, rationale: str = "why", task_id: str = "toy_quadratic"):
+    from looplab.core.models import Idea, Node, NodeStatus, RunState
+
+    state = RunState(run_id="run_me", run_uid="U-ME", task_id=task_id, goal=goal, direction="min")
+    node = Node(id=0, operator="draft", parent_ids=[],
+                idea=Idea(operator="draft", params={"x": 3.0}, rationale=rationale),
+                metric=0.25, status=NodeStatus.evaluated)
+    state.nodes = {0: node}
+    state.best_node_id = 0
+    return state
+
+
+def test_a_multi_kb_goal_still_leaves_a_case_bounded_with_its_receipt(tmp_path):
+    """EK-05, the mechanism. `valid_case_record` caps `goal` at 4,000 chars and `rationale` at 8,000
+    and REJECTS a longer one; `store_case` discarded `add`'s False, so a run with a multi-KB goal —
+    what the house goal guidance produces — never got a case while finalize marked the step done.
+    The writer now bounds both, with the truncation receipt in the text. MUTATION: drop the bound
+    -> `store_case` raises (the rejection is no longer silent) and no row is written."""
+    mem = tmp_path / "mem"
+    engine = _engine_over(tmp_path, mem)
+    engine.lessons.store_case(_finished_state("G" * 5_000, rationale="R" * 9_000))
+
+    [row] = _case_rows(mem / "cases.jsonl")
+    assert len(row["goal"]) <= 4_000 and "original_chars=5000" in row["goal"]
+    assert len(row["rationale"]) <= 8_000 and "original_chars=9000" in row["rationale"]
+    assert row["goal"].startswith("G" * 3_000), "the head of the goal is kept, not replaced"
+
+
+def test_a_case_the_store_rejects_raises_and_a_case_that_merely_lost_does_not(tmp_path):
+    """Persist or raise, like `store_concept_capsule`. `add` answers False for two different
+    things: a REJECTED row (never written) and a VALID case that did not win its group. Only the
+    first is a loss, so only the first raises."""
+    import pytest
+
+    mem = tmp_path / "mem"
+    engine = _engine_over(tmp_path, mem)
+    with pytest.raises(RuntimeError, match="rejected"):
+        engine.lessons.store_case(_finished_state("g", task_id="t" * 600))   # task id > 500
+    assert not (mem / "cases.jsonl").exists() or not _case_rows(mem / "cases.jsonl")
+
+    engine.lessons.store_case(_finished_state("g"))            # 0.25 on a minimized task
+    worse = _finished_state("g")
+    worse.run_uid = "U-OTHER"
+    worse.nodes[0].metric = 9.0
+    engine.lessons.store_case(worse)                           # stored INACTIVE: no raise
+    legacy = _finished_state("g")
+    legacy.run_uid = ""
+    legacy.nodes[0].metric = 9.0
+    engine.lessons.store_case(legacy)                          # kept the better case: no raise
+    assert {(r.get("run_uid"), r.get("active")) for r in _case_rows(mem / "cases.jsonl")} == {
+        ("U-ME", True), ("U-OTHER", False)}
+
+
+def test_a_rejected_case_leaves_the_finalize_step_open_and_the_run_alive(tmp_path, monkeypatch):
+    """The CALLER's half: finalize's case step contains the raise (the run finishes) and leaves
+    FINALIZE_STEP_CASE unmarked, so the next finalize pass retries — instead of committing the
+    step over a case that was never written, which is what the discarded False did."""
+    import anyio
+
+    import looplab.engine.memory as memory
+    from tests.factories import make_engine
+
+    monkeypatch.setattr(memory, "valid_case_record", lambda _case: False)
+    eng = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1, memory_dir=str(tmp_path / "mem"))
+    state = anyio.run(eng.run)
+    assert state.finished
+    steps = [e.data.get("step") for e in eng.store.read_all() if e.type == "finalize_step"]
+    assert "case" not in steps, steps
+    assert "budget" in steps, "the steps around it still completed"

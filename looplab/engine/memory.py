@@ -1137,6 +1137,12 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
         return None
 
 
+#: The two free-text fields a case may carry, and how long each may be. Named (review 2026-09-22,
+#: ENG3-11 / doc 50 EK-05) because the WRITER must bound to them: `valid_case_record` rejects a
+#: longer one outright, and a multi-KB goal is what the house goal guidance produces.
+CASE_TEXT_MAX_CHARS = {"goal": 4000, "rationale": 8000}
+
+
 def valid_case_record(case) -> bool:
     """Whether one unversioned durable case is safe for comparison and retrieval.
 
@@ -1149,7 +1155,7 @@ def valid_case_record(case) -> bool:
     if (not isinstance(task_id, str) or not task_id.strip()
             or len(task_id) > 500):
         return False
-    for key, maximum in (("goal", 4000), ("rationale", 8000)):
+    for key, maximum in CASE_TEXT_MAX_CHARS.items():
         value = case.get(key)
         if value is not None and (not isinstance(value, str) or len(value) > maximum):
             return False
@@ -1273,21 +1279,36 @@ class JsonlCaseLibrary:
             )
             self._reload()
             return winner is candidates[-1]
-        prev = next((c for c in self.cases
-                     if c.get("task_id") == tid and c.get("direction", "min") == direction
-                     and _case_scale(c) == scale), None)
-        if prev is not None:
-            # Keep the old case only when both metrics are comparable and the new one is not better.
-            # An UNMEASURED new case never displaces a MEASURED stored one: `valid_case_record`
-            # admits `metric=None`, and the incomparable branch used to fall straight through to the
-            # replace — inverting the module's retain-on-improvement contract for exactly the writer
-            # that has no evidence to justify the replacement. Replacing an unmeasured prior is still
-            # allowed (nothing is lost), as is the first write for a task.
-            if metric is not None and prev.get("metric") is not None:
-                better = metric < prev["metric"] if direction == "min" else metric > prev["metric"]
-                if not better:
-                    return False
-            elif metric is None and prev.get("metric") is not None:
+        # THE LEGACY (uid-less) WRITE is a single champion slot, and since review 2026-09-22 (ENG3-11,
+        # doc 50 EK-04) it is ONLY that slot. Its replace used to narrow by task/direction alone —
+        # not by `_case_scale`, not by "row names no run" — so ONE uid-less finalize erased every
+        # uid-keyed contribution of its group across every comparability partition (driven: three
+        # rows -> `[('legacy', 0.9, None)]`). It now replaces only uid-less rows of its own scale.
+        #
+        # AND IT MUST BEAT THE GROUP'S STANDING CHAMPION, not its first row. With the modern rows no
+        # longer erased, comparing against `next(...)` — an arbitrary, possibly INACTIVE sibling —
+        # let a case that loses the group's election land beside the winner as a second active row,
+        # and the case prior (`lessons_priors.py`: the LAST admitted active row wins) would hand the
+        # next run the LOSING configuration. On a pure-legacy group the standing rows are its one
+        # row, so the comparison is exactly what it was.
+        standing = [c for c in self.cases
+                    if c.get("task_id") == tid and c.get("direction", "min") == direction
+                    and _case_scale(c) == scale and c.get("active") is not False
+                    and c.get("metric") is not None]
+        if standing:
+            # Keep the standing case when the new one is not better. An UNMEASURED new case never
+            # displaces a MEASURED stored one: `valid_case_record` admits `metric=None`, and the
+            # incomparable branch used to fall straight through to the replace — inverting the
+            # module's retain-on-improvement contract for exactly the writer that has no evidence to
+            # justify the replacement. Replacing an unmeasured prior is still allowed (nothing is
+            # lost), as is the first write for a task.
+            champion = (min(standing, key=lambda c: c["metric"]) if direction == "min"
+                        else max(standing, key=lambda c: c["metric"]))
+            if metric is None:
+                return False
+            better = (metric < champion["metric"] if direction == "min"
+                      else metric > champion["metric"])
+            if not better:
                 return False
         # quarantine is a read decision, never permission for an unrelated upsert to erase
         # malformed or future-schema bytes. Replace only understood current rows for this task; retain every
@@ -1296,7 +1317,9 @@ class JsonlCaseLibrary:
             self.path, [case],
             replace_if=lambda row: (
                 valid_case_record(row) and row.get("task_id") == tid
-                and row.get("direction", "min") == direction),
+                and row.get("direction", "min") == direction
+                and _case_scale(row) == scale
+                and not (isinstance(row.get("run_uid"), str) and row.get("run_uid"))),
             loads=json.loads, dumps=json.dumps,
         )
         self._reload()

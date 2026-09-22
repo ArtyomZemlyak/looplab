@@ -141,7 +141,15 @@ def test_memory_persists_and_retains_best(tmp_path):
                      "metric": first_metric + 100, "params": {}}) is False
     assert lib2.add({"task_id": "toy_quadratic", "goal": "g", "direction": "min",
                      "metric": first_metric - 100, "params": {}}) is True
-    assert len(JsonlCaseLibrary(mem / "cases.jsonl").all()) == 1  # still one (upsert)
+    rows = JsonlCaseLibrary(mem / "cases.jsonl").all()
+    # Still ONE uid-less slot (upsert). What this line used to assert as well — that the run's own
+    # uid-keyed case was gone — was the defect: review 2026-09-22 (ENG3-11 = doc 50 EK-04) found a
+    # uid-less write replacing EVERY row of its group, erasing each run's modern contribution. A
+    # legacy write now replaces only uid-less rows, so the run's row survives beside it, and the
+    # better case is the LAST admitted — the one `_scan_prior_context` serves.
+    assert [r["metric"] for r in rows if not r.get("run_uid")] == [first_metric - 100]
+    assert [r["metric"] for r in rows if r.get("run_uid")] == [first_metric]
+    assert rows[-1]["metric"] == first_metric - 100
 
     # An UNMEASURED case never displaces a measured one. `valid_case_record` admits metric=None, and
     # the incomparable branch used to fall straight through to the replace — inverting the
@@ -150,7 +158,8 @@ def test_memory_persists_and_retains_best(tmp_path):
     assert kept.add({"task_id": "toy_quadratic", "goal": "g", "direction": "min",
                      "metric": None, "params": {}}) is False
     stored = JsonlCaseLibrary(mem / "cases.jsonl").all()
-    assert len(stored) == 1 and stored[0]["metric"] == first_metric - 100
+    assert [r["metric"] for r in stored if not r.get("run_uid")] == [first_metric - 100]
+    assert stored == rows, "the refused unmeasured case changed nothing"
 
     # ...but it may still land for a task with no measured case at all.
     fresh = JsonlCaseLibrary(mem / "cases.jsonl")

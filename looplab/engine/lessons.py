@@ -530,10 +530,35 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             # asymmetry is the point rather than a conservatism.
             "comparability": group_token(record_of(best)),
         }
+        # BOUNDED AT THE WRITER, with the truncation receipt in the text itself (review 2026-09-22,
+        # ENG3-11 / doc 50 EK-05). `valid_case_record` caps `goal` at 4,000 chars and `rationale` at
+        # 8,000 and REJECTS a longer one, so a run with a multi-KB goal — what the house goal
+        # guidance produces — never got a case row, while finalize marked the step done. Only an
+        # over-cap value changes; one within its cap is stored byte-identical, as before.
+        from looplab.core.redact import redact_persisted_text
+        from looplab.engine.memory import CASE_TEXT_MAX_CHARS, valid_case_record
+        for key, cap in CASE_TEXT_MAX_CHARS.items():
+            value = case.get(key)
+            if isinstance(value, str) and len(value) > cap:
+                case[key] = redact_persisted_text(value, max_chars=cap, entropy=False)
         # An empty value is dropped rather than persisted: absence is the wire shape the shelf reads as
         # "not tagged", and `""`/`[]` would pin the row as durably-untagged and block the run fallback.
-        lib.add({key: value for key, value in case.items()
-                 if value or key not in ("run_id", "run_uid", "concepts", "comparability")})
+        record = {key: value for key, value in case.items()
+                  if value or key not in ("run_id", "run_uid", "concepts", "comparability")}
+        if not str(record.get("task_id") or "").strip():
+            # A run that recorded no task cannot key a case at all (every reader matches on it), so
+            # there is nothing to lose — and raising would wedge the finalize step on every retry.
+            return
+        # PERSIST OR RAISE, like `store_concept_capsule` below. `add` returns False for TWO different
+        # things: a row the store REJECTED (never written — the silent loss) and a VALID case that
+        # simply did not win its group (the legacy slot kept a better one; a modern contribution was
+        # stored inactive). The second is the store working, so validity is decided HERE with the
+        # store's own fence and only a rejection raises — into finalize's retry handshake, whose
+        # `except` keeps the run alive and leaves the step unmarked so the next pass retries it.
+        if not valid_case_record(record):
+            raise RuntimeError(
+                f"case for run {final.run_id!r} was rejected by the case store's validity fence")
+        lib.add(record)
 
     def store_concept_capsule(self, final: RunState) -> None:
         """PART IV cross-run Step 2 (§21.20): persist this run's CONCEPT capsule to the shared
