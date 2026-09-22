@@ -21,6 +21,7 @@ import ast
 
 from _source_scan import iter_sources, iter_trees
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -338,24 +339,117 @@ def test_a_MOVED_generation_is_still_refused_after_the_read(tmp_path):
     assert response.status_code == 409 and response.json()["detail"]["code"] == "run_generation_changed"
 
 
+def _publish_stuck_reset_marker(rd):
+    """A reset marker whose receipt never landed — the "stuck Replay" leftover. Any marker will do:
+    `_state_payload` reaches for the sequencer BEFORE it validates anything."""
+    import uuid
+
+    from looplab.core.run_reset import publish_run_reset_marker
+
+    publish_run_reset_marker(rd, operation_id=str(uuid.uuid4()),
+                             expected_generation=_generation(rd), receipt_name="x.json")
+
+
+def test_state_is_readable_WHILE_a_writer_holds_a_run_that_carries_a_reset_marker(tmp_path):
+    """Review 2026-09-22, SRV2-08: with a reset marker on disk, `routers/runs.py::_state_payload`
+    reconciled it under `srv.commands.sequence(rd)` — the EXCLUSIVE lock, at the service's whole
+    acquire budget (60 s by default) — before serving a GET. Six GETs reach that helper, and `/state`
+    blocked for the full budget whenever a writer held the run. The reconcile is opportunistic
+    cleanup the owning writer (or the next uncontended read) completes anyway, so a read TRIES the
+    lock and never waits for it. The budget here is one the old path would have waited out in full.
+    MUTATION: drop `timeout=0` from that acquire -> this read is still blocked after 10 s."""
+    rd = _run(tmp_path)
+    _publish_stuck_reset_marker(rd)
+    app = make_app(tmp_path)
+    app.state.looplab.commands.lock_acquire_timeout = 30.0
+    timed: dict = {}
+
+    def _timed_state(client):
+        started = time.monotonic()
+        response = client.get(f"/api/runs/{RUN}/state")
+        timed["seconds"] = time.monotonic() - started
+        return response
+
+    response = _read_while_held(tmp_path, app, _timed_state)
+    assert response.status_code == 200, response.text
+    assert timed["seconds"] < 5.0, f"/state waited {timed['seconds']:.2f}s behind the writer"
+
+
+def test_an_uncontended_state_read_still_reconciles_the_reset_marker(tmp_path, monkeypatch):
+    """The other half: trying instead of waiting must not stop reconciling. With the lock free the
+    read still takes it (non-blocking) and completes the observation, exactly as before; with a
+    writer holding it, the read skips the cleanup rather than waiting for it."""
+    import looplab.serve.routers.runs as runs_router
+
+    rd = _run(tmp_path)
+    _publish_stuck_reset_marker(rd)
+    reconciled: list = []
+    monkeypatch.setattr(runs_router, "reconcile_run_reset_observation",
+                        lambda srv, run_dir: reconciled.append(run_dir) or False)
+    app = make_app(tmp_path)
+    assert TestClient(app).get(f"/api/runs/{RUN}/state").status_code == 200
+    assert reconciled == [rd], "an uncontended read must still reconcile the marker"
+
+    reconciled.clear()
+    response = _read_while_held(tmp_path, app, lambda c: c.get(f"/api/runs/{RUN}/state"))
+    assert response.status_code == 200 and reconciled == [], (
+        "a contended read must skip the cleanup, not wait for or race the writer")
+
+
+def _waits_on_the_sequencer(call: ast.Call) -> bool:
+    """A `.sequence(...)` acquire that can WAIT: anything but an explicit literal-zero `timeout`,
+    which is one non-blocking try (`RunCommandService.sequence` fails closed at once on contention)."""
+    if getattr(call.func, "attr", "") != "sequence":
+        return False
+    return not any(k.arg == "timeout" and isinstance(k.value, ast.Constant)
+                   and type(k.value.value) in (int, float) and k.value.value == 0
+                   for k in call.keywords)
+
+
 def test_only_a_reconciling_GET_still_takes_the_sequencer():
-    """The one GET handler whose body holds the exclusive lock is `start_status`, which RECONCILES a
+    """The one GET handler that can WAIT on the exclusive lock is `start_status`, which RECONCILES a
     dead spawn's claim — a write, not a read. Derived from the routers' own AST in both directions,
     so a converted fence cannot quietly grow the lock back and a new sequenced GET must be listed
-    here with its reason."""
+    here with its reason.
+
+    FOLLOWS SAME-MODULE HELPERS (review 2026-09-22, SRV2-08). This scanned handler BODIES only, and
+    six GETs reached the lock through `routers/runs.py::_state_payload` — a closure the handler
+    calls, or hands to `anyio.to_thread.run_sync` — so the rule this states was false while the test
+    was green. Every function or closure of the same module that a GET REFERENCES by name is
+    followed, transitively; a literal `timeout=0` acquire (one non-blocking try) is not a wait.
+    MUTATION: drop `timeout=0` from `_state_payload`'s acquire -> `get_state`, `stream_events` and the
+    node-evidence GETs are named."""
     allowed = {"start_status": "reconciles a dead spawn's start claim under the lock"}
-    sequenced_gets = set()
+    sequenced_gets, sequenced_helpers = set(), set()
     for path, tree in iter_trees(SERVE / "routers"):
+        functions: dict[str, list] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.setdefault(node.name, []).append(node)
+
+        def _waits(func, seen: set) -> bool:
+            if id(func) in seen:
+                return False
+            seen.add(id(func))
+            for sub in ast.walk(func):
+                if isinstance(sub, ast.Call) and _waits_on_the_sequencer(sub):
+                    return True
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                    if any(_waits(helper, seen) for helper in functions.get(sub.id, ())):
+                        return True
+            return False
+
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             is_get = any(isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "get"
                          for d in node.decorator_list)
-            holds = any(isinstance(sub, ast.Call) and getattr(sub.func, "attr", "") == "sequence"
-                        for sub in ast.walk(node))
+            holds = _waits(node, set())
             if is_get and holds:
                 sequenced_gets.add(node.name)
-            if node.name in {"_assert_artifact_generation", "validate_bound_generation",
-                             "recover_concept_lens_receipt"}:
-                assert not holds, f"{node.name} took the exclusive sequencer back"
+            if holds and node.name in {"_assert_artifact_generation", "validate_bound_generation",
+                                       "recover_concept_lens_receipt", "_state_payload",
+                                       "_cached_node_attempt"}:
+                sequenced_helpers.add(node.name)
     assert sequenced_gets == set(allowed), sequenced_gets
+    assert not sequenced_helpers, f"{sorted(sequenced_helpers)} took the exclusive sequencer back"

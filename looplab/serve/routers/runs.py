@@ -700,7 +700,15 @@ def build_router(srv) -> APIRouter:
             try:
                 # Reconcile before folding so a request that waited behind Replay cannot publish a
                 # generation-A payload after generation B has already committed.
-                with srv.commands.sequence(rd):
+                # ONE NON-BLOCKING TRY, never a wait (review 2026-09-22, SRV2-08). Six GETs reach
+                # this helper (`/state`, the SSE stream, and every node-evidence poll through
+                # `_cached_node_attempt`), and the default acquire budget is 60 s: with a marker on
+                # disk and a writer holding the run, `/state` blocked for the whole budget. The lock
+                # only ever guarded THIS cleanup — the fold below runs outside it either way — and
+                # the writer that holds it is the owner that completes the observation (or the next
+                # uncontended read does), so a contended read skips it: `sequence` fails closed
+                # with a 503 at once, which the handler below already treats as "not now".
+                with srv.commands.sequence(rd, timeout=0):
                     reconcile_run_reset_observation(srv, rd)
             except (HTTPException, OSError, ResetReceiptError, RunResetStorageError):
                 # The exact POST remains the recovery authority while observation is incomplete.
