@@ -456,9 +456,13 @@ without optional `psutil`. For a pre-upgrade, malformed, inaccessible-owner, or 
 execution/activity claim, `POST /api/runs/{run_id}/resolve-activity-claims` is the explicit recovery
 seam after process inspection and a safety delay; it requires the exact phrase
 `I verified no LoopLab command or run activity is active` and cannot clear a claim whose exact owner
-process generation is provably alive. The same route resolves an UNREADABLE `cmd_*.json` record,
-which is otherwise permanent: a record the server cannot parse counts as active (fail closed, so a
-delete cannot erase the evidence of a command whose state is unknown), which refuses every later
+process generation is provably alive. An activity lease the server itself wrote is the one claim
+it can judge from memory: once its work has ended, the lease is retired on sight even if the
+release could not unlink it at the time (a transient storage error), so it never blocks delete,
+Replay or trace-clear for the life of the process. The same route resolves an UNREADABLE
+`cmd_*.json` record, which is otherwise permanent: a record the server cannot parse counts as
+active (fail closed, so a delete cannot erase the evidence of a command whose state is unknown),
+which refuses every later
 command, refuses reset and delete, and answers 503 to the GET its own refusal names. Such a record is
 QUARANTINED rather than deleted — renamed out of the `cmd_*.json` glob, bytes intact on disk.
 

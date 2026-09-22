@@ -300,6 +300,30 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
     return None
 
 
+# The `run_activity` leases THIS PROCESS is still inside, by token (review 2026-09-22, SRV1-04).
+#
+# A lease file names its owner by pid and creation identity, and while the process lives that owner
+# is "exactly alive" to every reader — which is right while the work runs and wrong once it has
+# finished: the release's unlink is best-effort, and a lease it failed to remove went on blocking
+# delete, Replay and trace-clear, with the escape hatch refusing too, until the server exited. The
+# one fact the file cannot carry is whether its writer is still INSIDE the context, so it is kept
+# here, in memory, where it dies with the process that would otherwise hold the claim forever.
+# PROCESS-wide rather than per service: ownership is a property of the process (the file names a
+# pid), and a second `RunCommandService` over the same root must not read the first one's running
+# lease as an orphan.
+_live_activity_tokens: set[str] = set()
+_live_activity_tokens_lock = threading.Lock()
+_ACTIVITY_LEASE_NAME = re.compile(r"^\.activity_([0-9a-f]{32})\.json$")
+
+
+def _mark_activity_live(token: str, live: bool) -> None:
+    with _live_activity_tokens_lock:
+        if live:
+            _live_activity_tokens.add(token)
+        else:
+            _live_activity_tokens.discard(token)
+
+
 # The postcondition values that mean "the operator asked this run to PAUSE", in one place. Two of
 # them coexist on purpose and forever: `paused` is what `control_validation.py` mints today, and
 # `paused_and_stopped` is the LEGACY spelling every durable record written before 2026-08-13 still
@@ -643,7 +667,15 @@ class RunCommandService:
                 identity = None
             if identity:
                 owner["process_identity"] = identity
-            self._save(path, owner)
+            # LIVE BEFORE PUBLISHED (review 2026-09-22, SRV1-04): a scan under this same sequencer
+            # can then never see the file without its token, so it can never retire a lease whose
+            # work is still running (`_orphaned_own_activity_lease`).
+            _mark_activity_live(token, True)
+            try:
+                self._save(path, owner)
+            except BaseException:
+                _mark_activity_live(token, False)
+                raise
         try:
             yield
         finally:
@@ -652,6 +684,13 @@ class RunCommandService:
                     path.unlink(missing_ok=True)
             except (HTTPException, OSError):
                 pass
+            finally:
+                # WHETHER OR NOT the unlink worked. It is best-effort and nothing retried it, so one
+                # transient EIO used to leave a file naming THIS live process — which every liveness
+                # reader then took for a live owner: delete, Replay and trace-clear refused, and the
+                # operator's hatch refused too, until the server exited. The token leaving the live
+                # set is what lets the next scan retire that file as the orphan it is.
+                _mark_activity_live(token, False)
 
     # ---- owner liveness: ONE decision, two claim carriers (doc 25 SC-12) ---------------------
     # A spawn claim arrives as an already-parsed dict; an execution claim arrives as a file that has
@@ -737,6 +776,8 @@ class RunCommandService:
         except (ValueError, TypeError):
             parsed = None
         if isinstance(parsed, dict):
+            if self._orphaned_own_activity_lease(path, parsed):
+                return True
             return self._owner_definitely_gone(parsed)
         # Legacy bare-PID claim: adapt it to the same row shape rather than deciding again here.
         try:
@@ -747,9 +788,31 @@ class RunCommandService:
     def _execution_owner_exactly_alive(self, path: Path) -> bool:
         """True only when the claim names the exact live process generation that created it."""
         row = self._load(path)
+        if row and self._orphaned_own_activity_lease(path, row):
+            return False    # its writer is alive, but no longer inside the work the lease names
         # `own_process_counts`: even where creation identity is unavailable, never let an operator
         # clear a claim owned by THIS server process — its worker/activity context may still run.
         return bool(row) and self._owner_exactly_alive(row, own_process_counts=True)
+
+    def _orphaned_own_activity_lease(self, path: Path, row: dict) -> bool:
+        """An activity lease THIS process wrote whose `run_activity` context has already exited.
+
+        Only this process can know that (review 2026-09-22, SRV1-04): the file names a live owner —
+        us — whether or not the work is still running, and `_live_activity_tokens` is the one record
+        of which it is. Deliberately narrow, so nothing else changes meaning: the name must be a
+        `run_activity` lease (`.activity_<32 hex>.json`), the pid must be ours, and the lease must be
+        PROVABLY this process generation's — `_owner_exactly_alive`'s own answer, so a lease carrying
+        our pid under another creation identity stays with the pre-existing identity rule.
+        """
+        match = _ACTIVITY_LEASE_NAME.fullmatch(path.name)
+        pid = row.get("pid")
+        if (match is None or not isinstance(pid, int) or isinstance(pid, bool)
+                or pid != os.getpid()):
+            return False
+        if not self._owner_exactly_alive(row, own_process_counts=True):
+            return False
+        with _live_activity_tokens_lock:
+            return match.group(1) not in _live_activity_tokens
 
     # ---- the operator escape hatch: ONE scaffold, two hatches (doc 25 SC-12) -----------------
     # `resolve_active_claims` and `resolve_spawn_claim` are the only two routes in this service that
