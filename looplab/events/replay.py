@@ -526,6 +526,13 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     if current is not None and not _generation_matches(current, d):
         return
+    # A SETTLED lifecycle is not being built (review 2026-09-22, EVT-11). Concurrent build threads
+    # append their own node's rows, so a `node_building` can land AFTER that lifecycle's
+    # `node_created` — and after its terminal. Nothing later clears a marker set then: the node
+    # read `building…` on the board beside its own metric, forever. Only a PENDING node (a fresh
+    # reservation's re-emit, or a reset lifecycle awaiting its rebuild) may carry the marker.
+    if current is not None and current.status is not NodeStatus.pending:
+        return
     marker = {"node_id": nid, "operator": d.get("operator"),
               "parent_ids": d.get("parent_ids", []), "started": e.ts}
     card_id = _card_replay_id(d.get("card_id"))
@@ -955,6 +962,10 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
         # so a legitimate re-evaluation still applies (it IS the first terminal after the reset).
         first_terminal = n.status is NodeStatus.pending
         if first_terminal:
+            # The lifecycle is settled, so no build of it is in flight: drop a marker a late
+            # `node_building` left on it after its `node_created` (review 2026-09-22, EVT-11) — the
+            # same generation-gated clear `_on_node_failed` already makes on the other terminal.
+            _clear_build_marker(st, d, n.id)
             n.metric = _finite_metric(d.get("metric"))  # invalid/missing remains only in the raw log
             # Additive, reader-side default (invariant #5): the candidate's own number on a
             # host-scored node (doc 52 row 10a); an old log has no key and folds to None.

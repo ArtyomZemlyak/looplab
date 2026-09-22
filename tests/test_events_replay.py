@@ -1884,6 +1884,49 @@ def test_stale_terminal_cannot_clear_new_generation_building_marker(tmp_path):
     assert fold(s.read_all()).building["generation"] == 2
 
 
+@pytest.mark.parametrize("building_lands", ["after_created", "after_terminal"])
+def test_a_late_node_building_leaves_no_marker_on_a_settled_node(tmp_path, building_lands):
+    """Review 2026-09-22, EVT-11. Concurrent build threads append their own node's rows, so a
+    `node_building` can land AFTER its lifecycle's `node_created` — which is the only thing that
+    cleared the marker — or even after its terminal. Either way the evaluated node read `building…`
+    forever. MUTATIONS: drop the pending-only guard in `_on_node_building` and `after_terminal` is
+    red; drop the clear in `_on_node_evaluated`'s first-terminal branch and `after_created` is."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    building = {"node_id": 0, "generation": 0, "operator": "draft", "parent_ids": []}
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft", "generation": 0,
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    if building_lands == "after_created":
+        s.append("node_building", building)
+        assert 0 in fold(s.read_all()).buildings, "precondition: a pending node takes the marker"
+    s.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5, "eval_seconds": 1.0,
+                                "violations": [], "trials": [], "extra_metrics": {},
+                                "stdout_tail": ""})
+    if building_lands == "after_terminal":
+        s.append("node_building", building)
+    st = fold(s.read_all())
+    assert st.nodes[0].status is NodeStatus.evaluated
+    assert st.buildings == {} and st.building is None
+
+
+def test_a_reset_lifecycle_awaiting_its_rebuild_still_shows_the_marker(tmp_path):
+    """The guard refuses only a SETTLED node: a reset re-opens the id as pending, and its rebuild's
+    `node_building` must still show on the board until the new `node_created` lands."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft", "generation": 0,
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5, "eval_seconds": 1.0,
+                                "violations": [], "trials": [], "extra_metrics": {},
+                                "stdout_tail": ""})
+    s.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "implement"})
+    s.append("node_building", {"node_id": 0, "generation": 1, "operator": "draft",
+                               "parent_ids": []})
+    st = fold(s.read_all())
+    assert st.nodes[0].status is NodeStatus.pending
+    assert st.buildings[0]["generation"] == 1
+
+
 def test_run_finished_sequence_cas_rejects_intervening_control(tmp_path):
     s = EventStore(tmp_path / "e.jsonl")
     started = s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
