@@ -39,11 +39,23 @@ invariants, which survive a cleared trace. It also means this answers on a run w
 **WHAT AN OPEN INTERVAL MEANS.** A node that started and has no terminal is counted as busy up to
 the last event in the log — for a live run that is "still running", which is true, and for a killed
 one it is the last thing anyone can prove. Both are stated rather than guessed at.
+
+**AN INTERVAL IS ONE LIFECYCLE, NOT ONE NODE ID** (review 2026-09-22, EVT-06). A `node_reset`
+re-opens the same id and the engine evaluates it again under the next `generation`, so keying the
+start/terminal pairing by the bare id kept the FIRST lifecycle's start and terminal and dropped the
+re-evaluation entirely: its busy stretch was reported as dead time. Rows are paired by `(node_id,
+generation)`, the key the fold itself uses (`replay.py::_charge_terminal_cost`): a stamped
+`generation`, else the terminals' legacy `attempt` alias, else generation 0 — which is what an
+unstamped row has always meant — and an unusable stamp (a bool, a negative, a non-integer) names no
+lifecycle, so the row is not attributed at all rather than guessed onto one.
 """
 from __future__ import annotations
 
-_EVAL_STARTED = "node_eval_started"
-_TERMINALS = ("node_evaluated", "node_failed")
+from looplab.core.models import coerce_node_id
+from looplab.events.types import EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED, EV_NODE_FAILED
+
+_EVAL_STARTED = EV_NODE_EVAL_STARTED
+_TERMINALS = (EV_NODE_EVALUATED, EV_NODE_FAILED)
 
 
 def _field(row, name):
@@ -66,6 +78,28 @@ def _ts(row) -> float | None:
         return float(_field(row, "ts"))
     except (TypeError, ValueError):
         return None
+
+
+def _lifecycle(row) -> tuple[int, int] | None:
+    """`(node_id, generation)` of one eval-start / terminal row, or None when it names none.
+
+    `core/models.py::coerce_node_id` for BOTH halves — the fold's own guard, so a bool (`True`
+    would otherwise pair with node 1), a list or a non-integral float is refused the same way the
+    fold refuses it. A missing stamp is generation 0 (see the module docstring)."""
+    data = _field(row, "data")
+    if not isinstance(data, dict):
+        data = {"node_id": _field(row, "node_id")}
+    node = coerce_node_id(data)
+    if node is None or node < 0:
+        return None
+    if "generation" in data:
+        raw = data.get("generation")
+    elif "attempt" in data:
+        raw = data.get("attempt")
+    else:
+        return node, 0
+    generation = coerce_node_id({"node_id": raw})
+    return (node, generation) if generation is not None and generation >= 0 else None
 
 
 def eval_occupancy(events, width: int | None = None) -> dict:
@@ -100,25 +134,26 @@ def eval_occupancy(events, width: int | None = None) -> dict:
         stamp = _ts(e)
         if stamp is None:
             continue
-        data = _field(e, "data")
-        node = (data or {}).get("node_id") if isinstance(data, dict) else _field(e, "node_id")
-        if node is None:
-            continue
         kind = _field(e, "type")
+        if kind != _EVAL_STARTED and kind not in _TERMINALS:
+            continue
+        lifecycle = _lifecycle(e)
+        if lifecycle is None:
+            continue
         if kind == _EVAL_STARTED:
-            starts.setdefault(node, stamp)          # FIRST start wins: a re-append is not a re-run
-        elif kind in _TERMINALS:
-            ends.setdefault(node, stamp)            # FIRST terminal wins, as the fold does
+            starts.setdefault(lifecycle, stamp)     # FIRST start wins: a re-append is not a re-run
+        else:
+            ends.setdefault(lifecycle, stamp)       # FIRST terminal wins, as the fold does
     intervals = []
     open_intervals = 0
-    for node in sorted(starts, key=lambda n: (starts[n], str(n))):
-        begin = starts[node]
-        finish = ends.get(node)
+    for lifecycle in sorted(starts, key=lambda key: (starts[key], key)):
+        begin = starts[lifecycle]
+        finish = ends.get(lifecycle)
         if finish is None:
             finish = last                           # still running, or the log stops here
             open_intervals += 1
         if finish >= begin:
-            intervals.append((begin, finish, node))
+            intervals.append((begin, finish, lifecycle[0]))
     if not intervals:
         # A run with no evaluation at all: the whole thing is bootstrap, and there is no span in
         # which starvation could be measured. Saying "100 % dead" here would be the same category

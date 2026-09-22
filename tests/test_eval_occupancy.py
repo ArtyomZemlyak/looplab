@@ -145,3 +145,43 @@ def test_junk_rows_never_raise():
     out = _run(["nonsense", None, 42, _ev("run_started", 0.0),
                 _ev("node_eval_started", 1 * H, 0), _ev("node_evaluated", 2 * H, 0)])
     assert out["span_seconds"] == 1 * H
+
+
+def _lifecycle_row(kind, ts, node, **stamp):
+    return {"type": kind, "ts": ts, "data": {"node_id": node, **stamp}}
+
+
+def test_a_RE_EVALUATED_node_is_two_lifecycles_and_both_count_as_busy():
+    """Review 2026-09-22, EVT-06. `node_reset` re-opens the SAME id and the engine evaluates it again
+    under the next `generation`. Pairing by the bare id kept lifecycle 0's start and terminal and
+    dropped the re-evaluation, so its 60 busy seconds were reported as dead time. MUTATION: key
+    `starts`/`ends` by the node id alone and the (40, 100) interval vanishes, `dead_seconds` 70."""
+    rows = [_ev("run_started", 0.0),
+            _lifecycle_row("node_eval_started", 10.0, 0, generation=0),
+            _lifecycle_row("node_evaluated", 30.0, 0, generation=0),
+            _ev("node_reset", 35.0, 0),
+            _lifecycle_row("node_eval_started", 40.0, 0, generation=1),
+            # a terminal stamped only with the legacy `attempt` alias pairs the same way the fold's
+            # `_charge_terminal_cost` keys it
+            _lifecycle_row("node_evaluated", 100.0, 0, attempt=1)]
+    out = _run(rows)
+    assert out["intervals"] == [(10.0, 30.0, 0), (40.0, 100.0, 0)]
+    assert out["dead_windows"] == [(30.0, 40.0)]
+    assert out["dead_seconds"] == 10.0 and out["span_seconds"] == 90.0
+    assert abs(out["dead_share"] - 10.0 / 90.0) < 1e-9
+    assert out["open_intervals"] == 0
+
+
+def test_an_unusable_generation_stamp_names_no_lifecycle():
+    """`True == 1` in Python, so a bool stamp coerced naively would pair with lifecycle 1 and invent
+    a busy stretch. The fold refuses a bool generation (`core/models.py::coerce_node_id`) and so
+    does this reader. MUTATION: `int(raw)` instead of `coerce_node_id` adds a (3H, 4H) interval."""
+    rows = [_ev("run_started", 0.0),
+            _lifecycle_row("node_eval_started", 1 * H, 0, generation=0),
+            _lifecycle_row("node_evaluated", 2 * H, 0, generation=0),
+            _lifecycle_row("node_eval_started", 3 * H, 0, generation=True),
+            _lifecycle_row("node_evaluated", 4 * H, 0, generation=True),
+            _lifecycle_row("node_eval_started", 5 * H, [7], generation=0)]   # unhashable id
+    out = _run(rows)
+    assert out["intervals"] == [(1 * H, 2 * H, 0)]
+    assert out["open_intervals"] == 0
