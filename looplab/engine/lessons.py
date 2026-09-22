@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 import orjson
 
 from looplab.core.atomicio import append_jsonl_bytes_locked, file_identity
+from looplab.core.errors import BudgetExceeded
 from looplab.core.models import (
     NODE_CONCEPT_PROVENANCE_CLASSIFIER,
     RunState,
@@ -459,7 +460,12 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                     path, merged,
                     replace_if=lambda row: _valid_claim_source_row(row, research=False),
                 )
-        except Exception:  # noqa: BLE001
+        except BudgetExceeded:
+            # The paraphrase pass is PAID and runs unlocked (see LOCKING); the ceiling there reads
+            # as no merge at all only if it is swallowed here (review 2026-09-22, ENG3-02). Nothing
+            # is lost by letting it through: the rewrite comes after the merge, under a CAS token.
+            raise
+        except Exception:  # noqa: BLE001 — hygiene is best-effort: a failure leaves the store as the append left it
             pass
 
     @staticmethod

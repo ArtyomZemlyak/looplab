@@ -49,6 +49,8 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
+from looplab.core.containment import refuse_budget_stop
+from looplab.core.errors import BudgetExceeded
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import RunState
 
@@ -627,7 +629,13 @@ class CurationProtocolMixin:
                             log_name, final, curation_key, provenance,
                             row("error", empty_proposals(), error_type=type(exc).__name__),
                             require_durable=True)
+                        # The CLAIM is closed above either way — a paid attempt must never be left
+                        # "outcome unknown" — and only THEN does the spend ceiling go on up instead
+                        # of reading as one more steward error (review 2026-09-22, TAT-01/SCJ-03).
+                        refuse_budget_stop(exc)
                         return "error"
+        except BudgetExceeded:
+            raise                      # closed above; a stop is not a curation failure to log again
         except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
             try:
                 self._append_curation_once(

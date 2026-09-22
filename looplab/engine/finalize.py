@@ -17,6 +17,7 @@ import time
 from typing import TYPE_CHECKING
 
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
+from looplab.core.errors import BudgetExceeded
 from looplab.core.models import RunState
 from looplab.core.tracing import TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS
 from looplab.engine.costs import in_memory_cost_total, reconcile_cost_accountants
@@ -580,6 +581,12 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
         if not _finish_is_foreign:
             try:
                 ensure_finalize_reflection(engine, scope, state.last_finish_seq)
+            except BudgetExceeded:
+                # DECIDED, not swallowed blind (review 2026-09-22, TAT-01): this run is ALREADY
+                # terminal — usually because the ceiling is what ended it — and the close below is
+                # the one thing this path exists to guarantee. The stop has done its job; the
+                # remaining steps append records and make no paid call.
+                pass
             except Exception:  # noqa: BLE001 - cross-run memory must never wedge a terminal
                 pass
         if (state.finished and state.last_finish_seq >= 0 and not _finish_is_foreign

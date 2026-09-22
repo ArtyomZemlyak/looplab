@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from looplab.core.errors import BudgetExceeded
 from looplab.core.models import RunState
 # The cluster reaches a sibling's FUNCTIONS through the MODULE object, never by name. A
 # `from looplab.search.concept_tagging import tag_nodes_heuristic` binds the function OBJECT at
@@ -72,6 +73,8 @@ def derive_reference_concepts(task_goal: str, coverage: dict, *, client, asset_b
     try:
         out = parse_structured(client, [{"role": "system", "content": system},
                                         {"role": "user", "content": user}], _Out, parser)
+    except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+        raise
     except Exception:  # noqa: BLE001 — best-effort: no importance signal beats crashing the diagnostic
         # ``[]`` is also a valid successful verdict. The live cadence durably snapshots this
         # failure sentinel and de-duplicates the projection, turning a transient outage into permanent
@@ -228,6 +231,8 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
                 for m in members:
                     if m != canon and m not in decided:   # freeze known raws AND canonicals (see above)
                         rename[m] = canon
+    except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+        raise
     except Exception:  # noqa: BLE001 — deriving NEW merges is best-effort; never break the diagnostic
         # A failure to derive new merges must NOT discard the AUTHORITATIVE recorded decisions (B3): still
         # apply + return `known_renames` so the vocabulary stays stable (raw ids don't resurrect). Empty

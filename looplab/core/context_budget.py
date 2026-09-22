@@ -6,6 +6,9 @@ turns intact), which is where stale tool output accumulates. Pure + deterministi
 """
 from __future__ import annotations
 
+# The operator's spend ceiling, which `compact_history`'s paid summarizer must let through.
+from looplab.core.errors import BudgetExceeded
+
 # High-water mark (chars) at which auto-summary compacts a long tool-loop history when no explicit
 # `context_budget_chars` is set. ~120k chars ≈ ~30k tokens: short loops never hit it; a genuinely
 # long agent run gets its stale middle summarized before it can crowd the context window.
@@ -153,6 +156,11 @@ def compact_history(messages: list[dict], max_chars: int, summarize, *, keep_las
     body = "\n".join(_one(m) for m in middle)
     try:
         summary = summarize(body)
+    except BudgetExceeded:
+        # The summarizer is a PAID call (`agents/tool_loop.py::_summarizer`); its spend ceiling fell
+        # through to truncation below and the loop went on to its next paid turn (review
+        # 2026-09-22, TAT-01). A stop is not a flaky summarizer.
+        raise
     except Exception:                   # noqa: BLE001 - a flaky summarizer must never break the loop
         summary = ""
     if not summary:

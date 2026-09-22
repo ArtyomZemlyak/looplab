@@ -25,6 +25,7 @@ from typing import Callable, Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.errors import BudgetExceeded
 from looplab.core.parse import parse_structured
 from looplab.tools.vectorstore import Vector, cosine, hash_embed
 
@@ -237,6 +238,8 @@ def agent_merge(client, items: list[str], *, kind: str = "items", goal: str = ""
         plan = agentic_struct(
             client, None, msgs, _MergePlan, parser=parser or "tool_call", loop_opts={"max_turns": 15},
             fallback=lambda m: parse_structured(client, m, _MergePlan, parser or "tool_call"))
+    except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+        raise
     except Exception:  # noqa: BLE001 — advisory: a merge failure must never lose or corrupt data
         return singletons
     # Rebuild a clean partition: honor only VALID, DISJOINT groups of >=2; every unclaimed index stays

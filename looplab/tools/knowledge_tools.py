@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from looplab.core.atomicio import atomic_write_text, file_identity
+from looplab.core.errors import BudgetExceeded
 from looplab.core.context_budget import bounded_page
 from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.core.redact import redact_persisted_text
@@ -664,6 +665,11 @@ class KnowledgeTools:
                     raw, _NOTE_PAGE_CHARS, offset=_page_offset(args.get("offset")),
                     more_call=("read_note(name=" + repr(note_name) + ", offset={offset})"),
                     what=what)
+        except BudgetExceeded:
+            # `kb_search` embeds and (Memora) abstracts the query — paid calls. Fed back as a tool
+            # error, the spend ceiling became `(tool error: LLM spend ceiling reached)` in the
+            # model's context and the loop paid for its next turn (review 2026-09-22, TAT-01).
+            raise
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"
         return f"(unknown tool: {name})"

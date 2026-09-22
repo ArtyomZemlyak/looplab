@@ -28,6 +28,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from looplab.agents.agent import agentic_struct
+from looplab.core.errors import BudgetExceeded
 from looplab.core.parse import parse_structured
 from looplab.core.task_kinds import GENERATIVE_KINDS, default_backend
 
@@ -253,6 +254,10 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         plan = agentic_struct(client, tools, messages, _TaskPlan, parser=parser,
                               loop_opts={"max_turns": 15},
                               fallback=lambda m: parse_structured(client, m, _TaskPlan, parser))
+    except BudgetExceeded:
+        # Not "couldn't reach the model": the spend ceiling reached the operator as advice to check
+        # the endpoint URL (review 2026-09-22, TAT-01). It is a refusal with its own message.
+        raise
     except Exception as e:  # noqa: BLE001 - transport/parse failure: report it as an ERROR, distinct
         # from a vague goal (which parses fine but returns an empty task). The caller surfaces the two
         # differently — "reach the model" vs "your goal was too vague".

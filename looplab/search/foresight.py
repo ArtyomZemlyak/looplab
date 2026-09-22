@@ -117,7 +117,8 @@ def rank(client, report: str, items: list[str], *, goal: str = "", direction: st
     partial order is tolerated — any index the model omitted is appended in input order) and `reason`
     is the model's one-line justification (the analysis trace, "" if none), or None on any failure /
     abstention. `kind="hypothesis"` reframes the system prompt for the board-prioritize path (see
-    `_HYP_BOARD_SUFFIX`). Never raises — the predictor is advisory and fails open."""
+    `_HYP_BOARD_SUFFIX`). Never raises — the predictor is advisory and fails open — EXCEPT the run's
+    spend ceiling, which is not a failure to fail open on (review 2026-09-22, TAT-01/SCJ-03)."""
     if client is None or len(items) < 2:
         return None
     items = items[:_MAX_ITEMS]
@@ -127,6 +128,8 @@ def rank(client, report: str, items: list[str], *, goal: str = "", direction: st
                     report, items, goal, direction,
                     item_cap=_HYPOTHESIS_ITEM_CAP if kind == "hypothesis" else _ITEM_CAP)}]
         out = parse_structured(client, msgs, _Ranking, parser or "tool_call")
+    except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+        raise
     except Exception:  # noqa: BLE001 — advisory predictor: fall back on ANY error (parse/transport)
         return None
     return _sanitize_ranking(out, len(items))
@@ -496,7 +499,8 @@ class ForesightPanelResearcher(WrapsResearcher):
         replacing the world model's own (Pearson≈0, §21.12) self-reported confidence. Runs the grounded +
         repeated + criteria-decomposed scorer over the idea text + the Verified Data Analysis Report;
         returns the `improves_objective` criterion mean in [0,1], or None to DEGRADE to the self-reported
-        confidence (no client, verifier unavailable, or any error). Best-effort — never raises."""
+        confidence (no client, verifier unavailable, or any error). Best-effort — never raises, except
+        the run's spend ceiling, which `verify` re-raises and so does this (review 2026-09-22)."""
         if self.client is None:
             return None
         try:
@@ -526,6 +530,8 @@ class ForesightPanelResearcher(WrapsResearcher):
             if imp is None:
                 return float(rep.score) if rep.score is not None else None
             return float(imp) * float(feas) if feas is not None else float(imp)
+        except BudgetExceeded:  # `verify` re-raises the ceiling (doc 50 AG-01); so must its caller
+            raise
         except Exception:  # noqa: BLE001 — advisory: degrade to the self-reported confidence
             return None
 

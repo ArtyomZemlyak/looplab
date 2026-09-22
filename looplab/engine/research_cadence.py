@@ -1909,6 +1909,11 @@ class ResearchCadenceMixin:
                         "canonical": ids[0], "aliases": ids[1:], "statement": g["merged"],
                         "at_node": len(state.nodes)})
                     wrote = True
+        except BudgetExceeded:
+            # The adjudication is PAID (`hybrid_merge.consolidate`). The baseline stays unconsumed,
+            # exactly as for any failure below, and the cadence offload publishes what was written
+            # before the stop leaves it (review 2026-09-22, SCJ-03 / ENG3-02).
+            raise
         except Exception:  # noqa: BLE001 — advisory hygiene; a merge hiccup must not disturb the loop
             # The cadence baseline is NOT consumed here. It used to be assigned before the call, so a
             # transient LLM/transport failure silently skipped the whole window and duplicates piled

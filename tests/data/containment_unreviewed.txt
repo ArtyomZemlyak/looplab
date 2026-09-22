@@ -28,13 +28,10 @@ looplab/engine/evaluate.py::EvaluateMixin._repair_salvaged_cause#0
 looplab/engine/evaluate.py::EvaluateMixin._salvage_reader_root#0
 looplab/engine/genesis.py::author_task#0
 looplab/engine/lesson_hygiene.py::retrieve_lessons_harmonic#0
-looplab/engine/lessons.py::LessonMemory.consolidate_lessons_file#0
 looplab/engine/lessons_distill.py::LessonDistillMixin._reflect_loop_opts#0
 looplab/engine/lessons_reconcile.py::LessonReconcileMixin.reconcile_lessons#0
-looplab/engine/lessons_reconcile.py::LessonReconcileMixin.reconcile_lessons#2
 looplab/engine/metric_salvage.py::salvage_gates#1
 looplab/engine/novelty.py::NoveltyGateMixin._llm_novelty_gate#0
-looplab/engine/novelty.py::NoveltyGateMixin._llm_novelty_gate#1
 looplab/engine/novelty.py::NoveltyGateMixin._propose_batch#1
 looplab/engine/orchestrator.py::Engine.__init__#0
 looplab/engine/orchestrator.py::Engine.__init__#4

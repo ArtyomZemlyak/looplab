@@ -18,6 +18,7 @@ from typing import Optional
 
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
+from looplab.core.errors import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
@@ -178,5 +179,10 @@ class VerifierTiebreakMixin:
                 return None
             return {"score": score, "n_samples": rep.n_samples, "agreement": rep.agreement,
                     "method": str(rep.method or "")[:80]}
+        except BudgetExceeded:
+            # `verify` re-raises the ceiling at this SELECTION site on purpose (doc 50 AG-01); this
+            # caller swallowed it again, one frame up, and the tie-break went on to pay for the next
+            # tied candidate (review 2026-09-22, SCJ-03).
+            raise
         except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)
             return None

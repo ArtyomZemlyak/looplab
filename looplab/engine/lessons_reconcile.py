@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.containment import refuse_budget_stop
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import RunState
 from looplab.core.run_identity import row_belongs_to_run
@@ -430,6 +431,12 @@ class LessonReconcileMixin:
         spent_pairs_this_pass: list = []
         derivation = "failed" if client_failed else ("unavailable" if client is None else "empty")
         _stale_pairs = {tuple(p) for p in stale_pairs}
+        # THE SPEND CEILING, HELD (review 2026-09-22, TAT-01 / ENG3-02). Both paid steps here — the
+        # re-derivation below and the post-write consolidation — used to swallow it with every other
+        # failure. Re-raising on the spot would be worse: it would skip the retirement ("not
+        # optional", above) and the spend-ledger append that stops run-end reflection re-buying the
+        # same pairs. So a stop is kept here and let through at every exit, AFTER what is owed landed.
+        held_stop: Optional[BudgetExceeded] = None
         if client is not None:
             try:
                 fp = self._e._task_fingerprint(state, state.best())
@@ -453,7 +460,11 @@ class LessonReconcileMixin:
                     # the one writer of the three that did not.
                     spent_pairs_this_pass = list(pairs_used)
                 derivation = "rederived" if fresh_reflect or comp else "empty"
-            except Exception:  # noqa: BLE001
+            except BudgetExceeded as exc:
+                held_stop = exc              # the retirement below still runs; see `held_stop`
+                fresh_reflect, comp, pairs_used = [], [], []
+                derivation = "failed"
+            except Exception:  # noqa: BLE001 — re-derivation is optional; the retirement below is not
                 # model-backed rewriting can fail without keeping superseded evidence active.
                 fresh_reflect, comp, pairs_used = [], [], []
                 derivation = "failed"
@@ -536,16 +547,22 @@ class LessonReconcileMixin:
                     self._e._consolidate_lessons_file(path, client, self._e._embedder,
                                                       parser=parser, prompts=prompts)
                     self._e._compact_lessons(path)
+            except BudgetExceeded as exc:
+                held_stop = exc              # the ledger below is owed first; see `held_stop`
             except Exception:  # noqa: BLE001 — best-effort post-processing; ledger recorded below
                 pass
+        except BudgetExceeded:
+            raise                            # never from the locked write; the stop is not a hiccup
         except Exception:  # noqa: BLE001 — reconciliation is best-effort; never fail the run for it
             # Nothing was actually reconciled (a transient LLM/network/write error), so RESET the
             # change-gate hash — mirroring the client-None branch above — else the next same-signature
             # cadence pass returns early at the gate and never retries. Forward progress (a new terminal)
             # flips the hash anyway; this only matters when the failure is the run's last activity.
             self._reconcile_sig_hash = None
+            refuse_budget_stop(held_stop)
             return state
         if not n_retired:
+            refuse_budget_stop(held_stop)
             return state
         fresh = committed_fresh
         if not fresh:
@@ -570,4 +587,5 @@ class LessonReconcileMixin:
                          "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}
                         for lz in fresh[:12] if isinstance(lz, dict)]})
+        refuse_budget_stop(held_stop)        # the retirement and its receipts have landed
         return fold(self._e.store.read_all())

@@ -18,6 +18,7 @@ import hashlib
 import re
 from typing import Optional
 
+from looplab.core.errors import BudgetExceeded
 from looplab.tools.vectorstore import Hit
 
 _NEGATIVE = {"tested", "abandoned", "failed", "refuted"}
@@ -292,6 +293,11 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
                 keep.append((min(members), row))
         keep.sort(key=lambda t: t[0])
         return [row for _i, row in keep]
+    except BudgetExceeded:
+        # The merge is PAID (`hybrid_merge.consolidate`, one adjudication per bucket). Returning
+        # `rows` on the ceiling read as "nothing to merge" and handed the caller its next paid step;
+        # `agent_merge` used to swallow it one level down, per bucket (review 2026-09-22, ENG3-02).
+        raise
     except Exception:  # noqa: BLE001 — hygiene is best-effort; never drop lessons on a merge hiccup
         return rows
 

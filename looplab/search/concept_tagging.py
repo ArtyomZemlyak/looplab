@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
+from looplab.core.errors import BudgetExceeded
 from looplab.core.models import RunState
 from looplab.search.concept_graph import ConceptGraph, _normalize_concept_id
 
@@ -204,6 +205,8 @@ def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_
             return keep
         # named-only-unknowns -> recover a known alias; named-NOTHING -> respect the empty 'novel' verdict.
         return tag_text(text, graph, allow_plural=allow_plural) if raw_ids else frozenset()
+    except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+        raise
     except Exception:  # noqa: BLE001 — agentic tagging is best-effort; never block the caller
         return tag_text(text, graph, allow_plural=allow_plural)
 
@@ -341,6 +344,8 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
             else:
                 out = parse_structured(client, msgs, TagOut, parser)
             return n.id, list(out.concept_ids)
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — degrade this node to heuristic, never crash the harness
             return n.id, None
 

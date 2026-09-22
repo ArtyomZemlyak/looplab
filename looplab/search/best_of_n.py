@@ -9,6 +9,7 @@ with the ADR-7 cost rule. N=1 is a transparent pass-through (== today).
 from __future__ import annotations
 
 from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, WrapsDeveloper
+from looplab.core.errors import BudgetExceeded
 from looplab.core.models import Idea
 from looplab.core.prompts import render
 from looplab.core.validate import validate_agent_code
@@ -121,6 +122,8 @@ def _listwise_pick(client, idea, candidates: list[str], parser: str = "tool_call
             fallback=lambda m: parse_structured(client, m, _Pick, parser or "tool_call"))
         if isinstance(out.choice, int) and 0 <= out.choice < len(candidates):
             return out.choice
+    except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+        raise
     except Exception:  # noqa: BLE001 — selection is advisory; fall back to the first top-scorer
         pass
     return 0

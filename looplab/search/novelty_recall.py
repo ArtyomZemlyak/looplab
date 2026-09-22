@@ -23,6 +23,7 @@ from __future__ import annotations
 from itertools import combinations
 from typing import Optional
 
+from looplab.core.errors import BudgetExceeded
 from looplab.core.models import RunState
 from looplab.search.concept_tagging import experiment_nodes, node_text
 
@@ -133,6 +134,10 @@ def paraphrase_leaks(state: RunState, *, client=None, embed=None, parser: str = 
                 {"role": "system", "content": system},
                 {"role": "user", "content": f"A (node {a}): {by_id.get(a, '')[:500]}\n\n"
                                             f"B (node {b}): {by_id.get(b, '')[:500]}"}], _V, parser)
+        except BudgetExceeded:
+            # Per PAIR, so a swallowed ceiling was re-paid up to `max_pairs` times (60) — the one
+            # loop among these sites where the swallow multiplies (review 2026-09-22, SCJ-03).
+            raise
         except Exception:  # noqa: BLE001 — skip a bad adjudication, keep going
             continue
         if v is None or getattr(v, "is_paraphrase", None) is None:

@@ -29,6 +29,7 @@ import contextlib
 from typing import Optional
 
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
+from looplab.core.errors import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
@@ -268,6 +269,11 @@ class ConceptCadenceMixin:
                 alarm = uncovered_regions(state, graph, tags)
                 fired, uncovered_key = alarm["fired"], alarm["uncovered_key"]
                 uncovered_axes, directive = alarm["uncovered_axes"], alarm["directive"]
+        except BudgetExceeded:
+            # The snapshot TAGS (paid: `_refresh_concept_tags`, `_tag_hypothesis_concepts`) before
+            # it audits; an audit that swallows the spend ceiling hands the cadence its next paid
+            # call (review 2026-09-22, SCJ-03 / ENG3-02).
+            raise
         except Exception:  # noqa: BLE001 — never let an audit snapshot crash the cadence / the run
             return None
         return {
@@ -550,5 +556,9 @@ class ConceptCadenceMixin:
                                       {"hyp_id": str(h.id), "concepts": htags,
                                        "mode": mode, "at_vocab": v_now})
                     tagged_this_cadence += 1
+        except BudgetExceeded:
+            # Per-hypothesis paid tagging (`tag_text_llm`), up to `_HYP_TAG_CAP` a cadence; every row
+            # already appended is a complete fact, so the stop leaves nothing half-written.
+            raise
         except Exception:  # noqa: BLE001 — hypothesis tagging is best-effort audit enrichment
             pass

@@ -670,7 +670,11 @@ class NoveltyGateMixin:
             return idea
         try:
             v = agentic_struct(client, tools, msgs, _NoveltyVerdict, loop_opts={"max_turns": 12})
-        except Exception:  # noqa: BLE001
+        except BudgetExceeded:
+            # Admitting the idea on the ceiling handed it straight to a paid build (review
+            # 2026-09-22, TAT-01 / SCJ-03 / ENG1-09).
+            raise
+        except Exception:  # noqa: BLE001 — a failed adjudication admits: this gate must never block proposing
             return idea
         if not (v and getattr(v, "is_duplicate", False)
                 and isinstance(v.near_node_id, int) and v.near_node_id in state.nodes):
@@ -1013,6 +1017,11 @@ class NoveltyGateMixin:
                     accepted = ideas[:n]
                     self._pending_batch_novelty_gated = list(accepted)
                     return accepted
+            except BudgetExceeded:
+                # The native batch AND its novelty gate are paid; falling back to sequential rolls
+                # on the ceiling bought the first roll's `propose` (which the sequential loop below
+                # already lets through) — review 2026-09-22, SCJ-03.
+                raise
             except Exception:  # noqa: BLE001 — a batch-backend hiccup falls back to sequential rolls
                 ideas = []
                 dropped = []
@@ -1136,6 +1145,11 @@ class NoveltyGateMixin:
                 for index, root in enumerate(roots, start=1)
             ]
             brief = "\n\n".join(parts)[:_REEXAMINATION_BRIEF_CHARS].strip()
+        except BudgetExceeded:
+            # `asset_brief` is a paid entry point (agentic with a client); this call passes
+            # `client=None` today, so it cannot raise the ceiling — named so a client passed here
+            # later cannot turn the stop into an empty brief (review 2026-09-22).
+            raise
         except Exception:  # noqa: BLE001 -- unavailable grounding must defer, never block proposing
             brief = ""
         cache[key] = brief
@@ -1164,6 +1178,8 @@ class NoveltyGateMixin:
                 samples=_REEXAMINATION_SAMPLES,
                 parser=parser,
             )
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 -- verifier failures preserve the ordinary flat gate
             return False
         if not isinstance(verdict, dict):
@@ -1310,6 +1326,8 @@ class NoveltyGateMixin:
             # `[]` and the grade is byte-identical to its pre-2026-09-08 self.
             grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags,
                                   literature=self._literature_rows(state, idea))
+        except BudgetExceeded:  # `tag_idea_llm` is paid; a stop is not a tagger hiccup
+            raise
         except Exception:  # noqa: BLE001 — a grader/tagger/reconstruction hiccup must never block proposing
             return None
         # §21.20 Step 2: cross-run priors are AUDIT-ONLY and computed SEPARATELY from the grade above — we

@@ -262,11 +262,28 @@ def test_neither_gate_kept_a_private_copy_of_the_audit_append():
         encoding="utf-8")
     assert "def _reject_and_repropose(" in text, (
         "_reject_and_repropose was renamed; re-point this guard")
-    # Only two sites may see the budget stop: the shared helper (audits, then re-raises) and
-    # `_repropose_with_feedback` (re-raises past its keep-the-original fallback). A third means a
-    # gate is handling it inline again — which is precisely the copy that drifted.
-    assert text.count("except BudgetExceeded:") == 2, (
-        "a novelty gate is handling BudgetExceeded itself again instead of through the shared "
-        "reject/re-propose protocol")
+    # Only the shared helper may DO anything with the budget stop (audit it, then re-raise). Every
+    # other handler that names it must be the bare re-raise — `_repropose_with_feedback`'s, past its
+    # keep-the-original fallback, and the ones the transitive containment census requires beside
+    # each blind handler around a paid call (review 2026-09-22; this used to count the substring
+    # `except BudgetExceeded:` and demand exactly 2, which a pure re-raise now legitimately breaks).
+    # A handler that audits, re-proposes or returns is a gate handling it inline again — precisely
+    # the copy that drifted.
+    import ast
+
+    tree = ast.parse(text)
+    owner = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in ast.walk(fn):
+                owner[node] = fn.name        # the innermost def wins: walked outer-to-inner
+    handling = sorted({
+        owner.get(h, "<module>") for h in ast.walk(tree)
+        if isinstance(h, ast.ExceptHandler) and h.type is not None
+        and "BudgetExceeded" in ast.unparse(h.type)
+        and not (len(h.body) == 1 and isinstance(h.body[0], ast.Raise) and h.body[0].exc is None)})
+    assert handling == ["_reject_and_repropose"], (
+        f"a novelty gate is handling BudgetExceeded itself again ({handling}) instead of through "
+        "the shared reject/re-propose protocol")
     assert 'kind": "llm"' not in text and 'kind": "semantic"' not in text, (
         "a gate is re-building the audit payload inline instead of passing `kind=`")
