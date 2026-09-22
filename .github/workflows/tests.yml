@@ -17,10 +17,16 @@ jobs:
   # was CANCELLED at 20:00 having reached 63 % — and every master push back to at least 2026-08-04
   # (run 1260) ended red the same way. A gate that cannot pass is a gate nobody reads, so for seven
   # weeks the only evidence a push was sound was a local run. The Windows leg below already shards
-  # the same way; `--splits`/`--group` are pytest-split's (a `[dev]` dependency).
+  # the same way; `--splits`/`--group` are pytest-split's (a `[dev]` dependency). The Windows leg
+  # lives in `tests-windows.yml` since 2026-09-22 (that file says why).
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 45, not 30: with no `.test_durations` pytest-split cuts the collection into four CONTIGUOUS
+    # quarters by count, and the last quarter holds the slow families — locally 1,679 s against
+    # 637-740 s for the other three (2026-09-22), and run 1964's group 4 was still running at 25
+    # minutes when groups 1-3 had finished in 9-11. The ceiling is a stopgap, not the fix; the fix is
+    # balancing by measured duration.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -37,25 +43,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-      - run: pip install -e ".[dev,ui]"
-      - run: python -m pytest --splits 4 --group ${{ matrix.group }}
-
-  # A small second platform leg is deliberate: subprocess/path/locking behavior is materially
-  # different on Windows, and Linux-only CI previously missed both a path assertion and a network
-  # unit test that expanded into minutes of timeout retries on Windows.
-  pytest-windows:
-    runs-on: windows-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [1, 2, 3, 4]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
           cache: pip
       - run: pip install -e ".[dev,ui]"
       - run: python -m pytest --splits 4 --group ${{ matrix.group }}

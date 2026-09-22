@@ -1,0 +1,43 @@
+# The Windows leg of the offline test suite, in its OWN workflow since 2026-09-22.
+#
+# A second platform leg is deliberate: subprocess/path/locking behavior is materially different on
+# Windows, and Linux-only CI previously missed both a path assertion and a network unit test that
+# expanded into minutes of timeout retries on Windows.
+#
+# Why a separate file: until 2026-09-22 this leg died in COLLECTION on all four shards ("8 errors
+# during collection", zero tests run — `os.geteuid()` in two `skipif` decorators, a module-level
+# `import fcntl`, and `runtime/landlock.py::abi_version` calling `ctypes.CDLL(None)`), so for weeks it
+# ran no test at all. The first run that could execute (run 1964) failed hundreds of tests that had
+# never been run on Windows — bash-harness tests meeting the WSL stub, `os.fork`/`os.killpg`, locale-
+# default text reads — and the triage is its own piece of work (docs/66-mega-review-2026-09-22.md).
+# While it lived in `tests.yml`, that red folded into the ONE status every push is read by, and a
+# gate that is red for a reason nobody is fixing that day is the gate nobody reads (the Linux leg
+# was in exactly that state for seven weeks). Separate, the Linux/UI/package verdict stays
+# readable and this one stays visible — its failures are not skipped, silenced or marked allowed.
+name: tests-windows
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  pytest-windows:
+    runs-on: windows-latest
+    # 30, not 20: run 1964's group 4 was cancelled at the old 20-minute ceiling mid-suite.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev,ui]"
+      - run: python -m pytest --splits 4 --group ${{ matrix.group }}
