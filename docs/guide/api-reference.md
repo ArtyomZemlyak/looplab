@@ -10,13 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-137 routes on 123 paths; 2 deprecated; 25 with a declared response model.
-
-### `/`
-
-| method | path | summary | response model | deprecated |
-|---|---|---|---|---|
-| `GET` | `/` | *Index Placeholder* (no docstring) | — |  |
+136 routes on 122 paths; 2 deprecated; 25 with a declared response model.
 
 ### `/api`
 

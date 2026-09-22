@@ -804,20 +804,26 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
             "X-Content-Type-Options": "nosniff",
         })
 
+    # THE UI DELIVERY ROUTES ARE NOT API, and they are out of the schema for that reason AND because
+    # they exist only when the React bundle is built: in the schema they made the generated
+    # `docs/guide/api-reference.md` a function of the box (137 routes without `ui/dist`, 140 with),
+    # so `tests/test_api_reference.py` was red on every developer machine where `looplab ui` had
+    # auto-built the dist and green in CI, which never builds it (review 2026-09-22). The API is
+    # `/api/*`; these serve a page.
     if dist.exists():
         app.mount("/assets", _immutable_static_files(dist / "assets"), name="assets")
 
-        @app.get("/")
+        @app.get("/", include_in_schema=False)
         def index(request: Request):
             return _index_response(request)
 
-        @app.get("/review")
+        @app.get("/review", include_in_schema=False)
         def review_spa():
             # Credential validity is rendered by GET /api/review so expired/revoked links get the
             # product's accessible error state rather than a bare server error page.
             return _review_index_response()
 
-        @app.get("/review/")
+        @app.get("/review/", include_in_schema=False)
         def review_spa_trailing_slash():
             # Keep an explicitly shared trailing-slash URL functional without relying on a redirect
             # to preserve its fragment bearer.
@@ -827,7 +833,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
         # external-document `<use href="sprite.svg#id">`, so the UI now bundles the sprite and injects it
         # into the document, referencing same-document `#id` fragments. There is nothing left to serve.)
 
-        @app.get("/{path:path}")
+        @app.get("/{path:path}", include_in_schema=False)
         def spa(path: str, request: Request):
             # SPA fallback for client-side routes; never shadow /api. Resolve-guard the path so a
             # traversal (`/..%2f..%2fwin.ini`) can't read a file outside the built assets dir — the
@@ -845,7 +851,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                 return FileResponse(str(target))
             return _index_response(request)
     else:
-        @app.get("/")
+        @app.get("/", include_in_schema=False)
         def index_placeholder():
             return JSONResponse({
                 "looplab_ui": "backend up; the React app is not built yet",
