@@ -1160,6 +1160,20 @@ class EvalAttempt:
     triage: Any = None
     _monitor_verdicts: Any = None
 
+    def charged_eval_seconds(self, extra: float = 0.0) -> float:
+        """What this lifecycle's TERMINAL charges the run's eval budget: the attempts a DEAD process
+        already ran plus this process's own (`extra` = an attempt still on the clock).
+
+        `total_eval` restarts at 0.0 in every process, and the fold charges `eval_seconds` off the
+        terminal alone (it ignores `node_repaired.eval_seconds`), so a resumed repair chain used to
+        REFUND every attempt the dead process paid for: two 3,600 s attempts, a resume, and the run's
+        `total_eval_seconds` read 0.012 (review 2026-09-22, ENG2-04, driven). `prior_repair_seconds`
+        is those attempts off their durable `node_repaired` rows — the same seed the redone-work floor
+        already charges the chain with — read at admission, so a row this process writes is never
+        counted twice.
+        """
+        return round(self.prior_repair_seconds + self.total_eval + extra, 3)
+
     # The three workdir helpers that were closures over `workdir`/`generation` in the old method.
     def mark_superseded_workdir(self) -> None:
         try:
@@ -2500,6 +2514,8 @@ class EvaluateMixin:
                         if await self._eval_salvage(a) is PHASE_SETTLED:
                             break
                         sig = await self._eval_decide_repair(a)
+                        if sig is PHASE_RETURN:
+                            return               # a pause: no terminal, the chain resumes later
                         if sig is PHASE_SETTLED:
                             break
                         if sig is PHASE_RETRY:
@@ -2622,7 +2638,7 @@ class EvaluateMixin:
             self.store.append(EV_NODE_FAILED, {
                 "node_id": a.node_id, "generation": a.generation,
                 "error": "superseded by node reset", "reason": "superseded",
-                "eval_seconds": a.total_eval})
+                "eval_seconds": a.charged_eval_seconds()})
         a.mark_superseded_workdir()
 
     async def _eval_admit(self, a: "EvalAttempt") -> str:
@@ -3059,7 +3075,7 @@ class EvaluateMixin:
                             # accumulates it only after the task group exits (line 330), which this
                             # early return skips, so recording the bare accumulator would drop the
                             # Docker/runtime probe + setup cost from the immutable eval budget.
-                            "eval_seconds": round(a.total_eval + (time.time() - a._t0), 3)})
+                            "eval_seconds": a.charged_eval_seconds(time.time() - a._t0)})
                         self._maybe_crash()
                     # Inside the SAME shield: this exit owes its invocation a settle exactly as the
                     # normal path does, and an unshielded append here would be preempted by the
@@ -3120,7 +3136,7 @@ class EvaluateMixin:
                         else "aborted by operator (killed mid-eval)"
                     ),
                     "reason": "card_dropped" if a.operator_card_dropped else "aborted",
-                    "eval_seconds": a.total_eval})
+                    "eval_seconds": a.charged_eval_seconds()})
                 self._maybe_crash()
             return PHASE_RETURN
         # Set only by a REPAIRABLE watchdog stop (see just below); `None` on every other
@@ -3153,7 +3169,7 @@ class EvaluateMixin:
                         "node_id": a.node_id, "generation": a.generation,
                         "error": ("live watchdog stopped the run early: "
                                   + str(a.kill_signal.get("reason", ""))[:400]),
-                        "reason": _kreason, "eval_seconds": a.total_eval})
+                        "reason": _kreason, "eval_seconds": a.charged_eval_seconds()})
                     self._maybe_crash()
                 return PHASE_RETURN
         # THE PIPELINE RECORD, ONCE PER ATTEMPT — not once per NODE. Multi-stage eval
@@ -3325,7 +3341,8 @@ class EvaluateMixin:
     async def _eval_decide_repair(self, a: "EvalAttempt") -> str:
         """DECIDE_REPAIR — the two dependency rounds (`PHASE_RETRY`: re-run, no repair spent), the
         eval-budget stop, the floors, the inline-repair gate, the triage judge with its diagnosis
-        record, and the critic. `PHASE_SETTLED` on every stop; `PHASE_NEXT` means "repair"."""
+        record, and the critic. `PHASE_SETTLED` on every stop; `PHASE_RETURN` when the run was paused
+        mid-chain (no terminal: the node stays pending); `PHASE_NEXT` means "repair"."""
         # A REFUSED GATE READER IS THE OPERATOR'S TASK FILE, AND NO REPAIR CAN REACH IT. When a
         # task declares an `adapter` reader under `eval.metrics` / `constraints` / `cross_check`,
         # `run_command_eval` refuses by RETURNING a metric-less result (it used to raise, which
@@ -3340,6 +3357,29 @@ class EvaluateMixin:
             a.triage_outcome = ("abandon",
                                 "the task's declared metric/constraint readers were refused: this "
                                 "is the eval SPEC, not the candidate — no repair can reach it")
+            return PHASE_SETTLED
+        # THE RUN WAS PAUSED OR STOPPED WHILE THIS ATTEMPT RAN (review 2026-09-22, ENG2-01). Everything
+        # below buys NEW work — a dependency re-run, a triage judge, a Developer repair, a full
+        # re-evaluation — and nothing in the chain looked at the run after admission: a pause landed
+        # during the first evaluation of a crash chain still bought 4 repairs and 5 evaluations
+        # (`inline_repair_attempts=4`, driven), and an operator stop the same. One fresh fold:
+        #   * PAUSED — return with NO terminal. The node stays pending, and every ledger this chain
+        #     reads (repairs spent, dependency rounds, repair seconds) is durable, so the re-dispatch
+        #     after the pause lifts continues the chain where it stood; honouring the pause costs one
+        #     re-run of the current code.
+        #   * STOPPING (a finalize was requested, or the run finished) — settle NOW on this attempt's
+        #     own failure: a stop is final, and the finish is waiting on this worker
+        #     (`_refuse_finish_over_adopted_evals`).
+        # AFTER the gate-reader clause on purpose: that one settles without new work, and returning
+        # un-terminalized there would buy a whole pipeline again after the pause. The triage and repair
+        # prompts still read the admission fold (`a.state`): swapping it would change what they show on
+        # every chain, and that is a prompt contract, not this fix.
+        halted = fold(self.store.read_all())
+        if halted.paused:
+            return PHASE_RETURN
+        if halted.finished or halted.stop_requested:
+            a.triage_outcome = ("abandon", "the run is stopping (a finalize was requested): no further "
+                                "repair of this node")
             return PHASE_SETTLED
         # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
         # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
@@ -3371,7 +3411,9 @@ class EvaluateMixin:
         # next to the full eval it is guarding.
         if a.max_es is not None:
             spent = fold(self.store.read_all()).total_eval_seconds
-            if spent + a.total_eval >= a.max_es:
+            # …plus the attempts a dead process already ran on this chain (ENG2-04): they are in no
+            # terminal yet, so `spent` cannot contain them.
+            if spent + a.prior_repair_seconds + a.total_eval >= a.max_es:
                 a.triage_outcome = ("abandon", "eval budget exhausted during inline repair")
                 return PHASE_SETTLED
         # Pipeline depth reached by THIS attempt (stages passed/reused before the failure).
@@ -4415,7 +4457,7 @@ class EvaluateMixin:
                     # for (an eval that prints `os.environ`).
                     "stdout_tail": _redacted_tail(self._redact, a.res.stdout,
                                                   _SCORED_EVIDENCE_CHARS),
-                    "eval_seconds": a.total_eval,
+                    "eval_seconds": a.charged_eval_seconds(),
                     "extra_metrics": _extras,   # #5 multi-objective
                     "violations": a.res.violations or [],
                     # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
@@ -4718,7 +4760,7 @@ class EvaluateMixin:
                 # fold-ignored; an ABSENT pair on an older row means "nobody looked", which is
                 # deliberately not the same fact as `engine`.
                 data = {"node_id": a.node_id, "generation": a.generation,
-                        "error": a.err, "reason": a.reason, "eval_seconds": a.total_eval,
+                        "error": a.err, "reason": a.reason, "eval_seconds": a.charged_eval_seconds(),
                         "reason_source": a._reason_source, "engine_reason": a._engine_reason}
                 # …and the record's wider window on the same bytes. The TERMINAL is the row a
                 # whole run is audited from, and it is also the row for a node that never

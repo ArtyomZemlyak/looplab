@@ -36,6 +36,7 @@ are scripted, so they exercise the actual control flow.
 from __future__ import annotations
 
 import ast
+import collections
 from pathlib import Path
 
 import anyio
@@ -1038,8 +1039,17 @@ def test_only_one_pause_across_concurrent_sibling_evals(tmp_path):
     evs = list(EventStore(run_dir / "events.jsonl").read_all())
     assert len([e for e in evs if e.type == "pause"]) == 1
     terminals = [e for e in evs if e.type in ("node_evaluated", "node_failed")]
-    assert len(terminals) == 4                       # invariant #2: exactly one per node
+    # Since 2026-09-22 (review ENG2-01) a sibling that reaches its repair decision AFTER the run was
+    # paused buys no repair and writes no terminal: it stays pending, and its chain resumes from its
+    # durable ledgers once the operator has fixed the provider — a dead endpoint is not the node's
+    # failure. Which siblings get there before the pause is a race, so what is pinned is the shape:
+    # the sibling that crashed first has its terminal, no node has two (invariant #2), and every
+    # node without one is pending rather than lost.
+    per_node = collections.Counter(e.data["node_id"] for e in terminals)
+    assert terminals and max(per_node.values()) == 1
     assert all(e.data["reason"] == "developer_crash" for e in terminals)
+    state = fold(evs)
+    assert all(state.nodes[nid].status.value == "pending" for nid in range(4) if nid not in per_node)
 
 
 # ---------------------------------------------------------------------- replay safety
