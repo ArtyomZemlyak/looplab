@@ -139,7 +139,7 @@ def _drive_asha_monitor(tmp_path, monkeypatch, exc):
     wd, spec, curves = _kill_setup(tmp_path)
     judge = _RaisingJudgeClient(exc)
     stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
-    monkeypatch.setattr("looplab.events.replay.fold",
+    monkeypatch.setattr("looplab.engine.orchestrator.fold",
                         lambda events: _fake_state([0.8, 0.7, 0.6], curves=curves))
     outcome: dict = {}
 
@@ -179,7 +179,7 @@ def test_a_raising_asha_judge_is_bounded_by_the_judge_call_cap(tmp_path, monkeyp
     wd, spec, curves = _kill_setup(tmp_path)
     judge = _RaisingJudgeClient(RuntimeError("never reached: the tools raise first"))
     stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
-    monkeypatch.setattr("looplab.events.replay.fold",
+    monkeypatch.setattr("looplab.engine.orchestrator.fold",
                         lambda events: _fake_state([0.8, 0.7, 0.6], curves=curves))
     outcome: dict = {}
 

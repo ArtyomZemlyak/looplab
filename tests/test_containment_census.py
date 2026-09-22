@@ -264,12 +264,9 @@ NOT_PROPAGATED: dict[str, tuple[str, frozenset[str]]] = {
 # the right fix is the deferred-stop sink those findings describe. SHRINK-ONLY: fixing a site means
 # deleting its row, and a stale row is red. The one false positive is marked as such.
 FUNNEL_BACKLOG: dict[str, str] = {
-    "looplab/engine/orchestrator.py::Engine._create_node_guarded#0":
-        "review 2026-09-22 ENG1-01: a pooled build inside the parallel task group; the fix is to "
-        "stash the stop and re-raise after the join, beside the node-less pause",
-    "looplab/engine/orchestrator.py::Engine._serve_forced_requests#0":
-        "review 2026-09-22 ENG1-07: the inject path's synchronous Developer build is being "
-        "re-sequenced (reserve, inject_done, offload); a raise here skips its build-marker cleanup",
+    # `Engine._create_node_guarded#0` (ENG1-01) and `Engine._serve_forced_requests#0` (ENG1-07)
+    # left this list the same day: the guarded build and the inject lane both re-raise the stop now
+    # (8dd61cb9, fa1b1415), so the census stopped finding them.
     "looplab/engine/speculation.py::SpeculationMixin._produce_requested_card#0":
         "review 2026-09-22 ENG2-02: a Card producer in a task group turns the stop into a give-up "
         "result; needs the run-level deferred-stop sink",
@@ -518,7 +515,7 @@ def test_every_blind_handler_around_a_paid_call_in_the_run_path_reraises_the_bud
 def test_the_funnel_backlog_only_shrinks():
     """The number here is the backlog on 2026-09-22 and may only go DOWN; a larger list is a new
     swallow parked beside the old ones instead of fixed."""
-    assert len(FUNNEL_BACKLOG) <= 5, len(FUNNEL_BACKLOG)
+    assert len(FUNNEL_BACKLOG) <= 3, len(FUNNEL_BACKLOG)
 
 
 def test_every_paid_def_under_a_generic_name_is_classified():
