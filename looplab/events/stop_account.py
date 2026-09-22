@@ -140,6 +140,20 @@ def stop_account(state) -> StopAccount:
         # sentence printed only when a key exists makes its absence invisible on exactly the runs
         # where it matters. A finish with no reason is a legacy/markerless finish, not a clean one.
         if not reason:
+            # TWO SILENCES, and only one of them is the old log (review 2026-09-22, EVT-10). The
+            # engine's NATURAL completion — the empty-action ladder in
+            # `engine/orchestrator.py::Engine._handle_no_actions` finishing with a champion standing
+            # — writes `run_finished` with NO reason on purpose (`stop_reason is None` is that
+            # contract), so every run that simply ran to its end printed "an old log, or a finish
+            # written before reasons were recorded" about a log written a minute earlier. What tells
+            # the two apart is the finalization handshake only a modern finish opts into: its
+            # `finalization_finished` marker (`finalization_marker_seq`), or the finalization it
+            # still owes (`finalization_pending()`). A legacy markerless finish has neither.
+            if (getattr(state, "finalization_marker_seq", None) is not None
+                    or _finalization_pending(state)):
+                return StopAccount("finished", None,
+                                   "finished — the search ran out of work with a champion standing. "
+                                   "That natural completion is the one finish that names no reason.")
             return StopAccount("finished", None,
                                "finished, and the `run_finished` row names no reason — an old log, "
                                "or a finish written before reasons were recorded.")
@@ -168,6 +182,13 @@ def stop_account(state) -> StopAccount:
                 f"{head}\n  the `pause` row names no reason — nobody can say why.")
         return StopAccount("paused", reason, body + _unserved_finalize(state))
     return StopAccount("no_boundary", None, _NOBODY_SAID + _unserved_finalize(state))
+
+
+def _finalization_pending(state) -> bool:
+    """`RunState.finalization_pending()` when the state has it; False for anything else — the
+    account is TOTAL and reads its state duck-typed, like every other attribute above."""
+    probe = getattr(state, "finalization_pending", None)
+    return bool(probe()) if callable(probe) else False
 
 
 def _unserved_finalize(state) -> str:

@@ -447,3 +447,29 @@ def test_the_engine_does_not_import_the_stop_account():
     offenders = sorted(str(path.relative_to(pkg)) for path, text in iter_sources(pkg)
                        if "stop_account" in text and path.parts[-2] in ("engine", "search", "agents"))
     assert offenders == [], f"a decision layer imports the stop account: {offenders}"
+
+
+def test_a_natural_completion_is_not_reported_as_an_old_log(tmp_path):
+    """Review 2026-09-22, EVT-10. The engine's natural completion writes `run_finished` with NO
+    reason by contract, and the account read every such run — a log written seconds earlier — as
+    "an old log, or a finish written before reasons were recorded". Driven through a REAL offline
+    run, then the two silences side by side: the modern finish (it opted into the finalization
+    handshake) and a legacy markerless one (it did not)."""
+    import anyio
+
+    from factories import make_engine
+
+    run_dir = tmp_path / "run"
+    state = anyio.run(make_engine(run_dir, n_seeds=2, max_nodes=3).run)
+    assert state.finished and state.stop_reason is None       # the contract this reads around
+
+    account = stop_account(_fold(run_dir / "events.jsonl"))
+    assert account.disposition == "finished" and account.reason is None
+    assert "old log" not in account.line, account.line
+    assert "ran out of work with a champion standing" in account.line
+
+    legacy = tmp_path / "legacy.jsonl"
+    store = EventStore(legacy)
+    _started(store)
+    store.append("run_finished", {})                            # markerless: no handshake
+    assert "an old log" in stop_account(_fold(legacy)).line
