@@ -2,7 +2,8 @@
 // lifted out of panels.jsx (doc 25 UI-04). It carries a whole optimistic-control mini-framework
 // (cardControlReflected / _cardWithOptimisticControls / the sentEditRef pruning) and the hypothesis
 // delete-recovery journal, which is what makes it a module rather than one more function in the hub.
-// panels.jsx re-exports HypothesisBoard, so RunView still funnels every panel through one lazy chunk.
+// RunView lazy-loads this module as the Card workspace VIEW; panels.jsx no longer re-exports
+// HypothesisBoard (review 2026-09-22, UI-10), so opening a panel does not fetch the board.
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGet, getRunCommand,
   isTransientCommandReadError, retryRunCommand, runApiPath, runCommand,

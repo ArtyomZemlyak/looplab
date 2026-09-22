@@ -592,17 +592,11 @@ button { font: inherit; }
 
 /* ── Right-hand chat drawer (Cursor-style): the conversation thread + extra actions. Overlays the
    right side; the bottom bar remains the single composer. ── */
-.asst-drawer { position: fixed; top: 0; right: 0; bottom: 44px; width: min(400px, 92vw); z-index: 55;
-  display: flex; flex-direction: column; background: var(--bg-1); border-left: 1px solid var(--line);
-  box-shadow: -8px 0 24px rgba(0,0,0,.35); }
 .asst-drawer-h { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .asst-drawer-h .assistant-share-state.warn { order: 2; flex: 1 0 100%; justify-content: center; }
 .asst-drawer-ttl { font-size: 13px; }
 .asst-modes.sm { display: inline-flex; gap: 2px; }
 .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; }
-.asst-drawer-foot { border-top: 1px solid var(--line); padding: 6px 12px; font-size: 11px; }
-.asst-drawer-link { color: var(--accent); cursor: pointer; }
-.asst-drawer-link:hover { text-decoration: underline; }
 
 /* Full view = the same assistant as an overlay covering everything (folds back to the bar on exit). */
 .asst-view.asst-full { position: fixed; inset: 0; z-index: 60; }
@@ -953,25 +947,11 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .span-row .span-name.tool .tool-name { color: var(--working); font-family: ui-monospace, Consolas, monospace; }
 .span-row.gen .span-fill { background: linear-gradient(90deg, var(--accent-dim), var(--accent)); }
 .span-row.tool .span-fill { background: var(--working); }
-.span-row .llm-msgs { color: var(--fg-mut); font-size: 11px; flex: none; }
-.span-row .llm-think { color: var(--working); display: inline-flex; }
 .trace-totals { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 
 /* ---------- LLM call: compact, info-dense rows (langfuse-style "generation" line) ---------- */
 /* Each call is ONE line carrying what differentiates it — op · model · in→out tokens · #msgs · a
    content preview — so a tool-loop reads as distinct steps, not "chat / chat / chat". Full I/O on click. */
-.llm-row { border-top: 1px solid var(--bg-2); }
-.llm-row:first-child { border-top: none; }
-.llm-line { display: flex; align-items: center; gap: 7px; padding: 3px 4px; cursor: pointer; font-size: 12px; min-width: 0; }
-.llm-line:hover, .llm-row.open > .llm-line { background: var(--bg-2); }
-.llm-line .span-tw { color: var(--fg-mut); flex: none; }
-.llm-line .llm-i { color: var(--fg-mut); font-variant-numeric: tabular-nums; min-width: 11px; text-align: right; flex: none; }
-.llm-line .llm-op { color: var(--accent); font-family: ui-monospace, Consolas, monospace; flex: none; }
-.llm-line .llm-model { color: var(--fg-dim); flex: none; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.llm-line .llm-tok { color: var(--fg-dim); font-variant-numeric: tabular-nums; background: var(--bg-3); border-radius: 4px; padding: 0 5px; flex: none; }
-.llm-line .llm-msgs { color: var(--fg-mut); font-size: 11px; flex: none; }
-.llm-line .llm-think { flex: none; font-size: 11px; }
-.llm-line .llm-prev { color: var(--fg-mut); font-style: italic; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; flex: 1; }
 .llm-io { padding: 2px 6px 8px 24px; }
 .llm-io .msg { padding: 3px 0 5px; }
 .llm-io .msg-role { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; margin: 4px 0 2px; color: var(--fg-mut); }
@@ -997,11 +977,6 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .feed .t { color: var(--fg-mut); white-space: nowrap; }
 .feed .ty { color: var(--accent); min-width: 130px; }
 .feed-filter { margin-bottom: 6px; }
-.feed .ev-narr { flex: 1; }
-.feed .ev-tw { color: var(--fg-mut); user-select: none; min-width: 12px; text-align: center; }
-.feed .ev-tw.on { cursor: pointer; color: var(--fg); }
-.feed .ev-wrap { border-bottom: 1px solid var(--bg-2); }
-.feed .ev-wrap > .ev { border-bottom: none; }
 /* expandable "why" card under a feed row — proportional font, not the feed's monospace */
 .ev-detail-wrap { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; padding: 2px 8px 10px 24px; }
 .ev-detail .section-h { margin: 8px 0 3px; font-size: 12px; }
@@ -1166,7 +1141,7 @@ button.eval-pipeline-step { cursor: pointer; }
 .eval-pipeline-arrow { font-size: 10px; }
 .disclosure-button { border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .disclosure-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.span-row.disclosure-button, .llm-line.disclosure-button, .conv-req-h.disclosure-button,
+.span-row.disclosure-button, .conv-req-h.disclosure-button,
 .conv-tool-h.disclosure-button, .stage-h.disclosure-button,
 .art-root-h.disclosure-button, .art-file.disclosure-button { width: 100%; }
 .role-think.disclosure-button, .lt-toggle.disclosure-button { padding: 0; }
@@ -1234,7 +1209,6 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .compare-check:focus-visible { outline: 0; }
 .run-card-main { flex: 1; min-width: 0; color: inherit; cursor: pointer; border-radius: 6px; }
 .run-card-main:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.run-card .move-sel { width: auto; max-width: 150px; }
 .run-card .goal { color: var(--fg-dim); }
 .muted { color: var(--fg-mut); }
 .right { margin-left: auto; }
@@ -1388,13 +1362,6 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 
 /* ---------- experiment chat ---------- */
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; }
-.chat-log { flex: 1; overflow: auto; min-height: 120px; padding-right: 4px; }
-.chat-msg { margin: 8px 0; }
-.chat-msg .chat-role { font-size: 11px; color: var(--fg-mut); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
-.chat-msg .chat-text { white-space: pre-wrap; line-height: 1.45; border-radius: 9px; padding: 8px 11px; border: 1px solid var(--line); }
-.chat-msg.user .chat-text { background: rgba(74,163,255,.10); border-color: var(--accent-dim); }
-.chat-msg.assistant .chat-text { background: var(--bg-1); }
-.chat-msg.assistant .md.chat-text { white-space: normal; }
 
 /* ---------- markdown rendering (chat answers) ---------- */
 .md { line-height: 1.5; }
@@ -1506,8 +1473,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   background: var(--fg-dim); transition: transform .15s, background .15s; }
 .switch input:checked + .track { background: var(--accent-dim); border-color: var(--accent); }
 .switch input:checked + .track::after { transform: translateX(18px); background: var(--accent-ink); }
-.chk, .brief { font-size: 12px; color: var(--fg-dim); }
-.chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.brief { font-size: 12px; color: var(--fg-dim); }
 .brief { margin-top: 8px; }
 
 /* ---------- inspector: per-node lifecycle trace (compact) ---------- */
@@ -1732,9 +1698,6 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .feed-msg.k-lifecycle { opacity: .9; }
 .feed-msg.k-trust { border-left-color: var(--alarm); background: color-mix(in srgb, var(--alarm) 6%, transparent); }
 .feed-msg.k-trust .fm-ic-svg { color: var(--alarm); }
-.feed-msg.hl { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
-.feed-msg.hl .fm-ic-svg { color: var(--best); }
-.feed-msg .fm-star { color: var(--best); flex: none; }
 .kind-chip.k-trust.on { border-color: var(--alarm); background: color-mix(in srgb, var(--alarm) 18%, var(--bg-2)); }
 
 /* Chat turns get real breathing room so a typed message never visually merges with the event/agent
@@ -1774,10 +1737,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 /* collapse a long agent reply (the "wall of text") to a clamp with a fade + show-more toggle */
 .feed-msg.chat .chat-bubble.clamp { max-height: 132px; overflow: hidden;
   -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent); mask-image: linear-gradient(180deg, #000 70%, transparent); }
-.chat-more { font-size: 11px; color: var(--accent); cursor: pointer; user-select: none; margin-top: 3px; }
-.chat-more:hover { text-decoration: underline; }
 
-.ctx-row { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
 .ctx-chip { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; padding: 1px 7px;
   border-radius: 999px; background: var(--bg-3); border: 1px solid var(--line-2); color: var(--fg); }
 .ctx-chip button { background: none; border: none; color: var(--fg-mut); cursor: pointer; padding: 0; font-size: 11px; }
@@ -1810,8 +1770,6 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .agent-status .as-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
   box-shadow: 0 0 7px var(--accent); animation: breathe 1.4s infinite; flex: none; }
 .agent-status .as-seg { display: inline-flex; align-items: center; gap: 4px; }
-.agent-status .as-bullet { color: var(--line-2); }
-.agent-status .as-reply { color: var(--accent); }   /* the boss is replying to you, concurrently */
 .dock-agent-status { flex: none; max-height: 84px; overflow: auto; border-top: 1px solid var(--line); }
 
 /* Live agent-trace: a STANDARD inline disclosure — caret ▸ to the LEFT of the label (like every other
@@ -1900,25 +1858,9 @@ pre.code.event-json { max-height: 220px; }
 .trace-nav { display: inline-flex; gap: 4px; }
 .trace-clear { display: inline-flex; gap: 4px; margin-right: 8px; align-items: center; }
 
-/* per-message trace (round-6): click "▸ trace" on an assistant reply to read its LLM I/O */
-.chat-trace-tog { font-size: 11px; color: var(--fg-mut); cursor: pointer; user-select: none; margin-top: 4px; }
-.chat-trace-tog:hover { color: var(--fg); }
-.chat-trace { margin-top: 4px; }
-
 /* ── Chat actions (round-7): the boss APPLIES immediately; the row is the audit record ──── */
 .feed-msg.action { border-left-color: var(--line-2); }
 .feed-msg.action .fm-ic-svg { color: var(--accent); }
-/* a highlighted (critical) action must keep the accent border + gold icon — these win over the
-   plain .action rules above by being a compound (higher-specificity) selector, not by source order. */
-.feed-msg.action.hl { border-left-color: var(--accent); }
-.feed-msg.action.hl .fm-ic-svg { color: var(--best); }
-.pa-label { font-size: 12.5px; font-weight: 600; }
-.pa-why { font-size: 11px; margin: 1px 0; color: var(--fg-mut); }
-.pa-status { font-size: 11px; font-weight: 600; flex: none; }
-.pa-status.done { color: var(--ok); }
-.pa-status.failed { color: var(--fail); }
-.pa-status.running { color: var(--accent); }
-.pa-undo { margin-top: 3px; }
 
 /* ── Charts: grouping legend + click-to-drill affordances ──────────────────────────────────────── */
 .chart { position: relative; }
@@ -1953,15 +1895,10 @@ pre.code.event-json { max-height: 220px; }
 .pc-line.pick:hover { stroke-width: 3; opacity: 1; }
 
 /* ── Context usage (round-8): per-turn + running token badge, and the "Compact" recap card ──── */
-.chat-tok { font-size: 10.5px; color: var(--fg-dim); font-variant-numeric: tabular-nums; white-space: nowrap;
-  background: var(--bg-3); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; margin-left: 6px; }
-.chat-tok.hdr { margin-left: 0; margin-right: 6px; }       /* the header running-total variant */
 /* the recap row left by Compact: neutral, slightly inset, with a doc glyph — clearly a fold marker */
 .feed-msg.summary { border-left-color: var(--line-2); background: var(--bg-1); }
 .feed-msg.summary .fm-ic-svg { color: var(--fg-mut); }
 .feed-msg.summary .fm-narr { color: var(--fg-dim); font-style: italic; }
-.sum-foot { font-size: 11px; color: var(--fg-mut); cursor: pointer; user-select: none; margin-top: 6px; }
-.sum-foot:hover { color: var(--fg); }
 
 /* round-7 dock: collapsible controls block, header mini-tag, transport buttons */
 .dock-controls { border-bottom: 1px solid var(--line); }
@@ -2125,27 +2062,7 @@ pre.code.event-json { max-height: 220px; }
 
 /* ── Genesis: chat-first run creation (boss proposes an editable spec card) ─────── */
 .gen-panel { width: min(960px, 96%); }
-.gen-wrap { display: flex; gap: 14px; align-items: stretch; }
-.gen-chat { flex: 1 1 56%; min-width: 0; display: flex; flex-direction: column; min-height: 420px; max-height: 64vh; }
-.gen-feed { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 4px; padding: 4px 2px; }
-.gen-empty { padding: 8px 4px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
-.gen-seed { text-align: left; background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg);
-  border-radius: 8px; padding: 7px 10px; font-size: 12.5px; cursor: pointer; width: 100%; }
-.gen-seed:hover { background: var(--bg-3); border-color: var(--accent-dim); }
-.gen-card { flex: 1 1 44%; min-width: 0; border-left: 1px solid var(--line); padding-left: 14px; display: flex; flex-direction: column; }
-.gen-card-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.gen-card-empty { font-size: 12.5px; padding: 16px 4px; line-height: 1.5; }
-.gen-field { margin-bottom: 9px; }
-.gen-lab { font-size: 11px; color: var(--fg-mut); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; }
 .gen-help { font-size: 11px; color: var(--fg-mut); margin-top: 3px; }
-.gen-ro { font-size: 13px; padding: 6px 8px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
-  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.gen-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
-/* Repo-task fields + the "make it LoopLab-ready" adaptation checklist in the genesis card. */
-.gen-repo { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin-bottom: 10px; background: var(--bg-1); }
-.gen-steps { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
-.gen-steplist { margin: 6px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; }
-.gen-steplist li { font-size: 12.5px; line-height: 1.45; color: var(--fg-dim); }
 
 /* ── Cross-run scope report (project / task / super-task) ───────────────────────── */
 /* cross-run Report trigger reuses the run's [★ Report] tab style (gold text → filled when open) */
@@ -2588,9 +2505,6 @@ pre.code.event-json { max-height: 220px; }
   animation: asstPulse 1.6s infinite; }
 @keyframes asstPulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--best) 55%, transparent); }
   70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
-.asst-mention-pop { position: absolute; bottom: 100%; left: 12px; margin-bottom: 4px; z-index: 20;
-  background: var(--bg-2); border: 1px solid var(--line); border-radius: 9px; padding: 4px; min-width: 240px;
-  box-shadow: 0 6px 20px rgba(0,0,0,.35); }
 .asst-mention-item { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
   background: transparent; border: none; color: var(--fg); font-size: 12.5px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
 .asst-mention-item:hover { background: var(--bg-1); }
@@ -3244,7 +3158,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 :root[data-comfortable] .ptree-row { gap: 8px; padding-block: 8px; }
 :root[data-comfortable] .runbar, :root[data-comfortable] .portfolio-viewbar { gap: 10px; }
 :root[data-comfortable] .feed .ev, :root[data-comfortable] .feed-msg,
-:root[data-comfortable] .llm-line, :root[data-comfortable] .span-row { padding-block: 6px; }
+:root[data-comfortable] .span-row { padding-block: 6px; }
 :root[data-comfortable] .run-when, :root[data-comfortable] .map-summary > span,
 :root[data-comfortable] .ptree-row .pcount, :root[data-comfortable] .stat .l,
 :root[data-comfortable] .sf-help, :root[data-comfortable] .card-resource-request,

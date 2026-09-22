@@ -19,7 +19,8 @@ test.before(async () => {
     root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
     server: { middlewareMode: true },
   })
-  ;({ HypothesisBoard } = await vite.ssrLoadModule('/src/panels.jsx'))
+  // From its own module: the panel hub no longer re-exports it (review 2026-09-22, UI-10).
+  ;({ HypothesisBoard } = await vite.ssrLoadModule('/src/CardBoard.jsx'))
   ;({ cardEditReflected, cardControlSubmission } =
     await vite.ssrLoadModule('/src/cardControlModel.js'))
 })

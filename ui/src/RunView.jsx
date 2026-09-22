@@ -57,9 +57,9 @@ const Dag = lazy(() => import('./Dag.jsx'))
 const Dock = lazy(() => import('./Dock.jsx'))
 const ReportView = lazy(() => import('./Report.jsx'))
 const ConceptView = lazy(() => import('./ConceptView.jsx'))
-// A view, so it loads like the other views (its own chunk) rather than through `loadPanels`. It
-// still shares the CardBoard module with the legacy `HypothesisBoard` re-export in `panels.jsx`;
-// vite hoists that into a chunk both entry points reach, so the board is not shipped twice.
+// A view, so it loads like the other views (its own chunk) rather than through `loadPanels` — and
+// RunView is now the board's ONLY importer: the legacy `HypothesisBoard` re-export in `panels.jsx`
+// made every panel chunk pull the whole board and was removed (review 2026-09-22, UI-10).
 const CardWorkspace = lazyNamed(() => import('./CardBoard.jsx'), 'CardWorkspace')
 const ConceptChipBar = lazy(() => import('./ConceptChipBar.jsx'))
 

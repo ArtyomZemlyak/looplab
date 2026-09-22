@@ -2634,9 +2634,10 @@ export function CrossRunPanel({ state, onClose }) {
 }
 
 // The Card board (HypothesisBoard, the _CardKanban it renders, and the legacy _HypothesisFallback)
-// moved to ./CardBoard.jsx (doc 25 UI-04); re-exported here so the hub stays the one module RunView
-// lazily imports.
-export { HypothesisBoard } from './CardBoard.jsx'
+// moved to ./CardBoard.jsx (doc 25 UI-04), and RunView lazy-loads it as a workspace VIEW
+// (`CardWorkspace`). It is deliberately NOT re-exported here any more (review 2026-09-22, UI-10):
+// no production module took `HypothesisBoard` from the hub, and the re-export made every panel's
+// lazy chunk statically import the whole board — 21 KB gzip fetched on the first panel opened.
 
 // Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live
 // fold); defined inline they remounted the <select> each frame, closing an open dropdown mid-pick.

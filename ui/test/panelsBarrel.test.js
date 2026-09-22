@@ -29,14 +29,15 @@ const TEST = new URL('./', import.meta.url)
 // The panel modules the hub re-exports, each mapped to the COMPLETE set of modules allowed to
 // import it. Adding another split module means adding a row here.
 //
-// `CardBoard.jsx` has two importers on purpose since the board became the fourth workspace view:
-// `panels.jsx` keeps the legacy `HypothesisBoard` re-export, and `RunView.jsx` lazy-loads
-// `CardWorkspace` as a view like Dag/Report/Concepts. That is a second importer, not a second copy
-// — re-measured on the shipped build: `grep -rl 'card-kanban-card card-lane-card' dist/assets/*.js`
-// matches exactly ONE of the 35 chunks, because Rollup hoists a module both entry points reach.
-// The chunk-SIZE half of this concern is owned by `scripts/check-bundle.mjs` and its closure
-// budgets, which measure the real build; this test owns only the importer set.
-const EXTRACTED = { 'ConfigPanel.jsx': ['panels.jsx'], 'CardBoard.jsx': ['RunView.jsx', 'panels.jsx'] }
+// `CardBoard.jsx` has ONE importer: since the board became the fourth workspace view, `RunView.jsx`
+// lazy-loads `CardWorkspace` as a view like Dag/Report/Concepts. `panels.jsx` used to keep a legacy
+// `HypothesisBoard` re-export as a second importer; no production module took the name from the hub,
+// and the static import made every panel's lazy chunk pull the whole board (21,419 B gzip on the
+// first panel opened, measured on the 2026-09-22 build), so it was removed (review 2026-09-22,
+// UI-10) and this row is what refuses it coming back. The chunk-SIZE half of this concern is owned
+// by `scripts/check-bundle.mjs` and its closure budgets, which measure the real build; this test
+// owns only the importer set.
+const EXTRACTED = { 'ConfigPanel.jsx': ['panels.jsx'], 'CardBoard.jsx': ['RunView.jsx'] }
 
 const readDirSource = async base => {
   const names = (await readdir(base)).filter(name => /\.(js|jsx)$/.test(name))
@@ -83,12 +84,15 @@ test('every name a consumer takes from the panel hub is really exported by it', 
   }
 
   // Anti-vacuity: a derivation that silently stops finding call sites would make every assertion
-  // below pass over an empty set. ConfigPanel and HypothesisBoard are the two names this split moved,
-  // so they are the ones a dropped re-export would take out; they must come from real call sites in
-  // more than one file (RunView's lazyNamed table and a test's ssrLoadModule).
+  // below pass over an empty set. ConfigPanel is the name this split moved and the hub still
+  // re-exports, so it is the one a dropped re-export would take out; RegistryPanel is taken both by
+  // RunView's lazyNamed table and by a test's ssrLoadModule, so each half of the scan must still find
+  // real call sites. (HypothesisBoard was the second canary until the hub stopped re-exporting it —
+  // review 2026-09-22, UI-10.)
   assert.ok(sources.size >= 2, `the scan found consumers in only ${sources.size} file(s)`)
-  assert.ok(wanted.size >= 20, `the scan derived only ${wanted.size} hub exports`)
-  for (const canary of ['ConfigPanel', 'HypothesisBoard']) {
+  // 19 since the HypothesisBoard re-export went (it was 20, one of them that name).
+  assert.ok(wanted.size >= 19, `the scan derived only ${wanted.size} hub exports`)
+  for (const canary of ['ConfigPanel', 'RegistryPanel']) {
     assert.ok(wanted.has(canary), `${canary} is no longer derived from any call site`)
   }
 

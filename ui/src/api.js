@@ -573,16 +573,6 @@ export const purgeRunMemory = (runId, identity = {}, options = {}) => post(
   { run_uid: String(identity?.run_uid || ''), memory_dir: String(identity?.memory_dir || '') },
   options)
 
-export function getRunDeletion(runId, operationId, options = {}) {
-  if (!UUID_V4_RE.test(operationId || '')) {
-    throw Object.assign(new Error('A stable deletion operation id is required.'), {
-      code: 'delete_operation_invalid',
-    })
-  }
-  return get(runApiPath(runId, `/deletions/${encodeURIComponent(String(operationId).toLowerCase())}`), {
-    ...options, cache: 'no-store',
-  })
-}
 export const createRunReview = (runId, {
   ttl_seconds, include_evidence = false, expected_generation, request_id, token_secret,
 } = {}, options) =>
@@ -631,11 +621,7 @@ export const assignSupertask = (
   runOrganizationBody(
     'supertask_id', supertask_id, expectedGeneration, expectedSupertaskId))
 
-export const gpuStat = () => get('/api/gpu')
-
 // ---- settings + run launch ----
-export const getSettings = () => get('/api/settings')
-export const getSettingsSchema = (options = {}) => get('/api/settings/schema/2', options)
 export const saveSettings = (settings, { expectedRevision, ...options } = {}) =>
   send('/api/settings', 'PUT', {
     settings, ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
