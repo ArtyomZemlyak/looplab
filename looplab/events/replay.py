@@ -1456,6 +1456,13 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     node = st.nodes.get(node_id) if node_id is not None else None
     if node is None or node.metric is None:
         return
+    # THE LIFECYCLE IT WAS READ FOR (review 2026-09-22, EVT-09). `generation` is a REQUIRED key of
+    # this row and nothing read it: a backfill planned against lifecycle 0 and applied after a reset
+    # and a re-evaluation wrote lifecycle 0's recovered objectives onto lifecycle 1's metric —
+    # a reconstruction of one experiment presented beside another's number. An unstamped row is a
+    # legacy one and binds as it always did (`event_generation_binds`).
+    if not _generation_matches(node, d):
+        return
     if node.extra_metrics:
         return                      # a LIVE record. Never overwritten. This is the idempotence.
     found = d.get("extra_metrics")
@@ -1513,6 +1520,11 @@ def _on_applied_params_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCt
     node_id = _coerce_node_id(d)
     node = st.nodes.get(node_id) if node_id is not None else None
     if node is None or not isinstance(node.metric_provenance, dict):
+        return
+    # Bound to the lifecycle the workdir was read for, exactly like the sibling above (review
+    # 2026-09-22, EVT-09): a row stamped for a superseded generation describes a tree that no
+    # longer produced this node's metric. Unstamped = legacy, as `event_generation_binds` says.
+    if not _generation_matches(node, d):
         return
     if node.metric_provenance.get("applied_params") is not None:
         return                      # a LIVE record. Never overwritten. This is the idempotence.

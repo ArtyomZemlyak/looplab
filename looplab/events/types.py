@@ -1279,7 +1279,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "applied_params", "generation", "node_id", "read_at", "unrecoverable",
             "workdir_digest"
         ),
-        optional=(),
+        # `attempt` since review 2026-09-22 (EVT-09): the handler now binds `generation` through
+        # `replay._generation_matches`, whose shared reader also knows the legacy terminal alias —
+        # the read scan follows that helper, as it does for every other generation-fenced row.
+        optional=("attempt",),
     ),
     "approval_granted": PayloadContract(
         "The operator ratified the node the run paused on (HITL).",
@@ -2119,7 +2122,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "extra_metrics", "generation", "node_id", "precision_decimals", "read_at",
             "unrecoverable"
         ),
-        optional=(),
+        optional=("attempt",),      # same reason as `applied_params_backfilled` (EVT-09)
     ),
     "set_strategy": PayloadContract(
         "The operator set the search strategy.",
