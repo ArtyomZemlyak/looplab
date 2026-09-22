@@ -2396,9 +2396,8 @@ export function RegistryPanel({ state, onClose }) {
           setProvError('')
           try {
             const p = await get(runApiPath(state.run_id, '/prov'))
-            if (!downloadBlob(`${state.run_id}_prov.json`, [JSON.stringify(p, null, 2)], 'application/json')) {
-              throw new Error('this browser cannot save a file from the page')
-            }
+            if (!downloadBlob(`${state.run_id}_prov.json`, [JSON.stringify(p, null, 2)],
+              'application/json')) throw new Error('this browser cannot save a file from the page')
           } catch (error) { setProvError(error?.message || 'unknown error') }
         }}><OpIcon name="download" size={12} /> W3C-PROV graph (JSON)</button>
       </div>

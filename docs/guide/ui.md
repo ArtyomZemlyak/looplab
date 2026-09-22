@@ -1,7 +1,7 @@
 # Web UI
 
 LoopLab ships a live React control plane. It's a **separate read/control process** — it tails each
-run's `events.jsonl`, folds it with `replay.fold`, streams the state to the browser over SSE (a full frame per connection, then deltas keyed on the seq the tab last saw), serves
+run's `events.jsonl`, folds it with `replay.fold`, streams the state to the browser over SSE (a full frame per connection, then deltas keyed on the seq the tab last saw; a run whose state outgrows the stream's 64 MiB frame bound is followed by the small `/lifecycle` probe instead and re-read when it moves, under a visible "Live updates paused" banner), serves
 the built React app, and submits interactive controls through the server-owned durable command
 lifecycle. It never changes the engine in-process and is never imported by it (ADR-18).
 
@@ -149,7 +149,8 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   user bubble. A changed/corrupt identity is blocked instead of retried with rebuilt context. Retry of
   a completed persisted turn is a new turn, but it also reuses that durable raw/display/mode exactly.
   Reset preserves terminal command records and run-scoped background LLM/report work holds a
-  generation lease. State/SSE supplies a stable generation token that Web, Assistant, and TUI persist
+  generation lease. State/SSE (or, for a command no displayed state has bound, the small `/lifecycle`
+  probe, under the command deadline) supplies a stable generation token that Web, Assistant, and TUI persist
   with each fresh command before POST. If a request formed on generation A first arrives after Replay
   created B, the server returns `409 run_generation_changed` before any command record, event, or
   process side effect. Same-key recovery of an already-accepted A command remains observational.

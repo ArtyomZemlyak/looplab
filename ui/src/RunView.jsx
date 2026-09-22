@@ -2410,7 +2410,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {streamDegraded && <div className="review-banner" role="status" data-run-stream-degraded>
         <span className="history-lock" aria-hidden="true">◌</span>
         <b>Live updates paused</b>
-        <span>This run&rsquo;s state is too large to stream; it is re-read when the run changes, checked about once a minute.</span>
+        <span>This run&rsquo;s state is too large to stream; it is re-read when the run changes,
+          checked about once a minute.</span>
       </div>}
 
       {reviewMode && <div className="review-banner" role="status">
