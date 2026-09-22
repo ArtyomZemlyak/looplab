@@ -309,7 +309,11 @@ def _task_context(run_dir: Path) -> dict:
     if doc.get("kind") == "mlebench_real":
         try:
             from looplab.adapters.mlebench_real import MLEBenchRealTask
-            task = MLEBenchRealTask(**{k: v for k, v in doc.items() if k != "kind"})
+            # A RELOAD of the run's own snapshot, so grandfathered like `resume` (review
+            # 2026-09-22, RTA-05): the model now refuses an unknown key on submit, and a snapshot
+            # written before that must still yield its rule context here, not the degraded one.
+            task = MLEBenchRealTask.model_validate(
+                {k: v for k, v in doc.items() if k != "kind"}, context={"existing_run": True})
             context.update(task.rule_violation_context())
         except Exception:  # noqa: BLE001 — an unpreparable competition still gets the rule list
             pass

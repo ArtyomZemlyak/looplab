@@ -31,6 +31,7 @@ from typing import Optional
 
 from pydantic import BaseModel, model_validator, field_validator
 
+from looplab.adapters.repo_task import refuse_unknown_task_keys
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
@@ -83,6 +84,12 @@ def is_prepared(competition_id: str, data_dir: Optional[str] = None) -> bool:
 class MLEBenchRealTask(BaseModel):
     """A real Kaggle/MLE-bench competition. Requires the data to be prepared first:
     ``python -m looplab.adapters.mlebench_prep -c <competition>``."""
+
+    # A key this model does not declare is REFUSED at submit and grandfathered on reload (review
+    # 2026-09-22, RTA-05) — `seed`, which this kind deliberately has none of, included. A `before`
+    # validator, so the typo is named before `_resolve` looks the competition up.
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
 
     kind: str = "mlebench_real"
     competition: str

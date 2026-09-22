@@ -28,6 +28,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from looplab.adapters.repo_task import refuse_unknown_task_keys
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
@@ -107,6 +108,12 @@ class DatasetBaselineDeveloper:
 
 
 class DatasetTask(BaseModel):
+    # A key this model does not declare is REFUSED at submit and grandfathered on reload — the repo
+    # family's rule, extended here by review 2026-09-22 (RTA-05): `metrc: "auc"` validated and the
+    # agent chose the metric, while `task.snapshot.json` recorded the typo as if it had been read.
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
     kind: str = "dataset"
     id: str = "dataset_task"
     goal: str = ""

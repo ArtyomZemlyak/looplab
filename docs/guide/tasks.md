@@ -82,6 +82,9 @@ ran on the default timeout; `eval.stage:` (singular) ran with no pipeline at all
 Submitting a task now refuses it by name and lists the keys the model does declare, so the nearest
 correct spelling is visible in the error. This is the same rule `--set` and the `settings:` block
 already apply (`docs/guide/configuration.md`), and it fails the same way: one line, exit code 2.
+It holds for **every** kind: until 2026-09-22 only the `repo` family's models refused, so a
+synthetic, `dataset` or `mlebench_real` task still dropped a typo (`seed` misspelled ran at `seed: 0`;
+a `seed` on `mlebench_real`, which has none, was ignored rather than refused).
 
 A key beginning with `_` is a **comment** and is allowed — JSON has no comment syntax, and
 `examples/repo_drift_task.json` ships a `_note` explaining what the example demonstrates. It cannot

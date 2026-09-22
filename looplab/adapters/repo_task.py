@@ -51,7 +51,11 @@ def _grandfathered(info: ValidationInfo) -> bool:
 
 
 def refuse_unknown_task_keys(cls, data, info: ValidationInfo):
-    """ONE definition of "is this the name of a real field", for every task-spec model here.
+    """ONE definition of "is this the name of a real field", for every task-spec model here — and,
+    since review 2026-09-22 (RTA-05), for every OTHER task kind's model too: `SyntheticTaskBase`
+    (toy/regression/classification/timeseries/offline MLE-bench), `DatasetTask` and
+    `MLEBenchRealTask` attach this same function, because `docs/guide/tasks.md` states the rule of
+    every task and until then only the repo family kept it.
 
     THE DEFECT. Every model in this file but `DeveloperCommandSpec` took pydantic's default
     `extra="ignore"`, so a mistyped or MISPLACED key validated and the field took its default —

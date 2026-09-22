@@ -143,16 +143,84 @@ def test_an_underscore_key_is_a_COMMENT_and_is_allowed():
 
 def test_the_shipped_examples_still_load():
     """The regression this exemption exists for, driven against the real files rather than a
-    fixture — `test_documentation_contracts` loads them too, and this says WHY they must."""
+    fixture — `test_documentation_contracts` loads them too, and this says WHY they must.
+
+    EVERY kind since review 2026-09-22 (RTA-05): the refusal reaches the synthetic, dataset and
+    MLE-bench models now, so their shipped examples are in scope too. A failure for any OTHER reason
+    (an unprepared competition, a data file this box does not have) is not this guard's concern."""
     import json
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "examples"
-    for path in sorted(root.glob("*task*.json")):
+    for path in sorted(root.glob("*.json")):
         doc = json.loads(path.read_text(encoding="utf-8"))
-        if doc.get("kind") in {None, "repo", "dataset"} or "eval" in doc:
-            try:
-                validate_task(doc)
-            except (ValidationError, ConfigRefusal) as exc:      # pragma: no cover - the guard
-                assert "unknown key" not in str(exc), f"{path.name}: {exc}"
+        if not isinstance(doc, dict):
+            continue
+        try:
+            validate_task(doc)
+        except Exception as exc:     # noqa: BLE001 — only an unknown-key refusal fails this guard
+            assert "unknown key" not in str(exc), f"{path.name}: {exc}"
+
+
+# ------------------------------------------------------------------------------------------------
+# EVERY task kind, not only the repo family (review 2026-09-22, RTA-05)
+#
+# The rule above reached the six repo-family models and nothing else, while `docs/guide/tasks.md`
+# says "A key the spec does not declare is REFUSED" of every task. `ToyTask(sede=3)` validated with
+# `seed=0`; a dataset task's `metrc: "auc"` ran with the agent choosing the metric; the run's
+# `task.snapshot.json` then recorded the typo beside a default that nothing had asked for. Same rule,
+# same grandfathering: refused at submit, stripped-and-kept on reload, so no existing run's resume
+# changes.
+
+def _synthetic_and_dataset_docs(tmp_path):
+    data = tmp_path / "train.csv"
+    data.write_text("x,y\n1,2\n", encoding="utf-8")
+    return [
+        ({"kind": "quadratic", "goal": "min", "direction": "min", "bounds": {"x": [-1, 1]},
+          "sede": 3}, "sede"),
+        ({"kind": "regression", "noize": 0.5}, "noize"),
+        ({"kind": "code_regression", "max_degre": 3}, "max_degre"),
+        ({"kind": "classification", "gapp": 1.0}, "gapp"),
+        ({"kind": "timeseries", "perod": 7}, "perod"),
+        ({"kind": "mlebench", "n_trian": 10}, "n_trian"),
+        ({"kind": "dataset", "goal": "g", "data_path": str(data), "metrc": "auc"}, "metrc"),
+    ]
+
+
+def test_every_task_kind_refuses_a_typo_on_submit(tmp_path):
+    for doc, typo in _synthetic_and_dataset_docs(tmp_path):
+        with pytest.raises(ValidationError) as excinfo:
+            validate_task(dict(doc))
+        refusal = _refusal(excinfo)
+        assert refusal is not None, f"{doc['kind']}: the failure is not the typed refusal"
+        assert typo in str(refusal) and "known keys are" in str(refusal), refusal
+
+
+def test_every_task_kind_reloads_the_same_typo_for_an_existing_run(tmp_path):
+    """The grandfathering half. MUTATION: attach the validator without `_grandfathered` -> every
+    synthetic/dataset run whose snapshot carries such a key can no longer be resumed."""
+    for doc, typo in _synthetic_and_dataset_docs(tmp_path):
+        task = validate_task(dict(doc), existing_run=True)
+        assert task.kind == doc["kind"]
+        assert typo not in type(task).model_fields
+
+
+def test_the_competition_task_refuses_a_typo_before_it_touches_the_competition():
+    """`MLEBenchRealTask`'s own `_resolve` looks the competition up (it needs the `mlebench`
+    package); the key refusal is a `mode="before"` validator, so a typo is named FIRST, on any box."""
+    with pytest.raises(ValidationError) as excinfo:
+        validate_task({"kind": "mlebench_real", "competition": "spaceship-titanic",
+                       "grade_timout": 5})
+    refusal = _refusal(excinfo)
+    assert refusal is not None and "grade_timout" in str(refusal)
+
+
+def test_the_synthetic_field_order_the_config_hash_reads_is_unchanged():
+    """`core/setup_identity.py::setup_config_hash` dumps the task WITHOUT sorted keys, so a model's
+    field order is load-bearing (`adapters/synthetic.py`'s docstring). A validator is not a field;
+    this pins that attaching one moved nothing."""
+    from looplab.adapters.toytask import ToyTask
+
+    assert list(ToyTask.model_fields) == ["kind", "id", "goal", "direction",
+                                          "comparison_contract", "bounds", "seed", "step", "noise"]
 

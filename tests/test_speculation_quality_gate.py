@@ -372,7 +372,10 @@ def _make_run(
         seed, task_id=task_snapshot_id, direction=task_direction, noise=task_noise)
     (path / "task.snapshot.json").write_bytes(task_source)
 
-    task_model = ToyTask.model_validate(json.loads(task_source))
+    # A RELOAD of the snapshot the run wrote — grandfathered like `resume` — because some fixtures
+    # here deliberately carry a key ToyTask does not declare (the gate must refuse THAT, below); a
+    # submit-strict validation would refuse the fixture itself (review 2026-09-22, RTA-05).
+    task_model = ToyTask.model_validate(json.loads(task_source), context={"existing_run": True})
     task_payload = task_model.model_dump(mode="json")
     config_hash = hashlib.sha256(orjson.dumps(task_payload)).hexdigest()[:12]
     manifest_config_hash = hashlib.sha256(orjson.dumps(

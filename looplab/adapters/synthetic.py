@@ -34,8 +34,9 @@ import random
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
+from looplab.adapters.repo_task import refuse_unknown_task_keys
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
 
@@ -47,7 +48,15 @@ class SyntheticTaskBase(BaseModel):
     their own defaults; pydantic keeps an overridden field in the BASE's position, so the resulting
     `model_fields` order — and therefore `setup_config_hash` — is byte-identical to the hand-written
     models this replaced.
+
+    The unknown-key refusal is inherited from here (review 2026-09-22, RTA-05): the same
+    `repo_task.py::refuse_unknown_task_keys` the repo family uses — refused at submit, grandfathered
+    on reload — so `ToyTask(sede=3)` is named instead of running at `seed=0`. A validator is not a
+    field, so the field order above is untouched.
     """
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
 
     kind: str
     id: str

@@ -33,8 +33,10 @@ def _built(monkeypatch, **over):
     monkeypatch.setattr(cli_mod, "CliAgentDeveloper", _Spy)
 
     settings = Settings(developer="agent", developer_backend="opencode", **over)
-    task = validate_task({"kind": "quadratic", "task_id": "t", "goal": "g", "direction": "min",
-                          "expr": "(x-3)**2"})
+    # `id`, not `task_id`, and no `expr`: ToyTask declares neither of those, so both were silently
+    # DROPPED here until the unknown-key refusal reached the synthetic models (review 2026-09-22,
+    # RTA-05) — the objective is the toy's own fixed one either way.
+    task = validate_task({"kind": "quadratic", "id": "t", "goal": "g", "direction": "min"})
     factory_mod.make_roles(task, settings)
     return seen
 
