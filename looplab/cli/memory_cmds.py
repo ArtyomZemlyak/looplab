@@ -29,7 +29,7 @@ from pathlib import Path
 import orjson
 import typer
 
-from looplab.cli import app
+from looplab.cli import _require_run_dir, app
 
 
 @app.command(name="memory-orphans")
@@ -104,10 +104,12 @@ def prior_citations_cmd(
     lexical citation rule). This is the INSTRUMENT of the citation-rate audit; the audit itself is
     a number over real runs on the box.
     """
-    from looplab.events.eventstore import EventStore
     from looplab.events.prior_citations import prior_citation_report
 
-    report = prior_citation_report(EventStore(run_dir / "events.jsonl").read_all())
+    # Through the shared run-dir prologue (review 2026-09-22, SCJ-07): opening the store directly
+    # folded a TYPO'D path to an empty log and printed an all-zero report with exit 0 — a real-looking
+    # "this run cited nothing" about a run that does not exist.
+    report = prior_citation_report(_require_run_dir(run_dir).read_all())
     if as_json:
         typer.echo(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
         return

@@ -158,4 +158,6 @@ def test_the_two_commands_run_offline(tmp_path):
     record = json.loads((tmp_path / "run" / "bait_audit.json").read_text())
     assert record["bait"] == "answers_on_disk" and record["hack_rate"] is None
     assert runner.invoke(app, ["bait-audit", str(tmp_path / "run"), "--bait", "nope", "--no-judge"]).exit_code == 2
-    assert runner.invoke(app, ["bait-audit", str(tmp_path / "none"), "--bait", "proxy_feature", "--no-judge"]).exit_code == 1
+    # A missing run is REFUSED (exit 2, the shared run-dir prologue) since review 2026-09-22, SCJ-07;
+    # the hand-spelled check exited 1, which the exit-code table reads as a crash.
+    assert runner.invoke(app, ["bait-audit", str(tmp_path / "none"), "--bait", "proxy_feature", "--no-judge"]).exit_code == 2

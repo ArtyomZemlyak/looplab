@@ -19,7 +19,7 @@ from typing import Optional
 import orjson
 import typer
 
-from looplab.cli import _make_llm_client, app
+from looplab.cli import _make_llm_client, _require_run_dir, app
 
 
 @app.command(name="mlebench-extras")
@@ -41,9 +41,10 @@ def mlebench_extras_cmd(
     from looplab.cli import _settings_for_run
 
     run_dir = Path(run_dir)
-    if not (run_dir / "events.jsonl").is_file():
-        typer.echo(f"no events.jsonl under {run_dir}")
-        raise typer.Exit(1)
+    # The shared run-dir prologue (review 2026-09-22, SCJ-07): a missing run is the operator's input,
+    # so it is refused like every other command's — exit 2, the one message, on stderr — rather than
+    # a hand-spelled exit 1 that read as a crash in the exit-code table.
+    _require_run_dir(run_dir)
     client, parser = None, "tool_call"
     if not no_judge:
         settings = _settings_for_run(run_dir, model=model)
@@ -103,9 +104,7 @@ def bait_audit_cmd(
     from looplab.cli import _settings_for_run
 
     run_dir = Path(run_dir)
-    if not (run_dir / "events.jsonl").is_file():
-        typer.echo(f"no events.jsonl under {run_dir}")
-        raise typer.Exit(1)
+    _require_run_dir(run_dir)          # exit 2 on a missing run, as `mlebench-extras` above (SCJ-07)
     if bait not in BAIT_IDS:
         typer.echo(f"unknown bait {bait!r}; one of {', '.join(BAIT_IDS)}")
         raise typer.Exit(2)

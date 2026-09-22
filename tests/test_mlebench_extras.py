@@ -209,4 +209,4 @@ def test_the_cli_runs_the_plagiarism_half_without_a_judge(tmp_path, monkeypatch)
     assert "rule violation: skipped" in result.output and "plagiarism: unavailable" in result.output
     assert (run_dir / EXTRAS_SIDECAR).is_file()
     missing = CliRunner().invoke(app, ["mlebench-extras", str(tmp_path / "nowhere"), "--no-judge"])
-    assert missing.exit_code == 1
+    assert missing.exit_code == 2        # refused through the shared run-dir prologue (SCJ-07)

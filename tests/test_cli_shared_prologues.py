@@ -41,6 +41,42 @@ def test_every_mutating_command_reports_a_missing_run_the_same_way(tmp_path, com
     assert "(no events.jsonl)" in result.output
 
 
+@pytest.mark.parametrize("argv", [
+    ["prior-citations"],
+    ["mlebench-extras", "--no-judge"],
+    ["bait-audit", "--bait", "proxy_feature", "--no-judge"],
+])
+def test_a_typo_d_run_dir_is_refused_by_every_run_reader(tmp_path, argv):
+    """Review 2026-09-22, SCJ-07. `prior-citations` opened the store directly, so a typo'd path
+    folded to an empty log and printed an all-zero report with exit 0 — "this run cited nothing",
+    about a run that does not exist. The two audit instruments hand-spelled the check with exit 1
+    (a crash, in the exit-code table) and their own shorter message. All three go through the shared
+    prologue now: exit 2, the one message, on stderr."""
+    result = runner.invoke(app, [argv[0], str(tmp_path / "no_such_run"), *argv[1:]])
+    assert result.exit_code == 2, result.output
+    assert "no run found at" in result.stderr and "(no events.jsonl)" in result.stderr
+    assert "proposals 0" not in result.output
+
+
+def test_the_missing_run_refusal_is_on_stderr_as_the_exit_code_table_says(tmp_path):
+    """Exit `2` is "one message that names the problem and what to change, on stderr"
+    (docs/guide/cli-reference.md); `_require_run_dir` printed it on STDOUT, into whatever the
+    caller was piping the command's output into (review 2026-09-22, SCJ-07)."""
+    result = runner.invoke(app, ["replay", str(tmp_path / "no_such_run")])
+    assert result.exit_code == 2
+    assert "no run found at" in result.stderr
+    assert "no run found" not in result.stdout
+
+
+def test_the_developer_backend_flag_accepts_exactly_the_settings_vocabulary():
+    """`--developer-backend` was checked against a hand-spelled copy of the registry `Settings`
+    validates against (doc 25 AG-08; review 2026-09-22, SCJ-07)."""
+    from looplab import cli
+    from looplab.core.config import DEVELOPER_BACKENDS
+
+    assert cli._DEV_BACKENDS is DEVELOPER_BACKENDS
+
+
 def test_each_command_keeps_its_own_second_sentence(tmp_path):
     """The `hint:` parameter exists so sharing the check does not flatten the advice: `resume` can
     say "use `run` to start one" where the generic answer would send the operator to `--out`."""

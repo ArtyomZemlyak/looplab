@@ -31,7 +31,7 @@ import typer
 from typer.core import TyperGroup
 
 from looplab import __version__
-from looplab.core.config import Settings
+from looplab.core.config import DEVELOPER_BACKENDS, Settings
 from looplab.core.errors import EnvironmentRefusal, OperatorRefusal, exception_leaves
 from looplab.core.run_deletion import (
     RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
@@ -268,7 +268,10 @@ app = _TotalOutputTyper(
 # Accepted choices for the role/developer backends, surfaced in errors so a typo gets a clear list
 # instead of silently degrading (e.g. `--backend ll` would otherwise run the offline `toy` backend).
 _BACKENDS = ("toy", "llm")
-_DEV_BACKENDS = ("default", "opencode", "aider", "goose", "continue")
+# The `--developer-backend` vocabulary IS the registry `Settings` validates against, never a copy of
+# it (review 2026-09-22, SCJ-07 / doc 25 AG-08): a hand-spelled tuple here is how the flag and the
+# `settings:`/`-s`/env spellings of the same knob come to accept different sets.
+_DEV_BACKENDS = DEVELOPER_BACKENDS
 
 
 def _version_cb(value: bool) -> None:
@@ -362,7 +365,10 @@ def _require_run_dir(run_dir: Path, *, hint: str = _RUN_DIR_HINT,
     is itself the evidence), while a MUTATING command keeps failing closed exactly as before.
     """
     if not (run_dir / "events.jsonl").exists():
-        typer.echo(f"no run found at {run_dir} (no events.jsonl). {hint}")
+        # On STDERR, as the exit-code table says of every refusal (`2`: "one message … on stderr";
+        # review 2026-09-22, SCJ-07): on stdout it landed in whatever a caller was piping the
+        # command's output into, `looplab replay … | jq` included.
+        typer.echo(f"no run found at {run_dir} (no events.jsonl). {hint}", err=True)
         raise typer.Exit(2)
     store = EventStore(run_dir / "events.jsonl")
     if healthy:
