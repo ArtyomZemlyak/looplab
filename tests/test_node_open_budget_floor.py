@@ -247,9 +247,11 @@ def test_an_evaluation_in_flight_when_the_floor_fires_still_lands_its_terminal(t
 
 def test_the_gate_is_asked_on_the_main_task_at_every_open_decision_and_never_in_a_worker():
     """Placement is the safety argument: raised inside `_create_node` under the `llm_parallel`
-    fan-out, a `BudgetExceeded` is swallowed by `_create_node_guarded` into one node's terminal
-    and the run goes on spending. So the call lives at the main-task decision sites and is ABSENT
-    from the three methods that can run in a worker."""
+    fan-out, a `BudgetExceeded` is held until the whole fan-out joins (review 2026-09-22, ENG1-01;
+    before that `_create_node_guarded` swallowed it into one node's terminal and the run went on
+    spending), so a floor asked there refuses only after the node it guards was opened and paid
+    for. So the call lives at the main-task decision sites and is ABSENT from the three methods
+    that can run in a worker."""
     from looplab.engine import card_reservation, orchestrator, speculation
     gate = "self._refuse_node_open_below_floor"
     for owner, name in ((orchestrator.Engine, "_handle_create_actions"),

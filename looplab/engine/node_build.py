@@ -161,8 +161,11 @@ class NodeBuildMixin:
         MAIN TASK ONLY, at the decision to open a unit of paid work — the serial create loop, the
         head of a parallel-build chunk, the Card lane's staging pass and `_request_card_build`'s
         election — and deliberately NOT inside `_create_node`: under the `llm_parallel` fan-out
-        that method runs in an `anyio.to_thread` WORKER, and a `BudgetExceeded` raised there is
-        swallowed by `_create_node_guarded` into one node's terminal instead of ending the run. Nor
+        that method runs in an `anyio.to_thread` WORKER, where a `BudgetExceeded` is HELD until the
+        whole fan-out joins (`_create_node_guarded` lets it propagate into the caller's
+        `_DeferredBudgetStop` since review 2026-09-22, ENG1-01 — before that it was swallowed into
+        one node's terminal and the run went on spending), so a floor asked there would refuse only
+        AFTER the node it exists to keep closed had been opened and paid for. Nor
         in an eval child, where the same raise cancels sibling terminals (the `_DeferredBudgetStop`
         docstring's open item). Raised on the main task it is exactly the ceiling's own path:
         `Engine.run` drains the in-flight evaluation and re-raises, the CLI records

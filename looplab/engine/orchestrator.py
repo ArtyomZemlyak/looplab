@@ -208,7 +208,12 @@ class SettledWidthPinError(RunStartPinError):
 class _DeferredBudgetStop:
     """A task-group facade that DEFERS a background task's `BudgetExceeded` instead of letting it
     cancel that group's siblings -- used by `_dispatch_evals` for exactly one caller,
-    `_spawn_research`.
+    `_spawn_research`, and by the two parallel-build fan-outs (the chunked barrier in
+    `_handle_create_actions` and `_steady_state_build_lane`), whose pooled builds now let the
+    ceiling propagate out of `_create_node_guarded` instead of recording it as one node's
+    `build_crash` (review 2026-09-22, ENG1-01). Each owner re-raises the held stop on the MAIN task
+    the moment its group has joined, and each admission loop tests the sink before starting more
+    work — the same clauses (a) and (b) below.
 
     THE DEFECT IT CLOSES is the one `Engine._drain_inflight_evaluation` documents from the campaign
     artefacts, seen on the OTHER dispatch path.  Under Card speculation the evaluation lives in the
@@ -2984,7 +2989,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # serial path per node — and this lane, added later, asked it nowhere: with
         # `node_open_budget_floor_usd` set and `steady_state_build` on, the floor was simply inert
         # and the run kept opening nodes until the CEILING raised `BudgetExceeded` from inside a
-        # worker, where `_create_node_guarded` turns it into one node's terminal. Asked ONCE here
+        # worker, where `_create_node_guarded` then turned it into one node's terminal (it is held
+        # to the join and re-raised since review 2026-09-22, ENG1-01). Asked ONCE here
         # rather than per iteration because the loop below runs inside a task group, where a raise
         # would tear down lanes that are already building; the same "a lane of N node(s)" shape the
         # Card lane uses.
@@ -2997,12 +3003,18 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         limiter = anyio.Semaphore(len(pairs))
         free_pairs = list(pairs)
         started = 0
+        # The spend ceiling raised inside a lane's build is HELD until the lanes join and then
+        # re-raised on this MAIN task (review 2026-09-22, ENG1-01) — the chunked path's rule, and
+        # `_DeferredBudgetStop`'s clause (b): the admission below tests the sink before it proposes,
+        # so a held stop starts no new work (the next proposal is itself a paid call).
+        budget_stop: list[BaseException] = []
         async with anyio.create_task_group() as tg:
+            deferred = _DeferredBudgetStop(tg, budget_stop)
             for action in creates:
                 # BLOCKS UNTIL A LANE IS FREE — this is the whole difference from the barrier, and
                 # it is why the fold below sees completions the chunked path could not.
                 await limiter.acquire()
-                if self._create_paused:
+                if self._create_paused or budget_stop:
                     limiter.release()
                     break
                 state = fold(self.store.read_all())
@@ -3014,9 +3026,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     limiter.release()
                     continue
                 idea, telemetry_row = ideas[0], (telemetry[0] if telemetry else None)
-                if self._refuse_degraded_proposal(idea, main_task=True):
+                if budget_stop or self._refuse_degraded_proposal(idea, main_task=True):
                     # A dead provider hands back a degraded FALLBACK; the barrier path breaks the
                     # whole batch on one, and so does this — the next turn re-plans.
+                    # …and a lane that hit the spend ceiling WHILE this proposal was in flight
+                    # (review 2026-09-22, ENG1-01): the proposal is already paid, but reserving a
+                    # node for it is new work the held stop forbids — its build's first paid call
+                    # would only raise the same stop — so it takes the same exit.
                     self._record_dropped_batch_cards(dropped)
                     self._pending_batch_dropped = []
                     self._pending_batch_novelty_gated = []
@@ -3068,9 +3084,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                         free_pairs.append(pair)
                         limiter.release()
 
-                tg.start_soon(_lane)
+                deferred.start_soon(_lane)
         if self._create_paused:
             self._drain_create_pause()
+        if budget_stop:
+            raise budget_stop[0]
         return fold(self.store.read_all()), started > 0
 
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
@@ -3424,9 +3442,15 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # adaptive research threads. Fast workers cannot select/propose from completed
                 # sibling evidence until the slowest build and later eval batch finish; feed each
                 # completion back to a central scheduler and refill the freed lane immediately.
+                # The spend ceiling, raised inside one build, is HELD here until the chunk joins
+                # (review 2026-09-22, ENG1-01): `_create_node_guarded` no longer turns it into a
+                # `build_crash`, and letting it cancel the group would cost the siblings their
+                # already-paid builds. Re-raised below, after the join, on this MAIN task.
+                _budget_stop: list[BaseException] = []
                 with self.tracer.span("parallel_build_batch", fan=_fan, built=len(_chunk),
                                       parallel_build=self._llm_parallel):
                     async with anyio.create_task_group() as _tg:
+                        _deferred = _DeferredBudgetStop(_tg, _budget_stop)
                         for _a, _res, _pair, _idea, _tel in zip(
                                 _chunk, _reserved, _pb_pairs, _ideas, _telem):
                             if _res is None:
@@ -3435,15 +3459,20 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             # node_failed terminal for its already-reserved id (node_building was
                             # appended up front) instead of tearing down the task group and killing
                             # the whole run — the rest of the concurrent batch still finishes.
-                            _tg.start_soon(anyio.to_thread.run_sync,
-                                           functools.partial(self._create_node_guarded,
-                                                          _a, _pair, _res, _idea, _tel))
+                            _deferred.start_soon(anyio.to_thread.run_sync,
+                                                 functools.partial(self._create_node_guarded,
+                                                                   _a, _pair, _res, _idea, _tel))
                 # Circuit breaker under concurrency: `start_soon` does not yield, so no worker runs
                 # until the task group JOINS above — the pause flag can only be observed HERE, after
                 # the whole chunk finishes. So a developer/build crash pauses after AT MOST this one
                 # chunk (bounded by the fan-out width), not mid-chunk; stop before the next chunk.
+                # The pause a sibling requested is appended BEFORE the budget stop is re-raised: it
+                # records a hard fault this chunk really had, and the stop starts no new work.
                 if self._create_paused:
                     self._drain_create_pause()
+                if _budget_stop:
+                    raise _budget_stop[0]
+                if self._create_paused:
                     break
             return "continue", state, _no_mint_turns
         for _create_index, a in enumerate(creates):
@@ -4572,7 +4601,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         if causes:
             reject(*causes)
 
-    def _request_create_pause(self, node_id: int, reason: str) -> None:
+    def _request_create_pause(self, node_id: Optional[int], reason: str, *,
+                              generation: int = 0) -> None:
         """Ask the MAIN task to append the run-global auto-pause gate.
 
         Called from a build worker thread, where appending EV_PAUSE directly would put a FOLDED,
@@ -4580,13 +4610,27 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         atomic under the GIL, so several crashing siblings in one chunk queue safely; only the FIRST
         is appended — they are the same "a build crashed, stop the batch" gate and one pause is what
         the run needs.
+
+        `node_id=None` QUEUES A NODE-LESS PAUSE, and a caller whose build never reached
+        `node_created` must use it (review 2026-09-22, ENG1-01). `replay.py::_on_pause` reads a pause
+        that NAMES a node as the scoped developer-crash breaker and DROPS it unless that node is
+        folded, `failed`, with `error_reason == "developer_crash"` — so a pause naming a bare
+        reservation is a gate the fold never applies. `_create_node_guarded` queued exactly that:
+        driven, three `pause` rows, `fold().paused` False, and six reservations spent on
+        `build_crash` against a dead provider. The node-less form is the run-global gate, the same
+        payload `_refuse_degraded_proposal` queues for the same reason.
+
+        `generation` is the named node's CURRENT attempt. `_on_pause` binds the pause to the
+        generation it names, so an in-place rebuild (`_rerun_node`, attempt >= 1) that queued the
+        historical hard-coded 0 would be dropped exactly the same way.
         """
         # Lazily initialised: the run loop resets the queue each iteration, but a build can crash
         # on a path that has not reached that reset yet.
         if not isinstance(getattr(self, "_pending_create_pause", None), list):
             self._pending_create_pause = []
-        self._pending_create_pause.append({
-            "node_id": node_id, "generation": 0, "reason": reason})
+        self._pending_create_pause.append(
+            {"reason": reason} if node_id is None
+            else {"node_id": node_id, "generation": generation, "reason": reason})
         self._create_paused = True   # tell the create-batch loop to STOP after this node
 
     def _drain_create_pause(self) -> None:
@@ -7310,11 +7354,30 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         under `_id_lock`) instead of letting the exception propagate through the task group and tear
         down — and kill — the whole run. Keeps the one-terminal-per-node invariant (the reserved id
         gets exactly one terminal) and lets the rest of the concurrent batch finish. Used ONLY on the
-        parallel path; the serial path keeps its historical crash-on-raise so bugs surface in tests."""
+        parallel path; the serial path keeps its historical crash-on-raise so bugs surface in tests.
+
+        THE SPEND CEILING IS NOT ONE BUILD'S CRASH (review 2026-09-22, ENG1-01). `BudgetExceeded`
+        is an `Exception`, so the blind handler below used to record it as this reservation's
+        `build_crash` and let the run go on proposing — every proposal a paid call against an
+        accountant already over its limit — where the serial path ends the run on the same raise.
+        It now PROPAGATES, whether raised bare or wrapped (`core/errors.py::budget_stop_leaf`),
+        and both callers run this under `_DeferredBudgetStop`, which holds it until the fan-out
+        joins and re-raises it on the MAIN task: the siblings already paid for land their nodes,
+        and the run then ends `budget_exhausted` exactly as a serial build's raise does. The
+        reservation that raised is left OPEN, as the serial path leaves it, for
+        `_recover_interrupted_builds` to close on the next entry."""
         try:
             self._create_node(action, roles, reserved, preproposed=preproposed,
                               pretelemetry=pretelemetry)
+        except BudgetExceeded:
+            raise                    # the run's stop — deferred to the join by the caller, above
         except Exception as exc:  # noqa: BLE001 — one build's crash must not abort the concurrent batch
+            stop = budget_stop_leaf(exc)
+            if stop is not None:
+                # The same stop, wrapped (a task group, or a `raise … from` inside a role). Hand the
+                # deferral the LEAF: `_DeferredBudgetStop` captures by class, and the CLI derives
+                # `budget_exhausted` from the leaf either way.
+                raise stop
             node_id = reserved[1] if reserved else None
             if node_id is None:
                 return
@@ -7343,8 +7406,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     # repeated build_crash nodes (review finding #3). A plain resume continues once fixed.
                     # Same worker-seam reason as the developer_crash branch above: request the
                     # global pause, let the main task append it after the join.
+                    # NODE-LESS (`None`), because this id never reached `node_created`: a pause
+                    # naming it is dropped by `replay._on_pause` (review 2026-09-22, ENG1-01 — see
+                    # `_request_create_pause`), which is how this breaker never engaged at all.
                     self._request_create_pause(
-                        node_id,
+                        None,
                         "auto-paused: a node build raised (LLM unreachable or a hard error, "
                         "unresolved within the build) — resume once it's fixed")
                 except Exception:  # noqa: BLE001 — best-effort terminal; never re-raise into the group

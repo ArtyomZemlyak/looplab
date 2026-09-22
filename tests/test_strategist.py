@@ -994,10 +994,50 @@ def test_create_node_guarded_pauses_on_a_hard_build_raise(tmp_path):
     assert not any(e.type == EV_PAUSE for e in evs), "a build worker appended a run-global gate"
     eng._drain_create_pause()
     paused = [e for e in eng.store.read_all() if e.type == EV_PAUSE]
-    assert len(paused) == 1 and paused[0].data["node_id"] == nid
-    assert "resume once it" in paused[0].data["reason"]
+    assert len(paused) == 1 and "resume once it" in paused[0].data["reason"]
+    # THE FOLD IS THE PROPERTY, not the in-memory flag above (review 2026-09-22, ENG1-01). This
+    # test used to pin `paused[0].data["node_id"] == nid` — a pause naming a BARE reservation,
+    # which `replay._on_pause` drops because no node `nid` was ever created — and so it certified
+    # a breaker that never engaged: the run folded `paused=False` and kept building.
+    assert "node_id" not in paused[0].data, "a bare reservation cannot own a node-scoped pause"
+    assert fold(eng.store.read_all()).paused is True
     eng._drain_create_pause()                                   # drained once, not on every look
     assert len([e for e in eng.store.read_all() if e.type == EV_PAUSE]) == 1
+
+
+def test_create_node_guarded_lets_the_spend_ceiling_end_the_run(tmp_path):
+    # Review 2026-09-22, ENG1-01: `BudgetExceeded` is the RUN's stop, not one build's crash. It
+    # propagates (bare or wrapped — the caller's `_DeferredBudgetStop` captures the leaf), writes
+    # no `build_crash` terminal and requests no pause; the reservation stays open for
+    # `_recover_interrupted_builds`, exactly as a serial build's raise leaves it.
+    import pytest
+    from looplab.core.llm import BudgetExceeded
+    from looplab.events.types import EV_NODE_FAILED, EV_PAUSE
+    for wrapped in (False, True):
+        eng = _engine(tmp_path / f"guard-budget-{wrapped}")
+        eng._create_paused = False
+        eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
+                                         "direction": "min"})
+        reserved = eng._reserve_node_build({"kind": "draft"})
+        stop = BudgetExceeded("LLM budget exceeded: spent 1.01 >= budget 1.00")
+
+        def _raise(*a, stop=stop, wrapped=wrapped, **k):
+            if not wrapped:
+                raise stop
+            try:
+                raise stop
+            except BudgetExceeded as exc:
+                raise RuntimeError("the role wrapped the ceiling") from exc
+
+        eng._create_node = _raise
+        with pytest.raises(BudgetExceeded) as caught:
+            eng._create_node_guarded({"kind": "draft"}, None, reserved)
+        assert caught.value is stop
+        evs = eng.store.read_all()
+        assert not [e for e in evs if e.type == EV_NODE_FAILED], "the ceiling became a build_crash"
+        assert eng._create_paused is False and not getattr(eng, "_pending_create_pause", None)
+        assert not [e for e in evs if e.type == EV_PAUSE]
+        assert reserved[1] in fold(evs).buildings, "the reservation must stay open for recovery"
 
 
 def test_create_node_guarded_keeps_a_built_node_when_a_post_creation_emit_raises(tmp_path):
