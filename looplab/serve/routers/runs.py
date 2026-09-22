@@ -27,7 +27,8 @@ from looplab.core.atomicio import (atomic_write_text, file_identity, same_file_e
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_disagreement, run_start_pinned_settings,
     settings_from_snapshot)
-from looplab.core.node_evidence import node_attempt, node_attempt_from_payload
+from looplab.core.node_evidence import (
+    node_attempt, node_attempt_from_payload, node_workdir, read_bounded_regular_file)
 from looplab.core.models import Idea, idea_field_carried
 from looplab.core.trace_files import (
     TraceFileIdentity, iter_bounded_trace_jsonl_lines, open_private_trace_file)
@@ -126,6 +127,9 @@ _SPAN_FALLBACK_MAX_LINES = 20_000
 # streaming-bounded transport is /log-page (per-page byte + row limits).
 _LEGACY_LOG_MAX_ROWS = 100_000
 _LEGACY_LOG_MAX_BYTES = 64 * 1024 * 1024        # ~64 MiB aggregate response ceiling for the flat array
+# The Developer's `looplab_stages.json` as `node_logs` reads it on every poll: a manifest is a few KiB,
+# so a larger file is not one and is read as absent (review 2026-09-22, SRV2-03 — it was `read_text`).
+_STAGE_MANIFEST_MAX_BYTES = 1024 * 1024
 
 def _conversation_etag(run_id: str, node_id: int, run_generation: Optional[str],
                        attempt: int, span_cap: int, source_revision: str, *,
@@ -1248,8 +1252,13 @@ def build_router(srv) -> APIRouter:
             out["historical_generation"] = historical_generation
         return out
 
-    def _node_dir(rd: Path, nid: int) -> Path:
-        return rd / "nodes" / f"node_{nid}"
+    def _node_dir(rd: Path, nid: int) -> Optional[Path]:
+        """The node's workdir, or None when it is absent or not a REAL directory of this run.
+
+        The workdir is the candidate's cwd, and a linked `nodes/node_N` is as reachable to it as a
+        linked log (review 2026-09-22, SRV2-03) — `core/node_evidence.py::node_workdir` refuses it,
+        and every file under it is then read through `read_bounded_regular_file`."""
+        return node_workdir(rd, nid)
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/logs")
     def node_logs(run_id: str, nid: int, tail: int = 200_000,
@@ -1305,9 +1314,15 @@ def build_router(srv) -> APIRouter:
             # mid-node by the STAGES phase, so it can appear between polls and differs per node.
             try:
                 from looplab.runtime.command_eval import materialized_stages
-                man = json.loads((nd / "looplab_stages.json").read_text("utf-8"))
-                clean = materialized_stages(man)
-                stage_names = [str(s["name"]) for s in clean] if clean else []
+                # Through the shared hardened reader, bounded (review 2026-09-22, SRV2-03): the
+                # manifest sits in the candidate's cwd, and `read_text` on a FIFO planted under its
+                # name pinned this poll's thread before a single log was tailed.
+                raw = (read_bounded_regular_file(
+                    nd / "looplab_stages.json", _STAGE_MANIFEST_MAX_BYTES + 1)
+                    if nd is not None else None)
+                if raw is not None and len(raw) <= _STAGE_MANIFEST_MAX_BYTES:
+                    clean = materialized_stages(json.loads(raw.decode("utf-8")))
+                    stage_names = [str(s["name"]) for s in clean] if clean else []
             except (OSError, ValueError, TypeError):
                 pass
             if "score" not in stage_names:  # the engine appends a protected `score` stage post-manifest
@@ -1319,22 +1334,19 @@ def build_router(srv) -> APIRouter:
         file_slots = max(1, len(stage_names) + 3)
         n = min(requested_n, _LOG_TAIL_MAX // file_slots)
 
-        def _tail(name: str, base: Path = nd) -> str:
-            try:
-                root = base.resolve()
-                p = (root / name).resolve()
-                # Names are direct children, not paths. This second boundary also rejects a log
-                # symlink that points outside the run/node directory.
-                if p.parent != root:
-                    return ""
-                size = p.stat().st_size
-                with open(p, "rb") as f:
-                    if size > n:
-                        f.seek(size - n)
-                    b = f.read(n)
-            except (OSError, ValueError):
+        def _tail(name: str, base: Optional[Path] = nd) -> str:
+            # THE SHARED HARDENED READER (review 2026-09-22, SRV2-03). This resolved the name and
+            # then `open(p, "rb")`-ed it: every log here is in the candidate's cwd, so a FIFO planted
+            # as `setup.log` pinned this polled request thread forever, and a log SYMLINK was
+            # followed wherever it led inside the resolved node directory — which was itself
+            # resolved first, so a linked node directory led anywhere. `read_bounded_regular_file`
+            # refuses a link, a FIFO, a device or a directory at once and reads `n` bytes from the
+            # end; `_node_dir` has already refused a linked node directory. Names are direct
+            # children, not paths (stage names are slugs, but the rule is stated here too).
+            if base is None or Path(name).name != name:
                 return ""
-            return b.decode("utf-8", "replace")
+            data = read_bounded_regular_file(base / name, n, tail=True)
+            return "" if data is None else data.decode("utf-8", "replace")
 
         stages = {name: body for name in stage_names if (body := _tail(f"{name}.log"))}
         # run_setup.log lives in the RUN dir (shared setup), not the node dir. Tail-cap it like every
@@ -1383,7 +1395,8 @@ def build_router(srv) -> APIRouter:
         if attempt is not None and attempt != current_attempt:
             raise _attempt_cas_409(nid, attempt, current_attempt,
                                    "The node was reset before its metric evidence was read.")
-        m = fenced_node_metrics(_node_dir(rd, nid), current_attempt)
+        node_dir = _node_dir(rd, nid)
+        m = fenced_node_metrics(node_dir, current_attempt) if node_dir is not None else {}
         # This route folds fresh state rather than reading the payload cache, and an absent node is a
         # 404 above rather than attempt zero, so it keeps its own re-read (see the settle note on
         # `_assert_attempt_unchanged`) and shares only the refusal body.

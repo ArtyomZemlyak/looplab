@@ -8,14 +8,103 @@ attempt.
 from __future__ import annotations
 
 import json
+import os
+import stat
 import time
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.atomicio import atomic_write_text
+from looplab.core.atomicio import atomic_write_text, same_file_entry
+from looplab.core.pathsafe import is_reparse
 
 
 METRICS_ATTEMPT_FILE = ".looplab-metrics-attempt.json"
+#: The receipt is a ~50-byte JSON object; this is its whole allowance. A larger file is not one.
+METRICS_ATTEMPT_RECEIPT_MAX_BYTES = 8 * 1024
+
+# THE FLAG SET for reading a file a candidate process can write, in ONE place (review 2026-09-22,
+# SRV2-03) — the same set `core/trace_files.py::open_private_trace_file` holds for trace sidecars.
+# `O_NOFOLLOW` refuses a final-component symlink (ELOOP) and `O_NONBLOCK` lets a FIFO open at once so
+# the `fstat` below can refuse it; without it `open()` on a FIFO waits for a writer that never comes.
+_UNTRUSTED_READ_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0))
+_UNTRUSTED_READ_CHUNK = 1024 * 1024
+
+
+def read_bounded_regular_file(path: str | os.PathLike, limit: int, *,
+                              tail: bool = False) -> Optional[bytes]:
+    """At most `limit` bytes of ONE regular file a candidate may have written, or ``None``.
+
+    Review 2026-09-22, SRV2-03. The node workdir is the candidate's own cwd, and three POLLED readers
+    opened names in it with blocking, link-following, unbounded opens (the node-log tails, the
+    attempt receipt below, the stage manifest). `os.mkfifo('setup.log')` pinned a request thread
+    forever — forty of them hang every sync route — and a symlink published whatever it pointed at,
+    another run's log included. Modelled on `core/trace_files.py::open_private_trace_file`, minus
+    its trace-specific refusal of hard-link aliases (a hard link reaches nothing its maker could not
+    already read and copy into its own log, and a Docker-tier link cannot leave the mount):
+
+      * `lstat` first — a link or reparse point, a directory, a FIFO or a device is refused before
+        any open; this is also the whole symlink rule where `O_NOFOLLOW` does not exist (Windows);
+      * the `_UNTRUSTED_READ_FLAGS` open, then `fstat`: still a regular file, and the SAME entry the
+        `lstat` saw (`same_file_entry`), so a swap between the two cannot hand over another file;
+      * a bounded read of `limit` bytes — from the END when `tail`, the way a log panel reads.
+
+    ``None`` for absent, not regular, a link, swapped or unreadable: every caller's answer to each
+    of those is "no evidence yet", and none of them may raise into a route that polls. What this
+    does NOT cover is a DIRECTORY component swapped for a link between the caller's check and the
+    open — `node_workdir` below refuses a linked node directory, and the rest needs an `openat` walk.
+    """
+    if type(limit) is not int or limit < 0:
+        raise ValueError("limit must be a non-negative integer")
+    try:
+        before = os.lstat(path)
+    except OSError:
+        return None
+    if is_reparse(before) or not stat.S_ISREG(before.st_mode):
+        return None
+    try:
+        fd = os.open(path, _UNTRUSTED_READ_FLAGS)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or same_file_entry(opened) != same_file_entry(before):
+            return None
+        if tail and opened.st_size > limit:
+            os.lseek(fd, opened.st_size - limit, os.SEEK_SET)
+        chunks, remaining = [], limit
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, _UNTRUSTED_READ_CHUNK))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def node_workdir(run_dir: str | os.PathLike, nid: int) -> Optional[Path]:
+    """`<run>/nodes/node_<nid>` when BOTH components are real directories, else ``None``.
+
+    The reader above refuses a linked FILE; this refuses a linked DIRECTORY, which the candidate can
+    reach just as well (review 2026-09-22, SRV2-03): `nodes/node_0 -> ../../other/nodes/node_0`
+    turned this run's log panel into a window on another run's workdir, because the old containment
+    check resolved the base before comparing against it. `run_dir` is the canonical directory
+    `AppState.run_dir` returned; a missing node directory is ``None`` too — "no files yet".
+    """
+    base = Path(run_dir)
+    node = base / "nodes" / f"node_{int(nid)}"
+    for component in (base / "nodes", node):
+        try:
+            info = os.lstat(component)
+        except OSError:
+            return None
+        if is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            return None
+    return node
 
 
 def begin_metrics_attempt(node_dir: str | Path, attempt: int, *,
@@ -36,9 +125,18 @@ def metrics_attempt_receipt(node_dir: str | Path) -> Optional[tuple[int, float]]
 
     The file is an observability accelerator, not durable run truth.  A missing/torn/hand-edited
     receipt therefore fails closed at the caller without making the run itself unavailable.
+
+    Read through `read_bounded_regular_file` (review 2026-09-22, SRV2-03): it sits in the
+    candidate-writable node workdir and is read by a 4 s metrics poll, so a FIFO planted under its
+    name pinned that request thread forever. Bounded at `METRICS_ATTEMPT_RECEIPT_MAX_BYTES`; a
+    larger file is not a receipt.
     """
     try:
-        raw = json.loads((Path(node_dir) / METRICS_ATTEMPT_FILE).read_text("utf-8"))
+        data = read_bounded_regular_file(Path(node_dir) / METRICS_ATTEMPT_FILE,
+                                         METRICS_ATTEMPT_RECEIPT_MAX_BYTES + 1)
+        if data is None or len(data) > METRICS_ATTEMPT_RECEIPT_MAX_BYTES:
+            return None
+        raw = json.loads(data.decode("utf-8"))
         attempt = raw.get("attempt")
         started_at = raw.get("started_at")
         if (type(attempt) is not int or attempt < 0
