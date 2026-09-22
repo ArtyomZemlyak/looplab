@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from looplab.core.errors import OperatorRefusal  # noqa: E402
 from looplab.serve import owner_token  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
+from _posix_gates import MODE_BITS  # noqa: E402
 
 
 def _hub(monkeypatch):
@@ -52,7 +53,7 @@ def test_shared_hub_without_a_token_mints_one_and_denies_by_default(tmp_path, mo
     assert client.get("/api/health").status_code == 200
 
 
-def test_a_minted_token_is_private_and_reused_by_the_next_start(tmp_path, monkeypatch):
+def test_a_minted_token_is_reused_by_the_next_start(tmp_path, monkeypatch):
     """A credential regenerated on every restart is one the operator cannot keep, and two workers on
     one box that disagree about it 401 the tab that unlocked against the other."""
     _hub(monkeypatch)
@@ -60,11 +61,48 @@ def test_a_minted_token_is_private_and_reused_by_the_next_start(tmp_path, monkey
     path = owner_token.owner_token_path()
     first = path.read_text(encoding="utf-8").strip()
 
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
     monkeypatch.delenv(owner_token.OWNER_TOKEN_ENV, raising=False)   # a fresh process, same box
     make_app(tmp_path / "second-root")
 
     assert owner_token.read_owner_token_file() == first
+
+
+@MODE_BITS
+def test_a_minted_token_is_mode_0600(tmp_path, monkeypatch):
+    _hub(monkeypatch)
+    make_app(tmp_path)
+    assert stat.S_IMODE(owner_token.owner_token_path().stat().st_mode) == 0o600
+
+
+def test_a_windows_token_file_is_not_refused_for_mode_bits_windows_cannot_express(
+        tmp_path, monkeypatch):
+    """On Windows `st_mode` reads 0666 for EVERY writable file, whatever its ACL, so the POSIX
+    "readable by others" test refused the token the server had just minted and the second start on
+    a shared origin could never come up (review 2026-09-22, WIN-TOKEN; six red tests on the Windows
+    CI leg, each "mode 0666"). Driven here with that platform's answer: the file carries 0666 and
+    the read happens with `os.name == "nt"` — it must return the token, not refuse it."""
+    path = tmp_path / "ui-token"
+    path.write_text("minted-token", encoding="utf-8")
+    os.chmod(path, 0o666)
+    with monkeypatch.context() as m:
+        m.setattr(os, "name", "nt")
+        token = owner_token.read_owner_token_file(path)
+    assert token == "minted-token"
+
+
+def test_a_symlinked_token_is_refused_where_open_cannot_refuse_links(tmp_path, monkeypatch):
+    """Windows has no `O_NOFOLLOW`, so there the open FOLLOWS a planted link and reads a file
+    somebody else chose. The entry must be judged before the open. Driven with the flag taken away
+    and the target made private enough to pass every later check, so only the link rule can
+    refuse it."""
+    elsewhere = tmp_path / "somebody-elses-file"
+    elsewhere.write_text("not-the-token", encoding="utf-8")
+    os.chmod(elsewhere, 0o600)
+    path = tmp_path / "ui-token"
+    path.symlink_to(elsewhere)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    with pytest.raises(OperatorRefusal, match="symbolic link"):
+        owner_token.read_owner_token_file(path)
 
 
 def test_an_exported_token_still_wins_over_the_file(tmp_path, monkeypatch):
@@ -88,6 +126,7 @@ def test_the_anonymous_opt_out_is_explicit_and_restores_the_open_plane(tmp_path,
     assert not owner_token.owner_token_path().exists()
 
 
+@MODE_BITS
 def test_a_world_readable_token_file_is_a_typed_refusal(tmp_path, monkeypatch):
     """A credential the box has already published is not one to keep serving. It is an
     `OperatorRefusal`, so `looplab ui` prints one line at exit 2 instead of 42 frames."""

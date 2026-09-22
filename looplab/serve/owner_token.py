@@ -56,6 +56,7 @@ import stat
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.atomicio import same_file_entry
 from looplab.core.errors import EnvironmentRefusal
 from looplab.core.pathsafe import is_reparse
 from looplab.serve.engine_proc import _on_shared_hub
@@ -147,6 +148,19 @@ def read_owner_token_file(path: Optional[Path] = None) -> Optional[str]:
     silent downgrade — a credential the box has already published is not one to keep using.
     """
     target = owner_token_path() if path is None else path
+    # THE ENTRY IS JUDGED BEFORE THE OPEN, because the open's own guard is POSIX-only: `O_NOFOLLOW`
+    # does not exist on Windows (`getattr` answers 0), so there `os.open` FOLLOWS a planted link
+    # and the fstat below describes the link's TARGET — a file someone else chose. The fstat must
+    # then be the SAME entry, which also closes the swap between the two calls on both platforms
+    # (review 2026-09-22, WIN-TOKEN).
+    try:
+        entry = os.lstat(target)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if is_reparse(entry):
+        _refuse_unsafe(target, "is a symbolic link")
     try:
         fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
@@ -157,9 +171,18 @@ def read_owner_token_file(path: Optional[Path] = None) -> Optional[str]:
         return None
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or is_reparse(info):
+        if (not stat.S_ISREG(info.st_mode) or is_reparse(info)
+                or same_file_entry(info) != same_file_entry(entry)):
             _refuse_unsafe(target, "is not a private regular file")
-        if info.st_mode & 0o077:
+        # POSIX MODE BITS ARE PRIVACY EVIDENCE ONLY WHERE THEY EXIST. On Windows `st_mode` is
+        # synthesized from the read-only attribute alone — 0666 or 0444 for EVERY file, whatever
+        # its ACL — so this test refused the very token `_mint_owner_token` had just written: the
+        # second `looplab ui` on a shared origin could never start, and `looplab tui` could never
+        # read the credential (measured on the Windows CI leg, GitHub Actions run 35785582444:
+        # every shared-origin test an `EnvironmentRefusal` "mode 0666"). A test that refuses every
+        # file discriminates nothing. There the file's privacy is the ACL of the profile directory
+        # `owner_token_path()` puts it under, which is private to its user by default.
+        if os.name != "nt" and info.st_mode & 0o077:
             _refuse_unsafe(target, f"is readable by others (mode {info.st_mode & 0o777:04o})")
         raw = os.read(fd, 4096)
     finally:
