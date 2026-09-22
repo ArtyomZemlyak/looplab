@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import anyio
@@ -113,6 +114,15 @@ def _fake_dolos(bin_dir: Path, *, similarity: str = "0.73", fail: bool = False):
         f"    w.writerow(['0', '0', '1', '{similarity}'])\n"
         "    w.writerow(['1', '1', '2', '0.99'])\n"     # kernel-vs-kernel: not the question
         "    w.writerow(['2', '0', '2', '0.10'])\n")
+    if os.name == "nt":
+        # No shebang exec on Windows, and `shutil.which` finds only a PATHEXT name there -- the real
+        # CLI is npm's `dolos.cmd` shim. The extensionless script read as "not on PATH" (CI run
+        # 35785582444), so there the double is a `.cmd` running the same body under this interpreter.
+        impl = bin_dir / "dolos_impl.py"
+        impl.write_text("import sys\nsys.exit(3)\n" if fail else body, encoding="utf-8")
+        shim = bin_dir / "dolos.cmd"
+        shim.write_text(f'@"{sys.executable}" "{impl}" %*\n', encoding="utf-8")   # text mode: CRLF
+        return shim
     script.write_text(body, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return script

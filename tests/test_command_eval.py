@@ -837,9 +837,16 @@ def _subject_chain(tmp_path, last: dict) -> list:
 
 def _docker_wrap_without_rebind():
     """A wrap that CLAIMS to be docker and cannot carry a declared env — the `env_unsupported`
-    refusal, exactly as `tests/test_stage_environment.py` drives it."""
+    refusal, exactly as `tests/test_stage_environment.py` drives it.
+
+    A docker wrap earns the in-container `timeout -k 5 <secs>` prefix, which a real container runs
+    with its OWN coreutils. This double runs the argv on the HOST, and on Windows the host's
+    `timeout` is `timeout.exe`, a different program: the `train` stage died before the scorer was
+    reached (Windows CI run 35785582444). So the double consumes that prefix, as the container
+    would."""
     def old_wrap(argv, host_cwd):
-        return list(argv)
+        argv = list(argv)
+        return argv[4:] if argv[:2] == ["timeout", "-k"] else argv
     old_wrap._docker = True
     return old_wrap
 

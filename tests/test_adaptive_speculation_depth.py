@@ -459,9 +459,12 @@ def test_the_launch_flag_only_binds_on_the_literal_the_writer_emits(tmp_path):
     from looplab.events.replay import fold
     from looplab.events.eventstore import EventStore
 
-    for value, expected in ((True, True), (False, False), (1, False), ("true", False),
-                            ("", False), (None, False), (_MISSING := object(), False)):
-        run_dir = tmp_path / f"flag-{str(value)[:12]}-{expected}"
+    for index, (value, expected) in enumerate(((True, True), (False, False), (1, False),
+                                               ("true", False), ("", False), (None, False),
+                                               (_MISSING := object(), False))):
+        # Named by POSITION: `str(object())` starts "<object", and "<" is not a legal Windows file
+        # name character (CI run 35785582444: WinError 123 on `flag-<object obje-False`).
+        run_dir = tmp_path / f"flag-{index}-{expected}"
         _log(run_dir, depth=1, evals=[0.1], builds=[120.0])
         rows = (run_dir / "events.jsonl").read_text().splitlines()
         head = json.loads(rows[0])
