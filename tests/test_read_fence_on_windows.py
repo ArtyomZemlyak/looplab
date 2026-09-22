@@ -193,6 +193,19 @@ def test_a_tampered_fence_is_repaired_over_its_own_hardened_file(tmp_path, monke
     assert not refused
 
 
+def test_a_top_level_directory_on_a_drive_is_as_broad_as_one_on_the_root(monkeypatch):
+    """`_too_broad` counted the drive as a component, so on Windows `C:\\Users` and `C:\\Program Files`
+    -- where a per-user or a system Python lives, the analogue of `/home` and `/usr` -- were two parts
+    and narrow enough to fence. Measured on the CI leg as `/usr` resolving to `D:\\usr`: the probe that
+    `test_dev_probe` requires to refuse ran instead (run 35785582444)."""
+    monkeypatch.setattr(read_fence, "os", _windows_os("C:\\work"))
+    monkeypatch.setenv("USERPROFILE", "C:\\Users\\runner")
+    for broad in ("C:\\", "C:\\Users\\", "C:\\Program Files\\", "D:\\usr\\", "C:\\Users\\runner\\"):
+        assert read_fence._too_broad(broad), broad
+    for narrow in ("D:\\a\\looplab\\", "C:\\src\\repo\\", "C:\\Users\\runner\\repo\\"):
+        assert not read_fence._too_broad(narrow), narrow
+
+
 def test_posix_leaves_the_hardened_file_to_the_replace(tmp_path, monkeypatch):
     """Off Windows nothing is un-hardened: POSIX replaces a 0444 destination as a directory
     operation, which is what `install`'s own comment has always relied on."""

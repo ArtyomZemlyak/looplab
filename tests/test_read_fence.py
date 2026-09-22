@@ -340,10 +340,12 @@ def test_the_two_spellings_of_the_boundary_agree_about_the_declared_mounts(tmp_p
     assert os.path.realpath(str(src)) not in grants
 
 
-@FENCE_POSIX_PATHS
 def test_a_root_too_broad_to_fence_is_dropped_not_accepted():
     """Fencing `$HOME` or `/` would refuse reads the interpreter itself needs, so a run with such an
-    editable is left UNFENCED rather than made unable to start python at all — and it is reported."""
+    editable is left UNFENCED rather than made unable to start python at all — and it is reported.
+
+    Portable since `_too_broad` counts depth below the drive: on Windows `/usr` resolves to a
+    top-level directory of the cwd's drive (`D:\\usr`), as broad there as `/usr` is here."""
     home = os.path.expanduser("~")
     roots, _allow, dropped, _swallowed = read_fence.fence_inputs(
         {"editables": [{"name": ".", "path": home}, {"name": "x", "path": "/"},

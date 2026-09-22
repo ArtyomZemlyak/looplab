@@ -357,8 +357,13 @@ def _too_broad(root: str) -> bool:
     `/`, `/home`, `/home/<user>`, `/usr` — an editable path like `$HOME` is pathological, but the
     failure mode of accepting it is that every python on the box refuses to start, which is a worse
     outcome than an unfenced run. Dropped roots are REPORTED (see `fence_inputs`) rather than
-    silently ignored, so an operator whose whole fence evaporated can see why."""
-    parts = [p for p in root.strip(os.sep).split(os.sep) if p]
+    silently ignored, so an operator whose whole fence evaporated can see why.
+
+    The depth is counted BELOW the drive. Counted with it, a Windows `C:\\Users` or
+    `C:\\Program Files` -- where a per-user or system Python lives -- was two components and
+    "narrow enough", the exact analogue of `/home` and `/usr` that this rule refuses on POSIX
+    (review 2026-09-22; `splitdrive` answers no drive there, so POSIX is unchanged)."""
+    parts = [p for p in os.path.splitdrive(root)[1].strip(os.sep).split(os.sep) if p]
     if len(parts) < 2:
         return True
     home = os.path.realpath(os.path.expanduser("~"))
