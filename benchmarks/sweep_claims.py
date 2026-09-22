@@ -651,6 +651,7 @@ def check_snapshot_refusals(bench: str):
     snapshot: a drive that let the second run WIN the lock would copy 112 MB of bundles into a
     temporary directory, which is how this check was first written and why the wait is a variable.
     """
+    import select
     import shutil
     import subprocess
     import tempfile
@@ -674,14 +675,24 @@ def check_snapshot_refusals(bench: str):
 
         lockfile = store / "snaps" / ".snapshot.lock"
         lockfile.touch()
+        # The holder SAYS when it holds the lock, and the drive waits for that line. Started and
+        # immediately followed by the script, the two raced for `flock`: on a loaded box (a
+        # four-shard local run, 2026-09-22) the script's own `flock -w 3` could win before the
+        # holder's bash had even started, exit 0, and this instrument reported "a held lock exited
+        # 0, not 3" about a script that was right. A holder that never says so is reported as that,
+        # not as the script's fault.
         holder = subprocess.Popen(
-            ["bash", "-c", 'exec 9>"$1"; flock 9; sleep 120', "_", str(lockfile)])
+            ["bash", "-c", 'exec 9>"$1"; flock 9; echo held; sleep 120', "_", str(lockfile)],
+            stdout=subprocess.PIPE, text=True)
+        busy = None
         try:
-            busy = subprocess.run(
-                ["bash", str(script)],
-                env={**os.environ, "SNAPSHOT_DEST": str(store / "snaps"),
-                     "SNAPSHOT_LOCK_WAIT_S": "3"},
-                check=False, capture_output=True, text=True, timeout=180)
+            ready, _w, _x = select.select([holder.stdout], [], [], 60)
+            if ready and holder.stdout.readline().strip() == "held":
+                busy = subprocess.run(
+                    ["bash", str(script)],
+                    env={**os.environ, "SNAPSHOT_DEST": str(store / "snaps"),
+                         "SNAPSHOT_LOCK_WAIT_S": "3"},
+                    check=False, capture_output=True, text=True, timeout=180)
         finally:
             holder.kill()
             holder.wait(timeout=30)
@@ -690,7 +701,9 @@ def check_snapshot_refusals(bench: str):
         bad = []
         if gone.returncode == 0:
             bad.append(f"a vanished destination exited {gone.returncode}")
-        if busy.returncode != 3:
+        if busy is None:
+            bad.append("the lock holder never reported holding the lock, so the busy arm was not driven")
+        elif busy.returncode != 3:
             bad.append(f"a held lock exited {busy.returncode}, not 3")
         if wrote:
             bad.append(f"the refused run still wrote {wrote}")
