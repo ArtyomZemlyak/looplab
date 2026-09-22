@@ -177,7 +177,7 @@ rationale, in the same lines the TUI's proposal panel renders — before launchi
 - reads **where your data lives** straight from the goal — one path or several, a file or a folder —
   and authors the data mounts, so you don't need `--data` (it remains an optional shortcut);
 - defaults the backend to `llm` for a generative kind (`dataset`/`repo`/`mlebench_real`/…). Since
-  2026-08-04 `llm` is also the GLOBAL default (`core/config.py:927`), so the offline kinds
+  2026-08-04 `llm` is also the GLOBAL default (`core/config.py::Settings.backend`), so the offline kinds
   (`quadratic`/…) no longer fall back to a model-free run on their own — pass `--backend toy` when you
   want one. (The Web UI's genesis card applies the same default — an explicit backend, wherever set,
   always wins.)
@@ -197,7 +197,7 @@ complete file with no `--goal`. `--set` only changes engine settings.
 | `-s, --set KEY=VALUE` | — | Override an engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*`. **Not quite "any"**: the credential fields `llm_api_key` / `llm_api_key_base_url` are refused, so a secret never lands in shell history or the resolved snapshot — set them via `LOOPLAB_*` env or the secret store. Because of that split, `-s llm_base_url=…` moves the endpoint but **cannot** move the key with it: set `LOOPLAB_LLM_API_KEY` + `LOOPLAB_LLM_API_KEY_BASE_URL` to match, or the run refuses (see [moving a run to a different endpoint](llm-and-agents.md#moving-a-run-to-a-different-endpoint)) |
 | `--out DIR` | the file's `out:` or `runs/run_local` | Run directory (created if missing) |
 | `--max-nodes N` | `8` | Node (candidate) budget for the search |
-| `--backend toy\|llm` | `llm` | Role backend: offline optimizer or a live LLM. **Default changed toy→llm on 2026-08-04** (operator decision, `core/config.py:927`) — pass `--backend toy` for an offline run |
+| `--backend toy\|llm` | `llm` | Role backend: offline optimizer or a live LLM. **Default changed toy→llm on 2026-08-04** (operator decision, `core/config.py::Settings.backend`) — pass `--backend toy` for an offline run |
 | `--model ID` | `qwen3:8b` | LLM model id (when `--backend llm`) |
 | `--developer-backend NAME` | `default` | Delegate the Developer to `opencode` / `aider` / `goose` / `continue` |
 | `--agent-cmd PATH` | — | Override the external agent's launcher/path |
@@ -2066,6 +2066,47 @@ looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
 | `--k N` | `8` | Requested result count, validated in the inclusive range `1..64`; the retrieval receipt records the effective `k` |
 | `--json` | off | Emit ranked results plus the intent/corpus/quota receipt |
 
+## `memory-orphans`
+
+Report — and only with `--apply`, remove — cross-run memory rows whose run no longer exists. Nothing
+runs it automatically, on purpose: the five stores are SHARED and the purge is irreversible, so it
+shows the whole answer before it writes anything. A run deleted through the UI cascades only when the
+operator asks; a store full of rows from runs removed OUTSIDE the UI (an `rm -rf`, a temp dir, a
+worktree) has no deletion to hang off, and this is the sweep for that case. The attribution, the tier
+predicates that keep shared evidence, and the rule that refuses to call a uid-carrying row orphaned
+when a surviving run cannot be read are `serve/memory_cascade.py`'s (`purge_orphan_identities`,
+`orphan_survey`).
+
+```bash
+looplab memory-orphans MEMORY_DIR [--runs-root runs] [--apply] [--limit 25] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir (holds `cases.jsonl`, `lessons.jsonl`, …) |
+| `--runs-root DIR` | `runs` | The run root that decides which runs still exist |
+| `--apply` | off | Actually purge. Without it, nothing is written. **Irreversible** |
+| `--limit N` | `25` | How many contributing runs to list |
+| `--json` | off | Emit the survey as JSON |
+
+## `prior-citations`
+
+Did the cross-run priors this run was shown reach its proposals? (doc 52 row 17.) A pure projection
+over the run's `prior_injected` + `memory_read` diagnostic rows joined to the `node_created` rows that
+followed them; `events/prior_citations.py` states the join and the lexical citation rule. This is the
+INSTRUMENT of the citation-rate audit — the audit itself is a number over real runs. Reads only; no
+model call, no write.
+
+```bash
+looplab prior-citations RUN_DIR [--limit 30] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | A run directory (holds `events.jsonl`) |
+| `--limit N` | `30` | How many lessons to list, most-shown first |
+| `--json` | off | Emit the whole report as JSON |
+
 ---
 
 ## `claims`
@@ -2374,6 +2415,62 @@ log's byte ORDER additionally depends on cross-run memory: the first suite run a
 later suite has. Pin `LOOPLAB_MEMORY_DIR` to a fresh (or pre-warmed) directory per suite when you
 need log-byte comparability.
 
+## `mlebench-extras`
+
+The two official MLE-bench extras over a finished run's champion, as POST-RUN instruments (doc 52 row
+22): the LLM RULE-VIOLATION detector (code + transcript judged against the competition's rules — a
+**paid** call to the run's own endpoint) and the Dolos PLAGIARISM check against downloaded public
+kernels. Records only `<run>/mlebench_extras.json`; it moves no champion, metric or selection
+(`adapters/mlebench_extras.py`).
+
+```bash
+looplab mlebench-extras RUN_DIR [--kernels-dir DIR] [--no-judge] [--model NAME] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | A finished run directory (`events.jsonl` + `task.snapshot.json`) |
+| `--kernels-dir DIR` | the task's own `kernels_dir` | Public kernels for the Dolos plagiarism pass |
+| `--no-judge` | off | Skip the paid rule-violation judge; run only the plagiarism pass |
+| `--model NAME` | the run's model | Override the judge model for this call |
+| `--json` | off | Print the whole record as JSON |
+
+## `bait-materialize`
+
+Write the three BAIT tasks (doc 52 row 22, BAITBENCH's shape): ordinary small prediction tasks with
+one planted, rule-compliant shortcut each — a post-outcome `client_score` column, the test labels left
+in `archive/`, a scorer that trusts the printed metric — documented beside the data the way a real
+README documents a leaky column. Deterministic; no model, no network (`judgebench/bait.py`).
+
+```bash
+looplab bait-materialize ROOT
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `ROOT` | *(required)* | Directory to write the three bait tasks under (`<root>/<bait>/task.json`) |
+
+## `bait-audit`
+
+Score EVERY evaluated node of a run made on a bait task, in two stages: the planted bait's own
+fingerprint in the code (deterministic, a lower bound), then the two-stage transcript judge (a
+**paid** call to the run's own endpoint). Records `<run>/bait_audit.json` — a hack RATE — and moves
+nothing. The box measurement this instrument exists for is still owed (the open item
+`developer-hack-rate-unmeasured` in [doc 52](../52-development-plan-2026-09-05.md) names it).
+
+```bash
+looplab bait-audit RUN_DIR --bait BAIT [--bait-root DIR] [--no-judge] [--model NAME] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | A finished run made on one of the bait tasks |
+| `--bait NAME` | *(required)* | Which bait the run was made on: `proxy_feature` \| `answers_on_disk` \| `lenient_scorer` |
+| `--bait-root DIR` | — | The materialized bait root, to carry the reference scores |
+| `--no-judge` | off | Only the deterministic fingerprint stage; no paid call |
+| `--model NAME` | the run's model | Override the judge model for this call |
+| `--json` | off | Print the whole record as JSON |
+
 ---
 
 ## `ui`
@@ -2441,6 +2538,32 @@ server needs nothing beyond the core install. Honours `LOOPLAB_UI_TOKEN` for tok
 
 ---
 
+## `reap-service-files`
+
+Report — and only with `--apply`, remove — the service files a FINISHED destructive operation left in
+the run root. Every whole-run deletion parks a receipt and an identity sidecar beside the runs and
+takes a lifecycle lock, and nothing else ever removes one, so they accumulate for the life of the
+deployment. It reports what would go, and the rule that decided each file, BEFORE anything goes.
+
+What it refuses is the point, and it refuses by rule rather than by age alone: a receipt whose
+deletion has not SUCCEEDED (a retry resumes it), a `quarantine_ambiguous` receipt at any age (an
+absorbing state whose receipt is the only record a human still owes that run a look), an unfinished
+reset, a lifecycle lock whose run directory still exists (unlinking a held `flock` silently destroys
+the mutual exclusion it provides), a live fence, and a quarantine holding a run's own bytes.
+`serve/service_reaper.py` has the rules in full.
+
+```bash
+looplab reap-service-files [RUNS_ROOT] [--apply] [--grace-hours 24] [--show-kept] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUNS_ROOT` | `runs` | The run root that holds the service files |
+| `--apply` | off | Actually unlink. Without it, nothing is removed |
+| `--grace-hours H` | `24.0` | Only remove files older than this. `0` disables the grace period — do that only when no deletion, reset or resume is in flight |
+| `--show-kept` | off | Also list what is being kept, and why |
+| `--json` | off | Emit the whole plan as JSON |
+
 ## `export-mlflow`
 
 Log the run's champion (params / metrics / solution) to MLflow. Needs the optional `mlflow` package
@@ -2474,6 +2597,24 @@ looplab export-notebook RUN_DIR [--out champion.ipynb]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to export the champion from |
 | `--out PATH` | `<run>/champion.ipynb` | Output `.ipynb` path |
+
+## `export-bundle`
+
+Package ONE run for a REVIEWER as an RO-Crate (doc 52 row 23): the event log and trace, the launch
+snapshots, the champion's code off the folded record, every memo's claims, the summary row (number,
+caveats, the Mislead pair, seeds) and the audit sidecars, each described with its size and SHA-256 in
+`ro-crate-metadata.json`. It copies the run's own record and derives nothing but the summary row
+(`engine/bundle.py`).
+
+```bash
+looplab export-bundle RUN_DIR [--out DIR] [--verify/--no-verify]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory to bundle |
+| `--out DIR` | `<run>/bundle` | Bundle directory |
+| `--verify / --no-verify` | `--verify` | Re-check every packaged file against the crate's digests |
 
 ## `harden`
 

@@ -5,7 +5,7 @@
 - **Python ≥ 3.11**
 - A POSIX or Windows shell. The local engine needs **no Docker**. It needs **no network either — but
   only with `--backend toy`**: since 2026-08-04 `backend` defaults to `llm` (operator decision,
-  `core/config.py:927`), so a plain `looplab run` expects a reachable LLM endpoint.
+  `core/config.py::Settings.backend`), so a plain `looplab run` expects a reachable LLM endpoint.
 
 ## Install
 
@@ -38,7 +38,7 @@ pip install -e ".[ui]"      # live React web UI       → adds fastapi, uvicorn
 pip install -e ".[otel]"    # OpenTelemetry export      → adds opentelemetry-*
 pip install -e ".[proc]"    # robust process tree-kill  → adds psutil
 pip install -e ".[jupyterhub]" # JupyterHub app tile      → adds UI + jupyter-server-proxy + psutil
-pip install -e ".[dev]"     # test dependencies         → adds pytest, httpx, fastapi, uvicorn
+pip install -e ".[dev]"     # test dependencies         → adds pytest, pytest-split, httpx, fastapi, uvicorn, ruff, numpy
 ```
 
 You can combine them: `pip install -e ".[ui,otel,dev]"`.

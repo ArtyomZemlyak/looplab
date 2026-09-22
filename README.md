@@ -3,7 +3,7 @@
 > An autonomous ML/DS research engine. Give it a goal; it **invents → implements → tests → improves** candidate solutions in a loop and returns the best *verified* result.
 
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-8.9k-brightgreen.svg)](#testing)
+[![Tests](https://github.com/ArtyomZemlyak/looplab/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/ArtyomZemlyak/looplab/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 [![Docs](https://img.shields.io/badge/docs-mkdocs--material-0f9c8c.svg)](https://artyomzemlyak.github.io/looplab/)
 
@@ -273,11 +273,14 @@ Design records (the *why* behind the architecture) are in [`docs/00-INDEX.md`](d
 ## Testing
 
 ```bash
-python -m pytest -q          # 8,900+ collected tests, fully offline, a few minutes
+python -m pytest                          # ~17,000 collected tests, fully offline, ~40 min in one process
+python -m pytest --splits 4 --group 1     # one of the four shards CI runs in parallel (pytest-split)
 ```
 
 Live-LLM and external-agent tests auto-skip when no endpoint/agent is configured, so the suite runs
-fully offline.
+fully offline. CI runs the four Linux shards, the UI suite and a packaging check on every push
+(`.github/workflows/tests.yml`, the badge above), and the Windows leg as its own workflow
+(`tests-windows.yml`).
 
 ## License
 
