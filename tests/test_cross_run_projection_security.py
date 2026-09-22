@@ -163,14 +163,12 @@ def test_all_cross_run_prompt_pushes_share_the_redaction_contract(tmp_path):
 
     class _ProposalHost(ProposalCuesMixin):
         _cross_run_advisory = True
-        _cross_run_structured_claims = True
 
         def __init__(self):
             self.memory_dir = str(tmp_path)
 
     class _StrategyHost(StrategyCadenceMixin):
         _cross_run_advisory = True
-        _cross_run_structured_claims = True
 
         def __init__(self):
             self.memory_dir = str(tmp_path)

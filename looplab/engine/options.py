@@ -331,7 +331,9 @@ class EngineOptions:
     cross_run_concepts: bool = False     # PART IV CR Step 2: surface prior-run concept outcomes (audit-only)
     concept_run_base: bool = False        # PART V B: run-base + node-delta concept authoring (opt-in)
     cross_run_advisory: bool = False     # PART IV CR Step 5: fold the cross-run context pack into the prompt
-    cross_run_structured_claims: bool = True  # PART IV CR §21.20.13: scope+polarity-safe structured claim key
+    # (The structured-claims knob LEFT this bundle on 2026-09-22 — review ENG3-08, doc 25 EM-06: its
+    # only readers passed an inert `structured=` keyword that selects nothing since the lean claim
+    # projection was deleted. The Settings field outlives it until the calibration digest moves.)
     cross_run_curation: bool = False     # PART IV §22.4: agentic taxonomy steward proposes merge/split/purge
     task_facets_finalize: bool = False   # opt-in paid facet steward; no live behavior consumer yet
     cross_run_curation_auto: bool = False  # deprecated/inert: old snapshots validate; proposals never auto-apply

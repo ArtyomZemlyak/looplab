@@ -1090,10 +1090,11 @@ class ProposalCuesMixin:
                     splits=governance["splits"])
             else:
                 overview, concept_rows = None, None
-            # lessons + D8 claims + operator decisions; structured claim key when enabled (§21.20.13).
+            # lessons + D8 claims + operator decisions, under the ONE (structured, §21.20.13) claim
+            # identity. No `structured=`: the knob that relayed it here was inert and is gone
+            # (review 2026-09-22, ENG3-08).
             claims = claims_for_memory(base, lessons=lessons, research_claims=research,
-                                       decisions=governance["decisions"],
-                                       structured=getattr(self, "_cross_run_structured_claims", False))
+                                       decisions=governance["decisions"])
             claim_source = getattr(claims, "claim_source", {})
             if (not lessons and not overview and not research
                     and concept_scope["scope_complete"]

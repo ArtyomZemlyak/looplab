@@ -165,7 +165,6 @@ ATTR_BY_FIELD = {
     "cross_run_concepts": "_cross_run_concepts",
     "concept_run_base": "_concept_run_base",
     "cross_run_advisory": "_cross_run_advisory",
-    "cross_run_structured_claims": "_cross_run_structured_claims",
     "cross_run_curation": "_cross_run_curation",
     "task_facets_finalize": "_task_facets_finalize",
     "cross_run_curation_auto": "_cross_run_curation_auto",
@@ -202,6 +201,22 @@ def test_every_engine_options_field_is_covered():
     """The attribute map + digest_char_cap must cover EngineOptions exactly, so a new field can't
     silently dodge the differential comparison below."""
     assert set(ATTR_BY_FIELD) | {"digest_char_cap"} == set(EngineOptions.__dataclass_fields__)
+
+
+def test_the_inert_structured_claims_knob_no_longer_reaches_the_engine(tmp_path):
+    """Review 2026-09-22, ENG3-08 (doc 25 EM-06, phase 1). `cross_run_structured_claims` was
+    relayed Settings -> EngineOptions -> an Engine attribute -> `structured=` on two claim
+    projections that ignore it: a live knob naming a projection deleted on 2026-09-08. The relay is
+    gone. The Settings field still PARSES — an old snapshot pins it False and `LOOPLAB_*` env may
+    set it — and is simply not read; it leaves with the calibration digest in phase 2."""
+    import pytest
+
+    assert "cross_run_structured_claims" not in EngineOptions.__dataclass_fields__
+    with pytest.raises(TypeError, match="cross_run_structured_claims"):
+        _mk_engine(tmp_path / "r", cross_run_structured_claims=True)
+    pinned = Settings(cross_run_structured_claims=False)          # a pre-field snapshot's pin
+    assert EngineOptions.from_settings(pinned) == EngineOptions.from_settings(Settings())
+    assert not hasattr(_mk_engine(tmp_path / "r2"), "_cross_run_structured_claims")
 
 
 def test_task_facets_finalize_is_fresh_default_off_and_maps_explicit_opt_in():
@@ -353,7 +368,6 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         graded_novelty=settings.graded_novelty,
         cross_run_concepts=settings.cross_run_concepts,
         concept_run_base=settings.concept_run_base,
-        cross_run_structured_claims=settings.cross_run_structured_claims,
         cross_run_curation=settings.cross_run_curation,
         task_facets_finalize=settings.task_facets_finalize,
         cross_run_advisory=settings.cross_run_advisory,

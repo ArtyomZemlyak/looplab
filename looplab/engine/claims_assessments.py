@@ -329,14 +329,15 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     #
     # WHY THE KEYWORD SURVIVES THE PATH IT SELECTED. `fuzzy=` was deleted outright, because a
     # silently-accepted `fuzzy=True` would have read as "paraphrases still merge". `structured=`
-    # cannot follow it yet: `EngineOptions.cross_run_structured_claims` reaches
-    # `claim_context_pack` through `engine/proposal_cues.py` and `engine/strategy.py`, and
-    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins that field False — so a RESUMED pre-field run still
-    # passes `structured=False`, and refusing it would abort that run over a read-model preference.
-    # Accepting it is safe only because both values now name the SAME projection. Removing the
-    # keyword is what is left of EM-06, and it is a Settings-field retirement (config, options, the
-    # settings catalogue, `serve/routers/cross_run.py`, `tools/cross_run_tools.py`), not a claims
-    # change.
+    # cannot follow it yet. Its ENGINE relay is gone (review 2026-09-22, ENG3-08): the
+    # `EngineOptions` field that carried the pinned-False Settings value into
+    # `engine/proposal_cues.py` and `engine/strategy.py` was deleted, so no run passes `False` any
+    # more. What still passes the keyword — always `True` — is `serve/routers/cross_run.py` (the
+    # atlas and claims routes), `tools/cross_run_tools.py`, `engine/curation_protocol.py`, the CLI
+    # `claims --structured` flag and ~60 test call sites; refusing it would break those, and
+    # accepting it is safe only because every value names the SAME projection. Removing the keyword
+    # is what is left of EM-06, beside the Settings-field retirement (config, the calibration digest,
+    # the settings catalogue) — not a claims change.
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
     research_source = _research_source_summary(research_claims)

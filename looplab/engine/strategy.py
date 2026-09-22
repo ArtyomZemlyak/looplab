@@ -197,12 +197,13 @@ class StrategyCadenceMixin:
             capsule_source = capsule_source_summary(caps)
             # Use the same scope+polarity-safe projection as the Researcher advisory while
             # retaining the already-filtered, current-run-excluding snapshot used for the audit receipt.
+            # No `structured=`: the knob that relayed it here was inert and is gone (review
+            # 2026-09-22, ENG3-08) — there is ONE claim identity, and every value projected it.
             a = atlas_for_memory(
                 base,
                 lessons=lessons,
                 capsules=caps,
                 research_claims=research,
-                structured=getattr(self, "_cross_run_structured_claims", False),
                 _governance=_governance,
             )
             claim_source = safe_claim_source_summary(a.get("claim_source"))

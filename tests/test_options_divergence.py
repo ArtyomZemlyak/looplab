@@ -127,7 +127,8 @@ EXPECTED = {
     # paid work and admits no proposal, it only chooses which claim IDENTITY a read-only projection
     # groups by, and the durable governance write path has always used the structured one. A bare
     # `Engine(...)` on the lean default therefore read a projection its own decision writer could
-    # not have produced. Do not re-add it here without re-reading that finding.
+    # not have produced. Do not re-add it here without re-reading that finding. On 2026-09-22 it
+    # left `EngineOptions` altogether (review ENG3-08): the knob it relayed selected nothing.
     "cross_run_curation": (True, False),
     "cross_run_advisory": (True, False),
     "cross_run_read_tools": (True, False),

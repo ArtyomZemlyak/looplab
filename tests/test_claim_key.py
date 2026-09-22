@@ -176,8 +176,9 @@ def test_there_is_one_projection_and_the_retired_keyword_cannot_select_another()
     assert sorted(c["scope"] for c in default) == ["A", "B"]
     assert len({c["claim_uid"] for c in default}) == 2, "the default projection carries no scope-precise uid"
 
-    # The keyword survives only because `EngineOptions.cross_run_structured_claims` still reaches
-    # here through `proposal_cues`/`strategy` and `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins it False.
+    # The keyword survives its ENGINE relay (the `EngineOptions` field that carried the pinned-False
+    # Settings value through `proposal_cues`/`strategy` left on 2026-09-22, review ENG3-08) because
+    # `serve/routers/cross_run.py`, `tools/cross_run_tools.py`, the CLI and the suite still pass it.
     # Accepting it is safe ONLY while both values name the same projection, which is what this drives.
     assert claim_assessments(across_tasks, structured=False) == default, (
         "`structured=False` produced a different projection — the lean read path is back, or the "

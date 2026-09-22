@@ -2320,7 +2320,11 @@ guard (4 failures) and by narrowing the storage-fault translation to `TimeoutErr
 
 #### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-09-08)**
 
-> **OPEN[structured-claim-identity-not-default]** the lean read path and `_scoped_key` are DELETED and there is ONE claim identity, resolved once; what remains is the RETIRED `structured=` keyword itself — accepted and inert on five projection signatures, yet still passed `False` by a resumed pre-field run through `Settings.cross_run_structured_claims` and `EngineOptions.cross_run_structured_claims` (`engine/strategy.py`, `engine/proposal_cues.py`), so a live knob names a projection that no longer exists. proof:present:cross_run_structured_claims@looplab/engine/options.py
+> *Closed 2026-09-22 (review ENG3-08, phase 1): the ENGINE relay of the retired knob is gone — the `EngineOptions` field, the orchestrator attribute and the two `getattr` sites in `engine/strategy.py` / `engine/proposal_cues.py` — so no run passes `structured=False` any more; what is left is tracked by the two items below.*
+>
+> **OPEN[structured-claims-keyword-retirement]** the RETIRED `structured=` keyword is still accepted and inert on seven projection signatures (`claims_assessments.claim_assessments`, `claims.claims_for_memory` / `atlas_for_memory`, `claims_retrieval.cross_run_retrieve` / `portfolio_atlas`, `claim_steward.claim_curation_snapshot` / `steward_claims`), because `serve/routers/cross_run.py` (the atlas and claims routes), `tools/cross_run_tools.py`, `engine/curation_protocol.py`, the CLI `claims --structured` flag and ~60 test call sites still pass `True`; deleting it moves all of them in one change. proof:`present:structured: bool = True@looplab/engine/claims_assessments.py`
+>
+> **OPEN[structured-claims-setting-retirement]** `Settings.cross_run_structured_claims` still parses and is read by nothing; deleting it (and its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, calibration-profile row, catalogue row and counts) moves `SPECULATION_CALIBRATION_PROFILE_DIGEST` and revokes issued calibration receipts (ENG3-08 phase 2). proof:present:cross_run_structured_claims@looplab/core/config.py
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**
 
@@ -2444,6 +2448,12 @@ it is a Settings-field retirement (config, options, the settings catalogue and i
 `serve/routers/cross_run.py`, `tools/cross_run_tools.py`, `docs/guide/configuration.md`), not a
 claims change, which is why it did not travel with this one. The identity table at
 `claim_assessments` now lists ONE identity and `tests/test_claim_key.py` counts it.
+
+*Update 2026-09-22 (review ENG3-08, phase 1):* the `EngineOptions` relay named above is deleted —
+nothing on the engine path passes `structured=` any more, so the resumed-pre-field-run argument no
+longer holds the keyword; what holds it now is the list of `True`-passing callers in the
+`structured-claims-keyword-retirement` item at the top of this finding, and the Settings field is
+the `structured-claims-setting-retirement` item beside it.
 
 #### EM-07 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
