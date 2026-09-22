@@ -108,7 +108,7 @@ def test_the_pool_admits_every_lane_that_can_be_in_flight_at_once():
     assert _PROPOSAL_THREADS >= 2, (
         f"{_PROPOSAL_THREADS} tokens cannot admit the create-path lane and the speculative raw "
         "stage at the same time — the fix would deadlock the thing it was written to unblock")
-    spec = (ROOT / "looplab/engine/speculation.py").read_text()
+    spec = (ROOT / "looplab/engine/speculation.py").read_text(encoding="utf-8")
     assert "_spec_raw_stage_inflight" in spec, (
         "the raw stage's one-at-a-time bound is what makes 2 the floor; if it is gone, re-derive "
         "the size instead of trusting this number")
@@ -129,7 +129,7 @@ def test_every_offloaded_proposal_passes_the_limiter():
     offenders = []
     for target, rel in PROPOSAL_TARGETS.items():
         path = ROOT / rel
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         found = False
         for call in _offload_calls(tree):
             name = _partial_target(call)
@@ -154,7 +154,7 @@ def test_the_lane_set_still_matches_the_sink_installers():
     """
     installers = set()
     for path in (ROOT / "looplab/engine").glob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if (isinstance(node, ast.Call)
                     and getattr(node.func, "attr", None) == "_capture_proposal_events"):
                 installers.add(f"looplab/engine/{path.name}")
@@ -233,7 +233,7 @@ def test_the_isolated_producer_forwards_its_callers_limiter():
     # `novelty.card_build_limiter` for why a fifth consumer on the proposal pool would make that
     # pool's own derivation false). Found by this assertion on the day it was written:
     # `_produce_card_build` offloaded a PAID Developer session onto anyio's default.
-    tree = ast.parse((ROOT / "looplab/engine/speculation.py").read_text())
+    tree = ast.parse((ROOT / "looplab/engine/speculation.py").read_text(encoding="utf-8"))
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
              and getattr(n.func, "attr", None) == "_run_isolated_producer"]
     assert calls, "no `_run_isolated_producer` call found — re-point this rule"

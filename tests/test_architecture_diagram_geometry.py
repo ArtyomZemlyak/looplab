@@ -97,7 +97,11 @@ def _boxes() -> dict[str, dict]:
     const B = new Function(shim + lines.slice(0, cut).join('\\n') + '\\n; return B;')();
     process.stdout.write(JSON.stringify(B));
     """
-    out = subprocess.run([node, "-e", script, str(DIAGRAM)], capture_output=True, text=True)
+    # UTF-8, not the locale codec: the block map's labels hold a closing quote (U+201D, whose UTF-8
+    # ends in 0x9D, a byte cp1252 leaves undefined), so on Windows the decode of node's stdout died
+    # in the reader thread and left `stdout` None (CI run 35785582444).
+    out = subprocess.run([node, "-e", script, str(DIAGRAM)], capture_output=True, text=True,
+                         encoding="utf-8")
     assert out.returncode == 0, f"the diagram's geometry did not evaluate:\n{out.stderr[-2000:]}"
     return json.loads(out.stdout)
 

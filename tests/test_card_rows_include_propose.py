@@ -111,7 +111,7 @@ def test_the_shipped_claims_no_longer_say_BUILD_only():
         "the comment's old claim that every propose generation is unattributable")
 
     guide = pathlib.Path(__file__).resolve().parents[1] / "docs" / "guide" / "cli-reference.md"
-    text = guide.read_text()
+    text = guide.read_text(encoding="utf-8")
     assert "is where every `propose` generation belongs by construction" not in text
     # Pinned on a phrase that does not cross the guide's line wrap — the first cut looked for
     # "prices the whole experiment", which the file breaks across two lines, so the assertion failed

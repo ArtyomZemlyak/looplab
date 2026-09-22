@@ -351,7 +351,8 @@ def test_the_package_map_names_each_package_exactly_once():
     recorded in the backlog), and it is not meant to: this asserts the one property whose violation
     is undetectable by reading, since both copies look correct in isolation.
     """
-    rows = re.findall(r"^\| (`looplab/[^`]*`) \|", (ROOT / "CLAUDE.md").read_text(), re.M)
+    rows = re.findall(r"^\| (`looplab/[^`]*`) \|", (ROOT / "CLAUDE.md").read_text(encoding="utf-8"),
+                      re.M)
     assert rows, "the package map has no `looplab/...` rows — the table moved or its shape changed"
     duplicated = sorted(name for name, n in Counter(rows).items() if n > 1)
     assert not duplicated, (
