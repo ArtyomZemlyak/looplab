@@ -36,6 +36,9 @@ from looplab.core.redact import redact_secrets
 # The result FENCE is `core/evidence.py`'s (doc 52 row 13); re-exported under the names this
 # module's callers and tests import, so both spellings name the SAME objects.
 from looplab.core.evidence import fence_untrusted  # noqa: F401
+# ...and the label + re-derivation `_cap_tool_result` uses to cut a self-fenced result on its
+# interior (review 2026-09-22, TAT-03).
+from looplab.core.evidence import EVIDENCE_LABEL, is_fenced
 # The typed options bundle (doc 25 AG-01). Re-exported here — and, through `agents/agent.py`, under
 # every historical spelling — because `loop_opts_from_settings` lives in THIS module and now returns
 # one: a caller that imports the factory must be able to name its type from the same place.
@@ -489,9 +492,25 @@ def _cap_tool_result(result: str, cap: int = RESULT_CAP) -> str:
     truncates — so the model KNOWS the reply is partial and can re-request a narrower range instead
     of trusting a silently amputated page. Idempotent: an already-capped string passes through, so
     the loop can apply it as a final belt-and-braces bound too. The tiny fixed-point loop settles the
-    marker's own length (the omitted-count digits shift the split by a char or two)."""
+    marker's own length (the omitted-count digits shift the split by a char or two).
+
+    FENCE-AWARE (review 2026-09-22, TAT-03). A result that arrives ALREADY fenced — a tool that
+    stamps its own (`tools/web.py`, `tools/literature.py` with the envelope on) — is cut on its
+    INTERIOR and re-fenced, so the cut can never take the closing marker. It did: a fetched page is
+    `max_bytes` (4,000) of text plus the fence, 4,051 characters, and the tail cut landed exactly on
+    `END UNTRUSTED_RUN_EVIDENCE` — an opened, never-closed block on nearly every real page, which
+    `core/evidence.py::fence_untrusted` promises cannot happen. Only fenced results take this
+    branch, i.e. only envelope-on runs. The truncation note rides INSIDE the block: it is a fact
+    about the evidence, and outside it would leave the text unterminated-looking to `is_fenced`.
+    A cap too small to hold the fence and a note falls through to the plain cut, as before."""
     if len(result) <= cap:
         return result
+    if is_fenced(result, EVIDENCE_LABEL):
+        head, tail = f"{EVIDENCE_LABEL}\n", f"\nEND {EVIDENCE_LABEL}"
+        room = cap - len(head) - len(tail)
+        if room > 2 * len(_TRUNC_NOTE):
+            return fence_untrusted(_cap_tool_result(result[len(head):-len(tail)], room),
+                                   EVIDENCE_LABEL)
     keep = cap
     while True:
         note = _TRUNC_NOTE.format(n=len(result) - keep)
