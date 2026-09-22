@@ -58,7 +58,7 @@ from looplab.serve.control_validation import (
 from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
-    _spawn_engine)
+    _spawn_engine, child_exited)
 from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES
@@ -122,16 +122,46 @@ def _normalize_expected_generation(value: object) -> str:
     return value.lower()
 
 
+def _proc_stat_state(pid: int) -> Optional[str]:
+    """The one-letter kernel state `/proc/<pid>/stat` reports, or None where it cannot be read."""
+    if os.name == "nt":
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+    except OSError:
+        return None
+    # `comm` (field 2) is parenthesized and may itself contain ")" or spaces: split after the LAST
+    # one, exactly as `_process_identity` does for its start-time field.
+    fields = raw.rpartition(b")")[2].split()
+    return fields[0].decode("ascii", "replace") if fields else None
+
+
+# The states in which a pid still names a process table entry but no longer a running process: `Z`
+# (zombie: exited, not yet reaped by its parent) and `X`/`x` (dead, being torn down).
+_DEAD_PROC_STATES = frozenset({"Z", "X", "x"})
+
+
 def _process_alive(pid: Optional[int]) -> Optional[bool]:
     """Return True/False only when process liveness is known; None means fail-closed unknown.
 
     Spawn leases use this after their observation deadline. A timeout is not evidence that a cold
     detached child died: clearing its lease could launch a second engine before the first imports
-    enough code to expose ``engine.lock``. ``psutil`` gives the best zombie handling when installed;
-    ``kill(pid, 0)`` is the dependency-free fallback. Permission/platform ambiguity stays unknown.
+    enough code to expose ``engine.lock``. Permission/platform ambiguity stays unknown.
+
+    Asked in order of how exact the answer is (review 2026-09-22, SRV1-01):
+      1. a child THIS server spawned is answered by its own `Popen` (`engine_proc.child_exited`),
+         which also REAPS it — the one rung that works with no psutil and no `/proc`;
+      2. ``psutil`` when installed (it reads zombie status itself);
+      3. without psutil, the kernel's own state letter in `/proc/<pid>/stat`, so a zombie reads as
+         dead — `kill(pid, 0)` alone answers "exists" for one, which is how a pre-lock engine crash
+         wedged its run's spawn claim for as long as the server lived;
+      4. ``kill(pid, 0)``, the dependency-free fallback.
     """
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
+    exited = child_exited(pid)
+    if exited is not None:
+        return not exited
     try:
         import psutil  # optional proc extra
         try:
@@ -145,6 +175,8 @@ def _process_alive(pid: Optional[int]) -> Optional[bool]:
             return None
     except ImportError:
         pass
+    if _proc_stat_state(pid) in _DEAD_PROC_STATES:
+        return False
     try:
         os.kill(pid, 0)
         return True

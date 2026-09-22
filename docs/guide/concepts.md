@@ -421,7 +421,11 @@ rejected before append, so an ignored key cannot be persisted while the command 
 Decision, event append, and driver start are serialized per run. A pre-`Popen` lease covers the gap
 before `engine.lock` appears. If a detached child remains cold past the observation deadline, the
 lease is quarantined until its lock appears or its PID is definitively dead; timeout alone cannot
-authorize a second `Popen`. A different active command returns structured
+authorize a second `Popen`. A child that EXITS before taking the lock is definitively dead at once,
+including without the optional `psutil`: the server keeps the `Popen` of every engine it spawned and
+asks it first (which also reaps the child), and for any other PID it reads the kernel's state letter
+from `/proc/<pid>/stat` before trusting `kill(pid, 0)`, which answers "exists" for a zombie. A
+different active command returns structured
 `409 command_in_progress`; an unresolved identical intent returns `409 retry_existing_command`, which
 lets a reloaded client reattach without confusing one action's result with another. An intent whose
 EFFECT is already gone never blocks either of those: it is reconciled first, and if it is still

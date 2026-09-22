@@ -116,8 +116,20 @@ def _kill_process_tree(pid: int) -> None:
         pass
 
 
-# PIDs of engines THIS server spawned — reaped on shutdown ONLY under JupyterHub (see below).
-_spawned_engine_pids: set[int] = set()
+# The engines THIS server spawned, as their `Popen` OBJECTS keyed by pid — reaped on shutdown ONLY
+# under JupyterHub (see below), and the first thing asked whether one of them is still alive.
+#
+# A bare pid set was all this used to keep, and `_spawn_engine` dropped the `Popen` on return, so
+# nothing in the server ever called `waitpid` on its own child (review 2026-09-22, SRV1-01). Without
+# `psutil` — the default `[ui]` install — an engine that died BEFORE taking `engine.lock` (a refused
+# resume, a missing snapshot, an import error) therefore stayed a ZOMBIE, and the dependency-free
+# liveness fallback `kill(pid, 0)` answers "exists" for a zombie. Its spawn claim never resolved:
+# every command, start, Replay and delete of that run refused `engine_start_uncertain`, and the
+# operator's own `resolve-claim` refused too — until some unrelated `Popen` in the same process
+# happened to reap it through `subprocess._cleanup`. The `Popen` is the one handle that can both
+# ANSWER "has it exited?" and REAP the child in the same call (`poll`), so it is what is kept.
+# Mutated only under `_engine_spawn_gate`, the lock that already orders every Popen against shutdown.
+_spawned_engines: dict[int, subprocess.Popen] = {}
 
 # Serialize process creation against ASGI shutdown/reaping.  A resume timer used to be able to pass
 # its ``shutdown.is_set()`` check, lose the CPU, and Popen *after* the JupyterHub reaper had taken its
@@ -125,6 +137,59 @@ _spawned_engine_pids: set[int] = set()
 # gate, gives the two operations an unambiguous order.  RLock lets `_claim_and_spawn_resume` perform
 # the guarded cancellation check around `_spawn_engine`, which also uses the gate for every spawn.
 _engine_spawn_gate = threading.RLock()
+
+
+def _poll_exited(proc) -> Optional[bool]:
+    """Whether one registered child has exited — reaping it if so — or None for a `Popen` stand-in
+    that cannot say (tests stub `subprocess.Popen` with bare objects)."""
+    poll = getattr(proc, "poll", None)
+    if not callable(poll):
+        return None
+    try:
+        return poll() is not None
+    except OSError:
+        return None
+
+
+def _forget_exited_engines() -> None:
+    """Reap and drop every registered child that has exited. Caller holds `_engine_spawn_gate`.
+
+    Holding the `Popen` is what keeps `subprocess._cleanup` from reaping these children for us (it
+    only sees objects that were garbage-collected while still running), so this sweep takes over
+    that job: without it an engine that exited normally, whose claim nobody asks about again, would
+    stay a zombie for the life of the server."""
+    for pid, proc in list(_spawned_engines.items()):
+        if _poll_exited(proc) is True:
+            _spawned_engines.pop(pid, None)
+
+
+def _register_spawned_engine(proc) -> Optional[int]:
+    """Record one engine child this process created and return its pid (None for a pid-less stub)."""
+    raw_pid = getattr(proc, "pid", None)   # tests may stub Popen without a real integer pid
+    pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else None
+    if pid is not None:
+        with _engine_spawn_gate:
+            _forget_exited_engines()
+            _spawned_engines[pid] = proc
+    return pid
+
+
+def child_exited(pid: object) -> Optional[bool]:
+    """Has the engine child THIS process spawned as `pid` exited? The exact answer, when we hold it.
+
+    True — it exited, and asking REAPED it (so the pid is released to the kernel from here on);
+    False — it is our child and still running; None — `pid` is not a child this process holds, so
+    the caller must ask the OS instead. `run_commands.py::_process_alive` asks this FIRST: for our
+    own child it is the only answer that cannot mistake a zombie for a live process."""
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    with _engine_spawn_gate:
+        proc = _spawned_engines.get(pid)
+        if proc is None:
+            return None
+        exited = _poll_exited(proc)
+        _forget_exited_engines()
+        return exited
 
 
 class EngineSpawnOutcomeUnknown(RuntimeError):
@@ -235,10 +300,7 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
     try:
         with _engine_spawn_gate:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err, **kw)
-            raw_pid = getattr(proc, "pid", None)   # tests may stub Popen without a real integer pid
-            pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else None
-            if pid is not None:
-                _spawned_engine_pids.add(pid)
+            pid = _register_spawned_engine(proc)
     finally:
         if err_f is not None:
             try:
@@ -711,9 +773,16 @@ def _reap_spawned_engines() -> None:
     if not _on_shared_hub():
         return
     with _engine_spawn_gate:
-        for pid in list(_spawned_engine_pids):
+        for pid, proc in list(_spawned_engines.items()):
+            # LIVE children only (review 2026-09-22, SRV1-01). An exited child's pid is the kernel's
+            # to hand to anyone once reaped; only an UNREAPED child's pid is still provably ours, and
+            # `poll` both decides that and reaps. The cmdline guard below stays for the stand-ins
+            # that cannot answer (`_poll_exited` -> None).
+            if _poll_exited(proc) is True:
+                _spawned_engines.pop(pid, None)
+                continue
             _kill_process_tree(pid)
-            _spawned_engine_pids.discard(pid)
+            _spawned_engines.pop(pid, None)
 
 
 def install_reap_hooks(app) -> None:
