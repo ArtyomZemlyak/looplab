@@ -73,6 +73,24 @@ def test_iter_trees_names_the_file_in_a_syntax_error(tmp_path):
     assert "broken.py" in str(info.value.filename)
 
 
+def test_iter_trees_sees_an_edit_between_two_calls(tmp_path):
+    """The parse is memoized per file (review 2026-09-22, TST-04), so the one way it can go wrong is
+    to answer with a tree the file no longer has. The memo revalidates on `(st_mtime_ns, st_size)`
+    at every call: an edit is seen, and an untouched file is served the SAME tree object."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "b.py").write_text("y = 2\n", encoding="utf-8")
+    first = dict(iter_trees(pkg))
+    assert dict(iter_trees(pkg))[pkg / "b.py"] is first[pkg / "b.py"], "an unchanged file re-parsed"
+
+    (pkg / "a.py").write_text("def renamed():\n    return 1\n", encoding="utf-8")
+    second = dict(iter_trees(pkg))
+    names = [n.name for n in ast.walk(second[pkg / "a.py"]) if isinstance(n, ast.FunctionDef)]
+    assert names == ["renamed"], "the memo served a tree the file no longer has"
+    assert second[pkg / "b.py"] is first[pkg / "b.py"]
+
+
 def test_a_subtree_can_be_scanned_on_its_own():
     """Several guards are scoped to one package — `core` imports nothing above itself, `tools` names
     `serve` in exactly one place — so the walk has to take a root."""

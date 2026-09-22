@@ -18,6 +18,7 @@ subset rather than spelling their own, because a registry both of them ignore is
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 
 import pytest
@@ -31,7 +32,11 @@ LOOPLAB = pathlib.Path(__file__).resolve().parents[1] / "looplab"
 _REGISTRY_FILE = LOOPLAB / "core" / "models.py"
 
 
-def _minted_literals() -> set[str]:
+# Cached: the scan is a pure function of the tree and every parametrized case below asks it the
+# same question — seventeen full AST walks of the package made this file cost 66 s (review
+# 2026-09-22, TST-04). A frozenset, so no caller can edit the shared answer.
+@functools.lru_cache(maxsize=None)
+def _minted_literals() -> frozenset[str]:
     """Every string a call site writes AS A TERMINAL `reason`, anywhere in `looplab/`.
 
     NOT "every string constant in the package", which is what this was and which made the guard
@@ -112,7 +117,7 @@ def _minted_literals() -> set[str]:
                 for kw in node.keywords:
                     if kw.arg and kw.arg.endswith("reason"):
                         found |= _strings(kw.value)
-    return found
+    return frozenset(found)
 
 
 def test_the_scan_is_not_vacuous():

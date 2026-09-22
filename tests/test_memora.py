@@ -237,26 +237,41 @@ def test_case_library_retain_if_improved_still_works_harmonic():
     assert hit.payload["metric"] == 0.2 and hit.payload["anchors"]  # harmonic keys present
 
 
-def test_abstraction_cache_is_bounded(tmp_path):
+def test_abstraction_cache_is_bounded(tmp_path, monkeypatch):
     """The abstraction cache is loaded whole into RAM and re-serialized IN FULL on every miss.
 
     Unbounded, that is unbounded memory plus quadratic cumulative I/O over a long-lived shared memory
     corpus — each new note rewrites every entry that came before it. Evicting oldest-first bounds
     both; an evicted key simply re-abstracts, which this class already treats as an ordinary perf
     miss. (A compacted on-disk KV is the real fix and stays a separate change; this stops the growth.)
-    """
-    from looplab.tools.memora import _MAX_ABSTRACTION_CACHE, Abstraction, CachedAbstractor
 
+    The bound is driven at a cap of 20, not the shipped 5,000: `_evict` reads the module constant at
+    call time, and the property is the eviction ORDER and the trim-on-load, not the number. At the
+    real cap this test made 5,025 fsync'd full rewrites — the quadratic I/O it guards against — and
+    was the slowest test in the suite at 116 s (review 2026-09-22, TST-04).
+    """
+    import json
+
+    from looplab.tools import memora
+    from looplab.tools.memora import Abstraction, CachedAbstractor
+
+    cap = 20
+    monkeypatch.setattr(memora, "_MAX_ABSTRACTION_CACHE", cap)
     c = CachedAbstractor(lambda t: Abstraction(t, []), path=str(tmp_path / "abs.json"))
-    for i in range(_MAX_ABSTRACTION_CACHE + 25):
+    for i in range(cap + 25):
         c(f"note {i}")
-    assert len(c._cache) == _MAX_ABSTRACTION_CACHE
-    assert c._key(f"note {_MAX_ABSTRACTION_CACHE + 24}") in c._cache, "the newest entry was evicted"
+    assert len(c._cache) == cap
+    assert c._key(f"note {cap + 24}") in c._cache, "the newest entry was evicted"
     assert c._key("note 0") not in c._cache, "eviction must drop the OLDEST entries first"
 
-    # an over-large cache persisted by an older build is trimmed on load, not carried forward
-    reloaded = CachedAbstractor(lambda t: Abstraction(t, []), path=str(tmp_path / "abs.json"))
-    assert len(reloaded._cache) <= _MAX_ABSTRACTION_CACHE
+    # an over-large cache persisted by an older build is trimmed on load, not carried forward — and
+    # the trim keeps the NEWEST entries (a file written before the bound existed, so over it)
+    old = {c._key(f"old {i}"): {"primary": f"old {i}", "anchors": []} for i in range(cap * 3)}
+    (tmp_path / "old.json").write_text(json.dumps(old), encoding="utf-8")
+    reloaded = CachedAbstractor(lambda t: Abstraction(t, []), path=str(tmp_path / "old.json"))
+    assert len(reloaded._cache) == cap
+    assert c._key(f"old {cap * 3 - 1}") in reloaded._cache
+    assert c._key("old 0") not in reloaded._cache
 
 
 def test_the_shared_provider_wiring_actually_reaches_a_client(monkeypatch):

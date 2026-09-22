@@ -46,8 +46,8 @@ PKG = Path(__file__).resolve().parents[1] / "looplab"
 EXCLUDED_DIRS = frozenset({".ipynb_checkpoints", "__pycache__"})
 
 
-def iter_sources(pkg: Path = PKG) -> Iterator[tuple[Path, str]]:
-    """Every `.py` under *pkg*, sorted, with its decoded text.
+def _package_files(pkg: Path) -> Iterator[Path]:
+    """Every `.py` under *pkg*, sorted, minus `EXCLUDED_DIRS` — the ONE walk both readers share.
 
     Sorted so a failure message lists offenders in a stable order — an unsorted `rglob` reports the
     same set in a different order per filesystem, which reads as a flapping test.
@@ -55,13 +55,39 @@ def iter_sources(pkg: Path = PKG) -> Iterator[tuple[Path, str]]:
     for path in sorted(pkg.rglob("*.py")):
         if EXCLUDED_DIRS.intersection(path.parts):
             continue
-        yield path, path.read_text(encoding="utf-8-sig", errors="replace")
+        yield path
+
+
+def _decode(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def iter_sources(pkg: Path = PKG) -> Iterator[tuple[Path, str]]:
+    """Every `.py` under *pkg*, sorted, with its decoded text."""
+    for path in _package_files(pkg):
+        yield path, _decode(path)
+
+
+# Parsed trees, memoized per file for the life of the test process and revalidated on every call by
+# the file's `(st_mtime_ns, st_size)`. `ast.parse` of the whole package is ~1.3 s and `iter_trees`
+# has well over a hundred callers, so without this the guard family re-parsed the same unchanged
+# tree on every call (review 2026-09-22, TST-04). The stat revalidation keeps an edit made between
+# two calls visible; a mutation check runs in a throwaway COPY of the tree, i.e. at different paths,
+# so it never meets a tree cached from the real one. CONTRACT: callers treat a yielded tree as
+# READ-ONLY — it is shared with every later caller (none mutates one today: they `ast.walk`).
+_TREE_CACHE: dict[Path, tuple[tuple[int, int], ast.AST]] = {}
 
 
 def iter_trees(pkg: Path = PKG) -> Iterator[tuple[Path, ast.AST]]:
     """Every source under *pkg* parsed to an AST, with `filename` set so a SyntaxError names it."""
-    for path, text in iter_sources(pkg):
-        yield path, ast.parse(text, filename=str(path))
+    for path in _package_files(pkg):
+        st = path.stat()
+        signature = (st.st_mtime_ns, st.st_size)
+        hit = _TREE_CACHE.get(path)
+        if hit is None or hit[0] != signature:
+            hit = (signature, ast.parse(_decode(path), filename=str(path)))
+            _TREE_CACHE[path] = hit
+        yield path, hit[1]
 
 
 # ------------------------------------------------------------------ the comment-proof call pin
