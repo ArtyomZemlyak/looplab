@@ -1612,8 +1612,15 @@ def test_concurrent_topup_and_reads_are_safe(run):
         t.start()
     stop.wait(2.0)
     stop.set()
+    # ONE deadline for the whole join, and a generous one. `join(5)` per thread measured the time a
+    # reader's LAST iteration takes, not a hang: after 2 s of writes node 0 holds thousands of
+    # traces, `full_spans_for_node(0)` re-reads all of them, and seven threads share one GIL — on
+    # a loaded CI runner that single call outlived 5 s (run 1965, "a thread hung") and passed on
+    # the next three runs. A lock-order deadlock never returns, so a 60 s budget still catches the
+    # property this asserts and stops reporting a slow box as one.
+    deadline = time.monotonic() + 60.0
     for t in ts:
-        t.join(5)
+        t.join(max(0.0, deadline - time.monotonic()))
     assert not any(t.is_alive() for t in ts), "a thread hung — possible lock-order deadlock"
     assert errors == [], f"concurrent read/topup raised: {errors[:3]}"
 
