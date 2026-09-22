@@ -291,7 +291,7 @@ class _FoldCtx:
         "concept_input_capped", "concept_input_invalid", "run_base_capped",
         "run_base_invalid", "run_base_seen", "event_index",
         "card_enrichment_index", "card_enrichment_omissions", "charged_repair_seqs",
-        "repair_ledger_keys", "repair_ledger_per_node",
+        "repair_ledger_keys", "repair_ledger_per_node", "llm_cost_clean", "literature_ids",
     )
 
     def __init__(self):
@@ -305,6 +305,13 @@ class _FoldCtx:
         # New ledgers retry an ambiguously acknowledged append with the same identity. Replay is
         # first-write-wins for that ID; legacy usage events without an ID remain additive.
         self.llm_usage_ids: set[str] = set()
+        # Whether `st.llm_cost` was last written by `_on_llm_usage` and is therefore already clean
+        # (review 2026-09-22, EVT-04a: the ledger is sanitized once, not re-sanitized per row).
+        self.llm_cost_clean = False
+        # Every `lit-` id already in `st.literature` — the ONLY writer of that list is
+        # `_on_literature_retrieved`, so this set is exactly its id column, kept incrementally
+        # instead of rebuilt from the whole list on every row (review 2026-09-22, EVT-04a).
+        self.literature_ids: set = set()
         # First terminal COST wins per (node,lifecycle), independently from whether that lifecycle is
         # still current. A reset may discard its metric/state, but cannot refund compute already spent.
         self.charged_terminal_generations: set[tuple[int, int]] = set()
@@ -3017,6 +3024,21 @@ def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.llm_cost["priced_calls"] = _row_priced_calls(d, st.llm_cost)
 
 
+_LLM_LEDGER_COUNTERS = ("calls", "priced_calls", "prompt_tokens", "completion_tokens",
+                        "total_tokens")
+
+
+def _clean_llm_delta(d: dict) -> dict:
+    """The six ledger columns ONE usage row contributes — `_clean_llm_totals` minus its copy of
+    every other payload key, which a delta never adds to the ledger — plus the row's own
+    `_row_priced_calls` default. Same sanitizers, so the same numbers."""
+    clean = {"cost": _llm_cost_value(d.get("cost"))}
+    for key in _LLM_LEDGER_COUNTERS:
+        clean[key] = _llm_counter(d.get(key))
+    clean["priced_calls"] = _row_priced_calls(d, clean)
+    return clean
+
+
 def _on_llm_usage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     usage_id = d.get("usage_id")
     if isinstance(usage_id, str) and usage_id:
@@ -3024,14 +3046,23 @@ def _on_llm_usage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             ctx.llm_usage_seen = True
             return
         ctx.llm_usage_ids.add(usage_id)
-    base = _clean_llm_totals(st.llm_cost)
-    delta = _clean_llm_totals(d)
-    delta["priced_calls"] = _row_priced_calls(d, delta)
+    # THE LEDGER IS CLEANED ONCE, NOT ON EVERY ROW (review 2026-09-22, EVT-04a). Each row used to
+    # re-run `_clean_llm_totals` over the WHOLE accumulated ledger and over a full copy of its own
+    # payload, on the most frequent event of an LLM run, folded ~14x per node: measured 6.5 us a
+    # row for this handler alone, 3.3 us after. What
+    # this handler writes is already clean (every column below is a sanitized sum) and
+    # `_clean_llm_totals` is the identity on a clean ledger, so only the FIRST accumulation — whose
+    # base is the empty default or a legacy `llm_cost` summary — needs the pass; `_on_llm_cost`
+    # cannot replace the ledger afterwards (it yields once `llm_usage_seen`). Behaviour-identical:
+    # `tests/test_fold_fast_paths_are_exact.py` folds against the verbatim old handler.
+    base = dict(st.llm_cost) if ctx.llm_cost_clean else _clean_llm_totals(st.llm_cost)
+    delta = _clean_llm_delta(d)
     base["cost"] = min(_MAX_LLM_COST, float(base["cost"]) + float(delta["cost"]))
-    for key in ("calls", "priced_calls", "prompt_tokens", "completion_tokens", "total_tokens"):
+    for key in _LLM_LEDGER_COUNTERS:
         base[key] = min(_MAX_LLM_COUNTER, int(base[key]) + int(delta[key]))
     st.llm_cost = base
     ctx.llm_usage_seen = True
+    ctx.llm_cost_clean = True
 
 def _on_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     pid = _coerce_node_id(d, "parent_id")
@@ -4389,7 +4420,11 @@ def _on_literature_retrieved(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
     # The papers a Deep-Research pass read (doc 52 row 16), sanitized on the way in like the memo
     # they rode beside. Selection-neutral: nothing but the record reads `st.literature`.
     from looplab.core.advisory_payloads import sanitize_literature_items
-    seen = {row.get("id") for row in st.literature if isinstance(row, dict)}
+    # The ids already folded live on the ctx, kept in step with the ONE writer of `st.literature`
+    # below — rebuilding the set from the whole list on every row made the literature fold
+    # quadratic in papers read (review 2026-09-22, EVT-04a; measured on a loaded box, 1,500 rows
+    # carrying 6,000 papers folded in 563-976 ms before and 235-260 ms after).
+    seen = ctx.literature_ids
     at_node = d.get("at_node") if type(d.get("at_node")) is int else None
     for item in sanitize_literature_items(d.get("items"), env=_FOLD_REDACTION_ENV):
         if item["id"] not in seen:

@@ -1928,6 +1928,22 @@ def _card_work_item_ids(st: RunState, ledger: _CardLedger) -> frozenset[str]:
     return frozenset(work_items)
 
 
+def _merge_group_base(card: Card, members: list[str]) -> Card:
+    """The object one merge group's canonical row is built on.
+
+    A group of SEVERAL cards is built on a deep copy: its action owner's lists and dicts are
+    grafted onto it field by field, and the members are still read after it is written. A group of
+    ONE owns its card outright — it is the group's base, its action owner and its only member, the
+    pre-merge `ledger.cards` it came from is replaced wholesale, and every field the merge writes
+    onto it is an ASSIGNMENT of a fresh value — so it is reused exactly as the no-alias path reuses
+    every card. The copy was ~all of the merge fold's cost: any alias anywhere in a card run (and
+    card runs always have one) deep-copied EVERY card on every fold (review 2026-09-22, EVT-04a;
+    measured, 600 cards and one merge: 42 ms -> 5.5 ms per call, best of 7).
+    `tests/test_fold_fast_paths_are_exact.py` folds merge logs both ways.
+    """
+    return card if len(members) == 1 else card.model_copy(deep=True)
+
+
 def _fold_merged_cards(st: RunState, identity: _CardIdentity, ledger: _CardLedger,
                        aliases: _CardAliases,
                        control_ids: dict[str, set[str]]) -> dict[str, set[str]]:
@@ -1963,7 +1979,7 @@ def _fold_merged_cards(st: RunState, identity: _CardIdentity, ledger: _CardLedge
                 tid if tid in cards else members[0]
             )
             base_id = tid if tid in cards else action_owner_id
-            tgt = cards[base_id].model_copy(deep=True)
+            tgt = _merge_group_base(cards[base_id], members)
             if action_owner_id != base_id:
                 action_owner = cards[action_owner_id].model_copy(deep=True)
                 for field in (
