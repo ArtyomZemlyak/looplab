@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# The replacement-only file-identity tier the stage-log cursor keys on (`_stage_log_cursor`).
+from looplab.core.atomicio import same_file_entry
 # The DECLARED ENVIRONMENT rule lives in `core/envsafe.py` — `core/config.py::Settings.eval_env`
 # is the third declarer of the same contract and `core` may not import `runtime`, so the rule sits
 # where all three can reach it. Re-exported here because THIS is where the stage contract is read.
@@ -1441,10 +1443,13 @@ _NUMERIC_LOG_TAIL_BYTES = 1_048_576
 
 
 def _stage_log_cursor(path) -> Optional[tuple]:
-    """`(st_dev, st_ino, size)` of a stage log BEFORE an attempt appends to it; None when absent.
+    """`(same_file_entry, size)` of a stage log BEFORE an attempt appends to it; None when absent.
 
     The stage log is opened in append mode (`sandbox._tee_drain`) inside a workdir the repair loop
     deliberately reuses, so without a cursor a reader of "the log" reads every earlier attempt too.
+    The identity half is `core/atomicio.py::same_file_entry` — the REPLACEMENT-only tier, because
+    growth is exactly what an append cursor must survive (doc 25 SC-11's vocabulary; a hand-rolled
+    `(st_dev, st_ino)` here is what `tests/test_file_identity_tiers.py` refuses).
     """
     if not path:
         return None
@@ -1452,7 +1457,7 @@ def _stage_log_cursor(path) -> Optional[tuple]:
         st = os.stat(path)
     except OSError:
         return None
-    return (st.st_dev, st.st_ino, st.st_size)
+    return (same_file_entry(st), st.st_size)
 
 
 def _attempt_log_tail(path, cursor: Optional[tuple], cap: int = _NUMERIC_LOG_TAIL_BYTES) -> Optional[str]:
@@ -1469,8 +1474,8 @@ def _attempt_log_tail(path, cursor: Optional[tuple], cap: int = _NUMERIC_LOG_TAI
             st = os.fstat(fh.fileno())
             size = max(0, int(st.st_size))
             floor = 0
-            if cursor is not None and (st.st_dev, st.st_ino) == cursor[:2] and size >= cursor[2]:
-                floor = cursor[2]
+            if cursor is not None and same_file_entry(st) == cursor[0] and size >= cursor[1]:
+                floor = cursor[1]
             fh.seek(max(floor, size - cap))
             return fh.read().decode("utf-8", errors="replace")
     except (OSError, TypeError, ValueError):
