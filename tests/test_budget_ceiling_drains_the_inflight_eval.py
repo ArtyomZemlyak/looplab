@@ -855,3 +855,55 @@ def test_the_run_loop_pays_a_deferred_eval_ceiling_every_turn_and_before_finaliz
     drains = _calls(after_loop, "self._drain_adopted_evals")
     assert stops and finalize and drains and drains[-1] < stops[0] < finalize[0], (
         "the final drain must be followed by the deferred-stop check before finalize_run")
+
+
+def test_a_run_attempt_that_never_returned_carries_no_result_from_the_attempt_before(tmp_path):
+    """RUN_ATTEMPT binds `a.res` to THIS attempt's result, or to None (review 2026-09-22, ENG2
+    quick win). `_land_terminal_before_ceiling`'s guard reads `a.res is None` as "the sandbox
+    never returned, there is no measurement to lose" — but `a.res` used to be rebound only when the
+    sandbox returned, so on a repaired node's SECOND attempt a ceiling raised before that point
+    found attempt one's FAILED result still on the record and wrote it as this lifecycle's
+    terminal. Driven through the real `_eval_run_attempt` and the real guard."""
+    from looplab.engine.evaluate import EvalAttempt
+
+    written: list = []
+
+    class _Host:
+        _eval_run_attempt = Engine._eval_run_attempt
+        _land_terminal_before_ceiling = Engine._land_terminal_before_ceiling
+        _eval_spec = None
+        _train_monitor = False
+        _asha_live = False
+        store = types.SimpleNamespace(read_all=lambda: [])
+
+        async def _watch_for_intervention(self, *_a):
+            return None
+
+        async def _claim_eval_invocation(self, _a):
+            return None
+
+        def _run_eval(self, *_a):
+            raise BudgetExceeded(CEILING)        # a paid call inside the evaluator crosses it
+
+        async def _eval_write_terminal(self, a):
+            written.append(a.res)
+
+    host = _Host()
+    a = EvalAttempt(node_id=0, max_es=None)
+    a.generation, a.attempt, a.workdir = 0, 1, tmp_path
+    a.node = types.SimpleNamespace(idea=None)
+    a.state = types.SimpleNamespace(run_uid="u", run_id="r")
+    a.res = types.SimpleNamespace(metric=None, exit_code=1)    # attempt one's failed result
+
+    async def _drive():
+        try:
+            await host._eval_run_attempt(a)
+        except BaseException as exc:
+            await host._land_terminal_before_ceiling(a, exc)
+            raise
+
+    with pytest.raises(BaseException) as caught:          # noqa: PT011 - the leaf is asserted
+        anyio.run(_drive)
+    assert budget_stop_leaf(caught.value) is not None
+    assert a.res is None, "the attempt that never returned still carries the previous result"
+    assert written == [], "a previous attempt's result was written as this lifecycle's terminal"

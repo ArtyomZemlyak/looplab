@@ -2942,6 +2942,12 @@ class EvaluateMixin:
         """RUN_ATTEMPT — one sandboxed evaluation under the intervention watcher and both live-log
         watchdogs. Binds `a.res`, the watcher's verdict and the per-attempt signals; `PHASE_RETURN`
         only for the unenforceable-GPU-pin terminal it writes itself."""
+        # `a.res` is THIS attempt's result or None, from the first line (review 2026-09-22, ENG2).
+        # It was rebound only when the sandbox returned, so on a repaired node's next attempt anything
+        # raised before that — a spend ceiling above all — found the PREVIOUS attempt's result still
+        # bound, and `_land_terminal_before_ceiling`, whose guard reads None as "nothing was
+        # measured", wrote that stale result as this lifecycle's terminal.
+        a.res = None
         a._t0 = time.time()
         # repair/retry attempts reuse the workdir and sandbox stage logs append.
         # When anything will READ those logs, snapshot every existing one before this attempt
