@@ -206,11 +206,36 @@ def test_capture_rejects_invalid_or_nonobject_config(tmp_path, payload):
         capture_scope_source(tmp_path, "run-a")
 
 
-@pytest.mark.parametrize("run_id", ["../run-a", "nested/run-a", "nested\\run-a", "C:run-a"])
+@pytest.mark.parametrize("run_id", [
+    "../run-a", "nested/run-a", "nested\\run-a", "", ".", "..", "run\x00a",
+    # A drive-relative name escapes the root on Windows, and only there: on POSIX `C:run-a` is one
+    # ordinary directory name (see the next test), which is the run-name rule `run_dir` reads with.
+    pytest.param("C:run-a", marks=pytest.mark.skipif(
+        os.name != "nt", reason="a plain directory name on POSIX")),
+])
 def test_capture_rejects_non_child_run_ids(tmp_path, run_id):
     _run(tmp_path)
     with pytest.raises(ScopeSourceCorruptError, match="direct child"):
         capture_scope_source(tmp_path, run_id)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="':' cannot appear in a Windows directory name")
+@pytest.mark.parametrize("run_id", ["exp:v2", "trailing-dot.", "trailing-space "])
+def test_capture_admits_every_name_the_run_read_path_admits(tmp_path, run_id):
+    """Review 2026-09-22, SRV2-10: capture spelled a THIRD run-name rule (no ':' and no trailing
+    ' .') beside `pathsafe.run_child_name_defect`'s two tiers, so a run the dashboard lists and opens
+    through `AppState.run_dir` (the DEFAULT tier) was refused here and omitted from every scope
+    report. Stated as parity with that rule rather than as a list of names."""
+    from looplab.core.pathsafe import run_child_name_defect
+
+    assert run_child_name_defect(run_id) is None, "the read path must admit this name"
+    run_dir, raw = _run(tmp_path, run_id)
+
+    source = capture_scope_source(tmp_path, run_id)
+
+    assert source.run_dir == run_dir and source.event_bytes == len(raw)
+    assert probe_scope_log_sig(tmp_path, run_id)[0] == run_id
+    assert scope_event_size(tmp_path, run_id) == len(raw)
 
 
 def test_capture_rejects_symlink_run_directory(tmp_path):

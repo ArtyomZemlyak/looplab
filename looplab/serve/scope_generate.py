@@ -57,6 +57,7 @@ import anyio
 from fastapi import HTTPException
 
 from looplab.core.atomicio import same_file_kind, strict_atomic_write_text
+from looplab.core.pathsafe import run_child_name_defect
 from looplab.core.comparison import (
     canonical_comparison_contract,
     comparison_measurement,
@@ -349,10 +350,12 @@ class ScopeSourceProbes:
 
     def probe_key(self, run_id: str, log_sig: list) -> tuple:
         """Cheap identity for every file represented by a full source revision."""
+        # The run-name rule is `pathsafe.run_child_name_defect`'s default tier, the one
+        # `scope_sources._run_path` and `AppState.run_dir` share — this copy refused ':' and a
+        # trailing ' .' too, so a run capture admitted could never be KEYED here (review 2026-09-22,
+        # SRV2-10) and read as stale on every GET without saying why.
         if (not _valid_scope_sig_row(log_sig) or len(log_sig) != 7
-                or log_sig[0] != run_id or not run_id or run_id in {".", ".."}
-                or "\x00" in run_id or "/" in run_id or "\\" in run_id or ":" in run_id
-                or run_id.rstrip(" .") != run_id):
+                or log_sig[0] != run_id or run_child_name_defect(run_id) is not None):
             raise ScopeSourceError("scope source identity is invalid")
 
         def observed(status: os.stat_result) -> tuple[int, ...]:

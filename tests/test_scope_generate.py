@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -233,6 +234,29 @@ def test_the_offline_generation_publishes_one_confirmed_record_and_clears_its_fe
     published = json.loads(
         store._scope_report_path(srv.reports_dir, "task", TASK_ID).read_text("utf-8"))
     assert published["action_id"] == action_id
+
+
+@pytest.mark.skipif(os.name == "nt", reason="':' cannot appear in a Windows directory name")
+def test_a_run_the_read_path_can_open_is_a_run_the_scope_report_covers(tmp_path):
+    """Review 2026-09-22, SRV2-10: capture and the probe cache spelled a THIRD run-name rule that
+    refused ':' and a trailing ' .', while `AppState.run_dir` reads through
+    `pathsafe.run_child_name_defect`'s default tier. A run the dashboard lists and opens (`exp:v2`)
+    was therefore silently OMITTED from its task's scope report — every capture refused it as "not a
+    lexical direct child". MUTATION: restore the hand-spelled `":" in run_id` clause in either
+    `scope_sources._run_path` or `ScopeSourceProbes.probe_key` -> this is red."""
+    _seed_run(tmp_path, "plain")
+    _seed_run(tmp_path, "exp:v2")
+    srv = _srv(tmp_path, ["exp:v2", "plain"])
+
+    result = _generate(srv)
+
+    assert result["run_ids"] == ["exp:v2", "plain"]
+    assert result["omitted_runs"] == [], "a readable run was omitted from its scope report"
+    # …and the staleness cache can key it too: an unkeyable probe degrades to an "unavailable"
+    # receipt, which would read the report as stale on every GET without ever saying why.
+    probes = scope_generate.ScopeSourceProbes(srv)
+    key = probes.probe_key("exp:v2", probe_scope_log_sig(tmp_path, "exp:v2"))
+    assert key[0][0] == "exp:v2"
 
 
 def test_replaying_one_action_id_never_bills_a_second_generation(tmp_path):

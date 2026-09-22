@@ -20,7 +20,7 @@ from typing import Callable, TypeVar
 import orjson
 
 from looplab.core.models import Event
-from looplab.core.pathsafe import is_reparse
+from looplab.core.pathsafe import is_reparse, run_child_name_defect
 from looplab.events.eventstore import (MAX_EVENT_BATCH_BYTES, decode_event_record,
                                        UnsupportedEventVersionError)
 from looplab.serve.run_commands import run_generation_token
@@ -239,16 +239,13 @@ def _require_real_directory(path: Path, *, label: str) -> os.stat_result:
 
 
 def _run_path(root: Path, run_id: str) -> tuple[Path, os.stat_result]:
-    if (
-        not isinstance(run_id, str)
-        or not run_id
-        or run_id in {".", ".."}
-        or "\x00" in run_id
-        or "/" in run_id
-        or "\\" in run_id
-        or ":" in run_id
-        or run_id.rstrip(" .") != run_id
-    ):
+    # The run-NAME rule is `pathsafe.run_child_name_defect`'s DEFAULT tier — the one
+    # `AppState.run_dir` reads every run through — not a third hand-spelled one (review 2026-09-22,
+    # SRV2-10). The copy here also refused ':' and a trailing ' .' (the STRICT tier's creation-time
+    # ambiguity rules), so a run the dashboard lists and opens, `exp:v2`, was silently omitted from
+    # its task's scope report. A drive-relative `C:run` is still refused on Windows, where
+    # `PurePath(name).name != name`; the ids captured here come from the run root's own listing.
+    if run_child_name_defect(run_id) is not None:
         raise ScopeSourceCorruptError("run id is not a lexical direct child")
     try:
         root = Path(root).absolute()
