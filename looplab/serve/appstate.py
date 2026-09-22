@@ -40,6 +40,7 @@ from looplab.events.types import EV_NODE_CREATED
 from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
 from looplab.serve.engine_proc import _engine_liveness
+from looplab.serve.http import refusal
 from looplab.serve.jobs import JobRegistry
 from looplab.serve.llm_context import global_settings, llm_settings
 from looplab.serve.node_activity import public_node_activity
@@ -303,7 +304,16 @@ class AppState:
         return rd
 
     def events(self, rd: Path, upto_seq: Optional[int] = None) -> list[Event]:
-        evs = [Event(**o) for o in iter_event_jsonl(rd / "events.jsonl")]
+        try:
+            evs = [Event(**o) for o in iter_event_jsonl(rd / "events.jsonl")]
+        except OSError as exc:
+            # A log that EXISTS but cannot be read (EACCES after a permission change, EIO from a
+            # flaky network/FUSE mount) is a coded 503, never a bare 500 (review 2026-09-22,
+            # SRV2-04). `run_dir` has already admitted the run — it lstats the entry, it does not
+            # open it — so this read is where the fault surfaces, and every fold on the HTTP path
+            # goes through here. An ABSENT log is not this: `iter_jsonl` answers it as no events.
+            # `refusal` carries the slug, never the `OSError` text (the host path).
+            raise refusal("event_log_unreadable") from exc
         if upto_seq is not None:
             evs = [e for e in evs if e.seq <= upto_seq]
         return evs

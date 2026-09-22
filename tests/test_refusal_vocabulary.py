@@ -251,6 +251,85 @@ def test_the_review_plane_answers_the_same_refusal(tmp_path, monkeypatch):
     assert str(rd) not in response.text
 
 
+def _event_log_raises_eio(monkeypatch, rd) -> None:
+    """`events.jsonl` EXISTS — so `run_dir` admits the run, it lstats and never opens — and every
+    open of it fails with EIO: what a flaky network/FUSE mount produces, and what EACCES after a
+    permission change looks like to a server running as root (which a chmod cannot demonstrate)."""
+    import builtins
+    import errno
+    import os
+
+    real_open = builtins.open
+    target = os.path.realpath(rd / "events.jsonl")
+
+    def _eio_open(file, *args, **kwargs):
+        if isinstance(file, (str, os.PathLike)) and os.path.realpath(file) == target:
+            raise OSError(errno.EIO, "Input/output error", os.fspath(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _eio_open)
+
+
+@pytest.mark.parametrize("path", [
+    f"/api/runs/{RUN}/state", f"/api/runs/{RUN}/nodes/0", f"/api/runs/{RUN}/cost",
+    f"/api/runs/{RUN}/prov", f"/api/runs/{RUN}/config", f"/api/runs/{RUN}/comments",
+    f"/api/runs/{RUN}/nodes/0/trace",
+])
+def test_an_unreadable_event_log_is_a_coded_503_on_every_per_run_read(tmp_path, monkeypatch, path):
+    """Review 2026-09-22, SRV2-04: an `events.jsonl` that exists but cannot be read answered a bare
+    500 on every per-run GET — the framework's word for a crash in the server's own code, which a
+    client reports and never retries. `AppState.events` is the read every fold on the HTTP path goes
+    through, so it answers `event_log_unreadable` from the table. MUTATION: drop the `except OSError`
+    in `AppState.events` -> 500."""
+    rd = _run(tmp_path)
+    client = TestClient(make_app(tmp_path), raise_server_exceptions=False)
+    _event_log_raises_eio(monkeypatch, rd)
+    response = client.get(path)
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "event_log_unreadable" and detail["remediation"], detail
+    assert str(tmp_path) not in response.text and "Errno" not in response.text
+
+
+def test_an_unreadable_event_log_keeps_its_run_in_the_list_and_says_why(tmp_path, monkeypatch):
+    """The other half: the run list's per-run `except Exception: continue` swallowed the same error,
+    so the run silently VANISHED from `/api/runs`. It stays, as a stub whose receipt says
+    `unreadable` (the UI words that as "could not be read at all"), with EXACTLY the keys a folded
+    row carries — and it is not cached: the first list after the fault clears is the real row.
+    MUTATION: re-raise out of the new branch -> the run is missing from the list again."""
+    _run(tmp_path)
+    readable = tmp_path / "readable"
+    readable.mkdir()
+    EventStore(readable / "events.jsonl").append(
+        "run_started", {"run_id": "readable", "task_id": "t", "goal": "g", "direction": "min"})
+    client = TestClient(make_app(tmp_path))
+    with monkeypatch.context() as scoped:
+        _event_log_raises_eio(scoped, tmp_path / RUN)
+        rows = {row["run_id"]: row for row in client.get("/api/runs").json()}
+    assert set(rows) == {RUN, "readable"}, "a run whose log cannot be read vanished from the list"
+    stub = rows[RUN]
+    assert stub["source_integrity"]["unreadable"] is True
+    assert stub["source_integrity"]["complete"] is False
+    assert stub["nodes"] == 0 and stub["generation"] is None and stub["best_metric"] is None
+    assert set(stub) == set(rows["readable"]), "the stub row's shape drifted from a folded row"
+
+    healed = {row["run_id"]: row for row in client.get("/api/runs").json()}
+    assert healed[RUN]["source_integrity"]["complete"] is True, "the stub was cached"
+    assert healed[RUN]["task_id"] == "t" and healed[RUN]["nodes"] == 1
+
+
+def test_a_log_that_is_not_a_regular_file_stays_unlisted(tmp_path):
+    """The stub is for a log `run_dir` would OPEN. A directory where the log should be is a 404 per
+    run, so listing it would publish a row that cannot be opened — it stays out, as it always was."""
+    _run(tmp_path)
+    odd = tmp_path / "odd"
+    odd.mkdir()
+    (odd / "events.jsonl").mkdir()
+    client = TestClient(make_app(tmp_path))
+    assert [row["run_id"] for row in client.get("/api/runs").json()] == [RUN]
+    assert client.get("/api/runs/odd/state").status_code == 404
+
+
 # --------------------------------------------------------------------------- reads take no lock
 
 

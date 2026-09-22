@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import stat
 
+from fastapi import HTTPException
+
 from looplab.core.atomicio import file_identity
+from looplab.core.pathsafe import is_reparse
 from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
                                        load_run_deletion_fence, run_deletion_fence_path,
                                        run_deletion_snapshot_token)
@@ -25,6 +28,7 @@ from looplab.engine.comparability import record_of
 from looplab.events.trajectory import running_best
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
+from looplab.events.eventstore import integrity_wire
 from looplab.events.replay import fold
 from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
@@ -45,6 +49,43 @@ def _listed_fence_holds(rd, fence_names: set) -> bool:
     if run_deletion_fence_path(rd).name.lower() not in fence_names:
         return False
     return load_run_deletion_fence(rd) is not None
+
+
+def _is_unreadable_log(exc: HTTPException) -> bool:
+    """Is this `AppState.events`' own refusal for a log that exists but cannot be read? (The slug is
+    `serve/http.py::REFUSALS`' row; `tests/test_refusal_vocabulary.py` drives this branch.)"""
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    return detail.get("code") == "event_log_unreadable"
+
+
+def _is_regular_log_entry(log) -> bool:
+    """The entry itself (`lstat`) is a plain regular file — the shape `AppState.run_dir` admits."""
+    try:
+        entry = log.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(entry.st_mode) and not is_reparse(entry)
+
+
+def _unreadable_log_row(rd, stt) -> dict:
+    """The run-list row for a run whose `events.jsonl` exists but cannot be read (SRV2-04).
+
+    The SAME keys as a folded row (a test pins the two key sets equal), each at the value that
+    claims nothing: no task, no generation, no nodes, no metric. What it does say is on the receipt:
+    `source_integrity` is `unreadable`, the direction `log_integrity` itself takes for a file it
+    cannot scan. The two stat-derived fields are real — the entry is there and was stat'ed.
+    """
+    return {
+        "run_id": rd.name, "task_id": None, "goal": None, "run_uid": None,
+        "generation": None, "deletion_generation": None, "seq": -1,
+        "direction": None, "finished": False, "phase": None,
+        "finalization_incomplete": False, "nodes": 0,
+        "source_integrity": integrity_wire({"complete": False, "unreadable": True}),
+        "best_metric": None, "best_confirmed": None, "best_metric_caveats": [],
+        "mislead_gap": None, "trajectory": None, "best_metric_comparability": None,
+        "stop_reason": None, "resume_pending": False, "seeded_from": [], "themes": {},
+        "concepts": {}, "mtime": stt.st_mtime, "created": stt.st_ctime,
+    }
 
 
 def run_summaries(srv, only=None) -> list:
@@ -95,7 +136,13 @@ def run_summaries(srv, only=None) -> list:
         except (OSError, RunDeletionStorageError):
             continue
         log = rd / "events.jsonl"
-        if not log.exists():
+        try:
+            if not log.exists():
+                continue
+        except OSError:
+            # `exists()` RAISES for anything but "absent" (EACCES on an unsearchable directory, EIO):
+            # it sat outside the per-run `try`, so one such directory 500'd the whole list. Whether
+            # it is a run at all cannot be told — `run_dir` 404s it — so it is not listed.
             continue
         try:
             stt = log.stat()
@@ -117,7 +164,20 @@ def run_summaries(srv, only=None) -> list:
             if cached is not None and cached[0] == sig:
                 out.append(cached[1])
                 continue
-            events = srv.events(rd)
+            try:
+                events = srv.events(rd)
+            except HTTPException as exc:
+                if not _is_unreadable_log(exc) or not _is_regular_log_entry(log):
+                    # A log that is not a plain regular FILE (a directory, a link) is not a run
+                    # `run_dir` would open — it 404s one — so it stays unlisted, as before.
+                    raise
+                # PRESENT, AND SAYING SO (review 2026-09-22, SRV2-04). The log exists but cannot be
+                # read, and the generic handler below used to swallow that: the run VANISHED from
+                # the list while every per-run GET answered a bare 500. It is listed as a stub whose
+                # receipt says `unreadable` — the one the UI already words as "could not be read at
+                # all" — and it is NOT cached, so the next list retries the read.
+                out.append(_unreadable_log_row(rd, stt))
+                continue
             st = fold(events)
             first_ts = events[0].ts if events else 0.0
             finalize_incomplete = (

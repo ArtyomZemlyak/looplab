@@ -135,6 +135,16 @@ REFUSALS: dict[str, tuple[int, str, str]] = {
     "config_snapshot_not_object": (
         503, "the run configuration snapshot is not a JSON object",
         "Restore config.snapshot.json from a backup or from another run of the same task."),
+    # Review 2026-09-22, SRV2-04: `events.jsonl` exists (so `run_dir` admits the run) but reading it
+    # fails — EACCES after a permission change, EIO from a flaky network/FUSE mount. Every per-run GET
+    # answered a bare 500, and the run silently VANISHED from `/api/runs`, whose loop swallowed the
+    # same error. Raised by `AppState.events`, the read every fold on the HTTP path goes through; the
+    # run list keeps the run as a stub row whose `source_integrity` says `unreadable: true`.
+    "event_log_unreadable": (
+        503, "the run's event log could not be read",
+        "The run directory's events.jsonl exists but the server could not read it — most often a "
+        "permission change or an I/O error on the mount that holds it. Check the file's permissions "
+        "and the storage's health, then retry: nothing about the run can be shown until it reads."),
     # THE COMMAND-LIFECYCLE SITES, added 2026-09-08. Eight of them raised 409/503 with an f-string
     # of the caught `OSError`, i.e. exactly what `refusal()`'s own docstring one screen down
     # forbids — driven: a stray regular file where the server wants its lock directory reflects
