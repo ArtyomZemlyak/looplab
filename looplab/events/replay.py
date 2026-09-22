@@ -3322,6 +3322,16 @@ def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # handler so old logs retain byte-for-byte replay semantics after the event namespace split.
     receipt = _bounded_card_drop_receipt(d)
     if receipt is not None:
+        if e.type == EV_CARD_AUTO_DROPPED:
+            # THE EVENT TYPE IS THE AUTHORITY, not the payload's claim about itself (review
+            # 2026-09-22, EV-06). `card_auto_dropped` is the ENGINE's retirement by definition, and
+            # `card_ledger._apply_card_drops` lets a reopen undo only an OPERATOR drop — so a row of
+            # this type carrying `dropped_by: "operator"` (a forged, foreign or mis-parameterised
+            # writer: `_drop_card_once` takes the author as an argument) published
+            # `reopenable=True` and could be reopened, laundering an engine retirement back onto
+            # the board. Every engine writer already stamps "engine", so its receipts are unchanged;
+            # an unattributed one gains the key its reader already defaulted to.
+            receipt["dropped_by"] = "engine"
         # keep a typed lifecycle receipt, not the raw control payload. This also prevents
         # arbitrary objects from becoming enormous strings later in `_derive_cards`.
         receipt["_event_index"] = ctx.event_index

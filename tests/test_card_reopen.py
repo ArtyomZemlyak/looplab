@@ -169,6 +169,23 @@ def test_a_reopen_may_not_undo_the_ENGINES_own_retirement():
     assert str(card.status) == "dropped" and card.dropped_by == "engine"
 
 
+def test_an_ENGINE_TYPED_drop_claiming_the_operator_is_still_the_engines():
+    """Review 2026-09-22, EV-06. The event TYPE is the authority, not the payload's claim about
+    itself: `card_auto_dropped` is the engine's retirement by definition, yet the fold took the
+    receipt's `dropped_by` at its word, so a row of this type saying `"operator"` (a forged or
+    foreign writer — `_drop_card_once` even takes the author as a parameter) published
+    `reopenable=True`, and a reopen then put the retired card back on the board. MUTATION: drop the
+    type stamp in `replay._on_card_dropped` and the card reads `proposed` after the reopen."""
+    forged = ("card_auto_dropped", {"id": "card-x", "reason": "rejected", "dropped_by": "operator"})
+    dropped = _board([forged])
+    assert str(dropped.status) == "dropped"
+    assert dropped.dropped_by == "engine" and dropped.reopenable is False
+    reopened = _board([forged, _REOPEN])
+    assert str(reopened.status) == "dropped" and reopened.dropped_by == "engine"
+    # the operator's OWN intent type is untouched: its stamp is the server's, and it stays theirs
+    assert _board([_OPERATOR_DROP]).reopenable is True
+
+
 def test_a_reopen_still_undoes_the_operators_own_drop():
     """The counter-assertion — the fix must not cost the control the operator asked for by name."""
     card = _board([_OPERATOR_DROP, _REOPEN])
