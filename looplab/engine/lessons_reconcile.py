@@ -22,7 +22,8 @@ from looplab.core.models import RunState
 from looplab.core.run_identity import row_belongs_to_run
 from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
 from looplab.events.eventstore import read_jsonl_lenient
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_RECONCILED
 
 

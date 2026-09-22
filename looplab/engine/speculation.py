@@ -27,7 +27,8 @@ from looplab.core.models import (
     durable_idea_payload, is_developer_error, is_developer_stuck)
 from looplab.core.llm_broker import in_llm_lane
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.engine.node_build import developer_crash_records
 from looplab.search.card_selection import unconsumed_card_inventory
 from looplab.events.types import (

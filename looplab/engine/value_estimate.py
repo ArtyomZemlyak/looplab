@@ -46,7 +46,8 @@ from looplab.core.containment import contain
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import NodeStatus, RunState
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_NODE_VALUE_ESTIMATED
 
 # How many candidates one cadence may pay for. The tree only ever expands ONE node per creation

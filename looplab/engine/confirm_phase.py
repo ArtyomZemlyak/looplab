@@ -22,7 +22,8 @@ import time
 import anyio
 
 from looplab.core.models import NodeStatus, RunState
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_BEST_CONFIRMED, EV_CONFIRM_DONE, EV_CONFIRM_EVAL,
                                   EV_NODE_CONFIRMED, EV_PAUSE, EV_SPEC_DRIFT)
 from looplab.runtime.sandbox import GpuPinUnenforceable

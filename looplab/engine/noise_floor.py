@@ -45,7 +45,8 @@ import anyio
 from looplab.core.containment import contain
 from looplab.core.fitness import standard_error_difference
 from looplab.core.models import RunState
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_EVAL_NOISE_FLOOR, EV_EVAL_NOISE_SEED
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.trust.cv import cv_summary

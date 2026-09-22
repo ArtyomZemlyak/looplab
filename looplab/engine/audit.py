@@ -161,7 +161,7 @@ class AuditMixin:
         # projection.
         try:
             from looplab.core.models import hypothesis_id
-            from looplab.events.replay import fold
+            from looplab.engine.shared import engine_fold as fold  # the engine's seam
 
             state = fold(self.store.read_all())
             card_order: list[str] = []

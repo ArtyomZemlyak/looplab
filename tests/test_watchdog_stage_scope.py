@@ -460,7 +460,7 @@ def _drive_asha(host, wd, spec, monkeypatch, curves, *, plan=None, until=None, w
     for index, metric in enumerate([0.80, 0.70, 0.60], start=1):
         nodes[index] = Node(id=index, operator="draft", idea=idea, metric=metric,
                             status=NodeStatus.evaluated, resource_curve=curves[index - 1])
-    monkeypatch.setattr("looplab.events.replay.fold", lambda events: RunState(nodes=nodes))
+    monkeypatch.setattr("looplab.engine.orchestrator.fold", lambda events: RunState(nodes=nodes))
 
     async def _run():
         async with anyio.create_task_group() as tg:

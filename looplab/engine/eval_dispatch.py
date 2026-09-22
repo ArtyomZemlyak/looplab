@@ -20,7 +20,8 @@ from looplab.core.models import (EXTRA_METRIC_AUTO, apply_engine_extra_metric_ch
 from looplab.engine.evaluate import _redacted_tail
 from looplab.engine.shared import effective_researcher_eval_timeout
 from looplab.engine.speculation_gate import engine_authored_artifacts
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
                                   SETUP_THREAD_APPENDABLE)
 from looplab.runtime import applied_params, effective_batch, metric_inputs

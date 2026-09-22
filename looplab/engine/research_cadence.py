@@ -32,7 +32,8 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.engine.cadence import at_creation_boundary, deep_research_window
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_BELIEF_ADMISSION,
                                   EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_ATTEMPTED,

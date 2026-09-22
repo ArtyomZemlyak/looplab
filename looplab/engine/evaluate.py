@@ -739,7 +739,8 @@ def _durable_salvage_cause_fix(events, node_id: int, generation: int):
         if str(d.get("triage_action") or "") == SALVAGE_CAUSE_TRIAGE_ACTION:
             return d
     return None
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 # The fold's OWN generation rule, CALLED rather than re-derived — `_durable_row_belongs` above is
 # the single place the durable ledgers key a raw row, and it must agree with `replay` by
 # construction. Public on purpose (see its docstring): the alternative was importing the private

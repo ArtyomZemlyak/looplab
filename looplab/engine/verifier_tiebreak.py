@@ -20,7 +20,8 @@ from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence
                                   verifier_evidence_snapshot)
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_VERIFIER_GROUP_SCORED
 
 

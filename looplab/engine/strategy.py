@@ -40,7 +40,8 @@ from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_m
 from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
 from looplab.search.coverage import (already_covered_at, analytics_projection_token, coverage_signal,
                                      latest_live_snapshot)

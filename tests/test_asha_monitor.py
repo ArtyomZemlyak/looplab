@@ -420,7 +420,7 @@ _LOOP_SETTLE_TIMEOUT_S = 15.0
 def _run_loop(stub, workdir, spec, direction, kill_signal, monkeypatch, finals, *,
               tails=None, curves=None, log_snapshot=None, window=0.12, until=None):
     monkeypatch.setattr(
-        "looplab.events.replay.fold", lambda events: _fake_state(finals, tails=tails, curves=curves))
+        "looplab.engine.orchestrator.fold", lambda events: _fake_state(finals, tails=tails, curves=curves))
 
     async def drive():
         cancel = threading.Event()
@@ -519,7 +519,7 @@ def test_the_resume_recovery_rejects_a_bool_node_id_from_the_event_log(tmp_path,
     for index, metric in enumerate([0.80, 0.70, 0.60], start=2):
         nodes[index] = Node(id=index, operator="draft", idea=idea, metric=metric,
                             status=NodeStatus.evaluated)
-    monkeypatch.setattr("looplab.events.replay.fold", lambda events: RunState(nodes=nodes))
+    monkeypatch.setattr("looplab.engine.orchestrator.fold", lambda events: RunState(nodes=nodes))
 
     stub = _AshaStub(kill=False, quantile=0.5, min_siblings=3)
     stub.store.events.append((EV_ASHA_RANK, {

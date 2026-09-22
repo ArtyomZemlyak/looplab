@@ -40,6 +40,27 @@ assert EV_PHASE_PROGRESS in DIAGNOSTIC_EVENTS, (
     "fold-ignored DIAGNOSTIC type")
 
 
+def engine_fold(events):
+    """THE ENGINE'S ONE FOLD SEAM: `orchestrator.fold`, resolved at CALL time.
+
+    CLAUDE.md has long said the module-global `fold` in `orchestrator.py` is the seam "every helper
+    that folds must reach through", because tests monkeypatch it (`monkeypatch.setattr(orch, "fold",
+    …)`, twenty-odd sites) to control what the Engine sees. It was not true: fourteen engine modules
+    bound `looplab.events.replay.fold` at import time, so each such patch silently covered only the
+    methods that happen to live in `orchestrator.py` — and every mixin extraction quietly narrowed it
+    further (review 2026-09-22, ENG1-04; `card_reservation.py`'s docstring measured the same class of
+    detachment for one cluster and fixed it locally with its own `_fold`).
+
+    The deferred import is the point: binding `orchestrator.fold` at import time would snapshot the
+    real function and make the patch a no-op again. Modules import this under their own name
+    (`from looplab.engine.shared import engine_fold as fold`), so a test that patches ONE module's
+    `fold` still narrows to that module exactly as before. `tests/test_engine_fold_seam.py` holds it:
+    no engine module binds `replay.fold` directly, and a patched seam sees the folds of the others.
+    """
+    from looplab.engine import orchestrator
+    return orchestrator.fold(events)
+
+
 def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
     """Return the governed, finite and hard-clamped per-node timeout override."""
     # identity must describe the EXECUTED action, not an untrusted model request.

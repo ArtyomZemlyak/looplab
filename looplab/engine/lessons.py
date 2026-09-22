@@ -55,7 +55,8 @@ from looplab.engine.lessons_priors import (  # noqa: F401
     LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER, LessonPriorsMixin)
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import JsonlCaseLibrary
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (
     EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_LESSONS_STORE_UNAVAILABLE, EV_SKILLS_PROMOTED)
 

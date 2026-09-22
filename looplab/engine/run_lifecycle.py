@@ -278,7 +278,7 @@ def fresh_resume_launch_pending(rd: Path, *, now: Optional[float] = None) -> boo
     request eventually expires, so a zombie run remains operator-deletable.
     """
     from looplab.events.eventstore import EventStore
-    from looplab.events.replay import fold
+    from looplab.engine.shared import engine_fold as fold  # the engine's seam
 
     now = time.time() if now is None else now
     try:

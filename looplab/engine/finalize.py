@@ -49,7 +49,9 @@ from looplab.events.htmlview import render_html
 # patch seam — `monkeypatch.setattr(finalize, "build_readmodel", …)` would resolve and reach
 # nothing, because `publish_readmodel` calls its own module global.
 from looplab.events.readmodel import publish_readmodel
-from looplab.events.replay import fold, run_wall_clock_seconds
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
+from looplab.events.replay import run_wall_clock_seconds
 from looplab.events.traceview import (
     TRACE_VIEW_SPAN_CAP, build_trace_view, hydrate_inputs, load_span_tail,
     trace_projection_json_bytes)

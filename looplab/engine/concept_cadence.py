@@ -35,7 +35,8 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_
                                   node_concept_event_provenance)
 from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
                                      seed_boundary_due)
-from looplab.events.replay import fold
+# Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
                                   EV_CONCEPT_EDGE, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
                                   EV_RUN_CONCEPTS)

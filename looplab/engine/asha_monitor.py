@@ -734,7 +734,7 @@ class AshaMonitorMixin:
 
         from looplab.engine.train_monitor import (
             claim_watchdog_kill, last_lifecycle_row, read_training_tail_raw)
-        from looplab.events.replay import fold
+        from looplab.engine.shared import engine_fold as fold  # the engine's seam
         from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK, EV_ASHA_VERDICT
 
         base = self._asha_cadence()
