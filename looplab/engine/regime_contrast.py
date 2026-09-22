@@ -38,6 +38,7 @@ import re
 import statistics
 from typing import Optional
 
+from looplab.core.fitness import is_better
 from looplab.core.run_identity import run_ref
 
 # THE REGIMES, in the order a reader should think about them: what the node COMPILED, if anything.
@@ -83,18 +84,49 @@ def node_regime(files: dict) -> str:
     return REGIME_PLAIN
 
 
-def contrast(rows: list) -> Optional[dict]:
+_DIRECTIONS = ("min", "max")
+
+
+def _rank(medians: dict, direction: str) -> tuple:
+    """`(best, worst, ratio)` over `{regime: median}` under the objective's DIRECTION.
+
+    THE ONE PLACE A MEDIAN BECOMES "BETTER" (review 2026-09-22, ENG3-04). Both halves of this module
+    ranked with `max`/`min` on the raw median, i.e. assumed higher is better, so on a MINIMIZED
+    task (a runtime, a loss) the regime that scored worst was written to the shared ledger as
+    `best` and the prior told the next run "compiled over plain 5.48x" where plain had won.
+    `core/fitness.py::is_better` is the comparator the fold and every policy use; ties keep the
+    FIRST regime in iteration order, exactly as `max`/`min` did on a maximized task.
+
+    `ratio` is the fold by which the best median beats the worst — best/worst when maximizing,
+    worst/best when minimizing, so >= 1 either way and the same number §108 reports ("six-fold").
+    It is None rather than infinity when the denominator is zero or negative: a run whose baseline
+    scored zero has no ratio, and inventing one would put an unbounded number into a shared store.
+    """
+    best = worst = None
+    for regime, value in medians.items():
+        if best is None or is_better(direction, value, medians[best]):
+            best = regime
+        if worst is None or is_better(direction, medians[worst], value):
+            worst = regime
+    num, den = ((medians[best], medians[worst]) if direction == "max"
+                else (medians[worst], medians[best]))
+    return best, worst, (round(num / den, 4) if den > 0 else None)
+
+
+def contrast(rows: list, *, direction: str) -> Optional[dict]:
     """`[(regime, metric), ...]` -> what each regime was worth here, or None when it says nothing.
 
     None when fewer than two regimes carry a measured node: a "contrast" over one population is a
     summary of that population wearing a comparative's clothes, and the next reader would take it
-    for evidence that something was compared.
+    for evidence that something was compared. None, too, when `direction` is not `min`/`max`: a
+    ranking under an unknown objective polarity is a guess, and the ledger is read by other runs.
 
-    The ratio is the best regime's median over the WORST regime's median, which is the number §108
-    reports ("six-fold"), and it is `None` rather than infinity when the worst median is zero or
-    negative — a run whose baseline scored zero has no ratio, and inventing one would put an
-    unbounded number into a store that other runs read.
+    `direction` is REQUIRED (review 2026-09-22, ENG3-04) — a default would silently re-assume the
+    maximized objective this function used to hard-code. Best, worst and the ratio come from
+    `_rank`.
     """
+    if direction not in _DIRECTIONS:
+        return None
     by: dict[str, list[float]] = {}
     for regime, metric in rows:
         if regime in REGIMES and isinstance(metric, (int, float)):
@@ -104,14 +136,12 @@ def contrast(rows: list) -> Optional[dict]:
     stats = {r: {"n": len(v), "median": round(statistics.median(v), 6),
                  "max": round(max(v), 6), "min": round(min(v), 6)}
              for r, v in sorted(by.items())}
-    best = max(stats, key=lambda r: stats[r]["median"])
-    worst = min(stats, key=lambda r: stats[r]["median"])
-    lo = stats[worst]["median"]
+    best, worst, ratio = _rank({r: s["median"] for r, s in stats.items()}, direction)
     return {
         "regimes": stats,
         "best": best,
         "worst": worst,
-        "ratio": round(stats[best]["median"] / lo, 4) if lo > 0 else None,
+        "ratio": ratio,
         # THE SAMPLE, once, at the top level: every reader of this row needs it and a reader that
         # has to add up three sub-counts to find out how much evidence it is looking at will not.
         "nodes": sum(s["n"] for s in stats.values()),
@@ -133,7 +163,10 @@ def run_contrast(state) -> Optional[dict]:
     stamp = {"task_id": getattr(state, "task_id", ""),
              "direction": getattr(state, "direction", ""),
              "run_id": getattr(state, "run_id", "")}
-    got = contrast(rows)
+    # Ranked under the run's OWN objective (review 2026-09-22, ENG3-04): the stamp above always
+    # carried `direction`, but the ranking ignored it and wrote a minimized task's worst regime as
+    # its `best`. An unknown direction ranks nothing and takes the one-population path below.
+    got = contrast(rows, direction=stamp["direction"])
     if got is not None:
         return {**got, **stamp}
     # A RUN THAT TRIED ONE REGIME STILL WROTE DOWN WHAT IT MEASURED. `contrast` refuses to call one
@@ -189,7 +222,7 @@ def latest_row_per_run(rows) -> list:
     return [row if key is None else keyed[key] for key, row in order]
 
 
-def known_regimes(rows: list, task_id: str) -> dict:
+def known_regimes(rows: list, task_id: str, *, direction: str) -> dict:
     """Fold the shared ledger into what is KNOWN about `task_id`, and what is known elsewhere.
 
     The read side of docs/60 §60.9 B2, and the shape it returns is the whole argument. `here` is
@@ -208,13 +241,26 @@ def known_regimes(rows: list, task_id: str) -> dict:
 
     ONE ROW PER RUN, THE LATEST (review 2026-09-22, ENG3-03): see `latest_row_per_run`. The finalize
     appends a row every time a run is finalized, so a reopened run spoke twice for its first segment.
+
+    BY DIRECTION (review 2026-09-22, ENG3-04). `direction` is the reading run's objective and is
+    REQUIRED. A row is pooled into `here` only when it measured THIS task under THIS direction — a
+    task id reused for the opposite objective is not evidence about this one — and an OTHER task is
+    grouped per (task, direction) and ranked under its OWN direction by `_rank`, recomputed from the
+    per-regime medians and never from a stored `best`, so the inverted rows already written for
+    minimized tasks now read correctly. A row whose direction is not `min`/`max` cannot be ranked or
+    pooled and is skipped, the same fail-closed polarity rule `trust/cross_run.py` applies.
     """
     here: dict[str, list] = {}
-    other: dict[str, list] = {}
+    other: dict[tuple, list] = {}
     elsewhere: list = []
     for row in latest_row_per_run(rows):
         regimes = row.get("regimes")
+        row_direction = row.get("direction")
+        if row_direction not in _DIRECTIONS:
+            continue
         if row.get("task_id") == task_id:
+            if row_direction != direction:
+                continue
             for regime, stats in regimes.items():
                 if regime in REGIMES and isinstance(stats, dict):
                     here.setdefault(regime, []).append(stats)
@@ -226,7 +272,7 @@ def known_regimes(rows: list, task_id: str) -> dict:
             # of one task's 352-node picture. A reader counting sentences would have counted
             # evidence. Pooled the same way `here` is: the median of the run ratios, and the nodes
             # summed, so the sample beside a number is the sample behind it.
-            other.setdefault(row.get("task_id", ""), []).append(row)
+            other.setdefault((row.get("task_id", ""), row_direction), []).append(row)
     summary = {}
     for regime, seen in sorted(here.items()):
         medians = [s["median"] for s in seen if isinstance(s.get("median"), (int, float))]
@@ -237,7 +283,7 @@ def known_regimes(rows: list, task_id: str) -> dict:
             # about a question -- "does this regime work here" -- that is asked once per run.
             summary[regime] = {"runs": len(medians), "median_of_medians": round(
                 statistics.median(medians), 6), "nodes": sum(counts)}
-    for task, rows_of_task in other.items():
+    for (task, task_direction), rows_of_task in other.items():
         # AGGREGATED THE SAME WAY `here` IS, and that is not tidiness. The first version took the
         # MEDIAN OF THE PER-RUN RATIOS and read `discrete_log: 4.68x` while `benchmarks/
         # regime_table.py` publishes 1.28x for the same task -- two legitimate statistics (a median
@@ -252,12 +298,11 @@ def known_regimes(rows: list, task_id: str) -> dict:
         if len(per_regime) < 2:
             continue
         med = {k: statistics.median(v) for k, v in per_regime.items()}
-        best = max(med, key=lambda k: med[k])
-        worst = min(med, key=lambda k: med[k])
-        if med[worst] <= 0:
-            continue                       # no ratio, for the reason `contrast` gives
-        elsewhere.append({"task_id": task, "best": best, "worst": worst,
-                          "ratio": round(med[best] / med[worst], 4),
+        best, worst, ratio = _rank(med, task_direction)
+        if ratio is None:
+            continue                       # no ratio, for the reason `_rank` gives
+        elsewhere.append({"task_id": task, "direction": task_direction,
+                          "best": best, "worst": worst, "ratio": ratio,
                           "runs": len(rows_of_task),
                           "nodes": sum(int(r.get("nodes") or 0) for r in rows_of_task)})
     return {"task_id": task_id, "here": summary,
@@ -270,7 +315,8 @@ def known_regimes(rows: list, task_id: str) -> dict:
 REGIME_PRIOR_LABEL = "Implementation regimes measured"
 
 
-def regime_prior_line(rows: list, task_id: str, *, elsewhere_limit: int = 2) -> tuple:
+def regime_prior_line(rows: list, task_id: str, *, direction: str,
+                      elsewhere_limit: int = 2) -> tuple:
     """`(text, receipt)` for the propose prior — evidence about regimes, and never an instruction.
 
     Empty text when the ledger says nothing about anything, because a prior that renders a header
@@ -289,17 +335,27 @@ def regime_prior_line(rows: list, task_id: str, *, elsewhere_limit: int = 2) -> 
 
     There is no recommendation clause and there is no superlative. The proposer is being handed a
     measurement, not a verdict, and the difference is the whole reason the module exists.
+
+    `direction` is the proposing run's objective (review 2026-09-22, ENG3-04): `here` is listed
+    best-first UNDER IT — ascending medians when minimizing — and `known_regimes` ranks every other
+    task under its own. Before, both assumed higher is better, so a minimized task read its WORST
+    regime first and "compiled over plain 5.48x" where plain had won. An unknown direction renders
+    nothing: a regime ranking under an unknown polarity is not evidence.
     """
-    known = known_regimes(rows, task_id)
+    if direction not in _DIRECTIONS:
+        return "", {}
+    known = known_regimes(rows, task_id, direction=direction)
     here, elsewhere = known["here"], known["elsewhere"]
     if not here and not elsewhere:
         return "", {}
     parts = []
     if here:
+        sign = -1 if direction == "max" else 1          # best-first under this task's objective
         measured = "; ".join(
             f"{regime} (median {stats['median_of_medians']:.4g} over {stats['nodes']} node(s) "
             f"in {stats['runs']} run(s))"
-            for regime, stats in sorted(here.items(), key=lambda kv: -kv[1]["median_of_medians"]))
+            for regime, stats in sorted(
+                here.items(), key=lambda kv: sign * kv[1]["median_of_medians"]))
         parts.append(f"{REGIME_PRIOR_LABEL} on this task: {measured}.")
         if known["untried_here"]:
             parts.append("Never tried here: " + ", ".join(known["untried_here"]) + ".")

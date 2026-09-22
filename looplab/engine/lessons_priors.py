@@ -588,7 +588,11 @@ class LessonPriorsMixin:
                 from looplab.engine.regime_contrast import regime_prior_line
                 rows, _health = read_memory_jsonl_window(
                     Path(self._e.memory_dir) / "regime_contrast.jsonl")
-                line, rec = regime_prior_line([o for _i, o in rows], self._e.task.id)
+                # Ranked under THIS task's objective (review 2026-09-22, ENG3-04) — the same
+                # `task.direction` `_scan_prior_context` scopes every other prior tier by.
+                line, rec = regime_prior_line(
+                    [o for _i, o in rows], self._e.task.id,
+                    direction=str(getattr(self._e.task, "direction", "") or ""))
                 if line:
                     out += "\n" + line
                     receipt["regime"] = rec

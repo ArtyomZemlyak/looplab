@@ -46,15 +46,27 @@ DEFAULT_ROOT = (os.environ.get("BENCH_ROOT")
                 or "/home/jovyan/data/looplab-bench/runs-archive") + "/model-probes"
 
 
+def direction_of(started: dict) -> str:
+    """The objective a run optimized, read by the FOLD's own rule (`events/replay.py`'s
+    `run_started` handler: strip, lower-case, and anything but min/max is "min"), so the archive
+    and the run agree on which regime was BETTER. Review 2026-09-22, ENG3-04: this table ranked every
+    task as if higher were better and `--seed-ledger` stamped every row `max`, so a minimized task's
+    worst regime was published as its best."""
+    value = str(started.get("direction", "min")).strip().lower()
+    return value if value in ("min", "max") else "min"
+
+
 def read_probe(path: str) -> tuple:
-    """`(task_id, [(regime, metric), ...])` for one probe's event log."""
+    """`(task_id, direction, [(regime, metric), ...])` for one probe's event log."""
     files_by_id: dict = {}
     scored: list = []
     task = ""
+    direction = "min"          # the fold's default for a log with no `run_started`
     for event in events_read.iter_events(path):
         kind, data = event.get("type"), (event.get("data") or {})
         if kind == "run_started":
             task = str(data.get("task_id") or data.get("task") or "")
+            direction = direction_of(data)
         elif kind == "node_created":
             files = data.get("files")
             if isinstance(files, dict):
@@ -63,27 +75,38 @@ def read_probe(path: str) -> tuple:
             metric = data.get("metric")
             if isinstance(metric, (int, float)):
                 scored.append((data.get("node_id", data.get("id")), float(metric)))
-    return task, [(node_regime(files_by_id.get(nid) or {}), m) for nid, m in scored]
+    return task, direction, [(node_regime(files_by_id.get(nid) or {}), m) for nid, m in scored]
 
 
 def collect(root: str) -> tuple:
+    """`(probes, {task: rows}, {task: direction})`. A task whose probes disagree about the
+    direction gets `""`, which `contrast` refuses to rank rather than pooling two objectives."""
     by_task: dict = collections.defaultdict(list)
+    directions: dict = collections.defaultdict(set)
     probes = 0
     for path in sorted(glob.glob(f"{root}/*/runs/*/run/events.jsonl")):
         probes += 1
-        task, rows = read_probe(path)
+        task, direction, rows = read_probe(path)
         by_task[task].extend(rows)
-    return probes, by_task
+        directions[task].add(direction)
+    return probes, by_task, {t: (next(iter(d)) if len(d) == 1 else "")
+                             for t, d in directions.items()}
 
 
-def render(probes: int, by_task: dict, min_nodes: int) -> str:
+def render(probes: int, by_task: dict, min_nodes: int, direction_of_task: dict) -> str:
     out = [f"{probes} probe(s) under the root; tasks with at least {min_nodes} evaluated nodes:"]
     for task, rows in sorted(by_task.items(), key=lambda kv: -len(kv[1])):
         if len(rows) < min_nodes:
             continue
-        got = contrast(rows)
+        direction = direction_of_task.get(task, "")
+        got = contrast(rows, direction=direction)
         out.append("")
-        out.append(f"{task}  ({len(rows)} evaluated nodes)")
+        out.append(f"{task}  ({len(rows)} evaluated nodes, direction {direction or 'MIXED'})")
+        if not direction:
+            # Probes of one task that disagree about the objective cannot be pooled into one
+            # ranking; saying so beats printing a table whose "best" belongs to half of them.
+            out.append("  probes disagree about the objective direction -- not ranked")
+            continue
         out.append(f"  {'regime':<10} {'n':>5} {'median':>10} {'max':>10} {'min':>10}")
         for regime in REGIMES:
             stats = (got or {}).get("regimes", {}).get(regime)
@@ -122,12 +145,15 @@ def seed_rows(root: str) -> list:
     """
     out = []
     for path in sorted(glob.glob(f"{root}/*/runs/*/run/events.jsonl")):
-        task, rows = read_probe(path)
+        task, direction, rows = read_probe(path)
         if not task or not rows:
             continue
-        stamp = {"task_id": task, "direction": "max",
+        # The probe's OWN direction, not a hard-coded "max" (review 2026-09-22, ENG3-04): the
+        # live writer stamps the run's objective, and a seed that claims another one would be
+        # ranked backwards by every reader that now honours it.
+        stamp = {"task_id": task, "direction": direction,
                  "run_id": path.split("/model-probes/")[1].split("/")[0], "seeded_from": path}
-        got = contrast(rows)
+        got = contrast(rows, direction=direction)
         if got is not None:
             out.append({**got, **stamp})
             continue
@@ -170,13 +196,14 @@ def main(argv=None) -> int:
             n = sum(1 for r in rows if r["task_id"] == t)
             print(f"  {t:<32} {n:>3} run(s)")
         return 0
-    probes, by_task = collect(args.root)
+    probes, by_task, direction_of_task = collect(args.root)
     if args.json:
         print(json.dumps({"probes": probes, "root": args.root,
-                          "tasks": {t: contrast(r) for t, r in by_task.items()
+                          "tasks": {t: contrast(r, direction=direction_of_task.get(t, ""))
+                                    for t, r in by_task.items()
                                     if len(r) >= args.min_nodes}}, indent=1))
         return 0
-    print(render(probes, by_task, args.min_nodes))
+    print(render(probes, by_task, args.min_nodes, direction_of_task))
     return 0
 
 
