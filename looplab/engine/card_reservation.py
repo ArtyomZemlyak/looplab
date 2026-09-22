@@ -2147,6 +2147,57 @@ class CardReservationMixin:
             notes.append("the raw-proposal staging lane produced no durable Card")
         return "; ".join(notes)
 
+    @classmethod
+    def _card_auto_drop_row(cls, events, card_id: Optional[str], *, reason: str,
+                            dropped_by: str = "engine"):
+        """The `card_auto_dropped` row that retires ``card_id`` over ``events``, or None when a drop
+        already stands (or there is no card). ONE spelling of the payload and of the idempotence
+        rule for the two writers that need it: `_drop_card_once`'s own CAS, and the node-reset
+        re-proposal's single CAS'd batch (`orchestrator.py::_commit_rerun_card`, review 2026-09-22,
+        ENG1-05), which must fold the drop INTO its claim and so cannot call a helper that appends.
+        """
+        if not card_id:
+            return None
+        # IDEMPOTENCE IS "IS A DROP STANDING", NOT "WAS ONE EVER APPENDED", and keying it on the
+        # latter made an operator reopen permanently un-retirable by the engine. The fold has
+        # resolved drop/reopen LAST-RECEIPT-WINS since `dccad06f` (`events/card_ledger.py`), so
+        # after drop -> reopen the board shows the card LIVE while this scan still saw the
+        # historical drop and returned without appending. Every later engine retirement then
+        # silently no-opped while its caller believed the card retired: `_retire_unclaimable_
+        # cards` resets its counters and re-enters the same refuse/retire cycle, and the
+        # node-reset re-propose leaves the superseded twin live beside its replacement — the
+        # leak `_exhausted` below exists to refuse, made silent. The ledger's own comment names
+        # the state ("permanently un-droppable by its owner") and blocks only the laundering
+        # path; the legitimate operator reopen reached it too.
+        #
+        # THE RULE IS THE FOLD'S, REPLAYED OVER RAW EVENTS RATHER THAN RE-INVENTED, and the
+        # author test is why `_drop_author` is IMPORTED: its own docstring says "ONE spelling,
+        # because three readers ask it and they must not drift", and this is now a fourth. A
+        # reopen may only undo an OPERATOR's drop — an engine `card_auto_dropped` stands whatever
+        # follows it, which is what stops a reopen from laundering a rejected proposal back onto
+        # the selectable board (`_record_node_less_card` mints and auto-drops in one
+        # `append_many` precisely so the audit row is never live).
+        #
+        # Order is the log's own, so no `_event_index` is needed here: the CAS hands this plan
+        # the prefix in append order, and "later" is simply "further along `events`".
+        standing = False
+        standing_author = "engine"
+        for event in events:
+            if cls._canonical_card_id(event.data.get("id")) != card_id:
+                continue
+            if event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}:
+                standing = True
+                standing_author = _drop_author(event.data or {})
+            elif event.type == EV_CARD_REOPENED and standing and standing_author == "operator":
+                standing = False
+        if standing:
+            return None
+        return (EV_CARD_AUTO_DROPPED, {
+            "id": card_id,
+            "reason": reason,
+            "dropped_by": dropped_by,
+        })
+
     def _drop_card_once(self, card_id: Optional[str], *, reason: str,
                         dropped_by: str = "engine") -> None:
         if not card_id:
@@ -2155,45 +2206,11 @@ class CardReservationMixin:
         # unsafe. Use the EventStore's atomic tail CAS instead: concurrent callers either observe the
         # first drop or lose the CAS and retry against its prefix.
         def _plan(events, tail) -> None:
-            # IDEMPOTENCE IS "IS A DROP STANDING", NOT "WAS ONE EVER APPENDED", and keying it on the
-            # latter made an operator reopen permanently un-retirable by the engine. The fold has
-            # resolved drop/reopen LAST-RECEIPT-WINS since `dccad06f` (`events/card_ledger.py`), so
-            # after drop -> reopen the board shows the card LIVE while this scan still saw the
-            # historical drop and returned without appending. Every later engine retirement then
-            # silently no-opped while its caller believed the card retired: `_retire_unclaimable_
-            # cards` resets its counters and re-enters the same refuse/retire cycle, and the
-            # node-reset re-propose leaves the superseded twin live beside its replacement — the
-            # leak `_exhausted` below exists to refuse, made silent. The ledger's own comment names
-            # the state ("permanently un-droppable by its owner") and blocks only the laundering
-            # path; the legitimate operator reopen reached it too.
-            #
-            # THE RULE IS THE FOLD'S, REPLAYED OVER RAW EVENTS RATHER THAN RE-INVENTED, and the
-            # author test is why `_drop_author` is IMPORTED: its own docstring says "ONE spelling,
-            # because three readers ask it and they must not drift", and this is now a fourth. A
-            # reopen may only undo an OPERATOR's drop — an engine `card_auto_dropped` stands whatever
-            # follows it, which is what stops a reopen from laundering a rejected proposal back onto
-            # the selectable board (`_record_node_less_card` mints and auto-drops in one
-            # `append_many` precisely so the audit row is never live).
-            #
-            # Order is the log's own, so no `_event_index` is needed here: the CAS hands this plan
-            # the prefix in append order, and "later" is simply "further along `events`".
-            standing = False
-            standing_author = "engine"
-            for event in events:
-                if self._canonical_card_id(event.data.get("id")) != card_id:
-                    continue
-                if event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}:
-                    standing = True
-                    standing_author = _drop_author(event.data or {})
-                elif event.type == EV_CARD_REOPENED and standing and standing_author == "operator":
-                    standing = False
-            if standing:
+            # The standing-drop rule and the row are `_card_auto_drop_row`'s (see there).
+            row = self._card_auto_drop_row(events, card_id, reason=reason, dropped_by=dropped_by)
+            if row is None:
                 return None
-            self.store.append(EV_CARD_AUTO_DROPPED, {
-                "id": card_id,
-                "reason": reason,
-                "dropped_by": dropped_by,
-            }, expected_last_seq=tail)
+            self.store.append(*row, expected_last_seq=tail)
             return None
 
         def _exhausted():

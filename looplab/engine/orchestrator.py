@@ -507,6 +507,19 @@ def budget_stop_recheck(budget_stop: list) -> bool:
 
 
 
+class _RerunCardCommit(NamedTuple):
+    """What a node-reset re-proposal's main-task Card commit decided (`Engine._commit_rerun_card`).
+
+    `outcome` is "reserved" (the swap and the claim landed as one batch), "stale" (the node's own
+    lifecycle or a parent moved while the Researcher worked — nothing written), "rejected" (the
+    proposal cannot form a native Card — the reservation was closed `proposal_rejected`) or "lost"
+    (the tail CAS never settled — nothing written, the reset stays pending for the next turn)."""
+
+    outcome: str
+    state: Optional[RunState]
+    plan: object
+
+
 class _InjectedNodePlan(NamedTuple):
     """Pure, bounded preparation result for one operator-authored Node request."""
 
@@ -7588,6 +7601,96 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             return anyio.from_thread.run_sync(call)
         return call()
 
+    def _commit_rerun_card_on_main_task(self, **kwargs) -> _RerunCardCommit:
+        """`_commit_rerun_card`, always on the MAIN task, whichever thread asks.
+
+        The re-proposal's twin of `_reserve_on_main_task`, and for the same reason (review
+        2026-09-22, ENG1-05): `_rerun_node` has run in an `_offload_build` worker since 2026-09-06,
+        so its Card swap — `card_auto_dropped` + `card_added` + `node_building` — came off the
+        worker as three separate appends with no tail CAS, against the Card ledger's
+        "main-task-written" contract (`events/types.py`). It cannot reuse `_reserve_node_build`
+        itself: that mints a NEW node id, and a reset rebuilds an EXISTING one at its new
+        generation. The paid Developer call stays in the worker; only the commit comes back."""
+        call = functools.partial(self._commit_rerun_card, **kwargs)
+        if getattr(_OFFLOADED_BUILD, "value", False):
+            return anyio.from_thread.run_sync(call)
+        return call()
+
+    def _commit_rerun_card(self, *, node_id: int, generation: int, operator: str,
+                           parents: list, parent_generations: Mapping, idea,
+                           steering_context) -> _RerunCardCommit:
+        """Replace a re-proposed node's Card and claim its rebuild: ONE `append_many`, one tail CAS.
+
+        The plan and the commit are the ones `_rerun_node` made inline under `_id_lock` — the
+        lifecycle fence, `_plan_native_card` with the superseded card named, the ownership check
+        before the drop — moved, not changed, with two differences that are the fix. The rows land
+        as one batch, so another writer lands before or after the swap and never between the
+        drop and its replacement (a torn tail exposes none of them). And the batch is CAS'd on the
+        tail the plan read: a row that lands meanwhile makes the commit RE-PLAN against it rather
+        than be written over, which the three bare appends could not do.
+
+        The parent half of the fence is `parent_generations_current`, the one spelling the other
+        creation sites share, instead of this path's own inline copy (review 2026-09-22, ENG1-11).
+        """
+        with self._id_lock:
+            def _plan(events, tail) -> _RerunCardCommit:
+                latest = fold(events)
+                current = latest.nodes.get(node_id)
+                if (current is None or current.attempt != generation
+                        or current.rerun_from != "propose" or current.tombstoned
+                        or node_id in latest.aborted_nodes
+                        or not parent_generations_current(latest, parent_generations)):
+                    return _RerunCardCommit("stale", latest, None)
+                plan = self._plan_native_card(
+                    events, latest, idea, parents=parents,
+                    parent_generations=parent_generations,
+                    scored_against=latest.best_node_id, source="researcher", at_node=node_id,
+                    steering_context=steering_context,
+                    superseded_card_id=current.idea.card_id,
+                )
+                if plan.disposition not in {"mint", "reuse"}:
+                    return _RerunCardCommit("rejected", latest, plan)
+                rows = []
+                # THE SAME OWNERSHIP CHECK the refusal path four lines up routes through (via
+                # `_fail_reserved_build`). `_drop_card_once` has none of its own, so dropping
+                # unconditionally destroyed a card that a DIFFERENT node had attached to — a
+                # debug re-attempt landing on the same work item — and a dropped card is
+                # unrecoverable, because `_retry_attach_card` refuses `dropped` forever. The
+                # later repair then minted a byte-identical twin: exactly the duplicate work
+                # item the attach disposition exists to prevent. Reproduced end-to-end (mint on
+                # node 0, attach on node 1, `node_reset from_stage=propose` on node 0).
+                # Fail-closed here means the superseded card survives as proposed inventory,
+                # which is the cost `_reservation_minted_card`'s own docstring prices against
+                # deleting somebody else's finished work item.
+                # (The drop row is `_card_auto_drop_row`'s — `_drop_card_once`'s own idempotence
+                # rule without its append — so it can ride this batch.)
+                if self._reservation_minted_card(events, node_id, current.idea.card_id):
+                    drop = self._card_auto_drop_row(events, current.idea.card_id,
+                                                    reason="reproposed")
+                    if drop is not None:
+                        rows.append(drop)
+                if plan.disposition == "mint":
+                    rows.append((EV_CARD_ADDED, plan.payload))
+                rows.append((EV_NODE_BUILDING, {
+                    "node_id": node_id, "generation": generation,
+                    "operator": operator, "parent_ids": parents,
+                    "card_id": plan.card_id,
+                }))
+                self.store.append_many(rows, expected_last_seq=tail)
+                return _RerunCardCommit("reserved", latest, plan)
+
+            committed = retry_tail_cas(
+                self.store, _plan, on_exhaust=lambda: _RerunCardCommit("lost", None, None))
+            if committed.outcome == "rejected":
+                # Closed OUTSIDE the CAS loop (it appends through its own) but still under
+                # `_id_lock` and on this task, exactly where the inline block closed it.
+                current = committed.state.nodes[node_id]
+                self._fail_reserved_build(
+                    node_id=node_id, card_id=current.idea.card_id, generation=generation,
+                    error="replacement proposal was duplicate or outside the Card contract",
+                    reason="proposal_rejected", drop_card=bool(current.idea.card_id))
+            return committed
+
     async def _offload_node_build(self, action: dict, **kwargs) -> None:
         """`_create_node`, off the loop — see `_offload_build`."""
         await self._offload_build(functools.partial(self._create_node, action, **kwargs))
@@ -7663,60 +7766,23 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     # Persist the governed value so rerun receipts cannot diverge from execution.
                     "eval_timeout": self._effective_researcher_eval_timeout(idea),
                 })
-                with self._id_lock:
-                    events = self.store.read_all()
-                    latest = fold(events)
-                    current = latest.nodes.get(node.id)
-                    parents_current = all(
-                        pid in latest.nodes
-                        and latest.nodes[pid].attempt == parent_generation
-                        and pid not in latest.aborted_nodes
-                        and not latest.nodes[pid].tombstoned
-                        for pid, parent_generation in (
-                            (int(pid), value) for pid, value in parent_generations.items()))
-                    if (current is None or current.attempt != generation
-                            or current.rerun_from != "propose" or current.tombstoned
-                            or node.id in latest.aborted_nodes or not parents_current):
-                        self._discard_node_build_telemetry()
-                        return
-                    plan = self._plan_native_card(
-                        events, latest, idea, parents=parents,
-                        parent_generations=parent_generations,
-                        scored_against=latest.best_node_id, source="researcher", at_node=node.id,
-                        steering_context=getattr(self.researcher, "_steering_context", []),
-                        superseded_card_id=current.idea.card_id,
-                    )
-                    if plan.disposition not in {"mint", "reuse"}:
-                        self._fail_reserved_build(
-                            node_id=node.id, card_id=current.idea.card_id,
-                            generation=generation,
-                            error="replacement proposal was duplicate or outside the Card contract",
-                            reason="proposal_rejected", drop_card=bool(current.idea.card_id))
-                        self._discard_node_build_telemetry()
-                        return
-                    # THE SAME OWNERSHIP CHECK the refusal path four lines up routes through (via
-                    # `_fail_reserved_build`). `_drop_card_once` has none of its own, so dropping
-                    # unconditionally destroyed a card that a DIFFERENT node had attached to — a
-                    # debug re-attempt landing on the same work item — and a dropped card is
-                    # unrecoverable, because `_retry_attach_card` refuses `dropped` forever. The
-                    # later repair then minted a byte-identical twin: exactly the duplicate work
-                    # item the attach disposition exists to prevent. Reproduced end-to-end (mint on
-                    # node 0, attach on node 1, `node_reset from_stage=propose` on node 0).
-                    # Fail-closed here means the superseded card survives as proposed inventory,
-                    # which is the cost `_reservation_minted_card`'s own docstring prices against
-                    # deleting somebody else's finished work item.
-                    if self._reservation_minted_card(events, node.id, current.idea.card_id):
-                        self._drop_card_once(current.idea.card_id, reason="reproposed")
-                    if plan.disposition == "mint":
-                        self.store.append(EV_CARD_ADDED, plan.payload)
-                    self.store.append(EV_NODE_BUILDING, {
-                        "node_id": node.id, "generation": generation,
-                        "operator": node.operator, "parent_ids": parents,
-                        "card_id": plan.card_id,
-                    })
-                    state = latest
-                    idea = plan.idea
-                    active_card_id = plan.card_id
+                # THE CARD SWAP AND THE CLAIM ARE THE MAIN TASK'S, as ONE CAS'd batch (review
+                # 2026-09-22, ENG1-05): this method runs in an `_offload_build` worker, and the
+                # inline `_id_lock` block that stood here appended `card_auto_dropped`,
+                # `card_added` and `node_building` from it, separately and with no tail CAS. The
+                # plan, its fences and its ownership check (with its reproduction) moved unchanged
+                # into `_commit_rerun_card`. `_steering_context` is read HERE, off the same
+                # Researcher the proposal above just ran on, before the hop.
+                committed = self._commit_rerun_card_on_main_task(
+                    node_id=node.id, generation=generation, operator=node.operator,
+                    parents=parents, parent_generations=parent_generations, idea=idea,
+                    steering_context=getattr(self.researcher, "_steering_context", []))
+                if committed.outcome != "reserved":
+                    self._discard_node_build_telemetry()
+                    return
+                state = committed.state
+                idea = committed.plan.idea
+                active_card_id = committed.plan.card_id
             else:
                 # An implement reset keeps immutable Idea/Card identity and only re-runs Developer.
                 idea = node.idea.model_copy(deep=True)
@@ -7779,7 +7845,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # reaches `developer_crash_pause_after` (1 = always, the historical pair).
                 self.store.append(*crash_terminal)
                 if self._developer_crash_pause_due(fold(self.store.read_all()), node.id):
-                    self.store.append(*crash_pause)
+                    # QUEUED for the main task, not appended (review 2026-09-22, ENG1-05): this
+                    # method runs in an `_offload_build` worker, and EV_PAUSE is FOLDED and
+                    # run-GLOBAL — the same reason `_create_node_scoped`'s crash branch queues it.
+                    # The run loop drains it right after the offload. The GENERATION is this
+                    # rebuild's own: `_on_pause` binds the pause to it, and a rebuild is never 0.
+                    self._request_create_pause(node.id, crash_pause[1]["reason"],
+                                               generation=generation)
         self._consume_node_build_telemetry(node.id, generation, report=built.last_report,
                                            audit_extra=built.audit_extra,
                                            foresight_pick=built.last_foresight_pick)
