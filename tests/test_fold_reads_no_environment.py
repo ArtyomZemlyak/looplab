@@ -176,6 +176,46 @@ def test_env_names_whose_secrets_are_screened_at_every_entry_point(monkeypatch):
             assert (SECRET not in value) is masked, (env, value)
 
 
+_SEED_PROBE = r"""
+import sys
+from looplab.core.models import Event
+from looplab.events.replay import fold
+
+digest = "idea:v1:" + "a" * 64
+rows = [("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-7", "statement": "s"})]
+for n in range(3):
+    rows.append(("card_enriched", {"id": "card-7", "node_id": n, "generation": 0,
+                                   "proposal_ref": {"v": 1, "digest": digest},
+                                   "confidence": 0.5, "foresight_rank": n}))
+events = [Event(seq=i, ts=float(i + 1), type=t, data=d) for i, (t, d) in enumerate(rows)]
+sys.stdout.write(fold(events).model_dump_json())
+"""
+
+
+def test_the_folded_bytes_do_not_depend_on_the_process_hash_seed():
+    """Found proving the fold fast paths against the review's own run logs (review 2026-09-22):
+    the same log dumped DIFFERENT bytes in two processes, because `_on_card_enriched` built each
+    folded candidate by iterating a SET of key names, whose order is the process's string-hash
+    seed. Values were equal; the folded state's serialized form — what a digest, an export or a
+    byte comparison of two replays sees — was not. MUTATION: iterate `identity_keys` (the set)
+    again and the six identity keys come out in a seed-dependent order."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = str(Path(__file__).resolve().parents[1])
+    dumps = set()
+    for seed in ("0", "1", "2", "3"):
+        env = {"PYTHONHASHSEED": seed, "PYTHONPATH": root, "PATH": os.environ.get("PATH", "")}
+        out = subprocess.run([sys.executable, "-c", _SEED_PROBE], env=env, cwd=root,
+                             capture_output=True, text=True, timeout=120, check=True)
+        assert "card-7" in out.stdout, "precondition: the enrichment rows were folded"
+        dumps.add(out.stdout)
+    assert len(dumps) == 1, "the same log folded to different bytes under different hash seeds"
+
+
 @pytest.mark.parametrize("helper", ["_text", "_source_url", "_tree", "_verification"])
 def test_the_private_sanitizers_refuse_to_default_whose_environment(helper):
     """`env` is a REQUIRED keyword on the helpers the fold reaches through, so a new call site that

@@ -3399,6 +3399,11 @@ def _on_card_resource_pinned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
         st.card_resource_pins.pop(card_id, None)
         st.card_resource_pins[card_id] = pin
 
+# The identity half of every folded enrichment candidate, in the order `rec` below is built.
+_CARD_ENRICHMENT_IDENTITY_ORDER = ("id", "node_id", "generation", "proposal_ref", "_seq",
+                                   "_event_index")
+
+
 def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: a delta onto a card (novelty verdict, cross-run prior, footprint-finalize, steering cues).
     # Collected here; APPLIED last-write-by-envelope-order in `_derive_cards`.
@@ -3502,7 +3507,12 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         )
         order = (rec["_seq"], rec["_event_index"])
         for key in semantic_keys:
-            candidate = {name: rec[name] for name in identity_keys if name in rec}
+            # Built from the fixed `_CARD_ENRICHMENT_IDENTITY_ORDER`, never by iterating the SET
+            # above: the candidate is folded state, and a set of strings iterates in the process's
+            # hash-seed order — one log dumped these rows with differently-ordered keys in two
+            # processes (review 2026-09-22, found proving EVT-04a against the review's run logs).
+            candidate = {name: rec[name] for name in _CARD_ENRICHMENT_IDENTITY_ORDER
+                         if name in rec}
             candidate[key] = rec[key]
             if key == "concept_tags":
                 for flag in ("_concept_tags_overflow", "_concept_tags_invalid"):
