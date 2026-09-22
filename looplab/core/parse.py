@@ -450,7 +450,13 @@ def forced_structured(client: LLMClient, messages: list[dict], model: Type[T], p
     arriving as a `ParseError`. A hard budget stop must therefore END the run here, while everything
     else — an unparseable answer, a dead endpoint, a coercion that blew up — degrades. Two of the three sites
     re-stated that re-raise and one relied on a narrower catch to get the same effect by accident.
+
+    The ceiling can also arrive WRAPPED — in a task group's `ExceptionGroup`, or chained under a
+    `then` transform's own exception — where the `except BudgetExceeded` below cannot match it, so
+    the salvage asks `core/containment.py::refuse_budget_stop` before degrading (review 2026-09-22,
+    CORE-07): `on_fail` is a paid re-ask at two of the three callers.
     """
+    from looplab.core.containment import refuse_budget_stop
     from looplab.core.errors import BudgetExceeded
 
     turns = messages + ([{"role": "user", "content": nudge}] if nudge else [])
@@ -460,4 +466,5 @@ def forced_structured(client: LLMClient, messages: list[dict], model: Type[T], p
     except BudgetExceeded:      # a hard budget stop ends the run; it is not a degradable failure
         raise
     except Exception as exc:  # noqa: BLE001 — every other failure is what the salvage exists for
+        refuse_budget_stop(exc)
         return on_fail(exc)

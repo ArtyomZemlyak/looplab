@@ -25,6 +25,15 @@ re-raises it, so adopting the helper at a site is also adopting the funnel — a
 `tests/test_containment_census.py` pins, by AST, that every blind handler around a paid call in the
 run path re-raises it first.
 
+"WITH ONE" MEANS ANYWHERE INSIDE IT (review 2026-09-22, CORE-07). The ceiling rarely reaches a blind
+handler bare: an `anyio` task group hands it over wrapped in an `ExceptionGroup`, and a middle layer
+that translates a failure chains it under its own exception. The test here was `isinstance`, so both
+shapes were absorbed into the caller's fallback while the CLI (`run_finished` =
+`budget_exhausted`) and the eval drain — which ask `core/errors.py::budget_stop_leaf` — recognised
+the same object as the ceiling. The refusal now asks that same function, and re-raises the object in
+flight (group and chain intact) rather than a leaf torn out of it. `refuse_budget_stop` is the
+refusal alone, for a containment site that must not stamp a span.
+
 Adoption is deliberately opportunistic (doc 25 AG-06's rule for `resilient`): the existing
 why-comments are load-bearing and are not churned. New sites and the seams named above call it.
 """
@@ -35,6 +44,7 @@ import threading
 from collections import Counter
 
 from looplab.core import tracing
+from looplab.core.errors import budget_stop_leaf
 
 log = logging.getLogger(__name__)
 
@@ -51,10 +61,9 @@ def contain(reason: str, exc: BaseException | None = None) -> None:
 
     Call it from inside the handler. Never raises for an ordinary exception — a broken observer
     must not become a broken agent — and ALWAYS re-raises a `BudgetExceeded`, because a spend stop
-    is not a failure to contain.
+    is not a failure to contain (bare, grouped or chained: see `refuse_budget_stop`).
     """
-    if exc is not None and _is_budget_stop(exc):
-        raise exc
+    refuse_budget_stop(exc)
     why = str(reason or "unstated")[:_REASON_CAP]
     kind = type(exc).__name__ if exc is not None else ""
     with _COUNTS_LOCK:
@@ -73,11 +82,24 @@ def contain(reason: str, exc: BaseException | None = None) -> None:
         pass
 
 
+def refuse_budget_stop(exc: BaseException | None) -> None:
+    """Re-raise `exc` when the run's spend ceiling is anywhere inside it; a no-op otherwise.
+
+    The refusal half of `contain`, for a containment site that must stay blind to every OTHER
+    failure but has no business stamping a span (`core/parse.py::forced_structured`'s salvage, whose
+    telemetry is the parse span's own). Called — never spelled as a `raise` at the site — so the
+    site stays what it is in the census: one blind handler, with the funnel inside it.
+    """
+    if exc is not None and _is_budget_stop(exc):
+        raise exc
+
+
 def _is_budget_stop(exc: BaseException) -> bool:
-    # Deferred: `core/llm.py` is the heavy provider module and this helper is called from
-    # everywhere, including code paths that never touch a model.
-    from looplab.core.llm import BudgetExceeded
-    return isinstance(exc, BudgetExceeded)
+    # `budget_stop_leaf`, NOT `isinstance`: the ceiling in a task group's `ExceptionGroup`, or
+    # chained under a translating layer's exception, is still the ceiling (review 2026-09-22,
+    # CORE-07). `core/errors.py` is the light half of the provider vocabulary, so this no longer
+    # needs the deferred import of the heavy `core/llm.py` it used to carry.
+    return budget_stop_leaf(exc) is not None
 
 
 def contained_summary(spans) -> tuple[int, int, list[tuple[str, int]]]:

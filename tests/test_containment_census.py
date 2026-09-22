@@ -255,6 +255,110 @@ def test_resilient_counts_its_containments():
         resilient(lambda: (_ for _ in ()).throw(BudgetExceeded("stop")), lambda: "safe")
 
 
+# A spend stop rarely arrives bare where it is contained. An `anyio` task group wraps whatever
+# escaped it (`ExceptionGroup`), and a handler that translates a failure chains the original under
+# its own. `core/errors.py::budget_stop_leaf` is the one reading of "is the ceiling in here", and
+# the CLI's `run_finished {"reason": "budget_exhausted"}` and the eval drain already ask it; the
+# containment helpers asked `isinstance(exc, BudgetExceeded)` and so absorbed both shapes into
+# their fallback (review 2026-09-22, CORE-07).
+def _grouped_stop() -> BaseException:
+    return ExceptionGroup("task group", [ValueError("sibling"), BudgetExceeded("spend ceiling")])
+
+
+def _chained_stop() -> BaseException:
+    try:
+        try:
+            raise BudgetExceeded("spend ceiling")
+        except BudgetExceeded as inner:
+            raise RuntimeError("translated by a middle layer") from inner
+    except RuntimeError as exc:
+        return exc
+
+
+_WRAPPED_STOPS = pytest.mark.parametrize("make", [_grouped_stop, _chained_stop],
+                                         ids=["exception-group", "chained"])
+
+
+@_WRAPPED_STOPS
+def test_contain_refuses_a_wrapped_budget_stop(make):
+    """MUTATION: restore `isinstance(exc, BudgetExceeded)` in `_is_budget_stop` -> red."""
+    stop = make()
+    with pytest.raises(type(stop)) as raised:
+        contain("would swallow a wrapped budget stop", stop)
+    assert raised.value is stop          # the object in flight, group and chain intact
+
+
+@_WRAPPED_STOPS
+def test_resilient_refuses_a_wrapped_budget_stop(make):
+    """`resilient`'s own `except BudgetExceeded: raise` cannot match a group or a translation; its
+    blind handler reaches `contain`, which must refuse — never the fallback."""
+    from looplab.agents.tool_loop import resilient
+
+    stop = make()
+    fallbacks: list = []
+
+    def attempt():
+        raise stop
+
+    with pytest.raises(type(stop)):
+        resilient(attempt, lambda: fallbacks.append("fallback"))
+    assert fallbacks == []
+
+
+@_WRAPPED_STOPS
+def test_forced_structured_refuses_a_wrapped_budget_stop(make, monkeypatch):
+    """The salvage's `on_fail` is a paid re-ask at two of its three callers; a wrapped ceiling must
+    end the run here exactly as a bare one does."""
+    from pydantic import BaseModel
+
+    from looplab.core import parse as parse_mod
+
+    class _Out(BaseModel):
+        x: int = 0
+
+    stop = make()
+
+    def _raise(*_a, **_k):
+        raise stop
+
+    monkeypatch.setattr(parse_mod, "parse_structured", _raise)
+    salvaged: list = []
+    with pytest.raises(type(stop)):
+        parse_mod.forced_structured(object(), [], _Out, "tool_call",
+                                    on_fail=lambda exc: salvaged.append(exc))
+    assert salvaged == []
+
+
+def test_an_ordinary_failure_still_degrades_through_every_containment_helper(monkeypatch):
+    """The other half of the rule: only the CEILING is refused. A group of ordinary failures and an
+    ordinary chain still reach their fallbacks."""
+    from pydantic import BaseModel
+
+    from looplab.agents.tool_loop import resilient
+    from looplab.core import parse as parse_mod
+    from looplab.core.containment import refuse_budget_stop
+
+    ordinary = ExceptionGroup("task group", [ValueError("a"), OSError("b")])
+    contain("ordinary group", ordinary)                      # must not raise
+    refuse_budget_stop(ordinary)                             # must not raise
+    refuse_budget_stop(None)                                 # must not raise
+
+    def attempt():
+        raise ordinary
+
+    assert resilient(attempt, lambda: "safe") == "safe"
+
+    class _Out(BaseModel):
+        x: int = 0
+
+    def _raise(*_a, **_k):
+        raise ordinary
+
+    monkeypatch.setattr(parse_mod, "parse_structured", _raise)
+    assert parse_mod.forced_structured(object(), [], _Out, "tool_call",
+                                       on_fail=lambda exc: "salvaged") == "salvaged"
+
+
 # ------------------------------------------------------------------ 4. timings
 
 def _timings_output(tmp_path, spans: list[dict]) -> str:
