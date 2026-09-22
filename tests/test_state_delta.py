@@ -1,10 +1,23 @@
 """State deltas on the run stream (doc 52 row 29): the differ's round trip, and the stream itself
-sending a full frame first and a delta after — driven through the real server against a real log."""
+sending a full frame first and a delta after — driven through the real server against a real log.
+
+THE SHARED FIXTURE (review 2026-09-22, UI-03). The browser half, `ui/src/stateDelta.js`, claimed to
+apply "with the same rules" and nothing checked it: a delta path through a `__proto__` key — an
+ordinary dict key here — made the JavaScript walk re-parent the object instead of adding the key,
+and the NEXT delta walked `…__proto__.status` into `Object.prototype` of the operator's tab. The
+round-trip table below is now ALSO shipped, with the ops this differ emits, to
+`tests/fixtures/state_delta_cases.json`, and `ui/test/stateDelta.test.js` applies every row through
+the browser half. `test_the_shared_fixture_is_what_the_python_half_emits` refuses a stale file; to
+regenerate it after changing a table here:
+
+    PYTHONPATH=. python tests/test_state_delta.py
+"""
 from __future__ import annotations
 
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,18 +27,100 @@ from looplab.events.state_delta import DELTA_VERSION, apply, diff
 from looplab.serve.protocol import SSE_DONE, SSE_STATE, SSE_STATE_DELTA
 from looplab.serve.server import make_app
 
+FIXTURE = Path(__file__).parent / "fixtures" / "state_delta_cases.json"
 
-@pytest.mark.parametrize("old,new", [
-    ({}, {}),
-    ({"a": 1}, {"a": 2}),
-    ({"a": 1, "b": {"c": [1, 2]}}, {"b": {"c": [1, 2, 3], "d": None}, "e": "x"}),
-    ({"nodes": {"0": {"metric": None, "status": "pending"}}},
+# (name, old, new): `diff(old, new)` applied to `old` must give `new`. The last five rows are the
+# keys a JavaScript object does NOT treat as data by default; here they always were.
+ROUND_TRIP_CASES = [
+    ("no change", {}, {}),
+    ("a changed leaf", {"a": 1}, {"a": 2}),
+    ("a list arrives whole beside an added key and a removed one",
+     {"a": 1, "b": {"c": [1, 2]}}, {"b": {"c": [1, 2, 3], "d": None}, "e": "x"}),
+    ("a node evaluates and another appears",
+     {"nodes": {"0": {"metric": None, "status": "pending"}}},
      {"nodes": {"0": {"metric": 0.5, "status": "evaluated"}, "1": {"status": "pending"}}}),
-    ({"list": [{"a": 1}]}, {"list": [{"a": 1}, {"b": 2}]}),
-    ({"k": {"deep": {"x": 1}}}, {"k": 3}),
-    ({"k": 3}, {"k": {"deep": {"x": 1}}}),
-    ({"gone": {"x": 1}, "kept": 1}, {"kept": 1}),
-])
+    ("a list of dicts is still atomic", {"list": [{"a": 1}]}, {"list": [{"a": 1}, {"b": 2}]}),
+    ("a subtree collapses to a leaf", {"k": {"deep": {"x": 1}}}, {"k": 3}),
+    ("a leaf grows into a subtree", {"k": 3}, {"k": {"deep": {"x": 1}}}),
+    ("a whole subtree is deleted", {"gone": {"x": 1}, "kept": 1}, {"kept": 1}),
+    ("a __proto__ key is added as data", {"r": {}}, {"r": {"__proto__": {"status": "ok"}}}),
+    ("a leaf changes inside a __proto__ key",
+     {"r": {"__proto__": {"status": "ok"}}}, {"r": {"__proto__": {"status": "polluted"}}}),
+    ("a __proto__ key is deleted", {"r": {"__proto__": {"x": 1}, "y": 2}}, {"r": {"y": 2}}),
+    ("constructor and prototype keys are added as data",
+     {"r": {}}, {"r": {"constructor": {"prototype": {"polluted": True}}}}),
+    ("a leaf changes inside constructor.prototype",
+     {"r": {"constructor": {"prototype": {"x": 1}}}}, {"r": {"constructor": {"prototype": {"x": 2}}}}),
+]
+
+# (name, [payload, payload, ...]): deltas applied one after another, the way the stream applies
+# them. The first is the reviewer's reproduction — the delta that ADDS `…agent_report.__proto__`,
+# then the delta that changes a leaf under it; the browser half dropped the key on the first (the
+# assignment re-parented the object) and wrote the second into `Object.prototype`.
+DELTA_CHAINS = [
+    ("the reviewer's chain: add a __proto__ subtree, then change a leaf under it",
+     [{"seq": 1, "state": {"nodes": {"3": {"agent_report": {}}}}},
+      {"seq": 2, "state": {"nodes": {"3": {"agent_report": {"__proto__": {"status": "ok"}}}}}},
+      {"seq": 3, "state": {"nodes": {"3": {"agent_report": {"__proto__": {"status": "polluted"}}}}}}]),
+    ("constructor.prototype is added, changed and removed",
+     [{"r": {}}, {"r": {"constructor": {"prototype": {"x": 1}}}},
+      {"r": {"constructor": {"prototype": {"x": 2}}}}, {"r": {}}]),
+]
+
+# (name, base, ops): ops `diff` never emits but `apply` accepts — the contract is `apply`'s, so a
+# server-legal frame may carry them. A path THROUGH a key the base lacks creates it; a later op may
+# write inside a value an earlier op of the same delta set.
+RAW_OP_CASES = [
+    ("a path through a missing __proto__ key creates the key",
+     {"a": {}}, [["set", ["a", "__proto__", "polluted"], True]]),
+    ("a path through missing constructor.prototype keys creates them",
+     {}, [["set", ["constructor", "prototype", "polluted"], True]]),
+    ("deleting an absent __proto__ key is a no-op", {"a": {"b": 1}}, [["del", ["a", "__proto__"]]]),
+    ("a later op writes inside the value an earlier op set",
+     {"a": 1}, [["set", ["a"], {"b": {"c": 1}}], ["set", ["a", "b", "d"], 2]]),
+    ("a root set, then a write into the new root",
+     {"a": 1}, [["set", [], {"b": {}}], ["set", ["b", "c"], 3]]),
+]
+
+_FIXTURE_NOTE = [
+    "THE SHARED TRUTH TABLE for the run stream's state deltas, GENERATED by tests/test_state_delta.py",
+    "(`PYTHONPATH=. python tests/test_state_delta.py`) from the Python half, looplab/events/state_delta.py.",
+    "Each case applies `deltas` one after another to `base` and must reach `expected`. The Python suite",
+    "refuses a stale file; ui/test/stateDelta.test.js applies every case through ui/src/stateDelta.js, so",
+    "the two halves cannot disagree about what a delta means (review 2026-09-22, UI-03: they did, on",
+    "`__proto__`, and the browser half wrote the difference into Object.prototype).",
+]
+
+
+def state_delta_fixture() -> dict:
+    """The fixture file's content, derived from the three tables above by THIS differ."""
+    cases = [{"name": name, "base": old, "deltas": [diff(old, new)], "expected": new}
+             for name, old, new in ROUND_TRIP_CASES]
+    for name, states in DELTA_CHAINS:
+        cases.append({"name": name, "base": states[0],
+                      "deltas": [diff(a, b) for a, b in zip(states, states[1:])],
+                      "expected": states[-1]})
+    cases += [{"name": name, "base": base, "deltas": [ops], "expected": apply(base, ops)}
+              for name, base, ops in RAW_OP_CASES]
+    return {"_": _FIXTURE_NOTE, "cases": cases}
+
+
+def test_the_shared_fixture_is_what_the_python_half_emits():
+    on_disk = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert on_disk == state_delta_fixture(), (
+        f"{FIXTURE.name} is stale — regenerate it with `PYTHONPATH=. python "
+        "tests/test_state_delta.py` and commit it beside the change to the tables")
+    assert len(on_disk["cases"]) >= 20, "the fixture read too small to be the real table"
+    for case in on_disk["cases"]:
+        held, frozen = case["base"], json.dumps(case["base"], sort_keys=True)
+        for ops in case["deltas"]:
+            held = apply(held, ops)
+        assert held == case["expected"], case["name"]
+        assert json.dumps(case["base"], sort_keys=True) == frozen, "the base is untouched"
+
+
+@pytest.mark.parametrize("old,new", [(old, new) for _, old, new in ROUND_TRIP_CASES],
+                         ids=[name for name, _, _ in ROUND_TRIP_CASES])
 def test_diff_then_apply_is_the_identity_and_never_mutates_the_base(old, new):
     frozen = json.dumps(old, sort_keys=True)
     ops = diff(old, new)
@@ -111,3 +206,8 @@ def test_a_fresh_connection_always_starts_with_a_full_frame(tmp_path):
         frames = _frames(stream)
     assert [kind for kind, _ in frames] == [SSE_STATE, SSE_DONE]
     assert "state" in frames[0][1] and "ops" not in frames[0][1]
+
+
+if __name__ == "__main__":
+    FIXTURE.write_text(json.dumps(state_delta_fixture(), indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {FIXTURE}")
