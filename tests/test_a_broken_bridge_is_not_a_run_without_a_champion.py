@@ -72,6 +72,42 @@ def test_the_extractor_really_does_separate_them(tmp_path):
     assert codes == {"broken": 2, "nochamp": 1}, codes
 
 
+def test_a_log_that_is_not_a_file_is_a_broken_bridge_where_a_directory_reads_as_empty(
+        tmp_path, monkeypatch):
+    """The `broken` fixture above exited 1 on Windows (CI run 35785582444): NTFS reports a
+    directory's size as 0, so the store read it as an EMPTY log, the fold found no node and the
+    extractor said "no champion" -- the very conflation it exists to refuse. Driven in-process with
+    a directory's size reported the way Windows reports it; nothing else about the read changes."""
+    import importlib.util
+    import pathlib
+    import stat as _stat
+
+    spec = importlib.util.spec_from_file_location("extract_champion_under_test", EXTRACT)
+    extractor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(extractor)
+
+    class _NtfsDirectorySize:
+        st_size = 0
+
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    real_stat = pathlib.Path.stat
+
+    def ntfs_stat(self, *args, **kwargs):
+        info = real_stat(self, *args, **kwargs)
+        return _NtfsDirectorySize(info) if _stat.S_ISDIR(info.st_mode) else info
+
+    run = _run_dir(tmp_path / "broken", "broken")
+    monkeypatch.setattr(pathlib.Path, "stat", ntfs_stat)
+    monkeypatch.setattr(sys, "argv", ["extract_champion.py", "--run-dir", str(run), "--all-files",
+                                      "--out", str(tmp_path / "champion" / "solver.py")])
+    assert extractor.main() == 2
+
+
 # ------------------------------------------------------------------------------------------------
 # campaign.sh
 # ------------------------------------------------------------------------------------------------

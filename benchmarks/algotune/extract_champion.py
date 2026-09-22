@@ -57,6 +57,13 @@ def main() -> int:
     if not log.exists():
         print(f"no event log at {args.run_dir}", file=sys.stderr)
         return 1
+    if not log.is_file():
+        # THERE BUT NOT A FILE is a broken bridge, not an empty run -- and it has to be said here,
+        # because the store below does not say it everywhere: on Linux a directory's read raises
+        # (IsADirectoryError, exit 2 via the handler below), while on Windows its `st_size` is 0 and
+        # the store reads an EMPTY log, which folded to "no champion" (review 2026-09-22).
+        print(f"cannot read the event log at {log}: it is not a regular file", file=sys.stderr)
+        return 2
     try:
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
