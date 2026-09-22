@@ -25,6 +25,7 @@ from looplab.runtime import landlock, read_allowlist, read_fence
 from looplab.tools import dev_probe
 from looplab.tools._base import RESULT_CAP, stream_tails
 from looplab.tools.dev_probe import _MAX_CODE_CHARS, _MAX_TIMEOUT, DevProbeTools
+from _posix_gates import KERNEL_READ_RUNG
 
 # WHY A PROBE-EXECUTING TEST CAN SKIP, AND EXACTLY ONE CANNOT.
 #
@@ -330,7 +331,11 @@ def test_the_unaudited_mutator_set_is_re_derived_from_the_interpreter(tmp_path):
             print("@@" + json.dumps({"events": SEEN}))
         """), encoding="utf-8")
     unaudited = []
-    for name, case in sorted(_OS_MUTATORS.items()):
+    # Only the functions this interpreter HAS: `chown`, the xattr pair, `mknod` and `mkfifo` do not
+    # exist on Windows, so there the measurement is over what it can run and the launcher's set is
+    # compared on the same footing (Windows CI run 35785582444: "chown did not run").
+    available = {name: case for name, case in _OS_MUTATORS.items() if hasattr(os, name)}
+    for name, case in sorted(available.items()):
         work = tmp_path / ("w_" + name)
         work.mkdir()
         res = subprocess.run([sys.executable, str(probe), str(work), case],
@@ -340,9 +345,10 @@ def test_the_unaudited_mutator_set_is_re_derived_from_the_interpreter(tmp_path):
         assert "err" not in row, f"{name} did not run: {row['err']}"
         if not row["events"]:
             unaudited.append(name)
-    assert sorted(unaudited) == sorted(dev_probe._UNAUDITED_MUTATORS), (
+    pre_empted = sorted(n for n in dev_probe._UNAUDITED_MUTATORS if n in available)
+    assert sorted(unaudited) == pre_empted, (
         "this interpreter's unaudited filesystem mutators are "
-        f"{sorted(unaudited)}, the launcher pre-empts {sorted(dev_probe._UNAUDITED_MUTATORS)}")
+        f"{sorted(unaudited)}, the launcher pre-empts {pre_empted}")
 
 
 @pytest.mark.parametrize("call,kind", [
@@ -748,12 +754,26 @@ def test_the_kernel_rungs_grant_list_is_itself_refused_a_swallower_not_only_the_
     # (1) the KERNEL rung's own grant list must refuse to be built -- not merely `_install_fence`.
     with pytest.raises(dev_probe.ProbeRefusal) as caught:
         tools._read_allow(Path(tempfile.gettempdir()) / "swallow-guard" / "work")
-    assert "/opt/" in str(caught.value) and "source root" in str(caught.value)
+    # Named as the derivation normalizes it: `/opt/` here, `D:\\opt\\` on a Windows runner.
+    swallower = read_fence._norm_root("/opt/")
+    assert swallower in str(caught.value) and "source root" in str(caught.value)
 
     # (2) end to end, the probe refuses the RUN rather than handing `/opt/` to the kernel allow-list.
     result = tools.execute_result("run_probe", {"code": "print('the-probe-executed')"})
     assert result.is_error and "the-probe-executed" not in result.content
     assert "source root" in result.content
+
+
+def _mounted_grants():
+    """A root under the interpreter's prefix with a declared mount inside it: the root, the mount,
+    the kernel rung's grant list, and the hook's own predicate over the fence the probe installs."""
+    root = Path(sys.prefix) / "looplab-fence-test-absent"
+    mount = root / "datasets"
+    spec = {"editables": [{"name": ".", "path": str(root)}],
+            "data": {"train": {"path": str(mount), "mount": True}}}
+    tools = DevProbeTools(spec, timeout_s=30)
+    grants = tools._confined_allow(Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
+    return root, mount, grants, _fence_predicate(tools, grants)
 
 
 def test_the_hook_and_the_kernel_are_told_the_same_thing_about_every_path():
@@ -763,16 +783,9 @@ def test_the_hook_and_the_kernel_are_told_the_same_thing_about_every_path():
     declared mount inside it, what the interpreter needs, and the sibling that a prefix compare
     without a trailing separator would confuse for the tier.
 
-    The second assertion is the incident that made the single derivation a rule: the kernel rung
-    `open(O_PATH)`s each of its grants IN the interpreter the hook is already live in, so a grant
-    the hook refuses kills the probe while it is ADDING the rule."""
-    root = Path(sys.prefix) / "looplab-fence-test-absent"
-    mount = root / "datasets"
-    spec = {"editables": [{"name": ".", "path": str(root)}],
-            "data": {"train": {"path": str(mount), "mount": True}}}
-    tools = DevProbeTools(spec, timeout_s=30)
-    grants = tools._confined_allow(Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
-    fenced = _fence_predicate(tools, grants)
+    The incident that made the single derivation a rule -- the kernel rung opening a grant the live
+    hook refuses -- is `test_every_grant_the_kernel_rung_opens_passes_the_live_hook`, below."""
+    root, mount, grants, fenced = _mounted_grants()
 
     def granted(path):
         p = path if path.endswith(os.sep) else path + os.sep
@@ -787,11 +800,18 @@ def test_the_hook_and_the_kernel_are_told_the_same_thing_about_every_path():
         assert not granted(inside), f"the kernel would grant {inside}"
         assert fenced(inside) is not None, f"the hook would allow {inside}"
     assert granted(str(mount / "train.csv")) and fenced(str(mount / "train.csv")) is None
-    # (2) every grant the kernel is asked to open passes the hook that is already live.
+    # (2) the interpreter still has its stdlib, or the probe is fenced by not starting.
+    assert granted(os.path.join(sysconfig.get_paths()["stdlib"], "json", "__init__.py"))
+
+
+@KERNEL_READ_RUNG
+def test_every_grant_the_kernel_rung_opens_passes_the_live_hook():
+    """The incident that made the single derivation a rule: the kernel rung `open(O_PATH)`s each of
+    its grants IN the interpreter the hook is already live in, so a grant the hook refuses kills the
+    probe while it is ADDING the rule."""
+    _root, _mount, grants, fenced = _mounted_grants()
     for g in grants:
         assert fenced(g) is None, f"the hook refuses a path the kernel rung must open: {g}"
-    # (3) the interpreter still has its stdlib, or the probe is fenced by not starting.
-    assert granted(os.path.join(sysconfig.get_paths()["stdlib"], "json", "__init__.py"))
 
 
 def test_a_grant_of_a_tier_does_not_admit_its_sibling():
