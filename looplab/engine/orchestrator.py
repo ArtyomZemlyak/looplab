@@ -6118,12 +6118,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
 
     # The sub-object forwarding seam, DECLARED (doc 25 ES-13): `<engine name> -> (sub-object, lane)`
     # for every one-line delegator below that forwards to `self.<sub-object>.<same name minus the
-    # leading underscore>`. All 32 follow that naming rule exactly, which is what makes the table
-    # checkable rather than decorative.
+    # leading underscore>`. Every entry follows that naming rule exactly, which is what makes the
+    # table checkable rather than decorative.
     #
     # It exists because of ONE named cost, and it removes exactly that one: a new `LessonMemory` /
     # `HoldoutGrader` / `Workspace` method needs a hand-written forwarder carrying the correct
-    # `@in_llm_lane`, and eight of the thirty-two carry one. Forgetting the lane does not fail —
+    # `@in_llm_lane`, and several of them carry one (the table below is the count; the prose that
+    # kept one by hand said 32 and eight while the table held 34 and seven). Forgetting the lane does not fail —
     # the call simply runs outside the capped enrichment lane and competes with foreground work for
     # provider concurrency, which shows up as an unexplained stall, not an error. The two-way guard
     # in `tests/test_engine_forwarding_registry.py` turns both halves (a delegator missing from the
@@ -6152,9 +6153,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         "_store_case": ("lessons", None),
         "_store_concept_capsule": ("lessons", None),
         "_store_research_claims": ("lessons", "enrichment"),
-        "_store_concept_curation": ("lessons", "enrichment"),
-        "_store_claim_curation": ("lessons", "enrichment"),
-        "_store_task_facets": ("lessons", "enrichment"),
+        # `_store_concept_curation` / `_store_claim_curation` / `_store_task_facets` left this
+        # table on 2026-09-22 for the same reason `_write_reflection_note` did: each now opens its
+        # own op-span, because each PAYS in the post-stage finalize window (review 2026-09-22,
+        # ENG3-06). Their `@in_llm_lane("enrichment")` stays and is still what caps them.
         # --- holdout (engine/holdout.py::HoldoutGrader)
         "_graded_output_name": ("holdout", None),
         "_apply_host_grade": ("holdout", None),
@@ -6317,17 +6319,27 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     def _store_research_claims(self, final: RunState) -> None:
         return self.lessons.store_research_claims(final)
 
+    # THE THREE FINALIZE STEWARDS PAY, so each opens its own op-trace (review 2026-09-22, ENG3-06).
+    # `@in_llm_lane` LABELS a lane and opens no span, and finalize calls these after the last stage
+    # span has closed — so with `cross_run_curation` ON (the shipped default) every finalize wrote
+    # two or three steward calls with `trace_id=null`: billed, and absent from `looplab timings`,
+    # the trace view and every per-phase cost question (CLAUDE.md's span rule). The same window and
+    # the same fix as `_write_reflection_note` above; each span is named for the steward's own
+    # `finalize_step` receipt, so the trace and the receipt read as one step.
     @in_llm_lane("enrichment")
     def _store_concept_curation(self, final: RunState) -> str:
-        return self.lessons.store_concept_curation(final)
+        with self._op_span("concept_curation"):
+            return self.lessons.store_concept_curation(final)
 
     @in_llm_lane("enrichment")
     def _store_claim_curation(self, final: RunState) -> str:
-        return self.lessons.store_claim_curation(final)
+        with self._op_span("claim_curation"):
+            return self.lessons.store_claim_curation(final)
 
     @in_llm_lane("enrichment")
     def _store_task_facets(self, final: RunState) -> str:
-        return self.lessons.store_task_facets(final)
+        with self._op_span("task_facets"):
+            return self.lessons.store_task_facets(final)
 
 
     # -------------------------------------------------- novelty gate (extracted to engine/novelty.py)

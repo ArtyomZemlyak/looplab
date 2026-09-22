@@ -2081,7 +2081,9 @@ looking at a silent hole — a missing span is always accompanied by a receipt s
 **Per-operation traces.** A node's own work (propose → implement → repair, then evaluate/training)
 is one trace, shown under the node. But every OTHER LLM sub-operation runs in its **own** named trace
 (`new_trace`) — `strategist_consult`, `hypothesis_merge`, `deep_research`, `report`, `lessons_distill`/
-`lessons_refresh`, `card_build` (the Card-speculation producer — it has no node yet, so it is
+`lessons_refresh`, the three finalize stewards `concept_curation` / `claim_curation` / `task_facets`
+(own traces since 2026-09-22; before that every paid steward call was billed with no span open),
+`card_build` (the Card-speculation producer — it has no node yet, so it is
 run-level by construction, and until 2026-08-05 it opened no span at all, which made the whole
 speculative Developer call invisible to `spans.jsonl` and to `looplab timings` while the cost ledger
 still billed it), and the two Researcher ranking steps — `hyp_prioritize` behind `hypothesis_ranked`

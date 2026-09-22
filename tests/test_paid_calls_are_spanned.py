@@ -418,3 +418,44 @@ def test_the_verifier_tiebreak_pays_inside_a_span(tmp_path, monkeypatch):
 
     assert "verifier_tiebreak" in _span_names(engine)
     assert_span_channel_accounts_for_every_paid_call(engine, at_least=2)
+
+
+# --------------------------------------------------------------------------- the finalize stewards
+
+_STEWARDS = ("concept_curation", "claim_curation", "task_facets")
+
+
+def test_the_finalize_stewards_pay_inside_a_span(tmp_path, monkeypatch):
+    """Review 2026-09-22, ENG3-06, driven through a REAL run's finalize.
+
+    The three portfolio stewards (`_store_concept_curation`, `_store_claim_curation`,
+    `_store_task_facets`) run after the last stage span has closed and carry only
+    `@in_llm_lane("enrichment")`, which labels a lane and opens no span. `cross_run_curation`
+    ships ON, so every finalize bought two (three with task facets) paid calls written with
+    `trace_id=null` — the one gap the ENG3 census found among ~23 paid seams. Their sibling
+    `_write_reflection_note` sits in the same window and has carried its own op-span since
+    2026-08-29; the stewards now do too."""
+    engine = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1)
+    engine._cross_run_curation = True
+    engine._task_facets_finalize = True
+    seen: list = []
+
+    def _paying_steward(step):
+        def _run(final):
+            seen.append((step, tracing.current_ids()[1]))
+            _pay(engine, 0.002)
+            return "completed"
+        return _run
+
+    for step in _STEWARDS:
+        monkeypatch.setattr(engine.lessons, f"store_{step}", _paying_steward(step))
+    state = anyio.run(engine.run)
+    assert state.finished
+
+    assert [step for step, _span in seen] == list(_STEWARDS), "finalize did not run every steward"
+    assert all(span_id is not None for _step, span_id in seen), (
+        f"a steward was called with no span open: {seen}")
+    names = _span_names(engine)
+    for step in _STEWARDS:
+        assert names.count(step) == 1, f"the {step} steward must open exactly one op-trace"
+    assert_span_channel_accounts_for_every_paid_call(engine, at_least=3)

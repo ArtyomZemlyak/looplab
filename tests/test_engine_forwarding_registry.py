@@ -1,11 +1,11 @@
 """The Engine's sub-object delegators, and the lane each one has to carry (doc 25 ES-13).
 
-`Engine` forwards 32 one-line methods to `self.lessons` / `self.holdout` / `self.workspace`. The
+`Engine` forwards one-line methods to `self.lessons` / `self.holdout` / `self.workspace`. The
 delegators exist on purpose — CLAUDE.md documents them as a monkeypatch seam, and `LessonMemory`
 routes its own cross-calls back through them so an instance-level patch intercepts every path.
 
 What was NOT deliberate is that adding one is entirely manual, including the `@in_llm_lane`
-decoration that eight of them carry. Forgetting the lane does not fail: the call just runs outside
+decoration that several of them carry. Forgetting the lane does not fail: the call just runs outside
 the capped enrichment lane and competes with foreground work for provider concurrency, which
 surfaces as an unexplained stall rather than an error. `Engine.FORWARDED_SUBOBJECT_MEMBERS` declares
 the mapping and this file checks it BOTH ways.
@@ -114,7 +114,11 @@ def test_the_registry_is_not_empty_and_covers_all_three_sub_objects():
     # its money appeared in no trace surface (measured: 105 of 25,430 calls, $0.19 of $100.27,
     # across 49 of 68 probe runs). The floor is a vacuity guard, so it tracks the real count; it is
     # lowered here deliberately rather than by reflex, and the entry it lost is named above.
-    assert sum(1 for _sub, lane in REGISTRY.values() if lane == "enrichment") >= 7
+    # 4, not 7, since 2026-09-22 (review ENG3-06), for the identical reason: the three finalize
+    # stewards `_store_concept_curation`, `_store_claim_curation` and `_store_task_facets` each
+    # gained their own op-span because they PAY in that same post-stage window, with no span open
+    # (`test_paid_calls_are_spanned.py::test_the_finalize_stewards_pay_inside_a_span`).
+    assert sum(1 for _sub, lane in REGISTRY.values() if lane == "enrichment") >= 4
 
 
 # ------------------------------------------------------------------ the seam still intercepts
