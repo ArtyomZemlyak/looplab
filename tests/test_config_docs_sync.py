@@ -155,6 +155,10 @@ def documented_default_matches(cell: str, value) -> bool:
             return False
     text = str(value)
     bare = c.strip('"').strip("'")
+    if bare.startswith("~"):
+        # A home-relative cell names a PATH: compare it as one. `expanduser` keeps the cell's "/"
+        # while a Windows default reads `C:\Users\...\.looplab\memory` (CI run 35785582444).
+        return bare == text or os.path.normpath(os.path.expanduser(bare)) == os.path.normpath(text)
     return bare == text or os.path.expanduser(bare) == text or bare == text.replace(str(Path.home()), "~")
 
 

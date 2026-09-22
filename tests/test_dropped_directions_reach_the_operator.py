@@ -303,7 +303,7 @@ def test_logging_is_configured_ONCE_and_at_the_ENTRY_POINT():
     configured, scanned = {}, 0
     for path, _text in iter_sources():
         scanned += 1
-        rel = str(path.relative_to(PKG))
+        rel = path.relative_to(PKG).as_posix()      # the literals below are "/"-spelled
         text = text_without_markers(path)
         hits = {spelling for spelling in _CONFIGURES if spelling in text}
         if hits and rel not in _EXEMPT:

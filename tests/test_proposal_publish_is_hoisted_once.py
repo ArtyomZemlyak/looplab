@@ -55,7 +55,7 @@ def test_the_publish_loop_exists_exactly_once_and_it_is_in_the_sink_s_own_module
     for path, tree in iter_trees():
         for node in ast.walk(tree):
             if _unpacks_the_audit_tuple(node):
-                sites.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+                sites.append(f"{path.relative_to(ROOT).as_posix()}:{node.lineno}")
     assert sites == [s for s in sites if s.startswith(OWNER)], (
         "the proposal audit tuple is unpacked outside its owning module — call "
         f"`_publish_proposal_events` instead:\n  " + "\n  ".join(sites))
@@ -68,7 +68,7 @@ def test_the_offload_triple_is_not_hand_written_outside_the_helper():
     lane that opens the sink around its OWN `to_thread` offload by hand."""
     offenders = []
     for path, tree in iter_trees():
-        if str(path.relative_to(PKG.parent)) == OWNER:
+        if path.relative_to(PKG.parent).as_posix() == OWNER:     # OWNER is "/"-spelled
             continue
         for node in ast.walk(tree):
             if not isinstance(node, (ast.With, ast.AsyncWith)):
@@ -83,7 +83,7 @@ def test_the_offload_triple_is_not_hand_written_outside_the_helper():
                            and getattr(inner.func, "attr", None) == "run_sync"
                            for inner in ast.walk(node))
             if offloads:
-                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+                offenders.append(f"{path.relative_to(ROOT).as_posix()}:{node.lineno}")
     assert not offenders, (
         "these lanes hand-roll capture->offload — use `_offload_under_proposal_sink`, which also "
         f"carries the proposal pool and the publish-in-finally rule:\n  " + "\n  ".join(offenders))

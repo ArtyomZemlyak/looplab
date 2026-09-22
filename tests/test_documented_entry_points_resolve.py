@@ -45,7 +45,7 @@ def _documented_targets() -> dict[str, list[str]]:
             except OSError:                                # pragma: no cover - unreadable doc
                 continue
             for module in _INVOCATION.findall(text):
-                found.setdefault(module, set()).add(str(path.relative_to(ROOT)))
+                found.setdefault(module, set()).add(path.relative_to(ROOT).as_posix())
     return {module: sorted(cites) for module, cites in sorted(found.items())}
 
 
@@ -117,7 +117,9 @@ def test_every_documented_entry_point_is_actually_TRACKED():
         if not origin:
             continue
         try:
-            rel = str(Path(origin).resolve().relative_to(ROOT))
+            # `as_posix`: `git ls-files` answers with "/" on every host (Windows CI run
+            # 35785582444 reported eight tracked entry points as untracked, by separator).
+            rel = Path(origin).resolve().relative_to(ROOT).as_posix()
         except ValueError:                                # outside the repo (an installed copy)
             continue
         if rel not in tracked:
@@ -161,7 +163,7 @@ def test_the_tracking_check_sees_a_file_that_is_present_but_untracked():
     probe = ROOT / "tests" / ".untracked_probe_for_entry_point_guard.py"
     probe.write_text("# transient probe; the guard must not see this as tracked\n", encoding="utf-8")
     try:
-        assert str(probe.relative_to(ROOT)) not in _tracked_paths(), (
+        assert probe.relative_to(ROOT).as_posix() not in _tracked_paths(), (
             "a file that exists on disk but is not in the index was reported as tracked — the "
             "guard cannot tell a committed entry point from one that only exists locally, which "
             "is the exact failure it was written for")

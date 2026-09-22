@@ -87,7 +87,9 @@ def test_the_card_offers_a_profile_command_and_names_it_in_the_goal(tmp_path):
     assert "profile" in commands, f"no profiler for this arm: {sorted(commands)}"
     profile = commands["profile"]
     assert "looplab_profile.py" in " ".join(profile["command"]), profile["command"]
-    assert profile["command"][0].endswith(".venv/bin/python"), (
+    # Compared as PATH PARTS: the card builds it with pathlib, so on a Windows host it reads
+    # `...\AlgoTune\.venv\bin\python` (CI run 35785582444) -- the same venv, spelled natively.
+    assert Path(profile["command"][0]).parts[-3:] == (".venv", "bin", "python"), (
         "it must run in the venv the scores are computed in -- the one holding line_profiler")
     argv = profile["command"]
     assert "--subset" in argv and argv[argv.index("--subset") + 1] == "train", argv

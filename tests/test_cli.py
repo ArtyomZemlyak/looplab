@@ -120,21 +120,24 @@ def test_run_refuses_held_out_labels_that_live_inside_the_run_directory(tmp_path
     repo = tmp_path / "repo"
     repo.mkdir()
     task = tmp_path / "task.json"
-    task.write_text(json.dumps({
+    spec = {
         "id": "held_out", "kind": "repo", "goal": "g", "direction": "max",
         "editable_path": str(repo),
         "cmd": {"command": ["python", "-c", "print(1)"],
                 "metric": {"kind": "host_score", "predictions": "predictions.json",
-                           "labels": str(out / "labels.json"), "scorer": "accuracy"}}}))
+                           "labels": str(out / "labels.json"), "scorer": "accuracy"}}}
+    task.write_text(json.dumps(spec), encoding="utf-8")
     res = runner.invoke(app, ["run", str(task), "--out", str(out), "--max-nodes", "1",
                               "--backend", "toy", "--no-genesis"])
     assert res.exit_code == 2, res.output
     assert "refusing to start" in res.output and "INSIDE the candidate workspace" in res.output
     assert not (out / "events.jsonl").exists(), "the refusal must precede any run artifact"
 
-    # The same task with the labels OUTSIDE the run dir is not refused by this check.
-    task.write_text(task.read_text().replace(str(out / "labels.json"),
-                                             str(tmp_path / "labels.json")))
+    # The same task with the labels OUTSIDE the run dir is not refused by this check. Re-serialized
+    # rather than string-replaced: JSON escapes a Windows path's backslashes, so the raw path is not
+    # a substring of the file there and a text replace silently left the labels where they were.
+    spec["cmd"]["metric"]["labels"] = str(tmp_path / "labels.json")
+    task.write_text(json.dumps(spec), encoding="utf-8")
     ok = runner.invoke(app, ["run", str(task), "--out", str(out), "--max-nodes", "1",
                              "--backend", "toy", "--no-genesis"])
     assert "refusing to start" not in ok.output
