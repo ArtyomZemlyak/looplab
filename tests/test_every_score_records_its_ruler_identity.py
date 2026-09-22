@@ -35,7 +35,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from _posix_gates import BASH_HARNESS
+from _posix_gates import BASH_HARNESS, CPU_AFFINITY
 
 REPO = Path(__file__).resolve().parents[1]
 BRIDGE = REPO / "benchmarks" / "algotune" / "looplab_eval.py"
@@ -80,6 +80,7 @@ def _emit(monkeypatch, capsys, row: dict, *, workers: str = "auto") -> dict:
 # the result line
 # ------------------------------------------------------------------------------------------------
 
+@CPU_AFFINITY
 def test_a_scored_line_names_its_width_and_its_baseline(monkeypatch, capsys, tmp_path):
     w = _width()
     entry = _entry(tmp_path / "times", "demo", "test", f"__w{w}x1r3")
@@ -96,6 +97,7 @@ def test_a_scored_line_names_its_width_and_its_baseline(monkeypatch, capsys, tmp
     assert printed["baseline_source"].startswith("in-harness")
 
 
+@CPU_AFFINITY
 def test_the_digest_is_of_the_bytes_and_changes_when_the_cache_is_retimed(monkeypatch, capsys,
                                                                             tmp_path):
     """The key alone cannot see a re-timed cache: same name, different bytes, different
@@ -110,6 +112,7 @@ def test_the_digest_is_of_the_bytes_and_changes_when_the_cache_is_retimed(monkey
     assert first["baseline_cache_sha256"] != second["baseline_cache_sha256"]
 
 
+@CPU_AFFINITY
 def test_a_missing_entry_is_null_with_a_reason_and_never_a_guess(monkeypatch, capsys, tmp_path):
     w = _width()
     LE.bind_ruler("demo", "test", tmp_path / "times-that-do-not-exist")
@@ -121,6 +124,7 @@ def test_a_missing_entry_is_null_with_a_reason_and_never_a_guess(monkeypatch, ca
     assert printed["baseline_source"] == printed["baseline_cache_missing"]
 
 
+@CPU_AFFINITY
 def test_an_unbound_emit_says_so_rather_than_digesting_another_tasks_cache(monkeypatch, capsys):
     LE.bind_ruler(None, None, None)
     printed = _emit(monkeypatch, capsys, {"speedup": 2.0, "subset": "train"})
@@ -129,6 +133,7 @@ def test_an_unbound_emit_says_so_rather_than_digesting_another_tasks_cache(monke
     assert printed["eval_workers"] == str(_width())      # the width needs no binding
 
 
+@CPU_AFFINITY
 def test_the_row_s_own_subset_outranks_the_bound_one(monkeypatch, capsys, tmp_path):
     """`subset` is reassigned after the run when the evaluator says it scored the other half
     (`subset_from_stderr`); the entry named must be the one that DIVIDED, not the one asked for."""
@@ -141,6 +146,7 @@ def test_the_row_s_own_subset_outranks_the_bound_one(monkeypatch, capsys, tmp_pa
     assert printed["baseline_cache_sha256"] == hashlib.sha256(tested.read_bytes()).hexdigest()
 
 
+@CPU_AFFINITY
 def test_the_new_fields_do_not_reach_the_node_s_extra_metrics(monkeypatch, capsys, tmp_path):
     """The falsifier for `eval_workers: 22` as an int: `json_line_extras` sweeps every top-level
     numeric key into `extra_metrics` as an undeclared `auto` measurement."""
@@ -202,6 +208,7 @@ def _print_ruler(tmp: Path, *extra: str, workers: str = "auto") -> str:
     return got.stdout.strip()
 
 
+@CPU_AFFINITY
 def test_print_ruler_needs_no_arena(tmp_path):
     w = _width()
     entry = _entry(tmp_path / "times", "demo", "test", f"__w{w}x1r3")
@@ -211,6 +218,7 @@ def test_print_ruler_needs_no_arena(tmp_path):
     assert ident["baseline_cache_sha256"] == hashlib.sha256(entry.read_bytes()).hexdigest()
 
 
+@CPU_AFFINITY
 def test_print_ruler_marker_format_is_the_marker_grammar(tmp_path):
     w = _width()
     entry = _entry(tmp_path / "times", "demo", "test", f"__w{w}x1r3")

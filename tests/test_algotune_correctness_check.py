@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.algotune.looplab_check import check, find_task, solver_binding_error
+from _posix_gates import FORK
 
 # A whole task in miniature: the answer is the MINIMUM of the list, and `is_solution` demands
 # optimality exactly as kcenters does -- which is the property the probes never checked.
@@ -62,6 +63,7 @@ def _files(tmp_path, solver_src):
     return ref, sol
 
 
+@FORK
 def test_a_correct_solver_passes_every_instance(tmp_path):
     ref, sol = _files(tmp_path, _GOOD)
     out = check(ref, sol, n=4, size=6, seed=1)
@@ -69,6 +71,7 @@ def test_a_correct_solver_passes_every_instance(tmp_path):
     assert "NOT the score" in out["note"], "it must never be mistaken for the ruler"
 
 
+@FORK
 def test_the_suboptimal_solver_the_probes_shipped_is_caught_and_the_reason_is_shown(tmp_path):
     """This is dsKcCtl node 1 in miniature: valid-looking, fast, and not optimal."""
     ref, sol = _files(tmp_path, _SUBOPTIMAL)
@@ -79,6 +82,7 @@ def test_the_suboptimal_solver_the_probes_shipped_is_caught_and_the_reason_is_sh
     assert "score is 0 unless every instance validates" in out["note"]
 
 
+@FORK
 def test_a_candidate_that_raises_is_a_failed_instance_not_a_crashed_check(tmp_path):
     ref, sol = _files(tmp_path, _RAISES)
     out = check(ref, sol, n=2, size=6, seed=1)
@@ -123,6 +127,7 @@ _GUARDED_SOLVER = ("try:\n"
 @pytest.mark.parametrize("solver_src,helper_src", [_IMPORTED_SOLVER, _ASSIGNED_SOLVER,
                                                    _GUARDED_SOLVER],
                          ids=["imported", "assigned", "guarded-import-fallback"])
+@FORK
 def test_a_solver_that_binds_Solver_without_a_class_statement_is_checked_not_refused(
         tmp_path, solver_src, helper_src):
     """The three shapes the old regex convicted. Each must be RUN, and each must validate.
@@ -172,6 +177,7 @@ def test_the_reference_task_is_found_by_its_three_methods(tmp_path):
     assert find_task(mod).__name__ == "MiniTask", "NotATask has no is_solution and must be skipped"
 
 
+@FORK
 def test_the_check_leaves_root_logging_as_it_found_it(tmp_path):
     """It attaches a handler to capture `is_solution`'s rejection; it must not keep it."""
     root = logging.getLogger()
@@ -181,6 +187,7 @@ def test_the_check_leaves_root_logging_as_it_found_it(tmp_path):
     assert list(root.handlers) == before_handlers and root.level == before_level
 
 
+@FORK
 def test_it_runs_as_a_command_and_prints_json(tmp_path):
     ref, sol = _files(tmp_path, _SUBOPTIMAL)
     proc = subprocess.run([sys.executable, "benchmarks/algotune/looplab_check.py",
@@ -201,6 +208,7 @@ _ABORTS = (
 _HANGS = "import time\nclass Solver:\n    def solve(self, problem):\n        time.sleep(30)\n"
 
 
+@FORK
 def test_a_solver_that_kills_its_process_is_one_failed_row_not_an_empty_report(tmp_path):
     """MEASURED: dsKcCtl node 1 at the graded size dies with `Fatal glibc error: malloc.c:4376
     assertion failed` -- SIGABRT from native code under numpy/numba. The first version of this
@@ -212,6 +220,7 @@ def test_a_solver_that_kills_its_process_is_one_failed_row_not_an_empty_report(t
     assert all("KILLED its process" in r.get("raised", "") for r in out["rows"]), out["rows"]
 
 
+@FORK
 def test_one_hanging_instance_does_not_eat_the_whole_report(tmp_path):
     ref, sol = _files(tmp_path, _HANGS)
     out = check(ref, sol, n=2, size=6, seed=1, timeout=1.0)
@@ -219,12 +228,14 @@ def test_one_hanging_instance_does_not_eat_the_whole_report(tmp_path):
     assert all("TIMEOUT" in r.get("raised", "") for r in out["rows"]), out["rows"]
 
 
+@FORK
 def test_the_size_that_was_checked_is_reported(tmp_path):
     """A verdict without the size it was taken at cannot be compared to the graded one."""
     ref, sol = _files(tmp_path, _GOOD)
     assert check(ref, sol, n=1, size=7, seed=1)["size"] == 7
 
 
+@FORK
 def test_a_dying_candidate_does_not_drop_a_core_file_in_the_workspace(tmp_path, monkeypatch):
     """The CWD of a `check` call is the agent's workspace, and a core is 88 MB-1.4 GB of it.
 

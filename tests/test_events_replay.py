@@ -1232,22 +1232,16 @@ def test_repair_log_holds_the_event_log_lock_across_backup_and_truncate(tmp_path
     and writing it back leaves a window: an append that lands in it is an authoritative, durable
     event the replace then deletes. The whole detect/backup/truncate must sit inside the same lock
     every appender takes."""
-    import fcntl
+    from _lock_probe import lock_is_free
     from looplab.core import atomicio
     from looplab.events.eventstore import repair_log
     p = tmp_path / "events.jsonl"
     p.write_bytes(b'{"seq":0,"type":"a"}\n{corrupt\n{"seq":1,"type":"b"}\n')
 
     def _lock_is_free() -> bool:
-        # flock is per open-file description, so a second open() here faithfully stands in for the
-        # live engine's appender.
-        with open(str(p) + ".lock", "a+") as f:
-            try:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                return False
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            return True
+        # A second open() here faithfully stands in for the live engine's appender, through the
+        # appender's own primitive on this platform (tests/_lock_probe.py).
+        return lock_is_free(str(p) + ".lock")
 
     observed = []
     original = atomicio.atomic_write_bytes
@@ -1263,7 +1257,7 @@ def test_repair_log_derives_the_boundary_inside_the_lock(tmp_path, monkeypatch):
     """A boundary derived BEFORE the lock is a stale snapshot: by the time repair wins the lock the
     log may have been repaired by someone else, or extended past the divergence. It has to be
     re-derived under the same lock that fences the truncate, or the two disagree."""
-    import fcntl
+    from _lock_probe import lock_is_free
     from looplab.events import eventstore
     from looplab.events.eventstore import repair_log
     p = tmp_path / "events.jsonl"
@@ -1272,14 +1266,7 @@ def test_repair_log_derives_the_boundary_inside_the_lock(tmp_path, monkeypatch):
     real = eventstore.log_divergence
 
     def _probe(path):
-        with open(str(p) + ".lock", "a+") as f:
-            try:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                observed.append(False)
-            else:
-                observed.append(True)
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        observed.append(lock_is_free(str(p) + ".lock"))
         return real(path)
 
     monkeypatch.setattr(eventstore, "log_divergence", _probe)

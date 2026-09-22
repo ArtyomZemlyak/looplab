@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
 
 import arm_power  # noqa: E402
+from _posix_gates import CPU_AFFINITY
 
 
 def _batches(diff, n):
@@ -68,6 +69,7 @@ def test_power_rises_with_batches_and_with_effect():
     assert many >= few, (few, many)
 
 
+@CPU_AFFINITY
 def test_it_refuses_a_corpus_too_small_to_resample(tmp_path, capsys):
     assert arm_power.main(["--root", str(tmp_path)]) == 2
     assert "refusing to simulate" in capsys.readouterr().err

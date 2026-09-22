@@ -53,3 +53,14 @@ POSIX_ONLY_OS_CALLS = pytest.mark.posix_only(
 
 # The Linux process table (`/proc/<pid>/…`, `/proc/self/fd`).
 PROCFS = pytest.mark.posix_only("the Linux /proc filesystem")
+
+# The read fence's POSIX path branch, driven through the probe seam with '/'-rooted literals: the
+# sep-leading absolute test, the syscall-free relative bail, `//` and `/./` spellings, `dir_fd`
+# joins through /proc/self/fd, the POSIX system layout `_too_broad` guards. On Windows `_NT` sends
+# every path through `abspath` instead, so these literals are not paths there; that branch is driven
+# by tests/test_read_fence_on_windows.py, which runs on every platform.
+FENCE_POSIX_PATHS = pytest.mark.posix_only(
+    "the read fence's POSIX path branch ('/'-rooted literals, the relative bail, dir_fd)")
+
+# An extensionless `#!/bin/sh` file executed as a program: Windows has no shebang exec.
+SHEBANG = pytest.mark.posix_only("an extensionless `#!` script executed as a program")

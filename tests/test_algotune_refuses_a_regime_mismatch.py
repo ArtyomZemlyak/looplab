@@ -19,6 +19,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import CPU_AFFINITY
 
 BRIDGE = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "looplab_eval.py"
 
@@ -87,6 +88,7 @@ def _run(tmp: Path, cache_names: list[str], workers: str) -> dict:
     raise AssertionError(f"the bridge printed no JSON line:\n{out.stdout}\n{out.stderr}")
 
 
+@CPU_AFFINITY
 def test_a_foreign_regime_on_disk_is_refused_before_anything_is_timed(tmp_path):
     """workers=1 keys `__lane<N>r3`; only a `__w..x..r3` entry exists. It must refuse, and fast."""
     import time
@@ -109,6 +111,7 @@ def test_an_empty_cache_is_left_alone(tmp_path):
     assert (row.get("no_speedup") or {}).get("reason") != "baseline_regime_mismatch", row
 
 
+@CPU_AFFINITY
 def test_the_matching_regime_is_not_refused(tmp_path):
     """workers=1 keys `__lane<N>r3` and that entry is present — nothing to complain about."""
     import os
@@ -124,6 +127,7 @@ def test_a_different_subset_is_not_the_same_baseline(tmp_path):
     assert (row.get("no_speedup") or {}).get("reason") != "baseline_regime_mismatch", row
 
 
+@CPU_AFFINITY
 def test_the_regime_key_is_the_arenas_own_answer(monkeypatch):
     """The drift check, driving the SHIPPED `eval_regime()` against the SHIPPED `resolve_workers`.
 
@@ -173,6 +177,7 @@ def test_the_regime_key_is_the_arenas_own_answer(monkeypatch):
         assert mine == theirs, f"{env}: the bridge says {mine}, the arena keys {theirs}"
 
 
+@CPU_AFFINITY
 def test_an_unparseable_worker_environment_says_which_one(monkeypatch):
     """A bad env value is not a machine without CPU affinity, and the record must not say it is.
 
@@ -190,6 +195,7 @@ def test_an_unparseable_worker_environment_says_which_one(monkeypatch):
     assert got["lane_width"], "the affinity WAS readable; the record should still say so"
 
 
+@CPU_AFFINITY
 def test_auto_keys_a_worker_regime_not_a_lane_one(tmp_path):
     """The `auto` branch, driven through the bridge so it needs no arena import.
 

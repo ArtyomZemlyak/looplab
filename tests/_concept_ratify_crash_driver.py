@@ -29,7 +29,10 @@ def main(memory_dir: str) -> None:
         # the kill lands strictly AFTER a durable decision and strictly BEFORE the stage could
         # observe it, receipt it, or move on.
         sys.stdout.flush()
-        os.kill(os.getpid(), signal.SIGKILL)
+        # Windows has no SIGKILL; there `os.kill(pid, SIGTERM)` IS `TerminateProcess` — the same
+        # uncatchable death with no `finally`, no atexit and no flush, exiting with the signal
+        # number. What matters is the missing cleanup, not the name of the signal.
+        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
         return record                                  # unreachable
 
     concept_tidy.record_concept_alias = kill_after_first

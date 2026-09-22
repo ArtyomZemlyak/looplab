@@ -29,6 +29,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import CPU_AFFINITY
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "benchmarks" / "algotune" / "looplab_eval.py"
@@ -46,6 +47,7 @@ LE = _by_path(BRIDGE, "_bridge_under_test_regime")
 CA = _by_path(COMPARE, "_compare_under_test_regime")
 
 
+@CPU_AFFINITY
 def test_every_emitted_line_states_its_regime(monkeypatch, capsys):
     monkeypatch.setenv("ALGOTUNE_EVAL_WORKERS", "auto")
     monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", "/tmp/whatever/.baseline_times")
@@ -59,6 +61,7 @@ def test_every_emitted_line_states_its_regime(monkeypatch, capsys):
     assert block["baseline_cache_dir"] == "/tmp/whatever/.baseline_times"
 
 
+@CPU_AFFINITY
 def test_a_refusal_states_it_too(monkeypatch, capsys):
     """`_emit` is the ONE exit precisely so a rule holds on every path, including the ones that
     print no number."""
@@ -82,6 +85,7 @@ def test_the_ruler_is_nested_so_it_cannot_become_a_metric(monkeypatch, capsys):
         "the ruler leaked into the node's extra metrics")
 
 
+@CPU_AFFINITY
 def test_the_guard_and_the_record_are_the_same_rule(monkeypatch):
     """One authority. The refusal names a key it computes; the line reports a key it computes; if
     those are two computations they will disagree exactly when it matters."""

@@ -36,7 +36,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from _posix_gates import BASH_HARNESS
+from _posix_gates import BASH_HARNESS, CPU_AFFINITY
 
 ROOT = Path(__file__).resolve().parents[1]
 CAMPAIGN = ROOT / "benchmarks" / "algotune" / "campaign.sh"
@@ -207,6 +207,7 @@ def test_the_declared_ruler_arms_the_regime_guard(tmp_path):
     assert (row.get("no_speedup") or {}).get("reason") == "baseline_regime_mismatch", row
 
 
+@CPU_AFFINITY
 def test_without_the_declaration_the_guard_is_dead(tmp_path):
     """THE MUTATION, kept: the identical invocation with neither name set measures anyway.
 

@@ -39,6 +39,7 @@ from tests.test_card_speculation_engine import (  # noqa: F401 — the receipt f
     _start,
 )
 import looplab.engine.speculation as speculation_module
+from _posix_gates import PROCESS_GROUPS
 
 
 def _spec_node(
@@ -359,6 +360,7 @@ def _crash_a_speculative_evaluation(tmp_path) -> tuple[Path, int]:
     return run_dir, node_id
 
 
+@PROCESS_GROUPS
 def test_crash_interrupted_speculative_eval_is_never_refunded(tmp_path, monkeypatch):
     """A killed-mid-evaluation prefetch must keep its slot — the compute is already spent.
 

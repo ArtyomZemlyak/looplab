@@ -300,16 +300,10 @@ def test_claim_decision_evidence_lock_failure_appends_nothing(tmp_path, monkeypa
 # re-acquires to compare-and-swap before the rewrite.
 
 def _lock_is_free(path: Path) -> bool:
-    """Can an INDEPENDENT holder take lessons.jsonl.lock right now? flock is per open-file
-    description, so a second open() in this process is a faithful stand-in for another run."""
-    import fcntl
-    with open(str(path) + ".lock", "a+") as f:
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return False
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        return True
+    """Can an INDEPENDENT holder take lessons.jsonl.lock right now? Asked through the store's own
+    lock primitive (tests/_lock_probe.py), so the question means the same thing on every platform."""
+    from _lock_probe import lock_is_free
+    return lock_is_free(str(path) + ".lock")
 
 
 def test_paid_paraphrase_merge_does_not_run_under_the_shared_store_lock(tmp_path, monkeypatch):

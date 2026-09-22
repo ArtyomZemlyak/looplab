@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from _posix_gates import BASH_HARNESS
+from _posix_gates import BASH_HARNESS, CPU_AFFINITY
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "benchmarks" / "algotune" / "run_probe.sh"
@@ -51,6 +51,7 @@ def _key_under(lane: str) -> str:
     return out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
 
 
+@CPU_AFFINITY
 def test_the_lane_width_is_what_picks_the_ruler():
     """The fact the guard rests on, driven rather than asserted: one range and two of the same
     cores key different baselines, so a lane is not a scheduling detail."""

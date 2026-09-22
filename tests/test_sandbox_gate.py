@@ -7,6 +7,7 @@ import pytest
 
 from looplab.trust.gate import one_se_better
 from looplab.runtime.sandbox import SubprocessSandbox, _json_line_extras, _parse_metric
+from _posix_gates import PROCESS_GROUPS
 
 
 def test_sandbox_captures_metric(tmp_path):
@@ -668,6 +669,7 @@ def test_kill_tree_never_signals_an_already_reaped_process(tmp_path):
     _kill_tree(proc)                      # must be a no-op, not a killpg on a possibly-reused pid
 
 
+@PROCESS_GROUPS
 def test_kill_tree_still_kills_a_same_group_child_without_signalling_the_engine(tmp_path):
     """Sharing the engine's group disqualifies killpg — it must not disqualify the KILL.
 
@@ -709,6 +711,7 @@ def test_kill_tree_still_kills_a_same_group_child_without_signalling_the_engine(
     assert proc.poll() is not None, "the same-group child survived _kill_tree entirely"
 
 
+@PROCESS_GROUPS
 def test_kill_tree_last_resort_never_group_kills_a_same_group_child(monkeypatch, tmp_path):
     """Without psutil the fallback must degrade to `proc.kill()`, not to an engine-killing killpg."""
     import builtins

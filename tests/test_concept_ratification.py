@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -357,7 +358,11 @@ def _child_ratify(memory_dir: str, queue) -> None:
 
 
 def test_concurrent_processes_ratify_each_merge_exactly_once(portfolio):
-    ctx = mp.get_context("fork")
+    # `fork` where it exists (cheap); `spawn` where it does not (Windows) — the property is that
+    # SEPARATE PROCESSES contend through the interprocess lock, and both start methods give that.
+    # `_child_ratify` is a module-level function and its arguments are a str and a context Queue,
+    # so a spawned child can import and unpickle it.
+    ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else "spawn")
     queue = ctx.Queue()
     workers = [ctx.Process(target=_child_ratify, args=(str(portfolio), queue)) for _ in range(4)]
     for worker in workers:
@@ -518,7 +523,10 @@ def test_a_pass_killed_after_its_first_write_completes_on_re_entry(portfolio):
     proc = subprocess.run(
         [sys.executable, "-m", "tests._concept_ratify_crash_driver", str(portfolio)],
         cwd=str(repo_root), env=env, capture_output=True, timeout=180)
-    assert proc.returncode == -9, (proc.returncode, proc.stderr[-2000:])
+    # POSIX reports the SIGKILL as -9; on Windows the driver's TerminateProcess exits with the
+    # signal number it was given (see tests/_concept_ratify_crash_driver.py).
+    killed = -signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM
+    assert proc.returncode == killed, (proc.returncode, proc.stderr[-2000:])
 
     # Exactly one decision is durable, and no receipt was written — the crash left no claim behind.
     partial = _alias_rows(portfolio)

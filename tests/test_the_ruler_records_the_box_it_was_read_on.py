@@ -27,6 +27,7 @@ sys.path.insert(0, str(BENCH))
 
 import pulse  # noqa: E402
 import ruler_selfcheck  # noqa: E402
+from _posix_gates import CPU_AFFINITY
 
 
 def _pin(cpus):
@@ -52,6 +53,7 @@ def _spawn(cpus, busy: bool, exe: str = sys.executable, orphan: bool = False):
     return pid
 
 
+@CPU_AFFINITY
 def test_an_idle_pinned_neighbour_is_not_counted_as_load():
     """§390. THE PROCESS, not the box at a moment.
 
@@ -80,6 +82,7 @@ def test_an_idle_pinned_neighbour_is_not_counted_as_load():
         os.sched_setaffinity(0, keep)
 
 
+@CPU_AFFINITY
 def test_a_busy_pinned_neighbour_is_counted_as_the_cpus_it_holds():
     """The other side of the same per-process question, so neither half can be removed quietly."""
     keep = os.sched_getaffinity(0)
@@ -96,11 +99,13 @@ def test_a_busy_pinned_neighbour_is_counted_as_the_cpus_it_holds():
         os.sched_setaffinity(0, keep)
 
 
+@CPU_AFFINITY
 def test_a_process_that_is_gone_contributes_nothing():
     """A pid that vanishes mid-walk is the ordinary case on a box that spawns workers, not an error."""
     assert ruler_selfcheck.cpus_counted_for(2 ** 22, {0, 1}, os.cpu_count() or 8) == set()
 
 
+@CPU_AFFINITY
 def test_work_inside_our_own_lane_is_not_outside_it():
     """The disjointness half of the rule, which nothing here drove (§388).
 
@@ -123,6 +128,7 @@ def test_work_inside_our_own_lane_is_not_outside_it():
         os.sched_setaffinity(0, keep)
 
 
+@CPU_AFFINITY
 def test_an_unpinned_process_cannot_answer_the_question(monkeypatch):
     """`None` means "not answerable here", and it is not the same answer as zero: a process whose
     affinity is the whole box has no "outside" to look at. Mutating it to `set()` left every other
@@ -147,6 +153,7 @@ def test_the_count_is_exactly_the_size_of_the_set(monkeypatch):
     assert ruler_selfcheck.busy_cpus_outside_lane() is None
 
 
+@CPU_AFFINITY
 def test_a_busy_pinned_neighbour_is_counted():
     keep = os.sched_getaffinity(0)
     if os.cpu_count() is None or os.cpu_count() < 8:
@@ -189,6 +196,7 @@ def test_the_selfcheck_samples_the_count_while_it_runs_not_after():
     assert body.count("busy_cpus_outside_lane()") >= 2, body
 
 
+@CPU_AFFINITY
 def test_orphaned_bench_workers_are_reported_and_live_ones_are_not():
     if os.cpu_count() is None or os.cpu_count() < 8:
         return
