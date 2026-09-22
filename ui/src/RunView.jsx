@@ -286,7 +286,7 @@ function DagEmptyOverlay({ presentation, transport, onAction }) {
 }
 
 export default function RunView({ runId, onBack, reviewMode = false, reviewMeta = null }) {
-  const { live, seq, generation, eventCount: liveEventCount, connected,
+  const { live, seq, generation, eventCount: liveEventCount, connected, degraded: streamDegraded,
     status: runStatus, error: runError, retry: retryRun } =
     useRunState(runId, { pollOnly: reviewMode })
   const retryRunRef = useRef(retryRun)
@@ -2402,6 +2402,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <span className="history-lock" aria-hidden="true">◬</span>
         <b>Incomplete record</b>
         <span>{sourceIntegrityNotice(live)}</span>
+      </div>}
+
+      {/* The owner stream could not carry this run's state at its bound (review 2026-09-22, UI-01),
+          so the workspace follows the run by the minute-scale lifecycle probe and re-reads it when it
+          moves (`hooks.js::useRunState`). Current to within that probe, not live — said, not implied. */}
+      {streamDegraded && <div className="review-banner" role="status" data-run-stream-degraded>
+        <span className="history-lock" aria-hidden="true">◌</span>
+        <b>Live updates paused</b>
+        <span>This run&rsquo;s state is too large to stream; it is re-read when the run changes, checked about once a minute.</span>
       </div>}
 
       {reviewMode && <div className="review-banner" role="status">

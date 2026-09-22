@@ -9,10 +9,10 @@ import {
   commandIntentPreserved, commandPollBackoffMs, observeCommandError,
 } from './runCommandMachine.js'
 import {
-  MIN_BACKOFF_MS, TERMINAL_PROBE_MAX_MS, TERMINAL_PROBE_MS,
+  MIN_BACKOFF_MS, RUN_STATE_MAX_FRAME_CHARS, TERMINAL_PROBE_MAX_MS, TERMINAL_PROBE_MS,
   classifyRunProbeFailure, identityChanged, initialRunIdentity, nextBackoffMs, nextStreamCursor,
   ownerRunEnded, reviewLinkEnded, runSnapshotIdentity, snapshotMovedBackwards,
-  streamCursorMatchesSnapshot, terminalSnapshot,
+  streamCannotCarryState, streamCursorMatchesSnapshot, terminalSnapshot,
 } from './runStateModel.js'
 import {
   NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, nextNodeSpanWindow,
@@ -308,6 +308,9 @@ export function useRunState(runId, {
   const [eventCountState, setEventCountState] = useState({ runId, value: null })
   const eventCount = eventCountState.runId === runId ? eventCountState.value : null
   const [connected, setConnected] = useState(false)
+  // True once the owner stream could not carry a frame at the run's own bound and the connection
+  // fell back to the lifecycle probe (review 2026-09-22, UI-01) — the workspace says so.
+  const [degraded, setDegraded] = useState(false)
   const [status, setStatus] = useState('loading')
   const [error, setError] = useState(null)
   const [retryToken, setRetryToken] = useState(0)
@@ -331,6 +334,7 @@ export function useRunState(runId, {
     let terminalMode = false
     let terminalDelay = TERMINAL_PROBE_MS
     let terminalRequest = null
+    let streamDegraded = false
     let ownerEnded = false
     let reviewTerminal = false
     let reviewPoll = null
@@ -343,6 +347,7 @@ export function useRunState(runId, {
     setGenerationState({ runId, value: null })
     setEventCountState({ runId, value: null })
     setConnected(false)
+    setDegraded(false)
     setStatus('loading')
     setError(null)
     let backoff = MIN_BACKOFF_MS
@@ -384,18 +389,19 @@ export function useRunState(runId, {
       clearTimeout(timer)
       timer = setTimeout(probeTerminal, delay)
     }
+    const probeFailed = (request, error) => {
+      if (stopped || !terminalMode || terminalRequest !== request) return
+      if (ownerRunEnded(error)) { endOwnerRun(); return }
+      terminalRequest = null
+      setConnected(false)
+      terminalDelay = nextBackoffMs(terminalDelay, TERMINAL_PROBE_MAX_MS)
+      scheduleTerminalProbe()
+    }
     function probeTerminal() {
       if (stopped || ownerEnded || !terminalMode || hidden() || terminalRequest) return
       const request = deadlineGet(runApiPath(runId, '/lifecycle'))
       terminalRequest = request
-      const failed = error => {
-        if (stopped || !terminalMode || terminalRequest !== request) return
-        if (ownerRunEnded(error)) { endOwnerRun(); return }
-        terminalRequest = null
-        setConnected(false)
-        terminalDelay = nextBackoffMs(terminalDelay, TERMINAL_PROBE_MAX_MS)
-        scheduleTerminalProbe()
-      }
+      const failed = error => probeFailed(request, error)
       request.promise.then(payload => {
         if (stopped || !terminalMode || terminalRequest !== request) return
         let next
@@ -403,6 +409,9 @@ export function useRunState(runId, {
         terminalRequest = null
         setConnected(true)
         if (identityChanged(last, next)) {
+          // A DEGRADED connection re-reads the moved run; reopening would only receive the frame it
+          // already could not carry.
+          if (streamDegraded) { refetchDegraded(); return }
           terminalMode = false
           connect()
           return
@@ -411,12 +420,35 @@ export function useRunState(runId, {
         scheduleTerminalProbe()
       }, failed)
     }
+    // The degraded connection's read of a moved run: the same uncapped `/state` GET the initial probe
+    // makes, fenced like the probe (one request at a time, dropped once superseded or stopped).
+    function refetchDegraded() {
+      const request = deadlineGet(runApiPath(runId, '/state'))
+      terminalRequest = request
+      request.promise.then(payload => {
+        if (stopped || !terminalMode || terminalRequest !== request) return
+        try { commitSnapshot(payload) } catch { probeFailed(request); return }
+        terminalRequest = null
+        setStatus('ready')
+        setError(null)
+        terminalDelay = TERMINAL_PROBE_MS
+        scheduleTerminalProbe()
+      }, error => probeFailed(request, error))
+    }
     const enterTerminalMode = () => {
       if (ownerEnded) return
       terminalMode = true
       terminalDelay = TERMINAL_PROBE_MS
       setConnected(true)
       scheduleTerminalProbe()
+    }
+    // A frame the stream cannot carry at the run's own bound (`runStateModel.js::
+    // streamCannotCarryState`) would be the first frame of every reconnect too: follow the run by the
+    // terminal machine's probe instead of reopening it, and publish `degraded` for the workspace.
+    const degradeStream = () => {
+      streamDegraded = true
+      setDegraded(true)
+      enterTerminalMode()
     }
 
     function connect() {
@@ -445,6 +477,7 @@ export function useRunState(runId, {
       fetchEventStream(runApiPath(runId, '/events'), {
         signal: controller.signal,
         lastEventId: lastStreamEventId,
+        maxFrameChars: RUN_STATE_MAX_FRAME_CHARS,
         onEvent: event => {
           if (stopped || controller.signal.aborted) return
           if (event.type === 'done') {
@@ -497,6 +530,7 @@ export function useRunState(runId, {
       }).catch(error => {
         if (stopped || terminal || controller.signal.aborted || error?.name === 'AbortError') return
         if (ownerRunEnded(error)) { endOwnerRun(); return }
+        if (streamCannotCarryState(error)) { degradeStream(); return }
         setConnected(false)
         reconnect(backoff)
         backoff = nextBackoffMs(backoff)
@@ -619,6 +653,6 @@ export function useRunState(runId, {
   // create a small pre-render window where a click on visible generation A could be rebound to B.
   useLayoutEffect(() => { observeRunGeneration(runId, generation) }, [runId, generation])
 
-  return { live, seq, generation, eventCount, connected, status, error,
+  return { live, seq, generation, eventCount, connected, degraded, status, error,
     retry: () => setRetryToken(n => n + 1) }
 }

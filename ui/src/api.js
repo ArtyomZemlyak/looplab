@@ -60,7 +60,7 @@ export {
 export {
   getRunCommand, getRunGeneration, jobAwait, retryRunCommand, runCommand, submitRunCommand,
 } from './commandProtocol.js'
-export { createEventStreamParser, fetchEventStream } from './eventStream.js'
+export { EVENT_STREAM_FRAME_TOO_LARGE, createEventStreamParser, fetchEventStream } from './eventStream.js'
 export {
   abandonScopeReportAction, genScopeReport, getScopeReport, getScopeReportAction,
   reconcileScopeReportGeneration,

@@ -3,7 +3,7 @@
 // modules` refuses a second reachability root into the split members, because that is what lets the
 // bundler pull the barrel's chunk apart. Reaching for the leaf directly looks tidier and is the
 // change that guard exists to catch.
-import { normalizeRunGeneration } from './api.js'
+import { EVENT_STREAM_FRAME_TOO_LARGE, normalizeRunGeneration } from './api.js'
 
 // The RULES of the run-state connection (doc 25 UI-09), lifted out of `hooks.js::useRunState`'s one
 // long effect. That effect interleaves three connection machines — the owner SSE stream, the
@@ -39,6 +39,19 @@ export const TERMINAL_PROBE_MAX_MS = 300000
 
 // One ramp for every backoff in this subsystem: double, then stop at the cap.
 export const nextBackoffMs = (delay, cap = MAX_BACKOFF_MS) => Math.min(delay * 2, cap)
+
+// The run stream's OWN frame bound (review 2026-09-22, UI-01). Its first frame on every connection
+// is the whole folded state, and the transport's 2 MiB default refused it past ~468 toy nodes — real
+// runs far earlier — so the owner stream never connected on a large run. 64 MiB is the order of the
+// state the uncapped `/state` GET already hands this same tab: a bound on a runaway stream, not on a
+// run.
+export const RUN_STATE_MAX_FRAME_CHARS = 64 * 1024 * 1024
+
+// A frame over that bound is over it on the next connection too, so reconnecting on it is a loop
+// (the old behaviour, driven: a reconnect per backoff tick, forever). The connection DEGRADES
+// instead: the terminal machine's small `/lifecycle` probe follows the run and `/state` is re-read
+// when it moved. Every other stream failure still reconnects.
+export const streamCannotCarryState = error => error?.code === EVENT_STREAM_FRAME_TOO_LARGE
 
 export const normalizeEventCount = value => {
   if (value == null) return null // additive field: tolerate a legacy server during rolling upgrades
