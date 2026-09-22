@@ -183,3 +183,33 @@ def test_a_declared_key_does_not_bind_a_longer_key_it_is_the_suffix_of():
     # …and a key that legitimately CONTAINS those characters still binds itself.
     assert last_values("train.loss: 9.5\n", ["train.loss"]) == {"train.loss": 9.5}
     assert last_values("top5/acc = 0.9\n", ["top5/acc"]) == {"top5/acc": 0.9}
+
+
+def test_a_rerun_that_stops_printing_the_key_is_not_held_to_the_previous_attempts_value(tmp_path):
+    """The stage LOG is appended across attempts (`sandbox._tee_drain` opens it "a") in a workdir the
+    repair loop deliberately reuses, and the relation used to be read off that file's last MiB. So
+    an attempt that crashed after printing `val_ndcg: 0.80` left the value behind, and a rerun that
+    printed NOTHING about it passed its declared `val_ndcg >= 0.71` on the dead attempt's number —
+    the one reader in this module that was not attempt-scoped (review 2026-09-22, RTA-01)."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    relation = [{"key": "val_ndcg", "op": ">=", "value": 0.71}]
+    stages = _pipeline(tmp_path, "print('val_ndcg: 0.80'); raise SystemExit(1)\n", relation)
+    first = run_command_eval([sys.executable, "score.py"], str(tmp_path), 30, _M, stages=stages,
+                             log_dir=str(log_dir))
+    assert first.failed_stage == "train" and first.stages[0]["status"] == "fail"
+    assert "val_ndcg: 0.80" in (log_dir / "train.log").read_text(encoding="utf-8")
+
+    (tmp_path / "train.py").write_text("print('trained, and said nothing about ndcg')\n", encoding="utf-8")
+    second = run_command_eval([sys.executable, "score.py"], str(tmp_path), 30, _M, stages=stages,
+                              log_dir=str(log_dir))
+    assert second.failed_stage == "train" and second.metric is None
+    assert second.stages[0]["status"] == "expect_failed"
+    assert "never printed 'val_ndcg'" in second.stderr
+    assert second.stages[0][NUMERIC_VALUES_KEY] == {}
+
+    # CONTROL: the same rerun that DOES print the key passes on ITS value, read from the same log.
+    (tmp_path / "train.py").write_text("print('val_ndcg: 0.75')\n", encoding="utf-8")
+    third = run_command_eval([sys.executable, "score.py"], str(tmp_path), 30, _M, stages=stages,
+                             log_dir=str(log_dir))
+    assert third.failed_stage is None and third.stages[0][NUMERIC_VALUES_KEY] == {"val_ndcg": 0.75}

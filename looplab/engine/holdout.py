@@ -138,9 +138,13 @@ class HoldoutGrader:
         preds_path = _candidate_output(workdir, g.get("predictions", ""), "predictions.json")
         m = None
         if preds_path is not None:
+            from looplab.runtime.command_eval import read_candidate_file
             from looplab.runtime.sandbox import _to_float
             try:
-                preds = _json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
+                _preds_text = read_candidate_file(preds_path)   # size-bounded: candidate bytes
+                if _preds_text is None:
+                    raise ValueError("predictions unreadable or over the candidate-file ceiling")
+                preds = _json.loads(_preds_text)
                 # D1 holdout: when a holdout partition is reserved, the SEARCH signal is the score
                 # on the complement rows only — the holdout rows are scored exactly once, at
                 # finish, for the val-top-k (see _holdout_phase). No partition => legacy full score.
@@ -398,9 +402,10 @@ class HoldoutGrader:
             p = _candidate_output(
                 self._e.run_dir / "nodes" / f"node_{nid}",
                 g.get("predictions", ""), "predictions.json")
+            from looplab.runtime.command_eval import read_candidate_file
             try:
-                preds = (_json.loads(p.read_text(encoding="utf-8-sig", errors="replace"))
-                         if p is not None else None)
+                _preds_text = read_candidate_file(p) if p is not None else None   # size-bounded
+                preds = _json.loads(_preds_text) if _preds_text is not None else None
             except (OSError, ValueError):
                 preds = None
             m = self._e._host_score_split(preds, g, holdout=True) if preds is not None else None
@@ -477,10 +482,13 @@ class HoldoutGrader:
             tmp = Path(tempfile.mkdtemp(prefix="looplab-private-grade-"))
             try:
                 public_only = tmp / "submission.csv"
+                from looplab.runtime.command_eval import read_candidate_file
                 try:
+                    _sub_text = read_candidate_file(sub)            # size-bounded: candidate bytes
+                    if _sub_text is None:
+                        raise ValueError("submission unreadable or over the candidate-file ceiling")
                     public_only.write_text(filter_submission(
-                        sub.read_text(encoding="utf-8-sig", errors="replace"),
-                        self._e._search_hidden_ids, keep=False), encoding="utf-8")
+                        _sub_text, self._e._search_hidden_ids, keep=False), encoding="utf-8")
                 except (OSError, ValueError):
                     public_only = None
                 if public_only is not None:

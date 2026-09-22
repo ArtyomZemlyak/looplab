@@ -129,12 +129,17 @@ def grade_search_split_in_subprocess(competition_id: str, submission_path, answe
     import tempfile
 
     from looplab.adapters.mlebench_split import filter_submission
+    from looplab.runtime.command_eval import read_candidate_file
     from looplab.runtime.sandbox import _last_json_dict, run_argv
 
     tmp = Path(tempfile.mkdtemp(prefix="looplab-search-grade-"))
     try:
         try:
-            text = Path(submission_path).read_text(encoding="utf-8-sig", errors="replace")
+            # Size-bounded: the submission is CANDIDATE bytes read in the ENGINE process, and a
+            # sparse multi-GB file used to OOM the engine here (review 2026-09-22, RTA-02).
+            text = read_candidate_file(submission_path)
+            if text is None:
+                return None
             (tmp / "submission.csv").write_text(filter_submission(text, hidden_ids, keep=True),
                                                 encoding="utf-8")
         except (OSError, ValueError):

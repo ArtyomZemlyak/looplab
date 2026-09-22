@@ -424,18 +424,29 @@ def _file_is_fresh(p: Path, since: Optional[float]) -> bool:
 _MAX_METRIC_FILE_BYTES = 256 * 1024 * 1024   # 256 MiB
 
 
-def _read_metric_file(p: Path) -> Optional[str]:
-    """Read a candidate-written metric/prediction file, size-bounded so a huge adversarial file cannot
-    OOM the host. Returns None if the file is missing, unreadable, or larger than _MAX_METRIC_FILE_BYTES.
-    The eval command has already exited before this runs, so stat().st_size is a stable, race-free gate
-    (no concurrent writer). utf-8-sig strips a UTF-8 BOM (common on Windows-written files) that would
-    otherwise make json.loads fail / a first-line regex miss."""
+def read_candidate_file(p) -> Optional[str]:
+    """Read a candidate-written metric/prediction/submission file, size-bounded so a huge adversarial
+    file cannot OOM the host. Returns None if the file is missing, unreadable, or larger than
+    _MAX_METRIC_FILE_BYTES. The eval command has already exited before this runs, so stat().st_size is
+    a stable, race-free gate (no concurrent writer). utf-8-sig strips a UTF-8 BOM (common on
+    Windows-written files) that would otherwise make json.loads fail / a first-line regex miss.
+
+    PUBLIC, AND THE ONE DOOR (review 2026-09-22, RTA-02). It was `_read_metric_file`, private to this
+    module, so every other host-side reader of the SAME candidate bytes — the MLE-bench search-split
+    grade, the generic host grade, the holdout scorer, the private grade — re-spelled `read_text` and
+    got no bound: a sparse multi-GB `predictions.json` took down the ENGINE, not the node. Path
+    CONFINEMENT stays the caller's (`_candidate_output`, `_confined`); this owns only the SIZE rule."""
     try:
+        p = Path(p)
         if p.stat().st_size > _MAX_METRIC_FILE_BYTES:
             return None
         return p.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
+
+
+# The pre-2026-09-22 private spelling, kept for the module's own call sites.
+_read_metric_file = read_candidate_file
 
 
 def _confined(workdir, rel) -> Optional[Path]:
@@ -1424,6 +1435,46 @@ EXPECT_DECLARED_KEY = "expect_declared"
 # `metric_salvage._salvage_condition` reads `NUMERIC_DECLARED_KEY` to refuse salvage on this failure.
 NUMERIC_DECLARED_KEY = "numeric_declared"
 NUMERIC_VALUES_KEY = "numeric_values"
+# How much of a stage log's tail the numeric half reads: an end-of-stage summary sits in the last
+# lines, and a multi-GB training log must never be loaded to find it.
+_NUMERIC_LOG_TAIL_BYTES = 1_048_576
+
+
+def _stage_log_cursor(path) -> Optional[tuple]:
+    """`(st_dev, st_ino, size)` of a stage log BEFORE an attempt appends to it; None when absent.
+
+    The stage log is opened in append mode (`sandbox._tee_drain`) inside a workdir the repair loop
+    deliberately reuses, so without a cursor a reader of "the log" reads every earlier attempt too.
+    """
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size)
+
+
+def _attempt_log_tail(path, cursor: Optional[tuple], cap: int = _NUMERIC_LOG_TAIL_BYTES) -> Optional[str]:
+    """The last `cap` bytes THIS attempt wrote to `path`, or None when the log cannot be read.
+
+    Bytes before the cursor belong to an earlier attempt and are never returned. A log that is not
+    the file the cursor saw (replaced), or that is shorter than it was (truncated and regrown), holds
+    nothing older than this attempt, so it is read from its start. RTA-01 (review 2026-09-22): the
+    numeric contract used to read the file's last MiB unconditionally, and a rerun that no longer
+    printed its declared key passed on the value a DEAD attempt had printed.
+    """
+    try:
+        with open(path, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            size = max(0, int(st.st_size))
+            floor = 0
+            if cursor is not None and (st.st_dev, st.st_ino) == cursor[:2] and size >= cursor[2]:
+                floor = cursor[2]
+            fh.seek(max(floor, size - cap))
+            return fh.read().decode("utf-8", errors="replace")
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def verify_stage_artifacts(expect, workdir, since: Optional[float], *, stage: str = "") -> Optional[str]:
@@ -2883,6 +2934,10 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # The eval's own clock rides both tiers (`LOOPLAB_EVAL_DEADLINE`, doc 52 row 15):
             # `run_argv` sets it for the host process from `_sto`; a container needs it forwarded.
             _swrap_argv_dl, _senv_dl = _deadline_wrap(ex, _swrap_argv, _senv_decl, _sto)
+            # Where THIS attempt's bytes will start in the stage log, taken before the command runs:
+            # the log is appended across attempts, and the numeric contract below must read only what
+            # this attempt printed (`_attempt_log_tail`).
+            _log_cursor = _stage_log_cursor(ex.log(f"{_sname}.log"))
             run.rc, run.out, run.err, run.timed_out = run_argv(
                 _swrap_argv_dl(ex.bound(_scmd, _sto), str(ex.wd)), ex.wd, _sto + ex.grace,
                 merge_env(_senv, _senv_dl) if _senv_dl else _senv,
@@ -2975,14 +3030,10 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         _numeric = _expect.get("numeric") if isinstance(_expect.get("numeric"), list) else None
         if _numeric:
             _text = run.out or ""
-            try:
-                _log_file = ex.log(f"{_sname}.log")          # None without a log dir (a library caller)
-                if _log_file and os.path.isfile(_log_file):
-                    with open(_log_file, "rb") as _fh:
-                        _fh.seek(max(0, os.path.getsize(_log_file) - 1_048_576))
-                        _text = _fh.read().decode("utf-8", errors="replace")
-            except OSError:
-                pass
+            _log_file = ex.log(f"{_sname}.log")              # None without a log dir (a library caller)
+            _tail = _attempt_log_tail(_log_file, _log_cursor) if _log_file else None
+            if _tail is not None:
+                _text = _tail
             _defects, _values = numeric_contract_defects(_text, _numeric)
             stage_results[-1][NUMERIC_DECLARED_KEY] = list(_numeric)
             stage_results[-1][NUMERIC_VALUES_KEY] = _values

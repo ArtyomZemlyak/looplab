@@ -412,3 +412,37 @@ def test_a_resume_honours_the_recorded_split_not_a_changed_live_setting(tmp_path
     assert set(resumed._holdout_idx) == recorded_idx, "the held-out rows themselves changed"
     assert resumed._select_verifier is True and resumed._verifier_ci_tie is True, (
         "the engine's live tie-break gate disagrees with the rule the fold applies")
+
+
+def test_every_host_grader_holds_candidate_bytes_to_the_one_size_ceiling(tmp_path, monkeypatch):
+    """RTA-02 (review 2026-09-22). `command_eval._read_metric_file` bounded a candidate-written file
+    at 256 MiB so a sparse multi-GB `predictions.json` fails the NODE; the host GRADERS read the same
+    candidate bytes through `read_text` and had no bound, so the same file took down the ENGINE. All
+    of them now go through `command_eval.read_candidate_file`; driven here by lowering the ceiling
+    below an honest file's size and running the real engine, holdout phase included."""
+    from looplab.adapters import mlebench_grade
+    from looplab.runtime import command_eval
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    monkeypatch.setattr(command_eval, "_MAX_METRIC_FILE_BYTES", 16)
+    eng = Engine(
+        tmp_path / "run", task=_HostGradedTask(),
+        researcher=_PredsResearcher(), developer=_PredsDeveloper(),
+        sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+        n_seeds=1, max_nodes=1, timeout=30.0,
+        holdout_fraction=0.25, holdout_select=True, holdout_top_k=1,
+    )
+    final = anyio.run(eng.run)
+    node = final.nodes[0]
+    assert node.metric is None, "an over-ceiling predictions file was graded instead of refused"
+    assert node.holdout_metric is None
+
+    # The MLE-bench search-split grade refuses before it writes anything or spawns a grader.
+    sub = tmp_path / "submission.csv"
+    sub.write_text("id,label\n" + "".join(f"{i},0\n" for i in range(50)), encoding="utf-8")
+    spawned = []
+    monkeypatch.setattr("looplab.runtime.sandbox.run_argv", lambda *a, **k: spawned.append(a))
+    assert mlebench_grade.grade_search_split_in_subprocess(
+        "comp", sub, "id,label\n0,0\n", {"0"}) is None
+    assert spawned == [], "the grader was spawned over a submission the ceiling refused"
