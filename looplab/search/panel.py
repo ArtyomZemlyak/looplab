@@ -99,8 +99,16 @@ class PanelResearcher(WrapsResearcher):
         # keeps its inflated metric and stays FEASIBLE, so fitting on it teaches the k-NN to propose
         # near the cheated params. Both sibling predictors already exclude it for this exact reason
         # (search/surrogate.py, search/proxy.py); under `audit`/no flags the two pools are identical.
-        hist = [(numeric_params(n.idea.params), n.metric)
-                for n in state.breedable_nodes() if n.metric is not None]
+        #
+        # Only rows with a NUMERIC point count (review 2026-09-22, SCJ-09). On a structural task
+        # every node records `params={}`; those rows reached the warmup, every later turn fanned out
+        # to K paid proposals, none could be ranked (an empty point has no distance to anything) and
+        # `ideas[0]` came back — K-1 calls discarded per turn for the whole run. An empty point is
+        # no signal to rank by, so it is no warmup either; `_predict_with_distance` never matches
+        # one, so dropping them here changes no ranking.
+        hist = [(p, m) for p, m in ((numeric_params(n.idea.params), n.metric)
+                                    for n in state.breedable_nodes() if n.metric is not None)
+                if p]
         if len(hist) < self.warmup:
             return self.base.propose(state, parent)   # not enough signal to rank -> one proposal
         ideas = [self.base.propose(state, parent) for _ in range(self.k)]

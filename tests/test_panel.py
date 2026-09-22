@@ -113,3 +113,31 @@ def test_the_warmup_turn_makes_exactly_one_researcher_call():
     ranked = PanelResearcher(base_ranked, k=2, warmup=2)
     ranked.propose(_state([(3.0, -1.0, 0.1), (-4.0, 4.0, 50.0)]), None)
     assert base_ranked.i == 2
+
+
+def test_a_history_with_no_numeric_params_is_no_warmup_and_buys_one_proposal():
+    """A STRUCTURAL task (a repo task whose experiments are code edits) records `params={}` on every
+    node. Those rows counted toward the warmup, so once `warmup` nodes existed every turn fanned out
+    to K PAID proposals — and none could be ranked (an empty point has no distance to anything), so
+    the panel returned `ideas[0]` and threw K-1 away, on every turn of the run (review 2026-09-22,
+    SCJ-09). An empty point is no signal, so it is no warmup either."""
+    structural = Idea(operator="improve", params={}, rationale="edit the model code")
+    base = _SeqResearcher([structural] * 4)
+    panel = PanelResearcher(base, k=4, warmup=2)
+    st = RunState(direction="min")
+    for i, metric in enumerate((0.5, 0.4, 0.3)):
+        st.nodes[i] = Node(id=i, operator="improve", idea=Idea(operator="improve", params={}),
+                           metric=metric, status=NodeStatus.evaluated, feasible=True)
+    out = panel.propose(st, None)
+    assert base.i == 1, f"{base.i} paid researcher calls on an unrankable turn — K-1 were discarded"
+    assert out is structural and "panel" not in out.rationale
+
+    # A NUMERIC history still ranks once it reaches the warmup, however many empty rows sit beside it.
+    base_mixed = _SeqResearcher([Idea(operator="improve", params={"x": 3.0, "y": -1.0}),
+                                 Idea(operator="improve", params={"x": -4.0, "y": 4.0})])
+    mixed = PanelResearcher(base_mixed, k=2, warmup=2)
+    st_mixed = _state([(3.0, -1.0, 0.1), (-4.0, 4.0, 50.0)])
+    st_mixed.nodes[9] = Node(id=9, operator="improve", idea=Idea(operator="improve", params={}),
+                             metric=0.01, status=NodeStatus.evaluated, feasible=True)
+    assert mixed.propose(st_mixed, None).params == {"x": 3.0, "y": -1.0}
+    assert base_mixed.i == 2
