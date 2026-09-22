@@ -1388,6 +1388,75 @@ def test_concept_replay_cache_resets_and_returns_isolated_snapshots(tmp_path):
     assert shrunk_state.run_id == "demo" and not shrunk_state.nodes
 
 
+def test_concept_live_replay_stays_incremental_where_ctime_is_the_creation_time(
+        tmp_path, monkeypatch):
+    """On Windows `st_ctime_ns` is the CREATION time and never moves on an append. The replay cache
+    read the size from the index `st_ctime_ns` now occupies, so there every append looked like a
+    same-size rewrite and each poll re-folded the whole log (Windows CI run 35785582444: 11 applied
+    for one appended event). Driven here with the identity's ctime pinned, which is all that differs."""
+    import looplab.serve.routers.runs as runs_router
+
+    real_identity = runs_router.file_identity
+    monkeypatch.setattr(runs_router, "file_identity",
+                        lambda info: real_identity(info)[:4] + (1_700_000_000_000_000_000,)
+                        + real_identity(info)[5:])
+    rd = _demo_run(tmp_path)
+    log = rd / "events.jsonl"
+    cache = runs_router._ConceptReplayCache()
+    applied = []
+    real_extend = runs_router.FoldCursor.extend
+
+    def counted_extend(cursor, suffix):
+        items = list(suffix)
+        applied.append(len(items))
+        return real_extend(cursor, items)
+
+    monkeypatch.setattr(runs_router.FoldCursor, "extend", counted_extend)
+    cache.snapshot(log, runs_router._concept_event_file_identity(log))
+    writer = EventStore(log)
+    for index in range(3):
+        writer.append("hint", {"text": f"incremental-{index}"})
+        before = len(applied)
+        events, _, _, _ = cache.snapshot(log, runs_router._concept_event_file_identity(log))
+        assert applied[before:] == [1], (
+            f"append {index} re-applied {applied[before:]} events: the cursor was reset, so every "
+            "poll re-folds the whole log")
+        assert len(events) == 6 + index
+
+
+def test_a_same_size_rewrite_past_the_head_probe_is_not_served_stale(tmp_path):
+    """The other face of the same misread index, on POSIX: a same-size in-place rewrite changes ctime,
+    and with ctime standing in for the size it never read as a rewrite; the prefix probes were taken
+    at a byte offset of ~1.8e18, so the tail anchor was always empty. A rewrite of an event that is
+    neither the first nor the boundary, past the head probe's 4,096 bytes, then served the OLD fold."""
+    import looplab.serve.routers.runs as runs_router
+
+    log = tmp_path / "demo" / "events.jsonl"
+    store = EventStore(log)
+    store.append("run_started", {"run_id": "demo", "task_id": "toy", "goal": "g",
+                                 "direction": "max"})
+    for index in range(60):                                  # push the node past the head probe
+        store.append("hint", {"text": f"padding-{index:02d}-" + "x" * 64})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                           "concepts": ["loss/contrastive/aaa"]}})
+    store.append("hint", {"text": "the boundary event, unchanged by the rewrite"})
+    raw = log.read_bytes()
+    assert raw.index(b"loss/contrastive/aaa") > runs_router._CONCEPT_REPLAY_PREFIX_PROBE_BYTES
+    cache = runs_router._ConceptReplayCache()
+    _, state, _, _ = cache.snapshot(log, runs_router._concept_event_file_identity(log))
+    assert state.node_concepts[0] == ["loss/contrastive/aaa"]
+
+    prior = log.stat()
+    with log.open("r+b") as stream:
+        stream.write(raw.replace(b"loss/contrastive/aaa", b"loss/contrastive/bbb", 1))
+    os.utime(log, ns=(prior.st_atime_ns, prior.st_mtime_ns + 1_000_000))
+    assert log.stat().st_size == prior.st_size
+    _, state, _, _ = cache.snapshot(log, runs_router._concept_event_file_identity(log))
+    assert state.node_concepts[0] == ["loss/contrastive/bbb"], (
+        "a same-size rewrite was served the fold of the bytes it replaced")
+
+
 def test_concept_replay_cache_bounds_live_sources(tmp_path, monkeypatch):
     import looplab.serve.routers.runs as runs_router
 
