@@ -83,6 +83,42 @@ def test_a_healthy_log_is_walked_once_at_construction(tmp_path, monkeypatch):
     assert books.records == 25, "each record is decoded exactly once, by the tail-seq scan"
 
 
+def test_an_UNCHANGED_corrupt_log_is_walked_once_not_on_every_read(tmp_path, monkeypatch):
+    """Review 2026-09-22, EVT-08. A mid-file corruption parks the cache at the bad line, so every
+    later `read_all` saw "growth", re-read the rejected tail and re-ran the whole-file
+    `log_divergence` walk — on every poll, fold and append probe of a log nobody had touched.
+    MUTATION: drop the unchanged-identity early return in `read_all` and the three reads below
+    cost three more walks. The skip is keyed on the FILE, not latched: a changed log is walked
+    again and its new tail is counted, and the store still refuses to append past the corruption."""
+    from looplab.events.eventstore import EventLogCorruptionError
+
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    log = rd / "events.jsonl"
+    log.write_bytes(
+        b'{"v":1,"seq":0,"ts":1.0,"type":"a","data":{}}\n'
+        b'{"v":1,"seq":1,"ts":1.0,"type":"b","data":{}}\n'
+        b'{corrupt\n'
+        b'{"v":1,"seq":2,"ts":1.0,"type":"c","data":{}}\n')
+    books = _Accountant(monkeypatch)
+
+    store = EventStore(log)
+    assert books.divergence_walks == 1, "precondition: construction takes the one exact walk"
+    for _ in range(3):
+        assert [event.type for event in store.read_all()] == ["a", "b"]
+    assert books.divergence_walks == 1, "an unchanged corrupt log was re-walked on a plain read"
+    assert store.divergence == {"good_records": 2, "corrupt_line": 3, "dropped_lines": 1}
+
+    with open(log, "ab") as fh:
+        fh.write(b'{"v":1,"seq":3,"ts":1.0,"type":"d","data":{}}\n')
+    assert [event.type for event in store.read_all()] == ["a", "b"]
+    assert books.divergence_walks == 2, "a CHANGED log must be walked again"
+    assert store.divergence == {"good_records": 2, "corrupt_line": 3, "dropped_lines": 2}
+    with pytest.raises(EventLogCorruptionError):
+        store.append("hint", {"text": "past the corruption"})
+    assert books.divergence_walks == 2, "the append's own re-read of the unchanged log is free"
+
+
 def test_a_mid_file_corruption_is_still_seen_at_construction(tmp_path):
     """The cheap path may not cost the fail-closed receipt. `read_all` stops at the corrupt line and
     the tail behind it is durable-but-invisible to every fold; the store has to say so."""

@@ -682,6 +682,10 @@ class EventStore:
         # no-op — no torn line / duplicate seq. Held OUTSIDE the flock (consistent order, no deadlock).
         self._append_lock = threading.Lock()
         self._divergence: Optional[dict] = None
+        # The full `file_identity` of the log at the read that computed `_divergence` — see the
+        # early return at the head of `read_all` (review 2026-09-22, EVT-08). None whenever the
+        # divergence is None or was not computed by that read.
+        self._divergence_stat: Optional[tuple] = None
         # Fail closed on a MID-FILE divergence (a corrupt COMPLETE line followed by MORE records —
         # a FUSE/NFS/S3 mount can flip a middle byte; a single local writer never can). read_all()
         # stops at it, so a later append is durable-but-invisible to fold (arch-review §3 P0-4).
@@ -886,6 +890,7 @@ class EventStore:
             self._prefix_tail = None
             self._full_verified_bytes = 0
             self._divergence = None
+            self._divergence_stat = None
 
     def _locked_append(self, build, *, expected_last_seq: "int | None",
                        require_lock: bool, require_durable: bool):
@@ -1144,6 +1149,20 @@ class EventStore:
                 ctime_ns = None
                 identity = None
                 current_stat = None
+            # AN UNCHANGED DIVERGENT LOG IS NOT RE-WALKED (review 2026-09-22, EVT-08). A mid-file
+            # corruption parks `_cache_bytes` at the bad line, so every later call saw "growth",
+            # re-read the rejected tail and re-ran `log_divergence` — a `read_bytes()` and decode of
+            # the WHOLE file — on every poll, fold and append probe of a log nobody had touched:
+            # measured on the review's 15.7 MB corrupt log, 744-1,092 ms per `read_all` before and
+            # 0.3 ms after (a loaded 4-core box). With the full `file_identity` equal to the one the
+            # divergence was computed at (device, inode, size, mtime_ns, ctime_ns — the project's
+            # canonical "same file AND unchanged"), a re-read would re-derive exactly the cache and
+            # the divergence already held; any append, rewrite or replacement changes the identity
+            # and takes the full path below. (A same-size rewrite inside one tick of a filesystem
+            # with coarse timestamps is invisible here exactly as it is to `same_size_rewrite`.)
+            if (self._divergence is not None and current_stat is not None
+                    and current_stat == self._divergence_stat):
+                return list(self._cache)
             replaced = (self._cache_identity is not None and identity != self._cache_identity)
             same_size_rewrite = (size == self._cache_bytes and self._cache_mtime_ns is not None
                                  and (mtime_ns != self._cache_mtime_ns
@@ -1209,6 +1228,7 @@ class EventStore:
                 self._cache_bytes = 0
                 self._cache_hasher = hashlib.sha256()
                 self._divergence = None
+                self._divergence_stat = None
                 # Both prefix witnesses describe bytes we just discarded. Dropping them also sends the
                 # next external observation to the proof arm, so a rescan is followed by a full
                 # digest rather than by a window comparison against a prefix that no longer exists.
@@ -1263,6 +1283,9 @@ class EventStore:
                         "corrupt_line": len(self._cache) + 1,
                         "dropped_lines": max(0, remainder.count(b"\n") - 1),
                     }
+                    # Keyed on the identity stat'ed BEFORE this read: bytes that landed after it
+                    # change the identity, so the next call re-walks rather than trusting this.
+                    self._divergence_stat = current_stat
             self._cache_mtime_ns = mtime_ns
             self._cache_ctime_ns = ctime_ns
             self._cache_identity = identity
