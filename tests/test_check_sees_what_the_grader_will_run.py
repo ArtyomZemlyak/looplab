@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _posix_gates import FORK
 
 REPO = Path(__file__).resolve().parents[1]
 CHECKER = REPO / "benchmarks" / "algotune" / "looplab_check.py"
@@ -58,6 +59,7 @@ def _run(workspace: Path, python: str = sys.executable) -> dict:
     return json.loads(done.stdout)
 
 
+@FORK
 def test_a_solver_that_imports_its_own_helper_is_not_called_invalid(tmp_path):
     """MUTATION: drop `sys.path.insert(0, ...)` from `_one_instance` and every row comes back
     `ModuleNotFoundError: No module named 'kern'`, i.e. INVALID INSTANCES PRESENT about a
@@ -75,6 +77,7 @@ def test_a_solver_that_imports_its_own_helper_is_not_called_invalid(tmp_path):
     assert out["valid"] == 2 and out["invalid"] == 0, out
 
 
+@FORK
 def test_a_pyx_with_no_recipe_is_reported_and_is_not_an_error(tmp_path):
     """The evaluator's own rule, imported rather than re-spelled: `build_decision` does NOT compile
     a `.pyx` that has no `setup.py`/`pyproject.toml`, and grades the pure-Python path. So this must

@@ -33,6 +33,7 @@ from looplab.core.atomicio import (
     durable_no_replace_rename,
     exchange_paths_if_supported,
 )
+from _posix_gates import DIR_FSYNC
 
 
 def _bundle(root, name, marker):
@@ -192,6 +193,7 @@ def test_the_exchange_leaves_durability_to_its_caller(tmp_path, monkeypatch):
 # ----------------------------------------------------------------- best_effort_fsync_parent
 
 
+@DIR_FSYNC
 def test_it_syncs_the_directory_CONTAINING_the_named_path(tmp_path, monkeypatch):
     """Same convention as `strict_fsync_parent`: you pass the entry that changed, not its parent.
     A caller that got this backwards would sync the wrong directory and publish nothing."""
@@ -208,6 +210,7 @@ def test_it_syncs_the_directory_CONTAINING_the_named_path(tmp_path, monkeypatch)
                                                     os.stat(tmp_path).st_ino)
 
 
+@DIR_FSYNC
 def test_it_closes_the_directory_descriptor(tmp_path, monkeypatch):
     """It runs on every publish; a leaked fd per rename would exhaust the process over a session."""
     target = tmp_path / "dist"
@@ -220,6 +223,25 @@ def test_it_closes_the_directory_descriptor(tmp_path, monkeypatch):
     with pytest.raises(OSError) as exc:
         os.fstat(captured[0])
     assert exc.value.errno == errno.EBADF
+
+
+def test_on_windows_the_best_effort_parent_sync_opens_and_syncs_nothing(tmp_path, monkeypatch):
+    """The Windows branch the two DIR_FSYNC-gated tests above cannot reach there, driven on every
+    platform: no directory handle to sync exists, so the helper is a no-op by design rather than a
+    partial guarantee -- `_windows_move_write_through` is what orders a publish on Windows."""
+    import types
+
+    nt = types.ModuleType("os")
+    nt.__dict__.update(os.__dict__)
+    nt.name = "nt"
+    nt.open = lambda *a, **k: pytest.fail(f"a directory was opened on Windows: {a!r}")
+    monkeypatch.setattr(atomicio, "os", nt)
+    monkeypatch.setattr(atomicio, "best_effort_fsync",
+                        lambda fileno: pytest.fail("a directory fsync was attempted on Windows"))
+    target = tmp_path / "dist"
+    target.mkdir()
+
+    best_effort_fsync_parent(target)
 
 
 def test_an_unopenable_parent_is_silent(tmp_path):

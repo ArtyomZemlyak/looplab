@@ -64,3 +64,22 @@ FENCE_POSIX_PATHS = pytest.mark.posix_only(
 
 # An extensionless `#!/bin/sh` file executed as a program: Windows has no shebang exec.
 SHEBANG = pytest.mark.posix_only("an extensionless `#!` script executed as a program")
+
+# A DIRECTORY fsync through a descriptor opened on the directory. Windows exposes no portable
+# directory handle to sync, so there `atomicio` orders a publish with MOVEFILE_WRITE_THROUGH
+# (`_windows_move_write_through`) and its parent-sync helpers are no-ops by design -- a branch the
+# tests beside each gated one drive on every platform.
+DIR_FSYNC = pytest.mark.posix_only(
+    "a directory fsync through an fd opened on the directory (Windows: MOVEFILE_WRITE_THROUGH)")
+
+# The Linux kernel's no-replace rename, `renameat2(..., RENAME_NOREPLACE)` through libc, driven with
+# a fake libc. Windows never loads libc here: `durable_no_replace_rename` moves through
+# `MoveFileExW` without MOVEFILE_REPLACE_EXISTING, which refuses an existing destination itself.
+RENAMEAT2 = pytest.mark.posix_only(
+    "Linux renameat2(RENAME_NOREPLACE) through libc (Windows: MoveFileExW without REPLACE_EXISTING)")
+
+# The dev probe's KERNEL read rung: Landlock `open(O_PATH)`s each grant inside the interpreter the
+# audit hook is already live in. Windows has no kernel rung -- and its hook normalizes a directory
+# grant's trailing separator away, harmlessly, since an `open` of a directory reads nothing.
+KERNEL_READ_RUNG = pytest.mark.posix_only(
+    "the dev probe's Landlock kernel read rung (each grant opened O_PATH under the live hook)")

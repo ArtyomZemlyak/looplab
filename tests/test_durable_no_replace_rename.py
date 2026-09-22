@@ -24,6 +24,7 @@ from _source_scan import iter_sources
 import pytest
 
 from looplab.core.atomicio import durable_no_replace_rename
+from _posix_gates import DIR_FSYNC, RENAMEAT2
 
 
 @pytest.fixture
@@ -108,6 +109,7 @@ def test_the_label_names_the_operation_in_both_error_paths(sibling):
     assert "deletion quarantine" in str(exc.value)
 
 
+@DIR_FSYNC
 def test_the_parent_directory_is_fsynced_before_the_call_returns(sibling, monkeypatch):
     """Durability, not tidiness: a receipt that says "moved" must never be ahead of the filesystem.
     A crash between the rename and the fsync can otherwise leave BOTH names missing."""
@@ -216,6 +218,7 @@ class _FlagRefusingLibc:
 
 
 @pytest.mark.parametrize("code", [_errno.EINVAL, _errno.ENOSYS, _errno.EOPNOTSUPP])
+@RENAMEAT2
 def test_a_unique_destination_still_moves_when_the_flag_is_unsupported(tmp_path, monkeypatch, code):
     libc = _FlagRefusingLibc(code)
     monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: libc)
@@ -232,6 +235,7 @@ def test_a_unique_destination_still_moves_when_the_flag_is_unsupported(tmp_path,
 
 
 @pytest.mark.parametrize("code", [_errno.EINVAL, _errno.ENOSYS, _errno.EOPNOTSUPP])
+@RENAMEAT2
 def test_a_PREDICTABLE_destination_still_fails_closed(tmp_path, monkeypatch, code):
     """A caller that cannot promise its destination is unforgeable does not get the fallback.
 
@@ -257,6 +261,7 @@ def test_a_PREDICTABLE_destination_still_fails_closed(tmp_path, monkeypatch, cod
     assert src.exists(), "the source must be untouched when the guarantee cannot be given"
 
 
+@RENAMEAT2
 def test_a_REAL_rename_failure_is_never_treated_as_an_unsupported_flag(tmp_path, monkeypatch):
     """EXDEV, ENOTEMPTY, EACCES, EBUSY are answers about THIS rename, not about the flag. Treating
     one as "unsupported" would perform the very replace the no-replace contract forbids."""
@@ -271,6 +276,7 @@ def test_a_REAL_rename_failure_is_never_treated_as_an_unsupported_flag(tmp_path,
     assert src.is_dir()
 
 
+@RENAMEAT2
 def test_a_destination_that_appears_DURING_the_flag_probe_is_refused_not_replaced(
         tmp_path, monkeypatch):
     """The residual race the fallback opens, closed: the kernel is asked about flags first, and a
@@ -338,6 +344,7 @@ def test_a_cross_directory_move_still_refuses_an_occupied_destination(tmp_path):
     assert destination.read_text(encoding="utf-8") == "already carried"
 
 
+@DIR_FSYNC
 def test_BOTH_parents_are_fsynced_when_the_directories_differ(tmp_path, monkeypatch):
     """The sibling contract's single fsync publishes the new name AND the removal of the old one,
     because they are entries in one directory. Across two, one fsync is half the guarantee: a crash
@@ -366,7 +373,37 @@ def test_only_the_residue_absorber_may_cross_a_directory():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "looplab"
-    callers = sorted({str(path.relative_to(root))
+    callers = sorted({path.relative_to(root).as_posix()        # "/" on every host, like the literal
                       for path, source in iter_sources(root)
                       if "cross_directory=True" in source})
     assert callers == ["serve/deletion_service.py"], callers
+
+
+def test_on_windows_the_move_is_write_through_and_never_replaces(sibling, monkeypatch):
+    """The branch the RENAMEAT2 / DIR_FSYNC tests above gate out, driven on every platform: on
+    Windows the no-replace guarantee and the durability are ONE call -- `MoveFileExW` with
+    MOVEFILE_WRITE_THROUGH and without MOVEFILE_REPLACE_EXISTING -- so no libc is loaded and no
+    parent fsync is attempted (there is no directory handle to sync)."""
+    import types
+
+    import looplab.core.atomicio as atomicio
+
+    moves, synced = [], []
+
+    def record_move(src, dst, *, replace):
+        moves.append((src, dst, replace))
+        _os.rename(src, dst)
+
+    nt = types.ModuleType("os")
+    nt.__dict__.update(_os.__dict__)
+    nt.name = "nt"
+    monkeypatch.setattr(atomicio, "os", nt)
+    monkeypatch.setattr(atomicio, "_windows_move_write_through", record_move)
+    monkeypatch.setattr(atomicio, "strict_fsync_parent", lambda path: synced.append(path))
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: pytest.fail("libc was loaded on Windows"))
+    source, destination = sibling
+
+    durable_no_replace_rename(source, destination, label="replay archive")
+
+    assert moves == [(source, destination, False)] and synced == []
+    assert destination.exists() and not source.exists()

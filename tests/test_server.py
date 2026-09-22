@@ -24,6 +24,7 @@ from looplab.events.replay import fold  # noqa: E402
 from looplab.events.eventstore import EventStore, iter_event_jsonl, iter_jsonl  # noqa: E402
 from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
+from _posix_gates import RENAMEAT2
 
 
 def _sse_payloads(text: str) -> list:
@@ -4583,6 +4584,7 @@ def test_replay_completes_where_the_kernel_refuses_the_flag(tmp_path, monkeypatc
         f"archives must be named after the operation UUID, not a stamp: {archived}")
 
 
+@RENAMEAT2
 def test_the_flag_is_still_TRIED_before_any_fallback(tmp_path, monkeypatch):
     """The fallback is a degradation, never a first choice: a filesystem that CAN give the guarantee
     must still be asked for it.

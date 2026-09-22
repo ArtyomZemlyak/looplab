@@ -18,6 +18,7 @@ sys.path.insert(0, str(BENCH / "algotune"))
 sys.path.insert(0, str(BENCH))
 
 import looplab_eval  # noqa: E402
+from _posix_gates import CPU_AFFINITY
 
 CPSAT = "from ortools.sat.python import cp_model\nclass X:\n    def solve(self, p): return cp_model\n"
 PLAIN = "import numpy as np\nclass X:\n    def solve(self, p): return np.zeros(3)\n"
@@ -35,12 +36,14 @@ def _key(monkeypatch, workers):
     return looplab_eval.eval_regime()["key"]
 
 
+@CPU_AFFINITY
 def test_a_cpsat_reference_may_not_be_scored_twenty_two_wide(monkeypatch):
     wide = _key(monkeypatch, "auto")
     assert wide and "w" in wide.lstrip("_")[:1], wide
     assert looplab_eval.regime_scores_this_task(CPSAT, wide) is False
 
 
+@CPU_AFFINITY
 def test_the_same_reference_scores_at_one_worker(monkeypatch):
     serial = _key(monkeypatch, "1")
     assert serial and serial.lstrip("_").startswith("lane"), serial
@@ -55,6 +58,7 @@ def test_a_deterministic_reference_is_untouched(monkeypatch):
         assert looplab_eval.regime_scores_this_task(PLAIN, _key(monkeypatch, workers)) is True
 
 
+@CPU_AFFINITY
 def test_the_rule_reads_the_reference_and_not_a_list_of_task_names(monkeypatch):
     """A name list goes stale the first time upstream adds a solver; this box has already been bitten
     by a name-keyed check. `ortools` alone is enough -- a task importing it without `cp_model` is the
