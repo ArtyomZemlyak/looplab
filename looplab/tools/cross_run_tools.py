@@ -979,9 +979,12 @@ class CrossRunTools:
         scope_receipt = self._capsule_scope_receipt
         from looplab.engine.knowledge_views import (capsule_source_summary,
                                                     filter_capsule_rows)
-        prior_caps = filter_capsule_rows(
-            caps, lambda cap: (not self._run_id
-                               or str(cap.get("run_id") or "") != self._run_id))
+        # THIS RUN'S capsule is excluded by INCARNATION, the rule `_is_current_run` already carries
+        # (review 2026-09-22, the ENG3-01 follow-up): the three capsule filters in this class
+        # compared the directory NAME, so a DIFFERENT run that happens to share it (`run_local`, a
+        # re-created directory, a second root) vanished from `similar_runs`, `find_concept_slugs` and
+        # `concept_card` — while `dedup_valid_capsules` and the store both key on the incarnation.
+        prior_caps = filter_capsule_rows(caps, lambda cap: not self._is_current_run(cap))
         source_summary = capsule_source_summary(prior_caps)
         scope = "bound_task_family" if self._bound else "portfolio"
         direction = self._direction if self._bound else "any"
@@ -1086,9 +1089,8 @@ class CrossRunTools:
         taxonomy = _governance
         aliases, splits = taxonomy["aliases"], taxonomy["splits"]
         caps = self._all_capsules()
-        prior_caps = filter_capsule_rows(
-            caps, lambda cap: (not self._run_id
-                               or str(cap.get("run_id") or "") != self._run_id))
+        # By incarnation, not by name — see `_tool_similar_runs`.
+        prior_caps = filter_capsule_rows(caps, lambda cap: not self._is_current_run(cap))
         source_summary = capsule_source_summary(prior_caps)
         scoped_caps, unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
         mine = set(canonicalize_concepts(
@@ -1261,9 +1263,8 @@ class CrossRunTools:
         taxonomy = _governance
         aliases, splits = taxonomy["aliases"], taxonomy["splits"]
         caps = self._all_capsules()
-        prior_caps = filter_capsule_rows(
-            caps, lambda c: (not self._run_id
-                             or str(c.get("run_id") or "") != self._run_id))
+        # By incarnation, not by name — see `_tool_similar_runs`.
+        prior_caps = filter_capsule_rows(caps, lambda c: not self._is_current_run(c))
         source_summary = capsule_source_summary(prior_caps)
         scoped_caps, _unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
         # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's

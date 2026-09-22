@@ -1476,3 +1476,34 @@ def test_an_empty_query_never_claims_an_exact_or_substring_match():
 
     for slug in ("regularization/r-drop", "a/b/c", "x"):
         assert _slug_score("", slug) < 0.9
+
+
+def test_a_different_run_that_shares_this_runs_name_is_not_excluded_as_self(tmp_path):
+    """Review 2026-09-22 (the ENG3-01 follow-up): `similar_runs`, `find_concept_slugs` and
+    `concept_card` excluded "this run" by directory NAME while the store and `dedup_valid_capsules`
+    key on the incarnation, so a different run under the same name (`run_local`, a re-created
+    directory) vanished from all three. Written raw so the three rows survive as three runs."""
+    from types import SimpleNamespace
+
+    from looplab.engine.memory import build_concept_capsule
+
+    def cap(run_uid, concepts):
+        return build_concept_capsule(run_id="run_local", run_uid=run_uid, task_id="t",
+                                     fingerprint=["kind:dataset"], direction="max",
+                                     concepts=concepts,
+                                     concept_outcomes={c: 0.9 for c in concepts})
+
+    me = cap("a" * 32, ["loss/contrastive"])                       # this incarnation
+    twin = cap("b" * 32, ["loss/contrastive", "data/hard-neg"])    # another run, same name
+    (tmp_path / "concept_capsules.jsonl").write_bytes(
+        b"\n".join(orjson.dumps(c) for c in (me, twin)) + b"\n")
+
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(run_id="run_local", run_uid="a" * 32, task_id="t", goal="g",
+                                 direction="max", node_concepts={0: ["loss/contrastive"]}))
+    similar = t.execute("similar_runs", {})
+    assert "eligible_capsules=1" in similar and "'run_local'" in similar, similar
+    slugs = t.execute("find_concept_slugs", {"query": "hard-neg", "scope": "cross"})
+    assert "data/hard-neg" in slugs, slugs
+    card = t.execute("concept_card", {"slug": "data/hard-neg"})
+    assert card.count("'run_local'") == 1, card
