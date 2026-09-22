@@ -1326,9 +1326,11 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
 )
 
 # The subset that is BENIGN — a node that ended for a reason saying nothing about the experiment.
-# Both readers of it derive from here instead of spelling their own, which is what let one word
+# Every reader of it derives from here instead of spelling its own, which is what let one word
 # rot in two places at once. `attention.py` adds nothing and `replay.py` adds nothing; a reader
-# that needs a different set says so at its own site and explains why.
+# that needs a different set says so at its own site and explains why. The third reader,
+# `engine/orchestrator.py::systemic_failure_stop_reason`, adds nothing either — its hand-spelled
+# `{"superseded"}` had drifted (review 2026-09-22, ENG1-08).
 BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
     "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen",
 })

@@ -117,8 +117,8 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS,  # noqa: F401
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
-    Event, Idea, Node, NodeStatus, RunState, durable_idea_payload, effective_card_footprint,
-    is_developer_error, is_developer_stuck)
+    BENIGN_TERMINAL_REASONS, Event, Idea, Node, NodeStatus, RunState, durable_idea_payload,
+    effective_card_footprint, is_developer_error, is_developer_stuck)
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
@@ -784,7 +784,15 @@ class CreationRunawayCounters:
 # Failures that are not evidence about the run. `superseded` is a node RESET (the operator or the
 # engine replaced the node's generation) and an aborted node is an operator cancellation: charging
 # either to a no-progress bound would let ordinary steering end the run.
-_NON_EVIDENCE_FAILURE_REASONS = frozenset({"superseded"})
+# DERIVED, NOT SPELLED (review 2026-09-22, ENG1-08): this was `{"superseded"}` alone, a third
+# hand-written copy of `core/models.py::BENIGN_TERMINAL_REASONS` that had already drifted — an
+# operator's `card_dropped` (and a speculative build's `frozen`, a `proxy_skipped` candidate, a
+# materialize-time `aborted`) counted as environment failures, so dropping three Cards before
+# anything evaluated stopped the run blaming "the environment, dependencies or data". The registry
+# is the ONE statement of "ended for a reason saying nothing about the experiment", and the
+# failure-spike filter and the owner alert already derive from it
+# (`tests/test_engine_terminal_reasons.py` pins all three readers).
+_NON_EVIDENCE_FAILURE_REASONS = BENIGN_TERMINAL_REASONS
 
 
 def stamp_proposal_span(span, idea, *, node_id=None) -> None:

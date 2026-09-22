@@ -81,6 +81,26 @@ def test_resets_and_operator_aborts_are_not_evidence():
     assert systemic_failure_stop_reason(st, 3) is None
 
 
+def test_every_benign_terminal_is_not_evidence_either():
+    """Review 2026-09-22, ENG1-08. The exclusion was spelled `{"superseded"}` here while
+    `core/models.py::BENIGN_TERMINAL_REASONS` — the registry the other two readers derive from —
+    also names `card_dropped`, `frozen`, `proxy_skipped` and `aborted`. So an operator dropping
+    three Cards before anything had evaluated STOPPED THE RUN as a "systemic failure" blaming the
+    environment, dependencies or data, for steering the operator did on purpose."""
+    from looplab.core.models import BENIGN_TERMINAL_REASONS
+
+    for reason in sorted(BENIGN_TERMINAL_REASONS):
+        st = _state(_failed(0, reason), _failed(1, reason), _failed(2, reason))
+        assert systemic_failure_stop_reason(st, 3) is None, (
+            f"three `{reason}` terminals were counted as evidence about the environment")
+    # …and the real failures beside them still count.
+    st = _state(_failed(0), _failed(1, "card_dropped"), _failed(2), _failed(3, "frozen"),
+                _failed(4))
+    reason = systemic_failure_stop_reason(st, 3)
+    assert reason is not None and "3 node(s) failed" in reason
+    assert "card_dropped" not in reason and "frozen" not in reason
+
+
 def test_a_tombstoned_node_is_not_counted():
     n = _failed(2)
     n.tombstoned = True

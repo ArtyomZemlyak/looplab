@@ -177,8 +177,13 @@ def test_both_readers_derive_the_benign_set_rather_than_spelling_it():
     from looplab.events import replay
     from looplab.serve import attention
 
+    from looplab.engine import orchestrator
+
     assert set(replay._FAILURE_SPIKE_IGNORED_REASONS) == set(BENIGN_TERMINAL_REASONS)
     assert set(attention._IGNORED_FAILURE_REASONS) == set(BENIGN_TERMINAL_REASONS)
+    # The THIRD reader (review 2026-09-22, ENG1-08): the systemic-failure stop spelled `superseded`
+    # alone, so an operator's Card drops ended a run as an environment failure.
+    assert set(orchestrator._NON_EVIDENCE_FAILURE_REASONS) == set(BENIGN_TERMINAL_REASONS)
     assert "cancelled" not in replay._FAILURE_SPIKE_IGNORED_REASONS, (
         "no terminal writer mints `cancelled`; it can never match and must not read as if it could")
 
