@@ -45,6 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 ROOT = Path(__file__).resolve().parents[1]
 PROXY = ROOT / "benchmarks" / "meter" / "proxy.py"
@@ -359,6 +360,7 @@ def _run_campaign(tmp_path: Path, **extra) -> subprocess.CompletedProcess:
                           env=env)
 
 
+@BASH_HARNESS
 def test_the_driver_gives_the_task_a_url_that_names_the_attempt(tmp_path):
     """END TO END, THROUGH THE REAL DRIVER. The stub prints the environment `run_one` handed it, so
     this is the URL a real AlgoTuner would have called -- not a template read out of the source."""
@@ -372,6 +374,7 @@ def test_the_driver_gives_the_task_a_url_that_names_the_attempt(tmp_path):
     assert (tmp_path / "out" / "A-kcenters.attempts").read_text().startswith("a1 ")
 
 
+@BASH_HARNESS
 def test_a_resume_that_skips_a_done_task_does_not_burn_an_attempt_number(tmp_path):
     """The resume check used to sit BELOW the meter block, inside each arm branch. Harmless while
     the path held no per-attempt state; with an allocator there it would mint an id for every
@@ -387,6 +390,7 @@ def test_a_resume_that_skips_a_done_task_does_not_burn_an_attempt_number(tmp_pat
     assert "attempt=a1" in (tmp_path / "out" / "A-kcenters.done").read_text()
 
 
+@BASH_HARNESS
 def test_a_rerun_of_a_wall_cut_task_arm_gets_its_own_attempt(tmp_path):
     """The two fixes meet here. `RETRY_WALL_CUT=1` reopens exactly the wall cuts, and because the
     id is minted per RUN rather than per task, the retry's calls land under `a2` while the cut

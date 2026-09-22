@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 PROFILE = Path(__file__).resolve().parents[1] / "benchmarks" / "box-jhub-l40s.sh"
 
@@ -54,6 +55,7 @@ def _source(root: Path) -> subprocess.CompletedProcess:
         env={"PATH": "/usr/bin:/bin", "HOME": str(root)})
 
 
+@BASH_HARNESS
 def test_the_repair_probes_the_arena_interpreter_the_profile_declares(tmp_path):
     """THE ITEM. Under `$ROOT/AlgoTune/...` this list is empty because nothing was ever run."""
     root, record = _bench_root(tmp_path, with_arena=True)
@@ -65,6 +67,7 @@ def test_the_repair_probes_the_arena_interpreter_the_profile_declares(tmp_path):
     assert any("pip" in call for call in calls), calls
 
 
+@BASH_HARNESS
 def test_a_box_without_the_arena_says_so_instead_of_returning_silently(tmp_path):
     """The miss path was the silent success path, which is how the defect survived. A profile
     sourced before `setup_algotune.sh` has run is a normal state — and it has to be a stated one."""

@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tests._bench_fixtures import free_bench_lane, stand_launch_env
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -115,6 +116,7 @@ def test_the_default_is_the_shipped_card(tmp_path):
     assert implicit == explicit, "the flag changes the default arm, so the corpus is not comparable"
 
 
+@BASH_HARNESS
 def test_the_probe_records_which_card_it_ran(tmp_path):
     """A control arm the tree cannot identify is a dollar spent on an unusable run.
 
@@ -158,6 +160,7 @@ def test_the_probe_records_which_card_it_ran(tmp_path):
     )
 
 
+@BASH_HARNESS
 def test_the_probe_carries_its_own_credential(tmp_path):
     """The script set half the credential pair and inherited the other half from the operator.
 
@@ -228,6 +231,7 @@ def test_no_echo_in_the_record_block_mentions_the_key(tmp_path):
     )
 
 
+@BASH_HARNESS
 def test_the_record_pins_the_card_itself_not_only_the_flags(tmp_path):
     """Flags name a variant; a hash catches any change to the text the model actually read.
 

@@ -24,6 +24,10 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
+
+# Its subject is the bash bench harness: see tests/_posix_gates.py::BASH_HARNESS.
+pytestmark = BASH_HARNESS
 
 ALGOTUNE = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune"
 CHECK_LEAKS = ALGOTUNE / "check_leaks.sh"

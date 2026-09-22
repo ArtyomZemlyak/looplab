@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 START = REPO / "benchmarks" / "meter" / "start_meter.sh"
@@ -64,6 +65,7 @@ def test_the_proxy_help_does_not_claim_a_ceiling_that_is_off():
     )
 
 
+@BASH_HARNESS
 def test_start_meter_is_still_syntactically_valid():
     r = subprocess.run(["bash", "-n", str(START)], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr

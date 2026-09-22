@@ -295,6 +295,45 @@ def _stop_watch_schedulers_at_teardown(_isolation_patch):
 
 
 # --------------------------------------------------------------------------------------------
+# THE ONE PLATFORM GATE: `@pytest.mark.posix_only("<mechanism>")` (registered in pyproject.toml,
+# named gates in tests/_posix_gates.py).
+#
+# MEASURED on the first Windows CI leg that executed tests (GitHub Actions run 35785582444,
+# review 2026-09-22): of 421 failures in the ~11,000 tests that ran, the largest single family was
+# tests whose SUBJECT is a POSIX mechanism — the bash bench harness (`bash` there is the WSL
+# launcher stub and prints "Windows Subsystem for Linux has no installed distributions"),
+# `os.fork`, `os.killpg`, `fcntl` locks, CPU affinity, POSIX mode bits. Those are not Windows
+# defects and cannot become Windows passes; a skip that NAMES the mechanism is the honest answer.
+#
+# WHY A MARKER AND NOT A CONVENIENCE `skipif`: the mechanism is REQUIRED, so every skip in a
+# Windows report says what it is for, and `-m "not posix_only"` selects the portable suite on any
+# box. WHY NOT A DYNAMIC NET (skip whenever a test launches `bash` on Windows): it would also hide a
+# test whose subject IS meant to work on Windows but that happened to use bash as a fixture — the
+# failure is the signal that such a test needs rewriting, and a net would silence it for good.
+def _on_posix() -> bool:
+    """The platform predicate, as a seam `tests/test_posix_only_gate.py` can drive."""
+    return os.name == "posix"
+
+
+def pytest_collection_modifyitems(config, items):
+    posix = _on_posix()
+    for item in items:
+        mark = item.get_closest_marker("posix_only")
+        if mark is None:
+            continue
+        mechanism = mark.args[0] if mark.args else mark.kwargs.get("mechanism")
+        if not isinstance(mechanism, str) or not mechanism.strip():
+            # Refused on EVERY platform, not only where the gate would fire: a nameless gate found
+            # only by the Windows leg is found a CI cycle late, and a skip that cannot say what it
+            # is for is indistinguishable from one that is hiding a defect.
+            raise pytest.UsageError(
+                f"{item.nodeid}: @pytest.mark.posix_only needs the POSIX mechanism it gates, "
+                "e.g. posix_only('os.fork') — a skip that names nothing reads as a hidden failure")
+        if not posix:
+            item.add_marker(pytest.mark.skip(reason=f"POSIX-only mechanism: {mechanism.strip()}"))
+
+
+# --------------------------------------------------------------------------------------------
 # WHY THERE IS NO FIXTURE HERE REDIRECTING `ALGOTUNE_BASELINE_CACHE_DIR`.
 #
 # 2026-09-07: eight `<task>__<subset>__lane2r3.json` entries appeared in the box's live

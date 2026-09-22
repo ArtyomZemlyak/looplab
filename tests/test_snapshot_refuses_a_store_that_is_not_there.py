@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from _bench_fixtures import bench_root
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 SNAPSHOT = REPO / "benchmarks" / "snapshot.sh"
@@ -62,6 +63,7 @@ def _run(dest, env=None, timeout=600, src=None):  # noqa: D401 - timeout is rais
     )
 
 
+@BASH_HARNESS
 def test_a_refuses_a_store_whose_sentinel_is_gone():
     """The mount is gone but the path is writable: refuse, do not write a doomed backup."""
     with tempfile.TemporaryDirectory() as td:
@@ -82,6 +84,7 @@ def test_a_refuses_a_store_whose_sentinel_is_gone():
     )
 
 
+@BASH_HARNESS
 def test_a_adopts_a_genuinely_empty_store_and_leaves_the_sentinel():
     """A brand-new store must still work -- the check must not be a wall against first use."""
     with tempfile.TemporaryDirectory() as td:
@@ -98,6 +101,7 @@ def test_a_adopts_a_genuinely_empty_store_and_leaves_the_sentinel():
             "adopted the store but left no sentinel, so the next run will refuse it"
 
 
+@BASH_HARNESS
 def test_b_two_snapshots_at_once_do_not_share_one_directory():
     """Same-second concurrency must not interleave two trees into one output directory."""
     with tempfile.TemporaryDirectory() as td:
@@ -131,6 +135,7 @@ def test_b_two_snapshots_at_once_do_not_share_one_directory():
             assert not (t / ".partial").exists(), f"{t} left a partial marker"
 
 
+@BASH_HARNESS
 def test_c_records_the_settings_but_never_the_key():
     """A measurement's configuration must be recoverable from the snapshot, minus the secret."""
     with tempfile.TemporaryDirectory() as td:
@@ -172,6 +177,7 @@ def test_c_the_header_names_what_it_omits():
     )
 
 
+@BASH_HARNESS
 def test_b2_a_taken_stamp_does_not_become_a_shared_directory():
     """The stamp is not an identity, and this is the half the concurrency test cannot see.
 
@@ -250,6 +256,7 @@ def _assert_it_refused_without_claiming_busy(r, dest):
         assert wrote == [], f"it said NOTHING WAS WRITTEN and wrote {wrote}"
 
 
+@BASH_HARNESS
 def test_a_destination_that_cannot_hold_a_lock_file_is_a_failure_not_a_skip(tmp_path):
     """THE ROOT-RUNNABLE SPELLING of the rung, and the reason this branch was undriven for a week.
 
@@ -276,6 +283,7 @@ def test_a_destination_that_cannot_hold_a_lock_file_is_a_failure_not_a_skip(tmp_
 # `hasattr` first: an unguarded `os.geteuid()` in a decorator crashes COLLECTION off POSIX.
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
                     reason="root ignores the write bit, so there is no refusal")
+@BASH_HARNESS
 def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
     """THE PERMISSION SPELLING of the same rung — kept, but no longer the only one.
 
@@ -299,6 +307,7 @@ def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
     _assert_it_refused_without_claiming_busy(r, store / "snapshots")
 
 
+@BASH_HARNESS
 def test_a_busy_lock_exits_non_zero_so_the_timer_retries(tmp_path):
     """Skipping is legitimate; claiming a snapshot was taken is not."""
     import subprocess as sp
@@ -363,6 +372,7 @@ def _env_record(tmp_path, extra_env):
     return (tree / "ENVIRONMENT.txt").read_text()
 
 
+@BASH_HARNESS
 def test_a_credential_whose_NAME_looks_innocent_is_still_redacted(tmp_path):
     body = _env_record(tmp_path, {
         "ALGOTUNE_AUTH": "sk-LEAK-auth",
@@ -374,11 +384,13 @@ def test_a_credential_whose_NAME_looks_innocent_is_still_redacted(tmp_path):
     assert "ALGOTUNE_AUTH" in body, "the variable vanished entirely; its NAME is not the secret"
 
 
+@BASH_HARNESS
 def test_a_url_carrying_userinfo_is_redacted(tmp_path):
     body = _env_record(tmp_path, {"LOOPLAB_LLM_BASE_URL": "https://user:hunter2@gw.example/v1"})
     assert "hunter2" not in body, "a password embedded in a URL was written into the record:\n" + body
 
 
+@BASH_HARNESS
 def test_the_measurement_settings_are_still_shown(tmp_path):
     """A redaction that hides everything records nothing; the point is the settings."""
     body = _env_record(tmp_path, {"LOOPLAB_LLM_STREAM": "1", "ALGOTUNE_EVAL_WORKERS": "auto"})
@@ -389,6 +401,7 @@ def test_the_measurement_settings_are_still_shown(tmp_path):
     assert "ALGOTUNE_EVAL_WORKERS                    = auto" in live
 
 
+@BASH_HARNESS
 def test_the_record_says_which_of_two_values_was_in_force(tmp_path):
     """A real snapshot carried STREAM=false and STREAM=1 with nothing saying which one ran."""
     body = _env_record(tmp_path, {"LOOPLAB_LLM_STREAM": "1"})
@@ -399,6 +412,7 @@ def test_the_record_says_which_of_two_values_was_in_force(tmp_path):
     assert "ON DISK ONLY" in body, "the .env section is not marked as possibly superseded"
 
 
+@BASH_HARNESS
 def test_it_no_longer_promises_a_sha_it_never_computes(tmp_path):
     body = _env_record(tmp_path, {})
     assert "truncated sha256." not in body.split("none was ever computed")[0], (
@@ -410,6 +424,7 @@ def test_it_no_longer_promises_a_sha_it_never_computes(tmp_path):
 # above, so mutation could delete either one and the other caught it. These two separate them.
 
 
+@BASH_HARNESS
 def test_the_allowlist_alone_covers_a_value_that_does_not_look_like_a_secret(tmp_path):
     """A denylist on the name would print this; only the allowlist stops it."""
     body = _env_record(tmp_path, {"LOOPLAB_INTERNAL_ENDPOINT": "prod-db-17.internal:5432"})
@@ -421,6 +436,7 @@ def test_the_allowlist_alone_covers_a_value_that_does_not_look_like_a_secret(tmp
     assert "LOOPLAB_INTERNAL_ENDPOINT" in live, "the name should still be recorded"
 
 
+@BASH_HARNESS
 def test_the_value_sniff_alone_covers_an_allowlisted_name_holding_a_credential(tmp_path):
     """If a measurement setting ever carries a token, the allowlist would wave it through."""
     body = _env_record(tmp_path, {"LOOPLAB_LLM_MODEL": "sk-oops-a-token-in-the-model-field"})

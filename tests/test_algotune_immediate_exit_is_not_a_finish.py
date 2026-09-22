@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
 COMPARE = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "compare_arms.py"
@@ -91,6 +92,7 @@ def test_the_default_threshold_is_the_one_the_script_declares():
 # The marker itself
 # ---------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_an_rc0_exit_in_seconds_is_not_recorded_as_a_completion(tmp_path):
     """The defect. A start epoch of NOW makes the wall a few seconds, which is the shape of all
     sixteen 2026-08-24 markers."""
@@ -107,6 +109,7 @@ def test_an_rc0_exit_in_seconds_is_not_recorded_as_a_completion(tmp_path):
     assert "EXITED IMMEDIATELY" in got.stdout, got.stdout
 
 
+@BASH_HARNESS
 def test_an_rc0_exit_after_the_threshold_is_still_a_completion(tmp_path):
     """The control, so the rung cannot be satisfied by refusing every completion: a start epoch of
     0 makes the wall the whole Unix era, and that is `ran_to_completion` exactly as before."""
@@ -118,6 +121,7 @@ def test_an_rc0_exit_after_the_threshold_is_still_a_completion(tmp_path):
     assert "exited_immediately" not in done.read_text()
 
 
+@BASH_HARNESS
 def test_the_threshold_is_the_operators_to_move(tmp_path):
     """`IMMEDIATE_EXIT_S` is an environment knob like HARD_TIMEOUT; a 5 s wall under a 3 s bar is a
     completion, and the marker records the bar it was judged against either way."""
@@ -129,6 +133,7 @@ def test_the_threshold_is_the_operators_to_move(tmp_path):
     assert "state=ran_to_completion" in done.read_text(), done.read_text()
 
 
+@BASH_HARNESS
 def test_a_run_the_meter_proves_bought_nothing_still_gets_no_marker_at_all(tmp_path):
     """Precedence. The meter rung (no marker, task still owed) stays ABOVE the clock rung: a run the
     ledger proves paid for nothing is not even an immediate exit, it is nothing."""
@@ -150,12 +155,14 @@ def test_a_run_the_meter_proves_bought_nothing_still_gets_no_marker_at_all(tmp_p
 # Is it resumable? Terminal by default, reopened by ITS OWN flag.
 # ---------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_an_immediate_exit_is_terminal_by_default(tmp_path):
     done = tmp_path / "B-svm.done"
     done.write_text(IMMEDIATE)
     assert _bash(f'already_measured "{done}"', tmp_path).returncode == 0
 
 
+@BASH_HARNESS
 def test_retry_immediate_exit_reopens_it_and_retry_wall_cut_does_not(tmp_path):
     """Two flags, two classes. RETRY_WALL_CUT is the argument about a clock that may bind again;
     an immediate exit is an environment condition, and the flag that reopens it says so by name."""
@@ -176,6 +183,7 @@ def test_retry_immediate_exit_reopens_it_and_retry_wall_cut_does_not(tmp_path):
 # What the campaign SAYS at the end
 # ---------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_the_banner_does_not_count_an_immediate_exit_among_the_measured(tmp_path):
     """The falsifier for `FINAL CAMPAIGN COMPLETE` over sixteen instant exits."""
     out = tmp_path / "camp"
@@ -195,6 +203,7 @@ def test_the_banner_does_not_count_an_immediate_exit_among_the_measured(tmp_path
     assert "RETRY_IMMEDIATE_EXIT=1" in got.stdout
 
 
+@BASH_HARNESS
 def test_the_banner_is_unchanged_when_nothing_exited_immediately(tmp_path):
     """The control: the clean banner's exact wording is what a watcher greps for."""
     out = tmp_path / "camp"
@@ -284,6 +293,7 @@ def test_campaign_status_keeps_it_out_of_the_median(tmp_path):
     assert "scored: median" not in out.stdout, "an immediate exit reached the median"
 
 
+@BASH_HARNESS
 def test_record_done_takes_the_task_rather_than_a_caller_scoped_global():
     """A marker that is not written is how a terminal task gets silently re-run.
 

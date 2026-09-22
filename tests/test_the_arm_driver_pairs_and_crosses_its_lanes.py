@@ -31,6 +31,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 DRIVER = REPO / "benchmarks" / "algotune" / "run_arm.sh"
@@ -85,6 +86,7 @@ def _manifest(out_root: Path) -> list[dict]:
         encoding="utf-8").splitlines() if l.strip()]
 
 
+@BASH_HARNESS
 def test_without_the_go_it_spends_nothing_and_says_what_it_would(tmp_path):
     here = _stand(tmp_path)
     out = tmp_path / "out"
@@ -94,6 +96,7 @@ def test_without_the_go_it_spends_nothing_and_says_what_it_would(tmp_path):
     assert not (out / "T1").exists(), "a show wrote into the arm directory"
 
 
+@BASH_HARNESS
 def test_the_size_and_the_treatment_come_from_the_registered_file(tmp_path):
     """4 batches and that one setting are in the file and nowhere else; the driver takes no
     argument that could say otherwise."""
@@ -105,6 +108,7 @@ def test_the_size_and_the_treatment_come_from_the_registered_file(tmp_path):
     assert "ARM_BATCHES" not in src, "a size override is a knob someone will turn after the fact"
 
 
+@BASH_HARNESS
 def test_a_missing_preregistration_refuses(tmp_path):
     here = _stand(tmp_path)
     (here / "PREREGISTERED-T1.txt").unlink()
@@ -112,6 +116,7 @@ def test_a_missing_preregistration_refuses(tmp_path):
     assert got.returncode == 2 and "предрегистрации" in got.stderr, got.stdout + got.stderr
 
 
+@BASH_HARNESS
 def test_every_probe_gets_its_condition_lane_and_its_own_preregistration(tmp_path):
     here = _stand(tmp_path)
     out = tmp_path / "out"
@@ -130,6 +135,7 @@ def test_every_probe_gets_its_condition_lane_and_its_own_preregistration(tmp_pat
             assert "settings=(none)" in rec, "a control was handed the treatment:\n" + rec
 
 
+@BASH_HARNESS
 def test_the_lanes_cross_so_each_condition_sees_each_lane_equally(tmp_path):
     """§266's fix, driven: over the registered size the mapping must be balanced, not merely
     'alternating' in a comment."""
@@ -154,6 +160,7 @@ def test_the_row_is_written_before_the_probe_runs(tmp_path):
         "the manifest row is written after the launch, so a failed launch leaves no row"
 
 
+@BASH_HARNESS
 def test_a_preregistration_edited_mid_arm_refuses(tmp_path):
     """Changing the conditions halfway IS the interim look, whatever the intent."""
     here = _stand(tmp_path)
@@ -165,6 +172,7 @@ def test_a_preregistration_edited_mid_arm_refuses(tmp_path):
     assert got.returncode == 2 and "ИЗМЕНИЛАСЬ" in got.stderr, got.stdout + got.stderr
 
 
+@BASH_HARNESS
 def test_a_finished_probe_is_not_rerun(tmp_path):
     """$1 a probe: a resumed arm that re-runs what it already bought is a resumed arm nobody uses."""
     here = _stand(tmp_path)

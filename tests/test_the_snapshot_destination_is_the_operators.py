@@ -27,6 +27,10 @@ import subprocess
 from pathlib import Path
 
 from tests.test_snapshot_carries_the_repo_and_the_runs import SNAPSHOT, _bench_root
+from _posix_gates import BASH_HARNESS
+
+# Its subject is the bash bench harness: see tests/_posix_gates.py::BASH_HARNESS.
+pytestmark = BASH_HARNESS
 
 TIMER = Path(__file__).resolve().parents[1] / "benchmarks" / "snapshot_timer.sh"
 TREES = Path(__file__).resolve().parents[1] / "benchmarks" / "bench_trees.sh"

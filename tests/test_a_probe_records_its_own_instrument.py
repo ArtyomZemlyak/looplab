@@ -19,6 +19,7 @@ import pytest
 
 from looplab.core.envsafe import is_secret_env
 from tests._bench_fixtures import free_bench_lane, stand_launch_env
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "benchmarks" / "algotune" / "run_probe.sh"
@@ -71,6 +72,7 @@ def _dry_run(label, *, stream="1", lane=None, task="discrete_log", out_root=None
     return r, out / "INSTRUMENT.txt"
 
 
+@BASH_HARNESS
 def test_the_probe_writes_which_instrument_it_is_on(tmp_path):
     r, rec = _dry_run("t_instr_a", out_root=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -83,6 +85,7 @@ def test_the_probe_writes_which_instrument_it_is_on(tmp_path):
     assert "ALGOTUNE_EVAL_WORKERS=auto" in body, f"the eval regime is not recorded:\n{body}"
 
 
+@BASH_HARNESS
 def test_a_stray_unstreamed_setting_is_overridden_and_the_record_says_what_RAN(tmp_path):
     """The record must carry the EFFECTIVE setting, not the one the caller asked for.
 
@@ -100,6 +103,7 @@ def test_a_stray_unstreamed_setting_is_overridden_and_the_record_says_what_RAN(t
     )
 
 
+@BASH_HARNESS
 def test_a_deliberate_opt_out_is_recorded_as_the_other_instrument(tmp_path):
     """`LOOPLAB_ALLOW_UNSTREAMED=1` is the one way to reach the instrument that cost remEE 9 calls."""
     env = stand_launch_env()
@@ -121,6 +125,7 @@ def test_a_deliberate_opt_out_is_recorded_as_the_other_instrument(tmp_path):
     )
 
 
+@BASH_HARNESS
 def test_an_unset_setting_records_what_the_profile_resolved_it_to(tmp_path):
     """Unset in the caller's environment is not unset by the time the run starts."""
     r, rec = _dry_run("t_instr_c", out_root=tmp_path, stream=None)
@@ -131,6 +136,7 @@ def test_an_unset_setting_records_what_the_profile_resolved_it_to(tmp_path):
     )
 
 
+@BASH_HARNESS
 def test_it_pins_the_code_that_produced_the_run(tmp_path):
     r, rec = _dry_run("t_instr_d", out_root=tmp_path)
     body = rec.read_text()
@@ -141,6 +147,7 @@ def test_it_pins_the_code_that_produced_the_run(tmp_path):
     )
 
 
+@BASH_HARNESS
 def test_no_api_key_reaches_the_record(tmp_path):
     """The probe tree goes into snapshots, and snapshots go to S3.
 
@@ -216,6 +223,7 @@ def test_the_record_is_written_before_anything_is_spent(tmp_path):
     )
 
 
+@BASH_HARNESS
 def test_a_dry_run_writes_nothing_into_the_live_corpus(tmp_path):
     """The tests in this file used to leave directories among the real probes.
 
@@ -240,6 +248,7 @@ def test_a_dry_run_writes_nothing_into_the_live_corpus(tmp_path):
     )
 
 
+@BASH_HARNESS
 def test_a_refusal_is_reported_as_a_refusal_and_not_as_a_missing_file(tmp_path):
     """The failure mode that cost an hour: three tests reported `FileNotFoundError: INSTRUMENT.txt`.
 
@@ -316,6 +325,7 @@ def test_the_guard_still_refuses_when_a_real_probe_holds_the_lane(tmp_path):
     assert 'BUSY" != "0"' in src, "the refusal on a busy lane is gone"
 
 
+@BASH_HARNESS
 def test_the_record_carries_the_SETTINGS_ENVIRONMENT_not_only_the_flags(tmp_path):
     """A treatment handed over as an env var was invisible to the record, and both preregistrations
     name exactly that spelling.
@@ -345,6 +355,7 @@ def test_the_record_carries_the_SETTINGS_ENVIRONMENT_not_only_the_flags(tmp_path
         "the block lists every LOOPLAB_ var rather than the ones that ARE settings")
 
 
+@BASH_HARNESS
 def test_no_secret_value_reaches_the_settings_block(tmp_path):
     """`llm_api_key` IS a `Settings` field, so the block would print the key unless it masks. The
     same predicate the engine uses (`core/envsafe.py::is_secret_env`), never a second list."""

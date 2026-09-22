@@ -16,6 +16,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 SCRIPT = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "compare_arms.py"
 
@@ -128,6 +129,7 @@ def _markers(tmp: Path, **markers: str) -> Path:
     return out
 
 
+@BASH_HARNESS
 def test_the_banner_does_not_count_a_skip_among_the_measured(tmp_path):
     """The falsifier for `COMPLETE (20/20 markers)` over twelve measurements."""
     out = _markers(tmp_path, alpha=DONE, beta=DONE, gamma=SKIP, delta=SKIP)
@@ -141,6 +143,7 @@ def test_the_banner_does_not_count_a_skip_among_the_measured(tmp_path):
     assert "B-alpha" not in got.stdout.split("SKIPPED BY THE OPERATOR", 1)[1].split("=====")[0]
 
 
+@BASH_HARNESS
 def test_the_banner_says_nothing_about_skips_when_there_are_none(tmp_path):
     """The control: a line that always prints is a line nobody reads, and the exact wording of the
     clean banner is what a watcher greps for."""
@@ -151,6 +154,7 @@ def test_the_banner_says_nothing_about_skips_when_there_are_none(tmp_path):
     assert "arm B COMPLETE (2/2 markers)" in got.stdout, got.stdout
 
 
+@BASH_HARNESS
 def test_a_skip_is_still_terminal_and_retry_wall_cut_does_not_reopen_it(tmp_path):
     """Writing the marker IS the mechanism, so a resume must keep skipping it — and `RETRY_WALL_CUT`
     reopens CLOCK kills, not decisions. Folding `operator_skip` into `marker_is_harness_cut` would

@@ -24,13 +24,16 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 SNAPSHOT = REPO / "benchmarks" / "snapshot.sh"
 RESTORE = REPO / "benchmarks" / "restore_from_snapshot.sh"
 
-pytestmark = pytest.mark.skipif(shutil.which("git") is None or shutil.which("tar") is None,
-                                reason="the snapshot is a shell script over git and tar")
+# Its subject is the bash bench harness: see tests/_posix_gates.py::BASH_HARNESS.
+pytestmark = [BASH_HARNESS,
+              pytest.mark.skipif(shutil.which("git") is None or shutil.which("tar") is None,
+                                 reason="the snapshot is a shell script over git and tar")]
 
 TRACKED = "benchmarks/kept.py"
 EDITED = "# edited but not committed\n"

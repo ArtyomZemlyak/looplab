@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
+from _posix_gates import BASH_SCRIPT
 
 from looplab.adapters.repo_developer import LLMRepoDeveloper
 from looplab.adapters.repo_task import DeveloperCommandSpec, EvalSpec, RepoTask
@@ -117,6 +118,7 @@ def test_command_created_files_and_overlay_changes_never_touch_the_source(tmp_pa
     assert (tmp_path / "main.py").read_bytes() == before
 
 
+@BASH_SCRIPT
 def test_operator_can_pin_a_bash_validator_without_granting_a_shell_string(tmp_path):
     if shutil.which("bash") is None:
         pytest.skip("bash is not installed")

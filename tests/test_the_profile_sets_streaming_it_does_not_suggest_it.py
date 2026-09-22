@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 PROFILE = Path(__file__).resolve().parents[1] / "benchmarks" / "box-jhub-l40s.sh"
 
@@ -37,6 +38,7 @@ def _sourced(env_line: str) -> tuple[str, str]:
     return value, r.stderr
 
 
+@BASH_HARNESS
 def test_a_stray_env_cannot_silently_turn_streaming_off():
     """The exact accident: `.env` sourced for two credentials, carrying STREAM=false with it."""
     value, err = _sourced("export LOOPLAB_LLM_STREAM=false")
@@ -50,12 +52,14 @@ def test_a_stray_env_cannot_silently_turn_streaming_off():
     )
 
 
+@BASH_HARNESS
 def test_it_still_sets_streaming_when_nothing_is_preset():
     value, err = _sourced("unset LOOPLAB_LLM_STREAM")
     assert value == "1", f"profile did not enable streaming on a clean environment (got {value!r})"
     assert "override" not in err.lower(), "announced an override where there was nothing to override"
 
 
+@BASH_HARNESS
 def test_an_explicit_opt_out_is_honoured_and_loudly_labelled():
     """Turning it off must remain possible -- and must say the numbers are off the corpus's ruler."""
     value, err = _sourced("export LOOPLAB_LLM_STREAM=false; export LOOPLAB_ALLOW_UNSTREAMED=1")

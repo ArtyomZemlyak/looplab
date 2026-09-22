@@ -36,6 +36,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCH = ROOT / "benchmarks"
@@ -393,6 +394,7 @@ def _final_banner(out_dir: Path, arm: str, ntasks: int, tasks: str) -> subproces
                           capture_output=True, text=True, timeout=60)
 
 
+@BASH_HARNESS
 def test_the_banner_never_says_complete_over_a_task_arm_with_no_marker(tmp_path):
     """Reproduced on this box: `===== arm A COMPLETE (0/1 markers) =====`, exit 0, nothing measured.
 
@@ -410,6 +412,7 @@ def test_the_banner_never_says_complete_over_a_task_arm_with_no_marker(tmp_path)
     assert "beta" in proc.stdout
 
 
+@BASH_HARNESS
 def test_the_banner_still_says_complete_when_every_task_arm_has_one(tmp_path):
     out = tmp_path / "camp"
     out.mkdir()
@@ -420,6 +423,7 @@ def test_the_banner_still_says_complete_when_every_task_arm_has_one(tmp_path):
     assert "arm B COMPLETE (2/2 markers)" in proc.stdout
 
 
+@BASH_HARNESS
 def test_the_banner_still_refuses_a_refusal(tmp_path):
     """The case it always caught, re-checked after the branch above was put in front of it."""
     out = tmp_path / "camp"
@@ -474,6 +478,7 @@ def _arm_a_preflight(tmp_path: Path, key: str, meter: str) -> subprocess.Complet
 
 
 @pytest.mark.skipif(not (BENCH / "algotune" / "campaign.sh").exists(), reason="no campaign.sh")
+@BASH_HARNESS
 def test_arm_a_refuses_a_model_entry_that_would_bypass_the_meter(tmp_path):
     """AlgoTuner names the litellm model `model_info.get("model_name", <the config KEY>)`.
 
@@ -491,12 +496,14 @@ def test_arm_a_refuses_a_model_entry_that_would_bypass_the_meter(tmp_path):
     assert "arm A |" not in proc.stdout, proc.stdout
 
 
+@BASH_HARNESS
 def test_arm_a_accepts_an_openai_shaped_entry(tmp_path):
     proc = _arm_a_preflight(tmp_path, "gateway/deepseek-v4-flash", "http://127.0.0.1:8801")
     assert "honours OPENAI_BASE_URL" in proc.stdout, proc.stdout + proc.stderr
     assert "BYPASS" not in proc.stderr
 
 
+@BASH_HARNESS
 def test_an_unmetered_campaign_is_not_second_guessed(tmp_path):
     """No METER_BASE, no claim: the check is about a PROMISE the banner makes, not about routing."""
     proc = _arm_a_preflight(tmp_path, "openrouter/deepseek/deepseek-v4-flash-0731", "")
@@ -564,6 +571,7 @@ def _snapshot(tmp_path: Path, campaigns, **kw) -> tuple[subprocess.CompletedProc
     return proc, dest
 
 
+@BASH_HARNESS
 def test_the_snapshot_holds_the_campaign_that_is_running(tmp_path):
     """Live 2026-08-23: the 03:21 snapshot held `campaign/` (finished 08-20) and NOT
     `campaign-paired/` (17 markers, 19 scores, the whole arm-B result set), under a header saying
@@ -577,6 +585,7 @@ def test_the_snapshot_holds_the_campaign_that_is_running(tmp_path):
     assert (made[-1] / "campaign-paired" / "B-task.final.json").exists()
 
 
+@BASH_HARNESS
 def test_a_snapshot_that_could_not_copy_something_says_so_and_exits_nonzero(tmp_path):
     """It used to `return 0` on a missing path, so an EMPTY archive exited 0 and campaign.sh's
     `|| echo "(snapshot failed...)"` could never fire. An archive that is silently empty is worse
@@ -630,6 +639,7 @@ def test_a_snapshot_that_could_not_copy_something_says_so_and_exits_nonzero(tmp_
     assert "INCOMPLETE SNAPSHOT" in proc.stdout
 
 
+@BASH_HARNESS
 def test_a_named_source_that_is_not_there_is_named_in_the_output(tmp_path):
     """The other half of the same rule: `copy()` used to `return 0` on a missing path, so the
     reports directory (arm A's ENTIRE result set -- `agent_summary.json`) could be absent from an
@@ -693,6 +703,7 @@ def _watchdog_once(tmp_path: Path, *, campaign_running: bool, owed: bool) -> str
     return proc.stdout
 
 
+@BASH_HARNESS
 def test_the_watchdog_does_not_report_ok_over_a_dead_campaign(tmp_path):
     """The failure this file exists for, and nothing checked it.
 
@@ -707,12 +718,14 @@ def test_the_watchdog_does_not_report_ok_over_a_dead_campaign(tmp_path):
     assert "the campaign DIED, it did not finish" in line, line
 
 
+@BASH_HARNESS
 def test_a_finished_campaign_with_no_driver_is_still_ok(tmp_path):
     """A campaign that finished has no driver either, and that is not a fault."""
     line = _watchdog_once(tmp_path, campaign_running=False, owed=False)
     assert "] ok |" in line, line
 
 
+@BASH_HARNESS
 def test_a_live_campaign_is_not_called_dead(tmp_path):
     line = _watchdog_once(tmp_path, campaign_running=True, owed=True)
     assert "DEAD" not in line, line

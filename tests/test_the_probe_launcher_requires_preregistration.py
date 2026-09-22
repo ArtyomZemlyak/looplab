@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 LAUNCHER = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "run_probe.sh"
 
@@ -45,11 +46,13 @@ def _gate(probe_dir: Path, **env: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=60, env={**base, **env})
 
 
+@BASH_HARNESS
 def test_a_control_on_the_shipped_card_and_settings_needs_nothing(tmp_path):
     """The baseline every arm is preregistered against; an empty, even absent, probe dir is fine."""
     assert _gate(tmp_path / "never-made").returncode == 0
 
 
+@BASH_HARNESS
 def test_a_card_variant_is_an_arm_and_is_refused_without_the_file(tmp_path):
     got = _gate(tmp_path, PROBE_MAKE_TASK_ARGS="--no-unteachable-rules")
     assert got.returncode == 4, got.stderr
@@ -58,17 +61,20 @@ def test_a_card_variant_is_an_arm_and_is_refused_without_the_file(tmp_path):
     assert "primary_outcome:" in got.stderr and "batches:" in got.stderr and "power:" in got.stderr
 
 
+@BASH_HARNESS
 def test_a_settings_variant_is_an_arm_too(tmp_path):
     got = _gate(tmp_path, PROBE_LOOPLAB_SETTINGS="-s developer_probe_max_calls=12")
     assert got.returncode == 4, got.stderr
 
 
+@BASH_HARNESS
 def test_a_complete_preregistration_admits_the_arm(tmp_path):
     (tmp_path / "PREREGISTERED.txt").write_text(GOOD)
     assert _gate(tmp_path, PROBE_MAKE_TASK_ARGS="--no-unteachable-rules").returncode == 0
     assert _gate(tmp_path, PROBE_LOOPLAB_SETTINGS="-s x=1").returncode == 0
 
 
+@BASH_HARNESS
 def test_each_missing_or_malformed_line_is_named(tmp_path):
     cases = {
         "primary_outcome": GOOD.replace("primary_outcome: final champion TEST speedup on edge_expansion\n",
@@ -90,6 +96,7 @@ def test_each_missing_or_malformed_line_is_named(tmp_path):
     assert _gate(tmp_path, PROBE_MAKE_TASK_ARGS="--x").returncode == 0
 
 
+@BASH_HARNESS
 def test_an_empty_file_is_no_preregistration(tmp_path):
     (tmp_path / "PREREGISTERED.txt").write_text("")
     assert _gate(tmp_path, PROBE_MAKE_TASK_ARGS="--x").returncode == 4
@@ -99,6 +106,7 @@ def test_an_empty_file_is_no_preregistration(tmp_path):
 # the script around the function
 # ------------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_the_launcher_is_still_valid_shell():
     done = subprocess.run(["bash", "-n", str(LAUNCHER)], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
@@ -123,6 +131,7 @@ def test_the_instrument_records_the_preregistration_or_says_none_was_required():
     assert "preregistered:  (not required" in block, block
 
 
+@BASH_HARNESS
 def test_the_real_launcher_refuses_an_arm_before_touching_the_stand(tmp_path):
     """Driven through the script itself: the refusal lands before `cd "$ROOT/looplab"`, so it
     runs on a box with no bench stand at all, leaves no tree behind and spends nothing."""

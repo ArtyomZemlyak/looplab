@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 FENCE = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "fence_foreign_results.sh"
 
@@ -63,6 +64,7 @@ def _fence(env, verb):
                           capture_output=True, text=True, timeout=60)
 
 
+@BASH_HARNESS
 def test_arena_can_still_walk_results_while_the_fence_is_closed(tmp_path):
     at, results, env = _fenced_tree(tmp_path)
     assert _fence(env, "close").returncode == 0
@@ -133,6 +135,7 @@ def test_chmod_000_would_have_failed_this_test(tmp_path):
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
+@BASH_HARNESS
 def test_closing_twice_does_not_strand_the_directories(tmp_path):
     """`close` is called twice in a real launch, and the second call must not lose the first's work.
 

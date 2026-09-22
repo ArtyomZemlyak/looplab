@@ -34,6 +34,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
 
@@ -78,6 +79,7 @@ def _touch(path: Path, age_s: float) -> Path:
 
 # ------------------------------------------------------------------------------------------- (1)
 
+@BASH_HARNESS
 def test_an_evaluation_that_writes_only_a_stage_log_reads_as_alive(tmp_path):
     """THE DEFECT ITSELF. `events.jsonl` is an hour old, the stage log is a minute old.
 
@@ -94,6 +96,7 @@ def test_an_evaluation_that_writes_only_a_stage_log_reads_as_alive(tmp_path):
     assert silence < 120, f"a lane writing its stage log must read as alive, not {silence}s silent"
 
 
+@BASH_HARNESS
 def test_a_tree_nothing_has_touched_reads_as_silent(tmp_path):
     """The falsifier: a rule that always answers "alive" would pass the test above and disarm the
     guard entirely, which is the "endpoint down, lane hung for ever" case it exists for."""
@@ -106,6 +109,7 @@ def test_a_tree_nothing_has_touched_reads_as_silent(tmp_path):
     assert silence > 3000, f"nothing has been written for an hour; got {silence}s"
 
 
+@BASH_HARNESS
 def test_a_watch_path_that_does_not_exist_yet_is_silence_not_life(tmp_path):
     """The rule the file form was already fixed for, kept on the tree form: an absent watch path
     falls back to the START of the run, so a hang in preflight is bounded rather than unbounded."""
@@ -114,6 +118,7 @@ def test_a_watch_path_that_does_not_exist_yet_is_silence_not_life(tmp_path):
     assert out.stdout.strip() == str(t0), out.stdout
 
 
+@BASH_HARNESS
 def test_a_file_watch_never_scans_its_directory(tmp_path):
     """Arm A hands over its OWN lane log, and $OUT holds every lane's log. If a file watch scanned
     its parent, one busy lane would mask another's silence — a stall guard that cannot fire."""
@@ -144,6 +149,7 @@ _INVALID = {"speedup": None, "no_speedup": {"reason": "invalid_results",
 _SCORED = {"speedup": 3.12, "eval_seconds": 47.0}
 
 
+@BASH_HARNESS
 def test_only_the_refusal_a_second_pass_could_clear_is_reopenable(tmp_path):
     """The vocabulary, driven. `invalid_results` is a fact about the CANDIDATE — re-running it buys
     the same answer and a fresh evaluation's worth of clock."""
@@ -155,6 +161,7 @@ def test_only_the_refusal_a_second_pass_could_clear_is_reopenable(tmp_path):
         assert out.stdout.strip() == expected, (name, out.stdout, out.stderr)
 
 
+@BASH_HARNESS
 def test_an_unreadable_or_missing_row_reopens_nothing(tmp_path):
     """Silence, not a guess: a truncated row is not evidence that the pass was refused."""
     broken = tmp_path / "B-x.final.json"
@@ -178,6 +185,7 @@ def _refused_campaign(tmp_path: Path) -> tuple[Path, Path, Path]:
     return marker, final, out
 
 
+@BASH_HARNESS
 def test_the_flag_is_off_by_default_so_a_blind_resume_is_safe(tmp_path):
     """Every reopening in this driver is opt-in: a resume must be safe to run without reading the
     markers first."""
@@ -188,6 +196,7 @@ def test_the_flag_is_off_by_default_so_a_blind_resume_is_safe(tmp_path):
     assert "RE-SCORING" not in res.stdout
 
 
+@BASH_HARNESS
 def test_with_the_flag_the_scoring_pass_runs_again_and_the_search_does_not(tmp_path, monkeypatch):
     """The whole point: one evaluation, no model call, no new run directory.
 
@@ -212,6 +221,7 @@ def test_with_the_flag_the_scoring_pass_runs_again_and_the_search_does_not(tmp_p
     assert "state=ran_to_completion" in text and "attempt=a1" in text
 
 
+@BASH_HARNESS
 def test_a_second_refusal_keeps_the_marker_reopenable(tmp_path):
     """A re-score that fails the same way may not quietly promote a task-arm that still has no
     number — the flag's meaning has to stay stable across resumes."""
@@ -225,6 +235,7 @@ def test_a_second_refusal_keeps_the_marker_reopenable(tmp_path):
     assert "champion_refused=baseline_measured_in_pass" in marker.read_text(encoding="utf-8")
 
 
+@BASH_HARNESS
 def test_a_missing_champion_says_re_extract_rather_than_re_running_the_search(tmp_path):
     """The cheapness IS the argument for the flag. With no champion on disk the honest answer is
     "re-extract it" — the scores are in the event log — and never "spend the budget again"."""

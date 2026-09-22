@@ -40,6 +40,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
 
@@ -139,6 +140,7 @@ def _run_that_refused(root: Path) -> Path:
 # The marker itself
 # ---------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_a_spent_budget_at_exit_2_still_gets_its_marker(tmp_path):
     """The legitimate rc=2 the branch was written for, and the behaviour that must not regress: a
     task-arm that ran and hit the ceiling is FINISHED, and retrying it would spend the same
@@ -154,6 +156,7 @@ def test_a_spent_budget_at_exit_2_still_gets_its_marker(tmp_path):
     assert not list(tmp_path.glob("*.refused"))
 
 
+@BASH_HARNESS
 def test_a_refusal_to_start_at_exit_2_gets_no_marker(tmp_path):
     """The defect. Same exit code, opposite fact, and the marker is what a resume keys on."""
     run = _run_that_refused(tmp_path)
@@ -167,6 +170,7 @@ def test_a_refusal_to_start_at_exit_2_gets_no_marker(tmp_path):
     assert "B-svm.log" in got.stderr                   # names where the cause actually is
 
 
+@BASH_HARNESS
 def test_an_empty_event_log_is_not_a_started_run(tmp_path):
     """A zero-byte `events.jsonl` is the file the engine creates and never writes to — the same
     "nothing happened" as no file at all, and `-s` rather than `-e` is what makes them agree."""
@@ -178,6 +182,7 @@ def test_an_empty_event_log_is_not_a_started_run(tmp_path):
     assert not done.exists()
 
 
+@BASH_HARNESS
 def test_arm_a_exit_2_is_not_this_campaigns_refusal_code(tmp_path):
     """Arm A runs AlgoTuner, not LoopLab, so it has no event log AND no claim on exit 2: the branch
     is justified entirely by `cli/__init__.py::REFUSAL_EXIT_CODE`, which AlgoTuner does not
@@ -190,6 +195,7 @@ def test_arm_a_exit_2_is_not_this_campaigns_refusal_code(tmp_path):
 
 
 @pytest.mark.parametrize("rc", [0, 124])
+@BASH_HARNESS
 def test_the_terminal_codes_that_need_no_evidence_are_unchanged(rc, tmp_path):
     """rc=0 is the run ending on its own and rc=124 is the wall-clock net; neither is ambiguous
     about whether the task ran, so neither consults the log. Checked with the refusal-shaped run
@@ -202,6 +208,7 @@ def test_the_terminal_codes_that_need_no_evidence_are_unchanged(rc, tmp_path):
 
 
 @pytest.mark.parametrize("rc", [130, 137, 143, 1])
+@BASH_HARNESS
 def test_an_interruption_is_still_neither_a_marker_nor_a_refusal(rc, tmp_path):
     """The pre-existing rule, and the boundary of the new one: an interrupted task has no verdict,
     but it also did not refuse to start, so it must not land in the refusal tally either."""
@@ -213,6 +220,7 @@ def test_an_interruption_is_still_neither_a_marker_nor_a_refusal(rc, tmp_path):
     assert "interrupted" in got.stdout
 
 
+@BASH_HARNESS
 def test_a_started_run_that_paid_for_nothing_is_recorded_rather_than_hidden(tmp_path):
     """`metered=0` is a real state (a local model reports no cost, and a refusal can land after
     `run_started`). It is worth SEEING in the marker, but it is not what decides the marker: the run
@@ -227,6 +235,7 @@ def test_a_started_run_that_paid_for_nothing_is_recorded_rather_than_hidden(tmp_
 # What the campaign SAYS at the end
 # ---------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_the_driver_does_not_say_complete_over_an_arm_that_never_ran(tmp_path):
     """The half that makes the failure loud. A silently-correct marker rule would still have let the
     driver print COMPLETE and hand the operator a summarise command for a table of nothing."""
@@ -244,6 +253,7 @@ def test_the_driver_does_not_say_complete_over_an_arm_that_never_ran(tmp_path):
     assert "Do NOT summarise" in got.stdout
 
 
+@BASH_HARNESS
 def test_the_driver_still_says_complete_when_every_task_arm_reached_a_verdict(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
@@ -255,6 +265,7 @@ def test_the_driver_still_says_complete_when_every_task_arm_reached_a_verdict(tm
     assert "2/2 markers" in got.stdout
 
 
+@BASH_HARNESS
 def test_one_arms_refusals_do_not_count_against_the_other(tmp_path):
     """The tally is per arm, like the markers: an arm-A refusal must not make arm B report
     INCOMPLETE, or a two-arm box could never get a clean banner for either."""
@@ -306,6 +317,7 @@ _LEGACY_WALL_CUT = "wall=14400 rc=124 cpus=22-43 lanes=4 cores_per_lane=22\n"
 
 
 @pytest.mark.parametrize("rc,state", [(0, "ran_to_completion"), (124, "wall_cut")])
+@BASH_HARNESS
 def test_the_marker_says_in_words_what_happened(rc, state, tmp_path):
     """rc=0 and rc=124 shared one `case` arm and one marker format, so the two states were spelled
     only by an integer nobody but `compare_arms.py` read. `rc=` stays beside `state=` -- the 27
@@ -319,6 +331,7 @@ def test_the_marker_says_in_words_what_happened(rc, state, tmp_path):
     assert f"rc={rc}" in marker, marker
 
 
+@BASH_HARNESS
 def test_a_refusal_after_the_run_started_is_its_own_state(tmp_path):
     """The third member, so the vocabulary is closed rather than "wall_cut and everything else"."""
     run = _run_that_started(tmp_path)
@@ -337,6 +350,7 @@ def _meter_log(root, rows) -> str:
     return str(path)
 
 
+@BASH_HARNESS
 def test_rc0_with_no_successful_call_writes_no_marker(tmp_path):
     """The 2026-08-25 rung, DRIVEN rather than pinned. A total endpoint outage exits 0 in seconds
     having bought nothing; a marker would make every later resume skip the task for ever."""
@@ -349,6 +363,7 @@ def test_rc0_with_no_successful_call_writes_no_marker(tmp_path):
     assert "NO SUCCESSFUL CALLS" in got.stdout, got.stdout + got.stderr
 
 
+@BASH_HARNESS
 def test_rc0_with_a_successful_call_still_writes_its_marker(tmp_path):
     """The other half, so the rung above cannot be satisfied by refusing every marker: positive
     evidence for THIS attempt writes the marker and records the count it was decided on."""
@@ -364,6 +379,7 @@ def test_rc0_with_a_successful_call_still_writes_its_marker(tmp_path):
     assert "ok_calls=1" in done.read_text(), done.read_text()
 
 
+@BASH_HARNESS
 def test_an_unreadable_meter_log_leaves_the_old_behaviour(tmp_path):
     """"" and "0" are different answers and only "0" refuses. A bookkeeping gap is not evidence
     that a run bought nothing, so the marker is still written."""
@@ -375,6 +391,7 @@ def test_an_unreadable_meter_log_leaves_the_old_behaviour(tmp_path):
     assert "NO SUCCESSFUL CALLS" not in got.stdout
 
 
+@BASH_HARNESS
 def test_the_marker_carries_the_attempt_that_wrote_it(tmp_path):
     """The join to the meter. `attempt=` names the `/m/<arm>/<task>/<attempt>/v1` path this run's
     calls went to, so a per-task cost can be summed for THIS attempt and not for every attempt ever
@@ -396,6 +413,7 @@ def test_the_marker_carries_the_attempt_that_wrote_it(tmp_path):
     "wall=14400 rc=124 state=wall_cut cpus=0-21 lanes=4 cores_per_lane=22 attempt=a1\n",
     _LEGACY_WALL_CUT,          # written before `state=` existed -- five of these are on disk
 ])
+@BASH_HARNESS
 def test_a_wall_cut_is_terminal_by_default_and_a_blind_resume_leaves_it_alone(marker_text, tmp_path):
     """`.done` means "do not run this again", and a resume must be safe to run blind.
 
@@ -412,6 +430,7 @@ def test_a_wall_cut_is_terminal_by_default_and_a_blind_resume_leaves_it_alone(ma
     "wall=14400 rc=124 state=wall_cut cpus=0-21 attempt=a1\n",
     _LEGACY_WALL_CUT,
 ])
+@BASH_HARNESS
 def test_retry_wall_cut_reopens_a_wall_cut_without_deleting_its_marker(marker_text, tmp_path):
     """The retry is ONE FLAG away rather than zero, because the alternative is deleting `.done`
     files by hand -- which is how a marker over a real measurement gets destroyed.
@@ -427,6 +446,7 @@ def test_retry_wall_cut_reopens_a_wall_cut_without_deleting_its_marker(marker_te
     "wall=8808 rc=2 state=stopped_after_start cpus=0-21 metered=371 attempt=a1\n",
     "wall=7775 rc=0 cpus=44-65 lanes=4 cores_per_lane=22\n",     # a real pre-`state=` marker
 ])
+@BASH_HARNESS
 def test_retry_wall_cut_reopens_nothing_else(marker_text, tmp_path):
     """THE BOUNDARY. The flag must reopen exactly the wall cuts: a task-arm that ran to completion
     or spent its ceiling is a MEASUREMENT, and re-running it spends the allowance again to reach the
@@ -436,6 +456,7 @@ def test_retry_wall_cut_reopens_nothing_else(marker_text, tmp_path):
     assert _bash(f'RETRY_WALL_CUT=1; already_measured "{done}"', tmp_path).returncode == 0
 
 
+@BASH_HARNESS
 def test_no_marker_at_all_is_still_owed_with_or_without_the_flag(tmp_path):
     """The pre-existing rule the hoisted predicate must not have changed: an interrupted task-arm
     has no marker, and `already_measured` has to answer "run it" for both flag values."""
@@ -450,6 +471,7 @@ def test_no_marker_at_all_is_still_owed_with_or_without_the_flag(tmp_path):
 # "rc=124 produces no number" was FALSE for arm B, and the behaviour is what proves it
 # ---------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_a_wall_cut_does_not_erase_the_number_the_run_left_behind(tmp_path):
     """`campaign.sh:309` said rc=124 "produces no number (see docs/51)". docs/51 item 4 measures
     ARM A, where a cut AlgoTuner run writes no `final_speedup` into `agent_summary.json` at all --
@@ -483,6 +505,7 @@ def test_the_falsified_sentence_is_not_back():
 # What the banner SAYS about a wall cut it counted as complete
 # ---------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_the_banner_names_the_wall_cut_task_arms_inside_its_own_complete(tmp_path):
     """A wall cut IS terminal, so it counts into the marker total and the arm really is complete.
     But a banner that prints only a count hides the one fact an operator needs to decide whether to
@@ -501,6 +524,7 @@ def test_the_banner_names_the_wall_cut_task_arms_inside_its_own_complete(tmp_pat
     assert "RETRY_WALL_CUT=1" in got.stdout
 
 
+@BASH_HARNESS
 def test_the_banner_says_nothing_about_wall_cuts_when_there_are_none(tmp_path):
     """The control. A line that always prints is a line nobody reads."""
     out = tmp_path / "out"
@@ -511,6 +535,7 @@ def test_the_banner_says_nothing_about_wall_cuts_when_there_are_none(tmp_path):
     assert _CUT_BANNER not in got.stdout, got.stdout
 
 
+@BASH_HARNESS
 def test_the_banner_reads_a_marker_written_before_state_existed(tmp_path):
     """Five real markers under `campaign-paired/` carry only `rc=124`. A banner that keyed on
     `state=wall_cut` alone would silently reclassify all five as clean finishes -- the defect,
@@ -527,6 +552,7 @@ def test_the_banner_reads_a_marker_written_before_state_existed(tmp_path):
 # The attempt ledger: an id the CAMPAIGN mints, not one the proxy invents
 # ---------------------------------------------------------------------------------------------
 
+@BASH_HARNESS
 def test_attempts_at_one_task_arm_are_numbered_and_recorded(tmp_path):
     """`(arm, task)` is not an identity. Measured on `meter/meter.jsonl`: `B/kcenters` holds $2.0086
     over 816 calls in four sessions against ONE `.done` marker whose run cost $1.0070, so a naive
@@ -549,6 +575,7 @@ def test_attempts_at_one_task_arm_are_numbered_and_recorded(tmp_path):
     assert (out / "B-discrete_log.attempts").read_text().startswith("a1 ")
 
 
+@BASH_HARNESS
 def test_the_id_the_campaign_mints_is_the_id_the_proxy_reads_back(tmp_path):
     """THE TWO HALVES OF ONE FIX, JOINED. `campaign.sh` mints the id and `meter/proxy.py` parses it
     out of the URL, and the whole point is that the marker and the meter row name the SAME attempt.

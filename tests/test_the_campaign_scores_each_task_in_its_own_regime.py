@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 DRIVE = """set -e
@@ -60,12 +61,14 @@ def _drive(*tasks, root=True) -> dict:
         return out
 
 
+@BASH_HARNESS
 def test_a_cpsat_task_is_scored_serially_and_a_plain_one_wide():
     got = _drive("max_clique_cpsat", "pagerank")
     assert got.get("max_clique_cpsat") == "1", got
     assert got.get("pagerank") == "auto", got
 
 
+@BASH_HARNESS
 def test_an_unreadable_reference_is_not_reported_as_not_cpsat():
     """`uses_cpsat` answers False when the file is missing -- right for an inventory, wrong here:
     it would send an unknown task to the wide regime silently, which is the null-score campaign

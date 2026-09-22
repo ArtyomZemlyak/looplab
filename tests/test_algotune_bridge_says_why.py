@@ -96,6 +96,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "benchmarks" / "algotune" / "looplab_eval.py"
@@ -955,5 +956,6 @@ def test_setup_algotune_verifies_the_patch_took():
     assert "scripts/evaluate_results.py" in commands
 
 
+@BASH_HARNESS
 def test_the_setup_script_still_parses():
     assert subprocess.run(["bash", "-n", str(SETUP)], capture_output=True).returncode == 0

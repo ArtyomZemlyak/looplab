@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 LAUNCHER = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "run_probe.sh"
 
@@ -44,6 +45,7 @@ def test_the_card_hook_is_still_there_too():
     assert "card_args:" in src
 
 
+@BASH_HARNESS
 def test_the_launcher_is_still_valid_shell():
     import subprocess
     done = subprocess.run(["bash", "-n", str(LAUNCHER)], capture_output=True, text=True)

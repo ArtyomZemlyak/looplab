@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 SCRIPT = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
 
@@ -45,12 +46,14 @@ def _run(env_overrides: dict, tmp_path: Path) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, env=env, timeout=60)
 
 
+@BASH_HARNESS
 def test_an_unset_key_is_refused_before_the_first_token(tmp_path):
     got = _run({}, tmp_path)
     assert got.returncode == 2, got.stdout + got.stderr
     assert "REFUSED" in got.stderr and "LOOPLAB_LLM_API_KEY is empty" in got.stderr
 
 
+@BASH_HARNESS
 def test_an_EMPTY_key_is_refused_too(tmp_path):
     """`${VAR:-default}` treats unset and empty alike, and so must the guard: the campaign's own
     fallback produces the empty string, which is the case that actually happened."""
@@ -58,6 +61,7 @@ def test_an_EMPTY_key_is_refused_too(tmp_path):
     assert got.returncode == 2, got.stdout + got.stderr
 
 
+@BASH_HARNESS
 def test_a_complete_pair_passes_silently(tmp_path):
     """A guard that fires on a healthy stand is a guard the operator learns to ignore."""
     got = _run({"LOOPLAB_LLM_API_KEY": "sk-or-v1-fixture"}, tmp_path)
@@ -65,6 +69,7 @@ def test_a_complete_pair_passes_silently(tmp_path):
     assert got.stderr.strip() == "", got.stderr
 
 
+@BASH_HARNESS
 def test_the_openrouter_spelling_still_satisfies_it(tmp_path):
     """The driver's own fallback accepts `OPENROUTER_API_KEY`, so the guard must agree with the
     line it protects -- a guard stricter than the code it guards refuses working stands."""
@@ -72,6 +77,7 @@ def test_the_openrouter_spelling_still_satisfies_it(tmp_path):
     assert got.returncode == 0, got.stdout + got.stderr
 
 
+@BASH_HARNESS
 def test_the_refusal_says_where_it_looked_and_what_the_pair_is(tmp_path):
     """The 2026-09-10 operator had to read the ENGINE's refusal to learn that the two variables are
     one credential. The driver refuses first now, so it is the driver that has to say it."""

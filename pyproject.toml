@@ -101,4 +101,5 @@ markers = [
     "live: needs a reachable LLM endpoint (auto-skipped offline)",
     "corpus: reads the live bench corpus under /var/tmp/looplab-bench -- correct and SLOW. A real read of 150 probe trees is what catches a drift no fixture can, and five such anchors cost 675 s of one selection on 2026-09-09 while the sixth-slowest test took 6.5 s (§379). Use -m 'not corpus' for a fast neighbour run; the full suite still runs them.",
     "docker: needs a Docker daemon",
+    "posix_only(mechanism): the test's SUBJECT is a POSIX-only mechanism, named in the argument (a bash harness, fork, killpg, flock, CPU affinity, mode bits...); tests/conftest.py skips it where os.name != 'posix' and refuses a gate that names no mechanism. Named gates live in tests/_posix_gates.py",
 ]

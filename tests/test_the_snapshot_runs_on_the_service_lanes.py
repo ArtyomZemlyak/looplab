@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 HERE = Path(__file__).resolve().parents[1] / "benchmarks"
 BODY = (HERE / "snapshot_timer.sh").read_text(encoding="utf-8")
@@ -40,6 +41,7 @@ def test_the_default_is_the_reserved_service_lanes():
         f"the default service lane is {got.group(1)}, not the reserved 44-47,92-95 of sweep point 5")
 
 
+@BASH_HARNESS
 def test_the_snapshot_really_lands_on_those_cpus(tmp_path):
     """Not just that the word `taskset` is in the file: run the loop against a stub `snapshot.sh`
     that records its own affinity."""

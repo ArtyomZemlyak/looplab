@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 ROOT = Path(__file__).resolve().parents[1]
 CAMPAIGN = ROOT / "benchmarks" / "algotune" / "campaign.sh"
@@ -103,6 +104,7 @@ def _campaign_final(tmp: Path, shape: str) -> tuple[dict, str]:
     return json.loads(final.read_text(encoding="utf-8")), got.stdout
 
 
+@BASH_HARNESS
 def test_the_campaign_records_a_broken_bridge_as_a_harness_failure(tmp_path):
     row, said = _campaign_final(tmp_path, "broken")
     assert row["speedup"] is None, row
@@ -113,6 +115,7 @@ def test_the_campaign_records_a_broken_bridge_as_a_harness_failure(tmp_path):
     assert "extract_champion.py" in said, "it does not say how to recover without re-running"
 
 
+@BASH_HARNESS
 def test_the_campaign_still_calls_a_real_empty_run_empty(tmp_path):
     """The falsifier for a fix that turns every null into an alarm."""
     row, said = _campaign_final(tmp_path, "nochamp")
@@ -140,6 +143,7 @@ def _probe_champion(tmp: Path, shape: str) -> subprocess.CompletedProcess:
                           env=dict(os.environ, PYTHONPATH=str(ROOT)))
 
 
+@BASH_HARNESS
 def test_the_probe_refuses_to_call_a_broken_bridge_an_empty_run(tmp_path):
     got = _probe_champion(tmp_path, "broken")
     assert "СЛОМАН МОСТ" in got.stdout, got.stdout + got.stderr
@@ -149,6 +153,7 @@ def test_the_probe_refuses_to_call_a_broken_bridge_an_empty_run(tmp_path):
     assert "events.jsonl" in got.stdout, "it does not say that the scores survived"
 
 
+@BASH_HARNESS
 def test_the_probe_still_reports_a_genuinely_empty_run(tmp_path):
     got = _probe_champion(tmp_path, "nochamp")
     assert got.returncode == 0, got.stdout + got.stderr

@@ -30,6 +30,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "benchmarks" / "algotune" / "run_probe.sh"
@@ -121,6 +122,7 @@ def _pick(tmp: Path) -> subprocess.CompletedProcess:
     return _bash(script, tmp)
 
 
+@BASH_HARNESS
 def test_the_probe_scores_the_best_node_and_not_the_newest(tmp_path):
     """The falsifier for `ls -t`: node 1 is newer, node 0 is the champion."""
     got = _pick(tmp_path)
@@ -133,6 +135,7 @@ def test_the_probe_scores_the_best_node_and_not_the_newest(tmp_path):
     assert "# best" in body, f"the probe extracted the LATER node, not the best one: {body!r}"
 
 
+@BASH_HARNESS
 def test_the_whole_submission_travels_with_it(tmp_path):
     """`--all-files`: a compiled champion delivered without its extension scores 0.0 as
     `solver_unloadable`, which reads like a broken solver rather than a harness that shipped half
@@ -172,6 +175,7 @@ def _shim_body() -> str:
     return body
 
 
+@BASH_HARNESS
 def test_the_old_name_runs_the_repaired_script(tmp_path):
     """`run_model_probe.sh` must be a redirection and not a second copy of the rule.
 

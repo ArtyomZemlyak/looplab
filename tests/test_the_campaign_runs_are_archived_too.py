@@ -29,6 +29,7 @@ import subprocess
 from pathlib import Path
 
 from tests.test_snapshot_carries_the_repo_and_the_runs import SNAPSHOT, _bench_root, _rmtree
+from _posix_gates import BASH_HARNESS
 
 TIMER = Path(__file__).resolve().parents[1] / "benchmarks" / "snapshot_timer.sh"
 
@@ -61,6 +62,7 @@ def _snapshot(src, dest, archive, **env):
         capture_output=True, text=True, timeout=300)
 
 
+@BASH_HARNESS
 def test_the_campaigns_own_run_logs_reach_the_archive(tmp_path):
     """No `CAMPAIGN_RUNS` in the environment -- the operator ran `campaign.sh` without sourcing the
     box profile, which is the documented invocation for every box that is not this one. The tree is
@@ -88,6 +90,7 @@ def test_the_campaigns_own_run_logs_reach_the_archive(tmp_path):
         (out / "runs-manifest.txt").read_text())
 
 
+@BASH_HARNESS
 def test_a_runs_root_the_operator_moved_is_archived_because_it_is_named_not_guessed(tmp_path):
     """`CAMPAIGN_RUNS` is the operator's variable and may point anywhere, including off BENCH_ROOT.
 
@@ -108,6 +111,7 @@ def test_a_runs_root_the_operator_moved_is_archived_because_it_is_named_not_gues
         + result.stdout)
 
 
+@BASH_HARNESS
 def test_a_directory_that_holds_no_run_logs_is_not_dragged_in(tmp_path):
     """The other half of discovery-by-content: it must not degrade into "copy BENCH_ROOT".
 
@@ -132,6 +136,7 @@ def test_a_directory_that_holds_no_run_logs_is_not_dragged_in(tmp_path):
     assert not (archive / "looplab_ws").exists(), result.stdout
 
 
+@BASH_HARNESS
 def test_an_idle_box_is_still_idle_when_the_campaign_runs_tree_is_empty(tmp_path):
     """`campaign.sh` empties `$CAMPAIGN_RUNS/<task>` at the head of every attempt, so the tree is
     legitimately empty for the first minutes of an arm -- and an empty tree is not a measurement.

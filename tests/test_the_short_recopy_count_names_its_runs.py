@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 SNAPSHOT = Path(__file__).resolve().parents[1] / "benchmarks" / "snapshot.sh"
 
@@ -34,6 +35,7 @@ def _probe(root: Path, probe: str, lines: int) -> Path:
     return p
 
 
+@BASH_HARNESS
 def test_a_short_archive_copy_names_the_run_it_was_in(tmp_path):
     """`cp -ru` пропускает файл, чья копия НОВЕЕ источника, даже если она короче — та самая ловушка
     `-u`, ради которой счётчик и существует. Здесь она построена руками, и имя прогона должно
@@ -52,6 +54,7 @@ def test_a_short_archive_copy_names_the_run_it_was_in(tmp_path):
     assert dest.read_text().count("\n") == 400, "починка не догнала источник"
 
 
+@BASH_HARNESS
 def test_two_short_files_in_one_run_name_it_once(tmp_path):
     """Три лога одной живой пробы — это ОДНА проба, а не три тревоги."""
     src, arch = tmp_path / "model-probes", tmp_path / "arch"
@@ -69,6 +72,7 @@ def test_two_short_files_in_one_run_name_it_once(tmp_path):
     assert "IN=[remDL13]" in r.stdout, f"имя повторено или потеряно: {r.stdout}"
 
 
+@BASH_HARNESS
 def test_two_different_runs_are_both_named(tmp_path):
     src, arch = tmp_path / "model-probes", tmp_path / "arch"
     for probe in ("remDL13", "accEE"):
@@ -83,6 +87,7 @@ def test_two_different_runs_are_both_named(tmp_path):
     assert "remDL13" in r.stdout and "accEE" in r.stdout, r.stdout
 
 
+@BASH_HARNESS
 def test_a_clean_archive_names_nothing(tmp_path):
     src, arch = tmp_path / "model-probes", tmp_path / "arch"
     _probe(src, "remDL13", 100)

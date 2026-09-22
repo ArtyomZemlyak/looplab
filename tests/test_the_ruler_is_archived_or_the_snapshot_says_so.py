@@ -38,6 +38,10 @@ import subprocess
 from pathlib import Path
 
 from tests.test_snapshot_carries_the_repo_and_the_runs import SNAPSHOT, _bench_root, _rmtree
+from _posix_gates import BASH_HARNESS
+
+# Its subject is the bash bench harness: see tests/_posix_gates.py::BASH_HARNESS.
+pytestmark = BASH_HARNESS
 
 # The failure `[ ! -s ]` cannot see: non-zero exit, bytes on disk.
 _GIT_SHIM = """#!/bin/bash

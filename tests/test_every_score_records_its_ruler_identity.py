@@ -35,6 +35,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 BRIDGE = REPO / "benchmarks" / "algotune" / "looplab_eval.py"
@@ -249,6 +250,7 @@ def _bash(script: str, cwd: Path, here: Path = CAMPAIGN.parent, **env) -> subpro
                           env={**os.environ, "ALGOTUNE_EVAL_WORKERS": "auto", **env})
 
 
+@BASH_HARNESS
 def test_an_arm_a_marker_carries_the_ruler_identity(tmp_path):
     """Arm A's number goes through no `final.json`; the marker is where its identity has to be."""
     w = _width()
@@ -265,6 +267,7 @@ def test_an_arm_a_marker_carries_the_ruler_identity(tmp_path):
     assert f"baseline_sha256={hashlib.sha256(entry.read_bytes()).hexdigest()}" in marker, marker
 
 
+@BASH_HARNESS
 def test_every_marker_state_carries_it(tmp_path):
     """The identity rides in REGIME, so a state added later cannot forget it. Driven over the
     states that write a marker with no evidence prerequisites."""
@@ -283,6 +286,7 @@ def test_every_marker_state_carries_it(tmp_path):
     assert "state=exited_immediately" in marker and "baseline_sha256=" in marker, marker
 
 
+@BASH_HARNESS
 def test_a_cold_cache_is_none_and_an_unreachable_bridge_is_a_question_mark(tmp_path):
     """Two different absences, told apart in the marker -- and neither withholds the marker: the
     identity is a record, not a gate, and a task-arm that was measured stays measured."""

@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 START = Path(__file__).resolve().parents[1] / "benchmarks" / "meter" / "start_meter.sh"
 PORT = "8899"          # not 8801: start_meter kills by port, and a live campaign meter must survive
@@ -79,6 +80,7 @@ def _two_cores_this_box_has() -> str:
         else ",".join(str(c) for c in picked)
 
 
+@BASH_HARNESS
 def test_the_meter_lands_on_the_cores_it_was_given(tmp_path, meter):
     """The launcher's half: what it is handed is what the process ends up on, and it says so.
 
@@ -95,6 +97,7 @@ def test_the_meter_lands_on_the_cores_it_was_given(tmp_path, meter):
     assert f"pinned to {cpus}" in result.stdout
 
 
+@BASH_HARNESS
 def test_an_unpinned_meter_says_so_instead_of_going_quietly(tmp_path, meter):
     """The 2026-08-31 shape exactly: it came up on 0-95 and said nothing, so nobody looked."""
     result = _start(tmp_path, None)

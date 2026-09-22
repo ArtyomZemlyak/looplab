@@ -26,6 +26,7 @@ import tempfile
 
 import pytest
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 DRIVER = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "run_final.sh"
 ISO = re.compile(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] ")
@@ -92,6 +93,7 @@ def _run(*, env: dict, cwd: Path | None = None, script: Path = DRIVER) -> subpro
 VOLATILE_ABSENT = f"/var/tmp/looplab-bench-no-such-checkout-{os.getpid()}/AlgoTune"
 
 
+@BASH_HARNESS
 def test_the_driver_is_valid_shell():
     done = subprocess.run(["bash", "-n", str(DRIVER)], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
@@ -108,6 +110,7 @@ def test_the_driver_has_no_attempt_loop():
     assert calls == ["A", "B"], calls
 
 
+@BASH_HARNESS
 def test_a_volatile_algotune_root_is_refused_without_the_flag(tmp_path):
     got = _run(env={"ALGOTUNE_ROOT": VOLATILE_ABSENT, "CAMPAIGN_OUT": str(tmp_path)})
     assert got.returncode == 2, got.stdout + got.stderr
@@ -116,6 +119,7 @@ def test_a_volatile_algotune_root_is_refused_without_the_flag(tmp_path):
     assert all(ISO.match(ln) for ln in got.stderr.splitlines()), got.stderr
 
 
+@BASH_HARNESS
 def test_the_flag_admits_a_volatile_root_and_the_next_gate_still_stands(tmp_path):
     got = _run(env={"ALGOTUNE_ROOT": VOLATILE_ABSENT, "CAMPAIGN_OUT": str(tmp_path),
                     "ALLOW_VOLATILE_ROOT": "1"})
@@ -124,6 +128,7 @@ def test_the_flag_admits_a_volatile_root_and_the_next_gate_still_stands(tmp_path
     assert "no AlgoTune checkout" in got.stderr, got.stderr
 
 
+@BASH_HARNESS
 def test_a_volatile_campaign_out_is_refused_too(tmp_path):
     """The record is what died, and the record is CAMPAIGN_OUT: markers, ledgers, this log."""
     at = tmp_path / "AlgoTune"
@@ -133,6 +138,7 @@ def test_a_volatile_campaign_out_is_refused_too(tmp_path):
     assert "CAMPAIGN_OUT=/var/tmp/looplab-bench/campaign is under /var/tmp" in got.stderr
 
 
+@BASH_HARNESS
 def test_a_reopen_flag_is_refused_as_a_second_attempt(tmp_path):
     at = tmp_path / "AlgoTune"
     (at / "AlgoTuner").mkdir(parents=True)
@@ -178,6 +184,7 @@ def _stand(tmp_path: Path) -> tuple[Path, Path, dict]:
     return bench / "run_final.sh", out, env
 
 
+@BASH_HARNESS
 def test_both_arms_run_once_in_order_and_every_line_is_dated(tmp_path):
     script, out, env = _stand(tmp_path)
     got = _run(env=env, script=script)
@@ -199,6 +206,7 @@ def test_both_arms_run_once_in_order_and_every_line_is_dated(tmp_path):
     assert (out / "run_final.CONFIGURATION").exists()
 
 
+@BASH_HARNESS
 def test_a_resume_under_a_changed_configuration_is_refused(tmp_path):
     script, out, env = _stand(tmp_path)
     assert _run(env=env, script=script).returncode == 0
@@ -216,6 +224,7 @@ def test_a_resume_under_a_changed_configuration_is_refused(tmp_path):
     assert "MORE THAN ONE attempt" in again.stdout and "A-svm.attempts" in again.stdout
 
 
+@BASH_HARNESS
 def test_an_arm_that_exits_non_zero_makes_the_campaign_unfinished_not_complete(tmp_path):
     script, out, env = _stand(tmp_path)
     got = _run(env={**env, "STUB_RC_B": "3"}, script=script)
@@ -225,6 +234,7 @@ def test_an_arm_that_exits_non_zero_makes_the_campaign_unfinished_not_complete(t
     assert "summarise with" not in got.stdout
 
 
+@BASH_HARNESS
 def test_the_harness_refuses_to_hand_the_real_driver_a_real_checkout(tmp_path):
     """§384's guard, driven. Without it a fixture path that quietly starts existing turns a refusal
     test into a live campaign launch -- and the only thing that ended it was a 120 s timeout."""
@@ -276,6 +286,7 @@ def test_what_counts_as_a_disposable_checkout(path, disposable):
     assert _is_disposable(path) is disposable, path
 
 
+@BASH_HARNESS
 def test_a_symlink_under_tmp_does_not_launder_the_stand(tmp_path):
     """The name and the destination are different facts. A link in the temp area whose target is the
     live checkout reads as disposable by its path and is not; dropping the `realpath` left every

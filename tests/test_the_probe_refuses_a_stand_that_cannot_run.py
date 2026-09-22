@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 SCRIPT = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "run_probe.sh"
 SRC = SCRIPT.read_text(encoding="utf-8")
@@ -59,6 +60,7 @@ def _drive_engine_guard(python_body: str, tmp_path: Path) -> subprocess.Complete
                           timeout=60)
 
 
+@BASH_HARNESS
 def test_an_engine_that_does_not_import_is_refused(tmp_path):
     """The exact failure of 2026-09-18, with its own words on the operator's screen."""
     got = _drive_engine_guard(
@@ -69,6 +71,7 @@ def test_an_engine_that_does_not_import_is_refused(tmp_path):
     assert "/stand/looplab/.venv/bin" in got.stdout, "and so must the fix"
 
 
+@BASH_HARNESS
 def test_a_working_engine_passes_silently(tmp_path):
     """A guard that speaks on a healthy stand is a guard the operator learns to scroll past."""
     got = _drive_engine_guard("exit 0", tmp_path)

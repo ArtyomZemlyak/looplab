@@ -16,6 +16,7 @@ tracks the shipped implementation instead of a copy that can drift away from it.
 import re
 import subprocess
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
 
@@ -36,10 +37,12 @@ def _three_attempts(out_dir: Path, make_dir: bool) -> list[str]:
     return r.stdout.split()
 
 
+@BASH_HARNESS
 def test_attempt_ids_count_up_when_the_directory_exists(tmp_path):
     assert _three_attempts(tmp_path / "camp", make_dir=True) == ["a1", "a2", "a3"]
 
 
+@BASH_HARNESS
 def test_without_the_directory_every_attempt_is_a1(tmp_path):
     """The falsifier. If this ever stops reproducing, the test above proves nothing."""
     assert _three_attempts(tmp_path / "camp", make_dir=False) == ["a1", "a1", "a1"]

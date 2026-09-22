@@ -20,6 +20,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
 
@@ -41,6 +42,7 @@ def _log(tmp_path: Path, rows: list[dict]) -> Path:
     return p
 
 
+@BASH_HARNESS
 def test_an_outage_leaves_zero_successful_calls(tmp_path):
     """The real shape: rows exist for the arm, none of them for this task came back 200."""
     log = _log(tmp_path, [
@@ -51,6 +53,7 @@ def test_an_outage_leaves_zero_successful_calls(tmp_path):
     assert _successful_calls(log, "A", "kcenters") == "0"
 
 
+@BASH_HARNESS
 def test_a_working_run_counts_its_calls(tmp_path):
     """The falsifier: a checker that always said 0 would pass the test above and break every run."""
     log = _log(tmp_path, [
@@ -61,6 +64,7 @@ def test_a_working_run_counts_its_calls(tmp_path):
     assert _successful_calls(log, "A", "convex_hull") == "2"
 
 
+@BASH_HARNESS
 def test_a_200_that_carries_an_error_does_not_count(tmp_path):
     """The proxy records a broken pipe as status 200 with an `error`; nothing was delivered."""
     log = _log(tmp_path, [
@@ -70,6 +74,7 @@ def test_a_200_that_carries_an_error_does_not_count(tmp_path):
     assert _successful_calls(log, "A", "x") == "0"
 
 
+@BASH_HARNESS
 def test_other_attempts_of_the_same_task_are_not_borrowed(tmp_path):
     """A re-run must not inherit the previous attempt's calls as evidence that IT worked."""
     log = _log(tmp_path, [
@@ -79,6 +84,7 @@ def test_other_attempts_of_the_same_task_are_not_borrowed(tmp_path):
     assert _successful_calls(log, "A", "x", attempt="a2") == "0"
 
 
+@BASH_HARNESS
 def test_an_unknowable_answer_is_empty_not_zero(tmp_path):
     """"" and "0" are different answers, and only "0" withholds a marker.
 
@@ -133,6 +139,7 @@ def _ended_on_failure(meter_log, arm, task, attempt="a1", set_env=True) -> str:
     return r.stdout.strip()
 
 
+@BASH_HARNESS
 def test_a_run_cut_by_the_endpoint_is_not_complete(tmp_path):
     """Spent money, then the endpoint died: the shape that earned four false markers."""
     log = _log(tmp_path, [
@@ -143,6 +150,7 @@ def test_a_run_cut_by_the_endpoint_is_not_complete(tmp_path):
     assert _ended_on_failure(log, "A", "discrete_log") == "yes"
 
 
+@BASH_HARNESS
 def test_a_run_that_ended_on_a_working_call_is_complete(tmp_path):
     """The falsifier: a check that always said "yes" would pass the test above and refuse every
     marker the campaign ever earns, including the one task-arm that really did reach its ceiling."""
@@ -153,6 +161,7 @@ def test_a_run_that_ended_on_a_working_call_is_complete(tmp_path):
     assert _ended_on_failure(log, "A", "edge_expansion") == "no"
 
 
+@BASH_HARNESS
 def test_a_trailing_broken_pipe_also_counts_as_a_failure(tmp_path):
     """The proxy records a broken pipe as status 200 with an `error`; nothing was delivered, so a
     run whose last row is one did not end on a call that worked."""
@@ -164,6 +173,7 @@ def test_a_trailing_broken_pipe_also_counts_as_a_failure(tmp_path):
     assert _ended_on_failure(log, "A", "x") == "yes"
 
 
+@BASH_HARNESS
 def test_no_rows_for_this_attempt_is_unknowable(tmp_path):
     """"" is not "yes": a run with no rows of its own gets no verdict from this check, and the
     zero-calls check above is what speaks for it instead."""

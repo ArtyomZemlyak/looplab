@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _posix_gates import BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "benchmarks" / "algotune" / "run_probe.sh"
@@ -60,6 +61,7 @@ def test_the_lane_width_is_what_picks_the_ruler():
 
 
 @pytest.mark.skipif(not (STAND / "AlgoTune").is_dir(), reason="no bench stand on this box")
+@BASH_HARNESS
 def test_a_lane_with_no_cached_baseline_is_refused_at_launch(tmp_path):
     from tests._bench_fixtures import free_bench_lane, stand_launch_env
     env = {**stand_launch_env(), "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path)}
@@ -75,6 +77,7 @@ def test_a_lane_with_no_cached_baseline_is_refused_at_launch(tmp_path):
 
 
 @pytest.mark.skipif(not (STAND / "AlgoTune").is_dir(), reason="no bench stand on this box")
+@BASH_HARNESS
 def test_the_corpus_lane_passes_every_check(tmp_path):
     """A guard that refuses the lane the corpus was measured on would stop the bench dead."""
     from tests._bench_fixtures import free_bench_lane, stand_launch_env

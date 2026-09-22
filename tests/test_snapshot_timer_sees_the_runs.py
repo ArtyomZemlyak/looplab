@@ -18,6 +18,10 @@ what the fingerprint can SEE.
 import subprocess
 import textwrap
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
+
+# Its subject is the bash bench harness: see tests/_posix_gates.py::BASH_HARNESS.
+pytestmark = BASH_HARNESS
 
 TIMER = Path(__file__).resolve().parents[1] / "benchmarks" / "snapshot_timer.sh"
 TREES = Path(__file__).resolve().parents[1] / "benchmarks" / "bench_trees.sh"

@@ -18,6 +18,10 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
+
+# Its subject is the bash bench harness: see tests/_posix_gates.py::BASH_HARNESS.
+pytestmark = BASH_HARNESS
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "benchmarks" / "algotune" / "campaign.sh"

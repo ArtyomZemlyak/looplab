@@ -36,6 +36,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from _posix_gates import BASH_HARNESS
 
 ROOT = Path(__file__).resolve().parents[1]
 CAMPAIGN = ROOT / "benchmarks" / "algotune" / "campaign.sh"
@@ -99,6 +100,7 @@ def _patched_checkout(tmp: Path, cache_dir: str | None) -> Path:
 # ------------------------------------------------------------------------------------------------
 # the declaration itself
 # ------------------------------------------------------------------------------------------------
+@BASH_HARNESS
 def test_the_campaign_names_the_cache_dir_the_patch_really_writes(tmp_path):
     """`patch_baseline_cache.py` bakes the path at PATCH time, out of whichever clone ran it.
 
@@ -112,6 +114,7 @@ def test_the_campaign_names_the_cache_dir_the_patch_really_writes(tmp_path):
     assert Path(baked).is_dir(), "the guard globs this directory; it has to exist to be watched"
 
 
+@BASH_HARNESS
 def test_an_unpatched_checkout_falls_back_to_this_repos_own(tmp_path):
     repo = tmp_path / "repo"
     got = _declare(repo, _patched_checkout(tmp_path, None))
@@ -119,6 +122,7 @@ def test_an_unpatched_checkout_falls_back_to_this_repos_own(tmp_path):
                                                      / ".baseline_times"), got
 
 
+@BASH_HARNESS
 def test_the_width_is_declared_and_it_is_the_probes_width(tmp_path):
     """`auto` keys `__w<N>x1r3`, which is what `run_probe.sh` declares and what the live cache holds.
 
@@ -130,6 +134,7 @@ def test_the_width_is_declared_and_it_is_the_probes_width(tmp_path):
     assert got["ALGOTUNE_EVAL_CORES_PER_WORKER"] == "1", got
 
 
+@BASH_HARNESS
 def test_a_side_experiment_may_still_name_its_own_ruler(tmp_path):
     """The falsifier for a declaration that overrides the operator instead of defaulting for them."""
     got = _declare(tmp_path / "repo", _patched_checkout(tmp_path, str(tmp_path / "t")),
@@ -190,6 +195,7 @@ def _foreign_cache(tmp: Path) -> Path:
     return cache
 
 
+@BASH_HARNESS
 def test_the_declared_ruler_arms_the_regime_guard(tmp_path):
     """END TO END: the campaign's own environment, the real bridge, a foreign regime on disk."""
     cache = _foreign_cache(tmp_path)
@@ -229,6 +235,7 @@ def _declare_output(repo: Path, at: Path, **overrides: str) -> str:
     return out.stdout
 
 
+@BASH_HARNESS
 def test_an_inherited_width_above_one_is_named_and_still_honoured(tmp_path):
     """THE REMEDY docs/63 §8 PRESCRIBED. `${VAR:-auto}` is a default, not a pin, and `set -a; . .env;
     set +a` two hundred lines up is a live channel — so a width nobody chose for this campaign can
@@ -243,6 +250,7 @@ def test_an_inherited_width_above_one_is_named_and_still_honoured(tmp_path):
                     ALGOTUNE_EVAL_WORKERS="2")["ALGOTUNE_EVAL_WORKERS"] == "2"
 
 
+@BASH_HARNESS
 def test_the_campaigns_own_ruler_and_a_deliberate_serial_one_say_nothing(tmp_path):
     """The falsifier for a notice that fires on everything: `auto` is this campaign's own
     declaration (already in the banner) and `1` is the serial ruler docs/62 §10 mandates. Neither

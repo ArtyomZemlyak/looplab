@@ -21,6 +21,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_snapshot_carries_the_repo_and_the_runs import _bench_root  # noqa: E402
+from _posix_gates import BASH_HARNESS
+
+# Its subject is the bash bench harness: see tests/_posix_gates.py::BASH_HARNESS.
+pytestmark = BASH_HARNESS
 
 
 def _rows(n: int, attempt: int) -> str:
