@@ -313,7 +313,7 @@ export function buildConceptCooccurrence(runs = [], { minRuns = 2, forest = null
     ids.sort()
     for (let i = 0; i < ids.length; i += 1) {
       for (let j = i + 1; j < ids.length; j += 1) {
-        const key = `${ids[i]} ${ids[j]}`
+        const key = `${ids[i]}\u0000${ids[j]}`
         counts.set(key, (counts.get(key) || 0) + 1)
       }
     }
@@ -321,7 +321,7 @@ export function buildConceptCooccurrence(runs = [], { minRuns = 2, forest = null
   const above = []
   for (const [key, runCount] of counts) {
     if (runCount < floor) continue
-    const [a, b] = key.split(' ')
+    const [a, b] = key.split('\u0000')
     above.push({ a, b, runs: runCount })
   }
   // Rank by evidence, then by id. Unlike the TREE (ordered by id so click targets never move under

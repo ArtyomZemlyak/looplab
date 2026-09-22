@@ -171,7 +171,7 @@ export function crossRunGroups(runs = [], { limit = MAX_GROUP_ROWS } = {}) {
     // an opaque digest string, and a separator two different partitions could both spell is a
     // key that merges two evaluations — which is the exact merge this partition exists to undo.
     const partition = partitionKey(run)
-    const key = `${taskId} ${direction} ${partition}`
+    const key = `${taskId}\u0000${direction}\u0000${partition}`
     if (!buckets.has(key)) {
       buckets.set(key, { key, taskId, direction, partition, members: [] })
     }
