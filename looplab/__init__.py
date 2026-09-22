@@ -240,6 +240,7 @@ _LAYOUT = {
     "lesson_guard": "trust",   # PART IV D6 lesson over-generalization guard (advisory)
     "lesson_hygiene": "engine",  # lesson consolidation/contradiction/retrieval (doc 25 EM-10)
     "lessons": "engine",
+    "lifecycle": "serve",      # the UI server's ONE ordered lifespan (review 2026-09-22, SRV1-06)
     "lessons_distill": "engine",
     "lessons_priors": "engine",
     "lessons_reconcile": "engine",

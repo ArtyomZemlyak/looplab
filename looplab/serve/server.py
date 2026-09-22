@@ -424,11 +424,17 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
         raise _ui_extra_error("fastapi")
     from looplab.serve.appstate import AppState
     from looplab.serve.jobs import JobRegistry
+    from looplab.serve.lifecycle import ServerLifecycle
     from looplab.serve.router_wiring import mount_routers
 
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    app = FastAPI(title="LoopLab UI", version="0.1.0")
+    # ONE lifespan owns every startup/shutdown step, in the order they are registered below
+    # (review 2026-09-22, SRV1-06). `@app.on_event` is not an alternative to mix in: FastAPI never
+    # runs one on an app that was given `lifespan=`, and says nothing about it.
+    lifecycle = ServerLifecycle()
+    app = FastAPI(title="LoopLab UI", version="0.1.0", lifespan=lifecycle.lifespan)
+    app.state.lifecycle = lifecycle
     # CORS allow-list (review C3): the production UI is served SAME-ORIGIN from /dist (needs no
     # CORS), so the only legitimate cross-origin caller is the Vite dev server. Restricting to
     # localhost dev origins (instead of "*") stops any other web page the operator has open from
@@ -724,10 +730,10 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop).
     sweep_stale_lifecycle_locks(root)   # F22: GC orphaned per-run lifecycle lock files at startup
     resume_cancel = install_resume_reconcile_hooks(
-        app, root, launch_env=settings_store.launch_env_for_run)
-    # Shutdown handlers run in registration order. Cancel/join resume timers + tail waiters first,
+        lifecycle, root, launch_env=settings_store.launch_env_for_run)
+    # Shutdown steps run in registration order. Cancel/join resume timers + tail waiters first,
     # then reap every child that was registered before cancellation won the spawn gate.
-    install_reap_hooks(app)
+    install_reap_hooks(lifecycle)
 
     srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry(),
                    reviews=reviews, resume_cancel=resume_cancel)
@@ -736,12 +742,14 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # AppState instance, so replacing a dependency such as srv.commands is immediately observed.
     app.state.looplab = srv
 
-    @app.on_event("startup")
     def _recover_restart_command_workers():
         # A process can die after publishing an accepted restart record but before its worker appends
         # the folded restart intent. Once appended, install_resume_reconcile_hooks is independently
         # sufficient; this hook closes the earlier reserve->append window without any browser poll.
         srv.commands.recover_pending_restarts()
+
+    # After the resume scan (registered above), exactly where the `on_event` hook it replaces ran.
+    lifecycle.on_startup("recover_restart_command_workers", _recover_restart_command_workers)
 
     @app.get("/api/auth/status")
     def auth_status(request: Request):

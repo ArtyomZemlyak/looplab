@@ -665,10 +665,14 @@ _PENDING_RECHECK_S = 0.25
 
 
 def install_resume_reconcile_hooks(
-        app, root: Path, *,
+        lifecycle, root: Path, *,
         before_spawn: Optional[Callable[[Path], Optional[dict]]] = None,
         launch_env: Optional[Callable[[Path], Any]] = None) -> threading.Event:
-    """Recover durable resume intents on startup, without requiring a dashboard list poll."""
+    """Recover durable resume intents on startup, without requiring a dashboard list poll.
+
+    `lifecycle` is the app's `serve/lifecycle.py::ServerLifecycle` (review 2026-09-22, SRV1-06): the
+    startup scan and the timer cancellation are appended to ITS ordered steps, and the caller must
+    install this BEFORE `install_reap_hooks` — the cancellation has to precede the reaper."""
     timers: list[threading.Timer] = []
     shutdown = threading.Event()
 
@@ -754,11 +758,9 @@ def install_resume_reconcile_hooks(
             timers.append(timer)
             timer.start()
 
-    @app.on_event("startup")
     def _recover_resumes_on_startup():
         _scan_startup()
 
-    @app.on_event("shutdown")
     def _cancel_resume_timers():
         # Ordered against claim+Popen: once this returns no callback can create a new engine that the
         # following JupyterHub reaper fails to see.
@@ -778,6 +780,8 @@ def install_resume_reconcile_hooks(
             if thread is not threading.current_thread():
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
+    lifecycle.on_startup("recover_resumes_on_startup", _recover_resumes_on_startup)
+    lifecycle.on_shutdown("cancel_resume_timers", _cancel_resume_timers)
     return shutdown
 
 
@@ -807,20 +811,16 @@ def _reap_spawned_engines() -> None:
             _spawned_engines.pop(pid, None)
 
 
-def install_reap_hooks(app) -> None:
-    """Wire the JupyterHub reaper to this app's lifecycle: an ASGI shutdown hook plus — on the
-    server the hub launcher started only (`_reap_on_exit`) — an atexit backstop. Called once per
-    `make_app`, at the same construction point the inline registration used to occupy."""
-    # OPEN[serve-lifecycle-uses-deprecated-on-event] the four `@app.on_event` hooks here and in
-    # `server.py` are deprecated by FastAPI and go away in a future major. The replacement is one
-    # `lifespan=` at `FastAPI(...)` construction, which is why this is not a rename: the hooks come
-    # from THREE independent installers, one conditional, and `_cancel_resume_timers` records that
-    # its position is ordered against claim+Popen — so composing them means owning that order in a
-    # registry. A lifecycle change belongs in a change whose subject it is; `on_event` still works.
-    # proof:`present:@app.on_event@looplab/serve/engine_proc.py`
-    @app.on_event("shutdown")
+def install_reap_hooks(lifecycle) -> None:
+    """Wire the JupyterHub reaper to this app's lifecycle: a shutdown step on its
+    `serve/lifecycle.py::ServerLifecycle` plus — on the server the hub launcher started only
+    (`_reap_on_exit`) — an atexit backstop. Called once per `make_app`, AFTER
+    `install_resume_reconcile_hooks`, so the resume-timer cancellation precedes this step."""
+    # _Closed 2026-09-22 (review SRV1-06): the four deprecated `@app.on_event` hooks are now ordered
+    # steps of ONE `lifespan=` owned by `serve/lifecycle.py::ServerLifecycle`, migrated together._
     def _reap_on_shutdown():
-        _reap_spawned_engines()
+        _reap_spawned_engines()     # resolved at CALL time, so a patch of the module name lands
 
-    if _reap_on_exit():             # backstop for a hard exit where the ASGI shutdown hook doesn't fire
+    lifecycle.on_shutdown("reap_on_shutdown", _reap_on_shutdown)
+    if _reap_on_exit():             # backstop for a hard exit where the ASGI shutdown step doesn't run
         atexit.register(_reap_spawned_engines)

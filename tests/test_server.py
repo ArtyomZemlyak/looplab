@@ -1353,10 +1353,26 @@ def test_reset_replays_legacy_snapshot_with_off_defaults_and_explicit_null_alias
     assert snapshot.read_bytes() == before
 
 
-def test_resume_shutdown_hook_precedes_jupyter_reaper(tmp_path):
+def test_resume_shutdown_hook_precedes_jupyter_reaper(tmp_path, monkeypatch):
+    """DRIVEN, where it used to read the ORDER off `app.router.on_shutdown`'s handler names.
+
+    The order is the property: `_cancel_resume_timers` sets the resume-cancel event under the spawn
+    gate, so once it returns no timer or tail waiter can Popen a child the reaper's snapshot misses.
+    So run a real lifespan and ask the reaper what it saw. And the list the old pin read is now
+    EMPTY on purpose (review 2026-09-22, SRV1-06): the app owns ONE `lifespan=`
+    (`serve/lifecycle.py::ServerLifecycle`), and FastAPI never runs an `on_event` hook on such an
+    app — so a hook registered the deprecated way would not run at all, and must not exist."""
+    from looplab.serve import engine_proc
+
     app = make_app(tmp_path)
-    names = [getattr(handler, "__name__", "") for handler in app.router.on_shutdown]
-    assert names.index("_cancel_resume_timers") < names.index("_reap_on_shutdown")
+    resume_cancel = app.state.looplab.resume_cancel
+    seen = []
+    monkeypatch.setattr(engine_proc, "_reap_spawned_engines",
+                        lambda: seen.append(resume_cancel.is_set()))
+    with TestClient(app):
+        assert seen == [] and not resume_cancel.is_set()
+    assert seen == [True], "the reaper must run once, AFTER the resume timers were cancelled"
+    assert app.router.on_startup == [] == app.router.on_shutdown
 
 
 def test_server_startup_recovers_pending_resume_without_runs_poll(tmp_path, monkeypatch):
