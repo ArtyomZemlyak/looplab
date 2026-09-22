@@ -990,7 +990,9 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   the record columns are the enforced part. The durable
   rows now carry `reason_source` and `engine_reason` beside `reason`, so the record says who chose
   the word and never loses the deterministic answer. The **floors** stay underneath: an absolute ceiling of 50 repairs per node — 12 for a
-  crash the *rule* path cannot classify, because 50 is the ceiling under a judge that can say "I no
+  repairable failure the *rule* path cannot diagnose (a crash, and since 2026-09-22 also a failed
+  setup, a missing or uncorroborated metric and a failed artifact / check / input contract, which it
+  used to abandon at attempt 1), because 50 is the ceiling under a judge that can say "I no
   longer know how to fix this" and there is no judge on that branch — the eval-time
   budget, `systemic_failure_stop`, and the money ceiling. Both the budget and that history are read
   back off the **event log**, so `looplab resume` continues a node's repair chain instead of starting

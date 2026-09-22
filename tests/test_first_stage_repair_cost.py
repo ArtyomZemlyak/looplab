@@ -456,10 +456,17 @@ def test_there_is_ONE_crash_bound_and_the_text_no_longer_chooses_which():
     assert _rule_triage(UNCLASSIFIED_REASON, "", 1, 50)["action"] == "repair"
     assert _rule_triage(UNCLASSIFIED_REASON, "", blind + 1, 50)["action"] == "abandon"
 
-    # And nothing else moved: a non-crash reason still ends the node here exactly as before.
-    for reason in ("drift", "no_metric", "idea_rejected"):
+    # A reason OUTSIDE the repairable registry still ends the node here. `drift` and `no_metric`
+    # used to be listed beside `idea_rejected` as "nothing else moved" — true of F5, which touched
+    # only the crash branch — but they ARE in `REPAIRABLE_REASONS`, and since review 2026-09-22
+    # (ENG2-13) the no-judge path repairs them on this same blind bound rather than abandoning them
+    # at attempt 1 (`test_inline_repair_reason_coverage.py` holds the whole registry to that).
+    for reason in ("rules_violation", "idea_rejected"):
         out = _rule_triage(reason, "", 1, 50)
         assert out["action"] == "abandon" and "non-repairable" in out["rationale"]
+    for reason in ("drift", "no_metric"):
+        assert _rule_triage(reason, "", 1, 50)["action"] == "repair"
+        assert _rule_triage(reason, "", blind + 1, 50)["action"] == "abandon"
 
 
 # ----------------------------------------------- what ONE pipeline is licensed against (2026-08-15)

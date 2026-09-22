@@ -62,6 +62,9 @@ from pathlib import Path
 # `core/models.py` rather than here because `core/config.py` needs it for the `inline_repair_reasons`
 # default, and core may not import from `engine`.
 from looplab.core.models import FAILURE_REASONS  # noqa: F401
+# …and the subset an inline repair may be bought for, which the no-judge rule path below honours
+# member for member (review 2026-09-22, ENG2-13) rather than keeping a shorter list of its own.
+from looplab.core.models import REPAIRABLE_REASONS
 
 # Both fingerprinters shell out to `git rev-parse` and both run on setup AND on every resume, so
 # neither may block the run on a wedged mount. Short on purpose: a healthy repo answers in
@@ -501,7 +504,31 @@ _TRIAGE_REASK_LIMIT = 1
 # migrations above are all mechanical, and shortening them is how a node dies before it reaches its
 # research question. And it is a `min` with `max_attempts`, never a widening: an operator who spelled
 # a smaller cap keeps it.
+#
+# "The undiagnosed branch" is, since review 2026-09-22 (ENG2-13), every member of
+# `REPAIRABLE_REASONS` the rule path has no directive for — not `crash`/`unclassified` alone. The
+# other six (`setup`, `no_metric`, `drift`, `expect_failed`, `check_failed`, `needs_failed`) fell to
+# the catch-all `abandon` at attempt 1, i.e. a no-judge run ended a node on a one-line manifest fix
+# with ZERO repairs — `rubertlite-dr-unified-v5` node 0's outcome, which is the measured reason
+# `tests/test_inline_repair_reason_coverage.py` made them repairable by default at all. The rule path
+# can say no more about them than about a `crash`, so they share its bound.
 _RULE_BLIND_CRASH_ATTEMPTS = 12
+
+# The reasons the rule path CAN direct (its own rationale names what to change), repaired against
+# the caller's full cap; see `_rule_triage` for why each is a resource/health fact, not a mistaken
+# idea. Every OTHER member of `REPAIRABLE_REASONS` is repaired blind under the bound above.
+_RULE_DIRECTED_REASONS = ("timeout", "oom", "diverged", "stalled", "not_learning")
+
+# How a blindly-repaired reason is NAMED in a rule-path rationale: in words, never the slug.
+# `repair_verify.claimed_tokens` reads identifiers in a rationale as CLAIMS about the diff, so
+# `no_metric` in this text would be scored an `unmet` promise nobody made. `crash` and
+# `unclassified` read "crash", which keeps their rationale bytes exactly what they were.
+_RULE_BLIND_REASON_WORDS = {
+    "crash": "crash", "unclassified": "crash",
+    "setup": "setup failure", "no_metric": "missing metric", "drift": "uncorroborated metric",
+    "expect_failed": "artifact contract failure", "check_failed": "stage check failure",
+    "needs_failed": "input contract failure", "check_false_positive": "disputed stage check",
+}
 
 # --- The triage-verdict contract ---------------------------------------------------------------
 # WHETHER TO KEEP REPAIRING THIS NODE. The inline-repair loop consults the triage model once per
@@ -698,7 +725,7 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     # here arrive as `crash` and take the blind branch below. It stays because this is the ONE place
     # the rule path spells the memory-reduction directive, and a future router that does carry a
     # diagnosed reason here must find it rather than fall silently to "no judge wired".
-    if reason in ("timeout", "oom", "diverged", "stalled", "not_learning") and attempt <= max_attempts:
+    if reason in _RULE_DIRECTED_REASONS and attempt <= max_attempts:
         why = {"timeout": "timeout — reduce compute to fit the budget (rule-based)",
                "oom": "out of memory (kernel OOM-kill or a torch allocator raise) — reduce memory: "
                       "per-device batch, model size, sequence length or a subsample (rule-based)",
@@ -730,19 +757,32 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     # THE SINGLE BOUND, since `_MECHANICAL_MARKERS` was deleted: there is no longer a wider budget
     # for a crash whose text names a Python exception class. See that constant's obituary above for
     # why 12 still clears every legitimate chain in the corpus.
-    if reason in ("crash", UNCLASSIFIED_REASON):
+    #
+    # EVERY OTHER REPAIRABLE REASON takes this branch too (review 2026-09-22, ENG2-13): the rule path
+    # can no more diagnose a contract failure or a missing metric than a `crash`, and the catch-all
+    # `abandon` it used to reach threw away, at attempt 1, exactly the nodes the operator's
+    # `inline_repair_reasons` default says may buy a repair (`_RULE_BLIND_CRASH_ATTEMPTS` has the
+    # account). A reason OUTSIDE the registry — `rules_violation`, anything unknown — still ends here
+    # below, and an operator who narrowed the setting is never asked about: the engine's gate
+    # settles those nodes before any triage is consulted.
+    if reason in REPAIRABLE_REASONS and reason not in _RULE_DIRECTED_REASONS:
         blind_cap = min(int(max_attempts), _RULE_BLIND_CRASH_ATTEMPTS)
+        words = _RULE_BLIND_REASON_WORDS.get(reason, "failure")
         if attempt <= blind_cap:
             return {"action": "repair",
-                    "rationale": "crash with attempts remaining and no judge wired (rule-based)",
+                    "rationale": f"{words} with attempts remaining and no judge wired (rule-based)",
                     DIAGNOSIS_UNAVAILABLE_KEY: True}
         # Named separately from the catch-all below: an operator reading this terminal must be able
         # to tell "your cap ran out" from "nothing here could say what to change next", because the
         # remedies are different (raise the cap vs wire a triage model).
+        # A `crash` keeps its sentence byte for byte; the kinds the engine DID name (a contract, a
+        # missing metric) are ones this path cannot diagnose, which is the true half of "classify".
+        article = "an" if words[:1] in ("a", "e", "i", "o", "u") else "a"
+        verb = "classify" if words == "crash" else "diagnose"
         return {"action": "abandon",
-                "rationale": (f"a crash this rule path cannot classify has had its {blind_cap} blind "
-                              f"repair attempt(s) and no triage model is wired to decide what to "
-                              f"change next (rule-based)"),
+                "rationale": (f"{article} {words} this rule path cannot {verb} has had its "
+                              f"{blind_cap} blind repair attempt(s) and no triage model is wired to "
+                              f"decide what to change next (rule-based)"),
                 DIAGNOSIS_UNAVAILABLE_KEY: True}
     return {"action": "abandon",
             "rationale": "non-repairable failure or attempts exhausted (rule-based)",

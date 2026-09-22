@@ -295,9 +295,15 @@ def test_the_rule_path_is_only_for_no_judge_wired():
     assert _rule_triage("crash", "ImportError: x", 7, 6)["action"] == "abandon"   # cap respected
     assert _rule_triage("crash", "RuntimeError: shapes", 1, 6)["action"] == "repair"
     assert _rule_triage("crash", "RuntimeError: shapes", 7, 6)["action"] == "abandon"
-    # …and only a CRASH. The reason set is unchanged, so nothing else acquired a repair here.
-    assert _rule_triage("drift", "", 1, 6)["action"] == "abandon"
-    assert _rule_triage("no_metric", "", 1, 6)["action"] == "abandon"
+    # …and, since review 2026-09-22 (ENG2-13), every other REPAIRABLE reason on the same blind
+    # bound: `drift`/`no_metric` were pinned to `abandon` here as "the reason set is unchanged" by
+    # F5, which is how a no-judge run kept ending a node at attempt 1 on a failure the operator's
+    # own `inline_repair_reasons` default calls repairable. Still never `reject_idea`, the cap still
+    # binds, and a reason outside the registry still ends the node.
+    for reason in ("drift", "no_metric"):
+        assert _rule_triage(reason, "", 1, 6)["action"] == "repair"
+        assert _rule_triage(reason, "", 7, 6)["action"] == "abandon"   # cap respected
+    assert _rule_triage("rules_violation", "", 1, 6)["action"] == "abandon"
     assert all(_rule_triage(r, e, a, 6)["action"] != "reject_idea"
                for r in ("crash", "timeout", "oom", "drift") for e in ("", "boom") for a in (1, 9))
 

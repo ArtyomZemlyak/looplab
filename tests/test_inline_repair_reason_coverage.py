@@ -22,8 +22,10 @@ from __future__ import annotations
 import inspect
 import re
 
+import pytest
+
 from looplab.core.config import Settings
-from looplab.core.models import FAILURE_REASONS, NON_REPAIRABLE_REASONS
+from looplab.core.models import FAILURE_REASONS, NON_REPAIRABLE_REASONS, REPAIRABLE_REASONS
 from looplab.engine import triage
 from looplab.engine.train_monitor import MONITOR_REPAIR_REASON
 from looplab.engine.options import EngineOptions
@@ -98,6 +100,47 @@ def test_the_shipped_default_repairs_every_one_of_them():
                                                      - set(NON_REPAIRABLE_REASONS))
     assert "no_metric" in Settings().inline_repair_reasons, (
         "the reason that killed v5 node 0 after 76 minutes of successful training")
+
+
+@pytest.mark.parametrize("reason", REPAIRABLE_REASONS)
+def test_the_no_judge_rule_path_repairs_every_repairable_reason(reason):
+    """Review 2026-09-22, ENG2-13. The default that makes every one of these repairable is only half
+    of this file's criterion; the other half is what DECIDES when no triage model is wired
+    (`unified_agent` off), and `triage.py::_rule_triage` abandoned six members of this registry —
+    `setup`, `no_metric`, `drift`, `expect_failed`, `check_failed`, `needs_failed` — at attempt 1.
+    That is v5 node 0's exact outcome (ZERO repair attempts on a one-line path fix) reproduced on
+    every no-judge run, against an operator setting that says those reasons may buy a repair.
+
+    Each reason is repaired at attempt 1; the ones the rule path has no directive for are repaired
+    BLIND, under the same `min(max_attempts, _RULE_BLIND_CRASH_ATTEMPTS)` bound as a `crash`, and
+    stop past it. The rationale names the kind in WORDS: `repair_verify.claimed_tokens` reads a
+    rationale's identifiers as claims about the diff, so a slug like `no_metric` in it would be
+    scored an `unmet` promise nobody made."""
+    from looplab.engine.repair_verify import claimed_tokens
+
+    first = triage._rule_triage(reason, "", 1, 50)
+    assert first["action"] == "repair", (reason, first)
+    assert first.get(triage.DIAGNOSIS_UNAVAILABLE_KEY) is True
+    if reason in triage._RULE_DIRECTED_REASONS:
+        # a directive the rule path CAN give keeps its own words and the caller's own cap, exactly
+        # as before (its text predates this change and is not re-worded by it)
+        assert triage._rule_triage(reason, "", 13, 50)["action"] == "repair"
+        assert triage._rule_triage(reason, "", 51, 50)["action"] == "abandon"
+        return
+    assert claimed_tokens(first["rationale"]) == (), first["rationale"]
+    blind = triage._RULE_BLIND_CRASH_ATTEMPTS
+    assert triage._rule_triage(reason, "", blind, 50)["action"] == "repair"
+    stopped = triage._rule_triage(reason, "", blind + 1, 50)
+    assert stopped["action"] == "abandon" and f"{blind} blind" in stopped["rationale"]
+    assert claimed_tokens(stopped["rationale"]) == (), stopped["rationale"]
+    # never a WIDENING: an operator's smaller cap still binds
+    assert triage._rule_triage(reason, "", 3, 2)["action"] == "abandon"
+
+
+def test_only_a_reason_outside_the_registry_is_abandoned_outright_on_the_rule_path():
+    for reason in (*NON_REPAIRABLE_REASONS, "idea_rejected", ""):
+        out = triage._rule_triage(reason, "", 1, 50)
+        assert out["action"] == "abandon" and "non-repairable" in out["rationale"], (reason, out)
 
 
 def test_the_engine_options_default_cannot_drift_from_the_settings_default():
