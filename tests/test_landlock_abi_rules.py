@@ -194,3 +194,93 @@ def test_the_no_mutation_rung_refuses_a_native_truncate(tmp_path):
     assert "rung applied" in out.stdout, (out.stdout, out.stderr)
     assert "truncate -1 13" in out.stdout, out.stdout
     assert victim.stat().st_size == 4096
+
+
+# ================================================================================================
+# A FILE mount is a rule on that file (review 2026-09-22, RTA-08)
+#
+# `landlock_add_rule(PATH_BENEATH)` on a non-directory is EINVAL whenever `allowed_access` carries a
+# directory-only right, and every grant here carried `FS_READ_DIR`. So a task declaring ONE file as
+# a `data:` mount — `labels.csv` rather than the folder it sits in — could not run under
+# `landlock=enforce` at all: the launcher `_die`d with 126 before the eval's first byte, while
+# `build_ruleset` (what `looplab landlock-check` runs) merely listed the mount as SKIPPED. The two
+# spellings of one ruleset disagreed about whether the eval could run.
+#
+# The fix is the kernel's own answer — a rule on a file carries the file-applicable rights — and NOT
+# a widening to the containing directory, which would grant the file's siblings (the answer key next
+# to the labels) and, for a file inside the editable source tree, part or all of that tree: the one
+# place this allow-list exists to leave out.
+
+
+@pytest.mark.parametrize("abi", [1, 2, 3, 7])
+@pytest.mark.parametrize("mode", ["read", "readwrite"])
+def test_a_file_rule_carries_only_the_rights_a_file_can_hold(mode, abi):
+    file_bits = (landlock.FS_EXECUTE | landlock.FS_WRITE_FILE | landlock.FS_READ_FILE
+                 | landlock.FS_TRUNCATE)
+    on_file = landlock.rule_access(mode, is_dir=False, abi=abi)
+    on_dir = landlock.rule_access(mode, is_dir=True, abi=abi)
+    assert on_file & ~file_bits == 0                    # nothing the kernel would EINVAL
+    assert on_file & landlock.FS_READ_FILE              # ...and the read the mount exists for
+    assert on_file == on_dir & file_bits                # the SAME grant, cut to what a file holds
+    assert bool(on_file & landlock.FS_WRITE_FILE) is (mode == "readwrite")
+    with pytest.raises(ValueError):
+        landlock.rule_access("rw", is_dir=False, abi=abi)
+
+
+def test_a_file_mount_is_granted_as_itself_never_as_its_directory(tmp_path):
+    """The derivation keeps the declared FILE; widening to its directory is the refused alternative."""
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "labels.csv").write_text("y\n1\n", encoding="utf-8")
+    (data / "answers.csv").write_text("y\n0\n", encoding="utf-8")
+    spec = {"data": {"labels": {"path": str(data / "labels.csv")}}}
+    allow = dict(read_allowlist.derive(workdir=str(tmp_path / "wd"), repo_spec=spec))
+    assert allow[os.path.realpath(str(data / "labels.csv"))] == "read"
+    assert os.path.realpath(str(data)) not in allow
+
+
+def _file_mount_case(tmp_path):
+    base = tmp_path / "case"
+    wd = base / "run" / "nodes" / "node_0"
+    wd.mkdir(parents=True)
+    data = base / "data"
+    data.mkdir()
+    labels = data / "labels.csv"
+    labels.write_text("y\n1\n", encoding="utf-8")
+    (data / "answers.csv").write_text("the answer key\n", encoding="utf-8")
+    spec = {"data": {"labels": {"path": str(labels)}}}
+    keep = (os.path.realpath(str(wd)), os.path.realpath(str(base / "run")),
+            os.path.realpath(str(labels)))
+    allow = [(p, m) for p, m in read_allowlist.derive(workdir=str(wd), run_dir=str(base / "run"),
+                                                     repo_spec=spec)
+             if p in keep or not _contains(p, str(tmp_path))]
+    return wd, labels, data / "answers.csv", allow
+
+
+@pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
+def test_an_eval_with_a_file_mount_runs_reads_it_and_nothing_beside_it(tmp_path):
+    """The reviewer's `repro_ll_file.py`, as a guard: rc 126 before, and now the eval runs."""
+    wd, labels, sibling, allow = _file_mount_case(tmp_path)
+    prog = ("import sys\n"
+            "print('labels', open(sys.argv[1]).read().split()[-1])\n"
+            "try:\n"
+            "    open(sys.argv[2]).read(); print('sibling READ')\n"
+            "except OSError as e:\n"
+            "    print('sibling', e.errno)\n")
+    (wd / "p.py").write_text(prog, encoding="utf-8")
+    argv = landlock.launch_argv(sys.executable, landlock.format_env(allow),
+                                [sys.executable, "p.py", str(labels), str(sibling)])
+    out = subprocess.run(argv, capture_output=True, text=True, cwd=str(wd), timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert "labels 1" in out.stdout, out.stdout
+    assert "sibling 13" in out.stdout, out.stdout             # the directory was NOT granted
+
+
+@pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
+def test_the_check_command_and_the_launch_agree_about_a_file_mount(tmp_path):
+    """`build_ruleset` is `landlock-check`'s verdict; the launch above is the eval's. One answer."""
+    _wd, labels, _sibling, allow = _file_mount_case(tmp_path)
+    fd, added, skipped = landlock.build_ruleset(allow)
+    os.close(fd)
+    assert skipped == [], skipped
+    assert (os.path.realpath(str(labels)), "read") in added

@@ -1110,6 +1110,22 @@ def test_landlock_check_verifies_the_operators_own_declared_mounts(tmp_path):
 
 
 @pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
+def test_landlock_check_passes_a_single_file_mount_the_launch_can_run(tmp_path):
+    """Review 2026-09-22, RTA-08: a `data:` mount that is ONE FILE printed `SKIPPED ... would be
+    DENIED` and exited 1 here, while the real `enforce` launch died 126 on the same rule — the gate
+    and the thing it gates disagreed. Both now grant the file as itself
+    (`tests/test_landlock_abi_rules.py` drives the launch)."""
+    labels = tmp_path / "labels.csv"
+    labels.write_text("y\n1\n", encoding="utf-8")
+    run_dir = _snapshot_run(tmp_path, "run", _repo_task(
+        tmp_path, data={"labels": {"path": str(labels), "mount": True}}))
+    result = _landlock_check(run_dir)
+    assert result.exit_code == 0, result.output
+    assert "skipped: 0" in result.output
+    assert f"read      {os.path.realpath(labels)}" in result.output.split("allow-list (", 1)[1]
+
+
+@pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
 def test_landlock_check_survives_the_shipped_string_repo_shape(tmp_path):
     """`repo` is a PATH. Handing it to `mount_sources` raised `AttributeError: 'str' object has no
     attribute 'get'` — the shape `examples/repo_composable_task.json` ships and one preserved run

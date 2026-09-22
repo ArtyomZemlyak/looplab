@@ -89,6 +89,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import stat
 import sys
 from typing import Iterable, Optional
 
@@ -134,6 +135,19 @@ _WRITE = (_READ | FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR 
 # union above, so `handled \ granted` is what a rule refuses and nothing else is policed. These three
 # are the ABI-1 BASE; what a launch actually hands the kernel is `allowlist_masks(abi)`.
 _HANDLED = _WRITE
+
+# The rights a rule on a FILE may carry — the kernel's own `ACCESS_FILE` set (`landlock_add_rule`
+# answers EINVAL for a PATH_BENEATH rule on a non-directory carrying anything else). Every grant above
+# carries `FS_READ_DIR`, so until review 2026-09-22 (RTA-08) a task whose `data:` mount was ONE FILE
+# could not run under `landlock=enforce` at all: the launcher `_die`d (126) on the rule, while
+# `build_ruleset` — `looplab landlock-check` — merely listed it SKIPPED, so the check and the launch
+# disagreed. `rule_access` cuts a file's grant to this set, in both spellings. The file itself is
+# granted, never its directory: widening to the parent would grant its siblings (an answer key beside
+# the labels) and, for a file inside the editable source tree, part or all of that tree — the one
+# place `read_allowlist` exists to leave out. A `readwrite` (`edit: true`) FILE mount therefore
+# permits in-place writes to that file and nothing in its directory: a writer that replaces it by
+# rename needs MAKE/REMOVE on the parent, which is not granted — stated, not papered over.
+_FILE_ACCESS = FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE | FS_TRUNCATE
 
 # THE SECOND RULESET SHAPE, and it is the INVERSE of the allow-list above: handle only the bits that
 # CHANGE the filesystem, and grant NOTHING. `handled \ granted` is then the whole mutation set over
@@ -312,6 +326,23 @@ def _grant(mode: str, abi: Optional[int] = None) -> int:
     return read if mode == "read" else write
 
 
+def rule_access(mode: str, *, is_dir: bool, abi: Optional[int]) -> int:
+    """What ONE allow-list rule grants: `mode`'s mask on a kernel of ABI `abi`, cut to the rights a
+    file can hold (`_FILE_ACCESS`) when the path is not a directory. The same rule `_LAUNCHER`
+    applies in the child, so `build_ruleset` and the eval's launch cannot disagree about a file."""
+    access = _grant(mode, abi)
+    return access if is_dir else access & _FILE_ACCESS
+
+
+def _is_dir_fd(fd: int) -> bool:
+    """Whether an `O_PATH` descriptor names a directory. An fstat that fails answers True — the
+    directory grant — so the kernel, not a guess, decides: a file would then be REPORTED skipped."""
+    try:
+        return stat.S_ISDIR(os.fstat(fd).st_mode)
+    except OSError:
+        return True
+
+
 def build_ruleset(allow) -> tuple:
     """`(ruleset_fd, added, skipped)` for `allow` = an iterable of `(path, mode)`.
 
@@ -340,13 +371,15 @@ def build_ruleset(allow) -> tuple:
     added, skipped = [], []
     try:
         for path, mode in allow:
-            access = _grant(mode, abi)
+            _grant(mode, abi)                   # an unknown mode refuses before anything is opened
             try:
                 pfd = os.open(str(path), os.O_PATH | os.O_CLOEXEC)   # type: ignore[attr-defined]
             except OSError as exc:
                 skipped.append((str(path), exc.strerror or str(exc)))
                 continue
             try:
+                # A FILE is granted as that file, with the rights a file can hold (`rule_access`).
+                access = rule_access(mode, is_dir=_is_dir_fd(pfd), abi=abi)
                 rule = _PathBeneathAttr(allowed_access=access, parent_fd=pfd)
                 ctypes.set_errno(0)
                 rc = lib.syscall(ctypes.c_long(_SYS_LANDLOCK_ADD_RULE), ctypes.c_int(fd),
@@ -447,10 +480,10 @@ def format_env(allow: Iterable) -> str:
 # would mean an operator who set `landlock="enforce"` silently gets no boundary, which is worse than
 # a failed launch they can see: the whole content of this rung is a guarantee about what was NOT
 # readable while the number was produced.
-_LAUNCHER = """import ctypes, os, sys
+_LAUNCHER = """import ctypes, os, stat, sys
 _UNIT, _RECORD = %(unit)r, %(record)r
 _CREATE, _ADD, _RESTRICT = %(create)d, %(add)d, %(restrict)d
-_READ, _WRITE, _HANDLED = %(read)d, %(write)d, %(handled)d
+_READ, _WRITE, _HANDLED, _FILE = %(read)d, %(write)d, %(handled)d, %(file)d
 _a = sys.argv[1:]
 _spec, _argv = _a[0], _a[2:]
 
@@ -487,7 +520,14 @@ for _item in _spec.split(_RECORD):
     except OSError as exc:
         _die("cannot allow-list %%s: %%s (refusing to enforce a ruleset that would deny a path it "
              "was asked to allow)" %% (_path, exc))
-    _r = _Rule(allowed_access=(_WRITE if _mode == "readwrite" else _READ), parent_fd=_pfd)
+    _acc = _WRITE if _mode == "readwrite" else _READ
+    try:
+        _is_dir = stat.S_ISDIR(os.fstat(_pfd).st_mode)
+    except OSError:
+        _is_dir = True
+    if not _is_dir:
+        _acc &= _FILE        # a FILE mount: the rights a file can hold (landlock.py::rule_access)
+    _r = _Rule(allowed_access=_acc, parent_fd=_pfd)
     ctypes.set_errno(0)
     if _lib.syscall(ctypes.c_long(_ADD), ctypes.c_int(_fd), ctypes.c_uint32(1),
                     ctypes.byref(_r), ctypes.c_uint32(0)) != 0:
@@ -738,7 +778,7 @@ def launcher_source(abi=_THIS_KERNEL) -> str:
     read, write, handled = allowlist_masks(_resolve_abi(abi))
     return _LAUNCHER % {"unit": _UNIT, "record": _RECORD, "create": _SYS_LANDLOCK_CREATE_RULESET,
                         "add": _SYS_LANDLOCK_ADD_RULE, "restrict": _SYS_LANDLOCK_RESTRICT_SELF,
-                        "read": read, "write": write, "handled": handled}
+                        "read": read, "write": write, "handled": handled, "file": _FILE_ACCESS}
 
 
 def launch_argv(python: str, spec: str, argv: list) -> list:
