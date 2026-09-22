@@ -38,6 +38,8 @@ import re
 import statistics
 from typing import Optional
 
+from looplab.core.run_identity import run_ref
+
 # THE REGIMES, in the order a reader should think about them: what the node COMPILED, if anything.
 #
 # `compiled` is an AOT extension — a Cython/C/C++/Rust source the node shipped, or the build recipe
@@ -154,6 +156,39 @@ def run_contrast(state) -> Optional[dict]:
             "nodes": sum(len(v) for v in by.values()), **stamp}
 
 
+def latest_row_per_run(rows) -> list:
+    """The ledger's well-formed rows with ONE per run — the LATEST — at the run's first position.
+
+    WHY (review 2026-09-22, ENG3-03). `lessons_distill.py` APPENDS a row at every finalize, and a
+    reopened run (`budget_extend` / `add_nodes`) finalizes again over its WHOLE node set, so its
+    first segment was counted once per finalize: `runs` over-counted and a twice-finalized run's
+    medians spoke twice in `median_of_medians`. The writer stays append-only (a ledger is history);
+    the reader keeps the newest line per run, which also heals every ledger already written.
+
+    THE KEY is `core/run_identity.py::run_ref` (the incarnation uid, else `legacy:<name>`) beside the
+    row's `task_id` and `seeded_from`. The last two are not decoration: `benchmarks/regime_table.py
+    --seed-ledger` stamps the PROBE directory as `run_id` on every archived run under that probe, so
+    the name alone would merge distinct archived runs; `seeded_from` is the one source log a seeded
+    row came from, and re-seeding the same archive still collapses onto it. A row that names no run
+    and no source is kept as it is — there is nothing to match it against.
+    """
+    keyed: dict[tuple, dict] = {}
+    order: list = []
+    for row in rows or ():
+        if not isinstance(row, dict) or not isinstance(row.get("regimes"), dict):
+            continue
+        seeded = row.get("seeded_from")
+        key = (run_ref(row), str(row.get("task_id") or ""),
+               seeded if isinstance(seeded, str) else "")
+        if not key[0] and not key[2]:
+            order.append((None, row))
+            continue
+        if key not in keyed:
+            order.append((key, None))
+        keyed[key] = row                  # append-only ledger: a later line is a later finalize
+    return [row if key is None else keyed[key] for key, row in order]
+
+
 def known_regimes(rows: list, task_id: str) -> dict:
     """Fold the shared ledger into what is KNOWN about `task_id`, and what is known elsewhere.
 
@@ -170,16 +205,15 @@ def known_regimes(rows: list, task_id: str) -> dict:
     Rows are ledger lines (`regime_contrast.jsonl`), so they are data from earlier runs and may be
     anything; every access is defensive and a malformed row is skipped rather than failing a read
     that is only ever advisory.
+
+    ONE ROW PER RUN, THE LATEST (review 2026-09-22, ENG3-03): see `latest_row_per_run`. The finalize
+    appends a row every time a run is finalized, so a reopened run spoke twice for its first segment.
     """
     here: dict[str, list] = {}
     other: dict[str, list] = {}
     elsewhere: list = []
-    for row in rows or ():
-        if not isinstance(row, dict):
-            continue
+    for row in latest_row_per_run(rows):
         regimes = row.get("regimes")
-        if not isinstance(regimes, dict):
-            continue
         if row.get("task_id") == task_id:
             for regime, stats in regimes.items():
                 if regime in REGIMES and isinstance(stats, dict):

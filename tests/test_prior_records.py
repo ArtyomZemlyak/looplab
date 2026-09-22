@@ -189,6 +189,69 @@ def test_the_engine_records_the_prior_it_injected_and_folds_utility_back(tmp_pat
     assert receipt["rows"] and text == again.lessons._render_role_prior(ctx, "researcher")
 
 
+def test_a_refinalized_run_counts_once_in_the_utility_it_hands_the_next_run(tmp_path):
+    """Review 2026-09-22, ENG3-03. The finalize APPENDS one `lesson_utility.jsonl` row per lesson,
+    computed over the run's WHOLE log, so a reopened run's second finalize re-states its first
+    segment — and the reader summed every row, doubling that run's `shown` for a lesson the second
+    segment never showed again (driven: 2 -> 4). The reader now keeps the LATEST row per
+    (run, lesson); the writer stays append-only. MUTATION: sum every row again -> `shown` doubles."""
+    from looplab.core.models import Idea, Node, NodeStatus
+    from looplab.events.replay import fold
+
+    mem = _memory_dir(tmp_path)
+    eng = make_engine(tmp_path / "run", n_seeds=1, max_nodes=2, reflection_priors=True,
+                      memory_dir=str(mem))
+    state = anyio.run(eng.run)
+    lid = lesson_id(STATEMENT)
+
+    def _read_back():
+        again = make_engine(tmp_path / "reader", n_seeds=1, max_nodes=1, reflection_priors=True,
+                            memory_dir=str(mem))
+        parsed = {lesson_id(o): o for _, o in again.lessons._scan_prior_context(None, None)[1]}
+        return parsed[lid]["utility"]
+
+    once = _read_back()
+    assert once["shown"] >= 1
+
+    # The SECOND finalize of a reopened run: a new finish and one more node (a new coverage digest,
+    # so the reflection is not skipped), over the same log and therefore the same citations.
+    reopened = fold(eng.store.read_all())
+    nid = max(reopened.nodes) + 1
+    reopened.nodes[nid] = Node(id=nid, operator="improve", parent_ids=[],
+                               idea=Idea(operator="improve", params={"x": 9.0}), metric=99.0,
+                               status=NodeStatus.evaluated)
+    reopened.last_finish_seq = state.last_finish_seq + 1000
+    eng.lessons.write_reflection_note(reopened)
+    ledger = [orjson.loads(line) for line in (mem / "lesson_utility.jsonl").read_bytes().splitlines()]
+    assert sum(1 for r in ledger if r["lesson_id"] == lid) == 2, (
+        "the fixture must re-finalize: the writer stays append-only, the READER de-duplicates")
+
+    assert _read_back() == once, "a re-finalized run spoke twice for its first segment"
+
+
+def test_the_utility_reader_keeps_the_latest_row_per_run_and_lesson(tmp_path):
+    """The rule, on a hand-written ledger: one row per (`run_ref`, lesson) — the LAST line — summed
+    across runs; a row naming no run cannot be matched to its own earlier row and still counts."""
+    mem = _memory_dir(tmp_path)
+    lid = lesson_id(STATEMENT)
+    rows = [
+        {"lesson_id": lid, "run_id": "a", "run_uid": "U-A", "shown": 2, "cited": 0},
+        {"lesson_id": lid, "run_id": "a", "run_uid": "U-A", "shown": 3, "cited": 1},  # re-finalize
+        {"lesson_id": lid, "run_id": "a", "run_uid": "U-A2", "shown": 5, "cited": 0},  # same NAME
+        {"lesson_id": lid, "run_id": "legacy", "shown": 1, "cited": 1},
+        {"lesson_id": lid, "run_id": "legacy", "shown": 4, "cited": 1},               # re-finalize
+        {"lesson_id": lid, "shown": 7, "cited": 0},                                   # no run named
+        {"lesson_id": lid, "run_id": "a", "run_uid": "U-A", "shown": "x", "cited": 9},  # malformed
+    ]
+    (mem / "lesson_utility.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    reader = make_engine(tmp_path / "reader", n_seeds=1, max_nodes=1, reflection_priors=True,
+                         memory_dir=str(mem))
+    parsed = {lesson_id(o): o for _, o in reader.lessons._scan_prior_context(None, None)[1]}
+    # U-A's latest VALID row (3/1) + U-A2 (5/0) + legacy:legacy's latest (4/1) + the unnamed (7/0).
+    assert parsed[lid]["utility"] == {"shown": 3 + 5 + 4 + 7, "cited": 1 + 0 + 1 + 0}
+
+
 def test_the_engine_sink_redacts_nested_statements(tmp_path):
     eng = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1)
     secret = "sk-" + "a" * 40

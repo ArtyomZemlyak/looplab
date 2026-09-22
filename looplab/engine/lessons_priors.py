@@ -268,21 +268,39 @@ class LessonPriorsMixin:
         # as `utility` = {shown, cited} for `lesson_rank_key` / `filter_useless`; the store rows
         # themselves are never rewritten. Best-effort: an unreadable ledger is no utility, not a
         # failed prior.
+        from looplab.core.run_identity import run_ref
         from looplab.engine.memory import lesson_id
         totals: dict[str, dict] = {}
         try:
             utility_rows, _u_health = read_memory_jsonl_window(base / "lesson_utility.jsonl")
         except OSError:
             utility_rows = []
+        # ONE ROW PER (RUN, LESSON): the LATEST (review 2026-09-22, ENG3-03). The writer appends at
+        # every finalize a row computed over the run's WHOLE event log, so a reopened run's second
+        # finalize re-states its first segment — and summing every row counted that segment twice
+        # (driven: `shown` 2 -> 4 for one lesson after a re-finalize that showed it nothing new).
+        # The last row per `run_ref` is that run's cumulative answer, so keeping it heals existing
+        # ledgers too. The ledger is append-only, so file order is age: a later line wins. A row
+        # naming no run at all (`run_ref` == "") cannot be matched to its own earlier row and is
+        # summed as before rather than folded into an anonymous bucket.
+        latest: dict[tuple[str, str], tuple[int, int]] = {}
+        unattributed: list[tuple[str, int, int]] = []
         for _index, u in utility_rows:
             if not isinstance(u, dict) or not isinstance(u.get("lesson_id"), str):
                 continue
-            slot = totals.setdefault(u["lesson_id"], {"shown": 0, "cited": 0})
             try:
-                slot["shown"] += max(0, int(u.get("shown") or 0))
-                slot["cited"] += max(0, int(u.get("cited") or 0))
+                counts = (max(0, int(u.get("shown") or 0)), max(0, int(u.get("cited") or 0)))
             except (TypeError, ValueError):
                 continue
+            ref = run_ref(u)
+            if ref:
+                latest[(ref, u["lesson_id"])] = counts
+            else:
+                unattributed.append((u["lesson_id"], *counts))
+        for lid, shown, cited in [*((lid, *c) for (_ref, lid), c in latest.items()), *unattributed]:
+            slot = totals.setdefault(lid, {"shown": 0, "cited": 0})
+            slot["shown"] += shown
+            slot["cited"] += cited
         if totals:
             for _idx, o in parsed:
                 hit = totals.get(lesson_id(o))

@@ -164,6 +164,40 @@ def test_a_run_with_forty_nodes_does_not_outvote_one_with_two():
     assert got["here"][REGIME_COMPILED]["nodes"] == 44
 
 
+def test_a_refinalized_run_is_ONE_run_in_the_ledger_read():
+    """Review 2026-09-22, ENG3-03. The finalize APPENDS a row every time a run is finalized, and a
+    reopened run finalizes again over its whole node set, so the reader counted its first segment
+    once per finalize — `runs` and `nodes` inflated and its medians voted twice. The reader keeps
+    the LATEST row per run (`run_ref`); the ledger itself stays append-only history. MUTATION: fold
+    every row again -> `runs` reads 3 and `nodes` 10."""
+    first = _row("t", {REGIME_COMPILED: {"n": 2, "median": 100.0}}, run_id="r", run_uid="U1")
+    again = _row("t", {REGIME_COMPILED: {"n": 5, "median": 160.0}}, run_id="r", run_uid="U1")
+    other = _row("t", {REGIME_COMPILED: {"n": 3, "median": 40.0}}, run_id="r", run_uid="U2")
+    got = known_regimes([first, again, other], "t")
+    assert got["here"][REGIME_COMPILED] == {"runs": 2, "median_of_medians": 100.0, "nodes": 8}
+    # ...and the same rule on the other-task clause: one run is one run there too.
+    elsewhere = known_regimes(
+        [_row("o", {REGIME_COMPILED: {"n": 1, "median": 9.0}, REGIME_PLAIN: {"n": 1, "median": 3.0}},
+              run_uid="U9", nodes=2),
+         _row("o", {REGIME_COMPILED: {"n": 2, "median": 9.0}, REGIME_PLAIN: {"n": 2, "median": 3.0}},
+              run_uid="U9", nodes=4)], "t")["elsewhere"]
+    assert [(e["runs"], e["nodes"]) for e in elsewhere] == [(1, 4)]
+
+
+def test_seeded_rows_are_one_run_per_SOURCE_LOG_not_per_probe_name():
+    """`benchmarks/regime_table.py --seed-ledger` stamps the PROBE directory as `run_id` on every
+    archived run under that probe, so keying on the name alone would merge distinct runs;
+    `seeded_from` is the one log a seeded row came from, and re-seeding the same archive collapses
+    onto it. A row that names no run at all is kept as it is — nothing to match it against."""
+    a = _row("t", {REGIME_COMPILED: {"n": 1, "median": 100.0}}, run_id="probe1",
+             seeded_from="/a/model-probes/probe1/runs/x/run/events.jsonl")
+    b = _row("t", {REGIME_COMPILED: {"n": 1, "median": 200.0}}, run_id="probe1",
+             seeded_from="/a/model-probes/probe1/runs/y/run/events.jsonl")
+    anonymous = _row("t", {REGIME_COMPILED: {"n": 1, "median": 300.0}})
+    got = known_regimes([a, b, dict(a), anonymous, dict(anonymous)], "t")
+    assert got["here"][REGIME_COMPILED]["runs"] == 4, got["here"]
+
+
 def test_a_malformed_ledger_row_is_skipped_not_fatal():
     """Rows are data written by earlier runs; a reader that dies on one of them takes a run with
     it, and this read is only ever advisory."""

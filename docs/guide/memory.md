@@ -635,7 +635,9 @@ number. Doc 52 row 17 adds two diagnostic records, one ledger and one instrument
 - **The ledger** — at finalize the run appends its own report to `<memory_dir>/lesson_utility.jsonl`,
   one row per lesson its prior showed (`{lesson_id, run_id, run_uid, shown, cited, ts}`), receipted
   as `prior_citations` on the `reflection_note`. The next run's prior scan sums the ledger onto
-  each lesson as `utility` = `{shown, cited}`; `lesson_rank_key` ranks by the Laplace-smoothed
+  each lesson as `utility` = `{shown, cited}`, counting only the LATEST row per (run, lesson) —
+  a reopened run's second finalize appends a row computed over its whole log, and summing both
+  counted its first segment twice; `lesson_rank_key` ranks by the Laplace-smoothed
   citation rate `(cited + 1) / (shown + 2)` after similarity and corroboration (neutral 0.5 when a
   lesson has never been shown, so an old store is unmoved), and **forgetting by uselessness** —
   `filter_useless` — stops serving a lesson shown to 8 proposals that none of them cited. The
