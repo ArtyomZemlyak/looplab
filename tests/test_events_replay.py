@@ -3564,10 +3564,10 @@ def test_replay_no_longer_hand_rolls_the_bounded_int_shape():
     """A NEGATIVE pin, which stays a substring on purpose: what must not come back is the TEXT.
 
     Both retired spellings are checked, because the drift EV-04 named was that this module used two
-    of them for one concept."""
-    from pathlib import Path
+    of them for one concept. Over EVERY fold module (review 2026-09-22, EVT-12): a handler family
+    split out of `replay.py` must not be where the old shape quietly comes back."""
+    from _source_scan import fold_source
 
-    source = (Path(__file__).resolve().parents[1] / "looplab" / "events"
-              / "replay.py").read_text(encoding="utf-8-sig")
+    source = fold_source()
     assert "is int and 0 <=" not in source
     assert "is not int or not 0 <=" not in source

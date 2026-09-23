@@ -144,6 +144,7 @@ def test_the_writer_and_the_fold_agree_on_the_payload_keys():
     reader keyed on a field nothing writes is the dead branch `RunTools._research_memo` carried for
     six weeks — and this is the same join, one module over."""
     import ast
+    import inspect
     import looplab.maintenance.backfill_score_metrics as writer
     from looplab.events import replay
 
@@ -152,8 +153,8 @@ def test_the_writer_and_the_fold_agree_on_the_payload_keys():
                if isinstance(node, ast.Constant) and isinstance(node.value, str)}
     assert {"precision_decimals", "read_at", "extra_metrics"} <= written
 
-    handler = Path(replay.__file__).read_text(encoding="utf-8")
-    start = handler.index("def _on_score_metrics_backfilled")
-    body = handler[start:handler.index("def _on_applied_params_backfilled")]
+    # The handler's OWN source, wherever its family lives (review 2026-09-22, EVT-12) — not a slice
+    # of `replay.py` between it and whichever definition happened to follow it in that file.
+    body = inspect.getsource(replay._on_score_metrics_backfilled)
     for key in ("precision_decimals", "read_at", "extra_metrics"):
         assert f'"{key}"' in body, f"the fold never reads {key}, which the writer records"

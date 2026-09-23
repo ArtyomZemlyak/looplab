@@ -33,7 +33,7 @@ from looplab.events.replay import fold
 from looplab.events.stop_account import (STOP_DISPOSITIONS, last_record_line,
                                          stop_account)
 
-REPLAY_SRC = Path(__file__).resolve().parents[1] / "looplab" / "events" / "replay.py"
+from _source_scan import fold_trees
 
 # `runs-B/discrete_log` seq 317-318, byte for byte. The pause that cost hours to investigate.
 DEVELOPER_CRASH_PAUSE = ("auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
@@ -138,10 +138,13 @@ def test_pause_reason_is_cleared_wherever_the_pause_is_lifted():
     text pin here is a comment (CLAUDE.md's guard-test ladder, tier 3). It is a COUNT equality rather
     than a per-site adjacency check on purpose — the four sites sit at four different indentations
     inside four different handlers, and a shape assertion over that is a test about formatting.
+
+    EVERY fold module, not `replay.py` alone (review 2026-09-22, EVT-12): the handlers that lift a
+    pause may live in a family module split out of it, and a count over one file would then drop
+    below four — or, worse, stay at four while a fifth site in a sibling went unread.
     """
-    tree = ast.parse(REPLAY_SRC.read_text(encoding="utf-8-sig", errors="replace"))
     lifts, cleared = 0, 0
-    for node in ast.walk(tree):
+    for node in (n for _path, tree in fold_trees() for n in ast.walk(tree)):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]

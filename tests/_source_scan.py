@@ -565,43 +565,107 @@ def event_payload_writers() -> dict[str, dict]:
     return found
 
 
+# ------------------------------------------------------------------------------ the fold's modules
+# `events/replay.py` held the whole fold until review 2026-09-22 (EVT-12) began moving its handler
+# FAMILIES into sibling modules, `events/replay_<family>.py`. Every guard that read "the fold" off
+# `replay.py` alone would have narrowed SILENTLY with each move — a second hand-rolled queue purge
+# in a family module is invisible to a count over one file, and a pause-lift that forgot its reason
+# is invisible to an AST walk of the wrong tree. So those guards read the fold's source through the
+# helpers below, which find the modules by ONE naming rule instead of naming a family, and
+# `tests/test_replay_families.py` holds that rule to the table `fold` actually dispatches through:
+# a handler defined anywhere else is a red test, not a module these scans skip.
+FOLD_MODULE_GLOB = "replay*.py"
+
+
+def fold_source_paths(pkg: Path = PKG) -> list[Path]:
+    """`events/replay.py` first, then every `events/replay_<family>.py` it was split into, sorted."""
+    events = pkg / "events"
+    families = sorted(p for p in events.glob(FOLD_MODULE_GLOB) if p.name != "replay.py")
+    return [events / "replay.py", *families]
+
+
+def fold_sources(pkg: Path = PKG) -> Iterator[tuple[Path, str]]:
+    """Every fold module with its decoded text — `iter_sources` restricted to the fold."""
+    for path in fold_source_paths(pkg):
+        yield path, _decode(path)
+
+
+def fold_trees(pkg: Path = PKG) -> Iterator[tuple[Path, ast.AST]]:
+    """Every fold module parsed, through the same memo `iter_trees` keeps."""
+    wanted = set(fold_source_paths(pkg))
+    for path, tree in iter_trees(pkg / "events"):
+        if path in wanted:
+            yield path, tree
+
+
+def fold_source(pkg: Path = PKG) -> str:
+    """The whole fold as ONE text, `replay.py` first — what `inspect.getsource(replay)` was."""
+    return "\n".join(text for _path, text in fold_sources(pkg))
+
+
 def _fold_handler_functions() -> tuple[dict[str, ast.AST], dict[str, str]]:
     """`(functions the fold can reach, {event type: handler name})`, off `_HANDLERS` itself.
 
-    "Can reach" is `replay.py`'s own module-level functions PLUS the ones it imports from elsewhere
-    in the package under the local name it calls them by. That hop is load-bearing rather than
-    thorough: `_on_promote` reads no key itself and calls `_coerce_node_id(d)`, which is
-    `core/models.py::coerce_node_id`. Without the hop that handler reports an empty read set and,
-    worse, `fold_stores_payload_whole` counts the call as opaque and declares the payload stored.
-    """
-    from looplab.events import types as event_types
+    "Can reach" is the module-level functions of EVERY fold module (`fold_source_paths`) PLUS the
+    ones each imports from elsewhere in the package under the local name it calls them by. That hop
+    is load-bearing rather than thorough: `_on_promote` reads no key itself and calls
+    `_coerce_node_id(d)`, which is `core/models.py::coerce_node_id`. Without the hop that handler
+    reports an empty read set and, worse, `fold_stores_payload_whole` counts the call as opaque and
+    declares the payload stored. The same hop is what follows a handler in one family module into a
+    helper it imports from another.
 
-    tree = ast.parse((PKG / "events" / "replay.py").read_text(encoding="utf-8-sig"))
-    funcs = {n.name: n for n in tree.body
-             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    for node in tree.body:
-        if not (isinstance(node, ast.ImportFrom) and (node.module or "").startswith("looplab.")):
-            continue
-        source = PKG.parent / (node.module.replace(".", "/") + ".py")
-        if not source.is_file():
-            continue
-        imported = {n.name: n for n in ast.parse(source.read_text(encoding="utf-8-sig")).body
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        for alias in node.names:
-            target = imported.get(alias.name)
-            local = alias.asname or alias.name
-            if target is not None and local not in funcs:
-                funcs[local] = target
+    ONE namespace over all of them, which is sound only while a name means one function wherever
+    the fold says it — so a name two modules bind to DIFFERENT functions is REFUSED, never resolved
+    by whichever module was read first. The handler map is the RUNTIME `_HANDLERS`, the table `fold`
+    dispatches through however it is assembled, each entry pinned to the definition it really is.
+    """
+    from looplab.events import replay
+
+    trees: dict[Path, ast.Module] = {}
+
+    def defs_of(path: Path) -> dict[str, ast.AST]:
+        if path not in trees:
+            trees[path] = ast.parse(_decode(path), filename=str(path))
+        return {n.name: n for n in trees[path].body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    funcs: dict[str, ast.AST] = {}
+    origin: dict[str, tuple[Path, str]] = {}
+
+    def bind(local: str, path: Path, name: str, node: ast.AST) -> None:
+        where = (path.resolve(), name)
+        if origin.setdefault(local, where) != where:
+            raise AssertionError(
+                f"`{local}` names two different functions across the fold modules "
+                f"({origin[local]} and {where}); this scan resolves a call by its name and will "
+                "not guess which one a handler reaches")
+        funcs[local] = node
+
+    paths = fold_source_paths()
+    for path in paths:
+        for name, node in defs_of(path).items():
+            bind(name, path, name, node)
+    for path in paths:
+        for node in trees[path].body:
+            if not (isinstance(node, ast.ImportFrom)
+                    and (node.module or "").startswith("looplab.")):
+                continue
+            source = PKG.parent / (node.module.replace(".", "/") + ".py")
+            if not source.is_file():
+                continue
+            imported = defs_of(source)
+            for alias in node.names:
+                target = imported.get(alias.name)
+                if target is not None:
+                    bind(alias.asname or alias.name, source, alias.name, target)
     handlers: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == "_HANDLERS" for t in node.targets)):
-            continue
-        for key, value in zip(node.value.keys, node.value.values):
-            if isinstance(key, ast.Name) and isinstance(value, ast.Name):
-                etype = getattr(event_types, key.id, None)
-                if isinstance(etype, str):
-                    handlers[etype] = value.id
+    for etype, handler in replay._HANDLERS.items():
+        where = (Path(inspect.getsourcefile(handler)).resolve(), handler.__name__)
+        if origin.get(handler.__name__) != where:
+            raise AssertionError(
+                f"`{etype}` dispatches to {where}, which is not a module-level function of a fold "
+                "module this scan reads (`fold_source_paths`)")
+        handlers[etype] = handler.__name__
     return funcs, handlers
 
 

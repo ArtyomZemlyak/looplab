@@ -19,6 +19,8 @@ from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.events import replay
 from looplab.events.replay import _purge_node_requests, _queue_forced_request
 
+from _source_scan import fold_source
+
 
 def _live(st: RunState, nid: int, attempt: int = 0) -> Node:
     node = Node(id=nid, parent_ids=[], operator="mutate",
@@ -144,7 +146,10 @@ def test_no_fold_handler_re_derives_the_purge(handler):
 
 
 def test_the_purge_is_written_in_exactly_one_place():
-    source = inspect.getsource(replay)
+    # The WHOLE fold, not `replay.py` alone (review 2026-09-22, EVT-12): once a handler family
+    # lives in its own module, a second hand-rolled filter there is exactly what a count over one
+    # file cannot see — and the one real filter moving out would read as the rule vanishing.
+    source = fold_source()
     assert source.count("st.ablate_request_generations = [") == 1, (
         "a second hand-rolled ablate-queue filter appeared")
     assert source.count("st.confirm_request_generations = [") == 1

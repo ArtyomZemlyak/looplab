@@ -19,7 +19,6 @@ winner would pass identically whether the override was cleared or not.
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 
 import pytest
 
@@ -30,6 +29,8 @@ from looplab.events.types import (
     EV_NODE_EVALUATED, EV_NODE_RESET, EV_NODE_TOMBSTONED, EV_RESUME, EV_RUN_FINISHED,
     EV_RUN_STARTED,
 )
+
+from _source_scan import fold_trees
 
 METRIC_WINNER = 1        # best metric under direction=min
 CONFIRMED = 2            # the certificate's subject: a WORSE metric, so the override shows up
@@ -140,10 +141,12 @@ def test_a_finished_run_keeps_its_certificates():
 
 
 def _handler_bodies():
-    source = Path(R.__file__).read_text(encoding="utf-8")
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield node.name, ast.unparse(node)
+    # Every fold module, not `replay.py` alone (review 2026-09-22, EVT-12): a handler family split
+    # out of it is still the fold, and a sixth copy written there must be just as visible.
+    for _path, tree in fold_trees():
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield node.name, ast.unparse(node)
 
 
 def test_no_handler_opens_a_sixth_copy():
