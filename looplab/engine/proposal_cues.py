@@ -325,9 +325,10 @@ class ProposalCuesMixin:
     def _cue_watchdog_reflection(self, state: RunState, parent, _r):
         # Signal-delivery (§1): surface the live-watchdog observations (train-monitor health verdicts +
         # ASHA intermediate-rank flags) so the next proposal reacts to a config whose TRAINING was seen
-        # to be weak — even when the watchdog kills are OFF (the default) and the node ran to completion,
-        # so its live curve would otherwise be lost (those diagnostics are fold-ignored, invisible to
-        # the failure-reflection above). Reads the raw event rows (bounded/deduped inside the helper).
+        # to be weak — even when no watchdog kill fired (both kills ship ON in the product surface but
+        # act on few flags) and the node ran to completion, so its live curve would otherwise be lost
+        # (those diagnostics are fold-ignored, invisible to the failure-reflection above). Reads the raw
+        # event rows (bounded/deduped inside the helper).
         if not self._watchdog_reflection:
             return "", []
         from looplab.events.digest import watchdog_reflection

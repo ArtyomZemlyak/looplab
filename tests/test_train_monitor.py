@@ -1,5 +1,5 @@
 """Training-log monitor contracts: bounded digest/observation, diagnostic verdicts, adaptive cadence,
-and the separately opt-in early-kill path. Diagnostic events remain fold-ignored; only an enabled,
+and the separately switched early-kill path. Diagnostic events remain fold-ignored; only an enabled,
 confident `broken` intervention changes the node lifecycle through the ordinary terminal contract."""
 from __future__ import annotations
 

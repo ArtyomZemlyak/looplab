@@ -1,17 +1,20 @@
-"""ASHA live-curve early-stop watchdog (advisory + opt-in kill) — a sibling of `train_monitor.py`.
+"""ASHA live-curve early-stop watchdog (advisory rank + a kill switch) — a sibling of `train_monitor.py`.
 
 Where the training monitor judges the run's HEALTH from the log, this watchdog judges its RANK. The
-historical intermediate-vs-finished-endpoint comparison remains an ADVISORY signal. An opt-in kill is
-stricter: the metric spec must explicitly name ``resource_key`` and enough completed siblings must
-retain metric observations at exactly the same resource value. An early point is never treated as
-comparable to a finished endpoint merely because both contain the objective metric.
+historical intermediate-vs-finished-endpoint comparison remains an ADVISORY signal. The kill
+(`asha_live_kill` — ON in the product `Settings`, OFF in the bare-library `EngineOptions`; claim
+`asha-live-kill-ships-on`) is stricter: the metric spec must explicitly name ``resource_key`` and
+enough completed siblings must retain metric observations at exactly the same resource value. An
+early point is never treated as comparable to a finished endpoint merely because both contain the
+objective metric.
 
-Advisory by default: each rank-state transition records a fold-IGNORED `EV_ASHA_RANK` diagnostic event,
-so its thread-schedule-dependent position cannot directly alter lifecycle/champion/replay. The raw
-diagnostic may still advise a later Researcher prompt when `watchdog_reflection` is enabled. A matching
-`asha_monitor` trace span is also emitted. An opt-in `asha_live_kill` lets it tree-kill an underperformer early,
-reusing the training monitor's `kill_signal` + the single `_evaluate` terminal (reason
-`asha_underperforming`), so replay reads that terminal and never re-invokes this watchdog.
+The rank itself is advisory: each rank-state transition records a fold-IGNORED `EV_ASHA_RANK`
+diagnostic event, so its thread-schedule-dependent position cannot directly alter
+lifecycle/champion/replay. The raw diagnostic may still advise a later Researcher prompt when
+`watchdog_reflection` is enabled. A matching `asha_monitor` trace span is also emitted.
+`asha_live_kill` lets it tree-kill an underperformer early, reusing the training monitor's
+`kill_signal` + the single `_evaluate` terminal (reason `asha_underperforming`), so replay reads
+that terminal and never re-invokes this watchdog.
 
 **The rank comparison is EVIDENCE, not the decision.** A bare quantile test sees exactly one number and
 ignores everything else the run is saying — the SHAPE of its curve, the spread of the peers it is being
@@ -719,7 +722,7 @@ class AshaMonitorMixin:
                             log_plan=None) -> None:
         """Tail the live log on a timer, extract the intermediate objective metric, rank it against the
         completed sibling endpoints for diagnostics, and record advisory `EV_ASHA_RANK` transitions.
-        Opt-in tree-kill requires persistent underperformance against enough sibling observations at the
+        The tree-kill requires persistent underperformance against enough sibling observations at the
         same declared resource AND a confident `stop` from the LLM judge, which sees that evidence plus
         the live curve, the run's other metrics and the training monitor's latest health verdict. Exits
         with the eval; a per-tick hiccup skips only that tick.
@@ -877,10 +880,11 @@ class AshaMonitorMixin:
                     # transition away: the warning/recovery edge this block exists to publish was lost
                     # until the NEXT verdict change, leaving projections and Attention on a stale flag.
                     last_flag = diagnostic_key
-                # OPT-IN kill — independent of the advisory dedup: reached once the underperformance has
-                # PERSISTED past the grace window (a transient early dip that recovers resets the streak
-                # to 0 and is never considered). Reuses the monitor's kill_signal + cancel; `_evaluate`
-                # writes the single terminal (reason=asha_underperforming).
+                # THE KILL (`asha_live_kill`) — independent of the advisory dedup: reached once the
+                # underperformance has PERSISTED past the grace window (a transient early dip that
+                # recovers resets the streak to 0 and is never considered). Reuses the monitor's
+                # kill_signal + cancel; `_evaluate` writes the single terminal
+                # (reason=asha_underperforming).
                 if (kill_signal is not None and comparable_under is True
                         and under_streak > _ASHA_GRACE_TICKS
                         and getattr(self, "_asha_live_kill", False)):

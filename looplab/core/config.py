@@ -584,12 +584,15 @@ class Settings(BaseSettings):
     # `_interval_s` is the BASE tick cadence (the effective one adapts to the per-experiment budget).
     train_monitor: bool = True
     train_monitor_interval_s: float = Field(default=600.0, gt=0)
-    # Phase 3 — INTERVENTION (opt-in, separate from observation): let the monitor tree-kill a training the
-    # LLM judges 'broken' (diverged / silent CPU fallback / not learning) EARLY, instead of burning the
-    # whole budget. Off by default — the observer only WATCHES unless this is on. A kill only fires on a
-    # 'broken' verdict (a plateau is 'watch', never killed) with confidence >= the threshold; the node then
-    # fails normally (reason='monitor_broken'), so replay reconstructs it from that one terminal event.
-    # Default flipped 2026-08-04 (operator decision): the monitor's verdict is now allowed to act.
+    # Phase 3 — INTERVENTION (a switch separate from observation): let the monitor tree-kill a training
+    # the LLM judges 'broken' (diverged / silent CPU fallback / not learning) EARLY, instead of burning
+    # the whole budget. A kill only fires on a 'broken' verdict (a plateau is 'watch', never killed) with
+    # confidence >= the threshold; the node then fails normally (reason='monitor_broken'), so replay
+    # reconstructs it from that one terminal event.
+    # CLAIM[train-monitor-kill-ships-on] ON here, in the product surface, since the 2026-08-04 flip (an
+    # operator decision: the monitor's verdict is allowed to act), and OFF in the bare-library
+    # `EngineOptions`, where the observer only watches unless its caller turns this on.
+    # decided:`present:train_monitor_kill: bool = True@looplab/core/config.py+present:train_monitor_kill: bool = False@looplab/engine/options.py`
     # It only fires on a 'broken' verdict at confidence >= train_monitor_kill_confidence (0.8);
     # a plateau is 'watch' and is never killed.
     train_monitor_kill: bool = True
@@ -684,16 +687,21 @@ class Settings(BaseSettings):
     stage_check_tools: bool = True
     # ASHA live-curve watchdog (sibling of the training monitor): reads the latest INTERMEDIATE value of
     # the objective metric off the live log (reusing the eval's OWN metric reader). Finished-endpoint rank
-    # remains advisory. An opt-in KILL additionally requires an operator-declared metric.resource_key and
-    # enough sibling observations at exactly that resource; absent comparable evidence cannot stop a run.
-    # Records a fold-ignored `asha_rank` diagnostic + trace span; the library default is OFF (off == today).
+    # remains advisory. The KILL (`asha_live_kill`, below) additionally requires an operator-declared
+    # metric.resource_key and enough sibling observations at exactly that resource; absent comparable
+    # evidence cannot stop a run. Records a fold-ignored `asha_rank` diagnostic + trace span; the
+    # library default is OFF (off == today).
     asha_live: bool = True
-    # Opt-in INTERVENTION (separate from the advisory signal): let the watchdog tree-kill a node whose
-    # intermediate metric stays below the SAME-RESOURCE bar past a short grace window. Off by default —
-    # it only surfaces endpoint rank unless this is on. A kill fails normally (asha_underperforming).
-    # Default flipped 2026-08-04 (operator decision). Still narrowly scoped by construction: it acts
-    # ONLY for stdout_json metrics that declare an explicit `resource_key`, only past the grace
-    # window, and only with `asha_live_min_siblings` finished peers at the SAME resource value.
+    # INTERVENTION (a switch separate from the advisory signal): let the watchdog tree-kill a node whose
+    # intermediate metric stays below the SAME-RESOURCE bar past a short grace window. A kill fails
+    # normally (asha_underperforming).
+    # CLAIM[asha-live-kill-ships-on] ON here, in the product surface, since the 2026-08-04 flip (an
+    # operator decision), and OFF in the bare-library `EngineOptions`, where the watchdog only surfaces
+    # endpoint rank unless its caller turns this on.
+    # decided:`present:asha_live_kill: bool = True@looplab/core/config.py+present:asha_live_kill: bool = False@looplab/engine/options.py`
+    # Still narrowly scoped by construction: it acts ONLY for stdout_json metrics that declare an
+    # explicit `resource_key`, only past the grace window, and only with `asha_live_min_siblings`
+    # finished peers at the SAME resource value.
     asha_live_kill: bool = True
     # The bar sits at `asha_live_quantile` along a WORST->BEST ordering of the finished siblings' finals:
     # 0.5 = the median (a node worse than the median peer flags); a SMALLER value is more conservative —
@@ -900,9 +908,10 @@ class Settings(BaseSettings):
     failure_reflection: bool = True
     # Feed the LIVE-WATCHDOG observations (train-monitor health verdicts + ASHA intermediate-rank flags)
     # of recent experiments back into the proposal prompt, so the Researcher avoids re-proposing a config
-    # whose TRAINING was already observed to be weak — even when the watchdog kills are off (default) and
-    # the node ran to completion (those diagnostics are fold-ignored, so failure_reflection never sees
-    # them). ON by default and SELECTIVE like failure_reflection (injects only when a recent flag exists).
+    # whose TRAINING was already observed to be weak — even when no watchdog kill fired (both kills ship
+    # ON — `train-monitor-kill-ships-on` — but act on few flags) and the node ran to completion (those
+    # diagnostics are fold-ignored, so failure_reflection never sees them). ON by default and SELECTIVE
+    # like failure_reflection (injects only when a recent flag exists).
     watchdog_reflection: bool = True
     # C3 deep test-driven repair: hand the Developer the failure taxonomy + a structured "reproduce
     # then fix" directive on debug, not just the raw stderr tail. ON by default (product surface); the

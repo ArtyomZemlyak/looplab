@@ -193,6 +193,57 @@ def test_the_training_kill_row_describes_all_four_conjuncts_of_the_gate():
         assert conjunct in help_text
 
 
+_REPO = Path(__file__).resolve().parents[1]
+# The one-sided phrases each code site used, by file. NEGATIVE pins, so substrings on purpose: what
+# must not come back is the TEXT (CLAUDE.md, "A guard test must not be satisfiable by a COMMENT").
+_STALE_KILL_PHRASES = {
+    "looplab/engine/train_monitor.py": ("is explicitly enabled", "(opt-in) kill",
+                                        "intervention (opt-in)"),
+    "looplab/engine/monitor_gates.py": ("the opt-in (`train_monitor_kill`)",),
+    "looplab/engine/asha_monitor.py": ("opt-in kill", "Opt-in tree-kill", "OPT-IN kill",
+                                       "Advisory by default", "An opt-in `asha_live_kill`"),
+    "looplab/engine/proposal_cues.py": ("kills are OFF (the default)",),
+    "looplab/engine/knobs.py": ("opt-in kill",),
+    "looplab/__init__.py": ("opt-in early kill", "(advisory + opt-in kill)"),
+    "looplab/events/types.py": ("trigger the opt-in kill",),
+    "tests/test_train_monitor.py": ("separately opt-in early-kill",),
+}
+
+
+def _comment_above(rel: str, field: str) -> str:
+    """The contiguous `#` block directly above `    <field>:` in *rel* — the sentence a reader of
+    that Settings line reads."""
+    lines = (_REPO / rel).read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"    {field}:"))
+    block = []
+    for line in reversed(lines[:at]):
+        if not line.lstrip().startswith("#"):
+            break
+        block.append(line.lstrip().lstrip("#").strip())
+    return " ".join(reversed(block))
+
+
+def test_no_code_site_still_calls_the_shipped_kills_opt_in():
+    """The catalogue copy was fixed with the 2026-08-04 flip (the tests above); the CODE was not
+    (review 2026-09-22, ENG3-13 / doc 50 EM-10). The module docstrings of both watchdogs, the kill
+    gate's own docstring, the prompt cue, the layout map, the event note, the knob declaration and
+    the two Settings comments themselves went on describing `train_monitor_kill` / `asha_live_kill`
+    as opt-in or OFF by default while `Settings` ships both True — the sentence an agent reads
+    beside the code it is about to change. The truth is two-sided (ON in the product `Settings`, OFF
+    in the bare-library `EngineOptions`) and is pinned where it is DECIDED, on the two Settings
+    lines, by the `train-monitor-kill-ships-on` and `asha-live-kill-ships-on` claims."""
+    assert Settings.model_fields["train_monitor_kill"].default is True
+    assert Settings.model_fields["asha_live_kill"].default is True
+    stale = [f"{rel}: {phrase!r}" for rel, phrases in _STALE_KILL_PHRASES.items()
+             for phrase in phrases if phrase in (_REPO / rel).read_text(encoding="utf-8")]
+    for field in ("train_monitor_kill", "asha_live", "asha_live_kill", "watchdog_reflection"):
+        block = _comment_above("looplab/core/config.py", field).lower()
+        stale += [f"core/config.py above `{field}`: {phrase!r}"
+                  for phrase in ("off by default", "opt-in", "kills are off") if phrase in block]
+    assert not stale, "a site still describes a kill that ships ON as opt-in / off:\n  " + (
+        "\n  ".join(stale))
+
+
 def test_every_settings_field_is_a_row_or_a_written_down_omission():
     from looplab.serve import settings_ui_schema as schema
 

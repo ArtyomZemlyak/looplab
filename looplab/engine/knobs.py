@@ -312,7 +312,8 @@ class EngineKnobs:
     # watchdog judges and the LLM novelty adjudicator (review 2026-09-22, TAT-02). Read by
     # `shared.py::judge_evidence_kwargs`, the one place a judge learns its fence.
     _evidence_envelope = Knob("evidence_envelope", bool)
-    # ASHA live-curve rank watchdog (advisory in the product surface; opt-in kill). off == today.
+    # ASHA live-curve rank watchdog and its kill: both ON in the product `Settings`, both OFF in this
+    # library's `EngineOptions` (off == today).
     _asha_live = Knob("asha_live", bool)
     _asha_live_kill = Knob("asha_live_kill", bool)
     _asha_live_quantile = Knob("asha_live_quantile", float)

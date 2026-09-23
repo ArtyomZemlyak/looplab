@@ -433,13 +433,13 @@ _LAYOUT = {
     "event_reference": "events",   # the generated event reference (doc 52 row 30)
     "state_delta": "events",   # the SSE stream's delta frames: diff/apply over two folded payloads
     "tracing": "core",
-    "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill
+    "train_monitor": "engine",   # per-eval observer + diagnostics + a separately switched early kill
     # Its pure halves, split out and re-exported by it (review 2026-09-22, ENG3-13 / doc 50 EM-06):
     # the log measurement, the kill/repair/arming gates, and which log is whose + its readers.
     "loss_trajectory": "engine",
     "monitor_gates": "engine",
     "eval_log_plan": "engine",
-    "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory + opt-in kill)
+    "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory rank + a kill switch)
     "triage": "engine",
     "repair_judgment": "engine",
     "widths": "engine",        # the live concurrency-width settling rule (doc 25 ES-09/EC-11)

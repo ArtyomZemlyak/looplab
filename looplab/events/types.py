@@ -979,7 +979,7 @@ EV_PRIOR_INJECTED = "prior_injected"
 EV_MEMORY_READ = "memory_read"
 # ASHA live-curve watchdog (engine/asha_monitor.py): a node whose latest INTERMEDIATE metric ranks below
 # completed endpoints and/or comparable same-resource observations. New rows distinguish those verdicts;
-# only enough underperforming same-resource evidence may trigger the opt-in kill. DIAGNOSTIC / fold-
+# only enough underperforming same-resource evidence may trigger the kill. DIAGNOSTIC / fold-
 # ignored; intervention is recorded by the node's single `node_failed` terminal, so concurrent append
 # remains splice-neutral and replay-safe. The raw advisory row can still feed a later proposal through
 # watchdog_reflection; that prompt effect is separate from fold/champion semantics.

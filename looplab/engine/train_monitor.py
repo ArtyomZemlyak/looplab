@@ -10,7 +10,8 @@ and implements the complete bounded phase stack:
 - Phase 1: when a client is available, classify the bounded digest and append fold-ignored
   `train_monitor_alert` diagnostics for non-healthy verdicts;
 - Phase 2: self-pace later observations from the run budget, healthy streak, and bounded model hint;
-- Phase 3: only when `train_monitor_kill` is explicitly enabled, claim a CONFIRMED, sufficiently
+- Phase 3: when `train_monitor_kill` is on — ON in the product `Settings` since 2026-08-04, OFF in the
+  bare-library `EngineOptions` (claim `train-monitor-kill-ships-on`) — claim a CONFIRMED, sufficiently
   confident `broken` verdict about an IDENTIFIED training stage — one the engine's own MEASURED loss
   trajectory does not contradict — and reuse the evaluation cancel/tree-kill path. The node still
   terminates once with `reason=monitor_broken`.
@@ -785,7 +786,7 @@ class TrainingMonitorMixin:
                                 log_snapshot: Optional[TrainingLogSnapshot] = None,
                                 log_plan: Optional[EvalLogPlan] = None) -> None:
         """Tail the live training log every `train_monitor_interval_s`, ask the Developer to judge its
-        health, record the verdict, and (opt-in) kill a broken run early.
+        health, record the verdict, and (when `train_monitor_kill` is on) kill a broken run early.
 
         WHICH log (`log_plan`, from `eval_log_plan`): the monitor lives across the WHOLE eval — setup,
         every stage, the always-appended score stage — so "the freshest `*.log`" is not a synonym for
@@ -1059,10 +1060,11 @@ class TrainingMonitorMixin:
                         next_sleep = next_monitor_sleep(
                             base, status=verdict.status, recheck_after_s=verdict.recheck_after_s,
                             healthy_streak=healthy_streak)
-                        # Phase 3 intervention (opt-in): a CONFIRMED, confident 'broken' verdict about an
-                        # identified training stage is tree-killed EARLY. Hand the reason to `_evaluate`
-                        # via `kill_signal`, set `cancel` (same path as an operator abort), and stop
-                        # watching — `_evaluate` writes the single terminal node_failed.
+                        # Phase 3 intervention (`train_monitor_kill`, ON in the product surface): a
+                        # CONFIRMED, confident 'broken' verdict about an identified training stage is
+                        # tree-killed EARLY. Hand the reason to `_evaluate` via `kill_signal`, set
+                        # `cancel` (same path as an operator abort), and stop watching — `_evaluate`
+                        # writes the single terminal node_failed.
                         # No `or`-coercion on the confidence bar. `x or 0.0` turns an unset/None/0.0
                         # knob into a ZERO threshold — i.e. EVERY `broken` verdict kills — which is
                         # the wrong direction to fail in, and it matters much more now that

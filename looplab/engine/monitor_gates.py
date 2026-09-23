@@ -160,7 +160,8 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
 
     Five independent conjuncts, every one fail-closed on its default:
 
-    - `enabled`: the opt-in (`train_monitor_kill`).
+    - `enabled`: the switch (`train_monitor_kill` — ON in the product `Settings`, OFF in the bare
+      library; claim `train-monitor-kill-ships-on`).
     - a `broken` verdict at confidence >= `threshold`. The prompt makes a slow/plateauing-but-progressing
       run 'watch', never 'broken'; 'watch'/'healthy' stay advisory.
     - `log_role` is in `_KILL_ELIGIBLE_ROLES`, i.e. `LOG_ROLE_TRAINING`: the tail is provably the run's
