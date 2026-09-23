@@ -683,7 +683,7 @@ def test_every_repo_developer_phase_asks_the_loop_for_the_fence(monkeypatch, env
         seen[opts.get("phase_label")] = opts.get("tool_result_label", "<absent>")
         name = emit_spec["function"]["name"]
         if name == "declare_stages":
-            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+            return finalize({"stages": [{"name": "train", "command": ["python", "ttrain.py"]}]})
         if name == "propose_plan":
             return finalize({"steps": [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}]})
         return finalize({"summary": "done"})

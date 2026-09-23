@@ -58,7 +58,7 @@ def _install_loop(monkeypatch, *, on_done, capture=None):
         if capture is not None:
             capture.append({"name": name, "messages": list(messages)})
         if name == "declare_stages":
-            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+            return finalize({"stages": [{"name": "train", "command": ["python", "ttrain.py"]}]})
         if name == "propose_plan":
             return finalize({"steps": [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}]})
         return on_done(tools, finalize)

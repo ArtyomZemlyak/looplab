@@ -920,6 +920,45 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
 # absent entrypoint — "the Developer AUTHORS the eval entrypoint" is the designed flow), the
 # `declare_stages` tool (the stages phase runs with READ-ONLY tools, so the file cannot exist yet),
 # and the stage runner (too late: the node exists and the repair cascade is what costs).
+# THE SHELL FORM (2026-09-23). `minionerec-backbones-v3` node 0 declared
+# `["bash", "MiniOneRec/looplab/prepare_cache.sh"]`, never wrote it, and the rule above let it through
+# because its candidate reader returns [] for any shell wrapper — so the node paid exit 127, a 21-min
+# triage and a 30-min repair, twice. For THIS question the shell form is as decidable as the python
+# one: `bash`/`sh` cannot run a file that is not there. Narrow on purpose: a `-c` anywhere before the
+# script makes the argv opaque (the program is a string, not a file), and only a relative path that
+# stays inside the workdir counts. A bare relative path as argv[0] (`./run.sh`, `tools/run.sh`) is
+# the same question without the interpreter.
+_SHELLS = frozenset({"bash", "sh", "dash", "zsh"})
+
+
+def shell_script_candidate(command) -> list[str]:
+    """`[path]` when `command` runs a workdir-relative shell script, else []. Pure and total."""
+    argv = [t for t in (command or []) if isinstance(t, str)]
+    if not argv:
+        return []
+
+    def _relative(tok: str) -> str | None:
+        p = tok[2:] if tok.startswith("./") else tok
+        if not p or p.startswith(("/", "~", "-")) or ".." in p.split("/") or "$" in p:
+            return None
+        return p
+
+    head = argv[0].rsplit("/", 1)[-1]
+    if head in _SHELLS:
+        for tok in argv[1:]:
+            if tok == "-c" or (tok.startswith("-") and "c" in tok[1:] and not tok.startswith("--")):
+                return []
+            if tok.startswith("-"):
+                continue
+            path = _relative(tok)
+            return [path] if path else []
+        return []
+    if ("/" in argv[0] or argv[0].endswith(".sh")) and not argv[0].startswith("/"):
+        path = _relative(argv[0])
+        return [path] if path else []
+    return []
+
+
 def build_declared_script_never_written(manifest_json: str, written: dict, *,
                                         exists=None) -> str:
     """The bounce text for an implement emit whose manifest names a script that is NOT THERE, else "".
@@ -954,6 +993,11 @@ def build_declared_script_never_written(manifest_json: str, written: dict, *,
         # len==1 IS the script form, per `entrypoint_candidates`' documented contract: it returns
         # BOTH `-m` spellings and exactly one path for a script. Asserted in the tests so a change
         # to that contract breaks loudly here rather than silently widening this refusal.
+        if not cands:
+            # `entrypoint_candidates` reads `bash run.sh` as OPAQUE on purpose — it also decides
+            # which file PROTECTION freezes, and there a wrapper's argument must not be frozen. This
+            # rule asks a narrower question, so it reads the shell-script form itself.
+            cands = shell_script_candidate(stage.get("command"))
         if len(cands) != 1:
             continue
         path = cands[0]

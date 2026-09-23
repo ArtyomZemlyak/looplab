@@ -2901,6 +2901,37 @@ class LLMRepoDeveloper:
                       on_tool_result=self._established_hook("implement"),
                       **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
               **self._session_opts())
+        self._close_declared_script_gap(idea, write, system, stage_note=stage_note,
+                                        base_note=base_note)
+
+    def _close_declared_script_gap(self, idea: Idea, write, system: str, *, stage_note: str,
+                                   base_note: str) -> None:
+        """ONE focused session when the finished build still declares a stage whose script nobody
+        wrote (`engine/repair_verify.py::build_declared_script_never_written`).
+
+        `_validate_build` already bounces that emit once — but only where the bounce can buy a turn.
+        When the last step ends on its wall budget the salvage has no turn left, so the refusal just
+        drops the emit and the build ships without the script. `minionerec-backbones-v3` node 0
+        (2026-09-23): four of five steps cut by the 1200 s budget, `looplab_stages.json` running
+        `MiniOneRec/looplab/prepare_cache.sh` that no session ever wrote, exit 127 in 0.1 s, then a
+        21-min triage and a 30-min repair that ALSO ran out of time without writing it — twice. A
+        fresh session with its own budget and exactly one job is cheaper than any of that. At most
+        one: if it too leaves the gap, the engine's own eval/triage path takes over as before."""
+        from looplab.core import tracing
+        from looplab.engine.repair_verify import build_declared_script_never_written
+        refusal = build_declared_script_never_written(
+            write.files.get("looplab_stages.json", ""), write.files, exists=write.exists)
+        if not refusal:
+            return
+        self.last_budget_exhausted = ""
+        self.last_budget_facts = {}
+        step = {"title": "Write the script(s) the stage manifest runs but no session wrote",
+                "detail": (f"{refusal}\n\nThe rest of the build is done. Do ONLY this: write the "
+                           "missing file(s) so every declared stage can run end to end — or change "
+                           "looplab_stages.json to call a script that exists — then call done.")}
+        with tracing.operation("declared_script_gap", detail=str(refusal)[:300]):
+            self._run_step(idea, step, 1, 1, write, system, stage_note=stage_note,
+                           baseline_note=base_note)
 
     def _record_result(self, write, idea: Idea) -> None:
         """Publish this call's working set on the shared developer instance (doc 25 RA-07).

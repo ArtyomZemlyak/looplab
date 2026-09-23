@@ -42,7 +42,7 @@ def _install_fake_loop(monkeypatch, plan_steps, record, capture=None, stages_emi
             capture.append({"name": name, "tools": tools, "messages": list(messages), "opts": opts})
         if name == "declare_stages":     # the mandatory stages phase (fresh repo implement) — declare a train stage
             return finalize(stages_emit if stages_emit is not None
-                            else {"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+                            else {"stages": [{"name": "train", "command": ["python", "ttrain.py"]}]})
         if name == "propose_plan":
             return finalize({"steps": plan_steps})
         # a `done` session (a step, or the single-session fallback): write a file via the write tool

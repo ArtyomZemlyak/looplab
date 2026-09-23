@@ -20,6 +20,8 @@ Only the IMPLEMENT emit has both the manifest and the final file ledger.
 from __future__ import annotations
 
 import json
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -66,11 +68,18 @@ def test_the_contract_this_rule_leans_on_is_asserted_here():
 
 
 def test_an_opaque_command_is_left_alone():
-    """A shell wrapper, a bare binary, `python -c`, a launcher whose flag grammar decides which
-    token is the script — the resolver answers [] and this rule must not invent a target."""
-    for cmd in (["bash", "run.sh"], ["python", "-c", "print(1)"],
-                ["torchrun", "--nproc_per_node", "2", "score.py"], ["./scorer"]):
+    """`python -c`, a launcher whose flag grammar decides which token is the script, a program found
+    on PATH — the resolver answers [] and this rule must not invent a target.
+
+    `["bash", "run.sh"]` and `["./scorer"]` USED to be in this list and were moved out on 2026-09-23
+    (`shell_script_candidate`): for a shell the first positional token IS the file executed, and a
+    relative argv[0] IS the program — neither is a guess. `minionerec-backbones-v3` node 0 paid exit
+    127 plus two triage+repair cycles for a `bash …/prepare_cache.sh` no session wrote, which this
+    list waved through. `bash -c` stays opaque (see the truth table below)."""
+    for cmd in (["python", "-c", "print(1)"], ["bash", "-c", "python train.py"],
+                ["torchrun", "--nproc_per_node", "2", "score.py"], ["scorer"]):
         assert build_declared_script_never_written(_manifest(cmd), {}) == ""
+    assert "run.sh" in build_declared_script_never_written(_manifest(["bash", "run.sh"]), {})
 
 
 def test_several_missing_scripts_are_all_named_but_bounded():
@@ -248,3 +257,92 @@ def test_the_build_rung_SPENDS_the_shot_and_does_not_fire_twice(monkeypatch):
 
     assert seen and seen[0] and "gone.py" in seen[0], "the first emit is bounced"
     assert seen[1] is None, "and the second is not — the shot is spent"
+
+
+def _gap_build(monkeypatch, *, write_in_gap: bool):
+    """A real `implement()` whose plan steps never write the declared script (the v3 node-0 shape:
+    every step ended on its budget). Returns `(developer, gap_sessions)`."""
+    import looplab.agents.agent as agent_mod
+
+    gap_sessions: list = []
+    gap_title = "Write the script(s) the stage manifest runs"
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": [{"name": "prep", "command": ["bash", "prep_cache.sh"]}]})
+        if name == "propose_plan":
+            return finalize({"steps": [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}]})
+        user = str(messages[-1].get("content", ""))
+        if gap_title in user:
+            gap_sessions.append(user)
+            if write_in_gap:
+                tools.execute("write_file", {"path": "prep_cache.sh", "content": "echo ok\n"})
+        else:
+            tools.execute("write_file", {"path": "solution.py", "content": "print(1)\n"})
+        return finalize({"summary": "built it"})
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    from looplab.adapters.repo_task import EvalSpec, LLMRepoDeveloper, RepoTask
+    fixture = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
+    task = RepoTask(id="r", goal="g", direction="max", editable_path=str(fixture),
+                    edit_surface=["*"], protect=[],
+                    eval=EvalSpec(command=[sys.executable, "ttrain.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}))
+    dev = LLMRepoDeveloper(object(), task, plan_decompose=True, plan_min_steps=2)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    return dev, gap_sessions
+
+
+def test_a_build_that_ENDS_without_the_declared_script_gets_ONE_session_to_write_it(monkeypatch):
+    """minionerec-backbones-v3 node 0 (2026-09-23): the last step ran out of budget, so the one-shot
+    bounce had no turn to buy and the build shipped `prepare_cache.sh` undeclared-but-unwritten —
+    exit 127, then a triage and a repair that each ran out of time too. Mutation: drop the
+    `_close_declared_script_gap` call (no gap session; the script is never shipped)."""
+    dev, gaps = _gap_build(monkeypatch, write_in_gap=True)
+    assert len(gaps) == 1 and "prep_cache.sh" in gaps[0], gaps
+    assert "prep_cache.sh" in dev.last_files, "the gap session's script must ship with the build"
+
+
+def test_the_gap_session_is_spent_at_most_once(monkeypatch):
+    """If the focused session also leaves the gap, the build proceeds as before — no loop."""
+    dev, gaps = _gap_build(monkeypatch, write_in_gap=False)
+    assert len(gaps) == 1
+    assert "prep_cache.sh" not in dev.last_files
+
+
+def test_no_gap_session_when_the_declared_script_exists(monkeypatch):
+    """The committed-script case must not buy a session: `exists` sees the repo, not just the ledger."""
+    refusals = _fresh_repo_dev(
+        monkeypatch, stages=[{"name": "train", "command": ["python", "written.py"]}],
+        writes={"written.py": "print(1)\n"})
+    assert not refusals
+
+
+@pytest.mark.parametrize("command, expected", [
+    (["bash", "MiniOneRec/looplab/prepare_cache.sh"], ["MiniOneRec/looplab/prepare_cache.sh"]),
+    (["sh", "-e", "run.sh", "--fast"], ["run.sh"]),
+    (["/bin/bash", "./tools/run.sh"], ["tools/run.sh"]),
+    (["./run.sh"], ["run.sh"]),
+    (["tools/run.sh", "x"], ["tools/run.sh"]),
+    (["bash", "-c", "python train.py"], []),          # the program is a string, not a file
+    (["bash", "-ec", "make"], []),
+    (["bash", "/opt/run.sh"], []),                    # absolute: outside the workdir question
+    (["bash", "../escape.sh"], []),
+    (["bash", "$SCRIPT"], []),
+    (["python", "train.py"], []),                     # the python form is entrypoint_candidates'
+    (["make", "train"], []),
+    ([], []),
+    (None, []),
+])
+def test_the_shell_form_truth_table(command, expected):
+    from looplab.engine.repair_verify import shell_script_candidate
+    assert shell_script_candidate(command) == expected
+
+
+def test_the_v3_node0_manifest_is_refused():
+    """The exact manifest that cost v3 node 0 two triage+repair cycles."""
+    manifest = _manifest(["bash", "MiniOneRec/looplab/prepare_cache.sh"])
+    refusal = build_declared_script_never_written(manifest, {}, exists=lambda _p: False)
+    assert "MiniOneRec/looplab/prepare_cache.sh" in refusal
+    assert not build_declared_script_never_written(manifest, {}, exists=lambda _p: True)
