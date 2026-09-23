@@ -969,7 +969,7 @@
           "label": "Context budget (chars)",
           "type": "int",
           "default": 1000000,
-          "help": "H4: cap the agentic researcher’s tool-call history by middle-truncating stale output (0 = unbounded)."
+          "help": "H4: cap the agentic researcher’s tool-call history by middle-truncating stale output (0 = unbounded). The system prompt and the task (the first user turn) are never truncated while they fit in half the budget."
         },
         {
           "key": "agent_stuck_detection",
@@ -1014,7 +1014,7 @@
           "label": "Auto-summary",
           "type": "bool",
           "default": true,
-          "help": "C2: when the tool-loop history grows long, LLM-summarize the stale middle instead of only truncating it. Trigger is Context budget if set, else a built-in ~120k-char high-water mark, so short loops are untouched. On by default; one extra model call per over-budget turn."
+          "help": "C2: when the tool-loop history grows long, LLM-summarize the stale middle instead of only truncating it. Trigger is Context budget if set, else a built-in ~120k-char high-water mark, so short loops are untouched. On by default; one extra model call per over-budget turn. The task itself is never summarized away while it fits in half the budget."
         },
         {
           "key": "researcher_model",
@@ -1513,7 +1513,7 @@
           "label": "Untrusted-evidence envelope",
           "type": "bool",
           "default": true,
-          "help": "One envelope for the text a role did not write (core/evidence.py): the Strategist’s system prompt ends with a guard sentence and every tool result it reads is fenced between UNTRUSTED_RUN_EVIDENCE and END UNTRUSTED_RUN_EVIDENCE; the crash-triage judge’s stderr tail, repair history and code tail, and the repair critic’s trajectory, ride inside the same fence under their own guard; the arXiv and web tools stamp their own results so the Researcher and the Deep-Research stage see the marker too. The same sentence the Boss and the assistant already carry, with each role’s own powers named — a Strategist that cannot be talked into a policy or a timeout, a judge that cannot be talked into a verdict, a critic that cannot be talked into ending a chain. Annotates only: nothing here can move a metric, a champion, selectability or a violation. Turn it OFF to reproduce every one of those prompts byte for byte; a run launched before the field resumes with it OFF."
+          "help": "One envelope for the text a role did not write (core/evidence.py): the Strategist’s system prompt ends with a guard sentence and every tool result it reads is fenced between UNTRUSTED_RUN_EVIDENCE and END UNTRUSTED_RUN_EVIDENCE; the crash-triage judge’s stderr tail, repair history and code tail, and the repair critic’s trajectory, ride inside the same fence under their own guard; the judges that read the candidate's own text through their tools (the inter-stage checker, the training-monitor and ASHA judges, the LLM novelty adjudicator) and the pilot's next-action choice get their tool results fenced too (fence only, since 2026-09-22); the arXiv and web tools stamp their own results so the Researcher and the Deep-Research stage see the marker too. The same sentence the Boss and the assistant already carry, with each role’s own powers named — a Strategist that cannot be talked into a policy or a timeout, a judge that cannot be talked into a verdict, a critic that cannot be talked into ending a chain. Annotates only: nothing here can move a metric, a champion, selectability or a violation. Turn it OFF to reproduce every one of those prompts byte for byte; a run launched before the field resumes with it OFF."
         },
         {
           "key": "research_verify",
