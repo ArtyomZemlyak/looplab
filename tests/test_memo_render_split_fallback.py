@@ -17,6 +17,7 @@ Every assertion below has an input that makes it FAIL; the mutations are named i
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import pathlib
 
@@ -29,18 +30,41 @@ from looplab.tools import run_tools
 _SRC = pathlib.Path(inspect.getsourcefile(run_tools)).read_text(encoding="utf-8")
 
 
+def _dirs_rule() -> ast.Module:
+    """The renderer's `dirs` STATEMENTS as the module's own AST holds them: from the assignment of
+    `dirs` off `recommended_directions` through its `if not dirs:` fallback.
+
+    Found by the AST, not by text. The block used to be sliced from the `dirs = …` line up to the
+    COMMENT `# THE VIEW'S OWN population rule`, so rewording that comment broke all seven tests with
+    a ValueError that says nothing about the rule (review 2026-09-22, TST-05)."""
+    for node in ast.walk(ast.parse(_SRC)):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+        for i, stmt in enumerate(body):
+            if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id == "dirs"
+                    and "recommended_directions" in ast.unparse(stmt.value)):
+                continue
+            for j in range(i + 1, len(body)):
+                test = getattr(body[j], "test", None)
+                if (isinstance(body[j], ast.If) and isinstance(test, ast.UnaryOp)
+                        and isinstance(test.op, ast.Not) and isinstance(test.operand, ast.Name)
+                        and test.operand.id == "dirs"):
+                    return ast.Module(body=body[i:j + 1], type_ignores=[])
+    raise AssertionError("the renderer no longer assigns `dirs` from `recommended_directions` and "
+                         "falls back with `if not dirs:` — the rule these tests read is gone")
+
+
 def _dirs_for(memo: dict) -> list[str]:
     """Re-derive the renderer's `dirs` rule from its own source, over one memo.
 
     The rule lives inside a long method that needs a bound provider, a run directory and a fold to
-    call; this executes the exact lines instead of re-spelling them, so the test cannot drift into
-    asserting a rule the module does not have.
+    call; this executes the exact statements instead of re-spelling them, so the test cannot drift
+    into asserting a rule the module does not have.
     """
-    start = _SRC.index('        dirs = [str(d).strip() for d in (m.get("recommended_directions")')
-    end = _SRC.index("        # THE VIEW'S OWN population rule", start)
-    block = "\n".join(line[8:] for line in _SRC[start:end].splitlines())
     scope: dict = {"m": memo}
-    exec(compile(block, "<dirs-rule>", "exec"), scope)
+    exec(compile(_dirs_rule(), "<dirs-rule>", "exec"), scope)
     return scope["dirs"]
 
 
