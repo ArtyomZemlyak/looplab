@@ -315,14 +315,22 @@ def _served_expected(rd, envelope) -> str:
 
 
 def _job_result(client, response: dict) -> dict:
-    """The terminal payload of a route that may hand back `{status: running, job_id}`."""
+    """The terminal payload of a route that may hand back `{status: running, job_id}`.
+
+    The job id is taken ONCE, off the route's own receipt, as the UI's `jobAwait` does: a poll of a
+    job that is still running answers `{status: running}` alone. Reading it off each poll raised
+    KeyError: 'job_id' the first time a job outlived one poll (Windows CI run 35817293259, review
+    2026-09-22 wave 5, WIN-3; driven by `test_a_refresh_that_outlives_its_first_poll_is_still_awaited`)."""
     import time
 
+    if not (isinstance(response, dict) and response.get("status") == "running"):
+        return response
+    job_id = response["job_id"]
     deadline = time.monotonic() + 60
     while isinstance(response, dict) and response.get("status") == "running":
         assert time.monotonic() < deadline, "the job never reached a terminal state"
         time.sleep(0.05)
-        response = client.get(f"/api/jobs/{response['job_id']}").json()
+        response = client.get(f"/api/jobs/{job_id}").json()
     return response
 
 
@@ -349,6 +357,51 @@ def test_the_manual_report_refresh_fences_by_the_runs_own_snapshot(tmp_path, mon
         json={"expected_generation": generation}).json())
     assert out.get("ok") is True, out
     assert model.tool_messages == [_served_expected(rd, envelope)]
+
+
+def test_a_refresh_that_outlives_its_first_poll_is_still_awaited(tmp_path, monkeypatch):
+    """The harness's own race, driven rather than waited for. A poll of a job that is still running
+    answers `{status: running}` ALONE (`serve/jobs.py::build_router`), and `_job_result` used to read
+    the job id off each poll -- so the test above raised KeyError: 'job_id' the first time its job
+    outlived one poll, which the [off] case's did on the Windows CI leg, where the paid refresh's
+    durable appends are slow (run 35817293259, review 2026-09-22 wave 5, WIN-3). Here the model is
+    held until a poll has seen the job running; the route itself was right all along."""
+    pytest.importorskip("fastapi")
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.server import make_app
+
+    rd = _seed_payload_run(tmp_path, "demo", envelope=False)
+    seen_running = threading.Event()
+
+    class _HeldReader(_Reader):
+        def chat(self, messages, tools=None, tool_choice="auto", **kw):
+            assert seen_running.wait(30), "no poll ever saw the job still running"
+            return super().chat(messages, tools=tools, tool_choice=tool_choice, **kw)
+
+    model = _HeldReader("emit", {"headline": "manual"})
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: model)
+    client = TestClient(make_app(tmp_path))
+    real_get = client.get
+
+    def _get(url, *args, **kwargs):
+        response = real_get(url, *args, **kwargs)
+        if str(url).startswith("/api/jobs/") and response.json() == {"status": "running"}:
+            seen_running.set()
+        return response
+
+    monkeypatch.setattr(client, "get", _get)
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+    accepted = client.post(
+        "/api/runs/demo/report_refresh", headers={"Idempotency-Key": "outlived"},
+        json={"expected_generation": generation}).json()
+    assert accepted.get("status") == "running" and accepted.get("job_id"), accepted
+    out = _job_result(client, accepted)
+    assert seen_running.is_set(), "precondition: the job outlived a poll"
+    assert out.get("ok") is True, out
+    assert model.tool_messages == [_served_expected(rd, False)]
 
 
 @SNAPSHOT_CASES
