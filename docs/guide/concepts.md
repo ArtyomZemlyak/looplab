@@ -605,7 +605,11 @@ current turn/cancel epoch, action identity, and canonical scope digest for at mo
 `HIGH` and `UNKNOWN` actions cannot be remembered. Cancel, turn release, and session deletion
 invalidate the matching grants. The permission card displays the server-derived risk, scope,
 consequence, mode, expiry, and exact grant duration; legacy/incomplete metadata remains approvable
-once or rejectable but cannot expose persistent approval.
+once or rejectable but cannot expose persistent approval. Its preview — the diff of a file edit,
+the patch of `apply_patch` — is bounded at 4,000 characters, and a longer one ends on a whole line
+with a receipt stating how many characters and lines it does NOT show: approving applies the whole
+change, so reject and ask for it in smaller pieces to review the rest (until 2026-09-22 the cut was
+silent; `tools/perm_modes.py::clip_approval_preview` is the one bound).
 
 The older `POST .../control` and `POST .../resume` routes remain compatibility surfaces. Legacy
 mutation events cannot overtake an active/retryable command or incomplete finalize; the mutation-free,

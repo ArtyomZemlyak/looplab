@@ -27,12 +27,12 @@ from looplab.tools._base import fn_spec
 from looplab.tools.patch import (SurfacePolicy, apply_patch as _apply_patch, gate as _gate,
                                  symlink_paths as _symlink_paths)
 from looplab.tools.perm_modes import (
-    DEFAULT_PROTECT, DEFAULT_PROTECT_EXCEPTIONS, authorize, default_approver)
+    DEFAULT_PROTECT, DEFAULT_PROTECT_EXCEPTIONS, authorize, clip_approval_preview,
+    default_approver)
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.atomicio import same_file_entry
 from looplab.core.pathsafe import is_reparse
 
-_MAX_PREVIEW = 4000
 _BACKUP_STACK_LOCK = threading.RLock()
 _MAX_BACKUP_SLOT_DIGITS = 20
 
@@ -712,9 +712,13 @@ class FileBackups:
 
 
 def _diff(path: str, old: str, new: str) -> str:
+    """The approval card's preview of a write/edit: the unified diff, bounded by the ONE rule —
+    `perm_modes.clip_approval_preview`, which SAYS what it leaves out. It was `[:4000]`, silent, so an
+    approver saw the first 4,000 characters of a change they were approving whole (review
+    2026-09-22, TAT-05)."""
     d = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
                              fromfile=f"a/{path}", tofile=f"b/{path}")
-    return "".join(d)[:_MAX_PREVIEW]
+    return clip_approval_preview("".join(d))
 
 
 def _write_text_bytes(text: str) -> bytes:
@@ -1292,7 +1296,9 @@ class WriteTools:
             preimages, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         action = {"tool": "apply_patch", "tool_kind": "write",
                   "label": f"apply patch ({len(g['paths'])} file(s))", "verb": "apply this patch",
-                  "preview": diff[:_MAX_PREVIEW], "paths": g["paths"],
+                  # Bounded by the one rule that says what it leaves out (TAT-05); the scope's
+                  # `diff_digest` below still binds the WHOLE patch.
+                  "preview": clip_approval_preview(diff), "paths": g["paths"],
                   "recovery_available": self.backups is not None, "scope": {
                       "paths": g["paths"],
                       "preimage_digest": preimage_digest,

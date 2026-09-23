@@ -34,6 +34,48 @@ GRANT_TTL_SECONDS = 600.0
 APPROVAL_ALLOW_ONCE = "allow_once"
 APPROVAL_ALLOW_ALWAYS = "allow_always"
 
+# THE APPROVAL CARD'S PREVIEW BOUND, and the ONE function that applies it (review 2026-09-22,
+# TAT-05). A pending action's preview — a unified diff for `write_file`/`edit_file`, the patch
+# itself for `apply_patch` — was cut at 4,000 characters in three places, all SILENTLY:
+# `write_tools._diff`, the `apply_patch` action, and the assistant router's public projection of the
+# card. So a 14 KB rewrite reached the approver as its first 4,000 characters with nothing marking
+# the rest, and "Approve once" applies the WHOLE change: an instruction injected into the model only
+# had to put the edit that matters past character 4,000. The bound stays — a human reads the card,
+# and the approval scope already binds the full change by digest — but the cut is now SAID.
+APPROVAL_PREVIEW_CHARS = 4000
+
+_PREVIEW_CUT = ("\n…[approval preview cut here: {omitted:,} of {total:,} characters ({lines:,} more "
+                "line{s}) are NOT shown above, and approving applies ALL of it — reject and ask for "
+                "the change in smaller pieces to review the rest]")
+
+
+def clip_approval_preview(text: str, cap: int = APPROVAL_PREVIEW_CHARS) -> str:
+    """`text` whole when it fits in `cap`; else its head — ending on a whole line where it can — and
+    a receipt saying how much the card does NOT show and how to review it.
+
+    The receipt is charged INSIDE the cap, so applying this twice is a no-op: the router re-bounds
+    every preview it publishes, and a preview a tool already bounded must pass through unchanged
+    rather than lose its receipt to a second cut. A preview that fits comes back byte-identical —
+    nothing was left out, so there is nothing to say.
+    """
+    text = text if isinstance(text, str) else str(text or "")
+    if len(text) <= cap:
+        return text
+    budget = cap
+    while True:
+        head = text[:max(0, budget)]
+        newline = head.rfind("\n")
+        if newline >= 0:
+            head = head[:newline + 1]        # a diff is read line by line: never end mid-line
+        rest = text[len(head):]
+        lines = len(rest.splitlines())
+        receipt = _PREVIEW_CUT.format(omitted=len(rest), total=len(text), lines=lines,
+                                      s="" if lines == 1 else "s")
+        over = len(head) + len(receipt) - cap
+        if over <= 0 or budget <= 0:
+            return head + receipt
+        budget -= over
+
 
 @dataclass(frozen=True)
 class ActionPolicy:

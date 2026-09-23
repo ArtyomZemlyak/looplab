@@ -47,7 +47,8 @@ from looplab.serve.protocol import (
     ASSISTANT_STREAM_END_SENTINEL, PERM_ALLOW_ALWAYS, PERM_ALLOW_ONCE, PERM_DENY,
     RUN_GENERATION_FIELD, SSE_DONE, SSE_ERROR, SSE_STEP, SSE_TEXT, SSE_TODOS, SSE_TOKEN)
 from looplab.tools.perm_modes import (
-    GRANT_TTL_SECONDS, RememberedGrantStore, classify_action, normalize_mode)
+    APPROVAL_PREVIEW_CHARS, GRANT_TTL_SECONDS, RememberedGrantStore, classify_action,
+    clip_approval_preview, normalize_mode)
 from looplab.core.redact import redact_secrets
 
 ASSISTANT_SHARE_HEADER = "X-LoopLab-Share"
@@ -628,12 +629,16 @@ def build_router(srv) -> APIRouter:
             safe_action = {}
             public_limits = {
                 "tool": 160, "tool_kind": 80, "label": 500, "verb": 1000,
-                "path": 1000, "preview": 4000, "cwd": 1000,
+                "path": 1000, "preview": APPROVAL_PREVIEW_CHARS, "cwd": 1000,
             }
             for key, limit in public_limits.items():
                 value = (action or {}).get(key)
                 if isinstance(value, str):
-                    safe_action[key] = value[:limit]
+                    # The PREVIEW is what the human approves, so its cut is SAID, never silent: the
+                    # same bound and receipt the write tools apply, so an already-bounded preview
+                    # passes through unchanged (review 2026-09-22, TAT-05).
+                    safe_action[key] = (clip_approval_preview(value, limit) if key == "preview"
+                                        else value[:limit])
             safe_action.update({
                 "risk": policy.risk,
                 "action_id": policy.action_id,
