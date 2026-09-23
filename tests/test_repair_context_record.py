@@ -130,8 +130,17 @@ _SCENARIOS = {
     "metric_key_missing_with_warning": (lambda: _RecDev(
         "import json, sys\nsys.stderr.write('UserWarning: lr scheduler stepped before optimizer\\n')\n"
         "print(json.dumps({'accuracy': 0.91}))\n"), {}),
+    # SCRIPTED, not a real `os.kill(..., SIGKILL)`: Windows has no `signal.SIGKILL`, so the real kill
+    # became an AttributeError traceback there (Windows run 53) and the scenario stopped being a
+    # silent kill. The results are exactly what the real SIGKILL and the repaired run produced on
+    # POSIX — the OFF digest below, pinned over the real kill, is unchanged by the swap.
     "killed_silently": (lambda: _RecDev("import os, signal\nprint('epoch 1 loss=0.9')\n"
-                                        "os.kill(os.getpid(), signal.SIGKILL)\n"), {}),
+                                        "os.kill(os.getpid(), signal.SIGKILL)\n"), dict(
+        fake=[RunResult(exit_code=-9, stdout="epoch 1 loss=0.9\n", stderr="", metric=None,
+                        timed_out=False),
+              # …and the repaired attempt scores, as the real one did on `GOOD`.
+              RunResult(exit_code=0, stdout='{"metric": 0.1}\n', stderr="", metric=0.1,
+                        timed_out=False)])),
     "check_failed_diagnosed_not_learning": (lambda: _RecDev("print(1)\n"), dict(
         fake=[_CHECK_FAILED], judge=_diagnosing("not_learning", _SUMMARY))),
     "check_failed_diagnosed_diverged": (lambda: _RecDev("print(1)\n"), dict(
@@ -170,6 +179,9 @@ def test_off_the_developer_is_handed_what_it_was_handed_before(tmp_path):
     for name in _SCENARIOS:
         contexts, _events = _scenario(tmp_path, name)
         for ctx in contexts:
+            # CRLF FOLDED, as the golden this module drives folds it: a real child's stderr on
+            # Windows ends its lines `\r\n`, and the digest pins what the Developer was TOLD.
+            ctx = ctx.replace("\r\n", "\n")
             h.update(name.encode() + b"\x00" + ctx.encode("utf-8") + b"\x00")
             calls += 1
     assert calls == 14 and h.hexdigest() == _OFF_CONTEXTS_BEFORE

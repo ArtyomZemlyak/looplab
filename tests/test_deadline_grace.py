@@ -213,6 +213,13 @@ def test_the_durable_row_describes_what_actually_happened_to_a_silent_stage(tmp_
                            stall_cap=1800.0,
                            on_deadline=lambda tail: 600.0, deadline_grace_max_s=2.0)
     row = res.stages[0]
+    # THE ROW AND THE FLAGS IN THE MESSAGE: the Windows leg records no grace at all here (runs 51
+    # and 53, at a 1 s and then a 3 s budget) while the direct-`run_argv` sibling above passes there,
+    # so the cause is on the staged path and not yet established; the next failure must say which
+    # watchdog ended the stage and what the child wrote.
+    assert "deadline_grace_s" in row, (
+        f"no grace recorded: row={row} stalled={res.stalled} timed_out={res.timed_out} "
+        f"stderr tail={res.stderr[-400:]!r}")
     assert row["deadline_grace_s"] == pytest.approx(2.0)
     assert row["seconds"] >= budget + row["deadline_grace_s"] * 0.75, (
         f"the row claims {row['deadline_grace_s']}s of grace but only ran {row['seconds']}s: {row}")
