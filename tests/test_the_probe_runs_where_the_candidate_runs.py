@@ -279,7 +279,8 @@ def test_a_data_mount_is_linked_into_the_cwd_under_the_name_the_eval_uses(tmp_pa
     out = DevProbeTools(spec, timeout_s=60).execute(
         "run_probe", {"code": "print(open('assets/catalog.txt').read())"})
     assert "exit=0" in out and "item-1" in out, out
-    assert "data mounts linked here" in out
+    # Linked by the workspace seed where the repo is seeded, by `_link_mounts` where it is not.
+    assert "seeded here as its evaluation sees it" in out or "data mounts linked here" in out
     denied = DevProbeTools(spec, timeout_s=60).execute(
         "run_probe", {"code": "open('assets/new.txt', 'w')"})
     assert "exit=0" not in denied and not (assets / "new.txt").exists()
@@ -349,3 +350,75 @@ def test_probe_env_is_task_authored_validated_and_carried(tmp_path):
     with pytest.raises(ValueError):
         RepoTask(goal="g", editable_path=str(tmp_path),
                  eval={"command": run, "probe_env": {"OPENAI_API_KEY": "sk-x"}})
+
+
+# ------------------------------------------------------------ the repo's own code, as the eval sees it
+#
+# Measured 2026-09-23: two of thirty MiniOneRec probes died on `No module named 'service'` -- the
+# Developer wanted to run the repo's own code on CPU against its change, and the replica held only
+# what the node had staged.
+
+class _Staged:
+    def __init__(self, files=None, deleted=None):
+        self.files = dict(files or {})
+        self.deleted = list(deleted or [])
+
+
+def _repo(tmp_path):
+    src = tmp_path / "repo"
+    (src / "pkg").mkdir(parents=True)
+    (src / "pkg" / "__init__.py").write_text("")
+    (src / "pkg" / "core.py").write_text("VALUE = 'from the repo'\n")
+    (src / "pkg" / "gone.py").write_text("X = 1\n")
+    return src
+
+
+@needs_landlock
+def test_the_repo_s_own_modules_import_with_nothing_staged(tmp_path):
+    src = _repo(tmp_path)
+    spec = {"editables": [{"name": ".", "path": str(src), "surface": ["**"]}]}
+    out = DevProbeTools(spec, timeout_s=60).execute(
+        "run_probe", {"code": "from pkg.core import VALUE; print(VALUE)"})
+    assert "exit=0" in out and "from the repo" in out, out
+    assert "seeded here as its evaluation sees it" in out
+
+
+@needs_landlock
+def test_the_staged_overlay_wins_over_the_seed_and_deletions_apply(tmp_path):
+    src = _repo(tmp_path)
+    spec = {"editables": [{"name": ".", "path": str(src), "surface": ["**"]}]}
+    staged = _Staged({"pkg/core.py": "VALUE = 'staged'\n"}, deleted=["pkg/gone.py"])
+    out = DevProbeTools(spec, timeout_s=60, staged=staged).execute("run_probe", {"code": (
+        "import os\nfrom pkg.core import VALUE\nprint(VALUE, os.path.exists('pkg/gone.py'))\n")})
+    assert "staged False" in out, out
+
+
+@needs_landlock
+def test_the_original_tree_stays_fenced_when_its_copy_is_seeded(tmp_path):
+    src = _repo(tmp_path)
+    spec = {"editables": [{"name": ".", "path": str(src), "surface": ["**"]}]}
+    out = DevProbeTools(spec, timeout_s=60).execute(
+        "run_probe", {"code": f"print(open({str(src / 'pkg' / 'core.py')!r}).read())"})
+    assert "from the repo" not in out and "exit=0" not in out
+
+
+@needs_landlock
+def test_a_repo_over_the_cap_is_not_copied_and_says_so(tmp_path, monkeypatch):
+    monkeypatch.setattr(dev_probe, "_MAX_SEED_BYTES", 1)
+    src = _repo(tmp_path)
+    spec = {"editables": [{"name": ".", "path": str(src), "surface": ["**"]}]}
+    out = DevProbeTools(spec, timeout_s=60).execute(
+        "run_probe", {"code": "import os; print(os.path.exists('pkg'))"})
+    assert "NOT seeded" in out and "False" in out, out
+
+
+def test_sizing_a_tree_stops_as_soon_as_it_is_over_the_cap(tmp_path):
+    """The seed only asks "does it fit". Walking a tree to its end first cost 952 s on a root too
+    broad to fence, which the probe then refused anyway."""
+    for i in range(5):
+        (tmp_path / f"f{i}.bin").write_bytes(b"x" * 10)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "huge.pack").write_bytes(b"x" * 1000)       # ignored, as the seed ignores it
+    assert dev_probe._bytes_left_after(tmp_path, 100) == 50
+    assert dev_probe._bytes_left_after(tmp_path, 15) == -5          # stopped at the second file
+    assert dev_probe._bytes_left_after(tmp_path / "missing", 100) is None

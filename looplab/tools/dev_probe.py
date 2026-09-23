@@ -237,6 +237,10 @@ _MAX_OUTPUT = 64_000
 # about to use. The rule the no-write rungs serve -- "nothing a probe does can reach the record" --
 # holds for a directory the engine deletes when the probe ends and that is not the node's workdir.
 _SCRATCH_BYTES = 64 * 1024 * 1024
+# The largest repo a probe copies into its cwd per call (`DevProbeTools._seed_workspace`). A code
+# tree is kilobytes to tens of megabytes; one that carries data or checkpoints inside it is not
+# re-copied on every question.
+_MAX_SEED_BYTES = 64 * 1024 * 1024
 # Which arguments of the `shutil.*` events this module adds to `_MUTATE` are the paths it MUTATES --
 # the destination for a copy (reading the source is a read), both for a move, the tree for rmtree.
 # `os.startfile` has no row on purpose: it opens something with the shell and is never allowed.
@@ -246,6 +250,31 @@ _SHUTIL_PATH_ARGS = {
     "shutil.move": ((0, None), (1, None)), "shutil.rmtree": ((0, 1),),
     "shutil.unpack_archive": ((1, None),),
 }
+
+def _bytes_left_after(root: Path, budget: int):
+    """`budget` minus the bytes of the regular files under `root`, STOPPING as soon as it goes
+    negative -- the question is only "does it fit", and a tree that does not fit is not walked to its
+    end. Same `IGNORE_NAMES` as the seed itself, so the answer is about what would be copied. None if
+    the tree cannot be read."""
+    import fnmatch
+    from looplab.engine.workspace_seed import IGNORE_NAMES
+    stack = [root]
+    try:
+        while stack:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    if any(fnmatch.fnmatch(entry.name, pat) for pat in IGNORE_NAMES):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        budget -= entry.stat(follow_symlinks=False).st_size
+                        if budget < 0:
+                            return budget
+    except OSError:
+        return None
+    return budget
+
 
 # `-P` (PYTHONSAFEPATH) exists from CPython 3.11. The engine's own interpreter always has it; a TASK's
 # interpreter may not -- the MiniOneRec env this was built for is 3.10, where `-P` is "Unknown option"
@@ -1117,7 +1146,7 @@ class DevProbeTools:
             # the `finally` below removes it with everything else, and never the replica `work`.
             scratch = root / "scratch"
             scratch.mkdir()
-            replica_note = self._replicate(work) + self._link_mounts(work)
+            replica_note = self._seed_workspace(work) + self._replicate(work) + self._link_mounts(work)
             program = root / "probe.py"
             program.write_text(code, encoding="utf-8")
             launcher = root / "probe_launcher.py"
@@ -1517,6 +1546,48 @@ class DevProbeTools:
             note += (f"; {skipped + gskipped} omitted to stay under the replica cap — "
                      "read them with read_file")
         return note + ")"
+
+    def _seed_workspace(self, work: Path) -> str:
+        """The node's repo, seeded into the probe's cwd exactly as its EVAL workspace is seeded.
+
+        Measured 2026-09-23 on a MiniOneRec plan: two of thirty probes died on `No module named
+        'service'` -- the Developer wanted to run the repo's OWN code on CPU against its change, and the
+        replica held only what the node had staged. Rule 1 is about the ORIGINAL tree read by absolute
+        path (a human's checkpoint named by path and scored as a node's own); the eval itself runs on
+        a COPY of that tree, and `tools/dev_commands.py` already hands its commands the same copy
+        through the same `engine/workspace_seed.py::seed_candidate_workspace`. So the probe now sees
+        what the evaluation sees and no more -- the staged overlay is written over it next, and the
+        original stays fenced. BOUNDED: a tree over `_MAX_SEED_BYTES` is not copied per probe, and
+        the result says so rather than reading as a repo with no code in it."""
+        spec = self.repo_spec or {}
+        editables = [e for e in (spec.get("editables") or []) if isinstance(e, dict) and e.get("path")]
+        if not editables:
+            return ""
+        # The fence FIRST. A root too broad to fence (`/`, `$HOME`) is a refusal to run, and asking it
+        # after sizing meant walking that whole root before refusing -- measured: 952 s for
+        # `test_a_root_too_broad_to_fence_refuses_the_probe_rather_than_running_unfenced`, against
+        # 8 s for the whole file without the seed. Raises `ProbeRefusal`, as the grant derivation
+        # below would have a moment later.
+        self._fence_inputs()
+        from looplab.engine import workspace_seed
+        budget = _MAX_SEED_BYTES
+        for ed in editables:
+            budget = _bytes_left_after(Path(str(ed["path"])), budget)
+            if budget is None:
+                return "\n(the repo could not be sized, so it was NOT seeded here -- only your staged files)"
+            if budget < 0:
+                return (f"\n(the repo is over the {_MAX_SEED_BYTES // (1024 * 1024)} MiB a probe "
+                        "copies, so it was NOT seeded here -- only your staged files)")
+        try:
+            rows = workspace_seed.seed_candidate_workspace(spec, work, seed_mode="auto")
+        except (OSError, workspace_seed.MountCollision) as exc:
+            return f"\n(the repo could not be seeded here: {exc})"
+        for rel in sorted(getattr(self.staged, "deleted", None) or []):
+            target = (work / str(rel)).resolve()
+            if str(target).startswith(str(work.resolve()) + os.sep) and target.is_file():
+                target.unlink()
+        n = sum(1 for r in rows if r.get("kind") == "editable")
+        return f"\n(the node's repo seeded here as its evaluation sees it: {n} tree(s))"
 
     def _link_mounts(self, work: Path) -> str:
         """The task's `data:` mounts, linked into the probe's cwd under the names the eval uses.
