@@ -1,0 +1,30 @@
+# Strings of docs/infographic/agent-architecture.html's `B`/`E` data over the 600-character budget,
+# per box or edge, when the budget landed (review 2026-09-22, TST-07). `<owner> <count> <longest>`:
+# both numbers are CEILINGS — a box may shrink, never gain an over-budget string or lengthen its
+# longest — and a box back within budget must lose its row (tests/test_doc_surface_budgets.py).
+boss 2 870
+concept 1 1011
+deepres 3 2567
+e_dep 1 640
+e_fence 2 990
+e_ir 10 4277
+e_mon 2 844
+e_sal 5 5593
+e_stg 6 2109
+e_subj 9 2245
+evaluate 4 1738
+f_less 2 1772
+h_dedup 2 2526
+h_spec 5 4251
+i_probe 1 655
+i_val 2 1255
+implement 2 1082
+kanban 4 952
+n_sem 1 935
+propose 3 4453
+r_pol 1 894
+sd_memo 1 1028
+spine 2 731
+strat 2 1608
+t_gate 1 1103
+w_skill 1 672

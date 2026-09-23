@@ -1,0 +1,48 @@
+# docs/guide/configuration.md settings rows over the 1,500-character budget when the budget landed
+# (review 2026-09-22, TST-07). `<field> <count> <longest>`: both numbers are CEILINGS — a row may
+# shrink, never grow — and a field back within budget must lose its row
+# (tests/test_doc_surface_budgets.py).
+auto_extra_metrics 1 3015
+auto_install_deps 1 7332
+cadence_while_evaluating 1 2786
+concept_run_base 1 1516
+concept_tidy 1 1961
+cross_run_advisory 1 1700
+cross_run_concepts 1 1559
+cross_run_curation 1 3147
+cross_run_read_tools 1 2738
+cross_run_structured_claims 1 1759
+deep_research_every 1 1619
+developer_crash_pause_after 1 1687
+developer_probe 1 3036
+eval_deadline_grace_s 1 2212
+eval_noise_seeds 1 2093
+eval_parallel 1 2384
+evidence_envelope 1 2295
+inline_repair_attempts 1 3839
+inline_repair_reasons 1 5640
+inline_repair_retrain_cap 1 4119
+landlock 1 2874
+llm_parallel 1 2914
+mcts_cost_weight 1 1607
+mcts_value_weight 1 2171
+metric_salvage 1 2636
+metric_salvage_repair 1 1568
+metric_subject 1 5503
+node_open_budget_floor_usd 1 1933
+novelty_literature 1 1673
+proposal_width 1 2039
+read_fence 1 3118
+redact_output 1 2269
+repair_critic_after 1 2328
+repair_log_tools 1 3635
+single_command_divergence_watch 1 1753
+speculation_depth 1 5927
+speculation_gate_receipt 1 1654
+stage_check_tools 1 2639
+steady_state_build 1 1724
+syscall_fence 1 1713
+train_monitor_contract 1 2272
+train_monitor_kill 1 3245
+train_monitor_tools 1 4227
+triage_time_budget_s 1 1817
