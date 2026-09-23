@@ -3009,8 +3009,16 @@ class RunCommandService:
                         # still holds open, and the refusal was swallowed below -- the half-written
                         # claim survived naming this live process, which deadlocks the lane (review
                         # 2026-09-22 round 2, run 35804658308). POSIX was indifferent to the order.
-                        os.close(fd)
-                        fd = -1
+                        # The descriptor is given up BEFORE the close is tried, and a close that
+                        # raises is contained: this fallback exists for network filesystems, where
+                        # close() reports deferred write errors after releasing the number anyway, so
+                        # a retry in the `finally` could close another thread's file -- and a raise
+                        # here would skip the removal this branch exists for and bury the cause.
+                        closing, fd = fd, -1
+                        try:
+                            os.close(closing)
+                        except OSError:
+                            pass
                         try:
                             _unlink_execution_claim(lock)
                         except OSError:

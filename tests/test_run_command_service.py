@@ -2262,6 +2262,52 @@ def test_a_failed_o_excl_claim_is_removed_where_an_open_file_cannot_be_deleted(t
     assert not claim.exists()
 
 
+def test_a_close_that_raises_in_the_failed_fallback_closes_once_and_still_removes_the_claim(
+        tmp_path, monkeypatch):
+    """The fallback runs on network filesystems, and there close() reports deferred write errors
+    AFTER releasing the descriptor number. Closing before the removal must not turn that report into
+    either defect it could cause: a second close of the released number in the `finally` (another
+    thread's file, on a busy server), or a raise that skips the removal and buries the cause."""
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    monkeypatch.setattr(os, "link", lambda *_a, **_k: (_ for _ in ()).throw(
+        OSError(errno.EPERM, "hard links not supported on this filesystem")))
+    command_id = "cmd_" + "e" * 32
+    claim = srv.commands._exec_path(rd, command_id)
+    real_open, real_write, real_close = os.open, os.write, os.close
+    opened, closes = {}, []
+
+    def recording_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == str(claim):
+            opened["fd"] = fd
+        return fd
+
+    def reporting_close(fd):
+        if fd != opened.get("fd"):
+            return real_close(fd)
+        closes.append(fd)
+        if len(closes) > 1:              # never reach the OS twice with one number, even when red
+            raise OSError(errno.EBADF, "bad file descriptor")
+        real_close(fd)                   # released, as Linux releases it whatever close reports
+        raise OSError(errno.EIO, "deferred write error reported at close")
+
+    monkeypatch.setattr(os, "open", recording_open)
+    monkeypatch.setattr(os, "write", lambda _fd, _data: (_ for _ in ()).throw(
+        OSError(errno.ENOSPC, "no space left on device")))
+    monkeypatch.setattr(os, "close", reporting_close)
+    with pytest.raises(OSError) as raised:
+        srv.commands._claim_execution(rd, command_id)
+    monkeypatch.setattr(os, "close", real_close)
+    monkeypatch.setattr(os, "write", real_write)
+
+    assert raised.value.errno == errno.ENOSPC, "the close's report buried the failure's cause"
+    assert closes == [opened["fd"]], "the claim's descriptor was closed more than once"
+    assert not claim.exists(), "a failing close skipped the removal; the lane is owned forever"
+    assert srv.commands._claim_execution(rd, command_id) is True
+    srv.commands._release_execution(rd, command_id)
+
+
 def test_a_claim_released_while_a_reader_holds_it_open_is_still_removed(tmp_path, monkeypatch):
     """`_release_execution` unlinked the claim ONCE and swallowed any refusal. On Windows a `get`
     poll reading the owner (`_execution_owner_definitely_gone`) holds the claim open for a moment, a
