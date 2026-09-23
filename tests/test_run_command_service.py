@@ -2229,6 +2229,68 @@ def test_execution_claim_falls_back_to_o_excl_where_hard_links_are_unsupported(t
     srv.commands._release_execution(rd, command_id)
 
 
+def test_a_failed_o_excl_claim_is_removed_where_an_open_file_cannot_be_deleted(tmp_path,
+                                                                               monkeypatch):
+    """The Windows CI leg (run 35804658308, review 2026-09-22 round 2): the fallback removed its
+    half-written claim while ITS OWN descriptor was still open — `os.close` sat in the `finally`
+    that runs after the `except` — Windows refused the delete (a handle held it), the refusal was
+    swallowed, and the orphaned `.executing` claim named this live process, so nothing could ever
+    reclaim the command lane. Driven under the Windows rule itself."""
+    from _windows_emulation import refuse_deleting_an_open_file
+
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    monkeypatch.setattr(os, "link", lambda *_a, **_k: (_ for _ in ()).throw(
+        OSError(errno.EPERM, "hard links not supported on this filesystem")))
+    command_id = "cmd_" + "c" * 32
+    claim = srv.commands._exec_path(rd, command_id)
+    refuse_deleting_an_open_file(monkeypatch)
+    real_write, failing = os.write, {"on": True}
+
+    def guarded_write(fd, data):
+        if failing["on"]:
+            raise OSError(errno.ENOSPC, "no space left on device")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", guarded_write)
+    with pytest.raises(OSError):
+        srv.commands._claim_execution(rd, command_id)
+    assert not claim.exists(), "a failed fallback write left an orphaned .executing claim behind"
+    failing["on"] = False
+    assert srv.commands._claim_execution(rd, command_id) is True
+    srv.commands._release_execution(rd, command_id)
+    assert not claim.exists()
+
+
+def test_a_claim_released_while_a_reader_holds_it_open_is_still_removed(tmp_path, monkeypatch):
+    """`_release_execution` unlinked the claim ONCE and swallowed any refusal. On Windows a `get`
+    poll reading the owner (`_execution_owner_definitely_gone`) holds the claim open for a moment, a
+    delete in that moment is refused, and the claim then outlives its worker naming THIS live
+    process — no liveness rule reclaims it, so every later `get` finds the lane owned and the command
+    sits in `accepted`: the Windows CI leg's test_control_plane_liveness::test_no_reachable_control_
+    state_is_absorbing saw exactly that, 20 s past the command's deadline (run 35804658308)."""
+    from _windows_emulation import refuse_deleting_an_open_file
+
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    command_id = "cmd_" + "d" * 32
+    assert srv.commands._claim_execution(rd, command_id) is True
+    claim = srv.commands._exec_path(rd, command_id)
+    refused = refuse_deleting_an_open_file(monkeypatch)
+    reader = open(claim, "rb")                           # a concurrent poll reading the owner row
+    closer = threading.Timer(0.05, reader.close)
+    closer.start()
+    try:
+        srv.commands._release_execution(rd, command_id)
+    finally:
+        closer.join()
+        reader.close()
+    assert refused, "precondition: the delete met the open handle at least once"
+    assert not claim.exists(), "the claim outlived its worker; the command lane is now owned forever"
+    assert srv.commands._claim_execution(rd, command_id) is True
+    srv.commands._release_execution(rd, command_id)
+
+
 def test_command_record_save_retries_transient_windows_replace_denial(tmp_path, monkeypatch):
     import looplab.serve.run_commands as command_module
 

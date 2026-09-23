@@ -406,6 +406,31 @@ def _mark_activity_live(token: str, live: bool) -> None:
             _live_activity_tokens.discard(token)
 
 
+def _unlink_execution_claim(claim: Path) -> None:
+    """Remove an `.executing` claim, riding out Windows' TRANSIENT refusal; raises what persists.
+
+    Windows refuses to delete a file while any handle holds it open (ERROR_SHARING_VIOLATION,
+    WinError 32; ERROR_ACCESS_DENIED, 5), and every `get` poll opens the claim for a moment to read
+    its owner (`_execution_owner_definitely_gone`). A single best-effort unlink therefore lost that
+    race now and then, and the lost race is not cosmetic: the claim outlives its worker naming THIS
+    live process, no liveness rule can ever reclaim it, and the command sits in `accepted` until the
+    server exits (review 2026-09-22 round 2 -- the Windows CI leg's `test_no_reachable_control_state_
+    is_absorbing`, run 35804658308, a command `accepted` for 20 s past its deadline). The same
+    bounded retry `_save` applies to `os.replace` for the same reason; POSIX never takes it.
+    """
+    for attempt in range(20):
+        try:
+            claim.unlink(missing_ok=True)
+            return
+        except PermissionError as exc:
+            if (getattr(exc, "winerror", None) not in (5, 32)
+                    and getattr(exc, "errno", None) not in (errno.EACCES, errno.EBUSY)):
+                raise
+            if attempt == 19:
+                raise
+            time.sleep(min(0.05, 0.002 * (attempt + 1)))
+
+
 # The postcondition values that mean "the operator asked this run to PAUSE", in one place. Two of
 # them coexist on purpose and forever: `paused` is what `control_validation.py` mints today, and
 # `paused_and_stopped` is the LEGACY spelling every durable record written before 2026-08-13 still
@@ -2980,13 +3005,20 @@ class RunCommandService:
                         except OSError:
                             pass
                     except BaseException:
+                        # CLOSE FIRST, then remove: Windows refuses to delete a file its own handle
+                        # still holds open, and the refusal was swallowed below -- the half-written
+                        # claim survived naming this live process, which deadlocks the lane (review
+                        # 2026-09-22 round 2, run 35804658308). POSIX was indifferent to the order.
+                        os.close(fd)
+                        fd = -1
                         try:
-                            lock.unlink()
+                            _unlink_execution_claim(lock)
                         except OSError:
                             pass
                         raise
                     finally:
-                        os.close(fd)
+                        if fd >= 0:
+                            os.close(fd)
                     return True
             finally:
                 try:
@@ -3040,7 +3072,10 @@ class RunCommandService:
                      else record_path.with_name(f".{command_id}.executing"))
             if claim.is_symlink():      # `_exec_path`'s own refusal, kept for the sibling spelling
                 return
-            claim.unlink()
+            # Not a bare `unlink()`: on Windows a concurrent `get` reading the owner makes the delete
+            # fail for a moment, and a claim that outlives its worker is never reclaimable (see
+            # `_unlink_execution_claim`).
+            _unlink_execution_claim(claim)
         except (OSError, ValueError, HTTPException):
             pass
 

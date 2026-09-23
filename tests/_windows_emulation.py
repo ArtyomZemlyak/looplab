@@ -6,7 +6,10 @@ otherwise never executed until the Windows CI leg reports it — which is how th
 These doubles reproduce exactly the rule each branch exists for, no more:
 
 * `FakeMsvcrt` — byte-range locks held per HANDLE (`msvcrt.locking`): a byte held through one open
-  refuses every other open with EACCES, even in the same process.
+  refuses every other open with EACCES, even in the same process — and every other handle's READ
+  of that byte (`refuses_read` / `mandatory_reads`).
+* `refuse_deleting_an_open_file` — `DeleteFileW` refuses a file any handle holds open (WinError
+  32); POSIX unlinks it and lets the descriptors keep the inode.
 * `refuse_readonly_unlink` — `DeleteFileW` refuses an entry carrying FILE_ATTRIBUTE_READONLY with
   `[WinError 5] Access is denied`, where POSIX consults only the parent directory. On Windows that
   attribute IS what `os.chmod(path, 0o444)` sets, so "lacks the owner-write bit" is its double.
@@ -300,3 +303,50 @@ def windows_path_stat_ctime(monkeypatch) -> list:
     monkeypatch.setattr(os, "stat", _stat)
     monkeypatch.setattr(os, "lstat", _lstat)
     return answered
+
+
+def refuse_deleting_an_open_file(monkeypatch) -> list:
+    """Make `os.unlink`/`os.remove` refuse a file this process holds OPEN, the way Windows does.
+
+    `DeleteFileW` fails with ERROR_SHARING_VIOLATION (WinError 32) while any handle to the file was
+    opened without FILE_SHARE_DELETE -- and every `open()`/`os.open()` CPython makes on Windows is
+    such a handle -- where POSIX removes the name and lets the open descriptors keep the inode. The
+    open handles are read off `/proc/self/fd`, so the double sees exactly the descriptors this
+    process holds (and skips where there is no such table). Returns the refused paths, so a test can
+    prove it fired (review 2026-09-22 round 2, run 35804658308)."""
+    import pytest
+
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("no /proc/self/fd to read this process's open descriptors from")
+    real_unlink = os.unlink
+    refused: list = []
+
+    def _held_open(path, dir_fd) -> bool:
+        try:
+            info = os.lstat(path, dir_fd=dir_fd) if dir_fd is not None else os.lstat(path)
+        except OSError:
+            return False
+        for name in os.listdir("/proc/self/fd"):
+            try:
+                held = os.fstat(int(name))
+            except (OSError, ValueError):
+                continue
+            if stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (
+                    info.st_dev, info.st_ino):
+                return True
+        return False
+
+    def _unlink(path, *, dir_fd=None):
+        if _held_open(path, dir_fd):
+            refused.append(path)
+            exc = PermissionError(errno.EACCES, "The process cannot access the file because it is "
+                                  "being used by another process (emulated)", path)
+            exc.winerror = 32
+            raise exc
+        if dir_fd is not None:
+            return real_unlink(path, dir_fd=dir_fd)
+        return real_unlink(path)
+
+    monkeypatch.setattr(os, "unlink", _unlink)
+    monkeypatch.setattr(os, "remove", _unlink)
+    return refused
