@@ -166,14 +166,13 @@ def test_summary_capability_is_one_run_read_only_and_revocable(tmp_path, monkeyp
     before = list(iter_jsonl(tmp_path / "demo" / "events.jsonl"))
     # The command row is a COMPLETE durable command (a `hint` appends on any run; the generation is
     # the one the owner saw above; each request carries an `Idempotency-Key`), so what refuses it is
-    # the review capability and nothing else. It was the legacy `/control` route, slated for
-    # retirement (review 2026-09-22, SRV1-07).
+    # the review capability and nothing else. It was the legacy `/control` route, retired with the
+    # legacy `/resume` (whose row this list also carried) on 2026-09-23 (review SRV1-07).
     mutation_cases = [
         ("post", "/api/review/state", {}),
         ("post", "/api/runs/demo/commands",
          {"type": "hint", "data": {"text": "review"}, "expected_generation": generation}),
         ("put", "/api/runs/demo/config", {"settings": {"timeout": 1}}),
-        ("post", "/api/runs/demo/resume", {}),
         ("post", "/api/runs/demo/reset", {}),
         ("delete", "/api/runs/demo", None),
         ("post", "/api/start", {"run_id": "pwned", "task": {"kind": "quadratic"}}),

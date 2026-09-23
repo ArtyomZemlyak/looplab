@@ -71,7 +71,7 @@ POST /api/runs/{run_id}/chat-compact	tests/test_collaboration.py tests/test_prov
 GET /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_server.py
 POST /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/command	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py
-POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_fork_from_seq.py tests/test_legacy_control_deprecation.py tests/test_refusal_vocabulary.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py
+POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_fork_from_seq.py tests/test_refusal_vocabulary.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py
 GET /api/runs/{run_id}/commands/{command_id}	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_run_command_service.py tests/test_stalled_finalization_affordance.py
 POST /api/runs/{run_id}/commands/{command_id}/retry	tests/test_collaboration.py tests/test_run_command_service.py
 GET /api/runs/{run_id}/comments	tests/test_collaboration.py tests/test_refusal_vocabulary.py
@@ -83,7 +83,6 @@ GET /api/runs/{run_id}/concepts/lens/recovery	tests/test_concept_lens_durability
 POST /api/runs/{run_id}/concepts/lens/recovery/abandon	tests/test_concept_lens_durability.py
 GET /api/runs/{run_id}/config	tests/test_refusal_vocabulary.py tests/test_review_fixes.py tests/test_server.py tests/test_stage_environment.py
 PUT /api/runs/{run_id}/config	tests/test_refusal_vocabulary.py tests/test_review_fixes.py tests/test_server.py
-POST /api/runs/{run_id}/control	tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_control_reads_the_log_once.py tests/test_fork_from_seq.py tests/test_legacy_control_deprecation.py tests/test_run_command_service.py tests/test_server.py tests/test_strategist_developer_switch.py
 GET /api/runs/{run_id}/cost	tests/test_refusal_vocabulary.py tests/test_seq_gap_visibility.py
 POST /api/runs/{run_id}/deletions	tests/test_deletion_identity_leak.py tests/test_durable_op_kit.py tests/test_finalization_stall_deletion.py tests/test_projects.py tests/test_report.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_run_deletion_memory_cascade.py tests/test_run_deletion_quarantine_residue.py tests/test_server.py tests/test_start_idempotency.py
 GET /api/runs/{run_id}/deletions/{operation_id}	tests/test_deletion_identity_leak.py
@@ -105,7 +104,6 @@ GET /api/runs/{run_id}/prov	tests/test_fork_from_seq.py tests/test_prov_claims.p
 POST /api/runs/{run_id}/report_refresh	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/reset	tests/test_durable_op_kit.py tests/test_report.py tests/test_reset_phase_locks.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_server.py
 POST /api/runs/{run_id}/resolve-activity-claims	tests/test_run_command_service.py
-POST /api/runs/{run_id}/resume	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_run_command_service.py tests/test_server.py
 GET /api/runs/{run_id}/reviews	tests/test_review_capabilities.py
 POST /api/runs/{run_id}/reviews	tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_lens_durability.py tests/test_log_pages.py tests/test_refusal_vocabulary.py tests/test_review_capabilities.py tests/test_server_code_freshness.py
 DELETE /api/runs/{run_id}/reviews/{link_id}	tests/test_review_capabilities.py

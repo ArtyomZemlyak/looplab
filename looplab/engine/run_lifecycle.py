@@ -308,7 +308,8 @@ def fresh_resume_launch_pending(rd: Path, *, now: Optional[float] = None) -> boo
 # THE LAUNCH-IN-FLIGHT HANDSHAKE (review 2026-09-22, SRV1-09 remainder). Two FAMILIES of spawner
 # start an engine into an existing run, and each family used to read only its own ledger:
 #   * LOG-LEDGER spawners — the startup and run-list reconcilers, their after-exit waiters, the
-#     command service's restart hand-off, the legacy resume route — append a
+#     command service's restart hand-off (and, until its retirement on 2026-09-23, the legacy
+#     resume route) — append a
 #     `resume_requested(launch_claim=True)` under `run_lifecycle_lock` and then Popen;
 #   * PRECLAIM spawners — a command worker driving its intent, Replay, a fresh start — write the
 #     command service's spawn lease under the run's sequencer and then Popen.

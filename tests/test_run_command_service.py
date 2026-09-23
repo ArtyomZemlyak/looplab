@@ -688,15 +688,17 @@ def test_finalize_payload_is_canonical_and_external_attach_must_match(tmp_path):
     assert matched["status"] == "succeeded" and len(driver.calls) == 1
 
 
-def test_legacy_empty_finalize_gets_nonempty_canonical_reason(tmp_path):
+def test_an_empty_finalize_gets_the_nonempty_canonical_reason(tmp_path):
+    """Proved on the legacy `/control` route until its retirement (2026-09-23); the normalization
+    is the one the command intake shares (`control_validation.py::normalize_control`)."""
     rd = _seed(tmp_path)
     client, _srv = _client(tmp_path, _Driver())
-    response = client.post(
-        "/api/runs/demo/control", json={"type": "run_abort", "data": {}})
-    assert response.status_code == 200
+    record = _terminal(client, _post(client, "run_abort", {}, key="empty-finalize").json())
+    assert record.get("event_seq") is not None, record
     abort = [event for event in EventStore(rd / "events.jsonl").read_all()
              if event.type == "run_abort"][-1]
-    assert abort.data == {"reason": "finalized"}
+    assert {key: value for key, value in abort.data.items() if key != "_command_id"} == {
+        "reason": "finalized"}
     assert fold(EventStore(rd / "events.jsonl").read_all()).stop_requested == "finalized"
 
 
@@ -934,7 +936,7 @@ def test_approval_commands_validate_the_active_gate(tmp_path, event_type):
     assert event_type not in _types(tmp_path / "demo")
 
 
-def test_reset_normalization_is_shared_by_legacy_and_command_routes(tmp_path):
+def test_reset_normalization_on_the_command_route(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver()
 
@@ -944,9 +946,6 @@ def test_reset_normalization_is_shared_by_legacy_and_command_routes(tmp_path):
 
     driver.on_spawn = start_driver
     client, _srv = _client(tmp_path, driver)
-    legacy_bad = client.post("/api/runs/demo/control",
-                             json={"type": "node_reset", "data": {"node_id": 99}})
-    assert legacy_bad.status_code == 404
     command_bad = _post(client, "node_reset", {"node_id": 99}, key="bad-reset").json()
     assert command_bad["status"] == "rejected"
 
@@ -1450,90 +1449,9 @@ def test_semantically_equivalent_additive_payload_cannot_bypass_unresolved_guard
     assert _types(rd).count("budget_extend") == 1
 
 
-@pytest.mark.parametrize(("event_type", "data", "different_type", "different_data"), [
-    ("budget_extend", {"add_nodes": 2}, "fork", {"from_node_id": 0}),
-    ("fork", {"from_node_id": 0}, "inject_node", {
-        "idea": {"operator": "manual", "params": {}, "rationale": "legacy guard"},
-        "parent_id": 0,
-    }),
-    ("inject_node", {
-        "idea": {"operator": "manual", "params": {}, "rationale": "durable guard"},
-        "parent_id": 0,
-    }, "budget_extend", {"add_nodes": 3}),
-])
-@pytest.mark.parametrize("legacy_kind", ["identical", "different", "resume"])
-def test_legacy_mutation_cannot_overtake_retryable_terminal_additive_intent(
-        tmp_path, legacy_kind, event_type, data, different_type, different_data):
-    rd = _seed(tmp_path)
-    driver = _Driver(alive=True)
-    # Keep enough headroom above the 80ms startup floor for a loaded Windows CI worker to append and
-    # enter observation before the absolute ceiling. The behavior under test is the retryable
-    # terminal guard, not scheduler precision at a 10ms margin.
-    client, _srv = _client(tmp_path, driver, timeout=0.08, observation=0.30)
-    command = _terminal(client, _post(
-        client, event_type, data, key="legacy-terminal-guard").json())
-    assert command["status"] == "timed_out", command
-    assert command["error"]["retryable"] is True
-    before = _types(rd)
-    assert before.count(event_type) == 1
-
-    if legacy_kind == "identical":
-        response = client.post(
-            "/api/runs/demo/control",
-            json={"type": event_type, "data": data})
-    elif legacy_kind == "different":
-        response = client.post(
-            "/api/runs/demo/control",
-            json={"type": different_type, "data": different_data})
-    else:
-        response = client.post("/api/runs/demo/resume")
-
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "command_retry_required"
-    assert response.json()["detail"]["existing_command_id"] == command["id"]
-    assert response.json()["detail"]["current_status"] == "timed_out"
-    assert command["id"] in response.json()["detail"]["remediation"]
-    assert _types(rd) == before
-
-
-def test_legacy_mutations_cannot_overtake_failed_retryable_additive_intent(tmp_path):
-    """Produce the retryable failure BEFORE the Popen boundary.
-
-    A spawner that raises is now `engine_start_uncertain` and NOT retryable (see
-    `test_spawn_exception_and_no_progress_startup_are_structured_failures`), so injecting an error
-    into the driver no longer sets up the state this test needs — it would silently become a
-    non-retryable-intent test wearing a retryable name. Removing the task snapshot makes `_spawn`
-    refuse before it reaches the spawner, which is still `spawn_failed` + retryable.
-    """
-    rd = _seed(tmp_path)
-    (rd / "task.snapshot.json").unlink()
-    client, _srv = _client(tmp_path, _Driver())
-    command = _terminal(client, _post(
-        client, "budget_extend", {"add_nodes": 2}, key="legacy-failed-guard").json())
-    assert command["status"] == "failed"
-    assert command["error"]["code"] == "spawn_failed"
-    assert command["error"]["retryable"] is True
-    before = _types(rd)
-    assert before.count("budget_extend") == 1
-
-    responses = [
-        client.post("/api/runs/demo/control", json={
-            "type": "budget_extend", "data": {"add_nodes": 2}}),
-        client.post("/api/runs/demo/control", json={
-            "type": "inject_node", "data": {
-                "idea": {"operator": "manual", "params": {}, "rationale": "do not bypass"},
-                "parent_id": 0,
-            }}),
-    ]
-    for response in responses:
-        assert response.status_code == 409
-        assert response.json()["detail"]["code"] == "command_retry_required"
-        assert response.json()["detail"]["existing_command_id"] == command["id"]
-        assert response.json()["detail"]["current_status"] == "failed"
-    assert _types(rd) == before
-
-
-def test_legacy_guard_reconciles_late_ack_and_ignores_safe_nonretryable_failure(tmp_path):
+def test_a_read_reconciles_a_late_ack_and_a_vanished_intent(tmp_path):
+    """Both used to be observed THROUGH the legacy routes' guard, which reconciled before deciding;
+    those routes were retired 2026-09-23 and a read of the record is the path that is left."""
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
     client, _srv = _client(tmp_path, driver, timeout=0.04, observation=0.09)
@@ -1544,17 +1462,13 @@ def test_legacy_guard_reconciles_late_ack_and_ignores_safe_nonretryable_failure(
     EventStore(rd / "events.jsonl").append(
         "command_ack", {"command_id": command["id"], "event_seq": intent.seq})
 
-    # The legacy check performs observation-only reconciliation before deciding.  A proven late
-    # completion becomes terminal history and must not brick compatibility.
-    allowed_after_ack = client.post(
-        "/api/runs/demo/control", json={"type": "hint", "data": {"text": "after ack"}})
-    assert allowed_after_ack.status_code == 200
+    # A proven late completion becomes terminal history.
     reconciled = client.get(f"/api/runs/demo/commands/{command['id']}").json()
     assert reconciled["status"] == "succeeded"
     assert reconciled["reconciled_from"] == "timed_out"
 
     # A failed row whose exact durable intent disappeared is converted to a nonretryable terminal
-    # record by reconciliation.  It likewise cannot become a permanent legacy lock.
+    # record by reconciliation.
     from looplab.events.eventstore import write_jsonl_atomic
     events = EventStore(rd / "events.jsonl").read_all()
     # Drop the command's exact durable intent while keeping the surviving log densely sequenced. A
@@ -1574,10 +1488,6 @@ def test_legacy_guard_reconciles_late_ack_and_ignores_safe_nonretryable_failure(
                     "retryable": True, "remediation": "retry"}
     record_path.write_text(json.dumps(row), encoding="utf-8")
 
-    allowed_after_missing = client.post(
-        "/api/runs/demo/control", json={"type": "annotation", "data": {
-            "node_id": 0, "text": "safe terminal history"}})
-    assert allowed_after_missing.status_code == 200
     safe = client.get(f"/api/runs/demo/commands/{command['id']}").json()
     assert safe["status"] == "failed"
     assert safe["error"]["code"] == "command_intent_missing"
@@ -1664,6 +1574,29 @@ def test_finalize_finished_but_live_is_engine_finishing_not_false_noop(tmp_path)
     assert _types(rd).count("run_abort") == 0
 
 
+def test_the_assistants_direct_mutation_waits_behind_an_active_command(tmp_path):
+    """`tools/run_command_adapter.py::_RunCommandAdapter.mutation_guard` reaches `reject_if_active`
+    through `getattr(service, "reject_if_active", None)`, so a rename or removal there drops the
+    guard SILENTLY — and nearly did when the legacy routes that were its first callers were retired
+    (2026-09-23): a name search found no caller. Driven here instead: with a command in flight,
+    the assistant's direct write (the trust gate) is refused before it runs."""
+    from looplab.tools.run_command_adapter import _RunCommandAdapter
+
+    rd = _seed(tmp_path, paused=True)
+    client, srv = _client(tmp_path, _Driver())
+    srv.commands._start_worker = lambda *_args, **_kwargs: None      # hold the command in flight
+    held = _post(client, "resume", key="held-resume").json()
+    assert held["status"] == "accepted", held
+
+    adapter = _RunCommandAdapter(srv.commands)
+    with pytest.raises(HTTPException) as caught:
+        with adapter.mutation_guard(rd, "set the trust gate",
+                                    expected_generation=_generation(client)):
+            pytest.fail("the direct mutation ran beside an in-flight command")
+    assert caught.value.detail["code"] == "command_in_progress"
+    assert caught.value.detail["existing_command_id"] == held["id"]
+
+
 def test_preappend_active_command_blocks_stale_contradictory_preflight(tmp_path):
     rd = _seed(tmp_path, paused=True)
     client, srv = _client(tmp_path, _Driver())
@@ -1677,12 +1610,6 @@ def test_preappend_active_command_blocks_stale_contradictory_preflight(tmp_path)
     assert pause.status_code == 409
     assert pause.json()["detail"]["code"] == "command_in_progress"
     assert pause.json()["detail"]["existing_command_id"] == resume.json()["id"]
-    legacy_pause = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}})
-    assert legacy_pause.status_code == 409
-    assert legacy_pause.json()["detail"]["existing_command_id"] == resume.json()["id"]
-    legacy_resume = client.post("/api/runs/demo/resume")
-    assert legacy_resume.status_code == 409
-    assert legacy_resume.json()["detail"]["existing_command_id"] == resume.json()["id"]
     assert "resume" not in _types(rd) and _types(rd).count("pause") == 1  # seed pause only
 
     # The same rule protects finalize→resume, while a finalize reload attaches even before fold.
@@ -2904,7 +2831,8 @@ def test_reset_spawn_lease_failure_keeps_the_archive_intact_and_never_spawns(mon
 
 
 def test_external_spawn_record_failure_keeps_lease_and_reset_archives(monkeypatch, tmp_path):
-    resume_rd = _seed(tmp_path, "resume-me", paused=True)
+    """Popen returned, so a failure to PERSIST its pid must leave the preclaim in place. Driven through
+    Replay since 2026-09-23; the legacy `/resume` route that also drove it was retired then."""
     reset_rd = _seed(tmp_path, "reset-me", finished=True)
     app = make_app(tmp_path)
     srv = app.state.looplab
@@ -2922,31 +2850,17 @@ def test_external_spawn_record_failure_keeps_lease_and_reset_archives(monkeypatc
         srv.commands, "record_external_spawn",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("claim update failed")))
 
-    # Popen returned, so a persistence error must leave the preclaim in place. A second legacy
-    # resume observes already_starting and cannot call Popen again. The error surfaces WRAPPED as
-    # `EngineSpawnOutcomeUnknown`: past the spawn boundary a bare OSError would read as "nothing
-    # started", which is exactly the wrong conclusion to hand a caller deciding whether to retry.
-    with pytest.raises(EngineSpawnOutcomeUnknown) as spawn_error:
-        client.post("/api/runs/resume-me/resume")
-    assert isinstance(spawn_error.value.__cause__, OSError)
-    assert "claim update failed" in str(spawn_error.value.__cause__)
-    assert srv.commands._spawn_claim_path(resume_rd).exists()
-    resumed_again = client.post("/api/runs/resume-me/resume")
-    assert resumed_again.status_code == 409
-    assert resumed_again.json()["detail"]["code"] == "engine_start_uncertain"
-    assert len(spawns) == 1
-
     # Reset must not roll archived files back underneath a child that may already be using the new
-    # run directory; its preclaim likewise remains the duplicate-spawn quarantine. Unlike the legacy
-    # resume above, the durable transaction CATCHES the uncertain spawn and answers with a resumable
-    # receipt instead of letting the exception escape as a 500.
+    # run directory; its preclaim likewise remains the duplicate-spawn quarantine. The durable
+    # transaction CATCHES the uncertain spawn and answers with a resumable receipt instead of
+    # letting the exception escape as a 500.
     reset = client.post("/api/runs/reset-me/reset")
     assert reset.status_code == 503
     assert reset.json()["detail"]["code"] == "reset_launch_uncertain"
     assert srv.commands._spawn_claim_path(reset_rd).exists()
     assert not (reset_rd / "events.jsonl").exists()
     assert list(reset_rd.glob("events.jsonl.reset-*"))
-    assert len(spawns) == 2
+    assert len(spawns) == 1
 
 
 def test_spawn_stderr_close_failure_cannot_turn_successful_popen_into_failure(monkeypatch, tmp_path):

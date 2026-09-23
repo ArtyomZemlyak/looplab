@@ -59,7 +59,8 @@ RUN_GENERATION_FIELD = "generation"
 EXPECTED_RUN_GENERATION_FIELD = "expected_generation"
 
 # Control events the UI is allowed to append (intent). The engine writes the domain effect.
-# FROZEN on purpose: this is the security boundary routers/control.py checks membership against and
+# FROZEN on purpose: this is the security boundary the command intake
+# (`control_validation.py::normalize_control`) checks membership against and
 # control_validation asserts a ControlSpec for. As a plain set, any imported module — or a test doing
 # `CONTROL_EVENTS.add(...)` — could widen it process-wide and authorize a new appendable type with
 # no failing assertion and no spec review. Adding a type must be an edit to THIS literal.
@@ -103,15 +104,16 @@ CONTROL_EVENTS = frozenset({
     EV_CARD_REOPENED,
 })
 
-# Versioned collaboration is command-only: unlike the compatibility /control route, the durable
-# command protocol requires an idempotency key plus the exact run generation the operator observed.
+# Versioned collaboration takes the strict-CAS append (the retired compatibility /control route
+# refused these outright): the durable command protocol requires an idempotency key plus the exact
+# run generation the operator observed.
 COLLABORATION_EVENTS = frozenset({
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,
     EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
     EV_CARD_REOPENED,
     # PART V (D): a base-concept edit is command-only too — force it through the generation-fenced command
-    # endpoint (not the legacy /control route) so a write formed against an old generation can't land on a
+    # endpoint so a write formed against an old generation can't land on a
     # post-reset replacement run, exactly like its per-node sibling EV_CONCEPT_TAG_EDITED.
     EV_RUN_CONCEPTS,
 })

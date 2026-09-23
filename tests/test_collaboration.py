@@ -595,19 +595,6 @@ def test_cursor_helpers_reject_missing_anchors_and_invalid_limits():
     assert exc.value.stale is True
 
 
-def test_control_compatibility_route_rejects_versioned_comments(tmp_path):
-    _seed(tmp_path)
-    client = TestClient(make_app(tmp_path))
-    before = client.get("/api/runs/demo/state").json()["seq"]
-    response = client.post("/api/runs/demo/control", json={
-        "type": EV_COMMENT_CREATED,
-        "data": {"node_id": 0, "node_generation": 0, "text": "bypass"},
-    })
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "command_protocol_required"
-    assert client.get("/api/runs/demo/state").json()["seq"] == before
-
-
 def test_destructive_guard_still_fails_closed_for_active_comment_record(tmp_path):
     rd = _seed(tmp_path)
     app = make_app(tmp_path)

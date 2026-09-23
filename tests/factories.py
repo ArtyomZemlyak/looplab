@@ -63,7 +63,8 @@ def make_engine(run_dir, *, task_file=None, task=None, researcher=None, develope
 
 # ------------------------------------------------------------------ the durable command protocol
 #
-# `POST /api/runs/{run}/commands` is the fenced successor of the legacy `POST .../control` route, and
+# `POST /api/runs/{run}/commands` is the fenced successor of the legacy `POST .../control` route
+# (retired 2026-09-23), and
 # a test that drives it makes the same three moves every time: name the run GENERATION the command
 # was formed against (mandatory, 64 hex), submit with an `Idempotency-Key` (mandatory), and —
 # because the service applies `pause` and every intent whose engine policy is not `NO_SPAWN` on a

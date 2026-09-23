@@ -91,8 +91,8 @@ def test_options_preflight_not_gated_by_ui_token(monkeypatch):
     from looplab.serve.server import make_app
     client = TestClient(make_app(tempfile.mkdtemp()))
     # On `/commands`, the mutation route both first-party clients use, and with the headers a browser
-    # actually preflights for it — it was proved on the legacy `/control` route, slated for
-    # retirement (review 2026-09-22, SRV1-07).
+    # actually preflights for it — it was proved on the legacy `/control` route, retired
+    # 2026-09-23 (review SRV1-07).
     r = client.options("/api/runs/demo/commands",
                        headers={"Origin": "http://localhost:5173",
                                 "Access-Control-Request-Method": "POST",

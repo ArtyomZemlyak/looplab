@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-136 routes on 122 paths; 13 deprecated; 25 with a declared response model.
+134 routes on 120 paths; 11 deprecated; 25 with a declared response model.
 
 ### `/api`
 
@@ -175,7 +175,6 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/concepts/lens/recovery/abandon` | Resolve one exactly identified orphan without possessing or replaying its paid key. | — |  |
 | `GET` | `/api/runs/{run_id}/config` | *Run Config* (no docstring) | `RunConfigResponse` |  |
 | `PUT` | `/api/runs/{run_id}/config` | Per-run settings edit: rewrite THIS run's config.snapshot.json so a later RESUME re-enters | `RunConfigUpdateResponse` |  |
-| `POST` | `/api/runs/{run_id}/control` | *Control* (no docstring) | — | yes |
 | `GET` | `/api/runs/{run_id}/cost` | *Run Cost* (no docstring) | — | yes |
 | `POST` | `/api/runs/{run_id}/deletions` | Delete one exact run generation through an operation-bound durable transaction. | — |  |
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
@@ -197,7 +196,6 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
 | `POST` | `/api/runs/{run_id}/reset` | round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and | — |  |
 | `POST` | `/api/runs/{run_id}/resolve-activity-claims` | Guarded operator recovery for an ownership claim that cannot be proven dead. | — |  |
-| `POST` | `/api/runs/{run_id}/resume` | *Resume Run* (no docstring) | — | yes |
 | `GET` | `/api/runs/{run_id}/reviews` | *List Reviews* (no docstring) | — |  |
 | `POST` | `/api/runs/{run_id}/reviews` | *Create Review* (no docstring) | — |  |
 | `DELETE` | `/api/runs/{run_id}/reviews/{link_id}` | *Revoke Review* (no docstring) | — |  |

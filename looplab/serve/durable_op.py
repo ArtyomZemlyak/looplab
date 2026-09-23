@@ -81,10 +81,11 @@ def refuse_unless_quiescent(
     through here: it asks `_active_record` (this run's one authoritative command record) rather than
     `_active_command_ids` (a fail-CLOSED census that counts unreadable records and planted symlinks
     as active), it additionally refuses on `_unresolved_terminal_record`, and it checks finalize
-    FIRST with an `allow_incomplete_finalize` opt-out that no destructive caller has. Those are
-    answers to a different question — "may this legacy mutation overtake a durable intent?" versus
-    "is it safe to destroy this run?" — and flattening them would have given every destructive path
-    an opt-out from the finalize check.
+    FIRST — with an `allow_incomplete_finalize` opt-out, until 2026-09-23, that only the retired
+    legacy `/resume` route passed. Those are answers to a different question — "may this mutation
+    outside the command protocol overtake a durable intent?" versus "is it safe to destroy this
+    run?" — and flattening them would have given every destructive path that opt-out from the
+    finalize check.
 
     What is shared, and all that is shared, is the probe SET and its ORDER. The refusals are NOT: the
     three callers answer with three different HTTP bodies (a plain sentence, a `_detail` envelope

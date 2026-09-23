@@ -416,7 +416,8 @@ class AppState:
         `EventStore.__init__` walks the log once to learn its tail seq, and `routers/control.py`
         built a fresh one per `POST /control` — so a session of N control appends paid N full scans
         of a log that only ever grew by one record each time, which is the quadratic the finding
-        names. The store is exactly the object built to avoid that: its read cache keeps parsed
+        names. That route is retired (2026-09-23); the command worker appends through this store
+        (`run_commands.py::RunCommandService._event_store`). The store is exactly the object built to avoid that: its read cache keeps parsed
         Events and reads only the bytes appended since the previous call.
 
         **THIS IS NOT THE THING INVARIANT #4 FORBIDS, and the difference is the point.**

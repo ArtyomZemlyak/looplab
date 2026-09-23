@@ -135,12 +135,12 @@ export default function ForkFromSeqPanel({
       failure: 'Branch refused',
     })
     if (feedback.kind === 'error') {
-      // THE ASYMMETRY THIS PANEL EXISTS TO READ. The legacy `/control` route answers a stale parent
-      // with a 409, i.e. the `thrown` arm above; the durable `/commands` route answers 200 with a
-      // REJECTED RECORD carrying the same refusal in `record.error`. Both are proof that the intake
-      // refused before anything was appended, and `classifyForkFailure` is what knows that — reading
-      // `feedback.message` here instead would turn "the run moved under you, go and re-read the
-      // node" into "the outcome is unknown, your branch may already exist".
+      // THE SHAPE THIS PANEL EXISTS TO READ. The durable `/commands` route answers a stale parent
+      // with 200 and a REJECTED RECORD carrying the refusal in `record.error` (the legacy `/control`
+      // route, retired 2026-09-23, answered it as a 409 — the `thrown` arm above). Either is proof
+      // that the intake refused before anything was appended, and `classifyForkFailure` is what knows
+      // that — reading `feedback.message` here instead would turn "the run moved under you, go and
+      // re-read the node" into "the outcome is unknown, your branch may already exist".
       const failure = classifyForkFailure(record)
       setOutcome({ kind: 'error', failure, text: failure.message })
       return

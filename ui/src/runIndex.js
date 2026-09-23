@@ -351,10 +351,10 @@ export function dagEmptyPresentation({
   // REATTACH is offered only where there is something to reattach TO (see `pendingFinalizeIntent`).
   // Without a pending finalize the same button submits a command the server rejects, so the card
   // states the remedy instead of offering a control that cannot act. It is deliberately TEXT and not
-  // a second button: the paths that could act from here — `POST /api/runs/{id}/resume`, a
-  // finalize-only route — all SPAWN AN ENGINE, which is paid work and a different promise from
-  // "reattach". The command below re-enters wrap-up only (`cli/run_cmds.py::finalize`'s
-  // crash-boundary repair), never the search.
+  // a second button: the paths that could act from here — a finalize-only route, and until
+  // 2026-09-23 the legacy `POST /api/runs/{id}/resume` — all SPAWN AN ENGINE, which is paid work and
+  // a different promise from "reattach". The command below re-enters wrap-up only
+  // (`cli/run_cmds.py::finalize`'s crash-boundary repair), never the search.
   if (mode === 'finalization-stalled') {
     const remedy = stalledFinalizationRemedy(state, runId)
     if (!remedy) return result(

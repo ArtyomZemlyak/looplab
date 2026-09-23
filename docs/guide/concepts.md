@@ -426,8 +426,8 @@ Each control type also has an explicit payload allowlist. Unknown fields and los
 rejected before append, so an ignored key cannot be persisted while the command reports success.
 
 **A driver the server could not start is refused before anything is written.** Every driver the
-server starts for an existing run is `looplab resume` (for a finalize handoff on the legacy route,
-`looplab finalize`), and both read `config.snapshot.json` strictly: a setting this build does not
+server starts for an existing run is `looplab resume` (for a finalize hand-off, `looplab
+finalize`), and both read `config.snapshot.json` strictly: a setting this build does not
 know, a newer snapshot format, or a damaged file ends them at exit 2 (the policy is in the
 [configuration guide](configuration.md)). So when admitting a command WILL start one — an
 engine-driving control with no live driver, or any `restart`, whose replacement owner is its whole
@@ -436,7 +436,7 @@ submission and again under the sequencer just before the append. A snapshot the 
 becomes a `rejected` record with nothing appended and no process started:
 `config_snapshot_incompatible` (upgrade LoopLab, or correct a hand-edited key) or
 `config_snapshot_invalid` (restore the file; the underlying error, which can carry a host path, is
-withheld). The legacy `POST /resume` answers the same refusal as a `409`. A live driver already
+withheld). A live driver already
 holds its settings, so a bad snapshot never blocks a control it will serve, and a MISSING snapshot
 stays the child's decision (`resume` refuses one, `finalize` grandfathers a pre-snapshot run).
 Before 2026-09-23 the server learned this only from a crashed child, after the intent was durable,
@@ -502,8 +502,10 @@ Each new terminal attempt opens a durable scope with its exact terminal payload 
 and publishes `finalize_step:complete` only after the read-model build attempt (success or an explicit
 best-effort skip) and successful trace/tree projections. Until that last marker, the canonical phase
 is `finalizing` even if the engine died before or after `run_finished`; run list,
-workspace, reset/delete, and legacy mutation guards all preserve the same recovery state. The
-stop-aware `/resume` driver may finish it without appending a resume event. Wrap-up steps carry stable
+workspace, reset/delete, and the direct-mutation guard all preserve the same recovery state. A
+finalize command reattaches to a pending `run_abort`; a scope with none to reattach to is finished
+with `looplab finalize` (the legacy `/resume` route, retired 2026-09-23, was an HTTP spelling of that
+driver). Wrap-up steps carry stable
 scope gates, so a projection retry does not duplicate budget/diversity/cost events or already-marked
 case/reflection work.
 The effective latest terminal controls recovery: a later outer `run_finished(reason=error)` after a
@@ -632,21 +634,13 @@ with a receipt stating how many characters and lines it does NOT show: approving
 change, so reject and ask for it in smaller pieces to review the rest (until 2026-09-22 the cut was
 silent; `tools/perm_modes.py::clip_approval_preview` is the one bound).
 
-The older `POST .../control` and `POST .../resume` routes remain compatibility surfaces. Legacy
-mutation events cannot overtake an active/retryable command or incomplete finalize; the mutation-free,
-stop-aware `/resume` route remains available specifically to attach a recovery driver.
-`/control` now ANNOUNCES its deprecation on every successful append — `Deprecation: true`, a `Link`
-naming `/commands` as the successor version, and a `Warning` stating the exact hazard: it has no
-durable request identity, so a lost-response retry re-appends an ADDITIVE intent instead of
-resolving to the record it already created. There is deliberately **no `Sunset`**, because RFC 8594's
-field carries a date and no removal date has been agreed; the header pair is `Deprecation` + `Link`
-until one is. The server also tallies who still calls it, by event type and User-Agent
-(`routers/control.py::legacy_control_callers`), and says each NEW (type, User-Agent) pair once, at
-WARNING, in its own log — the tally has no other reader, so without that line nobody running a real
-deployment could tell whether anything but the test suite still calls the route. The migration is a
-number rather than an intention. Behaviour is otherwise unchanged: requiring `expected_seq` here was tried and reverted,
-because a silent 409 breaks the compatibility this route exists to provide. Current Web,
-boss, and TUI controls use the command lifecycle above. Report regeneration remains a background job,
+The older `POST .../control` and `POST .../resume` compatibility routes were retired on 2026-09-23.
+Both first-party clients had moved to the command lifecycle above, no other caller was known, and
+`/control` could not be made safe in place: it had no durable request identity, so a lost-response
+retry re-appended an ADDITIVE intent instead of resolving to the record it had already created. The
+assistant's direct mutations outside that lifecycle (the trust gate) still cannot overtake an active
+or retryable command or an incomplete finalize (`run_commands.py::RunCommandService.reject_if_active`).
+Current Web, boss, and TUI controls use the command lifecycle above. Report regeneration remains a background job,
 but its run-generation lease and cost events share the same destructive boundary.
 Standalone legacy CLI `stop`, `finalize`, `resume`, and `approve` commands are not yet participants in
 the server sequencer and must not be run concurrently with an active server-owned command. Migrating
@@ -734,28 +728,28 @@ operator authored was exported as the engine's own proposal with the parent's in
 `ll:rationale` on it. A node nobody branched keeps exactly the association it always had, with no
 role attached.
 
-**The fence is a CONTENT compare-and-swap, deliberately not a tail one.** The legacy `/control`
-route binds an *approval* append to the pre-normalization tail, because an approval means "accept the
-gate that is open right now" and a replacement request must not be granted by a click aimed at its
-predecessor. A branch has no such dependency: it means the same thing at seq N and at the live tail
+**The fence is a CONTENT compare-and-swap, deliberately not a tail one.** An *approval* is the
+opposite case: the command worker appends it CAS'd on the exact log tail its decision saw, because an
+approval means "accept the gate that is open right now" and a replacement request must not be granted
+by a click aimed at its predecessor. A branch has no such dependency: it means the same thing at seq N and at the live tail
 as long as its named parent is still the one the operator saw, which `parent_generations` already
 checks. A tail CAS would be strictly worse than useless here — a live run appends unrelated rows
 several times a second, so it would refuse branches whose meaning nothing had touched.
 
 When the run *has* moved, the operator is told so rather than having their branch quietly re-aimed:
-a parent that was re-run answers `409 stale parent #3: current generation is 1`, and a tombstoned or
-aborted parent answers 409 as well. Nothing is queued in either case.
+a parent that was re-run is refused with `stale parent #3: current generation is 1`, and a
+tombstoned or aborted parent is refused as well. Nothing is queued in either case.
 
-**That refusal arrives in two different shapes, and a client has to read both.** The legacy
-`/control` route answers a stale parent with the 409 above. The durable `/commands` route answers
-`200` with a **rejected record** — `{"status": "rejected", "error": {"code":
+**That refusal is a RECORD, not an HTTP status, and a client has to read it as one.** `POST
+/commands` answers `200` with a **rejected record** — `{"status": "rejected", "error": {"code":
 "command_target_not_found", "message": "stale parent #3: …"}}` — because a command that never
-reached the log still produced a durable record saying so. Both are proof that the intake refused
+reached the log still produced a durable record saying so. It is proof that the intake refused
 *before* appending anything, which is the only thing that licenses telling an operator "nothing was
-queued". A client that reads only the HTTP status would degrade the second one into "outcome
-unknown" and invite a second branch for one idea; one that reads only the record's wrapper text
-would find the wrapper's message rather than the refusal's. `tests/test_fork_from_seq.py` pins the
-asymmetry and `ui/src/forkFromSeqModel.js::classifyForkFailure` is the browser half that reads it.
+queued". A client that reads only the HTTP status would degrade it into "outcome unknown" and invite
+a second branch for one idea; one that reads only the record's wrapper text would find the wrapper's
+message rather than the refusal's. (The legacy `/control` route answered the same refusal as an HTTP
+409 until its retirement on 2026-09-23.) `tests/test_fork_from_seq.py` pins it and
+`ui/src/forkFromSeqModel.js::classifyForkFailure` is the browser half that reads it.
 
 **Where it is in the UI.** Open a point in the timeline, right-click (or use the node's action
 trigger on) the experiment you want to branch from, and take **Branch from here…**. That is the only

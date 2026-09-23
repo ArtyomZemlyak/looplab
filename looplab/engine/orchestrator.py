@@ -1745,7 +1745,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             self._pending_finalize_scope = pending_scope
             if pending_scope is not None:
                 break
-            # `/resume` records a durable request even when this process is already alive. A live
+            # A durable resume request can land while this process is already alive (a `restart`;
+            # the retired legacy `/resume` route recorded one unconditionally). A live
             # loop acknowledges it only when it can actually re-enter work; terminal/HITL/pause gates
             # leave it pending so the post-exit waiter (or on-load reconciler) spawns a fresh CLI,
             # whose normal resume path lifts the appropriate gate.

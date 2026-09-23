@@ -2,7 +2,7 @@
 
 Two ledgers record "an engine launch is in flight for this run": the resume CLAIM a log-ledger
 spawner appends to `events.jsonl` under `run_lifecycle_lock` (the startup and run-list reconcilers,
-their after-exit waiters, the restart hand-off, the legacy resume route), and the spawn LEASE a
+their after-exit waiters, the restart hand-off), and the spawn LEASE a
 command worker writes under the run's sequencer. Each family used to read only its own ledger, so
 a command worker could Popen beside a reconciler's still-importing child and the other way round.
 The second `looplab resume` is not a harmless no-op on a halted run: it waits for the singleton and
@@ -260,20 +260,6 @@ def test_an_unreadable_lease_is_read_as_a_launch_in_flight(tmp_path, monkeypatch
 
     assert ep.reconcile_pending_resume(rd, now=request_ts + 31, spawn_inflight=unreadable) is False
     assert spawns == [], "uncertain lease evidence was treated as permission to Popen"
-
-
-def test_the_legacy_routes_own_mirror_is_not_a_foreign_launch(tmp_path):
-    """The legacy resume route mirrors its log-claimed launch into the lease and then claims through
-    the same helper; reading its own mirror back as a foreign launch would refuse every legacy
-    resume. Any OTHER owner's lease still reads as in flight."""
-    rd = _seed(tmp_path)
-    _client_unused, srv = _client(tmp_path, _Driver())
-    srv.commands.begin_external_spawn(rd, "legacy-resume")
-    assert srv.commands.spawn_inflight(rd, ignoring="legacy-resume") is False
-    assert srv.commands.spawn_inflight(rd) is True
-    srv.commands.cancel_external_spawn(rd, "legacy-resume")
-    srv.commands.begin_external_spawn(rd, "reset:op")
-    assert srv.commands.spawn_inflight(rd, ignoring="legacy-resume") is True
 
 
 @pytest.mark.parametrize("helper", [

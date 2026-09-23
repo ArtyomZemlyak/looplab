@@ -748,8 +748,12 @@ def test_an_unreadable_command_record_has_a_confirmed_escape(tmp_path):
         damaged.write_text("{not json at all")
         os.utime(damaged, (time.time() - 600, time.time() - 600))
 
-        # Wedged, in both directions, and the refusal names its own way out.
-        assert _drive(commands, rd, EV_PAUSE, {})["code"] == "command_in_progress"
+        # Wedged, in both directions, and BOTH refusals name the way out: the record's own GET
+        # answers 503, so "GET it to a terminal status" alone is a dead end (the command path's
+        # refusal said only that until 2026-09-23).
+        refused = _drive(commands, rd, EV_PAUSE, {})
+        assert refused["code"] == "command_in_progress"
+        assert "resolve-activity-claims" in refused["detail"]["remediation"]
         with pytest.raises(HTTPException) as caught:
             commands.reject_if_active(rd, "pause the run")
         assert caught.value.detail["code"] == "command_in_progress"

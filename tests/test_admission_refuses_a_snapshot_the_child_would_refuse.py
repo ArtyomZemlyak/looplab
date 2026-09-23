@@ -2,21 +2,21 @@
 would refuse the run's config snapshot (review 2026-09-22, doc 66 §6 item 6 — the W2-2 tail).
 
 Every driver the UI server starts for an existing run is `looplab resume` (or, for a finalize
-handoff on the legacy route, `looplab finalize`), and both read `config.snapshot.json` STRICTLY
+hand-off, `looplab finalize`), and both read `config.snapshot.json` STRICTLY
 (`cli/__init__.py::load_run_settings(strict=True)` -> `refuse_unknown=True`): a setting this build
 does not know, a newer snapshot format, or a damaged file is refused at exit 2. The server did not
 ask. Driven on the pre-fix tree: a `resume` command on a paused run with no live engine and one
 unknown key in its snapshot was ACCEPTED, appended its marked `resume` intent to events.jsonl,
 and Popen'd the child — which then exits 2 before engine.lock, so the server sees a crashed
 process rather than a coded refusal, and `_monitor` re-spawns the same doomed child until the
-command's deadline. The legacy `POST /resume` did the same after a durable `resume_requested`.
+command's deadline. The legacy `POST /resume` (retired 2026-09-23) did the same after a durable
+`resume_requested`.
 
 Admission now asks the SAME read the child runs (`core/config.py::read_config_snapshot`, through
 `serve/engine_proc.py::spawn_snapshot_refusal`) exactly when admission will spawn
 (`serve/run_commands.py::admission_spawns_driver`), and refuses before any durable append: a
 REJECTED command record (the `/commands` protocol's shape for a refusal — see
-`tests/test_fork_from_seq.py`), or a coded 409 on the legacy route. An ABSENT snapshot stays the
-child's decision.
+`tests/test_fork_from_seq.py`). An ABSENT snapshot stays the child's decision.
 """
 from __future__ import annotations
 
@@ -296,44 +296,3 @@ def test_a_missing_snapshot_still_spawns_through_commands(tmp_path):
         assert time.time() < deadline, "the driver was never started"
         time.sleep(0.01)
     assert engine.spawns[0][0] == "resume"
-
-
-# ------------------------------------------------------------------------------ legacy /resume
-
-def _legacy_client(tmp_path, monkeypatch):
-    import looplab.serve.routers.control as control_router
-
-    spawns: list[list[str]] = []
-
-    def spawn(args, **_kwargs):
-        spawns.append(list(args))
-        return 9201
-
-    monkeypatch.setattr(control_router, "_spawn_engine", spawn)
-    return TestClient(make_app(tmp_path)), spawns
-
-
-def test_the_legacy_resume_route_answers_a_coded_409_before_any_append(tmp_path, monkeypatch):
-    """Same refusal on the deprecated route, as the HTTP status it speaks. MUTATION: drop its
-    preflight -> 200, a `resume_requested` handoff in the log and a spawned child."""
-    rd = _seed(tmp_path, snapshot=_snapshot("unknown key"))
-    client, spawns = _legacy_client(tmp_path, monkeypatch)
-    before = _log_bytes(rd)
-
-    response = client.post("/api/runs/demo/resume")
-
-    assert response.status_code == 409, response.text
-    detail = response.json()["detail"]
-    assert detail["code"] == "config_snapshot_incompatible" and UNKNOWN_KEY in detail["message"]
-    assert _log_bytes(rd) == before and spawns == []
-
-
-def test_the_legacy_resume_route_still_spawns_on_a_readable_snapshot(tmp_path, monkeypatch):
-    rd = _seed(tmp_path, snapshot=_snapshot("valid"))
-    client, spawns = _legacy_client(tmp_path, monkeypatch)
-
-    response = client.post("/api/runs/demo/resume")
-
-    assert response.status_code == 200, response.text
-    assert len(spawns) == 1 and spawns[0][0] == "resume"
-    assert "resume_requested" in [e.type for e in EventStore(rd / "events.jsonl").read_all()]

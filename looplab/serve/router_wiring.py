@@ -129,7 +129,7 @@ def router_builders() -> tuple:
       3. collaboration — owner-only bounded comment current/history projections
       4. reviews   — owner link management + the token-scoped reviewer manifest
       5. org       — projects / super-tasks / label / delete-run
-      6. control   — /control appends + resume/reset//api/start engine spawns
+      6. control   — /commands + reset//api/start engine spawns
       7. genesis   — /api/research + /api/genesis (reads srv.list_tasks_fn at request time)
       8. assistant — sessions + the HITL permission registry
       9. boss      — chat-log / chat / suggest / command / report_refresh (also late-binds the two

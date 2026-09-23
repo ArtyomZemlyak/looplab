@@ -182,7 +182,7 @@ def test_a_bad_command_lock_path_answers_a_code_and_no_host_path(tmp_path):
     (tmp_path / ".command-locks").write_text("not a directory\n", encoding="utf-8")
     client = TestClient(make_app(tmp_path))
     # Through `POST /commands`, the route both first-party clients use; it was the legacy `/control`
-    # route, slated for retirement (review 2026-09-22, SRV1-07). Both take the same sequencer.
+    # route, retired 2026-09-23 (review SRV1-07), which took the same sequencer.
     response = post_command(client, "run_abort", {}, "bad-lock-path", run_id=RUN,
                             generation=_generation(rd))
 

@@ -638,12 +638,14 @@ def test_every_destructive_caller_routes_through_the_one_ladder():
 def test_reject_if_active_is_a_different_ladder_and_is_deliberately_left_out():
     """The finding called this "four spellings"; it is three of one ladder plus one of another.
 
-    `reject_if_active` asks a different question — may this LEGACY mutation overtake a durable
-    intent? — and answers it with a different probe set: the authoritative `_active_record` rather
-    than the fail-closed census, plus `_unresolved_terminal_record`, plus a finalize check that comes
-    FIRST and has an `allow_incomplete_finalize` opt-out. Routing it through the shared helper would
-    have handed every destructive path that opt-out, which is a way to destroy a run whose terminal
-    projections are still being written.
+    `reject_if_active` asks a different question — may this mutation OUTSIDE the command protocol
+    (the assistant's direct mutations; the legacy `/control` and `/resume` routes until their
+    retirement, 2026-09-23) overtake a durable intent? — and answers it with a different probe set:
+    the authoritative `_active_record` rather than the fail-closed census, plus
+    `_unresolved_terminal_record`, plus a finalize check that comes FIRST. It carried an
+    `allow_incomplete_finalize` opt-out, which only the legacy `/resume` passed and which went with
+    it; routing this ladder through the shared helper would have handed every destructive path that
+    opt-out, a way to destroy a run whose terminal projections were still being written.
     """
     reject = run_commands.RunCommandService.reject_if_active
     called = called_names(reject)
@@ -652,9 +654,8 @@ def test_reject_if_active_is_a_different_ladder_and_is_deliberately_left_out():
     assert "self._active_record" in called and "self._unresolved_terminal_record" in called
     assert "self._active_command_ids" not in called, (
         "reject_if_active reads the authoritative record, not the fail-closed census")
-    assert "allow_incomplete_finalize" in inspect.signature(reject).parameters
 
-    # ...and the opt-out really is exclusive to it: no destructive caller may name it.
+    # ...and the retired opt-out does not come back through a destructive caller.
     for caller in DESTRUCTIVE_CALLERS:
         assert "allow_incomplete_finalize" not in inspect.getsource(caller), (
             f"{caller.__qualname__} must not reach the finalize opt-out")

@@ -1,16 +1,16 @@
 """Durable, idempotent lifecycle for run control commands.
 
-The legacy ``/control`` endpoint appends an intent and leaves every caller to guess whether an
-engine must be woken and whether the requested effect happened.  ``RunCommandService`` is the one
-authoritative funnel for command-aware clients: it normalizes the same control payloads as the
-legacy route, persists a per-run command record, appends at most one marked intent, applies the
-command's engine policy, and records an observable postcondition.
+The legacy ``/control`` endpoint appended an intent and left every caller to guess whether an
+engine must be woken and whether the requested effect happened; it was retired on 2026-09-23.
+``RunCommandService`` is the one authoritative funnel: it normalizes the control payloads,
+persists a per-run command record, appends at most one marked intent, applies the command's engine
+policy, and records an observable postcondition.
 
 Records deliberately contain only a SHA-256 digest of ``Idempotency-Key``.  One atomic JSON file per
 command avoids a shared read/modify/write index and survives UI/server restarts.  The event carries
 ``_command_id`` so recovery can prove an intent was appended before retrying it.
 
-The HTTP payload validation this funnel shares with the legacy route — ``normalize_control``, the
+The HTTP payload validation this funnel applies — ``normalize_control``, the
 five per-event tables and the 35 rules they register — is ``serve/control_validation.py`` (doc 25
 SC-01).  This module imports it and re-exports ONLY the names its own code calls; see that module's
 docstring for why `_card_resource_envelope` is reached through the module object instead.
@@ -1308,27 +1308,22 @@ class RunCommandService:
         except OSError:
             pass
 
-    def spawn_inflight(self, rd: Path, *, ignoring: Optional[str] = None) -> bool:
+    def spawn_inflight(self, rd: Path) -> bool:
         """True while a Popen is unresolved/quarantined, or on the decision that observes its lock.
 
         This is the lease half of the launch-in-flight handshake that every log-ledger spawner reads
-        after appending its claim (`serve/engine_proc.py::_claim_and_spawn_resume`). `ignoring`
-        names an external owner whose OWN mirrored lease that caller must not mistake for a foreign
-        launch: the legacy resume route writes `external:legacy-resume` and then claims through the
-        same helper. Such a mirror always travels with a log claim, so the log arbitrates it.
+        after appending its claim (`serve/engine_proc.py::_claim_and_spawn_resume`). It took an
+        `ignoring=` owner for the one spawner that mirrored its own launch into this lease, the
+        legacy `/resume` route; the route was retired 2026-09-23 and the parameter with it.
         """
-        if ignoring is not None:
-            row = self._load(self._spawn_claim_path(rd))
-            if isinstance(row, dict) and row.get("command_id") == f"external:{ignoring}":
-                return False
         return self._recent_spawn_claim(rd)
 
     def record_external_spawn(self, rd: Path, owner: str, pid: Optional[int]) -> None:
-        """Register a legacy/reset Popen performed while the caller holds ``sequence(rd)``."""
+        """Register a start/reset Popen performed while the caller holds ``sequence(rd)``."""
         self._record_spawn_claim(rd, f"external:{owner}", pid)
 
     def begin_external_spawn(self, rd: Path, owner: str) -> None:
-        """Install the crash-safe lease immediately before a legacy/reset Popen."""
+        """Install the crash-safe lease immediately before a start/reset Popen."""
         self._record_spawn_claim(rd, f"external:{owner}", None)
 
     def cancel_external_spawn(self, rd: Path, owner: str) -> None:
@@ -1814,7 +1809,7 @@ class RunCommandService:
         """A finalize remains pending until its terminal projections are durably complete.
 
         Served from the INCREMENTAL observation, which is what that index exists for: this runs on
-        every submit, every legacy /control POST and every destructive_guard entry, and it used to
+        every submit and every destructive_guard entry, and it used to
         cost a fresh `EventStore(...).read_all()` plus a second full read+fold through
         `srv.state(rd)` each time. Both pieces are memoized on the observation's revision, so an
         unchanged log is free and a grown one parses only the new suffix. `observe()` re-stats the
@@ -2108,20 +2103,25 @@ class RunCommandService:
                 "remediation": "Observe or retry that exact Replay operation first.",
             })
 
-    def reject_if_active(self, rd: Path, operation: str, *,
-                         allow_incomplete_finalize: bool = False) -> None:
-        """Fail closed when a legacy mutation would overtake a durable command intent.
+    def reject_if_active(self, rd: Path, operation: str) -> None:
+        """Fail closed when a mutation OUTSIDE the command protocol would overtake a durable intent.
+
+        Its caller is the assistant tool layer's direct mutation
+        (`tools/run_command_adapter.py::_RunCommandAdapter.mutation_guard`, reached through `getattr`,
+        so a rename here is silent there). The legacy `/control` and `/resume` routes were its first
+        callers until their retirement (2026-09-23); `allow_incomplete_finalize`, the opt-out only the
+        legacy `/resume` passed, went with them.
 
         Caller must hold ``sequence(rd)`` so the check and its own append/spawn are one ordering
         boundary.
         """
         self._reject_unresolved_reset(rd, operation)
         pending_finalize = self._finalize_incomplete(rd)
-        if pending_finalize and not allow_incomplete_finalize:
+        if pending_finalize:
             raise HTTPException(409, {
                 "code": "finalize_in_progress",
                 "message": f"Cannot {operation} while terminal projections are incomplete.",
-                "remediation": "Resume the finalization driver; do not append a legacy mutation.",
+                "remediation": "Resume the finalization driver; do not append a mutation around it.",
             })
         _path, active = self._active_record(rd)
         if active is not None:
@@ -2152,7 +2152,7 @@ class RunCommandService:
                     f"Cannot {operation} while an earlier run command intent is unresolved."),
                 "remediation": (
                     f"GET /commands/{command_id}; wait for late reconciliation or POST "
-                    f"/commands/{command_id}/retry. Do not use a legacy mutation to bypass it."),
+                    f"/commands/{command_id}/retry. Do not use a direct mutation to bypass it."),
             })
         if self._recent_spawn_claim(rd):
             raise HTTPException(409, {
@@ -2762,9 +2762,16 @@ class RunCommandService:
                                 "existing_command_id": existing_id,
                                 "current_status": active.get("status"),
                                 "message": "Another state-changing run command is still in progress.",
+                                # NAME THE ESCAPE. A record this server cannot READ counts as active
+                                # on purpose (`_active_record` fails closed), and its GET answers 503
+                                # — so "GET it to a terminal status" alone is a dead end. The retired
+                                # legacy routes' guard said the second sentence; this refusal is the
+                                # one left (2026-09-23).
                                 "remediation": (
                                     f"GET /commands/{existing_id} to a terminal status before submitting "
-                                    "the next command."),
+                                    "the next command; if that record cannot be read at all, POST "
+                                    "/api/runs/{run}/resolve-activity-claims with its confirmation "
+                                    "phrase."),
                             })
                     now = time.time()
                     record = {

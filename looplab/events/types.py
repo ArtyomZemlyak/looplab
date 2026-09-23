@@ -271,7 +271,7 @@ EV_LESSONS_DISTILLED = "lessons_distilled"
 EV_LESSONS_REFRESHED = "lessons_refreshed"
 EV_REPORT_GENERATED = "report_generated"
 EV_CONFIRM_DONE = "confirm_done"         # fulfillment gate for `force_confirm` requests
-# P1-1 recoverable-intent kernel for the resume/spawn handoff. `/resume` records a DURABLE
+# P1-1 recoverable-intent kernel for the resume/spawn handoff. A spawner records a DURABLE
 # `resume_requested` intent BEFORE spawning the detached engine (so a spawn that crashes before the
 # engine runs isn't lost); the engine appends `resume_served` once it has ACQUIRED the singleton lock
 # and is about to drive the loop. The pair is a seq-gated fulfillment (like fork/inject): a request
@@ -405,7 +405,7 @@ EV_SPECULATION_DEPTH_SETTLED = "speculation_depth_settled"
 # reader-side default is `None` = "the run never repinned" = the `run_started` pin, unchanged.
 EV_RUN_WIDTH_SETTLED = "run_width_settled"
 EV_RUN_REOPENED = "run_reopened"
-EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
+EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
 # Predict-before-execute pick among K ideas / N code candidates. FOLDED into RunState.foresight_selected
 # without re-ranking evaluated nodes, so the world model can be primed with its own calibration track

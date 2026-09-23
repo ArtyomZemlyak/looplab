@@ -73,12 +73,3 @@ def test_invalid_concept_id_and_unknown_node_are_rejected(tmp_path):
     missing = _command(client, {"node_id": 99, "node_generation": 0, "concepts": ["loss/a"]}, "missing")
     assert missing.status_code == 200 and missing.json()["status"] == "rejected"
     assert missing.json()["error"]["code"] == "command_target_not_found"   # 404-class string detail
-
-
-def test_legacy_control_route_rejects_the_command_only_event(tmp_path):
-    _seed(tmp_path)
-    client = TestClient(make_app(tmp_path))
-    resp = client.post("/api/runs/demo/control",
-                       json={"type": "concept_tag_edited",
-                             "data": {"node_id": 0, "node_generation": 0, "concepts": ["loss/a"]}})
-    assert resp.status_code == 409 and resp.json()["detail"]["code"] == "command_protocol_required"

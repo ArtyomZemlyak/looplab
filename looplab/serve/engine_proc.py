@@ -355,7 +355,8 @@ def _resolve_task_file(rd: Path) -> Optional[str]:
 
 # WHAT THE SPAWNED CHILD WOULD REFUSE, ANSWERED BEFORE THE SPAWN (review 2026-09-22, doc 66 §6
 # item 6 — the W2-2 tail). Every driver this server starts for an existing run is `looplab resume`
-# (or, for a finalize handoff on the legacy route, `looplab finalize`), and both read
+# (or, for a finalize hand-off the retired legacy `/resume` route recorded, `looplab finalize`),
+# and both read
 # `config.snapshot.json` STRICTLY: a key this build does not know, a newer format, or a damaged file
 # is refused at exit 2 (`core/config.py::CONFIG_SNAPSHOT_SCHEMA` states the policy). The server used
 # to find that out AFTER it had appended the intent and Popen'd the child — it saw a crashed process,

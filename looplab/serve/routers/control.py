@@ -1,13 +1,11 @@
-"""Control-plane routes: append control intents (/control) and spawn/resume/reset/start engine
-processes. Handler bodies are verbatim moves from `serve/server.py::make_app` (BACKLOG §4)."""
+"""Control-plane routes: the durable command lifecycle (/commands) and the reset/start/clear-trace
+engine operations. Handler bodies are verbatim moves from `serve/server.py::make_app` (BACKLOG §4)."""
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import secrets
-import threading
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -22,14 +20,10 @@ from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.config import Settings
 from looplab.core.errors import LLMError
-from looplab.events.eventstore import EventStoreConcurrencyError, EventStoreLockError
-from looplab.events.replay import fold
-from looplab.events.types import EV_APPROVAL_GRANTED, EV_RESUME_REQUESTED, EV_SPEC_APPROVED
+from looplab.events.eventstore import EventStoreLockError
 from looplab.serve.appstate import _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX
 from looplab.serve.http import json_object
-from looplab.serve.engine_proc import (
-    EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
-    _resolve_task_file, run_lifecycle_lock_http, spawn_snapshot_refusal)
+from looplab.serve.engine_proc import _engine_alive, _engine_liveness
 from looplab.serve.launch import (
     idempotency_key_digest,
     launch_request_digest,
@@ -39,9 +33,7 @@ from looplab.serve.launch import (
     safe_run_dir,
     validate_idempotency_key,
 )
-from looplab.serve.protocol import (
-    COLLABORATION_EVENTS, CONTROL_EVENTS, EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE)
-from looplab.serve.control_validation import normalize_control
+from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.reset_route import durable_reset_run
 from looplab.serve.settings_store import SettingsRevisionConflict
 from looplab.serve.start_record import (
@@ -139,62 +131,6 @@ def _command_responses(description: str) -> dict[int, dict[str, Any]]:
     }
 
 
-# WHO STILL CALLS THE LEGACY `/control` ROUTE — a process-local tally, so the port to `/commands`
-# is a number rather than an intention. The route's own comment has said since it was written that
-# it needs "a deprecation window with a warning header and a migration note"; nothing counted, so
-# nobody could say how far along that was or whether anything outside the test suite still spoke it.
-#
-# `{event_type: {user_agent: count}}`. The User-Agent is what separates the suite's own httpx client
-# from a real deployment's browser or script — the whole question the port turns on — and it is a
-# header the caller volunteers about itself, not an identity, so it discloses nothing about who is
-# operating. Truncated and bounded because it is untrusted input on a hot path.
-#
-# NOT AN EVENT, deliberately. This measures the SERVER's clients over its lifetime, not a run's
-# history, and a durable row per legacy call would put that history into the very log this route is
-# criticised for appending to unfenced.
-#
-# SAID ONCE PER NEW (type, User-Agent) PAIR, at WARNING, in the server log (review 2026-09-22,
-# SRV1-07). The retirement criterion reads this tally ("zero for every agent that is not the suite's
-# own client"), and until then nothing in production read it — no route serves it and nothing
-# logged it — so on a real deployment that criterion could not be observed at all. The log is the
-# channel an operator already reads, and it is bounded by the map it mirrors: one line per pair the
-# map admits, one more for a type's `(other)` bucket, never one per call.
-_LEGACY_CONTROL_MAX_AGENTS = 32
-_LEGACY_CONTROL_AGENT_CHARS = 120
-_legacy_control_callers: dict[str, dict[str, int]] = {}
-_legacy_control_lock = threading.Lock()
-_log = logging.getLogger("looplab.server")
-
-
-def _note_legacy_control_caller(event_type: str, user_agent: str) -> None:
-    """Record one SUCCESSFUL legacy control append, and say a NEW (type, agent) pair once. Never
-    raises."""
-    agent = (user_agent or "unknown").strip()[:_LEGACY_CONTROL_AGENT_CHARS] or "unknown"
-    etype = event_type or "unknown"
-    with _legacy_control_lock:
-        agents = _legacy_control_callers.setdefault(etype, {})
-        if agent not in agents and len(agents) >= _LEGACY_CONTROL_MAX_AGENTS:
-            # A caller that varies its User-Agent per request must not grow this map without bound.
-            # The overflow bucket keeps the COUNT honest while dropping the distinction.
-            agent = "(other)"
-        first = agent not in agents
-        agents[agent] = agents.get(agent, 0) + 1
-    if first:
-        # `%r`, not `%s`: the User-Agent is the caller's own claim, and a quoted literal is what stops
-        # a newline in it from starting a forged line of its own in the operator's log.
-        _log.warning(
-            "legacy POST /api/runs/{run}/control: first %r append from User-Agent %r since this "
-            "server started. The route is deprecated (no durable request identity: a retried POST "
-            "re-appends); port this client to POST /api/runs/{run}/commands with an "
-            "Idempotency-Key and the run's expected_generation.", etype, agent)
-
-
-def legacy_control_callers() -> dict[str, dict[str, int]]:
-    """A copy of the tally, for an operator or a test asking who has not migrated yet."""
-    with _legacy_control_lock:
-        return {etype: dict(agents) for etype, agents in _legacy_control_callers.items()}
-
-
 def _spawn_engine(*args, **kwargs):
     """Late-bound compatibility seam for patches on either this router or engine_proc."""
     return _engine_proc._spawn_engine(*args, **kwargs)
@@ -225,159 +161,15 @@ def build_router(srv) -> APIRouter:
             })
         return liveness
 
-    # ------------------------------------------------------------------ control
-    # KNOWN GAP (needs a deprecation, not a patch): this compatibility route has no durable request
-    # identity and no mandatory generation fence, so a lost-response retry re-appends an ADDITIVE
-    # intent — `budget_extend`'s `add_nodes` is a documented delta, and inject/fork/deep_research each
-    # queue another PAID unit of work. `/commands` is the fenced path and is what both first-party
-    # clients use (ui/src/api.js, tui_api.py). Requiring `expected_seq` for those types was tried and
-    # reverted: it is the correct end state but breaks the contract this route exists to preserve
-    # (the suite's own call sites, counted below, append here unfenced), so it needs a deprecation
-    # window with a warning header and a migration note — not a silent 409.
-    # OPEN[legacy-control-route-is-not-retired] the route still exists; the suite now speaks it only
-    # through its OWN instruments (every intent-coverage site moved to `/commands`, below), which
-    # die with it. It ANNOUNCES its deprecation (the headers below, and `deprecated=True` in
-    # OpenAPI), COUNTS its callers (`legacy_control_callers`) and SAYS each new (type, User-Agent)
-    # pair once at WARNING, so its retirement is schedulable and readable on a real deployment;
-    # what is open is the removal date and deleting the route.
-    # proof:`present:async def control(@looplab/serve/routers/control.py`
-    #
-    # WHAT BLOCKS IT, re-measured 2026-09-23 (review 2026-09-22, SRV1-07 found two of the four
-    # 2026-09-08 blockers false). The port is NOT a URL rewrite: `/commands` is a different contract
-    # in four ways, and each one retires an assertion the suite currently makes:
-    #   1. `Idempotency-Key` is REQUIRED — `run_commands.py::RunCommandService.submit` raises 400
-    #      without one — so every ported site must mint and manage a key, and a site that drives the
-    #      SAME intent twice (the pause/resume pairs) must mint two or get a replay of the first.
-    #   2. `expected_generation` is MANDATORY and strict (`_normalize_expected_generation` 400s on
-    #      anything but 64 hex), so a ported site first reads a token this route never asked for
-    #      (`tests/factories.py::http_run_generation`, or `log_run_generation` off the log). There
-    #      is no `expected_seq` equivalent, and no ported site needs one: the ONLY suite site that
-    #      sends `expected_seq` here is `tests/test_server.py::test_control_append_and_validation`,
-    #      asserting THIS route's own tail CAS — an instrument that dies with it. The 2026-09-08
-    #      text had the ~17 `test_fork_from_seq` sites "CAS on an exact event-log TAIL"; that file
-    #      sends no `expected_seq` at all. Their compare-and-swap is on CONTENT — the `forked_from`
-    #      receipt and `parent_generations` — in `control_validation.py::normalize_control`, which
-    #      `/commands` runs identically. No tail-precondition decision is owed.
-    #   3. It applies ASYNCHRONOUSLY for `EV_PAUSE` and for every intent whose engine policy is not
-    #      `NO_SPAWN` (`run_commands.py`'s `synchronous = … NO_SPAWN and … != EV_PAUSE`), so a site
-    #      that asserts on the event log right after the POST polls the record to a terminal status
-    #      first: `tests/factories.py::post_command` + `command_terminal`. The 2026-09-08 text
-    #      called that "a new suite affordance"; it existed, module-private in
-    #      `test_run_command_service.py`, and was hoisted 2026-09-23.
-    #   4. 400-class REFUSALS become coded REJECTED records — a 200 carrying an error object — so
-    #      `assert r.status_code == 400` becomes an assertion about a record's `error.code`, and
-    #      per the house rule a refusal that now depends on a race must pin the fail-closed SET.
-    # And the window itself is not ready: it opened 2026-09-07 with `Deprecation` + `Link` and
-    # DELIBERATELY no `Sunset`, because RFC 8594's field carries a DATE and none has been agreed.
-    # Retiring a route inside an announced window that names no removal date would make the header
-    # pair a lie in the other direction.
-    #
-    # SO THE WINDOW NEEDS: (a) a decided removal date, at which point `Sunset` is one line — NOT
-    # MET, none is agreed; (b) — WITHDRAWN, there is no tail-precondition decision (see 2); (c) a
-    # suite helper for 3 — MET 2026-09-23 (`tests/factories.py`); (d) the tally reading zero for
-    # every agent that is not the suite's own client — OBSERVABLE since 2026-09-23 (the WARNING
-    # line names every new pair a deployment sees) but UNMEASURED: no deployment's log has been read.
-    # Counted 2026-09-23 with `git grep -c -E 'runs/[^" ]*/control' -- 'tests/*.py'` (the same
-    # count read 64 lines in 11 files at review 2026-09-22 and 49 in 8 that morning): 22 lines in
-    # 6 files, and no first-party client — every one of them this route's OWN instrument, which dies
-    # with it rather than migrates: test_legacy_control_deprecation, test_control_reads_the_log_once,
-    # the command-only refusals in test_collaboration and test_concept_tag_command, test_server's
-    # tail-CAS/validation test and its incomplete-finalize refusal (9), and test_run_command_service's
-    # nine sites asserting that this route honours the command service's normalization and guards.
-    # Nothing that proves a guard or an intent dies with the route: the ten security tests that
-    # used it as their sample mutation (Origin, Host, owner token, review capability, the lock-path
-    # refusal) moved to `/commands` first, and the 27 intent-coverage sites followed
-    # (test_fork_from_seq 17, test_server 8, test_strategist_developer_switch 2), each re-verified
-    # there by mutating the check it covers.
-    # DEPRECATED in OpenAPI too — no behaviour change (review 2026-09-22, SRV2-09): the compat
-    # route both first-party clients left for `POST .../commands`; nothing in ui/src, the TUI or
-    # the CLI calls it. The flag joins the `Deprecation`/`Link` headers below; retiring the route
-    # is still the open item above.
-    @router.post("/api/runs/{run_id}/control", deprecated=True)
-    async def control(run_id: str, request: Request, response: Response):
-        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
-        body = await json_object(request, "control body")
-        # ANNOUNCED, not silently tolerated. A caller cannot discover a deprecation it is never told
-        # about, and the paragraph above had been the entire notice — in a comment, where no client
-        # can read it. `Deprecation: true` is the boolean form of the deprecation header field, and
-        # `Link; rel="successor-version"` is what names the replacement (RFC 8288).
-        #
-        # THERE IS DELIBERATELY NO `Sunset`. RFC 8594's field carries a DATE, nobody has committed to
-        # one, and emitting an invented date would be a schedule this project has not agreed to —
-        # the same reason `DECLINED[…]` markers here must carry a number rather than a plausible
-        # sentence. The header pair is `Deprecation` + `Link` until a removal date is actually
-        # decided; adding `Sunset` then is one line.
-        response.headers["Deprecation"] = "true"
-        response.headers["Link"] = (
-            f'</api/runs/{run_id}/commands>; rel="successor-version"')
-        response.headers["Warning"] = (
-            '299 - "This endpoint has no durable request identity: a lost-response retry '
-            're-appends an ADDITIVE intent. Use POST /commands with an Idempotency-Key."')
-
-        def _append_control() -> dict:
-            # Offloaded to a worker thread: ``sequence`` takes the cross-process flock (blocking up to
-            # ``lock_acquire_timeout``) and the append does disk I/O — holding that on the ASGI event
-            # loop freezes every concurrent SSE/poll in the worker. Same offload the start/preflight
-            # handlers already use.
-            with srv.commands.sequence(rd):
-                local_rd = srv.commands.validate_paths(rd)
-                srv.commands.reject_if_active(local_rd, "append a legacy control event")
-                etype = body.get("type")
-                if etype not in CONTROL_EVENTS:
-                    raise HTTPException(400, f"unknown control event: {etype!r}")
-                if etype in COLLABORATION_EVENTS:
-                    raise HTTPException(409, {
-                        "code": "command_protocol_required",
-                        "message": "versioned comments require the durable command endpoint",
-                        "remediation": (
-                            "submit with Idempotency-Key and the exact expected run generation"),
-                    })
-                # Approval decisions are valid only for the exact gate the normalizer folded. If the
-                # caller omitted an explicit CAS, bind the append to that pre-normalization tail so a
-                # replacement approval request cannot be accepted by this legacy endpoint.
-                gated_baseline = None
-                if etype in {EV_APPROVAL_GRANTED, EV_SPEC_APPROVED}:
-                    events = srv.events(local_rd)
-                    gated_baseline = events[-1].seq if events else -1
-                # One shared normalizer owns strict payload validation plus node-attempt and parent
-                # generation CAS. Pass the raw data intact so attempt>0 tokens are never erased here.
-                data = normalize_control(srv, local_rd, etype, body.get("data"))
-                _known_engine_liveness(local_rd, "append a control event")
-                expected = body.get("expected_seq")
-                if expected is None and gated_baseline is not None:
-                    expected = gated_baseline
-                # Require an actual JSON integer. This is a compare-and-swap token naming the EXACT tail
-                # the caller observed, so coercion defeats its purpose: `int(7.9)` silently truncates to
-                # 7 and `int("7")` accepts a string, either of which would fence the append against a
-                # tail the caller never named — authorizing a mutation on a state it did not see.
-                # (`bool` is an `int` subclass in Python, hence the explicit reject.)
-                if expected is not None:
-                    if isinstance(expected, bool) or not isinstance(expected, int):
-                        raise HTTPException(400, "expected_seq must be an integer")
-                try:
-                    # `srv.event_store`, not a fresh `EventStore(...)`: this route built one PER
-                    # POST, and each construction walks the whole log to learn its tail seq — N
-                    # control appends over a session cost N full scans of a log that grew by one
-                    # record each time (the CODE_REVIEW row on `eventstore.py::_scan_last_seq`). The
-                    # shared store reads only the bytes since its last call and re-validates against
-                    # disk under the append lock, so nothing about the CAS below is weakened.
-                    ev = srv.event_store(local_rd).append(
-                        etype, data, expected_last_seq=expected)
-                except EventStoreConcurrencyError as exc:
-                    raise HTTPException(409, str(exc)) from exc
-            return {"ok": True, "seq": ev.seq, "type": etype}
-
-        result = await anyio.to_thread.run_sync(_append_control)
-        # WHO STILL CALLS THIS. The comment above says the port needs "a deprecation window with a
-        # warning header and a migration note" and could not say how far along it is, because
-        # nothing counted. Recorded only for an append that SUCCEEDED: a 400/409 is a caller the
-        # route refused, and counting it as a migration blocker would inflate the number the port is
-        # tracked against. Process-local and deliberately not an event — this measures the SERVER's
-        # clients, not a run's history, and a durable row per legacy call would put that history in
-        # the log the route is criticised for appending to.
-        _note_legacy_control_caller(str(result.get("type") or ""),
-                                    request.headers.get("User-Agent", ""))
-        return result
+    # _Closed 2026-09-23 (review SRV1-07, owner decision): the legacy `POST .../control` and
+    # `POST .../resume` compatibility routes are retired. Both first-party clients had left them for
+    # `POST .../commands`, no caller outside the suite was known, and `/control` could not be fixed
+    # in place: with no durable request identity, a lost-response retry re-appended an ADDITIVE
+    # intent. What they guarded lives on the command path — intake normalization
+    # (`control_validation.py::normalize_control`), the active-command and pending-finalize
+    # refusals, the launch-in-flight handshake — and a durable resume request met while its owner
+    # is still in its tail is served by the after-exit waiter the startup scan and the reconcilers
+    # install (`engine_proc.py::_claim_and_spawn_resume`)._
 
     # ------------------------------------------------------------------ authoritative command lifecycle
     def _command_response_headers(response: Response) -> None:
@@ -427,101 +219,7 @@ def build_router(srv) -> APIRouter:
         return await anyio.to_thread.run_sync(
             lambda: srv.commands.resolve_active_claims(rd, confirmation))
 
-    # ------------------------------------------------------------------ spawn / resume
-    def _task_file_for(rd: Path) -> Optional[str]:
-        # The resolved immutable snapshot is authoritative. The shared helper tolerates malformed
-        # legacy ui_meta and only accepts its task_file when no snapshot exists and the target exists.
-        return _resolve_task_file(rd)
-
-    def _append_resume_request(rd: Path) -> str:
-        """Classify and durably append one handoff against the exact folded tail."""
-        store = srv.event_store(rd)   # shared reader; see the note at the /control append
-        for _attempt in range(8):
-            events = store.read_all()
-            state = fold(events)
-            last_seq = events[-1].seq if events else -1
-            last_stop = state.last_stop_request_seq
-            last_finish = state.last_finish_seq
-            mode = ("finalize" if state.stop_requested and last_stop > last_finish else "resume")
-            try:
-                store.append(EV_RESUME_REQUESTED, {"mode": mode}, expected_last_seq=last_seq)
-                return mode
-            except EventStoreConcurrencyError:
-                continue
-        raise HTTPException(409, "run state changed repeatedly; retry resume")
-
-    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): the compat
-    # route both first-party clients left for `POST .../commands` (a `resume` command); nothing
-    # in ui/src, the TUI or the CLI calls it.
-    @router.post("/api/runs/{run_id}/resume", deprecated=True)
-    def resume_run(run_id: str):
-        rd = _run_dir(run_id)
-        # The command sequencer excludes authoritative command workers while the lifecycle lock
-        # serializes this durable handoff with reset/delete and the resume reconciler.
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            srv.commands.reject_if_active(
-                rd, "resume through the legacy endpoint", allow_incomplete_finalize=True)
-            task_file = _task_file_for(rd)
-            if not task_file:
-                raise HTTPException(
-                    400, "run is not resumable — no task.snapshot.json or ui_meta.json "
-                         "(it predates self-describing runs; start it via the UI to enable resume)")
-            with run_lifecycle_lock_http(rd):
-                known_alive = _known_engine_liveness(rd, "resume the run")
-                # A dead engine means this request Popens `looplab resume`/`finalize` right below,
-                # and that child reads config.snapshot.json strictly. Ask it the child's question
-                # FIRST, so a snapshot it would refuse at exit 2 is a coded 409 here with nothing
-                # appended — not a `resume_requested` handoff and a crashed child (review 2026-09-22,
-                # doc 66 §6 item 6; `engine_proc.py::spawn_snapshot_refusal`). With a live owner
-                # nothing is spawned now, and its settings are already loaded.
-                if not known_alive:
-                    refused = spawn_snapshot_refusal(rd)
-                    if refused is not None:
-                        raise HTTPException(409, refused)
-                # Durable before every liveness branch: a current owner in its final tail, or a
-                # detached child that dies before engine.lock, leaves a recoverable intent.
-                mode = _append_resume_request(rd)
-            cli_args = (
-                ["finalize", str(rd), "--task-file", str(task_file)]
-                if mode == "finalize"
-                else ["resume", str(rd), "--task-file", str(task_file)])
-            # Preserve the historical monkeypatch seam while the production verdict remains the
-            # exact tri-state result captured under the lifecycle fence.
-            was_alive = known_alive or _engine_alive(rd)
-            # Mirror the launch into the command service's pre-lock lease so command-aware callers
-            # also fail closed during Popen→engine.lock. The event-log claim stays authoritative.
-            srv.commands.begin_external_spawn(rd, "legacy-resume")
-            popen_returned = False
-
-            def _record_spawn(pid: Optional[int]) -> None:
-                nonlocal popen_returned
-                # Mark the Popen boundary before persisting the PID. If persistence fails, the child
-                # may be live and the PID-less preclaim must remain as duplicate-spawn quarantine.
-                popen_returned = True
-                srv.commands.record_external_spawn(rd, "legacy-resume", pid)
-
-            try:
-                spawned = _claim_and_spawn_resume(
-                    rd, cli_args, cancel_event=srv.resume_cancel, wait_on_alive=True,
-                    spawn_engine=_spawn_engine, on_spawn=_record_spawn,
-                    launch_env=lambda: srv.settings.launch_env_for_run(rd),
-                    # Not this route's own mirror above: `reject_if_active` read the lease under
-                    # this sequencer, but the after-exit waiter this may leave behind claims
-                    # later, when a command worker's lease is exactly what it must see (SRV1-09).
-                    spawn_inflight=lambda run_dir: srv.commands.spawn_inflight(
-                        run_dir, ignoring="legacy-resume"))
-            except BaseException as exc:
-                if not popen_returned and not isinstance(exc, EngineSpawnOutcomeUnknown):
-                    srv.commands.cancel_external_spawn(rd, "legacy-resume")
-                raise
-            if not spawned:
-                # A live owner/post-exit waiter is fenced by the durable resume claim instead.
-                srv.commands.cancel_external_spawn(rd, "legacy-resume")
-            if was_alive and not spawned:
-                return {"ok": True, "already_running": True, "resume_after_exit": True}
-            return {"ok": True, "launch_pending": not spawned}
-
+    # ------------------------------------------------------------------ spawn
     @router.post("/api/runs/{run_id}/reset")
     async def reset_run(run_id: str, request: Request):
         """round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and

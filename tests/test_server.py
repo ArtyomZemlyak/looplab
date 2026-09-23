@@ -1158,22 +1158,6 @@ def test_resume_cancellation_after_claim_prevents_popen(tmp_path, monkeypatch):
     assert not spawns
 
 
-def test_resume_route_passes_shutdown_cancellation_and_live_waiter(tmp_path, monkeypatch):
-    from looplab.serve.routers import control as control_router
-
-    _build_run(tmp_path)
-    _make_resumable(tmp_path / "demo")
-    captured = []
-    monkeypatch.setattr(control_router, "_engine_alive", lambda _rd: False)
-    monkeypatch.setattr(
-        control_router, "_claim_and_spawn_resume",
-        lambda *a, **kw: captured.append((a, kw)) or False)
-    response = TestClient(make_app(tmp_path)).post("/api/runs/demo/resume")
-    assert response.status_code == 200
-    assert captured[0][1]["cancel_event"] is not None
-    assert captured[0][1]["wait_on_alive"] is True
-
-
 def test_corrupt_complete_log_does_not_crash_startup_recovery(tmp_path, monkeypatch):
     from looplab.serve import engine_proc as ep
 
@@ -1193,14 +1177,21 @@ def test_corrupt_complete_log_does_not_crash_startup_recovery(tmp_path, monkeypa
 @pytest.mark.parametrize("mutation", ["reset", "delete"])
 def test_resume_claim_popen_gap_fences_reset_and_delete(
         tmp_path, monkeypatch, mutation):
-    """A deterministic barrier pins the gap after launch-claim and before Popen returns."""
+    """A deterministic barrier pins the gap after launch-claim and before Popen returns.
+
+    The claim and the Popen are ONE `run_lifecycle_lock` transaction inside
+    `engine_proc.py::_claim_and_spawn_resume`, the helper every log-ledger spawner launches through,
+    so the gap is driven there with a durable request already in the log. It was driven through the
+    legacy `POST /resume` until that route was retired (2026-09-23)."""
     from concurrent.futures import ThreadPoolExecutor
     import threading
     import time as _time
     from looplab.serve import engine_proc as ep
 
     _build_run(tmp_path)
-    _make_resumable(tmp_path / "demo")
+    rd = tmp_path / "demo"
+    _make_resumable(rd)
+    EventStore(rd / "events.jsonl").append("resume_requested", {"mode": "resume"})
     entered = threading.Event()
     release = threading.Event()
 
@@ -1210,8 +1201,9 @@ def test_resume_claim_popen_gap_fences_reset_and_delete(
 
     monkeypatch.setattr(ep, "_spawn_engine", _blocked_spawn)
     client = TestClient(make_app(tmp_path))
+    args = ["resume", str(rd), "--task-file", str(rd / "task.snapshot.json")]
     with ThreadPoolExecutor(max_workers=2) as pool:
-        resume = pool.submit(client.post, "/api/runs/demo/resume")
+        resume = pool.submit(ep._claim_and_spawn_resume, rd, args, spawn_inflight=None)
         assert entered.wait(2.0), "resume did not reach the claim -> Popen barrier"
         # The delete arm goes through the deletion TRANSACTION: bodyless DELETE is a 409 stub that
         # returns instantly without taking the sequencer, so it would sail past the fence and the
@@ -1221,7 +1213,7 @@ def test_resume_claim_popen_gap_fences_reset_and_delete(
         _time.sleep(0.1)
         assert not mutate.done(), "lifecycle mutation crossed the in-flight launch fence"
         release.set()
-        assert resume.result(timeout=2.0).status_code == 200
+        assert resume.result(timeout=2.0) is True
         assert mutate.result(timeout=2.0).status_code == 409
 
 
@@ -1547,15 +1539,14 @@ def test_server_startup_does_not_create_waiter_for_unknown_liveness(tmp_path, mo
 
 
 def _registered_resume_waiter(rd: Path):
-    """The post-exit waiter `/resume` left for `rd`, taken while the old owner still holds
-    engine.lock. The route answers `resume_after_exit: True` whenever the owner was alive and it
-    did not spawn — including the paths where it installed NO waiter — so the answer alone does
-    not prove there is anything to wait for."""
+    """The post-exit waiter installed for `rd`, taken while the old owner still holds engine.lock, so
+    the hand-off can be JOINED rather than timed, and a spawner that installed none fails HERE, by
+    name, instead of later as a missing spawn."""
     from looplab.serve import engine_proc as ep
 
     with ep._resume_after_exit_lock:
         entry = ep._resume_waiter_threads.get(str(rd.resolve()))
-    assert entry is not None, "`/resume` answered resume_after_exit but installed no waiter"
+    assert entry is not None, "no post-exit waiter was installed for the live owner"
     return entry[0]
 
 
@@ -1577,7 +1568,14 @@ def _joined_hand_off(rd: Path, waiter, spawned: list) -> None:
 @pytest.mark.parametrize("intent", ["inject_node", "resume", "run_reopened"])
 def test_resume_during_post_finish_tail_spawns_once_after_engine_exit(
         tmp_path, monkeypatch, intent):
-    """An action after run_finished must not be stranded by the old engine's finalization lock tail."""
+    """An action after run_finished must not be stranded by the old engine's finalization lock tail.
+
+    The hand-off is the durable `resume_requested` row an older server's legacy `/resume` wrote (the
+    route was retired 2026-09-23), and the server that meets it while the old owner is still in its
+    tail is one STARTING then: its startup scan installs the post-exit waiter
+    (`engine_proc.py::install_resume_reconcile_hooks`). Two workers starting together install ONE
+    waiter, and the replacement is spawned once, after engine.lock is released."""
+    import contextlib
     import threading
 
     from looplab.cli import _engine_singleton
@@ -1595,26 +1593,23 @@ def test_resume_during_post_finish_tail_spawns_once_after_engine_exit(
         return type("P", (), {})()
 
     monkeypatch.setattr("looplab.serve.engine_proc.subprocess.Popen", _fake_popen)
-    client = TestClient(make_app(tmp_path))
 
-    with _engine_singleton(rd) as ok:
-        assert ok
-        # This is the exact SSE-visible window: state is already finished, but finalize_run still
-        # owns engine.lock. The control intent is durable; two resume calls must install one waiter.
-        # The intent is SETUP, appended as the durable row a client left in that window: what is
-        # under test is the `/resume` route's single waiter, not the route the intent came by (it
-        # used to be the legacy `/control`, SRV1-07; `/commands` would add its own driver monitor,
-        # whose hand-off with this waiter `tests/test_launch_inflight_handshake.py` drives).
-        data = ({"idea": {"operator": "manual", "params": {"x": 0.5}}}
-                if intent == "inject_node" else {})
-        EventStore(rd / "events.jsonl").append(intent, data)
-        first = client.post(f"/api/runs/{run_id}/resume").json()
-        second = client.post(f"/api/runs/{run_id}/resume").json()
-        assert first["resume_after_exit"] is True and second["resume_after_exit"] is True
-        assert not spawned
-        waiter = _registered_resume_waiter(rd)
+    with contextlib.ExitStack() as servers:
+        with _engine_singleton(rd) as ok:
+            assert ok
+            # The exact SSE-visible window: state is already finished, but finalize_run still owns
+            # engine.lock, and the intent and its hand-off are durable rows in the log.
+            data = ({"idea": {"operator": "manual", "params": {"x": 0.5}}}
+                    if intent == "inject_node" else {})
+            store = EventStore(rd / "events.jsonl")
+            store.append(intent, data)
+            store.append("resume_requested", {"mode": "resume"})
+            for _worker in range(2):
+                servers.enter_context(TestClient(make_app(tmp_path)))
+            assert not spawned
+            waiter = _registered_resume_waiter(rd)
 
-    _joined_hand_off(rd, waiter, spawned)
+        _joined_hand_off(rd, waiter, spawned)
     assert spawn_seen.is_set()
     assert len(spawned) == 1 and "resume" in spawned[0]
     state = fold(EventStore(rd / "events.jsonl").read_all())
@@ -1644,11 +1639,16 @@ def test_live_owner_explicitly_serves_resume_before_finish(tmp_path, monkeypatch
         return type("P", (), {})()
 
     monkeypatch.setattr("looplab.serve.engine_proc.subprocess.Popen", _fake_popen)
-    client = TestClient(make_app(tmp_path))
+    args = ["resume", str(rd), "--task-file", str(rd / "task.snapshot.json")]
     with _engine_singleton(rd) as ok:
         assert ok
-        response = client.post("/api/runs/demo/resume")
-        assert response.status_code == 200 and response.json()["resume_after_exit"] is True
+        # A durable request meeting the live owner leaves a post-exit waiter, not a second engine —
+        # the path every log-ledger spawner shares (the retired legacy `/resume` route took it too).
+        EventStore(rd / "events.jsonl").append("resume_requested", {"mode": "resume"})
+        assert ep._claim_and_spawn_resume(
+            rd, args, wait_on_alive=True, cancel_event=threading.Event(),
+            spawn_inflight=None) is False
+        _registered_resume_waiter(rd)
         EventStore(rd / "events.jsonl").append("resume_served", {})
         EventStore(rd / "events.jsonl").append("run_finished", {"reason": "post-wake done"})
         key = str(rd.resolve())
@@ -1670,9 +1670,11 @@ def test_live_owner_explicitly_serves_resume_before_finish(tmp_path, monkeypatch
 def test_post_finish_tail_of_pending_abort_hands_off_to_finalize_not_resume(
         tmp_path, monkeypatch):
     """The accepted mode is classified before the live owner lands run_finished and survives its tail.
-    Spawning ordinary resume afterward would reopen the just-finalized search."""
+    Spawning ordinary resume afterward would reopen the just-finalized search: the waiter is handed
+    `resume` arguments and the durable row's mode turns them into `finalize`."""
     import threading
     from looplab.cli import _engine_singleton
+    from looplab.serve import engine_proc as ep
 
     _build_run(tmp_path)
     rd = tmp_path / "demo"
@@ -1687,11 +1689,15 @@ def test_post_finish_tail_of_pending_abort_hands_off_to_finalize_not_resume(
         return type("P", (), {})()
 
     monkeypatch.setattr("looplab.serve.engine_proc.subprocess.Popen", _fake_popen)
-    client = TestClient(make_app(tmp_path))
+    args = ["resume", str(rd), "--task-file", str(rd / "task.snapshot.json")]
     with _engine_singleton(rd) as ok:
         assert ok
-        response = client.post("/api/runs/demo/resume")
-        assert response.status_code == 200 and response.json()["resume_after_exit"] is True
+        # The hand-off as the retired legacy `/resume` route classified it for a pending abort — a
+        # row older logs carry — met by a spawner while the owner is still alive.
+        EventStore(rd / "events.jsonl").append("resume_requested", {"mode": "finalize"})
+        assert ep._claim_and_spawn_resume(
+            rd, args, wait_on_alive=True, cancel_event=threading.Event(),
+            spawn_inflight=None) is False
         # Simulate the old owner accepting the abort after the handoff was durably classified.
         EventStore(rd / "events.jsonl").append("run_finished", {"reason": "operator"})
         waiter = _registered_resume_waiter(rd)
@@ -1702,7 +1708,6 @@ def test_post_finish_tail_of_pending_abort_hands_off_to_finalize_not_resume(
     assert "finalize" in spawned[0] and "resume" not in spawned[0]
     requests = [e for e in EventStore(rd / "events.jsonl").read_all()
                 if e.type == "resume_requested"]
-    assert requests[-2].data.get("mode") == "finalize"
     assert requests[-1].data.get("launch_claim") is True
     assert requests[-1].data.get("mode") == "finalize"
 
@@ -1876,40 +1881,30 @@ def test_trace_tail_survives_a_huge_recent_span_line(tmp_path):
     assert len(tail[-1]["text"]) <= 500                    # text still capped for the browser
 
 
-def test_control_append_and_validation(tmp_path):
+def test_the_command_intake_refuses_unknown_and_internal_types_and_unencodable_data(tmp_path):
+    """What `test_control_append_and_validation` proved on the legacy `/control` route that was not
+    that route's own contract, carried to `POST /commands` when it was retired (2026-09-23). An
+    unknown type and the INTERNAL hand-off record are REJECTED records — a caller able to append
+    `resume_requested(launch_claim=True)` could suppress real launches — and a lone surrogate (valid
+    JSON that UTF-8 cannot encode) is a clean 400, never a 500. Nothing is appended by any of them."""
     _build_run(tmp_path)
+    rd = tmp_path / "demo"
     client = TestClient(make_app(tmp_path))
-    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}})
-    assert r.status_code == 200 and r.json()["type"] == "pause"
-    st = fold(EventStore(tmp_path / "demo" / "events.jsonl").read_all())
-    assert st.paused is True
-    # unknown control event rejected
-    bad = client.post("/api/runs/demo/control", json={"type": "danger", "data": {}})
-    assert bad.status_code == 400
-    # Internal durable handoff records (especially launch_claim) are written only by /resume;
-    # exposing them through the generic control surface would let a caller suppress real launches.
-    internal = client.post(
-        "/api/runs/demo/control", json={"type": "resume_requested", "data": {"launch_claim": True}})
-    assert internal.status_code == 400
-    # P1-12 optimistic concurrency: a stale expected_seq -> 409 (the log advanced since); the matching
-    # tail seq -> 200. A non-integer expected_seq -> 400.
-    tail = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}}).json()["seq"]
-    stale = client.post("/api/runs/demo/control",
-                        json={"type": "resume", "data": {}, "expected_seq": tail - 1})
-    assert stale.status_code == 409
-    fresh = client.post("/api/runs/demo/control",
-                        json={"type": "resume", "data": {}, "expected_seq": tail})
-    assert fresh.status_code == 200
-    nonint = client.post("/api/runs/demo/control",
-                         json={"type": "pause", "data": {}, "expected_seq": "nope"})
-    assert nonint.status_code == 400
-    # A lone surrogate is valid JSON (\ud800) that json.loads decodes but str.encode("utf-8") cannot
-    # encode. The payload-size guard's encode must catch it as a clean 400, not surface a 500 (the
-    # encode used to sit outside the try that wraps json.dumps). Sent as raw content because httpx's
-    # own json= encoder would reject the surrogate before it ever reached the server.
-    surrogate = client.post("/api/runs/demo/control", headers={"Content-Type": "application/json"},
-                            content='{"type":"hint","data":{"text":"x\\ud800"}}')
-    assert surrogate.status_code == 400 and "encodable" in surrogate.json()["detail"]
+    generation = log_run_generation(rd)
+    before = list(iter_jsonl(rd / "events.jsonl"))
+
+    for key, event_type, data in (("unknown", "danger", {}),
+                                  ("internal", "resume_requested", {"launch_claim": True})):
+        record = post_command(client, event_type, data, key, generation=generation).json()
+        assert record["status"] == "rejected", record
+        assert record["error"]["code"] == "invalid_command"
+        assert f"unknown control event: {event_type!r}" in record["error"]["message"]
+
+    body = '{"type":"hint","data":{"text":"x\\ud800"},"expected_generation":"%s"}' % generation
+    surrogate = client.post("/api/runs/demo/commands", content=body, headers={
+        "Content-Type": "application/json", "Idempotency-Key": "surrogate"})
+    assert surrogate.status_code == 400 and "surrogates not allowed" in surrogate.json()["detail"]
+    assert list(iter_jsonl(rd / "events.jsonl")) == before
 
 
 def test_node_controls_compare_and_set_lifecycle_generation(tmp_path):
@@ -3288,7 +3283,7 @@ def test_cors_is_allowlisted_not_wildcard(tmp_path):
 
 # THE MUTATION GUARDS ARE PROVED ON `POST /commands` (review 2026-09-22, SRV1-07). The six tests
 # below (Origin, DNS-rebinding Host, the configured-host allow-list twice, the owner token twice)
-# each used the legacy `/control` route as their sample mutation — the route slated for retirement,
+# each used the legacy `/control` route as their sample mutation — the route since retired (2026-09-23),
 # which would have taken these proofs with it and left the guards unproved on the one mutation route
 # both first-party clients use. The sample is a `hint`: it APPENDS on any run (a `pause` on these
 # finished runs is a `noop` record, so a request the guard failed to stop could pass for one it
@@ -3501,13 +3496,14 @@ def test_sse_done_waits_for_error_finalize_recovery(tmp_path, monkeypatch):
     assert done_index > max(i for i, (event, _) in enumerate(frames) if event != "done")
 
 
-def test_scoped_incomplete_finalize_is_visible_and_blocks_reset_and_legacy_control_resume(
+def test_scoped_incomplete_finalize_is_visible_and_blocks_reset_and_a_resume_command(
         tmp_path, monkeypatch):
     """A durable terminal event is still ``finalizing`` until its scoped projection marker lands.
 
-    The state/list projections must agree. Reset and a legacy ``/control`` resume append fail closed,
-    while the stop-aware ``/resume`` driver remains available to finish the same terminal scope. An
-    unscoped legacy terminal remains finished for backwards compatibility.
+    The state/list projections must agree. Reset and a ``resume`` command fail closed. An unscoped
+    legacy terminal remains finished for backwards compatibility. (The legacy ``/resume`` route was
+    also a stop-aware driver for such a scope; it was retired 2026-09-23, and a scope with no
+    pending ``run_abort`` to reattach to is finished with ``looplab finalize``.)
     """
     import looplab.serve.routers.control as control_router
 
@@ -3548,16 +3544,12 @@ def test_scoped_incomplete_finalize_is_visible_and_blocks_reset_and_legacy_contr
     assert legacy_state["phase"] == listed["legacy"]["phase"] == "finished"
 
     reset = client.post("/api/runs/scoped/reset")
-    legacy_resume = client.post(
-        "/api/runs/scoped/control", json={"type": "resume", "data": {}})
+    resume = post_command(client, "resume", {}, "scoped-resume", run_id="scoped",
+                          generation=log_run_generation(tmp_path / "scoped")).json()
     assert reset.status_code == 409 and "projections are incomplete" in reset.json()["detail"]
-    assert legacy_resume.status_code == 409
-    assert legacy_resume.json()["detail"]["code"] == "finalize_in_progress"
+    assert resume["status"] == "rejected", resume
+    assert resume["error"]["code"] == "finalize_in_progress"
     assert spawns == []
-
-    recovery = client.post("/api/runs/scoped/resume")
-    assert recovery.status_code == 200
-    assert len(spawns) == 1 and spawns[0][0][0] == "resume"
 
 
 def test_g1_auth_token_required_on_mutating(tmp_path, monkeypatch):
