@@ -283,6 +283,24 @@ def query_nvidia_smi(fields: str, *, timeout: float = 5.0, nounits: bool = True)
     return [[c.strip() for c in line.split(",")] for line in out.stdout.strip().splitlines()]
 
 
+def gpu_compute_pids(*, timeout: float = 30.0) -> "set[int] | None":
+    """Pids holding a GPU compute context (`nvidia-smi --query-compute-apps=pid`), or None when the
+    driver cannot be asked. Separate from `query_nvidia_smi` on purpose: there an EMPTY answer means
+    "no GPU signal", here it means "no process is on a GPU" — the question the abandoned-lease check
+    (`engine/resources.py::abandoned_gpu_host_lease_holder`) must never read as the other."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "--query-compute-apps=pid", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return {int(tok) for tok in (out.stdout or "").split() if tok.strip().isdecimal()}
+
+
 def usable_cpu_count() -> int:
     """Usable CPU cores respecting the cgroup cpuset (sched_getaffinity), falling back to cpu_count.
     This is the number an eval's thread pools are (and should be) sized against."""

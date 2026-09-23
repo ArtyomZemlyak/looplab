@@ -29,7 +29,7 @@ from typing import BinaryIO, Optional
 import anyio
 
 from looplab.core.atomicio import same_file_entry
-from looplab.core.hardware import detect_gpus
+from looplab.core.hardware import detect_gpus, gpu_compute_pids
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
 from looplab.runtime import landlock, read_allowlist, read_fence, seccomp
 from looplab.runtime.sandbox import GpuPinUnenforceable, is_secret_env
@@ -193,6 +193,87 @@ def describe_gpu_host_lease_holder(path) -> str:
         # `kill(pid, 0)` race could print a reassuring "dead" for a holder that is very much alive.
         return f"held by pid {text[4:]}"
     return "holder unknown"
+
+
+# AN ABANDONED LEASE (2026-09-23). `minionerec-backbones-v3` waited 70 minutes before its first eval
+# on a lease "held by pid 2496": the v14 engine, whose thread-group leader was a ZOMBIE and whose one
+# remaining thread sat in D state on a geesefs FUSE request (`request_wait_answer`). Such a thread
+# ignores SIGKILL, so the flock it inherited is never released and every later run waits forever —
+# while all four GPUs are idle. `describe_gpu_host_lease_holder` deliberately does not liveness-check
+# (a `kill(pid, 0)` race could call a live holder dead); this does not either. It asks three questions
+# whose answers cannot race into a false "abandoned": the kernel's own lock table says THIS pid holds
+# the flock on THIS inode, the pid's leader is a zombie (it can never run again), and the GPU driver
+# lists no compute context for it. Only then is the NAME moved aside — the zombie keeps its lock on the
+# old inode, and the next open creates a fresh one. Linux only; anything unreadable answers "no".
+_ABANDONED_LEASE_SUFFIX = ".abandoned"
+
+
+def _flock_holders(path, locks_text: str) -> set[int]:
+    """Pids the kernel lock table (`/proc/locks` text) says hold a WRITE flock on `path`'s inode."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return set()
+    holders: set[int] = set()
+    for line in locks_text.splitlines():
+        parts = line.split()
+        # "8: FLOCK  ADVISORY  WRITE 2496 00:95b:404254346 0 EOF"
+        if len(parts) < 6 or parts[1] != "FLOCK" or parts[3] != "WRITE" or not parts[4].isdecimal():
+            continue
+        fields = parts[5].split(":")
+        if len(fields) != 3:
+            continue
+        try:
+            same = (int(fields[0], 16) == os.major(st.st_dev)
+                    and int(fields[1], 16) == os.minor(st.st_dev)
+                    and int(fields[2]) == st.st_ino)
+        except ValueError:
+            continue
+        if same:
+            holders.add(int(parts[4]))
+    return holders
+
+
+def _process_state(pid: int) -> str | None:
+    """The one-letter state in `/proc/<pid>/stat` (read after the `(comm)` field, which may hold
+    spaces or parentheses), or None when it cannot be read."""
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    tail = stat_text.rpartition(")")[2].split()
+    return tail[0] if tail else None
+
+
+def abandoned_gpu_host_lease_holder(path, *, locks_text: str | None = None, state_of=None,
+                                    gpu_pids=None) -> int | None:
+    """The pid of a lease holder that can provably never release it, else None (see above). The
+    keyword seams exist for the tests; the engine passes none of them."""
+    if locks_text is None:
+        try:
+            locks_text = Path("/proc/locks").read_text()
+        except OSError:
+            return None
+    holders = _flock_holders(path, locks_text)
+    if len(holders) != 1:
+        return None
+    pid = next(iter(holders))
+    if (state_of or _process_state)(pid) != "Z":
+        return None
+    on_gpu = (gpu_pids or gpu_compute_pids)()
+    if on_gpu is None or pid in on_gpu:
+        return None
+    return pid
+
+
+def set_aside_abandoned_gpu_host_lease(path, pid: int) -> Path | None:
+    """Rename the lease out of the next open's way; the new name, or None when the rename failed."""
+    aside = Path(f"{path}{_ABANDONED_LEASE_SUFFIX}-pid{pid}-{int(time.time())}")
+    try:
+        os.rename(path, aside)
+    except OSError:
+        return None
+    return aside
 
 
 def _release_gpu_host_lease(handle: BinaryIO) -> None:
@@ -680,6 +761,17 @@ class ResourceSchedulingMixin:
                 # each caller's existing node-terminal / retry contract instead of aborting the run mid
                 # task-group with no terminal and re-crashing on every resume.
                 handle = _try_acquire_gpu_host_lease(Path(lease_path))
+                if handle is None:
+                    # A holder that can never release (see `abandoned_gpu_host_lease_holder`) would
+                    # keep this run waiting forever; move its file aside and try once more.
+                    dead = abandoned_gpu_host_lease_holder(lease_path)
+                    aside = (set_aside_abandoned_gpu_host_lease(lease_path, dead)
+                             if dead is not None else None)
+                    if aside is not None:
+                        _LOG.warning("the host GPU pool lease %s was held by pid %d, a ZOMBIE with no "
+                                     "GPU context that can never release it; moved it aside to %s "
+                                     "and retried", lease_path, dead, aside)
+                        handle = _try_acquire_gpu_host_lease(Path(lease_path))
                 if handle is None:
                     self._note_gpu_host_lease_contention(lease_path)
                     return None
