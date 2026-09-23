@@ -246,6 +246,38 @@ def test_a_blocked_host_lease_wait_names_the_lease_file_and_its_holder(tmp_path,
     blocked._release_gpus([0])
 
 
+def test_a_blocked_peer_can_name_the_holder_where_the_lock_refuses_reads(tmp_path, monkeypatch):
+    """`msvcrt.locking` refuses every other handle's READ of the byte it holds, and the lease held
+    byte 0 — the first byte of the very stamp a blocked peer reads to name the holder. On Windows
+    every blocked wait therefore said "holder unknown" (CI run 35804658308, review 2026-09-22 round
+    2: 'holder unknown' == 'held by pid 4432'). Driven with the module's own `os` answering "nt" and
+    a byte-range `msvcrt` whose reads obey the Windows rule; exclusivity and the release are held to
+    the same double, which refuses an unlock of a byte that was not the one locked."""
+    from looplab.engine import resources
+    from looplab.engine.resources import describe_gpu_host_lease_holder
+    from _windows_emulation import FakeMsvcrt
+
+    msvcrt = FakeMsvcrt()
+    refused = msvcrt.mandatory_reads(monkeypatch)
+    windows_os = types.ModuleType("os")
+    windows_os.__dict__.update(os.__dict__)
+    windows_os.name = "nt"
+    monkeypatch.setitem(sys.modules, "msvcrt", msvcrt)
+    monkeypatch.setattr(resources, "os", windows_os)
+
+    lease = tmp_path / "gpu-pool.lock"
+    owner = _Pool(ids=(0, 1), lease_path=lease)
+    assert owner._acquire_gpus(1) == [0]
+    assert msvcrt.held, "precondition: the lease was taken through the Windows byte lock"
+    assert describe_gpu_host_lease_holder(lease) == f"held by pid {os.getpid()}", refused
+    blocked = _Pool(ids=(0, 1), lease_path=lease)
+    assert blocked._acquire_gpus(1) is None                  # still exclusive
+    owner._release_gpus([0])
+    assert msvcrt.held == {}, "the release must unlock the byte the acquisition locked"
+    assert blocked._acquire_gpus(1) == [0]
+    blocked._release_gpus([0])
+
+
 def test_a_wait_that_was_never_announced_stays_quiet_on_acquisition(tmp_path, caplog):
     """The close-the-loop notice answers a warning we actually emitted. An uncontended acquisition —
     every ordinary run — must stay silent, or the fix trades a silent hang for a noisy success."""

@@ -39,22 +39,86 @@ import types
 
 
 class FakeMsvcrt(types.ModuleType):
+    """`msvcrt.locking`: a byte RANGE, taken at the descriptor's current position, held per handle.
+
+    Beside who holds a file (`held`), it records WHICH bytes (`regions`), because on Windows the lock
+    is mandatory for every other handle's READ of those bytes too (`ReadFile` fails with
+    ERROR_LOCK_VIOLATION, i.e. EACCES), in this process as well: `refuses_read` answers that rule and
+    `mandatory_reads` applies it to `open(...)` reads. `on_lock(fd)` runs while a lock is held, so a
+    test can read the way a concurrent reader would (review 2026-09-22 round 2, run 35804658308)."""
     LK_UNLCK, LK_LOCK, LK_NBLCK = 0, 1, 2
 
-    def __init__(self):
+    def __init__(self, on_lock=None):
         super().__init__("msvcrt")
         self.held: dict = {}
+        self.regions: dict = {}
+        self.on_lock = on_lock
 
     def locking(self, fd, mode, nbytes):
         info = os.fstat(fd)
         key = (info.st_dev, info.st_ino)
+        offset = os.lseek(fd, 0, os.SEEK_CUR)
         if mode == self.LK_UNLCK:
             if self.held.get(key) == fd:
+                if self.regions.get(key, (fd, offset, nbytes)) != (fd, offset, nbytes):
+                    # UnlockFile names a region that must EXACTLY match a locked one.
+                    raise PermissionError(errno.EACCES, "unlock of a region that is not locked")
                 del self.held[key]
+                self.regions.pop(key, None)
             return
         if self.held.get(key, fd) != fd:
             raise OSError(errno.EACCES, "Permission denied")
         self.held[key] = fd
+        self.regions[key] = (fd, offset, nbytes)
+        if self.on_lock is not None:
+            self.on_lock(fd)
+
+    def refuses_read(self, fd, start: int, stop: int) -> bool:
+        """Would a read of bytes [start, stop) through `fd` fail here, as it does on Windows?"""
+        info = os.fstat(fd)
+        held = self.regions.get((info.st_dev, info.st_ino))
+        if held is None or held[0] == fd:
+            return False
+        _holder, offset, nbytes = held
+        return start < offset + nbytes and offset < stop
+
+    def mandatory_reads(self, monkeypatch) -> list:
+        """Make `open(..., "rb")` reads obey `refuses_read`. Returns the refused paths."""
+        import builtins
+
+        real_open = builtins.open
+        refused: list = []
+        double = self
+
+        class _Reader:
+            def __init__(self, handle, name):
+                self._handle, self._name = handle, name
+
+            def read(self, n=-1):
+                start = self._handle.tell()
+                stop = (os.fstat(self._handle.fileno()).st_size
+                        if n is None or n < 0 else start + n)
+                if double.refuses_read(self._handle.fileno(), start, stop):
+                    refused.append(self._name)
+                    raise PermissionError(errno.EACCES, "Permission denied (emulated lock "
+                                          "violation)", self._name)
+                return self._handle.read(n)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return self._handle.__exit__(*exc)
+
+            def __getattr__(self, name):
+                return getattr(self._handle, name)
+
+        def _open(file, mode="r", *args, **kwargs):
+            handle = real_open(file, mode, *args, **kwargs)
+            return _Reader(handle, file) if mode == "rb" else handle
+
+        monkeypatch.setattr(builtins, "open", _open)
+        return refused
 
 
 def refuse_readonly_unlink(monkeypatch) -> list:

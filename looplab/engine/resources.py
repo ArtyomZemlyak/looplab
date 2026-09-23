@@ -47,6 +47,14 @@ _LEASE_NOTICE_INTERVAL_S = 30.0
 # Bounded read of the holder stamp below.  Only this module writes a lease file, so anything longer is
 # a foreign/stale file and is reported as an unknown holder instead of being echoed back.
 _LEASE_STAMP_BYTES = 64
+# The byte the lease is LOCKED on -- beyond the stamp, never inside it. `msvcrt.locking` is a
+# MANDATORY byte-range lock on Windows: a blocked peer's read of a locked byte fails with EACCES, so
+# while the lock sat on byte 0 the stamp starting there could never be read by the one process it was
+# written for -- every blocked wait said "holder unknown" (Windows CI run 35804658308, review
+# 2026-09-22 round 2). `serve/scope_report_store.py::_try_lock_scope_action_descriptor` keeps its
+# lease byte past its bounded marker for the same reason. Locking past EOF does not extend the file,
+# and POSIX `flock` locks the whole file whatever the position.
+_LEASE_LOCK_BYTE = _LEASE_STAMP_BYTES + 1
 # "this has not been resolved yet", distinct from a real `None` result ("this run has no fence" /
 # "this run has no allow-list") — the difference decides whether the memo is a hit or a miss. Shared
 # by `_read_fence_dir` and `_landlock_allow`, which memoize the same way for the same reason: both
@@ -91,7 +99,7 @@ def _try_acquire_gpu_host_lease(path: Path) -> Optional[BinaryIO]:
                 "host GPU allocation lease is not a stable regular file")
         if opened.st_size == 0:
             os.write(descriptor, b"\0")
-        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.lseek(descriptor, _LEASE_LOCK_BYTE, os.SEEK_SET)
         handle = os.fdopen(descriptor, "r+b", buffering=0)
         descriptor = -1
         try:
@@ -136,9 +144,9 @@ def _stamp_gpu_host_lease_holder(handle: BinaryIO) -> None:
     Written only AFTER the lock is won: before that the bytes still belong to the live holder and
     overwriting them would erase the very answer this stamp exists to give.  Purely diagnostic — the
     descriptor, not the content, is the ownership token — so every failure is swallowed; a lease that
-    could not be stamped simply reports an unknown holder.  The file position is restored to 0
-    because that is the byte `_release_gpu_host_lease` (and Windows' one-byte `msvcrt.locking`)
-    operates on.
+    could not be stamped simply reports an unknown holder.  The stamp lives in bytes the lock does
+    NOT cover (`_LEASE_LOCK_BYTE`), which is what lets a blocked peer read it on Windows, where the
+    lock is mandatory; `_release_gpu_host_lease` seeks back to the lock byte itself.
     """
     try:
         handle.seek(0)
@@ -158,7 +166,9 @@ def describe_gpu_host_lease_holder(path) -> str:
     """Best-effort "who holds it" phrase for the contention notice.  Never raises.
 
     The holder is readable because the lease is per-OS-user by construction (`0o600`, uid in the
-    name), and a flock/`msvcrt` lock does not prevent a reader from opening the file.  A stale or
+    name), a flock/`msvcrt` lock does not prevent a reader from opening the file, and the stamp sits
+    outside the one byte `msvcrt` locks (`_LEASE_LOCK_BYTE`) — a Windows lock refuses READS of the
+    byte it holds, which is why the stamp may never share it.  A stale or
     foreign body (a lease written by an older build, which stamped a single NUL) degrades to an
     honest "holder unknown" rather than echoing junk.
     """
@@ -178,7 +188,7 @@ def describe_gpu_host_lease_holder(path) -> str:
 def _release_gpu_host_lease(handle: BinaryIO) -> None:
     """Release a live host lease; closing the descriptor is the authoritative crash-safe backstop."""
     try:
-        handle.seek(0)
+        handle.seek(_LEASE_LOCK_BYTE)
         if os.name == "nt":
             import msvcrt
 

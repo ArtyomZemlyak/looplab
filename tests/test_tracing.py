@@ -1252,6 +1252,51 @@ def test_exporter_revalidates_the_destination_after_its_append(tmp_path, monkeyp
     assert source.read_bytes() == b'{"replacement":true}\n'
 
 
+def test_a_trace_reader_is_not_refused_while_the_exporter_holds_its_windows_lock(
+        tmp_path, monkeypatch):
+    """`msvcrt.locking` is MANDATORY on Windows: while the exporter holds its byte, every other
+    handle's read of that byte fails with EACCES, in this process too. It held byte 0 of
+    `spans.jsonl` — the first byte every trace reader reads — so each append made the trace view,
+    the span index and `looplab timings` fail mid-read; measured on the Windows CI leg (run
+    35804658308, review 2026-09-22 round 2) as `PermissionError: [Errno 13]` out of a plain read of
+    spans.jsonl beside a live exporter (test_card_speculation_engine, test_watchdog_stage_scope).
+
+    Driven with the module's own `os` answering "nt" and a byte-range `msvcrt` double whose reads
+    obey the Windows rule: a reader that reads the whole trace WHILE the lock is held."""
+    import types
+
+    from looplab.core import tracing
+    from _windows_emulation import FakeMsvcrt
+
+    source = tmp_path / "spans.jsonl"
+    JsonlSpanExporter(source).export({"name": "first"})
+    committed = source.read_bytes()
+    seen = []
+
+    def _concurrent_reader(_fd):
+        try:
+            with open(source, "rb") as reader:
+                seen.append(reader.read())
+        except PermissionError as exc:          # what a Windows reader gets on a held byte
+            seen.append(exc)
+
+    msvcrt = FakeMsvcrt(on_lock=_concurrent_reader)
+    refused = msvcrt.mandatory_reads(monkeypatch)
+    windows_os = types.ModuleType("os")
+    windows_os.__dict__.update(os.__dict__)
+    windows_os.name = "nt"
+    monkeypatch.setitem(sys.modules, "msvcrt", msvcrt)
+    monkeypatch.setattr(tracing, "os", windows_os)
+
+    JsonlSpanExporter(source).export({"name": "second"})
+
+    assert seen, "precondition: the exporter never took its Windows lock"
+    assert seen == [committed] and not refused, (
+        f"a reader of the committed trace was refused while the exporter held its byte: {seen}")
+    assert msvcrt.held == {}, "the exporter must unlock the byte it locked"
+    assert source.read_bytes() == committed + b'{"name":"second"}\n'
+
+
 def test_append_receipt_journal_rotates_on_source_replacement(tmp_path):
     from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
 

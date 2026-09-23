@@ -1100,8 +1100,23 @@ def _export_lock(path: str | os.PathLike):
         return lock
 
 
+# THE WINDOWS BYTE THE DATA-FILE GUARD LOCKS. `msvcrt.locking` is a MANDATORY byte-range lock on
+# Windows: while it is held, every OTHER handle's read that overlaps the locked byte fails with EACCES
+# -- in this process too. Byte 0 of `spans.jsonl` is the first byte every trace reader reads (the UI's
+# trace view, the span index, `looplab timings`, the engine's own readers), so each append made every
+# concurrent read of the trace fail; measured on the Windows CI leg (review 2026-09-22 round 2, run
+# 35804658308) as `PermissionError: [Errno 13]` out of a plain `read_text()` of spans.jsonl beside a
+# live exporter. Cooperating exporters only have to agree on WHICH byte, so it sits where no reader
+# of the data reads, the rule `serve/scope_report_store.py::_try_lock_scope_action_descriptor` already
+# states for its lease ("keep the lock byte beyond the bounded marker"). Locking past EOF does not
+# extend the file. Kept inside a signed 32-bit file position, the range the CRT's `_locking` is
+# guaranteed to read back; a trace that ever grows past 2 GiB would contend only for that one byte,
+# only while an append holds it. POSIX `flock` locks the whole file and ignores the position.
+_WINDOWS_EXPORT_DATA_LOCK_BYTE = 0x7FFFFFFE
+
+
 @contextmanager
-def _interprocess_export_guard(stream, *, required: bool = False):
+def _interprocess_export_guard(stream, *, required: bool = False, windows_byte: int = 0):
     """Advisory serialization for cooperating exporters in different processes.
 
     The process-local canonical-path lock is always authoritative for threads/instances here.  This
@@ -1110,12 +1125,16 @@ def _interprocess_export_guard(stream, *, required: bool = False):
     compatibility. The Engine lifecycle sidecar passes ``required=True`` and fails before opening the
     source if its destructive-write fence cannot be proved. Every exporter acquires locks in the one
     order (path RLock, then lifecycle sidecar, then data file), so there is no reverse-order path.
+
+    ``windows_byte`` is the byte `msvcrt` locks: 0 for the sidecar (the byte `events/eventstore.py::
+    interprocess_lock` takes on it, so the destructive writers and the exporters exclude each other),
+    `_WINDOWS_EXPORT_DATA_LOCK_BYTE` for the data file (see its note).
     """
     locked = False
     try:
         if os.name == "nt":
             import msvcrt
-            stream.seek(0)
+            stream.seek(windows_byte)
             msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
         else:
             import fcntl
@@ -1131,7 +1150,7 @@ def _interprocess_export_guard(stream, *, required: bool = False):
             try:
                 if os.name == "nt":
                     import msvcrt
-                    stream.seek(0)
+                    stream.seek(windows_byte)
                     msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
@@ -1515,7 +1534,8 @@ class JsonlSpanExporter:
 
     def _export_lines_guarded(self, lines) -> None:
         """Commit while the canonical path lock and cross-plane writer guard are both held."""
-        with _open_export_append(self.path) as f, _interprocess_export_guard(f):
+        with _open_export_append(self.path) as f, _interprocess_export_guard(
+                f, windows_byte=_WINDOWS_EXPORT_DATA_LOCK_BYTE):
             # A killed writer can leave the final JSON record without its committing newline.  Every
             # forward reader correctly stops before that torn suffix, but appending blindly would glue
             # this record to it and turn the pair into one COMPLETE corrupt line; that line would then
