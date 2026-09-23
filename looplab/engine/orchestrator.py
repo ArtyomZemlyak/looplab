@@ -2939,7 +2939,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             return []
         running = self._running_eval_node_ids()
         queued = {node.id for node in state.pending_nodes()} - running
-        width = max(1, int(getattr(self, "_eval_parallel", 0) or 1))
+        # Bare: `__init__` always settles it (ENG1-03 — the `getattr(..., 0)` here was never a sentinel).
+        width = max(1, int(self._eval_parallel or 1))
         if not occupancy_due(inflight=len(running), queued=len(queued), width=width):
             return []
         if any(action.get("node_id") not in running for action in evals):
@@ -3746,7 +3747,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         from looplab.engine.plan import build_plan, replan
         if self._endgame_reserve_frac <= 0.0 or getattr(self, "_speculation_gate_calibration", False):
             return False
-        n_seeds = int(getattr(self.policy, "n_seeds", getattr(self, "n_seeds", 0)) or 0)
+        # 3 is what a real Engine settles `n_seeds` to; a double's 0 cut a plan with no seed phase.
+        n_seeds = int(getattr(self.policy, "n_seeds", getattr(self, "n_seeds", 3)) or 0)
         max_nodes = int(getattr(self.policy, "max_nodes", 0) or 0)
         if max_nodes <= 0:
             return False
@@ -5668,7 +5670,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         if depth != -1:
             return depth, False
         if (not self._build_calls_an_llm()
-                or getattr(self, "_policy_name", "") != SPECULATION_POLICY_SCOPE
+                # Bare: its one caller is `__init__`, after `_policy_name` is assigned (ENG1-03).
+                or self._policy_name != SPECULATION_POLICY_SCOPE
                 or not self.run_dir.name.strip()):
             # Report AUTO=False as well: the run is not speculating, so there is no AUTO treatment
             # for re-entry to adopt, and a log that pinned a positive depth must still fail closed

@@ -2361,7 +2361,10 @@ def needs_log_snapshot(engine, eval_spec) -> bool:
         return True
     if getattr(engine, "_asha_live", False) and isinstance(eval_spec, dict):
         return True
-    return bool(getattr(engine, "_repair_log_tools", False))
+    # Every default here is the value a real Engine settles the switch to (the two watchdogs off,
+    # the repair judge's tools on) — a double must not take a snapshot decision no real Engine
+    # would (review 2026-09-22, ENG1-03; `tests/test_engine_knob_defaults.py`).
+    return bool(getattr(engine, "_repair_log_tools", True))
 
 
 def _log_query_tools(workdir, log_plan, log_snapshot):
@@ -2460,8 +2463,10 @@ def monitor_code_tools(engine, workdir):
     per page and per walk, and it already skips the gigabyte directories a trainer workdir carries
     (`ckpt`, `checkpoints`, `wandb`, `lightning_logs`), which on geesefs is the difference between
     a grep and a stall.
+
+    The switch's default is the True a real Engine settles it to (review 2026-09-22, ENG1-03).
     """
-    if not getattr(engine, "_train_monitor_tools", False):
+    if not getattr(engine, "_train_monitor_tools", True):
         return None
     try:
         root = Path(workdir)
@@ -2494,7 +2499,7 @@ def monitor_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
     with it. A provider frozen at eval start would answer a question about `train.log` while the model
     read `setup.log`.
     """
-    if not getattr(engine, "_train_monitor_tools", False):
+    if not getattr(engine, "_train_monitor_tools", True):     # the settled default (ENG1-03)
         return None
     return _log_query_tools(workdir, log_plan, log_snapshot)
 
@@ -2550,7 +2555,7 @@ def repair_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
     reads `None` as "no extra tools" and splices no invitation, so the off path is the historical
     prompt and the historical toolset, byte for byte.
     """
-    if not getattr(engine, "_repair_log_tools", False):
+    if not getattr(engine, "_repair_log_tools", True):        # the settled default (ENG1-03)
         return None
     return _log_query_tools(workdir, log_plan, log_snapshot)
 
@@ -2579,7 +2584,7 @@ def stage_check_tools(engine, workdir, log_plan=None, log_snapshot=None):
     yet, which is why `_stage_check_fn` builds it at CHECK time rather than at construction — the
     checked stage's log does not exist until the stage has run.
     """
-    if not getattr(engine, "_stage_check_tools", False):
+    if not getattr(engine, "_stage_check_tools", True):       # the settled default (ENG1-03)
         return None
     return _log_query_tools(workdir, log_plan, log_snapshot)
 
@@ -3206,7 +3211,9 @@ class TrainingMonitorMixin:
                         if measured_for_gate is not None:
                             stamp_projected_overrun(
                                 _overrun_fields, trajectory, resolved, log_plan,
-                                grace_cap=getattr(self, "eval_deadline_grace_s", None))
+                                # AUTO (-1.0) is what a real Engine settles the cap to; `None`
+                                # resolved to NO grace for any engine lacking it (ENG1-03).
+                                grace_cap=getattr(self, "eval_deadline_grace_s", -1.0))
                         _wall_unreachable = wall_unreachable(_overrun_fields)
                         if (verdict.status != "healthy"
                                 or last_event_status in ("watch", "broken")

@@ -35,12 +35,23 @@ that never ran `Engine.__init__` can still call the mixin — `tests/test_asha_m
 which is a reason to register them, not a reason for the reads around them to stay silent.
 
 `GETATTR_DEFAULT_DRIFT` is the second, smaller backlog: a DECLARED attribute read through `getattr`
-with two different defaults at two sites (`_gpu_ids` as `None` here and `[]` there). Each such pair is
+with two different defaults at two sites (`_gpu_ids` was `None` here and `[]` there). Each such pair is
 two readers disagreeing about what an unset value means; the fix is to read the declared attribute
 bare, or to agree on one default, and delete the row. The guard pins the set exactly — a new drift is
-red, a fixed one must delete its row.
+red, a fixed one must delete its row. It is EMPTY since review 2026-09-22 (ENG1-03) agreed its last
+five pairs, so every entry from here on is a new drift.
 
-This module imports nothing: it is data, read by the test and by nobody else in the package.
+`UNSETTLED_KNOB_DEFAULTS` is the one sanctioned exception to a stronger rule over the ENGINE KNOBS
+(the attributes an `EngineOptions` field lands on; `tests/test_engine_knob_defaults.py`): a knob read
+through `getattr(<engine>, "<knob>", <default>)` must default to the value a real `Engine(...)` settles
+that knob to, because the only readers of such a default are doubles — an `Engine.__new__` stub, a
+duck-typed `engine` — and a default no real Engine holds is a test running a knob set no real Engine
+runs. Measured when the rule landed: 34 of 111 such reads disagreed, among them the PAID facet steward
+answered on for a double while a real Engine settles it off. A row here is a reader that turns a
+MISSING knob into "not knowable" ON PURPOSE — say nothing, fail closed — and states why; the guard pins
+the set exactly, both ways.
+
+This module imports nothing: it is data, read by the tests and by nobody else in the package.
 """
 from __future__ import annotations
 
@@ -91,9 +102,19 @@ LAZY_ENGINE_ATTRIBUTES: dict[str, tuple[str, ...]] = {
 }
 GETATTR_DEFAULT_DRIFT: dict[str, tuple[str, ...]] = {
     # name -> the distinct default spellings its `getattr(self, name, <default>)` reads use.
-    '_gpu_ids': ('None', '[]'),
-    '_gpu_mem': ('None', '{}'),
-    '_novelty_mode': ("'llm'", "'off'"),
-    'eval_deadline_grace_s': ('0.0', 'None'),
-    'run_dir': ("''", 'None'),
+}
+UNSETTLED_KNOB_DEFAULTS: dict[str, str] = {
+    # "<path under looplab/>::<function>::<knob attribute>" -> why a MISSING knob reads as "not
+    # knowable" at this one site instead of as the value a real Engine settles it to.
+    "engine/orchestrator.py::_hard_node_reservation_limit::max_nodes": (
+        "the LAST fallback of a hard reservation limit, after `_base_max_nodes` and the policy's own "
+        "`max_nodes`: an object carrying none of the three is unconfigured, and a limit fails CLOSED "
+        "at zero rather than open at the library's eight"),
+    "engine/proposal_cues.py::_gpu_budget_hint_text::_eval_parallel": (
+        "`widths.py::per_experiment_gpu_budget` reads 0 as a width that never SETTLED and answers "
+        "None, so the GPU BUDGET cue says nothing rather than quote a per-experiment device count "
+        "computed from a width the engine does not have"),
+    "engine/shared.py::effective_eval_time_budget::timeout": (
+        "None is this function's documented 'not knowable, say nothing': a plausible wrong wall-clock "
+        "ceiling in a Researcher prompt is worse than none, and the role must stop guessing"),
 }

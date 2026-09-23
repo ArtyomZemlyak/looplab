@@ -858,7 +858,7 @@ class EvalStagesMixin:
         from looplab.core.setup_identity import setup_config_hash
         from looplab.runtime.stage_identity import stage_input_key
         try:
-            scope = f"{Path(getattr(self, 'run_dir', '') or '')}|" + setup_config_hash(
+            scope = f"{Path(getattr(self, 'run_dir', None) or '')}|" + setup_config_hash(
                 self.task.model_dump(mode="json"))
         except Exception:  # noqa: BLE001 — an instrument may never take down an eval
             return None
@@ -1306,7 +1306,10 @@ class EvalStagesMixin:
         # and silently ship the new default as no change at all.
         import math
         try:
-            cap = float(getattr(self, "eval_deadline_grace_s", 0.0) or 0.0)
+            # The default is the AUTO -1.0 a real Engine settles to, not the opt-in era's 0.0: that
+            # copy is the same "AUTO read as OFF" this comment warns about, one line down, for any
+            # engine lacking the attribute (review 2026-09-22, ENG1-03).
+            cap = float(getattr(self, "eval_deadline_grace_s", -1.0) or 0.0)
         except (TypeError, ValueError):
             return None
         if not math.isfinite(cap) or cap == 0:

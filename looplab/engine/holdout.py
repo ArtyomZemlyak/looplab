@@ -254,7 +254,10 @@ class HoldoutGrader:
             # which is correct for a resume AND for a fresh run (whose `run_started` is appended by
             # `_setup_phase` a few lines earlier, so the re-pin sees the live value as the pinned
             # one). The epoch rebuild keeps the default: by then the fraction is already pinned.
-            if refuse and float(getattr(e, "_holdout_fraction", 0.0) or 0.0) > 0:
+            # Read BARE, like `_host_grader`/`_assets`/`_holdout_idx` above and the message below:
+            # the `getattr(..., 0.0)` it replaced let a double lacking the fraction skip a refusal a
+            # real Engine (0.25) makes (review 2026-09-22, ENG1-03).
+            if refuse and float(e._holdout_fraction or 0.0) > 0:
                 raise ConfigRefusal(
                     f"MLE-bench competition {g.get('competition')!r}: `holdout_fraction=" 
                     f"{float(e._holdout_fraction):g}` was declared but the search split cannot be "

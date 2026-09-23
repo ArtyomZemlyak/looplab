@@ -222,8 +222,11 @@ def test_h1_the_freshest_log_heuristic_hands_the_score_stage_to_the_training_jud
     _drive_train(host, wd, until=lambda h: h.store.rows(EV_TRAIN_MONITOR_ALERT))
 
     # The judge really is shown the SCORER's output — this is the wrong-log defect, not a theory.
+    # Read off the LOG section: the host now runs the monitor's real default, tools ON, and their
+    # invitation ("... the step-to-step noise ...") precedes it (review 2026-09-22, ENG1-03).
     assert client.calls >= 1
-    assert "CUDA not available" in client.digests[0] and "step" not in client.digests[0]
+    shown = client.digests[0].split("LIVE TRAINING LOG", 1)[-1]
+    assert "CUDA not available" in shown and "step" not in shown
 
     # Pre-fix, the entire kill gate was: enabled (now the default) + status broken + confidence >= 0.8.
     verdict = TrainingVerdict(status="broken", reason="silent CPU fallback", confidence=0.95)

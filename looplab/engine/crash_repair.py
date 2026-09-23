@@ -385,8 +385,11 @@ class CrashRepairMixin:
             try:
                 # NOT a proposal: this asks for a `TRIAGE_ACTIONS` verdict, not an `Idea`, so the
                 # board's claim contracts are instructions it cannot follow (see `_state_brief`).
+                # The default is the value a real Engine settles the cue to (True). A bare read
+                # would be worse here, not better: a double without it would raise into the
+                # `except` below and ask with NO brief (review 2026-09-22, ENG1-03).
                 brief = _state_brief(state, None, for_proposal=False,
-                                     memo_verdicts=getattr(self, "_memo_verdict_cue", False))
+                                     memo_verdicts=getattr(self, "_memo_verdict_cue", True))
             except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                 brief = ""
             # Signal-delivery (§1): a standing directive (e.g. "prefer lighter models") is
@@ -607,9 +610,10 @@ class CrashRepairMixin:
             from looplab.agents.roles import _state_brief
             try:
                 # NOT a proposal, exactly as in `_ask_triage`: this asks for a stop/continue verdict,
-                # so the board's claim contracts are instructions it cannot follow.
+                # so the board's claim contracts are instructions it cannot follow. The cue's default
+                # is the settled True, for `_ask_triage`'s reason.
                 brief = _state_brief(state, None, for_proposal=False,
-                                     memo_verdicts=getattr(self, "_memo_verdict_cue", False))
+                                     memo_verdicts=getattr(self, "_memo_verdict_cue", True))
             except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                 brief = ""
             # Own span, and it bands as `triage` beside the stop decision it belongs to rather than
@@ -711,7 +715,7 @@ class CrashRepairMixin:
                           f"training/eval command must target exactly {declared_gpus} device(s); keep "
                           "that count unchanged across repairs.]")
         elif (getattr(self, "_repo_spec", None) and self._eval_parallel > 1
-              and getattr(self, "_gpu_ids", None)):
+              and getattr(self, "_gpu_ids", [])):
             error += ("\n[hardware: this legacy unspecified-footprint node is pinned to exactly ONE "
                       "GPU for parallel eval. Keep every training/eval command at one device.]")
         if reason == "timeout":

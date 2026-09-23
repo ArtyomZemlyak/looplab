@@ -197,9 +197,13 @@ def test_without_a_workdir_or_a_log_the_checker_never_looks(tmp_path):
 def test_the_gate_is_its_own_switch_and_total_over_a_stub(tmp_path):
     (tmp_path / "train.log").write_text(_stage_log(), encoding="utf-8")
     plan = tm.eval_log_plan(STAGES)
-    assert tm.stage_check_tools(SimpleNamespace(), tmp_path, plan) is None
-    assert tm.stage_check_tools(SimpleNamespace(_repair_log_tools=True, _train_monitor_tools=True),
-                                tmp_path, plan) is None
+    # TOTAL over a stub — and a stub that never heard of the switch answers what a real Engine settles
+    # it to, which is ON. It answered OFF until review 2026-09-22 (ENG1-03): a double ran a knob set no
+    # real Engine has, and this line asserted that it did (`tests/test_engine_knob_defaults.py`).
+    assert isinstance(tm.stage_check_tools(SimpleNamespace(), tmp_path, plan), LogQueryTools)
+    # Its OWN switch: the two sibling LOOK switches do not open it.
+    assert tm.stage_check_tools(SimpleNamespace(_stage_check_tools=False, _repair_log_tools=True,
+                                                _train_monitor_tools=True), tmp_path, plan) is None
     assert isinstance(tm.stage_check_tools(SimpleNamespace(_stage_check_tools=True), tmp_path, plan),
                       LogQueryTools)
     empty = tmp_path / "empty"

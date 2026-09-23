@@ -88,7 +88,10 @@ class ConceptCadenceMixin:
         # `seed_boundary_due` for the table.
         if seed_boundary_due(n, last, self.n_seeds):
             return True
-        every = getattr(self, "concept_retag_every", 0) or self.strategist_every
+        # Read BARE, like `n_seeds`/`strategist_every` beside it: `__init__` always assigns it (clamped
+        # to >= 1). The `getattr(..., 0)` it replaced handed a double the pre-F1 coupling to
+        # `strategist_every` that no real Engine has had since (review 2026-09-22, ENG1-03).
+        every = self.concept_retag_every or self.strategist_every
         return cadence_due(n, last, every)
 
     @in_llm_lane("enrichment")

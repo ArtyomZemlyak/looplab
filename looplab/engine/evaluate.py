@@ -2039,7 +2039,8 @@ class EvaluateMixin:
             return salvage_gates(
                 spec, salvaged.metric, getattr(res, "stdout", "") or "",
                 self._salvage_reader_root(workdir), since,
-                enforce_drift=(getattr(self, "eval_trust_mode", "") == "ratify_freeze_drift"))
+                enforce_drift=(getattr(self, "eval_trust_mode", "ratify_freeze")
+                               == "ratify_freeze_drift"))
         except Exception as exc:  # noqa: BLE001 — see `_salvage_eval_metric`: never the thing that fails
             return {"violations": [{"name": "salvage_gates", "value": None, "max": None,
                                     "min": None,

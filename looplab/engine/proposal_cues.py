@@ -289,7 +289,7 @@ class ProposalCuesMixin:
         # Layer-4 resource cue: the Researcher declares a GPU count and the scheduler exposes that
         # many devices. This replaces the old unconditional single-device advice while retaining the
         # documented legacy behavior when the declaration is omitted.
-        if not (self._repo_spec and getattr(self, "_gpu_ids", None)):
+        if not (self._repo_spec and getattr(self, "_gpu_ids", [])):
             return "", []
         pool = len(self._gpu_ids)
         legacy = ("one device in parallel mode" if self._eval_parallel > 1
@@ -457,7 +457,7 @@ class ProposalCuesMixin:
         # `regularization/r-drop` already exists silently breaks the cross-run prior overlap (exact-slug
         # match). Point it at the fuzzy lookup so consistent slugs emerge at authoring time — cheaper and
         # more robust than post-hoc aliasing. Gated on the tools being wired + concept authoring being on.
-        if not (getattr(self, "_cross_run_read_tools", False) and getattr(self, "memory_dir", "")
+        if not (getattr(self, "_cross_run_read_tools", False) and getattr(self, "memory_dir", None)
                 and (getattr(self, "_concept_pivot", False)
                      or getattr(self, "_concept_run_base", False))):
             return "", []
@@ -601,7 +601,7 @@ class ProposalCuesMixin:
         from looplab.engine.widths import per_experiment_gpu_budget
         if not self._task_gpu_capable():
             return ""
-        pool = len(getattr(self, "_gpu_ids", None) or [])
+        pool = len(getattr(self, "_gpu_ids", []) or [])
         budget = per_experiment_gpu_budget(pool, getattr(self, "_eval_parallel", 0))
         if budget is None:
             return ""
@@ -614,7 +614,10 @@ class ProposalCuesMixin:
                     "rather than queued.")
         head = (f"\nGPU BUDGET — this run evaluates up to {self._eval_parallel} experiment(s) "
                 f"concurrently on a pool of {pool} GPU(s)")
-        if not getattr(self, "_gpu_footprint_cue", False):
+        # The default is the True a real Engine settles the cue to, here and in
+        # `_stamp_gpu_budget_hint`: a double lacking it took the QUIET branch no real Engine takes by
+        # default (review 2026-09-22, ENG1-03).
+        if not getattr(self, "_gpu_footprint_cue", True):
             # QUIET BRANCH (2026-09-08): the ordinary declaration and the count the command must
             # target — the two clauses of the pre-2026-08-19 paragraph that were never in dispute —
             # and NOTHING about what a larger count buys. It is spliced at the same position as the
@@ -706,8 +709,8 @@ class ProposalCuesMixin:
         decides a footprint is the reservable one. Silent unless `_gpu_mem` covers every visible
         device, for `detect_gpu_inventory`'s own reason: a partial join means the engine cannot say
         WHICH device carries which capacity, and admission already degrades to count-only there."""
-        ids = list(getattr(self, "_gpu_ids", None) or [])
-        memory = getattr(self, "_gpu_mem", None) or {}
+        ids = list(getattr(self, "_gpu_ids", []) or [])
+        memory = getattr(self, "_gpu_mem", {}) or {}
         sizes = [memory[gpu] for gpu in ids
                  if type(memory.get(gpu)) is int and memory[gpu] > 0]
         if not ids or len(sizes) != len(ids):
@@ -795,7 +798,7 @@ class ProposalCuesMixin:
         except Exception:  # noqa: BLE001
             pass
         try:
-            setattr(_r, "_gpu_footprint_cue", bool(getattr(self, "_gpu_footprint_cue", False)))
+            setattr(_r, "_gpu_footprint_cue", bool(getattr(self, "_gpu_footprint_cue", True)))
         except Exception:  # noqa: BLE001
             pass
 
@@ -906,7 +909,7 @@ class ProposalCuesMixin:
         number to plan against, and announcing it as though it did would hand back exactly the margin
         this hint exists to state. Silent only at an explicit `0.0`, which is now the OFF switch rather than the default."""
         try:
-            grace = float(getattr(self, "eval_deadline_grace_s", 0.0) or 0.0)
+            grace = float(getattr(self, "eval_deadline_grace_s", -1.0) or 0.0)   # settled AUTO
         except (TypeError, ValueError, OverflowError):
             return ""
         if not math.isfinite(grace) or grace == 0:
@@ -944,7 +947,7 @@ class ProposalCuesMixin:
         the two are orthogonal (pushed context vs on-demand drill-down) and the pointer must fire in the
         product default (advisory ON) too, or the tools go permanently unnamed. Gated only on the tools
         being wired + a memory_dir to query. Never touches node selection."""
-        if not getattr(self, "_cross_run_read_tools", False) or not getattr(self, "memory_dir", ""):
+        if not getattr(self, "_cross_run_read_tools", False) or not getattr(self, "memory_dir", None):
             return ""
         return ("\nCross-run memory may hold prior attempts and evidence for related runs. Before "
                 "proposing, you MAY call cross_run_prior_attempts / cross_run_claims / cross_run_atlas "

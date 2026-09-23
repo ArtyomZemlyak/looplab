@@ -210,9 +210,16 @@ def test_the_repair_gate_is_its_own_switch(tmp_path):
 
 def test_the_repair_gate_is_total_over_an_engine_that_never_heard_of_it(tmp_path):
     """A free function taking the engine, `getattr`-total — the same reason `monitor_log_tools` is one
-    (`tests/test_asha_monitor.py::_AshaStub` is the object that caught the mixin version)."""
+    (`tests/test_asha_monitor.py::_AshaStub` is the object that caught the mixin version).
+
+    Total, and answering what a REAL Engine settles the switch to — ON. It answered None here until
+    review 2026-09-22 (ENG1-03): an engine that never heard of the switch ran a knob set no real
+    Engine has (`tests/test_engine_knob_defaults.py`)."""
+    from looplab.tools.log_tools import LogQueryTools
+
     (tmp_path / "train.log").write_text("x\n", encoding="utf-8")
-    assert tm.repair_log_tools(object(), tmp_path, tm.eval_log_plan([{"name": "train"}])) is None
+    assert isinstance(tm.repair_log_tools(object(), tmp_path, tm.eval_log_plan([{"name": "train"}])),
+                      LogQueryTools)
 
 
 def test_no_log_yet_means_no_tools_rather_than_an_empty_one(tmp_path):

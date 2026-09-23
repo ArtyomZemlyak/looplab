@@ -116,6 +116,9 @@ def test_finalize_reflects_before_stewards_and_counts_stewards_before_cost(tmp_p
     _terminal_store(run_dir)
     eng = _EngineStub(run_dir)
     eng._cross_run_curation = True
+    # The facet steward is OPT-IN (a real Engine settles it off); this test orders all three, so it
+    # opts in rather than inheriting a default no real Engine has (review 2026-09-22, ENG1-03).
+    eng._task_facets_finalize = True
     order: list[str] = []
 
     eng._write_reflection_note = lambda _state: order.append("reflection")
@@ -965,6 +968,7 @@ def test_one_failing_steward_cannot_disable_the_others_and_leaves_a_receipt(tmp_
     _terminal_store(run_dir)
     eng = _EngineStub(run_dir)
     eng._cross_run_curation = True
+    eng._task_facets_finalize = True          # opt in to the third steward (see the ordering test)
     ran: list[str] = []
 
     def explode(_state):
@@ -1011,6 +1015,7 @@ def test_finalize_receipts_preserve_bounded_steward_outcomes(tmp_path, monkeypat
     _terminal_store(run_dir)
     eng = _EngineStub(run_dir)
     eng._cross_run_curation = True
+    eng._task_facets_finalize = True          # opt in to the third steward (see the ordering test)
     eng._store_concept_curation = lambda _state: "unavailable"
     eng._store_claim_curation = lambda _state: "error"
     eng._store_task_facets = lambda _state: "already-governed"

@@ -208,7 +208,7 @@ class ReentryMixin:
         recorded = getattr(entry, "eval_env", None)
         if not isinstance(recorded, dict) or not recorded:
             return
-        live = dict(getattr(self, "_eval_env", None) or {})
+        live = dict(getattr(self, "_eval_env", {}) or {})
         if live != recorded:
             # Name the DISAGREEING variables with BOTH values, not the two key sets: the ordinary
             # case is one variable whose VALUE changed (a data root re-pointed at a different

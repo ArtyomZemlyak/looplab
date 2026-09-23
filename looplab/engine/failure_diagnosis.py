@@ -1272,9 +1272,11 @@ def diagnosis_code_tools(engine, workdir):
     read the dead eval's logs has already allowed it to read that eval's own text — and a second
     switch would let a run reach the state "may read the log that says a parameter is absurd, may
     not read the line that sets it", which is the exact half-blindness `_MONITOR_LOOK_TURNS`' 6 -> 9
-    move was made to end. `getattr` is total over a partially-built engine.
+    move was made to end. `getattr` is total over a partially-built engine, and its default is the
+    True a real Engine settles the switch to — a double must not run a switch no real Engine has
+    (review 2026-09-22, ENG1-03; `tests/test_engine_knob_defaults.py`).
     """
-    if not getattr(engine, "_repair_log_tools", False):
+    if not getattr(engine, "_repair_log_tools", True):
         return None
     try:
         root = Path(workdir)

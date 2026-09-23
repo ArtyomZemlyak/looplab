@@ -849,7 +849,9 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                     ("concept_curation", engine._store_concept_curation),
                     ("claim_curation", engine._store_claim_curation),  # ratify/reject/pin
                 ]
-                if getattr(engine, "_task_facets_finalize", True):
+                # False is what a real Engine settles this opt-in PAID steward to; the old `True`
+                # scheduled it for every engine lacking the attribute (review 2026-09-22, ENG1-03).
+                if getattr(engine, "_task_facets_finalize", False):
                     stewards.append(("task_facets", engine._store_task_facets))  # once per task
                 for step, steward in stewards:
                     try:
@@ -891,7 +893,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # cannot perturb `QUIET_FINALIZATION_SUFFIX`, and needs no `BACKGROUND_APPENDABLE` entry.
         # Its audit lives in cross-run memory, where it survives this run's deletion. Main task,
         # after the steward, so a proposal bought seconds ago is ratifiable in the same finalize.
-        if getattr(engine, "_concept_tidy", False) and getattr(engine, "memory_dir", ""):
+        if getattr(engine, "_concept_tidy", False) and getattr(engine, "memory_dir", None):
             try:
                 import datetime as _dt
 

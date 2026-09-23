@@ -832,7 +832,9 @@ class NoveltyGateMixin:
         # duplicates (the serial path would catch the second against the first, already in history).
         # Guarded on the novelty mode so toy/off runs stay text-only + byte-identical; best-effort, so an
         # embedder hiccup silently degrades to text dedup. The new idea's vector is embedded at most once.
-        _semantic = getattr(self, "_novelty_mode", "off") not in (None, "off")
+        # The default is the "llm" a real Engine settles the mode to, as `_novelty_mode`'s other reads
+        # spell it; "off" answered a double with a mode no real Engine has (review 2026-09-22, ENG1-03).
+        _semantic = getattr(self, "_novelty_mode", "llm") not in (None, "off")
         _vec = None
         for other in chosen:
             other_action, other_has_action_axis = _canonical_action_identity(
@@ -1410,7 +1412,7 @@ class NoveltyGateMixin:
         """Return canonical prior concepts/capsules plus the taxonomy snapshot used for proposal tags.
         for tasks SIMILAR to this run's fingerprint. (set(), []) when `cross_run_concepts` is off / no
         memory dir / store empty. Best-effort — any hiccup yields no priors so proposing is never blocked."""
-        if not getattr(self, "_cross_run_concepts", False) or not getattr(self, "memory_dir", ""):
+        if not getattr(self, "_cross_run_concepts", False) or not getattr(self, "memory_dir", None):
             return set(), [], {}, {}
         try:
             from pathlib import Path

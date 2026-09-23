@@ -177,7 +177,7 @@ class WidthSettlingMixin:
         # walk twice — and, worse, let the receipt describe footprints the width was NOT derived
         # from if anything moved the board between the two calls. Evidence that does not come from
         # the decision's own inputs is not evidence.
-        pool = len(getattr(self, "_gpu_ids", None) or [])
+        pool = len(getattr(self, "_gpu_ids", []) or [])
         footprints = self._proposal_footprints(state)
         settled = {}
         width = proposal_derived_width(pool, footprints, ceiling=ceiling)

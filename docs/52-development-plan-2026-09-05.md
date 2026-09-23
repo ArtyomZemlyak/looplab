@@ -763,7 +763,9 @@ attributes, 218 declared in `Engine.__init__`, 42 minted only elsewhere, 125 rea
 holds four rules — every read has a declaring site (`__init__`, class level, or a row in
 `engine/attribute_sites.py::LAZY_ENGINE_ATTRIBUTES` naming EXACTLY the minting methods), a registered
 row is never also declared, a new lazy mint is red until declared or registered, and the declared
-attributes read with INCONSISTENT `getattr` defaults are exactly `GETATTR_DEFAULT_DRIFT` (five today).
+attributes read with INCONSISTENT `getattr` defaults are exactly `GETATTR_DEFAULT_DRIFT` (five today;
+all five agreed, and the table emptied, by review 2026-09-22 ENG1-03 — which also holds every KNOB's
+`getattr` default to the value a real `Engine(...)` settles it to, `tests/test_engine_knob_defaults.py`).
 Both tables are shrink-only backlogs. The guard found a dead setting on its first run:
 `Settings.single_command_divergence_watch` had no `EngineOptions` field and no `__init__` assignment,
 so the single-command divergence watchdog never armed on a product run from 2026-08-30 to 2026-09-06 —

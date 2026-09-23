@@ -31,9 +31,14 @@ from looplab.trust.cross_run import sanitize_cross_run_projection
 CROSS_RUN_SOURCE_NAMES = ("concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl")
 
 
-def advisory_enabled(owner) -> bool:
-    """Both builders are off unless `cross_run_advisory` is set AND a memory dir exists."""
-    return bool(getattr(owner, "_cross_run_advisory", False)) and bool(getattr(owner, "memory_dir", ""))
+def advisory_enabled(engine) -> bool:
+    """Both builders are off unless `cross_run_advisory` is set AND a memory dir exists.
+
+    The parameter is spelled `engine` because that is the name `tests/test_engine_knob_defaults.py`
+    reads an engine handle by: as `owner`, these two knob reads were invisible to the guard that holds
+    every knob default to the value a real Engine settles it to (review 2026-09-22, ENG1-03)."""
+    return (bool(getattr(engine, "_cross_run_advisory", False))
+            and bool(getattr(engine, "memory_dir", None)))
 
 
 def enter_governed(base: Path, reenter: Callable[[dict], str]) -> str:

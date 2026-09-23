@@ -248,7 +248,11 @@ class EvalDispatchMixin:
         the RUN the way a failed run-setup does — a run-setup failure means the operator's
         environment never came up, while this one means one node's speculative dependency edit did
         not take."""
-        if not getattr(self, "_auto_install_deps", False):
+        # Read BARE, as `evaluate.py` and `setup_phase.py` read it: `__init__` always assigns it. The
+        # `getattr(..., False)` it replaced answered a double with a switch no real Engine settles to
+        # (True on the trusted tier), and the settled default would be the one wrong fix here — a
+        # double that never declared it would go on to pip-install (review 2026-09-22, ENG1-03).
+        if not self._auto_install_deps:
             return
         from looplab.runtime import deps
         base = self._declared_deps()
@@ -346,10 +350,11 @@ class EvalDispatchMixin:
             action, cmd = "refused_untrusted_tier", []
         elif operator_cmd:
             action, cmd = "operator_run_setup", list(operator_cmd)
-        elif not getattr(self, "_auto_install_deps", False):
+        elif not self._auto_install_deps:
             # Reached only on a trusted tier, so `_auto_install_deps` being False here can only mean
             # the operator switched `auto_install_deps` off — a different fact from the tier refusal
-            # above, and it leads to a different fix.
+            # above, and it leads to a different fix. (Read bare for `_sync_node_deps`' reason: a
+            # missing attribute is no longer recorded as the operator's `auto_install_disabled`.)
             action, cmd = "auto_install_disabled", []
         else:
             action = "installed"
@@ -620,7 +625,7 @@ class EvalDispatchMixin:
         `cmd.command` itself, which is an argv the eval executes.
         """
         from looplab.runtime.command_eval import merge_env
-        declared = merge_env(getattr(self, "_eval_env", None), (es or {}).get("env"))
+        declared = merge_env(getattr(self, "_eval_env", {}), (es or {}).get("env"))
         if not declared:
             return env
         return {**(env or {}), **declared}
