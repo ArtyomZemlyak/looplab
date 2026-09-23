@@ -3439,7 +3439,27 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     def _sweep_researcher(self, researcher):
         """The k-NN surrogate the endgame's champion sweep proposes with (doc 52 row 18): bounds
         inferred from the run's own evaluated params, the run's Researcher as its fallback below
-        warm-up, the run's `surrogate_explore` weight. Built once per engine."""
+        warm-up, the run's `surrogate_explore` weight. Built once, and again only when the handle it
+        wraps changes (a mid-run BOHB switch re-wraps the primary).
+
+        NOT `search/researcher_stack.py::with_surrogate`, BY DECISION (review 2026-09-22, W5-5
+        follow-up). That rule builds the surrogate LAYER of a researcher HANDLE the run keeps; this
+        is a PROPOSER for one `META_SWEEP` action, which `_prepare_node_idea` asks instead of
+        `researcher` and then drops — no handle is ever replaced. Each of the rule's three
+        differences from this constructor would turn the sweep into something else:
+
+        * R1 (`shares_one_agent`): the rule returns a unified facade UNWRAPPED, because re-wrapping
+          one handle would split it from the developer. Nothing is re-wrapped here, so R1 has
+          nothing to protect — and under the shipped `unified_agent=True` the rule would make every
+          champion sweep a plain LLM improve.
+        * Idempotence: the rule returns a chain that already holds a surrogate unchanged, so on a
+          `surrogate_proposer` / `policy=bohb` run the sweep would be the primary's own surrogate —
+          an ordinary surrogate improve.
+        * Bounds: the rule adopts bounds a link DECLARES; the sweep passes `{}` with
+          `infer_bounds=True` on purpose, searching the region the run has evaluated (its observed
+          range padded by 10 %), not the task's whole declared space.
+
+        `tests/test_endgame_plan.py` pins all three."""
         from looplab.search.surrogate import SurrogateResearcher
         if self._endgame_surrogate is None or self._endgame_surrogate.fallback is not researcher:
             self._endgame_surrogate = SurrogateResearcher(

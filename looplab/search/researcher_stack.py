@@ -55,6 +55,15 @@ pooled pair outlives a Strategist switch, and a launch-time closure cannot follo
 BOHB mid-run. The engine applies it to every pair it mints, and `_ensure_surrogate` re-applies it to
 the pairs already minted when the switch lands.
 
+THE ONE SURROGATE NOT BUILT HERE, BY DECISION (review 2026-09-22, W5-5 follow-up): the endgame
+champion sweep's, `engine/orchestrator.py::_sweep_researcher`. It is a PROPOSER for one sweep action,
+not a layer of a handle the run keeps, and each of `with_surrogate`'s three rules would turn the sweep
+into something else — R1 would leave the shipped unified facade unwrapped (a plain LLM improve), the
+chain idempotence would hand a `surrogate_proposer`/`bohb` run the primary's own surrogate, and the
+declared bounds would widen a search of the region the run has evaluated to the whole declared space.
+Its docstring carries the account and `tests/test_endgame_plan.py` pins it; it is not a third
+derivation to fold in.
+
 Keep `forward_hints` semantics: the engine stamps hints on the OUTERMOST wrapper, whichever handle
 that is, and every wrapper mirrors them inward. Nothing here stamps a hint.
 """

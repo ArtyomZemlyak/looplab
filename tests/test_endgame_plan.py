@@ -216,6 +216,58 @@ def test_a_sweep_action_proposes_through_the_surrogate(tmp_path):
     assert eng._sweep_researcher(eng.researcher) is sweeper, "built once"
 
 
+def test_the_sweep_proposer_is_deliberately_not_the_stacks_surrogate_layer(tmp_path, monkeypatch):
+    """`_sweep_researcher` stays a SEPARATE proposer, not `search/researcher_stack.py::with_surrogate`
+    (review 2026-09-22, W5-5 follow-up). Each of that rule's three differences would turn the sweep
+    into something else, and each is pinned here so a "one rule" refactor goes red:
+
+    * R1 — under a unified facade (researcher IS developer, the shipped default) the stack returns
+      the facade UNWRAPPED; the sweep must still propose through the surrogate — DRIVEN below through
+      `_prepare_node_idea` on a warm log: the sweep's idea is the surrogate's numeric point;
+    * idempotence — on a chain that already holds a surrogate the stack returns it unchanged; the
+      sweep builds its own;
+    * bounds — the stack adopts bounds a link DECLARES; the sweep infers its range from the run."""
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
+    from looplab.agents.unified_agent import UnifiedAgent
+    from looplab.engine.plan import META_SWEEP
+    from looplab.search.researcher_stack import with_surrogate
+    from looplab.search.surrogate import SurrogateResearcher
+
+    eng = make_engine(tmp_path / "run", n_seeds=2, max_nodes=8, endgame_reserve_frac=0.25)
+    declared = dict(eng.task.bounds)
+    assert declared, "precondition: the toy task DECLARES its bounds"
+
+    # R1, driven.
+    facade = UnifiedAgent(researcher=ToyResearcher(eng.task.bounds), developer=ToyObjectiveDeveloper())
+    eng.researcher = eng.developer = facade
+    assert with_surrogate(facade, facade, explore=0.1) is facade, "the stack leaves R1 unwrapped"
+    eng.store.append("run_started", {
+        "run_id": eng.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
+    for i in range(5):
+        eng.store.append("node_created", {
+            "node_id": i, "parent_ids": [], "operator": "draft", "code": "print(1)",
+            "idea": {"operator": "draft", "params": {"x": float(i), "y": -float(i)}}})
+        eng.store.append("node_evaluated", {
+            "node_id": i, "generation": 0, "metric": float((i - 2) ** 2), "eval_seconds": 0.1})
+    monkeypatch.setattr(eng, "_apply_novelty_gate", lambda _state, idea, **_kw: idea)
+    idea = eng._prepare_node_idea(
+        {"kind": "improve", "parent_id": 2, META_SWEEP: True}, fold(eng.store.read_all()),
+        researcher=eng.researcher, prospective_node_id=5, source="researcher")
+    assert idea is not None and "surrogate-guided" in idea.rationale, (
+        "under the unified facade the champion sweep must still be the k-NN surrogate's point")
+    sweep = eng._sweep_researcher(facade)
+    assert isinstance(sweep, SurrogateResearcher) and sweep.fallback is facade
+
+    # Idempotence and declared bounds.
+    developer = ToyObjectiveDeveloper()
+    primary = with_surrogate(ToyResearcher(eng.task.bounds), developer, explore=0.1)
+    assert isinstance(primary, SurrogateResearcher) and primary.bounds == declared
+    assert with_surrogate(primary, developer, explore=0.1) is primary, "the stack is idempotent"
+    sweep = eng._sweep_researcher(primary)
+    assert sweep is not primary and sweep.fallback is primary, "the sweep builds its own"
+    assert sweep.bounds == {} and sweep.infer_bounds is True, "the sweep infers its range"
+
+
 # ------------------------------------------------------------------ (c) the Strategist
 
 def test_the_endgame_rule_names_the_sweep_and_a_strategist_may_switch_it_off(tmp_path):
