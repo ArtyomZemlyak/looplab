@@ -357,7 +357,7 @@ flowchart LR
 
 | Concept | Module |
 |---|---|
-| Control loop + crash-resume (the `run_started` pins and the re-entry checks that adopt or refuse them; the one-time setup phase that appends `run_started`) | `engine/orchestrator.py`, `engine/reentry.py`, `engine/setup_phase.py` |
+| Control loop + crash-resume (the `run_started` pins and the re-entry checks that adopt or refuse them; the one-time setup phase that appends `run_started`; the launch record `self.options` and the knobs declared once over it) | `engine/orchestrator.py`, `engine/reentry.py`, `engine/setup_phase.py`, `engine/knobs.py` |
 | The two pacing clocks: the node-count window (`cadence_due`, behind lessons/deep-research/report/Strategist/concept cadences) and the occupancy pace (`occupancy_due` — produce while an eval is running and the board behind it does not cover the width; records no `at_node`, has no setting of its own) | `engine/cadence.py`, `engine/orchestrator.py::_occupancy_paced_creates` |
 | Standing watches + continuous work: one durable assistant record (`<runs>/assistant/.watches/`) and lazy scheduler for typed run/experiment/stage waits, every-N monitoring, and bounded resumable goal/TODO/checkpoint cycles — server-evaluated conditions, pinned target identity and permission mode | `serve/assistant_watch.py`, `serve/routers/assistant.py`, `ui/src/assistantWatchModel.js` |
 | Append-only log · pure fold · SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |

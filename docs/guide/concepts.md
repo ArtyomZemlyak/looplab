@@ -2180,7 +2180,7 @@ Where each concept lives in the code:
 | Structured output + LLM client + cost accountant | `core/parse.py`, `core/llm.py` |
 | Durable per-run observed-usage ledger | `engine/costs.py` |
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
-| Control loop + crash-resume (run-start pins + re-entry checks; the setup phase) | `engine/orchestrator.py`, `engine/reentry.py`, `engine/setup_phase.py` |
+| Control loop + crash-resume (run-start pins + re-entry checks; the setup phase; the launch record and its knobs) | `engine/orchestrator.py`, `engine/reentry.py`, `engine/setup_phase.py`, `engine/knobs.py` |
 | The two pacing rules (node-count `cadence_due`, occupancy `occupancy_due`) | `engine/cadence.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
 | HTTP control-payload validation (`normalize_control` + the five per-event tables) | `serve/control_validation.py` |
