@@ -312,14 +312,13 @@ def test_the_run_mutating_tool_takes_its_lifecycle_primitives_by_injection():
     injected = RunLifecycleFns(
         engine_alive=lambda _rd: calls.append("alive") or False,
         fresh_resume_launch_pending=lambda _rd: calls.append("resume") or False,
-        fresh_run_launch_pending=lambda _rd: calls.append("run") or False,
         run_lifecycle_lock=lambda _rd: _Lock(),
         run_config_write_lock=lambda _p: _Lock(),
     )
     tools = RunControlTools("runs", lifecycle=injected)
     assert tools.lifecycle() is injected, "an injected provider must be used verbatim"
 
-    # ...and with nothing injected the default resolves the SAME five callables the server uses,
+    # ...and with nothing injected the default resolves the SAME callables the server uses,
     # so the historical behaviour of every existing caller is unchanged — but out of the module
     # below both packages. Compared by identity against `serve/engine_proc`'s re-exports, because
     # "the same implementation" is the property; "an importable name exists" is not.
@@ -328,7 +327,6 @@ def test_the_run_mutating_tool_takes_its_lifecycle_primitives_by_injection():
     from looplab.serve import engine_proc, run_files
     assert default.engine_alive is engine_proc._engine_alive
     assert default.fresh_resume_launch_pending is engine_proc._fresh_resume_launch_pending
-    assert default.fresh_run_launch_pending is engine_proc._fresh_run_launch_pending
     assert default.run_lifecycle_lock is engine_proc._run_lifecycle_lock
     assert default.run_config_write_lock is run_files.run_config_write_lock
 

@@ -36,7 +36,7 @@ from looplab.serve.deletion_transaction import (
 from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     _engine_alive, _engine_liveness, _fresh_resume_launch_pending,
-    _fresh_run_launch_pending, engine_write_lock_http, run_lifecycle_lock_http)
+    engine_write_lock_http, run_lifecycle_lock_http)
 from looplab.serve.projects import ProjectStoreLockError
 from looplab.serve.run_commands import run_generation_token
 from looplab.serve.run_files import run_config_write_lock
@@ -698,9 +698,11 @@ def begin_or_resume_run_deletion(
                             "engine_liveness_unknown",
                             "Engine ownership cannot be verified; the run was not deleted.",
                             operation_id=operation_id, retryable=True))
+                    # A fresh-RUN launch (Replay) is fenced above, by the reset marker and the
+                    # spawn preclaim `refuse_unless_quiescent` reads (`engine/run_lifecycle.py`
+                    # says why the old `.looplab-launching` check is gone).
                     if (liveness is True or _engine_alive(rd)
-                            or _fresh_resume_launch_pending(rd)
-                            or _fresh_run_launch_pending(rd)):
+                            or _fresh_resume_launch_pending(rd)):
                         raise HTTPException(409, _detail(
                             "engine_running", "Pause or finish this run before deleting it.",
                             operation_id=operation_id, retryable=True))

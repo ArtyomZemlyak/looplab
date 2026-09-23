@@ -293,58 +293,17 @@ def fresh_resume_launch_pending(rd: Path, *, now: Optional[float] = None) -> boo
                      or within_resume_grace(state.last_resume_request_ts, now)))
 
 
-RUN_LAUNCH_MARKER = ".looplab-launching"
-
-
-def run_launch_marker_path(rd: Path) -> Path:
-    return rd / RUN_LAUNCH_MARKER
-
-
-def mark_run_launching(rd: Path) -> None:
-    """Stamp the fresh-run launch marker just before a reset/replay Popen (F9), held under the lifecycle
-    lock. Reset spawns a fresh `run` engine on an ARCHIVED (emptied) event log, so a resume-style
-    launch claim in the log can't fence it; this short-lived FILE bridges the same gap — Popen -> the
-    detached child acquiring engine.lock — so a concurrent delete/reset can't rmtree the dir out from
-    under a starting engine. Best-effort: if it can't be written the reset still proceeds (today's
-    behavior), just without the extra fence."""
-    try:
-        run_launch_marker_path(rd).write_text(str(time.time()), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def clear_run_launching(rd: Path) -> None:
-    """Drop the launch marker (a failed Popen: no child is starting, so nothing to fence)."""
-    try:
-        run_launch_marker_path(rd).unlink()
-    except OSError:
-        pass
-
-
-def fresh_run_launch_pending(rd: Path, *, now: Optional[float] = None) -> bool:
-    """Whether a fresh-run (reset/replay) launch is in flight: the marker exists and is within the same
-    grace the resume claim uses. Once the child holds engine.lock `engine_alive` takes over; an engine
-    that died on startup lets the marker expire so the run stays operator-deletable (F9)."""
-    marker = run_launch_marker_path(rd)
-    # A just-closed file on Windows/network storage can briefly expose inaccessible or slightly
-    # future metadata. Retry that ambiguous publication once; an actually future timestamp remains
-    # rejected, while ordinary/expired markers stay on the zero-sleep path.
-    for attempt in range(2):
-        try:
-            ts = marker.stat().st_mtime
-        except OSError:
-            if attempt == 0:
-                time.sleep(0.001)
-                continue
-            return False
-        observed_now = time.time() if now is None else now
-        if observed_now >= ts:
-            return within_resume_grace(ts, observed_now)
-        if attempt == 0 and now is None:
-            time.sleep(0.001)
-            continue
-        return False
-    return False
+# THE FRESH-RUN LAUNCH MARKER IS RETIRED (review 2026-09-22, SRV1-09). `.looplab-launching` bridged
+# a reset/Replay's Popen -> engine.lock gap (F9) until 208fb4bd (2026-08-01) moved Replay to the
+# command service's spawn PRECLAIM (`serve/run_commands.py::RunCommandService.begin_external_spawn`,
+# read back by `_recent_spawn_claim`) beside the durable reset marker. The writer went with that
+# move; its four READERS did not — reset's two quiescence checks, whole-run deletion and the
+# assistant's node delete each consulted a file nothing had written for seven weeks, so every one of
+# them read "not launching" whatever was happening. Nothing lost the fence: all three paths also
+# pass the reset marker and `durable_op.refuse_unless_quiescent` (whose `_recent_spawn_claim` rung IS
+# the preclaim), and what remains is the one question "is a launch in flight?" answered from the two
+# ledgers that are written — the resume claim in the log (`fresh_resume_launch_pending`) and the
+# spawn preclaim.
 
 
 # ------------------------------------------------------- the per-run config write transaction

@@ -3,10 +3,13 @@ Mode-gated (deny in plan, inline in auto) + destructive verbs refuse a live engi
 the whole subtree so no parent link is orphaned."""
 from __future__ import annotations
 
+import ast
+
 import json
 import os
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -645,25 +648,28 @@ def test_delete_run_retires_root_start_record(tmp_path):
     assert not start_sidecar.exists(), "the run name stays occupied by a retired start identity"
 
 
-def test_delete_node_rejects_fresh_run_launch_marker(tmp_path, monkeypatch):
-    rd = tmp_path / "node-delete-reset-launch"
-    _run(rd, nodes=(0, 1)).append("pause", {})
-    # The tool's DEFAULT lifecycle provider reads this out of `looplab.engine.run_lifecycle`, which
-    # is where the five primitives live since doc 25 XP-03 closed (2026-09-08) — patching the
-    # `serve/engine_proc` re-export would leave the tool's own binding untouched, and the delete
-    # would go through with no launch fence at all.
-    monkeypatch.setattr(
-        "looplab.engine.run_lifecycle.fresh_run_launch_pending", lambda _rd: True)
-    tool = RunControlTools(
-        tmp_path, alive_fn=lambda _rd: False, mode="auto",
-        approver=lambda _action: "allow_once",
-        command_service=_RecordingCommands(tmp_path))
+def test_a_retired_launch_ledger_is_not_read():
+    """Review 2026-09-22, SRV1-09. `.looplab-launching` lost its only writer on 2026-08-01 (Replay moved
+    to the command service's spawn preclaim) and kept four readers — reset's two quiescence checks,
+    whole-run deletion and this tool's node delete — each of which therefore always read "not
+    launching". A reader of a ledger nothing writes is a fence that cannot fire and a sentence
+    that reads as one; the marker's name must not come back as a READ. A fresh-run launch is fenced
+    by `destructive_guard` (the reset marker, then `refuse_unless_quiescent`'s spawn-preclaim rung),
+    which `test_destructive_tools_reject_fresh_resume_launch_gap` and the Replay suites drive."""
+    import looplab
+    from _source_scan import iter_trees
 
-    out = tool.execute("delete_node", {"run_id": rd.name, "node_id": 1})
-
-    assert "launching" in out
-    assert not any(event.type == "node_tombstoned"
-                   for event in EventStore(rd / "events.jsonl").read_all())
+    readers = []
+    for path, tree in iter_trees(Path(looplab.__file__).resolve().parent):
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Name, ast.Attribute)):
+                name = node.id if isinstance(node, ast.Name) else node.attr
+                if name in {"fresh_run_launch_pending", "_fresh_run_launch_pending",
+                            "run_launch_marker_path", "RUN_LAUNCH_MARKER"}:
+                    readers.append(f"{path.name}:{node.lineno}")
+            elif isinstance(node, ast.Constant) and node.value == ".looplab-launching":
+                readers.append(f"{path.name}:{node.lineno}")
+    assert not readers, f"the writer-less launch marker is read again at {readers}"
 
 
 @pytest.mark.parametrize("name,args", [

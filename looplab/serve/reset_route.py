@@ -29,8 +29,7 @@ from looplab.events.span_index import (
     invalidate as invalidate_span_index, span_destructive_write_guard)
 from looplab.serve.engine_proc import (
     _engine_alive, _engine_liveness, _fresh_resume_launch_pending,
-    _fresh_run_launch_pending, _resolve_task_file, engine_write_lock_http,
-    run_lifecycle_lock_http)
+    _resolve_task_file, engine_write_lock_http, run_lifecycle_lock_http)
 from looplab.serve.appstate import (
     _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
@@ -245,7 +244,7 @@ def _validate_reset_quiescence(srv, rd: Path, expected_generation: str) -> None:
             "message": "Engine ownership is unknown; Replay did not archive or restart the run.",
         })
     if (ownership is True or _engine_alive(rd) or _fresh_resume_launch_pending(rd)
-            or _fresh_run_launch_pending(rd) or not srv.state(rd).finished):
+            or not srv.state(rd).finished):
         raise HTTPException(409, "run is active, launching, or no longer finished")
 
 
@@ -257,8 +256,7 @@ def _revalidate_reset_quiescence_locked(
         raise generation_conflict("The run changed before Replay ownership was published.",
                                   expected=expected_generation,
                                   current=current_generation or None)
-    if (_fresh_resume_launch_pending(rd) or _fresh_run_launch_pending(rd)
-            or not srv.state(rd).finished):
+    if _fresh_resume_launch_pending(rd) or not srv.state(rd).finished:
         raise HTTPException(409, "run changed or began launching during Replay preflight")
 
 

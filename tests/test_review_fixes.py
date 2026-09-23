@@ -209,24 +209,10 @@ def test_sweep_stale_lifecycle_locks_never_unlinks_a_flock_pathname(tmp_path):
 
 
 # --------------------------------------------- F9: fresh-run (reset/replay) launch marker fences delete
-def test_run_launch_marker_fences_then_expires(tmp_path):
-    """F9: reset/replay spawns a fresh engine on an archived log, so a time-bounded marker file bridges
-    the Popen->engine.lock gap that a resume-log claim can't cover — a delete/reset checks it and refuses
-    until it expires (an abandoned/died-on-startup launch stays operator-deletable)."""
-    import os
-    import time
-    from looplab.serve.engine_proc import (
-        _clear_run_launching, _fresh_run_launch_pending, _mark_run_launching, _run_launch_marker_path)
-    assert _fresh_run_launch_pending(tmp_path) is False       # no marker
-    _mark_run_launching(tmp_path)
-    assert _fresh_run_launch_pending(tmp_path) is True         # in-flight launch → fence delete/reset
-    mp = _run_launch_marker_path(tmp_path)
-    past = time.time() - 3600
-    os.utime(mp, (past, past))
-    assert _fresh_run_launch_pending(tmp_path) is False        # expired lease → run deletable again
-    _mark_run_launching(tmp_path)
-    _clear_run_launching(tmp_path)                             # failed Popen path
-    assert _fresh_run_launch_pending(tmp_path) is False
+# The `.looplab-launching` marker and its test are retired (review 2026-09-22, SRV1-09): Replay has
+# fenced its Popen -> engine.lock gap with the command service's spawn preclaim since 208fb4bd, and
+# the marker's writer left with that move while four readers stayed. What fences the window now is
+# pinned where it lives — `tests/test_run_control_tools.py::test_a_retired_launch_ledger_is_not_read`.
 
 
 # ------------------------------------ F13: reused-stage files pass the freshness gate on a stage re-run

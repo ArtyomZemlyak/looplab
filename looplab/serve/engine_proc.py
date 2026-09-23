@@ -37,15 +37,10 @@ from looplab.events.types import EV_RESTART, EV_RESUME_REQUESTED
 from looplab.serve.jupyter import REAP_ON_EXIT_ENV
 from looplab.engine.run_lifecycle import (  # noqa: F401 - re-exported for the historical import path
     RESUME_RECONCILE_GRACE_S as _RESUME_RECONCILE_GRACE_S,
-    RUN_LAUNCH_MARKER as _RUN_LAUNCH_MARKER,
-    clear_run_launching as _clear_run_launching,
     engine_alive as _engine_alive,
     engine_liveness as _engine_liveness,
     fresh_resume_launch_pending as _fresh_resume_launch_pending,
-    fresh_run_launch_pending as _fresh_run_launch_pending,
     launch_claim_is_fresh as _launch_claim_is_fresh,
-    mark_run_launching as _mark_run_launching,
-    run_launch_marker_path as _run_launch_marker_path,
     run_lifecycle_key as _run_lifecycle_key,
     run_lifecycle_lock as _run_lifecycle_lock,
     run_lifecycle_lock_path as _run_lifecycle_lock_path,

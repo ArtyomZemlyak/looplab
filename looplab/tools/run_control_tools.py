@@ -74,16 +74,17 @@ class RunLifecycleFns:
     """The run-lifecycle primitives a run-MUTATING tool needs, as an explicit contract.
 
     Every field is a fence, not a convenience: the lifecycle lock is the only thing standing between
-    a delete and a resume that has been claimed but has not yet taken `engine.lock`, and the two
-    launch-pending predicates are what make that window observable. Naming them here means a
+    a delete and a resume that has been claimed but has not yet taken `engine.lock`, and the
+    launch-pending predicate is what makes that window observable. Naming them here means a
     caller can substitute them (a test, a different host) without `tools/` reaching upward into
-    `serve/` — see doc 25 XP-03. Since 2026-09-08 the DEFAULT does not reach upward either: the
-    five live in `looplab/engine/run_lifecycle.py`, below both packages, and `serve/` re-exports
-    them. They were `serve`-owned only because that is where the server happened to write them.
+    `serve/` — see doc 25 XP-03. Since 2026-09-08 the DEFAULT does not reach upward either: they
+    live in `looplab/engine/run_lifecycle.py`, below both packages, and `serve/` re-exports them.
+    They were `serve`-owned only because that is where the server happened to write them. (A fifth,
+    `fresh_run_launch_pending`, read a marker nothing had written since 2026-08-01 and was retired
+    on 2026-09-23, SRV1-09; a fresh-run launch is fenced by `destructive_guard`.)
     """
     engine_alive: Callable
     fresh_resume_launch_pending: Callable
-    fresh_run_launch_pending: Callable
     run_lifecycle_lock: Callable
     run_config_write_lock: Callable
 
@@ -155,7 +156,6 @@ class RunControlTools:
         return RunLifecycleFns(
             engine_alive=run_lifecycle.engine_alive,
             fresh_resume_launch_pending=run_lifecycle.fresh_resume_launch_pending,
-            fresh_run_launch_pending=run_lifecycle.fresh_run_launch_pending,
             run_lifecycle_lock=run_lifecycle.run_lifecycle_lock,
             run_config_write_lock=run_lifecycle.run_config_write_lock,
         )
@@ -707,8 +707,10 @@ class RunControlTools:
         # The launch claim/Popen/child-lock gap is fenced only by the lifecycle lock. Acquire it after
         # approval, reject a fresh pending launch, then take engine.lock before the event-log CAS.
         with lifecycle.run_lifecycle_lock(rd):
-            if (lifecycle.fresh_resume_launch_pending(rd)
-                    or lifecycle.fresh_run_launch_pending(rd)):
+            # A fresh-RUN (Replay) launch is refused before this, by `destructive_guard`'s reset
+            # marker and spawn-preclaim rungs; the retired `.looplab-launching` check read a file
+            # nothing wrote (`engine/run_lifecycle.py`, review 2026-09-22 SRV1-09).
+            if lifecycle.fresh_resume_launch_pending(rd):
                 return f"(run {rid} is launching — retry delete after the engine settles)"
             if lifecycle.engine_alive(rd):
                 return f"(run {rid} became LIVE while awaiting permission — stop it and retry)"
