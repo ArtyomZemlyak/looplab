@@ -18,7 +18,11 @@ back as a bare interstitial narration with no notice at all, which is the operat
 """
 from __future__ import annotations
 
+import json
+import math
 import time
+
+import pytest
 
 from looplab.agents.loop_options import EXPLICIT_ONLY_LOOP_ARGS
 from looplab.agents.tool_loop import _note_budget, drive_tool_loop
@@ -80,16 +84,78 @@ class _Tools:
         return "looked"
 
 
-def test_a_turn_that_runs_out_of_wall_clock_notifies_before_it_salvages():
-    seen = {}
-    drive_tool_loop(
-        _Client(), _Tools(), [{"role": "user", "content": "go"}],
+class _LoopClock:
+    """The loop's wall clock, DRIVEN rather than slept: `monotonic()` answers the seconds the model
+    has spent (`spend`), read at `tick` granularity. `tick=1/64` is `time.monotonic` on Windows
+    under Python 3.12 — `GetTickCount64`, 15.625 ms (3.13 moved it to QueryPerformanceCounter) —
+    and the clock starts ON a tick boundary, the phase at which every later read is floored most."""
+
+    def __init__(self, tick: float = 0.0):
+        self.now = 1000.0        # 64 000 ticks of 1/64 s exactly: the loop's start is a boundary
+        self.tick = tick
+
+    def spend(self, seconds: float) -> None:
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return math.floor(self.now / self.tick) * self.tick if self.tick else self.now
+
+
+class _Investigates:
+    """A model that keeps calling a tool and never emits — the shape of a turn that runs out — and
+    whose every call is a NEW one, so the stuck detector (the same call and result `stuck_repeat`
+    times in a row) can never be what stops it: the wall clock is the only cutoff left. Each call
+    spends 20 ms of `clock`. `complete_tool` is the salvage emit the loop forces afterwards, and it
+    records what the caller had been told by the time it was asked."""
+
+    def __init__(self, clock: _LoopClock, seen: dict):
+        self.clock, self.seen, self.calls = clock, seen, 0
+        self.told_before_salvage = None
+
+    def chat(self, messages, tool_specs, tool_choice="auto"):
+        self.calls += 1
+        self.clock.spend(0.02)
+        return {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{self.calls}", "type": "function",
+             "function": {"name": "look", "arguments": json.dumps({"page": self.calls})}}]}
+
+    def complete_tool(self, messages, schema):
+        self.told_before_salvage = dict(self.seen)
+        return {"reply": "salvaged"}
+
+    def complete_text(self, messages):
+        return "text"
+
+
+@pytest.mark.parametrize("tick", [0.0, 1 / 64], ids=["fine-clock", "windows-py312-clock"])
+def test_a_turn_that_runs_out_of_wall_clock_notifies_before_it_salvages(monkeypatch, tick):
+    """ONLY THE CLOCK MAY STOP IT (review 2026-09-22, WIN-4: Windows CI run 36, 35823390348). This
+    used to drive `_Client`, which repeats ONE call — so the turn was ALSO stuck, and which cutoff
+    won was a race between two exits: three 20 ms calls had to read as more than the 50 ms budget
+    before the fourth identical call tripped `stuck_repeat=4`. On a 15.625 ms clock started on a
+    tick boundary they read as 46.875 ms, the fourth call ran, and the notice said "stuck". The
+    model is now one that is never stuck, and the loop's clock is DRIVEN (each call spends 20 ms of
+    it, read at both granularities), so the outcome is a function of the budget alone.
+    `time.monotonic` is the right clock for the product — a wall ceiling is seconds to minutes and
+    `LoopClock` / `remaining_time` read the same one — so nothing moved there. `max_turns` is only a
+    backstop: a loop whose wall check broke fails here as "turns" instead of spinning forever."""
+    import looplab.agents.tool_loop as loop_mod
+
+    clock = _LoopClock(tick)
+    monkeypatch.setattr(loop_mod.time, "monotonic", clock.monotonic)
+    seen: dict = {}
+    client = _Investigates(clock, seen)
+    result = drive_tool_loop(
+        client, _Tools(), [{"role": "user", "content": "go"}],
         {"type": "function", "function": {"name": "emit", "description": "emit",
          "parameters": {"type": "object", "properties": {"reply": {"type": "string"}}}}},
-        time_budget_s=0.05, finalize=lambda args: "done",
+        time_budget_s=0.05, max_turns=50, finalize=lambda args: args.get("reply"),
         fallback=lambda msgs: "fell back", on_budget=seen.update)
     assert seen.get("kind") == "time", "the caller must learn the wall clock is what stopped it"
     assert seen["turns"] >= 1 and seen["seconds"] >= 0.05
+    assert result == "salvaged", "a cut-short turn still salvages an answer from what it gathered"
+    assert (client.told_before_salvage or {}).get("kind") == "time", (
+        "the notice must reach the caller BEFORE the salvage emit is asked for")
 
 
 def test_an_ordinary_turn_reports_nothing():
