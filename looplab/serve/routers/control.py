@@ -29,7 +29,7 @@ from looplab.serve.appstate import _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX
 from looplab.serve.http import json_object
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
-    _resolve_task_file, run_lifecycle_lock_http)
+    _resolve_task_file, run_lifecycle_lock_http, spawn_snapshot_refusal)
 from looplab.serve.launch import (
     idempotency_key_digest,
     launch_request_digest,
@@ -469,6 +469,16 @@ def build_router(srv) -> APIRouter:
                          "(it predates self-describing runs; start it via the UI to enable resume)")
             with run_lifecycle_lock_http(rd):
                 known_alive = _known_engine_liveness(rd, "resume the run")
+                # A dead engine means this request Popens `looplab resume`/`finalize` right below,
+                # and that child reads config.snapshot.json strictly. Ask it the child's question
+                # FIRST, so a snapshot it would refuse at exit 2 is a coded 409 here with nothing
+                # appended — not a `resume_requested` handoff and a crashed child (review 2026-09-22,
+                # doc 66 §6 item 6; `engine_proc.py::spawn_snapshot_refusal`). With a live owner
+                # nothing is spawned now, and its settings are already loaded.
+                if not known_alive:
+                    refused = spawn_snapshot_refusal(rd)
+                    if refused is not None:
+                        raise HTTPException(409, refused)
                 # Durable before every liveness branch: a current owner in its final tail, or a
                 # detached child that dies before engine.lock, leaves a recoverable intent.
                 mode = _append_resume_request(rd)

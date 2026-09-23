@@ -3635,3 +3635,50 @@ def settings_from_snapshot(data: dict, *, refuse_unknown: bool = False) -> Setti
     migrated.pop("llm_api_key_base_url", None)
     migrated.pop(CONFIG_SNAPSHOT_SCHEMA_KEY, None)   # a document marker, never a Settings field
     return Settings(**migrated)
+
+
+class ConfigSnapshotUnreadableError(ConfigRefusal):
+    """A `config.snapshot.json` FILE that cannot be loaded as `Settings` at all: unreadable, not
+    UTF-8 JSON, not a JSON object, or carrying values `Settings` refuses.
+
+    Distinct from `ConfigSnapshotVersionError` in the remedy: that document is well-formed and was
+    written by a build that knows more than this one (upgrade), this one is damaged (restore it).
+    `reason` is the underlying failure's own text — for an `OSError` it carries the HOST PATH, so a
+    server must never put it in a response body (`serve/http.py::refusal`)."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"config snapshot cannot be loaded: {reason}")
+        self.reason = reason
+
+
+def read_config_snapshot(path, *, refuse_unknown: bool = False) -> Settings:
+    """THE read of a run's `config.snapshot.json` file, for every caller that must agree on it.
+
+    Two do, and they are in different processes: the `looplab resume` / `looplab finalize` child
+    (`cli/__init__.py::load_run_settings`, `strict=True`, which maps
+    `ConfigSnapshotUnreadableError` to its one-line `BadParameter`), and the UI server, which
+    answers at ADMISSION what that child would refuse — before it appends an intent and spawns a
+    driver doomed to exit 2 (`serve/engine_proc.py::spawn_snapshot_refusal`; review 2026-09-22,
+    doc 66 §6 item 6). A second spelling of this read is how those two would drift apart: the
+    server preflighting a looser check than the child enforces is a crashed child again, and a
+    stricter one refuses runs the child would have resumed.
+
+    Raises `ConfigSnapshotUnreadableError` for a file that is unreadable, not UTF-8 JSON (a
+    `UnicodeDecodeError` escaped the CLI's mapping as a traceback until this was hoisted), not an
+    object, or invalid as `Settings`; the `ConfigSnapshotVersionError` family passes through from
+    `settings_from_snapshot`, `refuse_unknown` included. An ABSENT file is the caller's policy, not
+    this function's: the child's `require_snapshot`, the server's "the child decides"."""
+    import json
+
+    from pydantic import ValidationError
+
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:   # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        raise ConfigSnapshotUnreadableError(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise ConfigSnapshotUnreadableError("expected a JSON object")
+    try:
+        return settings_from_snapshot(data, refuse_unknown=refuse_unknown)
+    except ValidationError as exc:
+        raise ConfigSnapshotUnreadableError(str(exc)) from exc

@@ -513,26 +513,21 @@ def _settings_from_config_snapshot(config_snap: Path, *, refuse_unknown: bool = 
     Shared by `run`'s finalization recovery and by `resume`/`finalize`, which read the same file.
     `refuse_unknown` is passed through to `settings_from_snapshot`; its refusal is already an
     `OperatorRefusal`, so it reaches the CLI boundary as one line at exit 2 without a mapping here.
+
+    The READ itself is `core/config.py::read_config_snapshot` (review 2026-09-22, doc 66 §6 item
+    6): the UI server asks that same function, before it spawns this command, whether this command
+    would refuse — so the two cannot disagree about a file. Only the mapping to `BadParameter` is
+    the CLI's. Its messages are unchanged; the one difference is a snapshot that is not valid UTF-8,
+    which escaped the old `(OSError, JSONDecodeError)` catch as a traceback at exit 1 and is now the
+    same one line at exit 2 as every other unreadable snapshot.
     """
-    import json
-
-    from pydantic import ValidationError
-
-    from looplab.core.config import settings_from_snapshot
+    from looplab.core.config import ConfigSnapshotUnreadableError, read_config_snapshot
 
     try:
-        config_data = json.loads(config_snap.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        return read_config_snapshot(config_snap, refuse_unknown=refuse_unknown)
+    except ConfigSnapshotUnreadableError as exc:
         raise typer.BadParameter(
-            f"cannot load original config snapshot {config_snap}: {exc}") from exc
-    if not isinstance(config_data, dict):
-        raise typer.BadParameter(
-            f"cannot load original config snapshot {config_snap}: expected a JSON object")
-    try:
-        return settings_from_snapshot(config_data, refuse_unknown=refuse_unknown)
-    except ValidationError as exc:
-        raise typer.BadParameter(
-            f"cannot load original config snapshot {config_snap}: {exc}") from exc
+            f"cannot load original config snapshot {config_snap}: {exc.reason}") from exc
 
 
 def _truthy_env(name: str) -> bool:

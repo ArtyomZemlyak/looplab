@@ -59,7 +59,7 @@ from looplab.serve.control_validation import (
 from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
-    _spawn_engine, child_exited)
+    _spawn_engine, child_exited, spawn_snapshot_refusal)
 from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES
@@ -546,6 +546,19 @@ class _PostconditionGate:
         self._asked = (revision, liveness)
         if self.reads_state:
             self._state_read_at = now
+
+
+def admission_spawns_driver(policy: EnginePolicy, alive: bool) -> bool:
+    """Will admitting a command under `policy` START a `looplab resume` child for this run?
+
+    The rule `_admit` acts on, stated where `_decision` can ask it BEFORE the append (review
+    2026-09-22, doc 66 §6 item 6): a `NO_SPAWN` intent never does; `RESTART_AFTER_EXIT` always does
+    — the replacement owner is the command's whole point, launched now or once the live owner exits;
+    every other policy does exactly when no driver is alive to serve the intent. A live driver that
+    dies before acknowledging is re-ensured later by `_monitor`; that spawn is not decided here."""
+    if policy is EnginePolicy.NO_SPAWN:
+        return False
+    return policy is EnginePolicy.RESTART_AFTER_EXIT or not alive
 
 
 class RunCommandService:
@@ -2526,7 +2539,7 @@ class RunCommandService:
         if spec.decide is not None:
             settled = spec.decide(self, rd, event_type, state, alive, pending_finalize)
             if settled is not None:
-                return settled
+                return self._refuse_unreadable_spawn(rd, spec, alive, settled)
         if pending_finalize and spec.engine_policy is not EnginePolicy.NO_SPAWN:
             return "reject", _error(
                 "finalize_in_progress", f"cannot apply {event_type} while finalization is pending",
@@ -2536,7 +2549,27 @@ class RunCommandService:
             return "reject", _error(
                 "engine_finishing", "the engine is still completing its terminal write-out",
                 "retry after engine_running becomes false", retryable=True)
-        return "append", None
+        return self._refuse_unreadable_spawn(rd, spec, alive, ("append", None))
+
+    @staticmethod
+    def _refuse_unreadable_spawn(rd: Path, spec, alive: bool,
+                                 decided: tuple[str, Optional[dict]]) -> tuple[str, Optional[dict]]:
+        """Turn an admitted append/attach into a coded REJECT when the driver it starts would refuse
+        the run's config snapshot (`engine_proc.py::spawn_snapshot_refusal`).
+
+        Asked at BOTH decision points — `submit` and `_admit` — so the verdict is re-taken under the
+        sequencer immediately before the intent is appended, and a driver that died in between is
+        covered too. Only when `admission_spawns_driver`: a live engine already holds its settings,
+        and a bad snapshot must not block a pause, a hint or a budget extension to it."""
+        decision, _error_detail = decided
+        if decision not in {"append", "attach"} or not admission_spawns_driver(
+                spec.engine_policy, alive):
+            return decided
+        refused = spawn_snapshot_refusal(rd)
+        if refused is None:
+            return decided
+        return "reject", _error(refused["code"], refused["message"], refused["remediation"],
+                                retryable=bool(refused["retryable"]))
 
     def submit(self, rd: Path, idempotency_key: str, event_type: str, data,
                *, expected_generation: object = None) -> dict:

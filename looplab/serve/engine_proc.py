@@ -353,6 +353,66 @@ def _resolve_task_file(rd: Path) -> Optional[str]:
     return None
 
 
+# WHAT THE SPAWNED CHILD WOULD REFUSE, ANSWERED BEFORE THE SPAWN (review 2026-09-22, doc 66 §6
+# item 6 — the W2-2 tail). Every driver this server starts for an existing run is `looplab resume`
+# (or, for a finalize handoff on the legacy route, `looplab finalize`), and both read
+# `config.snapshot.json` STRICTLY: a key this build does not know, a newer format, or a damaged file
+# is refused at exit 2 (`core/config.py::CONFIG_SNAPSHOT_SCHEMA` states the policy). The server used
+# to find that out AFTER it had appended the intent and Popen'd the child — it saw a crashed process,
+# not a coded refusal, and the command monitor re-spawned the same doomed child until its deadline.
+# Admission now asks the SAME read first (`read_config_snapshot`, the function the child calls) and
+# refuses before any durable append. An ABSENT snapshot is deliberately not refused here: whether a
+# run may continue without one is the child's own rule (`resume` refuses, `finalize` grandfathers a
+# pre-snapshot run), and a run driven straight through `Engine(...)` has none.
+SPAWN_SNAPSHOT_REFUSAL_CODES = frozenset({"config_snapshot_incompatible", "config_snapshot_invalid"})
+_SPAWN_SNAPSHOT_MESSAGE_CHARS = 600
+
+
+def spawn_snapshot_refusal(rd: Path) -> Optional[dict]:
+    """The coded refusal a spawned resume/finalize child would raise on `rd`'s config snapshot, as
+    `{code, message, remediation, retryable}` — or None when the child would read it, or when there
+    is no snapshot (the child's decision, above). Never raises: an unexpected failure of the read is
+    a child that would fail too, so it refuses (`config_snapshot_invalid`) rather than admit."""
+    from looplab.core.config import ConfigSnapshotVersionError, read_config_snapshot
+    from looplab.core.redact import redact_secrets
+
+    snap = rd / "config.snapshot.json"
+    try:
+        if not snap.exists():
+            return None
+        read_config_snapshot(snap, refuse_unknown=True)
+    except ConfigSnapshotVersionError as exc:
+        # A NEWER format, a malformed format marker, or a key this build does not know
+        # (`ConfigSnapshotUnknownKeysError` is a subclass). Its text names only versions, the
+        # marker's value and key names — never a path — so it is the most useful thing to show,
+        # bounded and redacted because a key name is still the snapshot's own bytes.
+        return {
+            "code": "config_snapshot_incompatible",
+            "message": redact_secrets(str(exc))[:_SPAWN_SNAPSHOT_MESSAGE_CHARS],
+            "remediation": (
+                "This build will not continue a run whose recorded settings it cannot fully read. "
+                "Upgrade LoopLab to continue it — or, if the run's config.snapshot.json was edited "
+                "by hand (a mistyped key, a damaged `config_snapshot_schema`), correct the file — "
+                "then submit a new command."),
+            "retryable": False,
+        }
+    except Exception:  # noqa: BLE001 — the child would fail on it too; refuse, and never echo it
+        # Unreadable, not UTF-8 JSON, not an object, or values `Settings` refuses. The exception's
+        # own text is withheld on purpose: an `OSError` carries the host path, and a pydantic error
+        # echoes the offending value (`serve/http.py::refusal` states the same rule).
+        return {
+            "code": "config_snapshot_invalid",
+            "message": ("the run's config.snapshot.json cannot be loaded as this build's settings, "
+                        "so the resume driver the server would start could not read it either"),
+            "remediation": (
+                "Inspect config.snapshot.json in the run directory — `looplab resume <run dir>` "
+                "prints the exact error — and restore it from a backup or from another run of the "
+                "same task, then submit a new command."),
+            "retryable": False,
+        }
+    return None
+
+
 def _resume_request_mode(state) -> str:
     """Return the durable command attached to the latest unserved UI handoff."""
     return ("finalize"

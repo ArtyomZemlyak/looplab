@@ -425,6 +425,23 @@ most once per 0.25 s; the deadline's final look is always a fresh one.
 Each control type also has an explicit payload allowlist. Unknown fields and lossy coercions are
 rejected before append, so an ignored key cannot be persisted while the command reports success.
 
+**A driver the server could not start is refused before anything is written.** Every driver the
+server starts for an existing run is `looplab resume` (for a finalize handoff on the legacy route,
+`looplab finalize`), and both read `config.snapshot.json` strictly: a setting this build does not
+know, a newer snapshot format, or a damaged file ends them at exit 2 (the policy is in the
+[configuration guide](configuration.md)). So when admitting a command WILL start one — an
+engine-driving control with no live driver, or any `restart`, whose replacement owner is its whole
+point — the server first runs the child's own read (`core/config.py::read_config_snapshot`), at
+submission and again under the sequencer just before the append. A snapshot the child would refuse
+becomes a `rejected` record with nothing appended and no process started:
+`config_snapshot_incompatible` (upgrade LoopLab, or correct a hand-edited key) or
+`config_snapshot_invalid` (restore the file; the underlying error, which can carry a host path, is
+withheld). The legacy `POST /resume` answers the same refusal as a `409`. A live driver already
+holds its settings, so a bad snapshot never blocks a control it will serve, and a MISSING snapshot
+stays the child's decision (`resume` refuses one, `finalize` grandfathers a pre-snapshot run).
+Before 2026-09-23 the server learned this only from a crashed child, after the intent was durable,
+and its command monitor re-spawned the same doomed child until the deadline.
+
 Decision, event append, and driver start are serialized per run. A pre-`Popen` lease covers the gap
 before `engine.lock` appears. If a detached child remains cold past the observation deadline, the
 lease is quarantined until its lock appears or its PID is definitively dead; timeout alone cannot
