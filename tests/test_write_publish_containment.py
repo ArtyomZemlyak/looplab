@@ -14,6 +14,7 @@ import stat
 
 import pytest
 
+from _posix_gates import MODE_BITS
 from looplab.tools import write_tools
 from looplab.tools.write_tools import WriteTools
 
@@ -75,7 +76,7 @@ def test_the_defect_is_real_with_both_guards_off_the_write_lands_outside_the_roo
     # The reproduction the fix is measured against: a by-name publish and no ancestor re-check is
     # the shape the marker described, and the attack above really does redirect it.
     monkeypatch.setattr(write_tools, "_DESCRIPTOR_RELATIVE", False)
-    monkeypatch.setattr(write_tools, "_ancestors_are_plain", lambda root, directory: True)
+    monkeypatch.setattr(write_tools, "_ancestors_are_plain", lambda root, directory, **_kw: True)
     root, outside = _workspace(tmp_path)
     tools = WriteTools([root], mode="default", approver=_attack_approver(root, outside),
                        backup_dir=tmp_path / "bak")
@@ -114,24 +115,62 @@ def test_edit_delete_and_the_undo_restores_take_the_same_walk(tmp_path, monkeypa
     assert (root / "pkg.moved" / "mod.py").read_text(encoding="utf-8") == "a = 4\n"
 
 
-def test_a_write_through_the_walk_creates_missing_directories_and_keeps_the_mode(tmp_path):
+def _publish_path(monkeypatch, descriptor_relative):
+    if descriptor_relative and not write_tools._DESCRIPTOR_RELATIVE:
+        pytest.skip("this platform has no dir_fd; the by-name path is the one it gets")
+    monkeypatch.setattr(write_tools, "_DESCRIPTOR_RELATIVE", descriptor_relative)
+
+
+@pytest.mark.parametrize("descriptor_relative", [True, False],
+                         ids=["descriptor-relative", "by-name-with-ancestor-recheck"])
+def test_a_write_through_the_walk_creates_missing_directories(tmp_path, monkeypatch,
+                                                              descriptor_relative):
+    """Both publish paths create a missing directory. The by-name path (Windows: no `dir_fd`) ran
+    its ancestor re-check BEFORE its `mkdir`, so the missing component read as "no longer a plain
+    directory" and every write into a new subdirectory was refused — measured on the Windows CI leg
+    (run 35804658308, review 2026-09-22 round 2) as `(error: an ancestor of the target is no longer a
+    plain directory under the allowed root)` for exactly this call."""
+    _publish_path(monkeypatch, descriptor_relative)
     root = tmp_path / "root"
     root.mkdir()
     tools = WriteTools([root], mode="auto", backup_dir=tmp_path / "bak")
-    assert tools.execute("write_file", {"path": str(root / "new" / "deep" / "file.txt"), "content": "hi\n"}).startswith("(wrote")
+    result = tools.execute("write_file", {"path": str(root / "new" / "deep" / "file.txt"),
+                                          "content": "hi\n"})
+    assert result.startswith("(wrote"), result
     target = root / "new" / "deep" / "file.txt"
     assert target.read_text(encoding="utf-8") == "hi\n"
     assert (root / "new").is_dir() and not (root / "new").is_symlink()
-    os.chmod(target, 0o640)
-    assert tools.execute("write_file", {"path": str(root / "new" / "deep" / "file.txt"), "content": "again\n"}).startswith("(wrote")
-    assert stat.S_IMODE(target.stat().st_mode) == 0o640, "an existing file keeps its exact mode"
+    assert tools.execute("write_file", {"path": str(target), "content": "again\n"}).startswith("(wrote")
     assert target.read_text(encoding="utf-8") == "again\n"
     assert not any(p.name.startswith(".file.txt.assistant-") for p in target.parent.iterdir())
 
 
-def test_a_root_replaced_wholesale_is_refused_by_its_identity(tmp_path):
-    if not write_tools._DESCRIPTOR_RELATIVE:
-        pytest.skip("identity re-check rides on the descriptor path")
+@MODE_BITS
+@pytest.mark.parametrize("descriptor_relative", [True, False],
+                         ids=["descriptor-relative", "by-name-with-ancestor-recheck"])
+def test_an_existing_file_keeps_its_exact_mode(tmp_path, monkeypatch, descriptor_relative):
+    """0o640 is a mode Windows cannot express (its `chmod` sets only the read-only attribute), so
+    this half of the old combined test is gated by name; the directory half above runs everywhere."""
+    _publish_path(monkeypatch, descriptor_relative)
+    root = tmp_path / "root"
+    root.mkdir()
+    tools = WriteTools([root], mode="auto", backup_dir=tmp_path / "bak")
+    target = root / "new" / "deep" / "file.txt"
+    assert tools.execute("write_file", {"path": str(target), "content": "hi\n"}).startswith("(wrote")
+    os.chmod(target, 0o640)
+    assert tools.execute("write_file", {"path": str(target), "content": "again\n"}).startswith("(wrote")
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640, "an existing file keeps its exact mode"
+    assert target.read_text(encoding="utf-8") == "again\n"
+
+
+@pytest.mark.parametrize("descriptor_relative", [True, False],
+                         ids=["descriptor-relative", "by-name-with-ancestor-recheck"])
+def test_a_root_replaced_wholesale_is_refused_by_its_identity(tmp_path, monkeypatch,
+                                                             descriptor_relative):
+    """The by-name path used to skip this: its ancestor re-check walks BELOW the root, so a root
+    replaced by a fresh directory of the same name passed it (Windows CI run 35804658308 —
+    test_write_tools::test_a_failed_patch_rolls_back_through_the_approved_root)."""
+    _publish_path(monkeypatch, descriptor_relative)
     root = tmp_path / "root"
     root.mkdir()
     (root / "f.txt").write_text("x\n", encoding="utf-8")

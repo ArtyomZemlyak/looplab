@@ -1,6 +1,8 @@
 """WriteTools: path/secret/protect gating and the permission-mode behavior (deny / ask / inline)."""
 from __future__ import annotations
 
+import pytest
+
 from looplab.tools.write_tools import FileBackups, WriteTools
 
 ALLOW = lambda a: "allow_once"      # noqa: E731
@@ -311,16 +313,26 @@ def test_a_symlink_mode_inside_hunk_text_is_not_a_mode_line(tmp_path):
     assert symlink_paths(deleted) == []            # removing a link plants nothing
 
 
-def test_a_failed_patch_rolls_back_through_the_approved_root(tmp_path, monkeypatch):
+@pytest.mark.parametrize("descriptor_relative", [True, False],
+                         ids=["descriptor-relative", "by-name-with-ancestor-recheck"])
+def test_a_failed_patch_rolls_back_through_the_approved_root(tmp_path, monkeypatch,
+                                                             descriptor_relative):
     """The rollback of a patch that did not land re-published every snapshot BY NAME (no `root`),
     the one restore path in the class that skipped the descriptor walk every other publish takes
     since doc 52 row 27. Driven: the approved root is REPLACED (renamed away, a fresh directory
     at the same path) inside the patch's window; the by-name rollback wrote the pre-image into the
-    stranger's directory, the root-walk refuses on the root's identity."""
+    stranger's directory, the root-walk refuses on the root's identity.
+
+    And so must the by-name path, which is the ONLY path on a platform without `dir_fd`: on the
+    Windows CI leg (run 35804658308, review 2026-09-22 round 2) this rollback still wrote into the
+    replaced root, because the by-name re-check walks below the root and never looked at the root."""
     import shutil
 
     import looplab.tools.write_tools as wt
 
+    if descriptor_relative and not wt._DESCRIPTOR_RELATIVE:
+        pytest.skip("this platform has no dir_fd; the by-name path is the one it gets")
+    monkeypatch.setattr(wt, "_DESCRIPTOR_RELATIVE", descriptor_relative)
     root = tmp_path / "ws"
     (root / "sub").mkdir(parents=True)
     target = root / "sub" / "a.txt"

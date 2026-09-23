@@ -739,8 +739,11 @@ def _write_text_bytes(text: str) -> bytes:
 # were resolved. No pathname is resolved again after the proof. POSIX has every primitive; Windows
 # has no `dir_fd` at all, so there the by-name publish stays and `_ancestors_are_plain` re-checks
 # every component for a reparse point immediately before staging and again before the replace — a
-# narrower window, stated rather than papered over. The patch tool is outside this: it publishes
-# through `git apply`, which refuses a path beyond a symbolic link itself.
+# narrower window, stated rather than papered over — while `_root_is_the_approved_one` re-identifies
+# the root by name at the same two points and a missing component is created one proven-plain parent
+# at a time (both added 2026-09-23: the Windows CI leg had the by-name path refusing every write into
+# a new subdirectory and publishing into a replaced root). The patch tool is outside this: it
+# publishes through `git apply`, which refuses a path beyond a symbolic link itself.
 _DESCRIPTOR_RELATIVE = (
     {os.open, os.stat, os.mkdir, os.rename, os.unlink} <= os.supports_dir_fd
     and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY"))
@@ -818,9 +821,16 @@ def _exact_state_matches_at(dir_fd: int, name: str, state, mode) -> bool:
     return _valid_mode_for_state(state, mode) and current == state and current_mode == mode
 
 
-def _ancestors_are_plain(root: Path, directory: Path) -> bool:
+def _ancestors_are_plain(root: Path, directory: Path, *, create: bool = False) -> bool:
     """The by-name fallback's re-check: every component from `root` down to `directory` is a real
-    directory and not a reparse point, read with `lstat` immediately before the publish."""
+    directory and not a reparse point, read with `lstat` immediately before the publish.
+
+    `create` is the by-name form of `_open_directory_within(create=True)`: a MISSING component is
+    made, one at a time, only beneath a component this walk has just proved plain, and is then held
+    to the same test. Without it a write into a new subdirectory could never succeed where `dir_fd`
+    does not exist: the check ran before the `mkdir`, so the missing component read as "no longer a
+    plain directory" and every such write was refused on Windows (review 2026-09-22 round 2, Windows
+    CI run 35804658308 — test_write_publish_containment)."""
     try:
         relative = directory.relative_to(root)
     except ValueError:
@@ -830,11 +840,43 @@ def _ancestors_are_plain(root: Path, directory: Path) -> bool:
         current = current / part
         try:
             info = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            try:
+                os.mkdir(current, 0o777)
+            except FileExistsError:
+                pass
+            except OSError:
+                return False
+            try:
+                info = os.lstat(current)
+            except OSError:
+                return False
         except OSError:
             return False
         if is_reparse(info) or not stat.S_ISDIR(info.st_mode):
             return False
     return True
+
+
+def _root_is_the_approved_one(root: Path, root_identity) -> bool:
+    """The by-name fallback's half of the descriptor walk's first check: is `root` still the
+    directory whose `(st_dev, st_ino)` was captured when the roots were resolved?
+
+    `_ancestors_are_plain` walks BELOW the root and never looks at the root itself, so where there is
+    no `dir_fd` a root renamed away and replaced by a fresh directory of the same name passed every
+    check and received the publish — a failed patch's rollback wrote its pre-image into the
+    stranger's directory on the Windows CI leg (run 35804658308, review 2026-09-22 round 2 —
+    test_write_tools::test_a_failed_patch_rolls_back_through_the_approved_root). By name, so a swap
+    after this check is still a window, stated as the ancestor re-check's is; `None` (a root that did
+    not exist yet) has nothing to compare, exactly as on the descriptor path."""
+    if root_identity is None:
+        return True
+    try:
+        return same_file_entry(os.stat(root)) == tuple(root_identity)
+    except OSError:
+        return False
 
 
 def _publish_bytes(path: Path, payload: bytes, *, mode, expected_state, expected_mode,
@@ -879,8 +921,13 @@ def _publish_bytes(path: Path, payload: bytes, *, mode, expected_state, expected
                         pass
         finally:
             os.close(dir_fd)
-    if root is not None and not _ancestors_are_plain(root, path.parent):
-        raise OSError("an ancestor of the target is no longer a plain directory under the allowed root")
+    if root is not None:
+        root.mkdir(parents=True, exist_ok=True)       # as the descriptor walk's `create=True` does
+        if not _root_is_the_approved_one(root, root_identity):
+            raise OSError("the allowed root is not the directory it was when the roots were resolved")
+        if not _ancestors_are_plain(root, path.parent, create=True):
+            raise OSError(
+                "an ancestor of the target is no longer a plain directory under the allowed root")
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(temp_name)
     fd = None
@@ -900,6 +947,8 @@ def _publish_bytes(path: Path, payload: bytes, *, mode, expected_state, expected
         if expected_state is not None and not FileBackups._exact_state_matches(
                 path, expected_state, expected_mode):
             raise OSError("target changed during write staging")
+        if root is not None and not _root_is_the_approved_one(root, root_identity):
+            raise OSError("the allowed root is not the directory it was when the roots were resolved")
         if root is not None and not _ancestors_are_plain(root, path.parent):
             raise OSError("an ancestor of the target is no longer a plain directory under the allowed root")
         os.replace(temp, path)
@@ -931,6 +980,8 @@ def _unlink_within(root: Optional[Path], root_identity, path: Path) -> None:
         finally:
             os.close(dir_fd)
         return
+    if root is not None and not _root_is_the_approved_one(root, root_identity):
+        raise OSError("the allowed root is not the directory it was when the roots were resolved")
     if root is not None and not _ancestors_are_plain(root, path.parent):
         raise OSError("an ancestor of the target is no longer a plain directory under the allowed root")
     path.unlink()
