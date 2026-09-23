@@ -1151,39 +1151,13 @@ def _reset_blocking(
         srv, rd, receipt_path, receipt, operation_id=operation_id)
 
 
-async def durable_reset_run(
-        srv, run_id: str, request: Request, *,
-        spawn_engine: Callable[..., Optional[int]]) -> dict[str, Any]:
-    # An ABSENT body is "no options": every field here has a default, and the CLI/tests have always
-    # been allowed to POST nothing. A malformed one is still a 400.
-    body = await json_object(request, "reset body", absent_is_empty=True)
-    expected_generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
-    operation_id = body.get("operation_id")
-    # A BROWSER Replay must carry its own generation fence: the tab may be acting on a snapshot the
-    # run has already moved past, and 428 is what tells it to re-read and retry. A scripted caller —
-    # the CLI, operator tooling, a test client — has no stale snapshot to guard against and has always
-    # been allowed to omit the field; requiring it unconditionally 400'd every non-browser reset
-    # before any of the route's real work. Origin is the same browser signal the pre-split handler
-    # keyed on, and the 428/400/409 ladder below is the contract
-    # `test_browser_replay_requires_and_validates_generation` pins.
-    browser = bool(request.headers.get("origin"))
-    if expected_generation is None and browser:
-        raise HTTPException(428, "expected_generation is required for browser Replay")
-    if expected_generation is not None and (
-            not isinstance(expected_generation, str)
-            or _GENERATION_RE.fullmatch(expected_generation) is None):
-        raise HTTPException(400, "expected_generation must be a lowercase SHA-256 token")
-    # The durable operation id gets the same split, and a supplied one is validated either way. It
-    # exists so a caller whose request outcome became unknown can REJOIN that exact operation rather
-    # than start a second one against the same generation — which `reset_receipts_for_run` below
-    # rejects as `reset_operation_conflict`. A supplied id is honoured; an ABSENT one is DERIVED below
-    # from (run, generation) rather than rejected, so the generation fence still gets to answer first
-    # (a stale-tab Replay must read as 409 run_generation_changed, not 400 operation_id).
-    if operation_id is not None and (
-            not isinstance(operation_id, str)
-            or RUN_RESET_OPERATION_RE.fullmatch(operation_id) is None):
-        raise HTTPException(400, "operation_id must be a lowercase UUID")
+def _resolve_reset_target(
+        srv, run_id: str, *, expected_generation: Optional[str],
+        operation_id: Optional[str]) -> tuple[Path, str, str]:
+    """The run directory, generation and operation id one Replay acts on — read off the disk.
 
+    Moved verbatim out of `durable_reset_run` so it runs on a worker thread, not the event loop.
+    """
     root = srv.root.resolve()
     # The service-name reservation is this route's own (those entries are root-side files, not
     # runs); everything else — plain name, lstat, reparse, junction, directory, resolved identity,
@@ -1241,9 +1215,55 @@ async def durable_reset_run(
         # as `reset_operation_conflict`. The generation is part of the key, so the next Replay (of the
         # replacement generation) is a genuinely new operation with a new id.
         operation_id = str(uuid.uuid5(_RESET_OPERATION_NS, f"{run_id}\n{expected_generation}"))
-    return await anyio.to_thread.run_sync(lambda: _reset_blocking(
-        srv, rd, run_id=run_id, expected_generation=expected_generation,
-        operation_id=operation_id, spawn_engine=spawn_engine))
+    return rd, expected_generation, operation_id
+
+
+async def durable_reset_run(
+        srv, run_id: str, request: Request, *,
+        spawn_engine: Callable[..., Optional[int]]) -> dict[str, Any]:
+    # An ABSENT body is "no options": every field here has a default, and the CLI/tests have always
+    # been allowed to POST nothing. A malformed one is still a 400.
+    body = await json_object(request, "reset body", absent_is_empty=True)
+    expected_generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
+    operation_id = body.get("operation_id")
+    # A BROWSER Replay must carry its own generation fence: the tab may be acting on a snapshot the
+    # run has already moved past, and 428 is what tells it to re-read and retry. A scripted caller —
+    # the CLI, operator tooling, a test client — has no stale snapshot to guard against and has always
+    # been allowed to omit the field; requiring it unconditionally 400'd every non-browser reset
+    # before any of the route's real work. Origin is the same browser signal the pre-split handler
+    # keyed on, and the 428/400/409 ladder below is the contract
+    # `test_browser_replay_requires_and_validates_generation` pins.
+    browser = bool(request.headers.get("origin"))
+    if expected_generation is None and browser:
+        raise HTTPException(428, "expected_generation is required for browser Replay")
+    if expected_generation is not None and (
+            not isinstance(expected_generation, str)
+            or _GENERATION_RE.fullmatch(expected_generation) is None):
+        raise HTTPException(400, "expected_generation must be a lowercase SHA-256 token")
+    # The durable operation id gets the same split, and a supplied one is validated either way. It
+    # exists so a caller whose request outcome became unknown can REJOIN that exact operation rather
+    # than start a second one against the same generation — which `reset_receipts_for_run` below
+    # rejects as `reset_operation_conflict`. A supplied id is honoured; an ABSENT one is DERIVED below
+    # from (run, generation) rather than rejected, so the generation fence still gets to answer first
+    # (a stale-tab Replay must read as 409 run_generation_changed, not 400 operation_id).
+    if operation_id is not None and (
+            not isinstance(operation_id, str)
+            or RUN_RESET_OPERATION_RE.fullmatch(operation_id) is None):
+        raise HTTPException(400, "operation_id must be a lowercase UUID")
+
+    # EVERYTHING below the body's pure validation runs on ONE worker hop (review 2026-09-22, the
+    # on-loop filesystem census): resolving the root, `validate_run_child`'s lstat/reparse walk, the
+    # reset marker read and `run_generation`'s event-log scan all touch the disk, and on this `async
+    # def` route they ran on the loop every SSE stream shares — ahead of the hop that already carried
+    # `_reset_blocking`. The 428/400/409 ladder above is pure and stays where it answers first.
+    def _resolve_then_reset() -> dict[str, Any]:
+        rd, generation, op_id = _resolve_reset_target(
+            srv, run_id, expected_generation=expected_generation, operation_id=operation_id)
+        return _reset_blocking(
+            srv, rd, run_id=run_id, expected_generation=generation,
+            operation_id=op_id, spawn_engine=spawn_engine)
+
+    return await anyio.to_thread.run_sync(_resolve_then_reset)
 
 
 __all__ = ["durable_reset_run"]

@@ -84,8 +84,9 @@ def build_router(srv) -> APIRouter:
         # model; `llm_api_key` is never in ui_settings at all (secrets live in the secret store), so
         # that filter entry was dead; and skipping `srv.llm_settings` skipped its
         # `store.resolve_settings()`, so a key saved after server start works here too. `None`
-        # because a research brief belongs to no run yet.
-        s = srv.llm_settings(None)
+        # because a research brief belongs to no run yet. Read on a worker: the settings store and the
+        # secret store are files, and this is an `async def` route.
+        s = await anyio.to_thread.run_sync(srv.llm_settings, None)
         model = s.llm_model
         try:
             from looplab.core.llm import make_llm_client_for, resolve_llm_target
@@ -102,16 +103,19 @@ def build_router(srv) -> APIRouter:
             text = await anyio.to_thread.run_sync(lambda: client.complete_text(msgs))
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
             return {"ok": False, **safe_provider_failure(e), "model": model}
-        saved = None
-        if body.get("save"):
+        def _save():
             kd = srv.settings.load_ui_settings().get("knowledge_dir") or Settings().knowledge_dir
-            if kd:
-                d = Path(kd)
-                d.mkdir(parents=True, exist_ok=True)
-                slug = "".join(c if c.isalnum() else "-" for c in topic.lower())[:48].strip("-") or "topic"
-                fp = d / f"research-{slug}.md"
-                fp.write_text(f"# Research brief: {topic}\n\n{text}\n", encoding="utf-8")
-                saved = str(fp)
+            if not kd:
+                return None
+            d = Path(kd)
+            d.mkdir(parents=True, exist_ok=True)
+            slug = "".join(c if c.isalnum() else "-" for c in topic.lower())[:48].strip("-") or "topic"
+            fp = d / f"research-{slug}.md"
+            fp.write_text(f"# Research brief: {topic}\n\n{text}\n", encoding="utf-8")
+            return str(fp)
+
+        # The note is a file write (and a settings read) — on the worker, like the completion above.
+        saved = await anyio.to_thread.run_sync(_save) if body.get("save") else None
         return {"ok": True, "text": text, "model": model, "saved": saved}
 
     # ------------------------------------------------------------------ genesis (pre-run BOSS)
@@ -284,7 +288,9 @@ def build_router(srv) -> APIRouter:
          defaults) = await anyio.to_thread.run_sync(_assemble)
         from looplab.core.parse import parse_structured
         _soft = {"run_id": "", "task": {}, "task_file": "", "settings": {}, "rationale": "", "setup_steps": []}
-        gset = srv.llm_settings(None)   # carries the agent-loop limits (unlimited by default)
+        # Carries the agent-loop limits (unlimited by default); the settings and secret stores are
+        # files, so the read runs on a worker, not this `async def` route's loop.
+        gset = await anyio.to_thread.run_sync(srv.llm_settings, None)
         try:
             from looplab.core.llm import make_llm_client_for
             client = make_llm_client_for(

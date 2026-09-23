@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
+import anyio
+
 # The wire-protocol names this server shares with the TUI + React UI live in `serve/protocol.py`.
 # CONTROL_EVENTS and POLL_SECONDS are re-exported here (imported, not aliased) so the historical
 # `looplab.serve.server.CONTROL_EVENTS` import path keeps working for tests and callers.
@@ -582,7 +584,9 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
             review_token = request.headers.get(REVIEW_HEADER, "")
             if review_token:
                 try:
-                    review = reviews.resolve(review_token)
+                    # A file read per review-token request (`ReviewStore.resolve`): on a worker, not
+                    # the loop every SSE stream shares (review 2026-09-22, on-loop filesystem census).
+                    review = await anyio.to_thread.run_sync(reviews.resolve, review_token)
                 except ReviewError as exc:
                     code = 410 if exc.kind in {"expired", "revoked", "generation"} else 401
                     return _review_denial(str(exc), exc.kind, code)
@@ -642,7 +646,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                 _stamp_principal(request, LOCAL_PRINCIPAL)
                 return await call_next(request)
             try:
-                review = reviews.resolve(review_token)
+                review = await anyio.to_thread.run_sync(reviews.resolve, review_token)
             except ReviewError as exc:
                 code = 410 if exc.kind in {"expired", "revoked", "generation"} else 401
                 return _review_denial(str(exc), exc.kind, code)

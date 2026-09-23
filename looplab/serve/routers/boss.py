@@ -513,7 +513,7 @@ def build_router(srv) -> APIRouter:
         """Append ONE chat turn (the verbatim feed entry: role/content/trace or role/action/status)
         so it survives a remount/reload. Single writer (this server) + a synchronous fsync'd append
         per request serialize within the process, so no cross-process lock is needed here."""
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         turn = await json_object(request, "chat turn")
         turn = _sanitize_chat_turn(turn)
         path = rd / "chat.jsonl"
@@ -565,7 +565,7 @@ def build_router(srv) -> APIRouter:
         sends the turns to fold; we return a recap string (+ its token cost) which the UI appends as a
         durable `summary` turn and then sends to the boss IN PLACE OF those turns. Read-only + soft-fail
         offline — compaction is opt-in, so a missing model just leaves the chat uncompacted."""
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         body = await _json_object(request)
         msgs = body.get("messages") or []
         convo = "\n".join(f"{m.get('role')}: {m.get('content', '')}"
@@ -631,7 +631,7 @@ def build_router(srv) -> APIRouter:
         """Advisory chat grounded on a run (and optionally one experiment node). Read-only — it
         never appends events; it's a thinking aid. The UI keeps the history and posts the full
         message list each turn. Soft-fails offline so the panel degrades cleanly."""
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         body = await _json_object(request)
         msgs = body.get("messages") or []
         nid = body.get("node_id")
@@ -673,7 +673,7 @@ def build_router(srv) -> APIRouter:
         """Turn the chat discussion (or a free-form instruction) into a CONCRETE experiment idea
         (operator + params + rationale) the UI can drop straight into the inject-node dialog.
         Uses structured output so the result is a ready-to-run Idea. Soft-fails offline."""
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         body = await _json_object(request)
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
@@ -719,7 +719,7 @@ def build_router(srv) -> APIRouter:
         proxy's gateway timeout, so a slow model hands back {status:'running', job_id} the UI awaits
         via jobAwait instead of 504ing — a fast model still returns the plan inline within the wait,
         so the confirm-card flow downstream is unchanged."""
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         body = await _json_object(request)
         msgs = body.get("messages") or []
         nid = body.get("node_id")
@@ -864,7 +864,7 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(
                 400, "Idempotency-Key is required and must be at most 512 characters")
 
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         settings = None
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization, Idempotency-Key"

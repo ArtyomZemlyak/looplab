@@ -505,7 +505,7 @@ async def durable_derive_concept_lens(srv, run_id: str, request: Request, respon
     """
     from looplab.search.concept_lens import default_lenses
 
-    rd = srv.run_dir(run_id)
+    rd = await anyio.to_thread.run_sync(srv.run_dir, run_id)
     body = await lens_json_body(request)
     prompt_value = body.get("prompt")
     prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
@@ -826,7 +826,7 @@ async def durable_abandon_recovered_concept_lens(
     """Resolve one exactly identified orphan without possessing or replaying its paid key."""
     from looplab.search.concept_lens import default_lenses
 
-    rd = srv.run_dir(run_id)
+    rd = await anyio.to_thread.run_sync(srv.run_dir, run_id)
     body = await lens_json_body(request)
     expected_generation = body.get("expected_generation")
     if (not isinstance(expected_generation, str)
@@ -957,7 +957,7 @@ async def durable_abandon_concept_lens(srv, run_id: str, request: Request, respo
     client-visible docstring explaining why abandonment is operator-driven and never time-based."""
     from looplab.search.concept_lens import default_lenses
 
-    rd = srv.run_dir(run_id)
+    rd = await anyio.to_thread.run_sync(srv.run_dir, run_id)
     body = await lens_json_body(request)
     expected_generation = body.get("expected_generation")
     if (not isinstance(expected_generation, str)

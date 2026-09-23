@@ -262,7 +262,7 @@ def build_router(srv) -> APIRouter:
     # is still the open item above.
     @router.post("/api/runs/{run_id}/control", deprecated=True)
     async def control(run_id: str, request: Request, response: Response):
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         body = await json_object(request, "control body")
         # ANNOUNCED, not silently tolerated. A caller cannot discover a deprecation it is never told
         # about, and the paragraph above had been the entire notice — in a comment, where no client
@@ -360,7 +360,7 @@ def build_router(srv) -> APIRouter:
     )
     async def submit_command(run_id: str, request: Request, response: Response):
         _command_response_headers(response)
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         body = await json_object(request, "command body")
         idem = request.headers.get("Idempotency-Key", "")
         # submit() takes the run flock and folds the log — offload so it never blocks the event loop.
@@ -389,7 +389,7 @@ def build_router(srv) -> APIRouter:
         """Guarded operator recovery for an ownership claim that cannot be proven dead."""
         _command_response_headers(response)
         body = await json_object(request, "resolve-activity-claims body")
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         confirmation = str(body.get("confirmation") or "")
         return await anyio.to_thread.run_sync(
             lambda: srv.commands.resolve_active_claims(rd, confirmation))
@@ -506,13 +506,18 @@ def build_router(srv) -> APIRouter:
         """Operator recovery for a crash-window claim whose child identity cannot be proven."""
         _command_response_headers(response)
         body = await json_object(request, "resolve-claim body")
-        rd = (root / run_id).resolve()
-        if (rd == root or rd.parent != root or rd.name.lower() in _RESERVED_RUN_IDS
-                or rd.name.lower().startswith(_RESET_RECEIPT_PREFIX)):
-            raise HTTPException(400, "bad run_id")
         confirmation = str(body.get("confirmation") or "")
-        return await anyio.to_thread.run_sync(
-            lambda: srv.commands.resolve_spawn_claim(rd, confirmation))
+
+        def _resolve():
+            # `resolve()` walks the filesystem (a symlink per component), so it runs here, on the
+            # worker, with the claim resolution — not on the loop every SSE stream shares.
+            rd = (root / run_id).resolve()
+            if (rd == root or rd.parent != root or rd.name.lower() in _RESERVED_RUN_IDS
+                    or rd.name.lower().startswith(_RESET_RECEIPT_PREFIX)):
+                raise HTTPException(400, "bad run_id")
+            return srv.commands.resolve_spawn_claim(rd, confirmation)
+
+        return await anyio.to_thread.run_sync(_resolve)
 
     @router.get("/api/start/{run_id}/status")
     def start_status(run_id: str, request: Request, response: Response,
@@ -601,7 +606,8 @@ def build_router(srv) -> APIRouter:
         key = validate_idempotency_key(body.get("idempotency_key"))
         key_digest = idempotency_key_digest(key) if key else ""
         request_digest = launch_request_digest(body) if key else ""
-        rd = safe_run_dir(root, body.get("run_id"), check_conflict=False)
+        rd = await anyio.to_thread.run_sync(
+            lambda: safe_run_dir(root, body.get("run_id"), check_conflict=False))
 
         # Lost-response replay is resolved before rereading mutable sources/defaults or rejecting the
         # now-owned run name. The request digest contains effects, never the raw idempotency key.

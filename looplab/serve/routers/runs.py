@@ -3017,9 +3017,9 @@ def build_router(srv) -> APIRouter:
         applied (masked llm_api_key + any unknown keys preserved); the merged config is validated through
         `Settings()` so a bad value (e.g. n_seeds<1, timeout<=0, bad enum) is rejected 422 — with the
         offending field surfaced — instead of poisoning the next resume."""
-        rd = _run_dir(run_id)
+        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
         snap = rd / "config.snapshot.json"
-        if not snap.exists():
+        if not await anyio.to_thread.run_sync(snap.exists):
             raise HTTPException(404, "run has no config.snapshot.json (it predates self-describing runs)")
         body = await json_object(request)
         has_expected_revision = "expected_revision" in body
