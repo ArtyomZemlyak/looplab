@@ -59,7 +59,12 @@ def test_the_proxy_help_does_not_claim_a_ceiling_that_is_off():
         "the docstring claims a default the code does not have"
     )
     assert "DELTA_CEILING_DEFAULT = 0" in src, "premise: the ceiling is off by default"
-    assert "THE DEFAULT IS OFF" in head, (
+    # The subject is the module DOCSTRING, so the positive pin reads it rather than the file head,
+    # where any comment above `DELTA_CEILING_VALUE` satisfied it (review 2026-09-22, TST-05).
+    import ast
+
+    doc = ast.get_docstring(ast.parse(src), clean=False) or ""
+    assert "THE DEFAULT IS OFF" in doc, (
         "the docstring no longer states that the ceiling is off, so the next reader repeats the "
         "same investigation"
     )

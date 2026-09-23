@@ -76,12 +76,15 @@ def test_the_vector_store_is_still_unwired_or_its_docstring_is_now_wrong():
 
 
 def test_both_docstrings_name_the_other_so_neither_reads_as_the_live_one_alone():
-    text = (_PKG / "engine" / "memory.py").read_text(encoding="utf-8")
-    unwired = text.index("class CaseLibrary:")
-    live = text.index("class JsonlCaseLibrary:")
-    assert "UNWIRED" in text[unwired:unwired + 900]
-    assert "JsonlCaseLibrary" in text[unwired:unwired + 900]
-    assert "CaseLibrary` above" in text[live:live + 900]
+    """The subject is the two class DOCSTRINGS, so they are what is read — `__doc__`, not the 900
+    characters of file text after each `class` line, which any comment in that window satisfied
+    (review 2026-09-22, TST-05)."""
+    from looplab.engine.memory import CaseLibrary, JsonlCaseLibrary
+
+    unwired, live = CaseLibrary.__doc__ or "", JsonlCaseLibrary.__doc__ or ""
+    assert "UNWIRED" in unwired
+    assert "JsonlCaseLibrary" in unwired
+    assert "CaseLibrary` above" in live
 
 
 def _memory_dir_with_one_of_each(tmp_path, task_id: str, fingerprint: list[str]):

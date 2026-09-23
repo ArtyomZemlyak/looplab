@@ -24,10 +24,15 @@ import sweep_claims  # noqa: E402
 
 
 def test_the_quote_the_threshold_rests_on_is_still_in_the_source():
-    """Выдуманные цитаты — сверяй дословно. Уедет фраза — уедет и основание проверки."""
-    src = (REPO / "looplab" / "engine" / "proposal_cues.py").read_text(encoding="utf-8")
-    assert "Revisit if either grows past a few per cent." in src, "the revisit line is gone"
-    assert "2.4 % of spend between them" in src, "the recorded pair figure is gone"
+    """Выдуманные цитаты — сверяй дословно. Уедет фраза — уедет и основание проверки.
+
+    The quote is `_cue_llm_budget`'s DOCSTRING, so that docstring is what is read — the file's
+    whole text let any comment carry it (review 2026-09-22, TST-05)."""
+    from looplab.engine.proposal_cues import ProposalCuesMixin
+
+    doc = ProposalCuesMixin._cue_llm_budget.__doc__ or ""
+    assert "Revisit if either grows past a few per cent." in doc, "the revisit line is gone"
+    assert "2.4 % of spend between them" in doc, "the recorded pair figure is gone"
 
 
 def test_the_pair_is_added_up_and_compared_with_the_recorded_figure():

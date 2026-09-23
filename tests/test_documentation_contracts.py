@@ -328,8 +328,12 @@ def test_load_bearing_source_comments_match_current_identity_and_replay_contract
         "boss launches a run",
     ]
     assert not [claim for claim in stale_claims if claim in source]
-    novelty = (ROOT / "looplab/engine/novelty.py").read_text(encoding="utf-8")
-    assert "This is a behavioral admission decision" in novelty
+    # The one POSITIVE phrase is a docstring, so the docstring is what is read: anywhere in
+    # `novelty.py`'s text, a comment carrying the sentence satisfied it (review 2026-09-22, TST-05).
+    from looplab.engine.novelty import NoveltyGateMixin
+
+    assert "This is a behavioral admission decision" in (
+        NoveltyGateMixin._graded_novelty_precheck.__doc__ or "")
 
 
 def test_the_package_map_names_each_package_exactly_once():

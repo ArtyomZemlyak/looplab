@@ -89,7 +89,15 @@ def test_an_empty_box_is_refused_not_passed(tmp_path):
 
 def test_the_rule_is_still_worded_that_way_in_compare_arms():
     """Цитата сверена дословно. Если формулировка уйдёт из `compare_arms`, эта проверка защищает
-    правило, которого там больше нет."""
-    src = (BENCH / "algotune" / "compare_arms.py").read_text(encoding="utf-8")
-    assert "Every LoopLab node is\n    evaluated on TRAIN" in src, \
+    правило, которого там больше нет.
+
+    The quote lives in `_arm_b_final`'s DOCSTRING, so that docstring is what is read (raw, so its
+    line break and indentation are the quote's): the whole file's text let any comment carry it
+    (review 2026-09-22, TST-05)."""
+    import ast
+
+    tree = ast.parse((BENCH / "algotune" / "compare_arms.py").read_text(encoding="utf-8"))
+    doc = next(ast.get_docstring(node, clean=False) or "" for node in tree.body
+               if isinstance(node, ast.FunctionDef) and node.name == "_arm_b_final")
+    assert "Every LoopLab node is\n    evaluated on TRAIN" in doc, \
         "формулировка правила изменилась -- сверить заново, а не подгонять тест"
