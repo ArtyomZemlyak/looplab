@@ -201,7 +201,7 @@ def prompt_slot_key(s: str, cap: int = 80) -> str:
     return _NUMBER_RE.sub("#", normalize_statement(s))[:cap]
 
 def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
-                        parser: str = "tool_call", prompts=None) -> list[dict]:
+                        parser: str = "tool_call", prompts=None, memo=None) -> list[dict]:
     """Merge near-duplicate lessons and resolve contradictions — the write-path hygiene pass.
     Input: lessons in FILE ORDER (oldest first). For each (normalized statement, task_id) group:
     the NEWEST VERDICT-CARRYING entry wins (its outcome is the current verdict — forgetting the
@@ -216,7 +216,10 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
     'increase the learning rate'): per task_id, hybrid retrieval (lexical+BM25+vector) clusters
     candidates and the agent decides the true merges + a synthesized statement. Agreeing evidence is
     summed across the merged rows; a conflicting verdict never absorbs support. No client -> identical
-    to the old deterministic behavior (we never merge paraphrases on the blind signal alone)."""
+    to the old deterministic behavior (we never merge paraphrases on the blind signal alone).
+
+    `memo` (a `MergeVerdictMemo`, optional) is handed to the paraphrase pass so a cluster the model
+    already DECLINED is not bought again; `None` is the old pass exactly (review 2026-09-22, EK-09)."""
     groups: dict[tuple, list[dict]] = {}
     order: list[tuple] = []
     for o in lessons:
@@ -248,14 +251,97 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
         out.append(merged)
     if client is None or len(out) < 2:
         return out
-    return _agentic_merge_lessons(out, client=client, embed=embed, parser=parser, prompts=prompts)
+    return _agentic_merge_lessons(out, client=client, embed=embed, parser=parser, prompts=prompts,
+                                  **({} if memo is None else {"memo": memo}))
+
+
+#: Version of the merge-verdict KEY (`MergeVerdictMemo.key`). Bump it and every remembered verdict
+#: stops matching — which is the only safe response to a change in what the key covers.
+MERGE_VERDICT_KEY_VERSION = 1
+
+
+class MergeVerdictMemo:
+    """`(bucket, cluster question) -> DECLINED`, remembered across finalizes (review 2026-09-22, EK-09).
+
+    THE DEFECT. `_agentic_merge_lessons` re-clusters the WHOLE shared store at every finalize and
+    sends every multi-member cluster to the model. A cluster the model declined leaves no trace — the
+    store is rewritten only when something merged — so it is sent again at the next finalize of ANY
+    run, forever. Measured through the real `LessonMemory.consolidate_lessons_file` with a counting
+    client that declines everything: a store with N declined clusters costs N calls per finalize
+    (N = 1, 5, 20 -> 1/1/1, 5/5/5, 20/20/20 over three finalizes), whether the later run wrote to the
+    same task's bucket or another one. Scoping the pass to "buckets this run touched" was the
+    alternative the finding offered and the measurement refused it: repeated runs of ONE task — the
+    shape of every shared store here — touch the one bucket every declined cluster lives in, so it
+    saves nothing where the money is. The memo: N, 0, 0 in both shapes.
+
+    THE KEY IS THE QUESTION. `hybrid_merge.merge_request` is the exact messages the model would be
+    sent (the kind-aware system prompt with any `merge_system.md` override, every presented member),
+    digested with the bucket and `MERGE_VERDICT_KEY_VERSION`. So a CHANGED cluster — a member
+    joined, left or was reworded, which is what a later run's lesson does to the cluster it lands in
+    — is a different question and is asked; an unchanged one is not. The model is deliberately NOT
+    in the key, as it is not in `curation_protocol`'s `_portfolio_curation_key`: the question is the
+    same whoever answers it, and a portfolio alternating two models would otherwise re-buy every
+    cluster at every finalize, which is the defect again.
+
+    ONLY "DECLINED" IS REMEMBERED, and only when the model ANSWERED (`agent_merge`'s `receipt`). A
+    merge needs no memo: the rewrite consumes its cluster. A fail-open is not a verdict. And nothing
+    about the TEXT is stored — a row is a digest — so the store holds no lesson content a run's
+    deletion would have to chase.
+
+    `snapshot` is what the store held when the pass began, `fresh` what this pass declined, `live`
+    every declined key this pass consulted or minted — the set a compaction keeps
+    (`lessons.py::LessonMemory.persist_merge_verdicts`); `complete` is set only once every bucket
+    was walked, because a partial pass cannot say which remembered verdicts went stale.
+    """
+
+    def __init__(self, declined=()):
+        self.snapshot = frozenset(declined)
+        self.fresh: list[str] = []
+        self.live: set[str] = set()
+        self.complete = False
+
+    @staticmethod
+    def key(bucket, request) -> Optional[str]:
+        """The verdict key of one cluster question in one `(task_id, role)` bucket, or None when it
+        has no canonical form — an unkeyable question is asked, never guessed at."""
+        from looplab.core.jsonutil import canonical_json_digest
+        return canonical_json_digest({"v": MERGE_VERDICT_KEY_VERSION, "bucket": list(bucket),
+                                      "request": request})
+
+    def for_bucket(self, bucket) -> "_BucketMergeMemo":
+        return _BucketMergeMemo(self, tuple(bucket))
+
+
+class _BucketMergeMemo:
+    """The `hybrid_merge.consolidate` side of `MergeVerdictMemo`, bound to one bucket."""
+
+    def __init__(self, memo: MergeVerdictMemo, bucket: tuple):
+        self._memo = memo
+        self._bucket = bucket
+
+    def declined(self, request) -> bool:
+        key = MergeVerdictMemo.key(self._bucket, request)
+        if key is None or not (key in self._memo.snapshot or key in self._memo.live):
+            return False
+        self._memo.live.add(key)
+        return True
+
+    def decline(self, request) -> None:
+        key = MergeVerdictMemo.key(self._bucket, request)
+        if key is None or key in self._memo.live:
+            return
+        self._memo.live.add(key)
+        if key not in self._memo.snapshot:
+            self._memo.fresh.append(key)
+
 
 def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
-                           parser: str = "tool_call", prompts=None) -> list[dict]:
+                           parser: str = "tool_call", prompts=None, memo=None) -> list[dict]:
     """Second-pass paraphrase merge (hybrid retrieval + agent decision), per task_id, over already
     exact-deduped lesson rows. Best-effort: any failure returns `rows` unchanged. Order-preserving by
     each merged group's earliest row. `parser`/`prompts` reach the agent adjudication call (the
-    run's structured-output parser + any merge_system.md PromptStore override)."""
+    run's structured-output parser + any merge_system.md PromptStore override). `memo` (a
+    `MergeVerdictMemo`) spares a cluster the model already declined; see its docstring."""
     from looplab.search.hybrid_merge import consolidate
     # Cluster paraphrases within a (task, role) bucket — NOT across roles: the agent must never fold a
     # Researcher lesson into a Developer one (or vice versa), which `_verdict_base` below would then
@@ -271,8 +357,11 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
                 keep.append((idxs[0], rows[idxs[0]]))
                 continue
             texts = [str(rows[i].get("statement", "")) for i in idxs]
+            # The memo rides only when there is one, so `consolidate` is called with exactly the
+            # arguments it always was otherwise (its test doubles pin that signature).
             for g in consolidate(texts, client, kind="research lessons", embed=embed,
-                                 parser=parser, prompts=prompts):
+                                 parser=parser, prompts=prompts,
+                                 **({} if memo is None else {"memo": memo.for_bucket(_tid)})):
                 members = [idxs[j] for j in g["members"]]      # back to original rows indices
                 # Newest wins for non-statement fields — same base rule as the exact pass above
                 # (see `_verdict_base`): the newest KNOWN-verdict member carries the verdict.
@@ -291,6 +380,8 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
                     row["evidence_traceable_count"] = traceable
                     row["evidence_untraceable_count"] = omitted
                 keep.append((min(members), row))
+        if memo is not None:
+            memo.complete = True        # every bucket walked: `live` is now the whole live set
         keep.sort(key=lambda t: t[0])
         return [row for _i, row in keep]
     except BudgetExceeded:

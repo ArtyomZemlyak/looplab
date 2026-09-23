@@ -1,8 +1,8 @@
 """EVERY cross-run memory store, one row each: what lives under `memory_dir`, what one of its rows is
 keyed by, who writes it, and whether a run's deletion may take it (review 2026-09-22, ENG3-07).
 
-`memory_dir` holds sixteen JSONL stores, the `skills/` tree, an abstraction cache and the paid-
-curation claim receipts, and until this module NO module listed them. Five partial lists did, each
+`memory_dir` held sixteen JSONL stores when this landed, the `skills/` tree, an abstraction cache and
+the paid-curation claim receipts, and until this module NO module listed them. Five partial lists did, each
 for its own purpose, and each was complete only for that purpose: `governance_health` named seven
 ledgers (and the three governed sources a second time), `cross_run_context` the same three sources,
 `serve/memory_cascade.py` five cascaded stores and two preserved groups — and the literal
@@ -193,6 +193,14 @@ MEMORY_STORES: tuple[MemoryStore, ...] = (
         key="content hash of the abstracted text", names_run=False, group="abstraction_cache",
         reason="a content-addressed cache of model-written abstractions: no entry names a run",
         writer="tools/memora.py::CachedAbstractor._persist"),
+    # Review 2026-09-22, EK-09: the paraphrase pass's memory of what it asked and was told "no".
+    MemoryStore(
+        "lesson_merge_verdicts.jsonl", "merge verdicts", PRESERVED,
+        key="digest of one (task_id, role) bucket's cluster question", names_run=False,
+        group="merge_verdicts",
+        reason=("a content-addressed cache of declined lesson merges: a row is a digest, names no "
+                "run, and removing one costs one re-asked question"),
+        writer="engine/lessons.py::LessonMemory.persist_merge_verdicts"),
 )
 
 

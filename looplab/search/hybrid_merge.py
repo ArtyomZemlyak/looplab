@@ -197,38 +197,58 @@ _MERGE_SYSTEM = (
     "When in doubt, DON'T merge (a wrong merge loses information).")
 
 
+def merge_request(items: list[str], *, kind: str = "items", goal: str = "",
+                  prompts=None) -> list[dict]:
+    """The exact messages `agent_merge` sends for `items` — the one spelling of the QUESTION.
+
+    Moved verbatim out of `agent_merge` (review 2026-09-22, EK-09) so that a caller memoizing the
+    ANSWER keys it on what was actually asked: the kind-aware system prompt with any
+    `merge_system.md` override, the goal, and every presented item as presented (clipped to 600
+    characters, in cluster order). A changed item, a changed override or a changed kind is a changed
+    question, and a memo keyed on it asks again. Raises what `render` raises; `agent_merge` calls it
+    inside its fail-open handler, exactly where these lines used to sit."""
+    from looplab.core.prompts import render
+    blocks = "\n".join(f"[{i}] {c[:600]}" for i, c in enumerate(items))
+    # Kind-aware synthesis rule: hypothesis statements legitimately carry decisive values
+    # (thresholds, LRs) a merge must keep, but LESSON statements are deliberately number-free —
+    # engine.lessons prompts for GENERALIZABLE findings ("NOT these exact numbers") — so telling
+    # the merger to preserve numbers there would fight the reflection contract and re-inject
+    # per-run specifics into cross-run memory. The hypothesis wording is the pre-existing text.
+    detail = ("caveats and scope qualifiers (lesson statements are deliberately number-free)"
+              if "lesson" in (kind or "").lower() else
+              "every specific detail — thresholds, numbers, caveats —")
+    sysmsg = render(prompts, "merge_system", _MERGE_SYSTEM, kind=kind, detail=detail)
+    # Back-compat: the pre-$var contract substituted a literal `{kind}` AFTER the render, so
+    # existing merge_system.md overrides written with `{kind}` placeholders must keep working.
+    # A no-op on the new $kind default (already substituted by render above).
+    sysmsg = sysmsg.replace("{kind}", kind)
+    user = ((f"Goal context: {goal}\n\n" if goal else "")
+            + f"Candidate {kind} (decide which indices are the SAME):\n" + blocks)
+    return [{"role": "system", "content": sysmsg}, {"role": "user", "content": user}]
+
+
 def agent_merge(client, items: list[str], *, kind: str = "items", goal: str = "",
-                parser: str = "tool_call", prompts=None) -> list[dict]:
+                parser: str = "tool_call", prompts=None,
+                receipt: Optional[dict] = None) -> list[dict]:
     """Let the agent make the FINAL merge decision over `items` (a candidate near-duplicate cluster
     surfaced by hybrid retrieval). Returns a partition as a list of groups
     `[{"members": [i, ...], "merged": <text>}]` covering EVERY index EXACTLY once — genuinely-merged
     groups carry the agent's synthesized text; everything else comes back as a singleton whose
     `merged` is its own original text. Fail-open: no client / <2 items / any error -> all singletons
-    (nothing merged, no information lost). Never raises."""
+    (nothing merged, no information lost). Never raises.
+
+    `receipt` (optional, a dict the caller owns) gets `answered: True` only when the model's plan
+    was actually obtained. All-singletons is TWO different facts — "the model looked and merged
+    nothing" and "the call failed open" — and only the first is a VERDICT a caller may remember;
+    remembering the second would turn one transient provider error into a permanent refusal to ask
+    (review 2026-09-22, EK-09). Absent, nothing is recorded and the call is byte-identical."""
     n = len(items)
     singletons = [{"members": [i], "merged": items[i]} for i in range(n)]
     if client is None or n < 2:
         return singletons
     try:
-        from looplab.core.prompts import render
         from looplab.agents.agent import agentic_struct
-        blocks = "\n".join(f"[{i}] {c[:600]}" for i, c in enumerate(items))
-        # Kind-aware synthesis rule: hypothesis statements legitimately carry decisive values
-        # (thresholds, LRs) a merge must keep, but LESSON statements are deliberately number-free —
-        # engine.lessons prompts for GENERALIZABLE findings ("NOT these exact numbers") — so telling
-        # the merger to preserve numbers there would fight the reflection contract and re-inject
-        # per-run specifics into cross-run memory. The hypothesis wording is the pre-existing text.
-        detail = ("caveats and scope qualifiers (lesson statements are deliberately number-free)"
-                  if "lesson" in (kind or "").lower() else
-                  "every specific detail — thresholds, numbers, caveats —")
-        sysmsg = render(prompts, "merge_system", _MERGE_SYSTEM, kind=kind, detail=detail)
-        # Back-compat: the pre-$var contract substituted a literal `{kind}` AFTER the render, so
-        # existing merge_system.md overrides written with `{kind}` placeholders must keep working.
-        # A no-op on the new $kind default (already substituted by render above).
-        sysmsg = sysmsg.replace("{kind}", kind)
-        user = ((f"Goal context: {goal}\n\n" if goal else "")
-                + f"Candidate {kind} (decide which indices are the SAME):\n" + blocks)
-        msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": user}]
+        msgs = merge_request(items, kind=kind, goal=goal, prompts=prompts)
         # AGENTIC upgrade of the adjudication call: were a run/tools threaded in, the adjudicator
         # could READ the real candidate experiments before deciding. This is a shared utility that
         # only ever receives the candidate TEXTS (no RunState/tools), so there is nothing extra to
@@ -242,6 +262,8 @@ def agent_merge(client, items: list[str], *, kind: str = "items", goal: str = ""
         raise
     except Exception:  # noqa: BLE001 — advisory: a merge failure must never lose or corrupt data
         return singletons
+    if receipt is not None:
+        receipt["answered"] = True
     # Rebuild a clean partition: honor only VALID, DISJOINT groups of >=2; every unclaimed index stays
     # a singleton. This repairs a model that double-claims an index, references out-of-range, or drops
     # some — so downstream never sees an item vanish or appear twice.
@@ -262,7 +284,7 @@ def agent_merge(client, items: list[str], *, kind: str = "items", goal: str = ""
 
 def consolidate(texts: list[str], client=None, *, kind: str = "items",
                 embed: Optional[Callable[[str], Vector]] = None, cluster_k: int = 6,
-                goal: str = "", parser: str = "tool_call", prompts=None) -> list[dict]:
+                goal: str = "", parser: str = "tool_call", prompts=None, memo=None) -> list[dict]:
     """One-call hybrid + agent consolidation over `texts`. Hybrid-cluster candidate near-duplicates
     (recall), then the agent adjudicates each multi-item cluster (precision + synthesis). Returns
     groups `[{"members": [orig_idx, ...], "merged": <text>}]` covering EVERY index exactly once.
@@ -272,7 +294,14 @@ def consolidate(texts: list[str], client=None, *, kind: str = "items",
 
     No client (or <2 texts) -> every item is its own singleton: we NEVER merge on the blind retrieval
     signal alone — the agent is the decider — so an offline/degraded run loses nothing. Callers keep
-    any deterministic exact-dedup as a base and layer this on top for paraphrase-level merges."""
+    any deterministic exact-dedup as a base and layer this on top for paraphrase-level merges.
+
+    `memo` (optional): an object answering `declined(request) -> bool` and `decline(request)`, keyed
+    on `merge_request`'s exact messages. A cluster whose question the memo already saw DECLINED comes
+    back as singletons with no provider call; a cluster the model answers with no merge is reported
+    to it. Only an ANSWERED "no merge" is reported (`agent_merge`'s `receipt`) — a fail-open is not a
+    verdict. `None`, the default and every caller before review 2026-09-22 (EK-09), is the old path
+    byte for byte: `agent_merge` is called with exactly the arguments it always was."""
     n = len(texts)
     if n <= 1 or client is None:
         return [{"members": [i], "merged": texts[i]} for i in range(n)]
@@ -281,8 +310,44 @@ def consolidate(texts: list[str], client=None, *, kind: str = "items",
         if len(cl) < 2:
             out.append({"members": list(cl), "merged": texts[cl[0]]})
             continue
-        for g in agent_merge(client, [texts[i] for i in cl], kind=kind, goal=goal,
-                             parser=parser, prompts=prompts):
+        items = [texts[i] for i in cl]
+        if memo is None:
+            groups = agent_merge(client, items, kind=kind, goal=goal,
+                                 parser=parser, prompts=prompts)
+        else:
+            groups = _memoized_agent_merge(memo, client, items, kind=kind, goal=goal,
+                                           parser=parser, prompts=prompts)
+        for g in groups:
             out.append({"members": [cl[j] for j in g["members"]], "merged": g["merged"]})
     out.sort(key=lambda grp: grp["members"][0])
     return out
+
+
+def _memoized_agent_merge(memo, client, items: list[str], *, kind: str, goal: str, parser: str,
+                          prompts) -> list[dict]:
+    """`agent_merge` behind a verdict memo: a question already DECLINED is not bought again.
+
+    WHY (review 2026-09-22, EK-09, measured through the real `consolidate_lessons_file` with a
+    counting client that declines every cluster): a lesson store holding N declined paraphrase
+    clusters cost N paid calls at EVERY finalize — 1/1/1, 5/5/5 and 20/20/20 over three finalizes
+    for N = 1, 5, 20 — because the pass re-clusters the whole store and a declined cluster leaves no
+    record (the store is rewritten only when something merged). With the memo: N, 0, 0.
+
+    The key is the QUESTION (`merge_request`), so a cluster that gained a member, lost one, or was
+    reworded is a different question and is asked; so is any cluster after a `merge_system.md`
+    change. An unkeyable request (no canonical form) is simply asked, as before — and so is one that
+    could not be rendered here (`PromptStore.get` already absorbs an unreadable override, so only a
+    foreign store gets that far): `agent_merge` renders it again inside its own fail-open handler."""
+    try:
+        request = merge_request(items, kind=kind, goal=goal, prompts=prompts)
+    except (OSError, ValueError, TypeError, KeyError):
+        request = None
+    if request is not None and memo.declined(request):
+        return [{"members": [i], "merged": text} for i, text in enumerate(items)]
+    receipt: dict = {}
+    groups = agent_merge(client, items, kind=kind, goal=goal, parser=parser, prompts=prompts,
+                         receipt=receipt)
+    if (request is not None and receipt.get("answered")
+            and all(len(g["members"]) == 1 for g in groups)):
+        memo.decline(request)
+    return groups

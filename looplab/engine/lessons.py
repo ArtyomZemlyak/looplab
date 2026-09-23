@@ -64,6 +64,14 @@ from looplab.events.types import (
 if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestrator
     from looplab.engine.orchestrator import Engine
 
+# The paraphrase pass's DECLINED-cluster memo, beside the lessons store it spares (review 2026-09-22,
+# EK-09; `lesson_hygiene.py::MergeVerdictMemo`). A content-addressed cache: a row is a digest of one
+# cluster question and names no run, so a run's deletion has nothing in it to take.
+LESSON_MERGE_VERDICTS = "lesson_merge_verdicts.jsonl"
+# Compaction bound of that memo — the lessons store's own `compact_lessons(max_lines=4000)`, since a
+# store held near 2,000 rows cannot have 4,000 live clusters (a cluster has at least two members).
+MERGE_VERDICTS_MAX_ROWS = 4000
+
 
 class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                    CurationProtocolMixin):
@@ -440,7 +448,14 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         re-acquire and compare-and-swap. If any writer touched the store while we were waiting on the
         model, the rewrite is DROPPED — applying a stale snapshot would erase their append, which is
         exactly the loss the lock exists to prevent. Hygiene is best-effort and cadence-driven, so a
-        skipped round costs nothing: the next one merges the combined file."""
+        skipped round costs nothing: the next one merges the combined file.
+
+        A cluster the paid pass DECLINED is remembered in `lesson_merge_verdicts.jsonl` beside the
+        store and not bought again until it changes (review 2026-09-22, EK-09 — the measurement is in
+        `lesson_hygiene.py::MergeVerdictMemo`). The memo is persisted in a `finally`, so verdicts the
+        model gave before a spend ceiling are kept rather than re-bought; a memo that cannot be read
+        or written costs exactly the old behaviour."""
+        memo = LessonMemory.load_merge_verdicts(path.parent) if client is not None else None
         try:
             from looplab.engine.claims import (load_claim_source_path,
                                                _valid_claim_source_row)
@@ -452,7 +467,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 before = LessonMemory.lessons_file_token(path)
                 rows = load_claim_source_path(path, research=False)
             merged = consolidate_lessons(rows, client=client, embed=embed,   # unlocked: may be paid
-                                         parser=parser, prompts=prompts)
+                                         parser=parser, prompts=prompts,
+                                         **({} if memo is None else {"memo": memo}))
             if len(merged) >= len(rows):
                 return
             with interprocess_lock(lock_path, required=True):
@@ -471,6 +487,77 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             raise
         except Exception:  # noqa: BLE001 — hygiene is best-effort: a failure leaves the store as the append left it
             pass
+        finally:
+            if memo is not None:
+                LessonMemory.persist_merge_verdicts(path.parent, memo)
+
+    @staticmethod
+    def merge_verdict_keys(path: Path) -> list[str]:
+        """The DECLINED cluster keys `lesson_merge_verdicts.jsonl` holds, oldest first, deduplicated.
+
+        Lenient and total, like every reader of a shared cache: an unreadable file, a torn line, a
+        future row version or a malformed key reads as "not remembered", which costs one re-ask and
+        can never suppress one."""
+        from looplab.core.jsonutil import valid_digest_ref
+        from looplab.events.eventstore import read_jsonl_lenient
+        try:
+            rows = read_jsonl_lenient(path, dicts_only=True)
+        except (OSError, ValueError):
+            return []
+        keys = (row.get("key") for row in rows
+                if row.get("v") == 1 and row.get("verdict") == "declined")
+        return list(dict.fromkeys(key for key in keys if valid_digest_ref(key)))
+
+    @staticmethod
+    def load_merge_verdicts(memory_dir):
+        """The `MergeVerdictMemo` a hygiene pass starts from: what the store remembers declining."""
+        from looplab.engine.lesson_hygiene import MergeVerdictMemo
+        return MergeVerdictMemo(LessonMemory.merge_verdict_keys(
+            Path(memory_dir) / LESSON_MERGE_VERDICTS))
+
+    @staticmethod
+    def persist_merge_verdicts(memory_dir, memo) -> None:
+        """Append what this pass DECLINED to `lesson_merge_verdicts.jsonl`; compact a complete pass.
+
+        APPEND-ONLY by default, under the store's own lock with `required=True` like every sibling
+        write: only keys the file does not already hold are added, so an unchanged store appends
+        nothing. A key goes stale when its cluster changes (the new question gets a new key), so the
+        file is COMPACTED once it passes `MERGE_VERDICTS_MAX_ROWS` — and only after a COMPLETE pass,
+        which walked every bucket and therefore knows the whole live set: kept are the keys this pass
+        consulted or minted, plus any key a concurrent writer added since this pass read the file
+        (not in its snapshot, so not this pass's to judge). The compaction bound is the lessons
+        store's own: `compact_lessons` holds that store near 2,000 rows, so its live clusters are
+        fewer than the cap and a compaction can only ever drop stale keys.
+
+        Best-effort and contained: the memo is a cache, and a cache that cannot be written costs one
+        re-ask at the next finalize — the behaviour before it existed — never a failed finalize."""
+        compact = memo.complete and len(memo.snapshot) + len(memo.fresh) > MERGE_VERDICTS_MAX_ROWS
+        if not memo.fresh and not compact:
+            return
+        try:
+            from looplab.events.eventstore import interprocess_lock, write_jsonl_atomic
+            path = Path(memory_dir) / LESSON_MERGE_VERDICTS
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            def _row(key: str) -> dict:
+                return {"v": 1, "key": key, "verdict": "declined"}
+
+            with interprocess_lock(Path(str(path) + ".lock"), required=True):
+                held = LessonMemory.merge_verdict_keys(path)
+                present = set(held)
+                new = [key for key in dict.fromkeys(memo.fresh) if key not in present]
+                if memo.complete and len(held) + len(new) > MERGE_VERDICTS_MAX_ROWS:
+                    kept = [key for key in held if key in memo.live or key not in memo.snapshot]
+                    write_jsonl_atomic(path, [_row(key) for key in dict.fromkeys(kept + new)])
+                elif new:
+                    append_jsonl_bytes_locked(
+                        path, b"".join(orjson.dumps(_row(key)) + b"\n" for key in new))
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            # A cache write never fails hygiene: the cost is one re-ask at the next finalize. Named
+            # rather than blind — the lock's `EventStoreLockError` is a RuntimeError, and nothing in
+            # this block calls a model, so there is no spend stop to let through.
+            from looplab.core.containment import contain
+            contain("lesson merge-verdict memo write", exc)
 
     @staticmethod
     def compact_lessons(path: Path, max_lines: int = 4000, keep: int = 2000) -> None:
