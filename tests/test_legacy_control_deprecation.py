@@ -19,6 +19,7 @@ makes a `DECLINED[…]` marker here carry a number rather than a plausible sente
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
@@ -131,6 +132,67 @@ def test_a_missing_user_agent_is_named_not_dropped(tmp_path):
     """"unknown" and "nobody called" are different facts."""
     control_router._note_legacy_control_caller("pause", "")
     assert control_router.legacy_control_callers()["pause"]["unknown"] == 1
+
+
+def _legacy_warnings(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records
+            if record.name == "looplab.server" and record.levelno == logging.WARNING
+            and "/control" in record.getMessage()]
+
+
+def test_each_NEW_caller_is_said_once_at_WARNING_where_an_operator_reads(tmp_path, caplog):
+    """The retirement criterion is "no agent but the suite's own client still calls this", and the
+    tally that answers it is process-local with NO production reader — nothing serves it and nothing
+    logs it, so on a real deployment the criterion could not be observed at all (review 2026-09-22,
+    SRV1-07). Each NEW (type, User-Agent) pair is now said once, at WARNING, in the server log.
+
+    MUTATION: drop the log -> zero lines, the criterion is unobservable again; log on every append
+    -> the repeat below makes four lines, and a busy legacy client floods the log it is read from."""
+    _run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="looplab.server"):
+        _post(client, headers={"User-Agent": "looplab-tui/1"})
+        _post(client, headers={"User-Agent": "looplab-tui/1"})          # the same pair: said already
+        _post(client, headers={"User-Agent": "curl/8"})                 # a new agent
+        _post(client, body={"type": "resume", "data": {}},
+              headers={"User-Agent": "curl/8"})                         # a new type for that agent
+
+    lines = _legacy_warnings(caplog)
+    assert len(lines) == 3, lines
+    assert "'pause'" in lines[0] and "'looplab-tui/1'" in lines[0]
+    assert "'pause'" in lines[1] and "'curl/8'" in lines[1]
+    assert "'resume'" in lines[2] and "'curl/8'" in lines[2]
+    # Actionable, not just loud: every line names the successor a migrating client moves to.
+    assert all("/commands" in line and "Idempotency-Key" in line for line in lines), lines
+
+
+def test_a_refused_call_is_not_said_and_an_agent_cannot_forge_a_log_line(tmp_path, caplog):
+    """A refused append is not a migration blocker (it is not counted either), and the User-Agent is
+    the caller's own claim: it is rendered as a quoted literal, so a newline in it cannot start a
+    forged line of its own in the operator's log."""
+    _run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="looplab.server"):
+        refused = _post(client, body={"type": "not_a_control_event", "data": {}})
+        assert refused.status_code == 400
+        assert _legacy_warnings(caplog) == []
+        control_router._note_legacy_control_caller("pause", "evil\nERROR forged line")
+
+    (line,) = _legacy_warnings(caplog)
+    assert "\n" not in line and "evil\\nERROR forged line" in line, line
+
+
+def test_the_overflow_bucket_is_said_once_not_per_agent(tmp_path, caplog):
+    """The map is bounded at `_LEGACY_CONTROL_MAX_AGENTS` agents per type plus one `(other)` bucket,
+    and the log is bounded by the map: a caller rotating its User-Agent gets ONE more line, for the
+    bucket, however many agents it invents."""
+    with caplog.at_level(logging.WARNING, logger="looplab.server"):
+        for i in range(control_router._LEGACY_CONTROL_MAX_AGENTS + 5):
+            control_router._note_legacy_control_caller("pause", f"agent-{i}")
+
+    lines = _legacy_warnings(caplog)
+    assert len(lines) == control_router._LEGACY_CONTROL_MAX_AGENTS + 1, len(lines)
+    assert "'(other)'" in lines[-1]
 
 
 def test_the_fenced_commands_route_carries_no_deprecation(tmp_path):

@@ -3,6 +3,7 @@ processes. Handler bodies are verbatim moves from `serve/server.py::make_app` (B
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -151,22 +152,41 @@ def _command_responses(description: str) -> dict[int, dict[str, Any]]:
 # NOT AN EVENT, deliberately. This measures the SERVER's clients over its lifetime, not a run's
 # history, and a durable row per legacy call would put that history into the very log this route is
 # criticised for appending to unfenced.
+#
+# SAID ONCE PER NEW (type, User-Agent) PAIR, at WARNING, in the server log (review 2026-09-22,
+# SRV1-07). The retirement criterion reads this tally ("zero for every agent that is not the suite's
+# own client"), and until then nothing in production read it — no route serves it and nothing
+# logged it — so on a real deployment that criterion could not be observed at all. The log is the
+# channel an operator already reads, and it is bounded by the map it mirrors: one line per pair the
+# map admits, one more for a type's `(other)` bucket, never one per call.
 _LEGACY_CONTROL_MAX_AGENTS = 32
 _LEGACY_CONTROL_AGENT_CHARS = 120
 _legacy_control_callers: dict[str, dict[str, int]] = {}
 _legacy_control_lock = threading.Lock()
+_log = logging.getLogger("looplab.server")
 
 
 def _note_legacy_control_caller(event_type: str, user_agent: str) -> None:
-    """Record one SUCCESSFUL legacy control append. Never raises."""
+    """Record one SUCCESSFUL legacy control append, and say a NEW (type, agent) pair once. Never
+    raises."""
     agent = (user_agent or "unknown").strip()[:_LEGACY_CONTROL_AGENT_CHARS] or "unknown"
+    etype = event_type or "unknown"
     with _legacy_control_lock:
-        agents = _legacy_control_callers.setdefault(event_type or "unknown", {})
+        agents = _legacy_control_callers.setdefault(etype, {})
         if agent not in agents and len(agents) >= _LEGACY_CONTROL_MAX_AGENTS:
             # A caller that varies its User-Agent per request must not grow this map without bound.
             # The overflow bucket keeps the COUNT honest while dropping the distinction.
             agent = "(other)"
+        first = agent not in agents
         agents[agent] = agents.get(agent, 0) + 1
+    if first:
+        # `%r`, not `%s`: the User-Agent is the caller's own claim, and a quoted literal is what stops
+        # a newline in it from starting a forged line of its own in the operator's log.
+        _log.warning(
+            "legacy POST /api/runs/{run}/control: first %r append from User-Agent %r since this "
+            "server started. The route is deprecated (no durable request identity: a retried POST "
+            "re-appends); port this client to POST /api/runs/{run}/commands with an "
+            "Idempotency-Key and the run's expected_generation.", etype, agent)
 
 
 def legacy_control_callers() -> dict[str, dict[str, int]]:
@@ -212,32 +232,39 @@ def build_router(srv) -> APIRouter:
     # queue another PAID unit of work. `/commands` is the fenced path and is what both first-party
     # clients use (ui/src/api.js, tui_api.py). Requiring `expected_seq` for those types was tried and
     # reverted: it is the correct end state but breaks the contract this route exists to preserve
-    # (41 call sites in the suite alone append here unfenced), so it needs a deprecation window with a
-    # warning header and a migration note — not a silent 409.
+    # (the suite's own call sites, counted below, append here unfenced), so it needs a deprecation
+    # window with a warning header and a migration note — not a silent 409.
     # OPEN[legacy-control-route-is-not-retired] the route still exists and the suite still speaks
-    # it unfenced, which is the reason a silent 409 is not the fix. It now ANNOUNCES its
-    # deprecation (headers below) and COUNTS its callers (`legacy_control_callers`), so the port to
-    # `/commands` is schedulable and its progress readable; what is open is doing it and deleting
-    # the route.
+    # it unfenced, which is the reason a silent 409 is not the fix. It ANNOUNCES its deprecation
+    # (the headers below, and `deprecated=True` in OpenAPI), COUNTS its callers
+    # (`legacy_control_callers`) and SAYS each new (type, User-Agent) pair once at WARNING, so the
+    # port to `/commands` is schedulable and its progress readable on a real deployment; what is
+    # open is doing it and deleting the route.
     # proof:`present:async def control(@looplab/serve/routers/control.py`
     #
-    # WHAT BLOCKS IT, stated so the next pass does not re-derive it (re-measured 2026-09-08). The
-    # port is NOT a URL rewrite, because `/commands` is a different contract in four ways and each
-    # one retires an assertion the suite currently makes:
+    # WHAT BLOCKS IT, re-measured 2026-09-23 (review 2026-09-22, SRV1-07 found two of the four
+    # 2026-09-08 blockers false). The port is NOT a URL rewrite: `/commands` is a different contract
+    # in four ways, and each one retires an assertion the suite currently makes:
     #   1. `Idempotency-Key` is REQUIRED — `run_commands.py::RunCommandService.submit` raises 400
     #      without one — so every ported site must mint and manage a key, and a site that drives the
     #      SAME intent twice (the pause/resume pairs) must mint two or get a replay of the first.
     #   2. `expected_generation` is MANDATORY and strict (`_normalize_expected_generation` 400s on
-    #      anything but 64 hex), so a ported site must first read `/state` for a token this route
-    #      never asked for. There is NO `expected_seq` equivalent: the ~17 `test_fork_from_seq`
-    #      sites CAS on an exact event-log TAIL, and a generation fence answers a different
-    #      question ("is this the same run?" rather than "is this the same tail?"). Either those
-    #      sites lose their CAS or `/commands` grows a tail precondition — an unmade decision.
+    #      anything but 64 hex), so a ported site first reads a token this route never asked for
+    #      (`tests/factories.py::http_run_generation`, or `log_run_generation` off the log). There
+    #      is no `expected_seq` equivalent, and no ported site needs one: the ONLY suite site that
+    #      sends `expected_seq` here is `tests/test_server.py::test_control_append_and_validation`,
+    #      asserting THIS route's own tail CAS — an instrument that dies with it. The 2026-09-08
+    #      text had the ~17 `test_fork_from_seq` sites "CAS on an exact event-log TAIL"; that file
+    #      sends no `expected_seq` at all. Their compare-and-swap is on CONTENT — the `forked_from`
+    #      receipt and `parent_generations` — in `control_validation.py::normalize_control`, which
+    #      `/commands` runs identically. No tail-precondition decision is owed.
     #   3. It applies ASYNCHRONOUSLY for `EV_PAUSE` and for every intent whose engine policy is not
     #      `NO_SPAWN` (`run_commands.py`'s `synchronous = … NO_SPAWN and … != EV_PAUSE`), so a site
-    #      that asserts on the event log right after the POST must instead poll the record to a
-    #      terminal status. That is a new suite affordance, not a line edit.
-    #   4. 400-class REFUSALS become coded FAILED RECORDS — a 200 carrying an error object — so
+    #      that asserts on the event log right after the POST polls the record to a terminal status
+    #      first: `tests/factories.py::post_command` + `command_terminal`. The 2026-09-08 text
+    #      called that "a new suite affordance"; it existed, module-private in
+    #      `test_run_command_service.py`, and was hoisted 2026-09-23.
+    #   4. 400-class REFUSALS become coded REJECTED records — a 200 carrying an error object — so
     #      `assert r.status_code == 400` becomes an assertion about a record's `error.code`, and
     #      per the house rule a refusal that now depends on a race must pin the fail-closed SET.
     # And the window itself is not ready: it opened 2026-09-07 with `Deprecation` + `Link` and
@@ -245,17 +272,23 @@ def build_router(srv) -> APIRouter:
     # Retiring a route inside an announced window that names no removal date would make the header
     # pair a lie in the other direction.
     #
-    # SO THE WINDOW NEEDS, in order: (a) a decided removal date, at which point `Sunset` is one
-    # line; (b) a decision on 2's tail precondition; (c) a suite helper for 3 (submit, poll to
-    # terminal, assert) so a ported site reads no worse than the one it replaces; (d) the tally
-    # below reading zero for every agent that is not the suite's own client.
-    # Counted 2026-09-08: 63 occurrences in 10 test files — test_server 27, test_fork_from_seq 17,
-    # test_run_command_service 9, test_review_fixes 3, test_strategist_developer_switch 2, one each
-    # in test_review_capabilities, test_legacy_control_deprecation, test_concept_tag_command,
-    # test_collaboration and test_control_reads_the_log_once — and no first-party client. The
-    # sixty-third is new and deliberate: `test_control_reads_the_log_once.py` measures THIS route's
-    # per-POST log read, so it is an instrument that dies with the route rather than a caller to
-    # migrate. Each of the other sites is a contract to RE-VERIFY under `/commands`.
+    # SO THE WINDOW NEEDS: (a) a decided removal date, at which point `Sunset` is one line — NOT
+    # MET, none is agreed; (b) — WITHDRAWN, there is no tail-precondition decision (see 2); (c) a
+    # suite helper for 3 — MET 2026-09-23 (`tests/factories.py`); (d) the tally reading zero for
+    # every agent that is not the suite's own client — OBSERVABLE since 2026-09-23 (the WARNING
+    # line names every new pair a deployment sees) but UNMEASURED: no deployment's log has been read.
+    # Counted 2026-09-23 with `git grep -c -E 'runs/[^" ]*/control' -- 'tests/*.py'` (the same
+    # count read 64 lines in 11 files at review 2026-09-22): 49 lines in 8 files, and no
+    # first-party client. The ten security tests that used this route as their sample mutation
+    # (Origin, Host, owner token, review capability, the lock-path refusal) moved to `/commands`
+    # FIRST and were re-verified there by mutation, so no guard's proof dies with the route. Of the
+    # 49, 22 are this route's OWN instruments, which die with it rather than migrate:
+    # test_legacy_control_deprecation, test_control_reads_the_log_once, the command-only refusals
+    # in test_collaboration and test_concept_tag_command, test_server's tail-CAS/validation test
+    # and its incomplete-finalize refusal (9), and test_run_command_service's nine sites asserting
+    # that this route honours the command service's normalization and guards. The other 27 are
+    # intent coverage to port and RE-VERIFY under `/commands`: test_fork_from_seq 17, test_server 8,
+    # test_strategist_developer_switch 2.
     # DEPRECATED in OpenAPI too — no behaviour change (review 2026-09-22, SRV2-09): the compat
     # route both first-party clients left for `POST .../commands`; nothing in ui/src, the TUI or
     # the CLI calls it. The flag joins the `Deprecation`/`Link` headers below; retiring the route

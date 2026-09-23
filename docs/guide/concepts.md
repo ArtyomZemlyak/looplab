@@ -624,8 +624,10 @@ durable request identity, so a lost-response retry re-appends an ADDITIVE intent
 resolving to the record it already created. There is deliberately **no `Sunset`**, because RFC 8594's
 field carries a date and no removal date has been agreed; the header pair is `Deprecation` + `Link`
 until one is. The server also tallies who still calls it, by event type and User-Agent
-(`routers/control.py::legacy_control_callers`), so the migration is a number rather than an
-intention. Behaviour is otherwise unchanged: requiring `expected_seq` here was tried and reverted,
+(`routers/control.py::legacy_control_callers`), and says each NEW (type, User-Agent) pair once, at
+WARNING, in its own log — the tally has no other reader, so without that line nobody running a real
+deployment could tell whether anything but the test suite still calls the route. The migration is a
+number rather than an intention. Behaviour is otherwise unchanged: requiring `expected_seq` here was tried and reverted,
 because a silent 409 breaks the compatibility this route exists to provide. Current Web,
 boss, and TUI controls use the command lifecycle above. Report regeneration remains a background job,
 but its run-generation lease and cost events share the same destructive boundary.
