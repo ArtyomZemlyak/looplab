@@ -232,7 +232,10 @@ def test_the_spend_ceiling_reaches_the_accountant_and_zero_means_no_limit():
     from looplab.core.config import Settings
     from looplab.core.llm import make_llm_client
 
-    common = dict(llm_model="m", llm_base_url="http://localhost:1/v1", llm_api_key="k")
+    # No `llm_api_key` here: a key set on a bare `Settings` is now REFUSED rather than silently
+    # dropped (review 2026-09-22 CORE-14 / CO-04), and it was only ever dropped — this ceiling
+    # check never sent it anywhere.
+    common = dict(llm_model="m", llm_base_url="http://localhost:1/v1")
     assert make_llm_client(Settings(**common)).accountant.limit is None, (
         "0.0 must stay the historical no-limit behaviour, not a ceiling of zero")
     assert make_llm_client(Settings(llm_budget_usd=0.25, **common)).accountant.limit == 0.25

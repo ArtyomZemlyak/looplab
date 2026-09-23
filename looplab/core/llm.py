@@ -340,6 +340,36 @@ def misbound_credential_refusal(*, key_env: str, binding_env: str, target: str, 
           "key, unset both.")
 
 
+def untrusted_settings_key_refusal(*, source: str, ambient_has_key: bool) -> str:
+    """Name the key that was SET on a `Settings` object and would have been silently NOT sent.
+
+    Review 2026-09-02 CO-04, still live on 2026-09-22 (CORE-14). `bound_api_key_for` honours
+    `Settings.llm_api_key` only when a source-aware resolver selected it together with its binding
+    (`_llm_credential_pair_trusted`), because a merged `Settings` cannot say which tier each half
+    came from and a cross-tier pair is exactly what `_atomic_pair_rule` refuses. Everything else is
+    re-read from ONE ambient tier. That reselection was right; doing it SILENTLY was not: a caller
+    who wrote `Settings(llm_api_key=...)` got an unauthenticated client (or the ambient tier's
+    OTHER key), and the provider's 401 then named an environment variable they had never used.
+    Driven before the fix: key + binding set on `Settings`, nothing ambient -> `"local"`.
+
+    `tests/test_credential_diagnosis.py` pins when this fires: only when the declared key would be
+    DROPPED. A `Settings` built from the environment carries the ambient tier's own pair and passes.
+    """
+    found = "a DIFFERENT key" if ambient_has_key else "no key at all"
+    return (
+        "llm_api_key was set on this Settings object, and it would NOT be the key sent.\n"
+        "    A key on Settings is honoured only when the owner-side secret store "
+        "(serve/settings_store.py) selected it\n"
+        "    together with its binding. Any other key is re-read from ONE ambient source "
+        f"({_SOURCE_PROCESS} first, else {_SOURCE_DOTENV}),\n"
+        f"    and {source or _SOURCE_PROCESS} holds {found}. Refused rather than sent without it, "
+        "because a request that\n"
+        "    silently drops the key you set fails later as a 401 naming a variable you never used.\n"
+        f"    Fix: set {SHARED_KEY_ENV} and {SHARED_BINDING_ENV} together in the environment "
+        "(or both in .env)\n"
+        "         and build Settings without llm_api_key; or save the pair in the UI secret store.")
+
+
 def bound_api_key_for(settings, base_url: str, *, api_key=None,
                       api_key_base_url: str | None = None) -> str:
     """Resolve a key for ``base_url`` and fail before transport on an unbound/mismatched secret."""
@@ -347,6 +377,7 @@ def bound_api_key_for(settings, base_url: str, *, api_key=None,
     if api_key is NO_CREDENTIAL:
         return "x"
     shadowed: tuple[str, ...] = ()
+    dropped = False
     if api_key is None:
         if getattr(settings, "_llm_credential_pair_trusted", False):
             key = _secret_value(getattr(settings, "llm_api_key", None))
@@ -357,6 +388,14 @@ def bound_api_key_for(settings, base_url: str, *, api_key=None,
             # may have combined init/file/env/dotenv values; reselect one atomic ambient tier here.
             key, binding, source, shadowed = _ambient_credential()
             source = source or _SOURCE_PROCESS   # nothing declared: still the tier we would read
+            # …but never SILENTLY (CO-04 / CORE-14): a key declared on Settings that this
+            # reselection would not send is refused below, after the half-pair refusal, which
+            # names a mixed-tier state more precisely when that is what happened. A Settings
+            # built from the environment carries the ambient pair itself and is never refused.
+            declared = _secret_value(getattr(settings, "llm_api_key", None))
+            declared_binding = getattr(settings, "llm_api_key_base_url", None) or ""
+            dropped = bool(declared) and (
+                declared != key or bool(declared_binding and declared_binding != binding))
     else:
         key = _secret_value(api_key)
         binding = api_key_base_url
@@ -365,6 +404,9 @@ def bound_api_key_for(settings, base_url: str, *, api_key=None,
         raise LLMCredentialError(incomplete_pair_refusal(
             key_env=SHARED_KEY_ENV, binding_env=SHARED_BINDING_ENV, have_key=bool(key),
             source=source, shadowed=bool(shadowed)))
+    if dropped:
+        raise LLMCredentialError(untrusted_settings_key_refusal(
+            source=source, ambient_has_key=bool(key)))
     if not key:
         return "local"
     if not binding:

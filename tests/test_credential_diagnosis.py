@@ -30,7 +30,8 @@ from looplab.core.errors import LLMCredentialError, LLMError, credential_cause
 from looplab.core.llm import (SHARED_BINDING_ENV, SHARED_ENDPOINT_ENV, SHARED_KEY_ENV,
                               _ambient_credential, _ambient_shared_pair, bound_api_key_for,
                               incomplete_pair_refusal, misbound_credential_refusal,
-                              render_credential_failures, validate_bound_profiles)
+                              render_credential_failures, untrusted_settings_key_refusal,
+                              validate_bound_profiles)
 
 _A = "https://provider-a.example.com/v1"
 _B = "https://provider-b.example.com/v1"
@@ -354,3 +355,87 @@ def test_the_two_tuple_view_of_the_ambient_pair_is_the_same_resolution(clean_amb
     monkeypatch.setenv(SHARED_BINDING_ENV, _A)
     resolved = _ambient_credential()
     assert _ambient_shared_pair() == (resolved.key, resolved.binding) == ("k", _A)
+
+
+# ---------------------------------------------------------------------------------------------
+# 4. a key set on Settings is sent or refused — never silently dropped (CO-04, review 2026-09-22
+#    CORE-14). Before: key + binding on a bare `Settings`, nothing ambient -> `"local"`, an
+#    unauthenticated client whose 401 then named a variable the caller never set.
+# ---------------------------------------------------------------------------------------------
+
+def test_a_key_set_on_settings_with_nothing_ambient_is_refused_not_sent_as_local(clean_ambient):
+    settings = Settings(llm_base_url=_A, llm_api_key="sk-declared-only", llm_api_key_base_url=_A)
+    with pytest.raises(LLMCredentialError) as refused:
+        bound_api_key_for(settings, _A)
+    msg = str(refused.value)
+    assert "would NOT be the key sent" in msg and "no key at all" in msg
+    assert SHARED_KEY_ENV in msg and SHARED_BINDING_ENV in msg
+    assert "sk-declared-only" not in msg
+
+
+def test_a_key_set_on_settings_is_refused_when_the_ambient_tier_holds_another(
+        clean_ambient, monkeypatch):
+    """The quieter half: the reselection would have sent the ambient tier's OTHER key."""
+    monkeypatch.setenv(SHARED_KEY_ENV, "sk-ambient")
+    monkeypatch.setenv(SHARED_BINDING_ENV, _A)
+    settings = Settings(llm_base_url=_A, llm_api_key="sk-declared", llm_api_key_base_url=_A)
+    with pytest.raises(LLMCredentialError) as refused:
+        bound_api_key_for(settings, _A)
+    msg = str(refused.value)
+    assert "a DIFFERENT key" in msg
+    assert "sk-declared" not in msg and "sk-ambient" not in msg
+
+
+def test_a_binding_set_on_settings_that_would_be_dropped_is_refused(clean_ambient, monkeypatch):
+    """Same key, different declared binding: the caller's statement of WHERE the key belongs was
+    about to be replaced by the ambient one — also a silent drop."""
+    monkeypatch.setenv(SHARED_KEY_ENV, "sk-same")
+    monkeypatch.setenv(SHARED_BINDING_ENV, _A)
+    settings = Settings(llm_base_url=_A, llm_api_key="sk-same", llm_api_key_base_url=_B)
+    with pytest.raises(LLMCredentialError):
+        bound_api_key_for(settings, _A)
+
+
+def test_settings_built_from_the_environment_still_resolve_their_own_key(
+        clean_ambient, monkeypatch):
+    """The ordinary CLI path must not move: pydantic fills the field from the same tier the
+    reselection reads, so nothing is dropped and nothing is refused."""
+    monkeypatch.setenv(SHARED_KEY_ENV, "sk-ambient")
+    monkeypatch.setenv(SHARED_BINDING_ENV, _A)
+    settings = Settings(llm_base_url=_A)
+    assert settings.llm_api_key is not None, "precondition: the env populated the field"
+    assert bound_api_key_for(settings, _A) == "sk-ambient"
+
+
+def test_a_trusted_pair_on_settings_is_still_the_one_sent(clean_ambient):
+    settings = Settings(llm_base_url=_A, llm_api_key="sk-trusted", llm_api_key_base_url=_A)
+    settings._llm_credential_pair_trusted = True
+    assert bound_api_key_for(settings, _A) == "sk-trusted"
+
+
+def test_a_half_pair_is_still_diagnosed_as_a_half_pair_first(clean_ambient, monkeypatch):
+    """A mixed-tier state has the more precise sentence; the new refusal must not shadow it."""
+    monkeypatch.setenv(SHARED_KEY_ENV, "sk-orphaned")
+    settings = Settings(llm_base_url=_A, llm_api_key="sk-declared", llm_api_key_base_url=_A)
+    with pytest.raises(LLMCredentialError) as refused:
+        bound_api_key_for(settings, _A)
+    assert "was set without" in str(refused.value)
+
+
+def test_the_refusal_fires_where_the_client_is_built(clean_ambient):
+    """`make_llm_client` resolves the key at construction, so the caller hears it there — before
+    any request, not as a provider 401."""
+    from looplab.core.llm import make_llm_client
+    with pytest.raises(LLMCredentialError):
+        make_llm_client(Settings(llm_model="m", llm_base_url=_A, llm_api_key="sk-x",
+                                 llm_api_key_base_url=_A))
+
+
+def test_the_untrusted_key_refusal_truth_table():
+    other = untrusted_settings_key_refusal(source="the .env file", ambient_has_key=True)
+    none = untrusted_settings_key_refusal(source="", ambient_has_key=False)
+    assert "the .env file holds a DIFFERENT key" in other
+    assert "the process environment holds no key at all" in none
+    for msg in (other, none):
+        assert msg.startswith("llm_api_key was set on this Settings object")
+        assert "serve/settings_store.py" in msg

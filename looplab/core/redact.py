@@ -52,8 +52,8 @@ stricter sibling, and `tests/test_secret_env_pattern.py` holds those two togethe
 `_SECRET_KEY_RE` is the THIRD and is deliberately the narrowest: it screens a FIELD NAME inside
 free-form subprocess output, where over-matching does not cost a withheld variable but a destroyed
 diagnostic — `envsafe`'s bare `KEY` alternative would mask the value of every `key=` in an ML log,
-and its `AUTH` would eat `author=`. `_BENIGN_KEYS` exists for the same reason one level down. So
-this one must NOT be widened toward the other two; the direction of safety is the opposite here.
+and its `AUTH` would eat `author=`. `_TOKEN_COUNT_STEM` exists for the same reason one level down.
+So this one must NOT be widened toward the other two; the direction of safety is the opposite here.
 """
 from __future__ import annotations
 
@@ -66,10 +66,28 @@ import unicodedata
 
 from looplab.core.envsafe import is_secret_env
 
-# Field names that merely CONTAIN a credential substring but are benign diagnostic output
-# (tokenizer / max_tokens / *_tokens) — never mask these so operators keep model/token diagnostics.
-_BENIGN_KEYS = {"tokenizer", "max_tokens", "num_tokens", "n_tokens",
-                "total_tokens", "prompt_tokens", "completion_tokens", "tokens"}
+# A credential is A token; a COUNT is tokens. Field names built on the plural, on `tokeniz*`, or on
+# `token_count`/`token_usage` are model and throughput diagnostics — the numbers a trace exists to
+# show — and `_SECRET_KEY_RE`'s bare `token` masked every one of them. This was an 8-name list
+# (tokenizer / max_tokens / num_tokens / n_tokens / total_tokens / prompt_tokens /
+# completion_tokens / tokens), so `input_tokens`, `output_tokens`, `cached_tokens`,
+# `reasoning_tokens`, `max_new_tokens`, `tokens_per_second` and `tokenizer_path` reached the span
+# as "***" (review 2026-09-02 CO-15, still live 2026-09-22 as CORE-14; 16 such names measured).
+# A STEM, not a longer list, because the provider vocabulary grows faster than any list did.
+#
+# The plural is still a credential when a part of the name says so: `api_tokens`, `accessTokens`
+# and `id_tokens` are LISTS of credentials, so a qualifier from `_CREDENTIAL_QUALIFIERS` anywhere
+# in the name (split at separators AND camelCase) keeps the whole name masked. The singular
+# `token` is never exempted: `hf_token`, `access_token` and a bare `token` mask exactly as before.
+_TOKEN_COUNT_STEM = re.compile(r"tokeniz[a-z]*|tokens(?![a-z])|token_(?:counts?|usage)(?![a-z])")
+_CREDENTIAL_QUALIFIERS = frozenset({"api", "auth", "access", "refresh", "bearer", "session",
+                                    "oauth", "id", "csrf", "secret", "private", "personal"})
+
+
+def _name_parts(key: str) -> set[str]:
+    """The lower-cased words of a field name, split at separators and at camelCase boundaries."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", key)
+    return {part for part in re.split(r"[^a-z0-9]+", spaced.lower()) if part}
 
 
 _SECRET_KEY_RE = re.compile(
@@ -90,10 +108,14 @@ _ASSIGN_PREFIX = r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(['\"]?\s*(?:=>|[:=])\s*)"
 def is_secret_key_name(value) -> bool:
     """Whether a structured diagnostic key names credential material."""
     try:
-        key = unicodedata.normalize("NFKC", str(value or "")).lower()
+        raw = unicodedata.normalize("NFKC", str(value or ""))
     except Exception:  # noqa: BLE001 - an opaque diagnostic key is safer masked than inspected twice
         return True
-    return key not in _BENIGN_KEYS and _SECRET_KEY_RE.search(key) is not None
+    key = raw.lower()
+    if not (_name_parts(raw) & _CREDENTIAL_QUALIFIERS):
+        # A space, not "", so the words on either side of a removed stem never fuse into a new one.
+        key = _TOKEN_COUNT_STEM.sub(" ", key)
+    return _SECRET_KEY_RE.search(key) is not None
 
 
 def _keyval_repl(m: re.Match) -> str:

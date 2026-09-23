@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from looplab.core.redact import (redact_env_values, redact_output_tail, redact_persisted_text,
-                                 redact_secrets, secret_env_values)
+from looplab.core.redact import (is_secret_key_name, redact_env_values, redact_output_tail,
+                                 redact_persisted_text, redact_secrets, secret_env_values)
 
 
 def test_redacts_openai_style_key():
@@ -95,6 +95,60 @@ def test_benign_token_fields_not_overmasked():
     assert redact_secrets("tokenizer=gpt2") == "tokenizer=gpt2"
     assert redact_secrets("max_tokens: 1024") == "max_tokens: 1024"
     assert redact_secrets("usage: total_tokens=512") == "usage: total_tokens=512"
+
+
+# --- CO-15 / CORE-14: a COUNT of tokens is a diagnostic, a token is a credential ----------------
+#
+# Before the stem rule these were all "***" on the span and in the tail (16 measured names): the
+# throughput numbers a trace exists to show. The second list is what the stem must never exempt.
+
+_TOKEN_COUNT_NAMES = (
+    "input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens", "max_new_tokens",
+    "tokenizer_path", "tokens_per_second", "token_count", "token_counts", "token_usage",
+    "max_completion_tokens", "cache_read_input_tokens", "tokenizer_name", "n_tokens_generated",
+    "tokenized", "tokenization", "inputTokens", "maxNewTokens",
+    # the eight names the old allow-list held, which the stem must keep covering
+    "tokenizer", "max_tokens", "num_tokens", "n_tokens", "total_tokens", "prompt_tokens",
+    "completion_tokens", "tokens",
+)
+_CREDENTIAL_NAMES = (
+    "token", "access_token", "refresh_token", "auth_token", "api_token", "hf_token", "github_token",
+    "bearer_token", "id_token", "session_token", "csrf_token", "slack_bot_token", "token_secret",
+    "token_value", "token_id", "tokenid", "accessToken",
+    # the plural is a credential LIST when a part of the name says so, camelCase included
+    "api_tokens", "accessTokens", "id_tokens", "AUTH_TOKENS", "refresh_tokens",
+    "personal_access_tokens", "secret_tokens", "tokenizer_secret",
+    "secret", "api_key", "OPENAI_API_KEY", "password", "credential", "AWS_SECRET_ACCESS_KEY",
+)
+
+
+@pytest.mark.parametrize("name", _TOKEN_COUNT_NAMES)
+def test_a_token_count_name_is_a_diagnostic_not_a_credential(name):
+    assert not is_secret_key_name(name)
+
+
+@pytest.mark.parametrize("name", _CREDENTIAL_NAMES)
+def test_a_credential_name_is_still_masked(name):
+    assert is_secret_key_name(name)
+
+
+def test_the_throughput_numbers_survive_the_free_text_pass():
+    line = "step 40: input_tokens=1532 output_tokens=87 tokens_per_second=41.5 tokenizer_path=/m/tok"
+    assert redact_secrets(line, entropy=False) == line
+    assert "hunter2hunter2" not in redact_secrets("hf_token=hunter2hunter2", entropy=False)
+
+
+def test_the_throughput_numbers_reach_the_span(tmp_path):
+    """`SpanHandle.set` masks by key NAME — the path CO-15 was measured on."""
+    import orjson
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+    t = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
+    with t.span("op", new_trace=True) as sp:
+        sp.set("input_tokens", 1532).set("tokens_per_second", 41.5).set("hf_token", "x")
+    (rec,) = [orjson.loads(line) for line in (tmp_path / "s.jsonl").read_bytes().splitlines()]
+    assert rec["attributes"]["input_tokens"] == 1532
+    assert rec["attributes"]["tokens_per_second"] == 41.5
+    assert rec["attributes"]["hf_token"] == "***"
 
 
 def test_real_secret_fields_still_redacted():
