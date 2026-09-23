@@ -1275,7 +1275,10 @@ plus a final because that node's own trainer said `save_total_limit=3`. So the o
 named the copy, the copy got blamed for 727 GB it never wrote, and a whole migration proposal was
 written against a mechanism responsible for 0.096 % of the bytes
 (doc 37 §6 — the measurement that DECLINED it — and §8's R1, which asked for
-exactly this receipt). The claim and the measurement now print on the same rows.
+exactly this receipt). The claim and the measurement now print on the same rows. Since 2026-09-23
+the row also records `workspace_bytes`, the bytes the seed copied from the editable tree(s) — the
+workspace AS SEEDED, so a run whose node directories are gone still says how big each seed was;
+what the node's own run wrote afterwards is still only this walk's to measure.
 
 ```
 workspace bytes for runs/demo — apparent size (sum of file sizes, what doc 37 quotes), symlinks NOT followed

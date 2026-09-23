@@ -341,10 +341,27 @@ class WorkspaceSeeder:
                             link_input=self._e._link_input,
                             copy_input=self.copy_input))
             seeded: list[str] = []
+            # THE RUN'S OWN RECORD OF WHAT THE SEED COPIED (docs/29 F3, `f3-workspace-byte-total`):
+            # the editable tree(s)' bytes, summed by the seed walk itself (`workspace_seed.SeedCount`),
+            # so a run whose node dirs are gone — or ran on a box you no longer have — can still
+            # say how big each seed was. It is the workspace AS SEEDED: the node's own files, the
+            # task assets, a mounted or copied data input, and everything the node's run writes
+            # later (retained checkpoints — doc 37 §6's 727 GB) are not in it. One editable the
+            # seam could not measure (a patched `Engine._seed_repo_tree` answering a plain int)
+            # makes the whole total unknown and the key is LEFT OUT: a partial sum would read as a
+            # smaller workspace.
+            editable_bytes: list = []
             for row in rows:
                 if row["kind"] == "editable":
-                    seeded.append(f"{row['name']}[{row['mode']}]:" + (
-                        "copytree" if row["count"] < 0 else f"{row['count']} tracked"))
+                    editable_bytes.append(row.get("bytes"))
+                    # A full copy that was a FALLBACK nobody asked for names its reason (review
+                    # 2026-09-22, ES1-05): `copytree:git_timeout` is a wedged listing that
+                    # deep-copied the untracked tree, and must not read as a non-git source's
+                    # ordinary `copytree`.
+                    copied = ("copytree" if row["count"] < 0 else f"{row['count']} tracked")
+                    if row["count"] < 0 and row.get("fallback"):
+                        copied += f":{row['fallback']}"
+                    seeded.append(f"{row['name']}[{row['mode']}]:" + copied)
                 elif row["kind"] == "protected":
                     seeded.append(f"{row['name']}:protected[{len(row['files'])}]:"
                                   + ",".join(row["files"][:5]))
@@ -361,7 +378,10 @@ class WorkspaceSeeder:
                 nid = int(str(wd.name).split("_")[-1])
             except (ValueError, IndexError):
                 nid = None
-            self._e.store.append(EV_WORKSPACE_SEEDED, {"node_id": nid, "materialized": seeded})
+            payload = {"node_id": nid, "materialized": seeded}
+            if editable_bytes and all(type(b) is int and b >= 0 for b in editable_bytes):
+                payload["workspace_bytes"] = sum(editable_bytes)
+            self._e.store.append(EV_WORKSPACE_SEEDED, payload)
 
     def seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:
         """Delegate to the shared evaluation/Developer candidate seeding rule."""

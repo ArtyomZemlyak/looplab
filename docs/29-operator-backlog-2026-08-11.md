@@ -920,15 +920,19 @@ This entry is PERMANENT. Do not re-open it without reading doc 37.
 > what it never reached, because doc 37 §9 records this walk as unbounded in general and a number
 > that silently truncated is worse than a refusal.
 >
-> What remains is the RECORDED half, and it keeps the slug:
-> OPEN[f3-workspace-byte-total] the RUN must record its own workspace size, not only an operator who
-> proof:absent:workspace_bytes@looplab/engine/workspace.py
-> thinks to ask: `engine/workspace.py` still appends `workspace_seeded` with the `materialized` name
-> list and no byte total, so a run whose workspaces have been deleted — or that ran on a box you no
-> longer have — still cannot answer the question the instrument above answers on disk. One additive
-> field (a byte sum taken during the seed walk, reader-side default, invariant #5-safe) or the
-> eval-end per-node receipt doc 37 §8 R1 names; then the written retention policy that document
-> requires before any checkpoint reclaim.
+> What remained was the RECORDED half: the run itself had to say how big its workspaces were, not
+> only an operator who thinks to ask.
+>
+> *Closed 2026-09-23 (review 2026-09-22, ES1-05): the marker `f3-workspace-byte-total` stood here.
+> `workspace_seeded` now carries `workspace_bytes`, the bytes the seed copied from the editable
+> tree(s), summed by the seed walk itself (`engine/workspace_seed.py::SeedCount`): the tracked walk
+> reads each size off the one `stat` per file it already takes — one syscall FEWER per file than the
+> `is_dir()` + `exists()` pair it replaced — and a full copy re-reads the tree it just wrote, measured
+> at 0.58 % of a seed on a 2,230-file checkout. A seam that cannot measure leaves the key out rather
+> than recording a partial sum. It is the workspace AS SEEDED: what the node's own run writes later
+> (the retained checkpoints of doc 37 §6) is not in it — that is the eval-end receipt doc 37 §8 R1
+> names, and the written retention policy doc 37 requires before any checkpoint reclaim is still
+> unwritten. Deleted per the index rule.*
 
 **Asked:** "move to git worktree?"
 

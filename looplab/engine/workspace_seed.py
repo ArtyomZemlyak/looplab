@@ -18,12 +18,105 @@ that whole sequence by hand until 2026-08-19, so the next fix to it would have l
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import shutil
+import stat as _stat
 import subprocess
 import sys
-from typing import Callable
+from typing import Callable, Optional
+
+from looplab.core.errors import EnvironmentRefusal
+
+_LOG = logging.getLogger(__name__)
+
+# How long `git ls-files` may take before the listing counts as WEDGED rather than slow. The value it
+# always had; named because the refusal and the warning below both quote it.
+LS_FILES_TIMEOUT_S = 120
+
+# The reason a full copy was a FALLBACK nobody asked for, as `SeedCount.fallback` and the engine's
+# `workspace_seeded` row spell it (`.[auto]:copytree:git_timeout`).
+GIT_TIMEOUT_FALLBACK = "git_timeout"
+
+
+class SeedCount(int):
+    """What `seed_repo_tree` returns: the count it always returned, plus two facts the walk learned.
+
+    AN `int` SUBCLASS, deliberately. The contract is "the number of tracked files copied, or ``-1``
+    for a full copytree", and it is a patch seam three delegators deep (`SeedOps`,
+    `WorkspaceSeeder.seed_repo_tree`, `Engine._seed_repo_tree`) that tests replace with functions
+    answering a plain int. A tuple or a record would break every one of them; an int that carries two
+    attributes passes through all three unchanged and still compares, formats and serializes as the
+    count. `seed_candidate_workspace` reads the extras with `getattr(..., None)`, so a plain int from
+    a patched seam means "not measured" — never a guess.
+
+    * ``nbytes`` — the bytes the seed copied (docs/29 F3, `f3-workspace-byte-total`): summed off the
+      one `stat` the tracked walk takes per file anyway, or, after a full copy, off the tree the
+      copy just wrote. ``None`` when not measured.
+    * ``fallback`` — why a full copy was taken that the MODE did not ask for, when there is a reason
+      beyond "this source is not a git worktree": ``GIT_TIMEOUT_FALLBACK`` (review 2026-09-22,
+      ES1-05). ``None`` otherwise.
+    """
+
+    nbytes: Optional[int]
+    fallback: Optional[str]
+
+    def __new__(cls, count: int, *, nbytes: Optional[int] = None, fallback: Optional[str] = None):
+        self = super().__new__(cls, count)
+        self.nbytes = nbytes
+        self.fallback = fallback
+        return self
+
+
+class TrackedSeedTimeout(EnvironmentRefusal):
+    """An EXPLICIT ``seed_mode: tracked`` whose `git ls-files` timed out: refused, not deep-copied.
+
+    `tracked` is the operator saying "copy the code, never the untracked tree", and a listing that
+    hangs is the one case where the full-copy fallback would do precisely what they excluded — a
+    wedged listing is, on the mounts this repo documents, a LARGE tree. `auto` keeps its fallback (it
+    asked for "tracked when you can"), loudly; `tracked` fails closed. An `EnvironmentRefusal`: the
+    configuration is not wrong, the box cannot serve it right now. Raised inside an evaluation, the
+    containment closes that node (`engine_error`) and pauses the run, which is the right shape — the
+    next node would hit the same wedged listing.
+    """
+
+    def __init__(self, src, timeout):
+        self.src = str(src)
+        self.timeout = timeout
+        super().__init__(
+            f"`git ls-files` timed out after {timeout:g} s listing {self.src}, and this editable's "
+            "seed_mode is `tracked`: refusing the full-copy fallback, which would deep-copy every "
+            "untracked file (checkpoints, datasets) into every node workspace. Make the source "
+            "listable (a wedged network mount or a stuck `.git/index.lock` is the usual cause), or "
+            "set seed_mode to `auto` to accept that fallback (recorded as `copytree:git_timeout`) or "
+            "to `all` to copy the full tree deliberately.")
+
+
+def _tree_bytes(root: Path) -> Optional[int]:
+    """The bytes of every regular file under ``root``, symlinks NOT followed — a full copy's total.
+
+    A second walk, and the only one the byte total costs anything on: `shutil.copytree` hands a
+    custom `copy_function` a PATH instead of its cached `DirEntry`, so sizing inside the copy would
+    cost MORE `stat`s than this one per file. Measured 2026-09-23 on this repo's own checkout (2,230
+    tracked files, 50 MB, ext4): one extra `stat` per copied file is 0.58 % of a seed (2.45 us of
+    ~420 us per file). ``None`` if any of it cannot be read back — a
+    total that silently skipped a directory would read as a smaller workspace, which is worse than
+    no total at all.
+    """
+    total = 0
+    stack = [root]
+    try:
+        while stack:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+    except OSError:
+        return None
+    return total
 
 
 def seed_repo_tree(src, dst, ignore, mode: str = "auto") -> int:
@@ -33,13 +126,22 @@ def seed_repo_tree(src, dst, ignore, mode: str = "auto") -> int:
       artifacts is not deep-copied. Both fall back to a full copy outside a git worktree.
     - ``all``: force a full recursive copy.
 
-    Returns the number of tracked files copied, or ``-1`` for a full copytree.
+    Returns the number of tracked files copied, or ``-1`` for a full copytree — as a `SeedCount`,
+    which also carries the bytes copied and why a full copy was a fallback (see there).
+
+    A WEDGED LISTING IS NOT A MISSING GIT (review 2026-09-22, ES1-05). A `git ls-files` that times
+    out used to take the same blind `except` as "git is not installed", i.e. the full-copy branch,
+    silently: every untracked checkpoint and dataset deep-copied into every node workdir, with only
+    the `workspace_seeded` row's `copytree` to betray it — the same word a non-git source earns. The
+    timeout is now its own case: `auto` still falls back, at WARNING and recorded as
+    `GIT_TIMEOUT_FALLBACK`; an explicit `tracked` raises `TrackedSeedTimeout` instead.
     """
     from looplab.runtime.sandbox import git_subprocess_env
 
     src = Path(src)
     dst = Path(dst)
     tracked = None
+    fallback = None
     if mode != "all":
         # Ask git directly (no `.git`-at-root check): the editable repo is often a SUBDIR of a
         # larger git repo whose `.git` lives in a parent, so `(src/'.git').exists()` is False even
@@ -52,29 +154,55 @@ def seed_repo_tree(src, dst, ignore, mode: str = "auto") -> int:
         # untracked tree was copied instead (review 2026-09-22).
         try:
             out = subprocess.run(["git", "-C", str(src), "ls-files", "-z"],
-                                 capture_output=True, text=True, encoding="utf-8", timeout=120,
-                                 env=git_subprocess_env())
+                                 capture_output=True, text=True, encoding="utf-8",
+                                 timeout=LS_FILES_TIMEOUT_S, env=git_subprocess_env())
             if out.returncode == 0:
                 files = [p for p in out.stdout.split("\0") if p]
                 if files:
                     tracked = files
+        except subprocess.TimeoutExpired as exc:
+            # BEFORE the blind clause below, which would otherwise take it as "git missing".
+            if mode == "tracked":
+                raise TrackedSeedTimeout(src, exc.timeout) from exc
+            fallback = GIT_TIMEOUT_FALLBACK
+            _LOG.warning(
+                "`git ls-files` timed out after %gs listing %s, so this candidate is a FULL COPY "
+                "of the tree — every untracked file (checkpoints, datasets) included — instead of "
+                "the tracked files `seed_mode=%s` asked for. Recorded as `copytree:%s` on the "
+                "node's workspace_seeded row. Make the source listable, or set seed_mode to "
+                "`tracked` to refuse this fallback or to `all` to copy the full tree deliberately.",
+                exc.timeout, src, mode, GIT_TIMEOUT_FALLBACK)
         except Exception:  # noqa: BLE001 - git missing / not a repo -> copytree fallback
             tracked = None
     if tracked is None:
         shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
-        return -1
+        return SeedCount(-1, nbytes=_tree_bytes(dst), fallback=fallback)
     dst.mkdir(parents=True, exist_ok=True)
     copied = 0
+    nbytes = 0
     for rel in tracked:
         source = src / rel
-        if source.is_dir() or not source.exists():     # submodule dir / deleted-but-tracked path
+        # ONE `stat` answers both questions the loop asks — is it a directory (a submodule), and how
+        # many bytes will the copy write — where `is_dir()` + `exists()` took two, so the byte total
+        # costs the walk nothing and saves it a syscall per file. Only on the ERROR path does
+        # pathlib decide, exactly as those two predicates did on this interpreter: an absent path
+        # (a deleted-but-tracked file, a dangling link) is skipped, and anything `exists()` itself
+        # raises on still raises.
+        try:
+            st = source.stat()
+        except (OSError, ValueError):
+            if not source.exists():
+                continue
+            st = source.stat()
+        if _stat.S_ISDIR(st.st_mode):
             continue
         target = dst / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         # Follow a tracked symlink into the candidate instead of preserving an escape from scratch.
         shutil.copy2(source, target, follow_symlinks=True)
         copied += 1
-    return copied
+        nbytes += st.st_size
+    return SeedCount(copied, nbytes=nbytes)
 
 
 def seed_protected_files(src, dst, protect, *, reserved_top=()) -> list[str]:
@@ -241,7 +369,8 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
     audiences (a `workspace_seeded` event for the operator, a `seed=` line in a tool result for the
     model) and a shared sentence would have made the receipt the reason they diverge again:
 
-        {"kind": "editable",  "name", "mode", "count"}          name AS DECLARED; count -1 == copytree
+        {"kind": "editable",  "name", "mode", "count",          name AS DECLARED; count -1 == copytree
+                              "bytes", "fallback"}              both None unless the seed said (`SeedCount`)
         {"kind": "protected", "name", "files"}                  only when something was protected
         {"kind": "reference", "name", "source", "action", "symlink", "read_only"}
         {"kind": "data",      "name", "source", "action", "symlink", "read_only"}
@@ -278,9 +407,12 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
         count = _seed_tree(editable["path"], _target(editable), ignore, mode)
         # The name is the DECLARED one, verbatim: each caller renders it its own way (the engine
         # prints it raw into `workspace_seeded`, the tool normalizes a root "" to "."), and a
-        # normalization here would silently rewrite one of two existing receipts.
+        # normalization here would silently rewrite one of two existing receipts. `bytes` and
+        # `fallback` are read OFF the result, never inferred: a patched seam answering a plain int
+        # leaves both None (see `SeedCount`).
         rows.append({"kind": "editable", "name": editable.get("name"), "mode": mode,
-                     "count": count})
+                     "count": count, "bytes": getattr(count, "nbytes", None),
+                     "fallback": getattr(count, "fallback", None)})
 
     # Fail loud on a data/reference mount name that collides with a top-level entry of the ROOT
     # editable (name "."/"" — seeded at the workspace root). The root repo is materialized FIRST,
