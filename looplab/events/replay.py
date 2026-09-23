@@ -6,7 +6,6 @@ only the final tie-break. No separate ``best_updated`` event is needed.
 from __future__ import annotations
 
 import math
-from types import MappingProxyType
 from typing import Iterable, Optional
 
 from looplab.core.concepts import bounded_raw_concept_values
@@ -61,19 +60,26 @@ from looplab.events.replay_ctx import (
     _MISSING, _FoldCtx, _control_generation_matches, _event_generation, _generation_matches,
     _node_for_event,
 )
-from looplab.events.replay_ctx import event_generation_binds  # noqa: F401 — re-export
+from looplab.events.replay_ctx import (  # noqa: F401 — re-export
+    event_generation_binds, event_timestamp, run_wall_clock_seconds)
 # The CONCEPT family (review 2026-09-22, EVT-12): its table joins `_HANDLERS` below, the node
 # lifecycle hands it each `node_created`'s concept envelope, and the post-pass materializes deltas.
 from looplab.events.replay_concepts import HANDLERS as _CONCEPT_HANDLERS
 from looplab.events.replay_concepts import (_fold_node_concept_envelope,
                                             _materialize_concept_deltas)
+# The JOURNALS family: the spend ledger, the advisory memo/literature/report payloads and the
+# audit journals. Only its table is read here; the ledger sanitizers and the fold's empty redaction
+# environment stay readable from this module (`tests/test_fold_fast_paths_are_exact.py`).
+from looplab.events.replay_journals import HANDLERS as _JOURNAL_HANDLERS
+from looplab.events.replay_journals import (  # noqa: F401 — re-export
+    _FOLD_REDACTION_ENV, _MAX_LLM_COST, _MAX_LLM_COUNTER, _clean_llm_totals, _row_priced_calls)
 from looplab.events.types import (
-    EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
+    EV_ABLATE, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
-    EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
+    EV_CONFIRM_EVAL,
     EV_EVAL_NOISE_FLOOR, EV_EVAL_NOISE_SEED,
-    EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
+    EV_DEEP_RESEARCH,
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_BUILD_ATTEMPTED, EV_CARD_BUILD_DONE,
@@ -81,83 +87,25 @@ from looplab.events.types import (
     EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED, EV_CARD_REOPENED,
     EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_FORESIGHT_SELECTED, EV_FORK,
-    EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
-    EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
-    EV_LESSONS_REFRESHED, EV_LLM_COST, EV_LLM_USAGE, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
+    EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
+    EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE,
+    EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_NODE_CREATED, EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
     EV_NODE_RESET,
-    EV_CROSS_RUN_PRIOR,
     EV_APPLIED_PARAMS_BACKFILLED,
     EV_SCORE_METRICS_BACKFILLED,
-    EV_NODE_TOMBSTONED, EV_NODE_VALUE_ESTIMATED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
-    EV_PLAN, EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
-    EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_LITERATURE_RETRIEVED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
+    EV_NODE_TOMBSTONED, EV_NODE_VALUE_ESTIMATED, EV_NODE_VERIFIED, EV_PAUSE, EV_STAGE_FINISHED,
+    EV_PROMOTE, EV_PROXY_SCORED,
+    EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
     EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED,
     EV_RUN_WIDTH_SETTLED,
-    EV_RUNG_PROMOTED,
     EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
     EV_SPECULATION_DEPTH_SETTLED,
-    EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_VERIFIER_GROUP_SCORED, EV_WORKSPACE_CHANGED,
+    EV_TRUST_GATE_CHANGED, EV_VERIFIER_GROUP_SCORED,
     standing_hint_dedup_key)
-
-
-# 9999-12-31T23:59:59Z. Past this an `Event.ts` is corruption (or a unit mix-up — a milliseconds
-# timestamp lands here), not a date, and admitting it would let one damaged row define a run's whole
-# duration. Paired with the `> 0` floor below because `Event.ts` DEFAULTS to 0.0: a hand-built Event
-# or a fixture that never went through `EventStore.append` carries "no timestamp", not 1970.
-_MAX_EVENT_TS = 253_402_300_799
-
-
-def event_timestamp(e) -> Optional[float]:
-    """One event's wall-clock timestamp as a usable float, or None when the row does not carry one.
-
-    The ONE spelling of that rule, because two readers need the same answer over the same untrusted
-    bytes and used to derive it separately: `_on_report` publishes `published_at` from it, and
-    `run_wall_clock_seconds` below measures a run's duration from it. `type(ts) in (int, float)`
-    rather than `isinstance` on purpose — `isinstance(True, int)` is True, and a JSON `true` in a
-    hand-edited log would otherwise become the epoch second 1.
-    """
-    ts = getattr(e, "ts", None)
-    if type(ts) not in (int, float) or not math.isfinite(ts):
-        return None
-    return float(ts) if 0 < ts <= _MAX_EVENT_TS else None
-
-
-def run_wall_clock_seconds(events: Iterable[Event]) -> Optional[float]:
-    """How long the RUN took, from its own log: last usable `ts` minus first usable `ts`.
-
-    This is the one duration that survives a process boundary. A run that is stopped and wrapped up
-    hours later by `looplab finalize` is finished by a DIFFERENT process, so any `time.time() - start`
-    the finalizing process measures describes the wrap-up, not the run — measured, a 274-second run
-    reported `budget.elapsed_s = 0.027`. The event log is the only record that spans both processes,
-    and it has carried `ts` on every row since the first version of the envelope, so this is exact on
-    OLD logs too — nothing had to be recorded for it.
-
-    Order-tolerant (min/max, not first/last position) like everything else that reads the log, and
-    reader-tolerant: rows without a usable timestamp are skipped rather than dragging the span to
-    1970. Returns None when NO row carries one (a synthetic/hand-built log), so a caller can say
-    "unknown" instead of publishing a confident 0.0.
-
-    Note what it deliberately does NOT do: subtract the idle gap while a stopped run waited for its
-    `finalize`. That gap is part of how long the run took, and it is exactly the interval the old
-    number pretended did not exist. `looplab timings` names the untraced share of it.
-    """
-    first: Optional[float] = None
-    last: Optional[float] = None
-    for e in events:
-        ts = event_timestamp(e)
-        if ts is None:
-            continue
-        if first is None or ts < first:
-            first = ts
-        if last is None or ts > last:
-            last = ts
-    if first is None or last is None:
-        return None
-    return max(0.0, last - first)
 
 
 def flagged_node_ids(st: RunState) -> set:
@@ -1930,23 +1878,6 @@ def _on_agent_validated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
             "shipped_ok": d.get("shipped_ok"),
         }
 
-def _on_data_profiled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.data_profile = d.get("columns")
-
-def _on_data_provenance(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # ALIASES the live `Event.data` (as do host_grading, leakage, archive, spec_proposed,
-    # hypothesis_ranking, the `append(d)` audit journals, and Node.files/deleted). The fold runs on
-    # EVERY loop iteration over the whole log, so copying each of these would be real per-iteration
-    # cost for a hazard none of them carry: they are read-only PROJECTIONS — no consumer writes back
-    # through them. `_on_fork`/`_on_inject_node` are the exception and DO copy, because those dicts
-    # are REQUEST records the engine consumes, and `EventStore` caches parsed Events across
-    # `read_all()`, so an in-place edit there would silently diverge every later fold in the process
-    # from the bytes on disk. The rule for a new handler: alias a projection, copy a request.
-    st.data_provenance = d   # D4: pinned dataset/asset content hashes
-
-def _on_host_grading(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.host_grading = d      # out-of-process host-side grading active (audit; no labels)
-
 def _on_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P0-3: setup completed (task+data preflight, incl. the leakage hard-stop). Folded so resume can
     # tell "setup done" from "crashed mid-setup right after run_started" — the latter must re-run the
@@ -1981,9 +1912,6 @@ def _on_run_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     st.run_setup_open.discard(key)
     if d.get("exit_code") == 0 and not d.get("timed_out"):
         st.run_setup_done.add(key)
-
-def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.leakage = d
 
 def _on_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Compare-and-set: the request carries the seq it believes it follows and is honoured only when it
@@ -2086,130 +2014,6 @@ def _on_spec_drift(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             return
     st.drifts.append(d)                         # audit only; metric already discarded
 
-def _on_workspace_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.workspace_changed = True                 # resume saw the source repo/data change
-
-
-def _on_env_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.env_changed = True                       # resume saw the Python/lib environment drift (F18)
-
-def _on_diversity_archive(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.archive = d
-
-def _on_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # direct-best-neutral, not behaviorally inert: Strategist/proposal cues read it.
-    st.coverage_snapshots.append(d)   # at_node/projection gates dedup and reject stale snapshots
-
-_MAX_LLM_COUNTER = (1 << 63) - 1
-_MAX_LLM_COST = 1.7976931348623157e308
-
-
-def _llm_counter(value) -> int:
-    # The bool rejection this used to spell separately is inside `bounded_int` — `type(x) is int` is
-    # False for `True`, so a hand-edited `{"tokens": true}` still folds to 0 rather than arithmeticing
-    # as 1. Keeping the two-step form here was what let this site and its siblings drift into two
-    # spellings of one rule (doc 25 EV-04).
-    return value if bounded_int(value, 0, _MAX_LLM_COUNTER) else 0
-
-
-def _llm_cost_value(value) -> float:
-    if not is_usable_metric(value):
-        return 0.0
-    out = float(value)
-    return out if out >= 0.0 else 0.0
-
-
-def _clean_llm_totals(d: dict | None) -> dict:
-    try:
-        raw = dict(d) if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001 - a corrupt event must not poison every replay
-        raw = {}
-    out = dict(raw)
-    out.update({
-        "cost": _llm_cost_value(raw.get("cost")),
-        "calls": _llm_counter(raw.get("calls")),
-        # How many of `calls` the provider actually stated an amount for (`core/llm.py::
-        # cost_is_reported`). Plain sanitizer only — the reader-side default for a log written
-        # before this field existed belongs to `_row_priced_calls`, which still has the raw row.
-        "priced_calls": _llm_counter(raw.get("priced_calls")),
-        "prompt_tokens": _llm_counter(raw.get("prompt_tokens")),
-        "completion_tokens": _llm_counter(raw.get("completion_tokens")),
-        "total_tokens": _llm_counter(raw.get("total_tokens")),
-    })
-    return out
-
-
-def _row_priced_calls(raw: object, clean: dict) -> int:
-    """Priced-call count for ONE usage/summary row, with the pre-counter reader-side default.
-
-    `priced_calls` is additive (invariant 5), so every log written before it existed omits it, and
-    the default chosen there decides what the UI says about ~every historical run. Neither constant
-    works: 0 reports runs with a real invoice as unpriced, `calls` reports the unpriced ones as
-    fully priced. The row settles it itself — a nonzero `cost` on that row IS the provider having
-    stated an amount, and a zero one is exactly the evidence that it did not
-    (`core/llm.py::cost_is_reported`). Measured against `runs/rubert-dr-0804`, whose gateway started
-    reporting prices mid-run, this recovers the true 209-priced-of-313 split from the existing log
-    with no migration; `runs/rubert-dr-0805` stays 0-of-354.
-
-    A modern row always carries the field, so this branch cannot mislabel a new run.
-    """
-    if isinstance(raw, dict) and "priced_calls" in raw:
-        return int(clean["priced_calls"])
-    # Deliberately a COPY of `core/llm.py::inferred_priced_calls` rather than an import of it: that
-    # module pulls in the openai/httpx transport (measured 0.5 s, ~4x this module's whole import) and
-    # `fold` is on every state read. The rule is one comparison and its rationale lives at the shared
-    # definition — change both together, and prefer the import if that weight ever goes away.
-    return int(clean["calls"]) if float(clean["cost"]) > 0.0 else 0
-
-
-def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    if not ctx.llm_usage_seen:
-        # Compatibility base: latest legacy summary before the new ledger. Once a usage delta is
-        # present, later summaries are derived snapshots and may not overwrite durable totals.
-        st.llm_cost = _clean_llm_totals(d)
-        st.llm_cost["priced_calls"] = _row_priced_calls(d, st.llm_cost)
-
-
-_LLM_LEDGER_COUNTERS = ("calls", "priced_calls", "prompt_tokens", "completion_tokens",
-                        "total_tokens")
-
-
-def _clean_llm_delta(d: dict) -> dict:
-    """The six ledger columns ONE usage row contributes — `_clean_llm_totals` minus its copy of
-    every other payload key, which a delta never adds to the ledger — plus the row's own
-    `_row_priced_calls` default. Same sanitizers, so the same numbers."""
-    clean = {"cost": _llm_cost_value(d.get("cost"))}
-    for key in _LLM_LEDGER_COUNTERS:
-        clean[key] = _llm_counter(d.get(key))
-    clean["priced_calls"] = _row_priced_calls(d, clean)
-    return clean
-
-
-def _on_llm_usage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    usage_id = d.get("usage_id")
-    if isinstance(usage_id, str) and usage_id:
-        if usage_id in ctx.llm_usage_ids:
-            ctx.llm_usage_seen = True
-            return
-        ctx.llm_usage_ids.add(usage_id)
-    # THE LEDGER IS CLEANED ONCE, NOT ON EVERY ROW (review 2026-09-22, EVT-04a). Each row used to
-    # re-run `_clean_llm_totals` over the WHOLE accumulated ledger and over a full copy of its own
-    # payload, on the most frequent event of an LLM run, folded ~14x per node: measured 6.5 us a
-    # row for this handler alone, 3.3 us after. What
-    # this handler writes is already clean (every column below is a sanitized sum) and
-    # `_clean_llm_totals` is the identity on a clean ledger, so only the FIRST accumulation — whose
-    # base is the empty default or a legacy `llm_cost` summary — needs the pass; `_on_llm_cost`
-    # cannot replace the ledger afterwards (it yields once `llm_usage_seen`). Behaviour-identical:
-    # `tests/test_fold_fast_paths_are_exact.py` folds against the verbatim old handler.
-    base = dict(st.llm_cost) if ctx.llm_cost_clean else _clean_llm_totals(st.llm_cost)
-    delta = _clean_llm_delta(d)
-    base["cost"] = min(_MAX_LLM_COST, float(base["cost"]) + float(delta["cost"]))
-    for key in _LLM_LEDGER_COUNTERS:
-        base[key] = min(_MAX_LLM_COUNTER, int(base[key]) + int(delta[key]))
-    st.llm_cost = base
-    ctx.llm_usage_seen = True
-    ctx.llm_cost_clean = True
-
 def _on_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     pid = _coerce_node_id(d, "parent_id")
     n = st.nodes.get(pid) if pid is not None else None
@@ -2237,41 +2041,6 @@ def _on_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         ctx.charged_ablation_ids.add(ablation_id)
         _charge_eval_seconds(st, "node", d.get("eval_seconds"))
 
-def _on_policy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    _scores = {}
-    _raw = d.get("scores")
-    # A non-dict `scores` (a list/str/number from a corrupt or hand-edited log) has no `.items()`
-    # and would raise an uncaught AttributeError that bricks the ENTIRE fold — the same corrupt-log
-    # class the per-key try/except below already guards. Skip a non-dict container the same way.
-    for k, v in (_raw.items() if isinstance(_raw, dict) else ()):
-        try:
-            _scores[int(k)] = v                 # a non-integer key (corrupt log) is skipped
-        except (TypeError, ValueError):
-            continue
-    st.policy_scores = _scores
-    st.policy_chosen = d.get("chosen")
-    st.policy_reason = d.get("reason") or ""
-
-def _on_strategy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # A7 Strategist behavioral replay state: rebuild the chosen Strategy without re-calling the LLM;
-    # engine re-entry applies active_strategy before the next decision/evaluation boundary.
-    st.active_strategy = d.get("strategy")
-    history = {"strategy": d.get("strategy"), "at_node": d.get("at_node"),
-               "ctx": d.get("ctx")}
-    if d.get("developer_application") is not None:
-        history["developer_application"] = d["developer_application"]
-    st.strategy_history.append(history)
-
-def _on_plan(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # doc 52 row 18: the run's plan artifact. Latest wins; the history keeps every re-cut. The row
-    # is validated by its writer (`engine/plan.py::build_plan`) and read back defensively here.
-    if not isinstance(d, dict) or not isinstance(d.get("phases"), list):
-        return
-    st.plan = dict(d)
-    st.plan_history.append({"at_node": d.get("at_node"), "reason": d.get("reason"),
-                            "endgame_start": d.get("endgame_start"), "reserve": d.get("reserve")})
-
-
 def _on_hypothesis_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FOREAGENT board prioritization: latest wins. The order does not re-rank evaluated nodes; the sole
     # board derivation `_derive_cards` uses it to stamp Card.priority (the compatibility priority
@@ -2288,15 +2057,6 @@ def _on_hypothesis_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     raw_order = d.get("order")
     st.hypothesis_ranking = ({**d, "order": raw_order} if isinstance(raw_order, list)
                              else {**d, "order": []})
-
-def _on_rung_promoted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.rungs.append({"rung": d.get("rung"), "survivors": d.get("survivors", [])})
-
-def _on_agent_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Self-driving unified agent (audit-only): records WHICH legal macro action the agent
-    # chose and why. NEVER drives selection — the effect is the subsequent node_created,
-    # folded as usual. Additive & non-load-bearing: an old log without it folds identically.
-    st.agent_decisions.append(d)
 
 def _on_reward_hack_suspected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     nid = _coerce_node_id(d)
@@ -2338,15 +2098,6 @@ def _on_foresight_selected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
         if generation is not _MISSING:
             record["generation"] = generation
         st.foresight_selected.append(record)
-
-def _on_novelty_rejected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.novelty_events.append(d)   # E1: a near-duplicate proposal nudged off (audit)
-
-def _on_novelty_graded(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.novelty_grades.append(d)   # D3: a graded-ALLOW (level-4/5) the flat gate would reject (audit)
-
-def _on_cross_run_prior(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.cross_run_priors.append(d)   # §21.20 Step 2: concept tried in a SIMILAR earlier run (audit; surface)
 
 def _on_hypothesis_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P1+: engine-written agentic merge — fold alias beliefs into a canonical. Collected
@@ -3518,119 +3269,6 @@ def _on_inject_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_deep_research(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.research_requests.append(d)       # manual "go think hard" request (control event)
 
-def _on_research_attempted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Paid-attempt receipt appended BEFORE the Deep-Research provider call. Selection-neutral: only
-    # the research trigger gates read it, exactly like the memo row below. Ignore a row without a
-    # usable identity — an attempt nothing can ever reconcile would strand the manual queue.
-    attempt_id = d.get("attempt_id")
-    if not isinstance(attempt_id, str) or not attempt_id:
-        return
-    at_node = d.get("at_node")
-    st.research_attempts.append({
-        "attempt_id": attempt_id,
-        "trigger": str(d.get("trigger") or ""),
-        "at_node": at_node if type(at_node) is int and at_node >= 0 else None,
-        "manual": bool(d.get("manual")),
-    })
-
-# THE FOLD SCREENS NO ENVIRONMENT (review 2026-09-22, EVT-02). The three advisory handlers below
-# re-sanitize what their writers already sanitized, and that pass read the REPLAYING process's
-# `os.environ` (`core/redact.py::redact_persisted_text` -> `redact_env_values`): one log folded to
-# a different `RunState` on a box that happened to hold a matching secret — driven, a shapeless
-# `MY_DB_PASSWORD` value in a memo summary and a report headline folded verbatim in one process
-# and as `***REDACTED_ENV***` in the next, `model_dump_json()` unequal. Invariant 5 is that the
-# fold is a function of the log. So the writers keep the identity screen (their `env` is the
-# default: the process that owns the secret, at the moment the bytes become durable), and the fold
-# keeps every screen that IS a function of the bytes — shapes, entropy, controls, caps — and
-# passes an empty, read-only mapping for the one that is a property of the box. A log written
-# before 2026-09-08 (when that screen reached the memo writer) can therefore fold a raw env value
-# it always carried: the durable row holds it either way, and the fold was never the place that
-# could take it back.
-_FOLD_REDACTION_ENV = MappingProxyType({})
-
-
-def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Deep-Research memo: never re-ranks current nodes/best; later proposal context and cross-run
-    # evidence may read it. `served_manual` also prevents replay from re-serving the request.
-    from looplab.core.advisory_payloads import sanitize_research_memo_payload
-    # old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
-    # instead of manufacturing a complete receipt from an already-truncated legacy projection.
-    memo = sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False,
-                                          env=_FOLD_REDACTION_ENV)
-    st.research.append(memo)
-    # THE DURABLE RESEARCH RECORD (doc 52 row 16): the latest memo's plan is the run's current
-    # ResearchPlan / ProgressLedger, and every memo's exact-span evidence accrues by id. Both are
-    # sanitized above and read by nothing that selects; an old row carries neither.
-    if isinstance(memo.get("plan"), dict):
-        st.research_plan = memo["plan"]
-    for item in memo.get("evidence") or ():
-        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
-            st.research_evidence.setdefault(item["id"], item)
-    # `research_served` indexes `research_requests`: the engine only sets `served_manual` while
-    # serving `research_requests[research_served]` (engine/research_cadence.py::normalized_belief_key). Counting every
-    # such row unconditionally let a duplicate/orphan completion push the cursor PAST the queue, so a
-    # `deep_research` request appended afterwards sat at an index the manual trigger would never reach
-    # — the operator's "go think hard now" was silently dropped. Clamping to the queue is a no-op on
-    # any log a sanctioned producer wrote. There is no per-request identity to compare (the memo
-    # carries none), so the head clamp IS the bind here.
-    if d.get("served_manual") and st.research_served < len(st.research_requests):
-        st.research_served += 1
-    # Close this memo's paid attempt so the trigger gates stop counting it as still outstanding.
-    # Order-tolerant: the attempt row may be folded before or after this one — the engine only ever
-    # asks "which attempt ids are completed", never "in what order".
-    attempt_id = d.get("attempt_id")
-    if isinstance(attempt_id, str) and attempt_id:
-        st.research_attempts_completed.add(attempt_id)
-
-def _on_literature_retrieved(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # The papers a Deep-Research pass read (doc 52 row 16), sanitized on the way in like the memo
-    # they rode beside. Selection-neutral: nothing but the record reads `st.literature`.
-    from looplab.core.advisory_payloads import sanitize_literature_items
-    # The ids already folded live on the ctx, kept in step with the ONE writer of `st.literature`
-    # below — rebuilding the set from the whole list on every row made the literature fold
-    # quadratic in papers read (review 2026-09-22, EVT-04a; measured on a loaded box, 1,500 rows
-    # carrying 6,000 papers folded in 563-976 ms before and 235-260 ms after).
-    seen = ctx.literature_ids
-    at_node = d.get("at_node") if type(d.get("at_node")) is int else None
-    for item in sanitize_literature_items(d.get("items"), env=_FOLD_REDACTION_ENV):
-        if item["id"] not in seen:
-            seen.add(item["id"])
-            st.literature.append({**item, "at_node": at_node})
-
-
-def _on_lessons_distilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # M6 does not re-rank current nodes/best; at_node + pair ids are behavioral replay gates that
-    # prevent paid re-distillation, while the shared lesson output can steer later proposals.
-    st.lessons_distilled.append(d)
-
-def _on_lessons_refreshed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.lessons_refreshed.append(d)   # M6 shared-store re-read cadence/replay gate
-
-def _on_report_generated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Agent-authored run report (selection-neutral; NEVER touches nodes/best). Latest wins; the cadence
-    # and manual-refresh paths both append this, and the receipt also gates future regeneration.
-    from looplab.core.advisory_payloads import sanitize_report_payload
-    content = sanitize_report_payload(d.get("content") or d, env=_FOLD_REDACTION_ENV)
-    # The event envelope is the publication authority. Model/provider content must not forge which
-    # node-count/trigger the writer bound, nor the physical receipt that made the narrative durable.
-    # Preserve inner at_node/trigger only for historical events whose outer payload omitted them.
-    if "at_node" in d or "trigger" in d:
-        envelope = sanitize_report_payload({
-            "at_node": d.get("at_node"), "trigger": d.get("trigger"),
-        }, env=_FOLD_REDACTION_ENV)
-        if "at_node" in d:
-            content["at_node"] = envelope["at_node"]
-        if "trigger" in d:
-            content["trigger"] = envelope["trigger"]
-    content["published_seq"] = (e.seq if type(e.seq) is int
-                                and 0 <= e.seq <= (1 << 53) - 1 else None)
-    content["published_at"] = event_timestamp(e)   # the shared rule; see `event_timestamp`
-    if "trigger" in d and content["trigger"] == "finish":
-        # Publish only if the immediately-adjacent run_finished accepts this report's CAS chain.
-        ctx.pending_finish_report = (e.seq, ctx.event_index, content)
-        return
-    st.report = content
-
 def _on_confirm_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     nid = _coerce_node_id(d)   # forced-confirm finished for this node (gate; selection untouched)
     n = st.nodes.get(nid) if nid is not None else None
@@ -3700,37 +3338,19 @@ _OWN_HANDLERS = {
     EV_EVAL_NOISE_FLOOR: _on_eval_noise_floor,
     EV_HOLDOUT_EVALUATED: _on_holdout_evaluated,
     EV_AGENT_VALIDATED: _on_agent_validated,
-    EV_DATA_PROFILED: _on_data_profiled,
-    EV_DATA_PROVENANCE: _on_data_provenance,
-    EV_HOST_GRADING: _on_host_grading,
     EV_SETUP_FINISHED: _on_setup_finished,
     EV_RUN_SETUP_STARTED: _on_run_setup_started,
     EV_RUN_SETUP_FINISHED: _on_run_setup_finished,
-    EV_DATA_LEAKAGE: _on_data_leakage,
     EV_APPROVAL_REQUESTED: _on_approval_requested,
     EV_APPROVAL_GRANTED: _on_approval_granted,
     EV_SPEC_PROPOSED: _on_spec_proposed,
     EV_SPEC_APPROVAL_REQUESTED: _on_spec_approval_requested,
     EV_SPEC_APPROVED: _on_spec_approved,
     EV_SPEC_DRIFT: _on_spec_drift,
-    EV_WORKSPACE_CHANGED: _on_workspace_changed,
-    EV_ENV_CHANGED: _on_env_changed,
-    EV_DIVERSITY_ARCHIVE: _on_diversity_archive,
-    EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
-    EV_LLM_COST: _on_llm_cost,
-    EV_LLM_USAGE: _on_llm_usage,
     EV_ABLATE: _on_ablate,
-    EV_POLICY_DECISION: _on_policy_decision,
-    EV_STRATEGY_DECISION: _on_strategy_decision,
-    EV_PLAN: _on_plan,
     EV_HYPOTHESIS_RANKED: _on_hypothesis_ranked,
-    EV_RUNG_PROMOTED: _on_rung_promoted,
-    EV_AGENT_DECISION: _on_agent_decision,
     EV_REWARD_HACK_SUSPECTED: _on_reward_hack_suspected,
     EV_FORESIGHT_SELECTED: _on_foresight_selected,
-    EV_NOVELTY_REJECTED: _on_novelty_rejected,
-    EV_NOVELTY_GRADED: _on_novelty_graded,
-    EV_CROSS_RUN_PRIOR: _on_cross_run_prior,
     EV_NODE_VERIFIED: _on_node_verified,
     EV_NODE_VALUE_ESTIMATED: _on_node_value_estimated,
     EV_VERIFIER_GROUP_SCORED: _on_verifier_group_scored,
@@ -3771,12 +3391,6 @@ _OWN_HANDLERS = {
     EV_INJECT_NODE: _on_inject_node,
     EV_INJECT_DONE: _on_inject_done,
     EV_DEEP_RESEARCH: _on_deep_research,
-    EV_RESEARCH_ATTEMPTED: _on_research_attempted,
-    EV_RESEARCH_COMPLETED: _on_research_completed,
-    EV_LITERATURE_RETRIEVED: _on_literature_retrieved,
-    EV_LESSONS_DISTILLED: _on_lessons_distilled,
-    EV_LESSONS_REFRESHED: _on_lessons_refreshed,
-    EV_REPORT_GENERATED: _on_report_generated,
     EV_CONFIRM_DONE: _on_confirm_done,
     EV_ANNOTATION: _on_annotation,
     EV_COMMENT_CREATED: _on_comment,
@@ -3784,7 +3398,7 @@ _OWN_HANDLERS = {
     EV_COMMENT_RESOLUTION_CHANGED: _on_comment,
     EV_PROMOTE: _on_promote,
 }
-_HANDLER_TABLES = (_OWN_HANDLERS, _CONCEPT_HANDLERS)
+_HANDLER_TABLES = (_OWN_HANDLERS, _CONCEPT_HANDLERS, _JOURNAL_HANDLERS)
 _HANDLERS = {etype: handler for table in _HANDLER_TABLES for etype, handler in table.items()}
 # The tables must be DISJOINT: a type two of them claim would be folded by whichever merged last,
 # silently — the same no-op-by-shadowing class invariant #7 exists for. A bare `assert` at import,

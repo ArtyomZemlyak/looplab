@@ -468,7 +468,7 @@ def persisted_usage_deltas(events: Iterable[object]) -> list[dict[str, int | flo
     fold — what `inspect`, the UI and the budget summary report — said $0.50. The ceiling a resumed
     run enforced was therefore neither the number it showed nor the same number twice.
 
-    `events/replay.py::_on_llm_usage` / `_on_llm_cost` are the rule, and this mirrors them:
+    `events/replay_journals.py::_on_llm_usage` / `_on_llm_cost` are the rule, and this mirrors them:
 
       * a row with a `usage_id` counts ONCE, the first time it is seen (the id is the physical
         call's identity; a repeat is the same call re-recorded, not a second call);

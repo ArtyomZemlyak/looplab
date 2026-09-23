@@ -853,8 +853,9 @@ def snapshot_superseded_receipt(value) -> dict:
     `nodes` the bounded sample, so a long list is truncated rather than under-reported.
 
     Engine-derived like `verification`, and it rides INSIDE the memo payload for the same reason:
-    `events/replay.py::_on_research_completed` folds only `d["memo"]` into `state.research`, so a
-    fact stamped on the event envelope alone could never reach the prompt that quotes the summary.
+    `events/replay_journals.py::_on_research_completed` folds only `d["memo"]` into
+    `state.research`, so a fact stamped on the event envelope alone could never reach the prompt
+    that quotes the summary.
     """
     src = value if isinstance(value, dict) else {}
     raw, total, shape_known = _bounded_source(src.get("nodes"))

@@ -344,6 +344,7 @@ _LAYOUT = {
     # context/generation vocabulary they all read.
     "replay_ctx": "events",
     "replay_concepts": "events",
+    "replay_journals": "events",
     "stop_account": "events",
     "repo_developer": "adapters",
     "repo_task": "adapters",

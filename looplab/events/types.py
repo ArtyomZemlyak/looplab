@@ -1787,15 +1787,16 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(),
         # EVERY COLUMN `sanitize_usage_delta` EMITS, not two of them. The row declared
         # `priced_calls` and `usage_id` alone while the writer (`engine/costs.py::_payload`) spreads
-        # the whole sanitized delta and the fold (`replay.py::_clean_llm_totals`) reads all five
-        # missing ones — so `docs/guide/event-reference.md` described the run's cost ledger as
-        # carrying no cost and no tokens. Optional rather than required: `_row_priced_calls` already
-        # establishes that a log written before a counter existed omits it.
+        # the whole sanitized delta and the fold (`replay_journals.py::_clean_llm_totals`) reads
+        # all five missing ones — so `docs/guide/event-reference.md` described the run's cost
+        # ledger as carrying no cost and no tokens. Optional rather than required:
+        # `_row_priced_calls` already establishes that a log written before a counter existed
+        # omits it.
         optional=("calls", "completion_tokens", "cost", "priced_calls", "prompt_tokens",
                   "total_tokens", "usage_id"),
         # NOT whole (review 2026-09-22, EVT-05): only the six sanitized counters are added into the
-        # ledger (`replay.py::_on_llm_usage`). It is `llm_cost`, the legacy SUMMARY row, whose
-        # extra keys ride into `RunState.llm_cost` — that row stays whole.
+        # ledger (`replay_journals.py::_on_llm_usage`). It is `llm_cost`, the legacy SUMMARY row,
+        # whose extra keys ride into `RunState.llm_cost` — that row stays whole.
     ),
     "log_repaired": PayloadContract(
         "The `looplab repair-log` receipt for a rewritten torn log: what was dropped, and where the backup is.",

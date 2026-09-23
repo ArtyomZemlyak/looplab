@@ -1,24 +1,31 @@
 """The fold's shared vocabulary: its context object and the lifecycle-generation rules.
 
 `events/replay.py` held the whole fold until review 2026-09-22 (EVT-12) split its handler FAMILIES
-into sibling modules (`events/replay_<family>.py`). Every family needs the two things here, so they
-live BELOW all of them — a family may not import `replay.py`, which imports every family:
+into sibling modules (`events/replay_<family>.py`). More than one family needs each thing here, so
+they live BELOW all of them — a family may not import `replay.py`, which imports every family:
 
 * `_FoldCtx`, the cross-arm state one fold threads through every handler (selection certificate,
   accounting de-dup keys, finish/report adjacency, concept receipts);
 * the ONE reading of an event's lifecycle stamp — `_event_generation` and its `_MISSING` sentinel,
   `event_generation_binds` and the Node-side `_generation_matches`, the control-intent variant
-  `_control_generation_matches`, and `_node_for_event`.
+  `_control_generation_matches`, and `_node_for_event`;
+* the ONE reading of an event's wall-clock stamp — `event_timestamp`, which the journals family's
+  report handler publishes from, beside `run_wall_clock_seconds`, the run-duration reader its
+  docstring pairs it with (moved together so that pairing still reads true).
 
 Moved VERBATIM, comments included. `replay.py` re-exports every name, so `from
-looplab.events.replay import event_generation_binds` (`engine/evaluate.py`) and the tests' imports
-of the private names keep resolving to these same objects. A patch aimed at `looplab.events.replay`
-does NOT reach the families' calls to these names — `tests/test_replay_families.py` holds every
-patch the suite makes on that module to a name `replay.py` itself defines or reads.
+looplab.events.replay import event_generation_binds` (`engine/evaluate.py`), `event_timestamp` /
+`run_wall_clock_seconds` (`cli/`, `engine/finalize.py`) and the tests' imports of the private names
+keep resolving to these same objects. A patch aimed at `looplab.events.replay` does NOT reach the
+families' calls to these names — `tests/test_replay_families.py` holds every patch the suite makes on
+that module to a name `replay.py` itself defines or reads.
 """
 from __future__ import annotations
 
-from looplab.core.models import Node, RunState, coerce_node_id as _coerce_node_id
+import math
+from typing import Iterable, Optional
+
+from looplab.core.models import Event, Node, RunState, coerce_node_id as _coerce_node_id
 
 
 class _FoldCtx:
@@ -162,3 +169,59 @@ def _control_generation_matches(n: Node, d: dict) -> bool:
 def _node_for_event(st: RunState, d: dict) -> Node | None:
     nid = _coerce_node_id(d)
     return st.nodes.get(nid) if nid is not None else None
+
+
+# 9999-12-31T23:59:59Z. Past this an `Event.ts` is corruption (or a unit mix-up — a milliseconds
+# timestamp lands here), not a date, and admitting it would let one damaged row define a run's whole
+# duration. Paired with the `> 0` floor below because `Event.ts` DEFAULTS to 0.0: a hand-built Event
+# or a fixture that never went through `EventStore.append` carries "no timestamp", not 1970.
+_MAX_EVENT_TS = 253_402_300_799
+
+
+def event_timestamp(e) -> Optional[float]:
+    """One event's wall-clock timestamp as a usable float, or None when the row does not carry one.
+
+    The ONE spelling of that rule, because two readers need the same answer over the same untrusted
+    bytes and used to derive it separately: `_on_report` publishes `published_at` from it, and
+    `run_wall_clock_seconds` below measures a run's duration from it. `type(ts) in (int, float)`
+    rather than `isinstance` on purpose — `isinstance(True, int)` is True, and a JSON `true` in a
+    hand-edited log would otherwise become the epoch second 1.
+    """
+    ts = getattr(e, "ts", None)
+    if type(ts) not in (int, float) or not math.isfinite(ts):
+        return None
+    return float(ts) if 0 < ts <= _MAX_EVENT_TS else None
+
+
+def run_wall_clock_seconds(events: Iterable[Event]) -> Optional[float]:
+    """How long the RUN took, from its own log: last usable `ts` minus first usable `ts`.
+
+    This is the one duration that survives a process boundary. A run that is stopped and wrapped up
+    hours later by `looplab finalize` is finished by a DIFFERENT process, so any `time.time() - start`
+    the finalizing process measures describes the wrap-up, not the run — measured, a 274-second run
+    reported `budget.elapsed_s = 0.027`. The event log is the only record that spans both processes,
+    and it has carried `ts` on every row since the first version of the envelope, so this is exact on
+    OLD logs too — nothing had to be recorded for it.
+
+    Order-tolerant (min/max, not first/last position) like everything else that reads the log, and
+    reader-tolerant: rows without a usable timestamp are skipped rather than dragging the span to
+    1970. Returns None when NO row carries one (a synthetic/hand-built log), so a caller can say
+    "unknown" instead of publishing a confident 0.0.
+
+    Note what it deliberately does NOT do: subtract the idle gap while a stopped run waited for its
+    `finalize`. That gap is part of how long the run took, and it is exactly the interval the old
+    number pretended did not exist. `looplab timings` names the untraced share of it.
+    """
+    first: Optional[float] = None
+    last: Optional[float] = None
+    for e in events:
+        ts = event_timestamp(e)
+        if ts is None:
+            continue
+        if first is None or ts < first:
+            first = ts
+        if last is None or ts > last:
+            last = ts
+    if first is None or last is None:
+        return None
+    return max(0.0, last - first)

@@ -83,7 +83,8 @@ def _log() -> list[Event]:
 def test_one_log_folds_identically_whatever_the_replaying_process_holds(monkeypatch):
     """THE DEFECT, driven: before the fix the second fold masked the planted value and the two
     dumps differed. MUTATION: drop `env=_FOLD_REDACTION_ENV` from any one of the three advisory
-    handlers in `replay.py` and the dumps differ again."""
+    handlers in `events/replay_journals.py` (split out of `replay.py`, review 2026-09-22 EVT-12)
+    and the dumps differ again."""
     events = _log()
     monkeypatch.delenv(ENV_NAME, raising=False)
     plain = fold(events)
