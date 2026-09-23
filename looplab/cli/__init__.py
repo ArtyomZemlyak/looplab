@@ -676,45 +676,6 @@ def _engine_singleton(run_dir: Path):
         f.close()
 
 
-def _foresight_panel_applies(settings, researcher) -> bool:
-    """Whether the FOREAGENT predict-before-execute panel should wrap this researcher.
-
-    The two call sites spelled this guard out with ONE clause of difference — the non-unified branch
-    also tested `backend == "llm"`, which the unified branch gets for free from `_unified` itself.
-    Written twice with a difference, it read as though the two paths were checking different things
-    (doc 25 CT-15); folding the clause in here is equivalent and says plainly that they are not.
-
-    Yields to an explicitly-configured numeric `researcher_panel > 1`, so opting into the k-NN panel
-    is never silently overridden by this default. Needs a client — a bare surrogate wrapper exposes
-    none, and falls through.
-    """
-    return bool(
-        getattr(settings, "foresight", True)
-        and settings.backend == "llm"
-        and getattr(settings, "foresight_panel", 2) > 1
-        and settings.researcher_panel <= 1
-        and getattr(researcher, "client", None) is not None)
-
-
-def _wrap_with_foresight_panel(researcher, settings, ftools):
-    """Build the foresight panel around *researcher*. ONE constructor call, deliberately.
-
-    Five getattr-defaulted kwargs written out in two branches is exactly the shape that grows a
-    sixth in only one of them, and a drift there would silently change unified-vs-plain behaviour
-    with nothing to catch it (doc 25 CT-15).
-    """
-    from looplab.core.evidence import envelope_enabled
-    from looplab.search.foresight import ForesightPanelResearcher
-    return ForesightPanelResearcher(
-        researcher, k=settings.foresight_panel, tools=ftools,
-        min_confidence=getattr(settings, "foresight_min_confidence", 0.0),
-        verify_score=getattr(settings, "foresight_verify", False),
-        verify_samples=getattr(settings, "foresight_verify_samples", 3),
-        # The agentic ranker's run tools return the candidates' own code: fenced when the run's
-        # envelope is on (review 2026-09-22, TAT-02), through the ONE Settings reader.
-        evidence_envelope=envelope_enabled(settings))
-
-
 def _apply_speculation_calibration_profile(settings: Settings) -> None:
     """Force the source-owned offline measurement profile before any role/client is built."""
     fields = settings.__class__.model_fields
@@ -888,44 +849,16 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             _ftools = CompositeTools([RunTools(), DataTools(task)])
         except Exception:  # noqa: BLE001 — introspection tools are optional; degrade to one-shot ranking
             _ftools = None
-    # Unified mode: researcher IS developer (one agent). Skip the researcher-only wrappers
-    # (surrogate/panel) — they would re-wrap `researcher` without re-wrapping `developer`, so the
-    # two handles would diverge mid-run (R1). The unified agent owns its own ideation machinery.
+    # THE RESEARCHER-WRAPPER STACK, composed by the ONE rule every pair of this run shares (review
+    # 2026-09-22, SCJ-02): here for the primary pair; the engine applies its FREE layers to every
+    # pooled pair it mints from `role_factory` below (`_build_role_pairs`), and its surrogate layer on
+    # a mid-run BOHB switch (`engine/strategy.py::_ensure_surrogate`). This block used to spell the
+    # stack out by hand and the other two sites each re-derived a different version of it — see
+    # `search/researcher_stack.py`, which also says which layers a pooled pair does NOT get, and why.
+    from looplab.search.researcher_stack import wrap_researcher
+    researcher, developer = wrap_researcher(researcher, developer, settings=settings, tools=_ftools)
+    # Unified mode: researcher IS developer (one agent) — and, below, the strategist handle too.
     _unified = settings.unified_agent and settings.backend == "llm"
-    if not _unified:
-        # A2 surrogate-guided proposer: wrap the base Researcher when the task exposes numeric bounds
-        # (it bootstraps via the wrapped Researcher and delegates on non-numeric spaces). A3 BOHB =
-        # ASHA racing + the surrogate, so `policy=bohb` auto-enables it.
-        if settings.surrogate_proposer or settings.policy == "bohb":
-            from looplab.search.surrogate import SurrogateResearcher
-            # Constructed whether or not the TASK declares bounds. Only the built-in benchmarks
-            # declare them, so the old `if _bounds:` gate meant this setting silently did nothing on
-            # repo and dataset tasks — the ones real operators run — while the settings table said it
-            # was on. The wrapper self-gates: with no bounds and no usable history it delegates to the
-            # wrapped Researcher exactly as before, and once the run has enough evaluated numeric
-            # params it learns the ranges from them.
-            researcher = SurrogateResearcher(getattr(researcher, "bounds", None) or {},
-                                             fallback=researcher,
-                                             explore=settings.surrogate_explore)
-        # FOREAGENT predict-before-execute for HYPOTHESES: rank K candidate ideas with the LLM world
-        # model primed with the data profile + experiment memory — it compares the structural / text
-        # ideas the numeric surrogate can't. ON by default for the LLM backend.
-        if _foresight_panel_applies(settings, researcher):
-            researcher = _wrap_with_foresight_panel(researcher, settings, _ftools)
-        # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
-        elif settings.researcher_panel > 1:
-            from looplab.search.panel import PanelResearcher
-            researcher = PanelResearcher(researcher, k=settings.researcher_panel,
-                                         explore=settings.surrogate_explore)
-    elif _foresight_panel_applies(settings, researcher):
-        # Foresight in UNIFIED mode: the wrappers above are skipped because they'd re-wrap only the
-        # researcher handle, but ForesightPanelResearcher now DELEGATES its whole developer surface to
-        # the wrapped agent (__getattr__), so wrapping the single unified agent and using it for BOTH
-        # handles keeps them identical — predict-before-execute + hypothesis-board prioritization work,
-        # implement/repair pass straight through. (Numeric surrogate/panel stay researcher-only, so
-        # they remain unified-skipped; only the client-based foresight is safe to share.)
-        researcher = _wrap_with_foresight_panel(researcher, settings, _ftools)
-        developer = researcher
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).
     mk = getattr(task, "make_onboarder", None)
@@ -1031,6 +964,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # a fresh wired pair per concurrent build prevents mutable role state from being
         # shared when the settled build width is >1 (canonical llm_parallel; legacy parallel_build).
         # This is LLM/build isolation, not proof of the later evaluation's CPU/GPU allocation.
+        # BARE on purpose: the engine gives each pair it mints the primary's FREE wrapper layers
+        # (`orchestrator.py::_build_role_pairs` -> `researcher_stack.py::pooled_researcher`), which
+        # a closure over the LAUNCH settings could not keep in step through a mid-run BOHB switch.
         role_factory=(lambda: role_builder(task, settings, run_dir)),
         proxy_scorer=proxy_scorer,
         embedder=_make_embedder(settings),

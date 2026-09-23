@@ -70,11 +70,17 @@ def test_the_panel_spends_the_distance_once_explore_is_on_in_both_directions():
 
 
 def test_the_cli_wires_the_surrogates_own_exploration_knob():
-    import inspect
-    from looplab import cli
-    src = inspect.getsource(cli)
-    assert "PanelResearcher(researcher, k=settings.researcher_panel,\n" \
-           "                                         explore=settings.surrogate_explore)" in src
+    """Driven through the stack the CLI builds with (`search/researcher_stack.py::wrap_researcher`,
+    where review 2026-09-22 SCJ-02 moved it) rather than pinned as CLI text: the k-NN panel the
+    launch composes spends `Settings.surrogate_explore`."""
+    from looplab.core.config import Settings
+    from looplab.search.researcher_stack import wrap_researcher
+
+    settings = Settings(backend="llm", unified_agent=False, researcher_panel=3,
+                        surrogate_explore=0.37)
+    researcher, _developer = wrap_researcher(_Seq([]), object(), settings=settings)
+    assert isinstance(researcher, PanelResearcher) and researcher.k == 3
+    assert researcher.explore == 0.37
     assert PanelResearcher(_Seq([]), k=2).explore == 0.0, "a bare panel keeps the historical ranking"
 
 

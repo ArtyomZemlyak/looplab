@@ -38,6 +38,7 @@ from looplab.events.types import (
     EV_CARD_BUILD_ATTEMPTED,
     EV_CARD_BUILD_DONE,
     EV_CARD_BUILD_REQUESTED,
+    EV_FORESIGHT_SELECTED,
     EV_LLM_COST,
     EV_LLM_USAGE,
     EV_NODE_BUILDING,
@@ -794,6 +795,20 @@ class SpeculationMixin:
         per-build output slots are shared with repairs and ordinary builds.  The surrounding Card
         session never overlaps a normal build batch, so the cached pool pair is exclusively leased
         for the session and can be safely reused by its single producer.
+
+        THE LEASED RESEARCHER IS NOT THE PRIMARY'S STACK, BY DECISION (review 2026-09-22, SCJ-02).
+        It carries the primary's FREE wrapper layer — the surrogate, under `surrogate_proposer` /
+        `policy=bohb` — and NEITHER PAID one: no foresight panel, no k-NN researcher panel. Under the
+        shipped `unified_agent=True` that makes it the bare facade while the primary is
+        `ForesightPanelResearcher(UnifiedAgent)`, so a raw-lane proposal gets no predict-before-execute
+        and no predicted board order (`_hyp_order`). Wrapping it would be a SPEND change nothing has
+        authorised — at least three paid calls per prefetch where this lane pays one, on a prefetch
+        the freshness gate discards whenever the board moves — and the ranking could not even be
+        recorded: `_prepare_raw_card_stage` runs in a worker, where the board-wide ranking registers
+        must not be appended, and discards role telemetry in its `finally`. So `_create_precoded_node`
+        reads no researcher telemetry off this pair (the Developer's best-of-N pick it still reads);
+        the build producer never proposes, and a value found there would be another proposal's.
+        `search/researcher_stack.py` carries the full account and the proof the free layer is free.
         """
 
         self._ensure_speculation_state()
@@ -1490,10 +1505,16 @@ class SpeculationMixin:
                 retry_tail_cas(self.store, _plan_terminal, on_exhaust=lambda: None)
         try:
             self._emit_agent_report(node_id, developer=developer)
-            self._emit_hypothesis_ranked(node_id, 0, researcher=researcher)
-            self._emit_foresight_selected(
-                node_id, 0, researcher=researcher, developer=developer,
-            )
+            # THE DEVELOPER HALF ONLY (review 2026-09-22, SCJ-02). This used to call
+            # `_emit_hypothesis_ranked` and both halves of `_emit_foresight_selected` on the pooled
+            # researcher, which cannot hold THIS node's ranking: the build producer implements a
+            # Card an earlier proposal minted and never proposes (it clears the pair's telemetry
+            # first), and the pooled researcher carries no panel that could rank (see
+            # `_producer_role_pair`). The reads were dead on every real pair — and on the leased pair
+            # a value there would belong to ANOTHER proposal, i.e. a cross-wired receipt. Best-of-N's
+            # pick on the pooled Developer is this build's own, so it is still published.
+            self._emit_role_telemetry(
+                developer, "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, 0)
         finally:
             # `_emit_agent_report` does not consume `last_report`; make pair reuse explicit.
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)

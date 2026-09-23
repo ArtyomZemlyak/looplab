@@ -346,6 +346,7 @@ _LAYOUT = {
     "repo_write_tools": "adapters",
     "report": "serve",
     "research_cadence": "engine",
+    "researcher_stack": "search",   # the ONE researcher-wrapper stack rule: launch, pool, BOHB switch
     "reset_route": "serve",
     "reset_transaction": "serve",
     "resources": "engine",  # resource-envelope and Card footprint scheduling helpers

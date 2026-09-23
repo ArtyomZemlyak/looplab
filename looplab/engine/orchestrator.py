@@ -5703,6 +5703,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             return [(self.researcher, self.developer)]
         if self._role_pool is None:
             self._role_pool = []
+        # Function-local: the stack module pulls the three wrapper modules in, which nothing else on
+        # the engine's import path needs until a pool is actually minted.
+        from looplab.search.researcher_stack import pooled_researcher
         while len(self._role_pool) < n - 1:
             try:
                 pair = self.role_factory()
@@ -5710,6 +5713,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 break
             if not (isinstance(pair, tuple) and len(pair) == 2):
                 break
+            # THE PRIMARY'S FREE LAYERS, NONE OF ITS PAID ONES (review 2026-09-22, SCJ-02). The
+            # factory's pair is bare, and the Layer-5 producer PROPOSES on it: under
+            # `surrogate_proposer`/`policy=bohb` the primary proposed through the surrogate while
+            # this lane ignored the setting. Decided off the primary's LIVE chain, before the
+            # developer override below so the unified-facade test sees the factory's own pair, and
+            # on a draw stream of its own (`seed`) so two lanes never re-propose one point.
+            # `search/researcher_stack.py` says why the two panels stay off a pooled pair.
+            pair = (pooled_researcher(self.researcher, pair[0], pair[1],
+                                      explore=self._surrogate_explore,
+                                      seed=len(self._role_pool) + 1), pair[1])
             if self._pool_developer_override is not None and self.developer_factory is not None:
                 try:
                     pair = (pair[0], self.developer_factory(self._pool_developer_override))

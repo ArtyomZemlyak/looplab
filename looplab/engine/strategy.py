@@ -538,36 +538,49 @@ class StrategyCadenceMixin:
         """Wrap the Researcher in a SurrogateResearcher if it isn't already (idempotent). Used when a
         mid-run strategy switch turns BOHB on: BOHB is ASHA's racing schedule PLUS the surrogate
         proposer, and the proposer is only wired at startup for policy=bohb/surrogate_proposer — so a
-        Strategist switching to bohb would otherwise run bare ASHA. Needs numeric bounds; if the
-        Researcher (or anything it wraps) exposes none, this is a no-op (bohb degrades to ASHA)."""
-        from looplab.search.surrogate import SurrogateResearcher
-        # Unified mode: re-wrapping `self.researcher` here would desync it from `self.developer`
-        # (the same agent object) — the cli already skips the startup surrogate wrap for the same
-        # reason (R1). A mid-run switch to bohb degrades to bare ASHA, which is acceptable.
-        if self.unified_agent:
-            return
-        # "if it isn't already" has to mean the WHOLE wrapper chain, not just the outermost handle.
-        # The cli builds the surrogate FIRST and wraps a panel around it, so `researcher_panel > 1`
-        # (or foresight) combined with `surrogate_proposer`/`policy=bohb` starts the run as
-        # `Panel(Surrogate(base))` — and `_apply_strategy` calls this on EVERY strategy application
-        # whose policy is bohb, including a params-only change to a run that was already bohb. An
-        # outermost-only isinstance therefore re-wrapped into `Surrogate(Panel(Surrogate(base)))`,
-        # demoting the operator's configured panel to the outer surrogate's bootstrap path.
-        # The links carry different names — panels hold `.base`, SurrogateResearcher `.fallback`,
-        # the roles/unified wrappers `.inner` — so the walk follows all three (`seen` guards the
-        # self-referential `inner` unified_agent.py builds).
-        chain, seen, link = [], set(), self.researcher
-        while link is not None and id(link) not in seen:
-            seen.add(id(link))
-            chain.append(link)
-            link = (getattr(link, "base", None) or getattr(link, "inner", None)
-                    or getattr(link, "fallback", None))
-        if any(isinstance(r, SurrogateResearcher) for r in chain):
-            return
-        bounds = next((b for b in (getattr(r, "bounds", None) for r in chain) if b), None)
-        if bounds:
-            self.researcher = SurrogateResearcher(bounds, fallback=self.researcher,
-                                                  explore=self._surrogate_explore)
+        Strategist switching to bohb would otherwise run bare ASHA.
+
+        THE LAUNCH'S RULE, NOT A THIRD ONE (review 2026-09-22, SCJ-02). The layer is
+        `search/researcher_stack.py::with_surrogate` — the function `cli/__init__.py::_engine` builds
+        the startup surrogate with, and the one the pool follows. This method used to re-derive it
+        with two differences from the launch, and a run that switches to BOHB mid-run now behaves
+        differently in exactly those two places:
+
+        * NO BOUNDS GATE. It wrapped only when some link of the chain declared numeric bounds — the
+          gate the launch's own comment calls the defect — so on a repo/dataset task (they declare
+          none) a Strategist's `bohb` ran bare ASHA. It now wraps, and the wrapper learns its ranges
+          from the run's own evaluated params once ~4 of them share a numeric key. Until then — and
+          forever on a structural task whose params carry no numbers — it delegates every proposal
+          to the wrapped Researcher, the same call with the same hints, so the switch adds no paid
+          call and changes no prompt; past warm-up it REMOVES the Researcher call.
+        * R1 IS DECIDED ON THE OBJECTS. It skipped on the raw `unified_agent` flag, which a
+          toy/templated run carries by default with two separate role objects (`make_roles` honours
+          the flag only with `backend=llm`), so a `--backend toy` run never got the surrogate its
+          launch gives `policy=bohb`. The skip now fires exactly where re-wrapping would desync the
+          two handles: the Researcher IS the Developer.
+
+        What did NOT change: the surrogate still goes OUTERMOST, over whatever the chain already is
+        (`Surrogate(Foresight(base))` — the H8 shape `tests/test_foresight.py` pins), rather than
+        innermost as the launch composes it; re-composing would rebuild the panels mid-run and drop
+        their state.
+
+        What is NEW beside the two: the POOL follows. The pairs it has already minted take the layer
+        here (`pooled_researcher`, the rule `_build_role_pairs` applies to every pair it mints later),
+        and the producer's lease is re-taken from the pool, so the Layer-5 producer does not keep
+        proposing past the switch without it. The lease is cleared exactly as a Developer swap
+        clears it in `_apply_strategy`, and for the same reason it is race-free: sessions are joined
+        before the Strategist cadence runs."""
+        from looplab.search.researcher_stack import pooled_researcher, with_surrogate
+        wrapped = with_surrogate(self.researcher, self.developer, explore=self._surrogate_explore)
+        if wrapped is self.researcher:
+            return      # unified (R1), or the chain already carries one: idempotent
+        self.researcher = wrapped
+        if self._role_pool:
+            self._role_pool = [
+                (pooled_researcher(wrapped, pair[0], pair[1], explore=self._surrogate_explore,
+                                   seed=index + 1), pair[1])
+                for index, pair in enumerate(self._role_pool)]
+            self._spec_role_pair = None
 
     def _apply_strategy(
             self, strat: dict, *, _prepared_developer=_NO_PREPARED_DEVELOPER,

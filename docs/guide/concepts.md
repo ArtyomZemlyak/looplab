@@ -853,6 +853,18 @@ the configured policy's legal lanes and budget semantics rather than inventing a
 Add `policy=bohb` behavior by combining ASHA racing with the surrogate proposer
 (`surrogate_proposer`).
 
+**One researcher-wrapper stack for every pair (2026-09-23, review 2026-09-22 SCJ-02).** The
+Researcher a run proposes with is composed by one rule, `search/researcher_stack.py`: the surrogate
+proposer innermost (under `surrogate_proposer` or `policy=bohb`), then EITHER the foresight panel OR
+the k-NN panel (`researcher_panel > 1`). A Strategist switch to `bohb` mid-run adds the SAME
+surrogate layer the launch would have — on a task that declares no numeric bounds too, where it
+learns its ranges from the run's own evaluated params and delegates until then — and skips it only
+where the Researcher IS the Developer (the unified facade). The speculative producer's pooled
+Researcher carries the stack's FREE layer (the surrogate) and neither PAID panel: a panel there
+would multiply every prefetch's paid calls, and its ranking receipt could not be written from the
+producer's worker. Under the shipped `unified_agent=true` the pooled Researcher is therefore the
+bare facade while the primary is the foresight panel around it.
+
 **The three empirical predictors spend the same uncertainty (2026-09-06).** `core/numeric.py::knn_idw`
 returns `(prediction, nearest_distance)`, and the distance to the nearest evaluated point is the
 only uncertainty proxy the search layer has. The surrogate proposer always spent it as a UCB term;

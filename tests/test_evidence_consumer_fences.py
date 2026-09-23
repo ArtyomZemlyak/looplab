@@ -572,19 +572,21 @@ def test_the_prior_art_sweep_fences_the_repository_files_it_reads(tmp_path, monk
 @pytest.mark.parametrize("envelope", [True, False], ids=["on", "off"])
 def test_the_foresight_ranker_fences_the_run_it_reads_before_it_ranks(envelope):
     """The predict-before-execute panel ranks the Researcher's candidate ideas agentically, reading
-    the run's experiments first (`RunTools`). Driven through the CLI's own builder
-    (`_wrap_with_foresight_panel`), so the Settings -> panel -> `rank_agentic` chain is the product's."""
-    from looplab.cli import _wrap_with_foresight_panel
+    the run's experiments first (`RunTools`). Driven through the product's own builder
+    (`search/researcher_stack.py::with_foresight_panel`, the CLI's `_wrap_with_foresight_panel`
+    until review 2026-09-22, SCJ-02 moved the stack), so the Settings -> panel -> `rank_agentic`
+    chain is the product's."""
     from looplab.core.config import Settings
     from looplab.search.foresight import ForesightPanelResearcher
+    from looplab.search.researcher_stack import with_foresight_panel
     from looplab.tools.run_tools import readonly_run_tools
 
     assert ForesightPanelResearcher(object(), client=object()).evidence_envelope is False
     state = _run_state()
     model = _Reader("emit", {"order": [1, 0], "confidence": 0.7, "reason": "x=3 first"})
     base = type("Base", (), {"client": model, "bounds": None, "parser": None, "prompts": None})()
-    panel = _wrap_with_foresight_panel(base, Settings(evidence_envelope=envelope),
-                                       readonly_run_tools(state))
+    panel = with_foresight_panel(base, Settings(evidence_envelope=envelope),
+                                 readonly_run_tools(state))
     order, _confidence, _reason = panel._rank("REPORT", ["idea A", "idea B"], goal="g",
                                               direction="min")
     assert order[0] == 1

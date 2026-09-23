@@ -260,25 +260,48 @@ def test_a_task_snapshot_that_cannot_be_written_does_not_lose_the_config_one(tmp
 
 def test_the_foresight_panel_is_constructed_in_exactly_one_place():
     """Five getattr-defaulted kwargs written out in two branches is the shape that grows a sixth in
-    only one of them, silently changing unified-vs-plain behaviour (doc 25 CT-15)."""
-    from looplab import cli
+    only one of them, silently changing unified-vs-plain behaviour (doc 25 CT-15).
 
-    source = inspect.getsource(cli)
-    assert source.count("ForesightPanelResearcher(") == 1
-    assert source.count("_wrap_with_foresight_panel(") == 3        # def + two call sites
+    The ONE constructor moved out of the CLI with the rest of the researcher-wrapper stack
+    (review 2026-09-22, SCJ-02) into `search/researcher_stack.py::with_foresight_panel`; counted by
+    AST over the whole package, so a second constructor anywhere — the CLI included — is red."""
+    import ast
+
+    from _source_scan import PKG, called_names, iter_trees
+    from looplab.search import researcher_stack
+
+    sites = sorted(path.relative_to(PKG).as_posix() for path, tree in iter_trees()
+                   for node in ast.walk(tree)
+                   if isinstance(node, ast.Call) and (getattr(node.func, "id", None)
+                                                      or getattr(node.func, "attr", None))
+                   == "ForesightPanelResearcher")
+    assert sites == ["search/researcher_stack.py"]
+    assert called_names(researcher_stack.with_foresight_panel).count(
+        "ForesightPanelResearcher") == 1
+    # …and the stack reaches it from its two branches (unified and plain), never around it.
+    assert called_names(researcher_stack.wrap_researcher).count("with_foresight_panel") == 2
 
 
 def test_the_two_foresight_guards_stopped_differing_by_one_clause():
     """The non-unified branch tested `backend == "llm"` and the unified one did not — it gets that
-    for free from `_unified`. Written twice with a difference, they read as different checks."""
+    for free from `_unified`. Written twice with a difference, they read as different checks.
+
+    Re-pointed at `search/researcher_stack.py` (review 2026-09-22, SCJ-02), where both branches now
+    live; the CLI decides no layer of the stack itself any more."""
+    from _source_scan import called_names
     from looplab import cli
+    from looplab.search import researcher_stack
 
-    source = inspect.getsource(cli._engine)
-    assert source.count("_foresight_panel_applies(settings, researcher)") == 2
-    assert 'getattr(settings, "foresight_panel", 2) > 1' not in source, (
-        "_engine still re-derives the guard the helper owns")
+    stack = inspect.getsource(researcher_stack.wrap_researcher)
+    assert called_names(researcher_stack.wrap_researcher).count("foresight_panel_applies") == 2
+    assert 'getattr(settings, "foresight_panel", 2) > 1' not in stack, (
+        "the stack still re-derives the guard the helper owns")
+    engine_calls = called_names(cli._engine)
+    assert engine_calls.count("wrap_researcher") == 1
+    for layer in ("foresight_panel_applies", "SurrogateResearcher", "PanelResearcher"):
+        assert layer not in engine_calls, f"_engine builds a stack layer ({layer}) by hand again"
 
-    predicate = inspect.getsource(cli._foresight_panel_applies)
+    predicate = inspect.getsource(researcher_stack.foresight_panel_applies)
     assert 'settings.backend == "llm"' in predicate, (
         "folding the clause in is what removes the asymmetry; dropping it would widen the guard")
 
@@ -286,8 +309,8 @@ def test_the_two_foresight_guards_stopped_differing_by_one_clause():
 def test_the_foresight_guard_still_yields_to_an_explicit_numeric_panel():
     """Behaviour, not shape: `researcher_panel > 1` is an explicit opt-in to the k-NN panel and must
     never be silently overridden by the foresight default."""
-    from looplab import cli
     from looplab.core.config import Settings
+    from looplab.search.researcher_stack import foresight_panel_applies
 
     class _WithClient:
         client = object()
@@ -296,14 +319,14 @@ def test_the_foresight_guard_still_yields_to_an_explicit_numeric_panel():
         client = None
 
     base = Settings(backend="llm")
-    assert cli._foresight_panel_applies(base, _WithClient()) is True
-    assert cli._foresight_panel_applies(base, _NoClient()) is False
-    assert cli._foresight_panel_applies(Settings(backend="toy"), _WithClient()) is False
-    assert cli._foresight_panel_applies(
+    assert foresight_panel_applies(base, _WithClient()) is True
+    assert foresight_panel_applies(base, _NoClient()) is False
+    assert foresight_panel_applies(Settings(backend="toy"), _WithClient()) is False
+    assert foresight_panel_applies(
         Settings(backend="llm", researcher_panel=4), _WithClient()) is False
-    assert cli._foresight_panel_applies(
+    assert foresight_panel_applies(
         Settings(backend="llm", foresight=False), _WithClient()) is False
-    assert cli._foresight_panel_applies(
+    assert foresight_panel_applies(
         Settings(backend="llm", foresight_panel=1), _WithClient()) is False
 
 

@@ -354,8 +354,8 @@ def test_every_construction_site_threads_the_one_settings_reader():
     that make most of a run's tool calls are construction sites too — `ToolUsingResearcher`,
     `DeepResearcher` and the repo Developer, each OFF at its constructor — and so are the report
     writer and the foresight panel (driven in `tests/test_evidence_consumer_fences.py`)."""
-    from looplab import cli
     from looplab.agents import deep_research, developer_backends, factory, providers, strategist
+    from looplab.search import researcher_stack
     from looplab.serve import report
 
     def calls_named(module, name):
@@ -380,7 +380,10 @@ def test_every_construction_site_threads_the_one_settings_reader():
                                 (developer_backends, "LLMRepoDeveloper", "evidence_envelope"),
                                 (deep_research, "DeepResearcher", "evidence_envelope"),
                                 (report, "ReportWriter", "evidence_envelope"),
-                                (cli, "ForesightPanelResearcher", "evidence_envelope")):
+                                # The ONE foresight-panel constructor moved out of the CLI with
+                                # the researcher-wrapper stack (review 2026-09-22, SCJ-02).
+                                (researcher_stack, "ForesightPanelResearcher",
+                                 "evidence_envelope")):
         calls = calls_named(module, name)
         assert calls, f"{module.__name__} no longer constructs {name}"
         assert all(passes_reader(c, kwarg) for c in calls), (module.__name__, name)
