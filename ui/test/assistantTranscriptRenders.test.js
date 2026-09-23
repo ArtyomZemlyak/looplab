@@ -118,7 +118,7 @@ function sseStream() {
   }
 }
 
-function server({ transcript }) {
+function server({ transcript, meta = META }) {
   const calls = []
   const streams = []
   const revert = { pending: [] }
@@ -128,9 +128,9 @@ function server({ transcript }) {
     calls.push({ method, path: url.pathname, body: init.body ?? null })
     const path = url.pathname
     if (method === 'GET' && path === '/api/assistant/commands') return json({ commands: [] })
-    if (method === 'GET' && path === '/api/assistant/sessions') return json({ sessions: [META] })
+    if (method === 'GET' && path === '/api/assistant/sessions') return json({ sessions: [meta] })
     if (method === 'GET' && path === `/api/assistant/sessions/${SID}`) {
-      return json({ messages: transcript, meta: META })
+      return json({ messages: transcript, meta })
     }
     if (method === 'GET' && path === '/api/assistant/watches') return json({ watches: [] })
     if (method === 'GET' && path === '/api/runs') {
@@ -186,8 +186,8 @@ test.after(async () => {
   await harness?.close()
 })
 
-async function mountRestoredChat({ transcript }) {
-  const backend = server({ transcript })
+async function mountRestoredChat({ transcript, meta }) {
+  const backend = server({ transcript, meta })
   globalThis.fetch = backend.fetch
   localStorage.clear()
   sessionStorage.clear()
@@ -195,7 +195,10 @@ async function mountRestoredChat({ transcript }) {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
-  await React.act(async () => { root.render(React.createElement(AssistantBar, { runId: null })) })
+  const render = props => React.act(async () => {
+    root.render(React.createElement(AssistantBar, { runId: null, ...props }))
+  })
+  await render({})
   await until(() => backend.calls.some(call => call.path === `/api/assistant/sessions/${SID}`),
     'the saved chat to be read back')
   await settle()
@@ -209,6 +212,9 @@ async function mountRestoredChat({ transcript }) {
   await until(() => turns().length === transcript.length, 'the restored transcript to render')
   return {
     backend, container, turns,
+    // The SAME root re-rendered with new props — an update, never a remount, so React compares
+    // this render's hooks with the previous one's.
+    rerender: props => render(props),
     unmount: async () => {
       await settle()
       await React.act(async () => { root.unmount() })
@@ -462,6 +468,57 @@ test('an autoscroll frame that outlives its feed does nothing instead of throwin
     assert.doesNotThrow(() => beforeUnmount(0), 'a frame that outlived the whole bar does nothing')
   } finally {
     frames.release()
+    await chat.unmount()
+  }
+})
+
+// `hidden` returned early ABOVE three effects (the watch poll and the two share-expiry timers), so a
+// bar whose `hidden` flipped while mounted called a different number of hooks than the render before
+// it: React's hook-order invariant, which takes the whole Assistant down (review 2026-09-22
+// follow-up). What a hidden bar RUNS must not change either: one hidden from its first render never
+// ran those three, so a bar hidden later stops them, and showing it again restarts them. Both are
+// read off the server, because each restart is a request: the watch poll reads at once, and a share
+// whose expiry has already passed makes the expiry effect re-read the session list at once.
+const EXPIRED_SHARE_META = {
+  ...META, shared: true, share_count: 1, share_ids: ['c'.repeat(32)], live_share_ids: [],
+  share_expires_at: 1, share_live: false,
+}
+
+test('flipping `hidden` keeps the hooks and the state, and a hidden bar runs nothing', async () => {
+  const chat = await mountRestoredChat({
+    transcript: settledTranscript(2), meta: EXPIRED_SHARE_META,
+  })
+  const hookErrors = []
+  const logError = console.error
+  console.error = (...args) => {
+    const text = args.map(String).join(' ')
+    if (/Rendered (fewer|more) hooks|change in the order of Hooks/i.test(text)) hookErrors.push(text)
+    logError(...args)
+  }
+  const reads = path => chat.backend.calls.filter(call => call.method === 'GET' && call.path === path)
+    .length
+  try {
+    await settle()
+    const watches = reads('/api/assistant/watches')
+    const sessions = reads('/api/assistant/sessions')
+    assert.ok(watches >= 1 && sessions >= 1, 'the visible bar polls its watches and re-reads the list')
+
+    await chat.rerender({ hidden: true })
+    await settle()
+    assert.equal(chat.container.innerHTML, '', 'hidden renders nothing at all')
+    assert.equal(reads('/api/assistant/watches'), watches, 'a hidden bar starts no watch read')
+    assert.equal(reads('/api/assistant/sessions'), sessions, 'and arms no share-expiry re-read')
+
+    await chat.rerender({ hidden: false })
+    await settle()
+    assert.equal(!!chat.container.querySelector('.asst-side-panel'), true,
+      'shown again in the view it had, not remounted into the bar')
+    assert.equal(chat.turns().length, 4, 'with the transcript it had')
+    assert.equal(reads('/api/assistant/watches'), watches + 1, 'its watch poll restarts')
+    assert.equal(reads('/api/assistant/sessions'), sessions + 1, 'and its share-expiry effect re-arms')
+    assert.deepEqual(hookErrors, [], 'React saw the same hooks on every render')
+  } finally {
+    console.error = logError
     await chat.unmount()
   }
 })

@@ -3294,8 +3294,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     e.preventDefault(); send()
   }
 
-  if (hidden) return null
-
   // ── shared sub-renders ──────────────────────────────────────────────────────────────────────────
   const currentSession = sessions.find(session => session.id === sid)
   const shareUnknown = !!sid && shareUnknownSids.has(sid)
@@ -3514,6 +3512,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // change the list is the operator, who is already causing a refresh when they do it.
   const watchView = watchStrip(watches)
   useEffect(() => {
+    if (hidden) return undefined   // a hidden bar polls nothing (see the `hidden` return below)
     if (!sid) { setWatches([]); return undefined }
     let live = true
     let timer = null
@@ -3531,7 +3530,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     read()
     return () => { live = false; if (timer) clearTimeout(timer) }
-  }, [sid])
+  }, [hidden, sid])
 
   const stopWatch = async (watchId) => {
     if (!watchId || stoppingWatches.has(watchId)) return
@@ -3853,7 +3852,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   useEffect(() => {
     const expiryMs = Number(currentSession?.share_expires_at) * 1000
-    if (!sid || !Number.isFinite(expiryMs) || expiryMs <= 0) return undefined
+    if (hidden || !sid || !Number.isFinite(expiryMs) || expiryMs <= 0) return undefined
     let timer = null
     let cancelled = false
     const arm = () => {
@@ -3865,9 +3864,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     arm()
     return () => { cancelled = true; if (timer != null) window.clearTimeout(timer) }
-  }, [sid, currentSession?.share_expires_at, refreshSessions])
+  }, [hidden, sid, currentSession?.share_expires_at, refreshSessions])
   useEffect(() => {
-    if (!sid || !shareCopy) return undefined
+    if (hidden || !sid || !shareCopy) return undefined
     if (!validAssistantShareFallback(shareCopy)) {
       clearShareCopy(sid)
       setShareUnknown(sid, true)
@@ -3892,7 +3891,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     arm()
     return () => { cancelled = true; if (timer != null) window.clearTimeout(timer) }
-  }, [sid, shareCopy, clearShareCopy, setShareUnknown, refreshSessions])
+  }, [hidden, sid, shareCopy, clearShareCopy, setShareUnknown, refreshSessions])
   // ── the three layouts ──
   // Doc 25 UI-05. One conversation, three views (see the header note). Each is named here so the
   // component's `return` shows the SHAPE of the surface instead of 350 lines of one view's chrome
@@ -4275,6 +4274,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       </section>
     </div>
 
+  // Every hook is above this line. `hidden` used to return at the top of the shared sub-renders,
+  // ABOVE the watch poll and the two share-expiry effects, so a bar whose `hidden` flipped while
+  // mounted called a different number of hooks than the render before — React's hook-order invariant
+  // ("Rendered fewer hooks than expected"), which takes the whole Assistant down. Between there and
+  // here there are only definitions, and those three effects are gated on `hidden` instead: a hidden
+  // bar runs none of them, as one hidden from its first render never did (review 2026-09-22, UI-06
+  // follow-up).
+  if (hidden) return null
   return <>
     {hiddenFileInput}
     <output className="sr-only" aria-live="polite" aria-atomic="true">
