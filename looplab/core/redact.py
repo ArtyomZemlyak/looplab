@@ -278,8 +278,72 @@ def secret_env_values(env=None) -> list[str]:
 
     Longest first so a variable whose value is a PREFIX of another's cannot mask the shorter one
     first and leave the longer one's tail exposed as `***<rest>`.
+
+    `env=None` — THIS process's environment, what every write boundary passes — is answered by
+    `_process_secret_env_values`, which re-screens only when the environment's contents changed; a
+    mapping is screened on every call, exactly as before.
     """
-    items = (os.environ if env is None else env)
+    if env is None:
+        return list(_process_secret_env_values())
+    return _screen_secret_env_values(env)
+
+
+# THIS process's screen, cached as ONE tuple `(environ object, raw snapshot, values)` so a reader on
+# another thread sees either the old triple or the new one, never a torn pair. See
+# `_process_secret_env_values` for why the key is sound.
+_PROCESS_ENV_SCREEN: tuple | None = None
+
+
+def _process_secret_env_values() -> tuple[str, ...]:
+    """`secret_env_values()` for this process, re-screened only when `os.environ` CHANGED.
+
+    WHY A CACHE (review 2026-09-22, CORE-02). The screen used to walk every variable on every call,
+    and every persisted string calls it: measured 268 us per call over this box's 145 variables,
+    and one traced LLM generation of a 30-turn tool loop made 146 calls — 39 ms of a 70 ms
+    generation, on the caller's thread, re-deriving the same answer from an unchanged environment.
+
+    WHY THIS KEY CANNOT MISS A SECRET. The comment this replaces refused a cache because "there is
+    no cheap sound signal that [the env] changed" and a PROXY key would mask a secret set after the
+    first call. The key here is not a proxy: it is the environment's whole CONTENT — `os.environ`'s
+    own backing dict (`_data`, which every `os.environ[...] = ...`, `del`, `update`, `setdefault`,
+    `monkeypatch.setenv` and `patch.dict` writes through), compared BY VALUE against a snapshot on
+    every call. That compare costs 1.5 us here (175x under the walk), and it fails on any change a
+    call to the uncached screen could have observed, because the uncached screen reads nothing
+    else: a `putenv` or a C extension's `setenv` never reaches `os.environ` either, so neither
+    version sees those. The VALUES are computed from the SNAPSHOT (decoded through `os.environ`'s own
+    `decodekey`/`decodevalue`, i.e. exactly what `os.environ.items()` yields), never from the live
+    mapping, so a change racing the screen can only make the next call miss — the cached answer is
+    always the answer for the cached key. `is_secret_env` and `_MIN_SECRET_ENV_VALUE` are module
+    constants, so the contents ARE the whole input.
+
+    Anything that is not CPython's `os._Environ` (a replaced `os.environ`, another interpreter) has
+    no such dict and is screened on every call, as before.
+    """
+    global _PROCESS_ENV_SCREEN
+    environ = os.environ
+    store = getattr(environ, "_data", None)
+    decode_key = getattr(environ, "decodekey", None)
+    decode_value = getattr(environ, "decodevalue", None)
+    if type(store) is not dict or not callable(decode_key) or not callable(decode_value):
+        return tuple(_screen_secret_env_values(environ))
+    cached = _PROCESS_ENV_SCREEN
+    try:
+        if cached is not None and cached[0] is environ and cached[1] == store:
+            return cached[2]
+        snapshot = dict(store)
+        values = tuple(_screen_secret_env_values(
+            {decode_key(key): decode_value(value) for key, value in snapshot.items()}))
+    except (TypeError, ValueError, RuntimeError):
+        # What copying/decoding/comparing a str- or bytes-keyed dict can raise (an odd value's
+        # compare, a decode, a size change seen by a free-threaded build). A redactor must never
+        # raise into its caller, and the uncached walk still screens — it only costs the walk.
+        return tuple(_screen_secret_env_values(environ))
+    _PROCESS_ENV_SCREEN = (environ, snapshot, values)
+    return values
+
+
+def _screen_secret_env_values(items) -> list[str]:
+    """The screen itself over one mapping: `secret_env_values`' rule, with no cache."""
     try:
         pairs = list(items.items())
     except Exception:  # noqa: BLE001 - a diagnostic redactor must never raise into its caller
@@ -421,9 +485,11 @@ def _redact_persisted(value, *, max_chars: int, entropy: bool = True,
     # it ("cannot recognise `hunter2hunter2` as this box's `POSTGRES_PASSWORD`").
     #
     # COST, measured: 212 us of the 213 is `secret_env_values` walking 137 variables; the replaces are
-    # 0.6 us. NOT cached on purpose — the env is mutable (every `monkeypatch.setenv` in the suite), and
-    # there is no cheap sound signal that it changed, so a cache keyed on a proxy would mask a secret
-    # set after the first call. A persistence boundary writes to disk; 0.2 ms belongs to it.
+    # 0.6 us. The walk is now CACHED on the environment's whole content, not on a proxy (review
+    # 2026-09-22, CORE-02): the env is mutable (every `monkeypatch.setenv` in the suite), and the one
+    # sound signal that it changed turned out to be cheap — `os.environ`'s own backing dict compared
+    # by value, 1.5 us. `_process_secret_env_values` states why a secret set after the first call is
+    # still masked on the very next one; 0.2 ms per string was 39 ms per traced LLM generation.
     #
     # WHOSE environment is the CALLER's to say (review 2026-09-22, EVT-02), and `None` — this
     # process's — is right only where the bytes are about to become durable on the box that owns

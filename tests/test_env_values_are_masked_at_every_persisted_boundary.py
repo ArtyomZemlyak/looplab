@@ -64,3 +64,101 @@ def test_ordinary_text_is_untouched():
     environment must come back byte-identical — otherwise this would be masking prose."""
     plain = "epoch 3 loss 0.214 -- lr 3e-4, batch 64, no credential here"
     assert redact_persisted_text(plain, max_chars=4000) == plain
+
+
+# ------------------------------------------------------------------------------------------------
+# The screen is CACHED on the environment's whole content (review 2026-09-22, CORE-02): every
+# persisted string used to re-walk `os.environ` — 146 walks, 39 ms, per traced LLM generation. A
+# cache is only acceptable if nothing it could serve stale is a secret, so these drive the three
+# ways the environment moves under a warm cache, and the one thing the cache must actually save.
+
+ROTATED = "rotated-credential-7Qx"
+LATE = "late-bound-credential-3Kv"
+
+
+@pytest.fixture
+def _cold_screen(monkeypatch):
+    """Start every cache test from nothing, and leave nothing behind for the next test."""
+    from looplab.core import redact
+    monkeypatch.setattr(redact, "_PROCESS_ENV_SCREEN", None)
+    return redact
+
+
+def test_an_unchanged_environment_is_walked_once_not_once_per_string(_cold_screen, monkeypatch):
+    redact = _cold_screen
+    evaluations = []
+    real = redact.is_secret_env
+    monkeypatch.setattr(redact, "is_secret_env",
+                        lambda name, value="": (evaluations.append(name), real(name, value))[1])
+    for index in range(50):
+        assert SECRET not in redact_persisted_text(f"row {index}: {SECRET}", max_chars=4000)
+    walked = len(evaluations)
+    assert walked, "the screen never ran at all"
+    redact_persisted_text(f"one more {SECRET}", max_chars=4000)
+    assert len(evaluations) == walked, "a warm screen re-walked an unchanged environment"
+    # ONE walk for fifty strings: the walk evaluates each long-enough variable exactly once.
+    assert walked == len({name for name in evaluations}), (
+        f"{walked} evaluations over {len(set(evaluations))} variables — the environment was "
+        "walked once per persisted string, the cost this cache exists to remove")
+
+
+def test_a_secret_set_deleted_or_rotated_under_a_warm_screen_moves_on_the_very_next_call(
+        _cold_screen, monkeypatch):
+    """Every mutation `os.environ` accepts reaches the next redaction — no proxy key, no TTL."""
+    assert SECRET not in redact_persisted_text(SECRET, max_chars=4000)      # warm
+    monkeypatch.setenv("C2FIXTURE_SERVICE_TOKEN", LATE)
+    assert LATE not in redact_persisted_text(f"later: {LATE}", max_chars=4000), (
+        "a secret set after the screen was warmed was served the stale answer")
+    monkeypatch.setenv("C2FIXTURE_SERVICE_TOKEN", ROTATED)
+    rotated = redact_persisted_text(f"old {LATE} new {ROTATED}", max_chars=4000)
+    assert ROTATED not in rotated
+    assert LATE in rotated, "a value no longer in the environment is not a secret any more"
+    monkeypatch.delenv("C2FIXTURE_SERVICE_TOKEN")
+    assert ROTATED in redact_persisted_text(ROTATED, max_chars=4000)
+    assert SECRET not in redact_persisted_text(SECRET, max_chars=4000)      # the rest still holds
+
+
+def test_a_change_racing_the_screen_is_never_cached_as_the_current_answer(
+        _cold_screen, monkeypatch):
+    """The cached VALUES are computed from the snapshot that KEYS them. A variable that lands while
+    the screen runs must make the next call a miss — keying on a snapshot taken after the screen
+    would serve the pre-race values for the post-race environment indefinitely."""
+    redact = _cold_screen
+    real = redact._screen_secret_env_values
+
+    def racing(items):
+        out = real(items)
+        monkeypatch.setenv("C2FIXTURE_RACE_API_KEY", LATE)      # lands mid-screen
+        return out
+
+    monkeypatch.setattr(redact, "_screen_secret_env_values", racing)
+    assert LATE not in redact.secret_env_values()               # screened the pre-race snapshot
+    monkeypatch.setattr(redact, "_screen_secret_env_values", real)
+    assert LATE in redact.secret_env_values()
+    assert LATE not in redact_persisted_text(f"raced {LATE}", max_chars=4000)
+
+
+def test_a_secret_set_mid_trace_is_masked_in_every_span_written_after_it(
+        _cold_screen, monkeypatch, tmp_path):
+    """The same property at the trace boundary, read back off disk: spans written BEFORE the
+    variable existed may hold the value (it was not a secret yet); none written after it may."""
+    from looplab.core import tracing
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True)
+    history = [{"role": "system", "content": "SYS"}, {"role": "user", "content": f"say {LATE}"}]
+    with tracer.span("loop", new_trace=True, node_id=0):
+        for turn in range(6):
+            if turn == 3:
+                written_before = path.read_bytes()
+                monkeypatch.setenv("C2FIXTURE_SERVICE_TOKEN", LATE)
+            with tracing.generation(op="chat", model="m", messages=history) as gen:
+                gen.output(f"turn {turn} repeats {LATE}")
+            history = history + [{"role": "assistant", "content": f"turn {turn}: {LATE}"},
+                                 {"role": "tool", "content": f"tool {turn} saw {LATE}"}]
+    after = path.read_bytes()[len(written_before):]
+    assert LATE.encode() in written_before, "premise: the value WAS persisted before it was secret"
+    assert after.count(b"\n") >= 3 and b"REDACTED_ENV" in after
+    assert LATE.encode() not in after, (
+        "a span written after the variable was set persisted its value — the screen was stale")
