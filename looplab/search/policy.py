@@ -105,25 +105,7 @@ def model_arm_costs(arms: dict[str, tuple[str, float]]) -> dict[str, float]:
 def model_arm_yields(state: RunState) -> dict[str, dict]:
     """`operator_yields`' rule keyed by the model ARM a node was built with (`Node.model_arm`; an
     unrouted node counts for the default arm), so the pick can learn which MODEL's builds pay."""
-    out: dict[str, dict] = {}
-    for n in state.nodes.values():
-        if not n.parent_ids or n.status is not NodeStatus.evaluated or n.metric is None:
-            continue
-        if (n.tombstoned or not n.feasible
-                or n.id in state.aborted_nodes or n.id in state.breed_excluded):
-            continue
-        pm = [state.nodes[p].metric for p in n.parent_ids
-              if p in state.nodes and state.nodes[p].metric is not None]
-        if not pm:
-            continue
-        base = max(pm) if state.direction == "max" else min(pm)
-        delta = (n.metric - base) if state.direction == "max" else (base - n.metric)
-        gain = max(0.0, delta) / max(0.1, (n.eval_seconds or 0.1))
-        arm = getattr(n, "model_arm", "") or DEFAULT_MODEL_ARM
-        d = out.setdefault(arm, {"n": 0, "gain": 0.0})
-        d["gain"] = (d["gain"] * d["n"] + gain) / (d["n"] + 1)
-        d["n"] += 1
-    return out
+    return _mean_gain_by(state, lambda n: getattr(n, "model_arm", "") or DEFAULT_MODEL_ARM)
 
 
 def _model_arm_pick(yields: dict[str, dict], arms: list[str], costs: dict[str, float],
@@ -294,7 +276,25 @@ def operator_yields(state: RunState) -> dict[str, dict]:
     deterministic UCB over operators (the cheap, principled 'adaptive operator mix' — the
     Strategist's rule table becomes priors, not hard-coded cadences). Draft nodes have no
     parent, so 'draft' yield is not defined here (drafts are the exploration baseline)."""
+    return _mean_gain_by(state, lambda n: n.operator)
+
+
+def _mean_gain_by(state: RunState, key) -> dict[str, dict]:
+    """`{key(node): {"n": credited, "gain": mean gain}}` over `_breeding_credits`."""
     out: dict[str, dict] = {}
+    for n, gain in _breeding_credits(state):
+        d = out.setdefault(key(n), {"n": 0, "gain": 0.0})
+        d["gain"] = (d["gain"] * d["n"] + gain) / (d["n"] + 1)
+        d["n"] += 1
+    return out
+
+
+def _breeding_credits(state: RunState):
+    """Every node that earns a bandit CREDIT, with its gain — the ONE rule `operator_yields` and
+    `model_arm_yields` group differently (review 2026-09-22, SCJ-08). They were verbatim copies,
+    and the filters below arrived one lane at a time (the note that follows is the lifecycle half's
+    own account), so the next exclusion added to one copy would have left the other crediting what
+    it excludes — the operator mix and the MODEL router learning from different populations."""
     # CREDIT ONLY BREEDABLE NODES — the same pool `breedable_nodes()` defines, not `state.nodes` raw.
     # A tombstoned node is §6.3 logically deleted and `evaluated_nodes()` gates it out of every other
     # selection path; an aborted one never finished on its own terms; and a `breed_excluded` node is
@@ -318,10 +318,7 @@ def operator_yields(state: RunState) -> dict[str, dict]:
         base = max(pm) if state.direction == "max" else min(pm)
         delta = (n.metric - base) if state.direction == "max" else (base - n.metric)
         gain = max(0.0, delta) / max(0.1, (n.eval_seconds or 0.1))
-        d = out.setdefault(n.operator, {"n": 0, "gain": 0.0})
-        d["gain"] = (d["gain"] * d["n"] + gain) / (d["n"] + 1)
-        d["n"] += 1
-    return out
+        yield n, gain
 
 
 def _bandit_pick(yields: dict[str, dict], candidates: list[str], c: float = 0.8) -> str:

@@ -17,7 +17,7 @@ from looplab.core.llm import OpenAICompatibleClient, model_override
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.search.policy import (
     DEFAULT_MODEL_ARM, META_MODEL, GreedyTree, _model_arm_pick, model_arm_costs,
-    model_arm_yields, parse_model_arms)
+    model_arm_yields, operator_yields, parse_model_arms)
 from tests.factories import make_engine
 
 
@@ -127,3 +127,30 @@ def test_the_engine_builds_under_the_arms_model_override(tmp_path):
     assert eng._model_for_arm({META_MODEL: "cheap"}) == "toy-cheap"
     assert eng._model_for_arm({META_MODEL: DEFAULT_MODEL_ARM}) is None, "the default arm is the configured model"
     assert eng._model_for_arm({}) is None and eng._model_for_arm({META_MODEL: "unknown"}) is None
+
+
+# ------------------------------------------------------------------ one credit rule, two groupings
+def test_the_operator_mix_and_the_model_router_credit_the_same_nodes():
+    """Review 2026-09-22, SCJ-08: `operator_yields` and `model_arm_yields` were verbatim copies of
+    one credit rule, and its lifecycle filters arrived one lane at a time — the next exclusion added
+    to one copy would have left the other learning from a population the first excludes. Every node
+    here carries its OWN operator and its OWN arm, so each table's keys name exactly the nodes it
+    credited, and every node but the last is excluded by a different clause of the rule."""
+    root = _node(0, metric=0.5)
+    excluded = {
+        1: _node(1, metric=0.9, op="o1", parents=(0,), model_arm="a1"),     # tombstoned
+        2: _node(2, metric=0.9, op="o2", parents=(0,), model_arm="a2"),     # infeasible
+        3: _node(3, metric=0.9, op="o3", parents=(0,), model_arm="a3"),     # aborted
+        4: _node(4, metric=0.9, op="o4", parents=(0,), model_arm="a4"),     # breed-excluded
+        5: _node(5, metric=None, op="o5", parents=(0,), model_arm="a5"),    # no metric
+        6: _node(6, metric=0.9, op="o6", parents=(99,), model_arm="a6"),    # no scored parent
+    }
+    excluded[1].tombstoned = True
+    excluded[2].feasible = False
+    credited = _node(7, metric=0.8, op="o7", parents=(0,), model_arm="a7")
+    st = _state([root, *excluded.values(), credited])
+    st.aborted_nodes = {3}
+    st.breed_excluded = {4}
+    by_op = {int(op[1:]) for op in operator_yields(st)}
+    by_arm = {int(arm[1:]) for arm in model_arm_yields(st) if arm != DEFAULT_MODEL_ARM}
+    assert by_op == by_arm == {7}, (by_op, by_arm)
