@@ -707,3 +707,79 @@ def test_a_withdrawal_survives_the_next_pass_in_BOTH_directions(portfolio):
     record_concept_alias(portfolio, from_concept=a, to_concept=b, by="operator", action_id="op-redo")
     assert load_concept_aliases(portfolio).get(a) == b
     assert frozenset({a, b}) not in withdrawn_alias_pairs(portfolio)
+
+
+# --------------------------------------------------------------------------- what the receipt says
+# Review 2026-09-22, EK-13 (doc 50 ENG3-12): `pending_curation_work` summed EVERY split/purge ever
+# proposed — the same proposal re-counted at every finalize that repeated it, and still "pending"
+# after the operator applied it — and a receipt was appended at EVERY pass once any proposal existed,
+# because the already-applied merges are re-reported as `skipped`. Both driven below.
+
+_SPLIT = {"from_concept": "coarse/thing",
+          "rules": [{"to": "coarse/left", "when_any": ["one"]}], "default": "coarse/thing"}
+
+
+def test_pending_work_counts_each_proposed_source_once_and_forgets_it_once_governed(tmp_path):
+    """"Pending" is work an operator could still do. The same split and purge proposed by two
+    finalizes is ONE split and ONE purge, and once the operator has governed the concept neither is
+    pending. MUTATION: drop the dedup -> 2/2; drop the governed subtraction -> 1/1 at the end."""
+    from looplab.engine.concept_registry import record_concept_split
+    from looplab.engine.concept_tidy import pending_curation_work
+
+    memory_dir = tmp_path / "mem"
+    _write_capsules(memory_dir, [_capsule("run-a", ["a/one", "noise/x", "coarse/thing"])])
+    for run, digest in (("r1", "a" * 64), ("r2", "b" * 64)):
+        _append_proposal(memory_dir, splits=[_SPLIT], purges=[{"from_concept": "noise/x"}],
+                         run_id=run, digest=digest)
+    assert pending_curation_work(memory_dir) == {"splits": 1, "purges": 1}
+
+    record_concept_alias(str(memory_dir), from_concept="noise/x", to_concept="", by="operator")
+    assert pending_curation_work(memory_dir) == {"splits": 1, "purges": 0}
+    record_concept_split(str(memory_dir), from_concept="coarse/thing",
+                         rules=[{"to": "coarse/left", "when_any": ["one"]}],
+                         default="coarse/thing", by="operator")
+    assert pending_curation_work(memory_dir) == {"splits": 0, "purges": 0}
+
+
+def test_a_pass_that_changes_nothing_writes_no_receipt(portfolio):
+    """One receipt per CHANGE, not per finalize. The first pass applies three merges, the second
+    re-reports them as `already_applied` (a change of outcome: a receipt), and from then on every
+    pass says exactly what the last receipt already says — so nothing is appended. MUTATION: drop
+    the comparison -> five receipts, each re-listing every historical proposal."""
+    first = ratify_concept_merges(portfolio, at="t1")
+    assert first["receipt"] is True and len(first["applied"]) == 3
+    second = ratify_concept_merges(portfolio, at="t2")
+    assert second["receipt"] is True
+    for at in ("t3", "t4", "t5"):
+        again = ratify_concept_merges(portfolio, at=at)
+        assert again["receipt"] is False and again["receipt_unchanged"] is True
+    assert len(read_ratification_receipts(portfolio)) == 2
+
+    # A new proposal is a change, and it is receipted.
+    _write_capsules(portfolio, [
+        _capsule("run-a", ["model/gradient-boosting", "optimization/hyperparameter-tuning"]),
+        _capsule("run-b", ["model/gradient_boosting", "optimization/hyperparameter_tuning"]),
+        _capsule("run-c", ["regularization/r-drop", "regularization/rdrop", "axis/a", "axis/b"]),
+    ])
+    _append_proposal(portfolio, merges=[_merge("axis/b", "axis/a")], run_id="r9", digest="9" * 64)
+    fresh = ratify_concept_merges(portfolio, at="t6")
+    assert fresh["receipt"] is True
+    assert [e["from"] for e in fresh["applied"]] == ["axis/b"]
+    assert len(read_ratification_receipts(portfolio)) == 3
+
+
+def test_a_change_in_pending_operator_work_is_receipted(tmp_path):
+    """The receipt records what landed AND what is left for the operator, so a pass whose decisions
+    are unchanged but whose pending work moved (the operator applied the proposed purge) still
+    writes one — otherwise the newest receipt would misstate what is left."""
+    memory_dir = tmp_path / "mem"
+    _write_capsules(memory_dir, [_capsule("run-a", ["a/one", "a/two", "noise/x"])])
+    _append_proposal(memory_dir, merges=[_merge("a/two", "a/one")],
+                     purges=[{"from_concept": "noise/x"}])
+    ratify_concept_merges(memory_dir, at="t1")
+    ratify_concept_merges(memory_dir, at="t2")
+    assert ratify_concept_merges(memory_dir, at="t3")["receipt"] is False
+    record_concept_alias(str(memory_dir), from_concept="noise/x", to_concept="", by="operator")
+    moved = ratify_concept_merges(memory_dir, at="t4")
+    assert moved["receipt"] is True and moved["pending"] == {"splits": 0, "purges": 0}
+    assert read_ratification_receipts(memory_dir)[-1]["pending"] == {"splits": 0, "purges": 0}

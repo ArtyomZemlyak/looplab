@@ -149,7 +149,8 @@ MEMORY_STORES: tuple[MemoryStore, ...] = (
         ledger="task_facets_curation", curation_kind="facets"),
     MemoryStore(
         "concept_ratification_log.jsonl", "ratification log", PRESERVED,
-        key="none: one observation per ratification pass (by, at)", names_run=False,
+        key="none: one observation per ratification pass that changed an outcome (by, at)",
+        names_run=False,
         group="curation_logs", reason="append-only governance audit",
         writer="engine/concept_tidy.py::_append_ratification_receipt"),
     MemoryStore(

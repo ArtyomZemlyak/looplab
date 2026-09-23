@@ -276,23 +276,41 @@ def pending_curation_work(memory_dir) -> dict:
     Reported rather than acted on, so "the background stage ran and the taxonomy is still messy" can
     be told apart from "the background stage silently declined to act". Never raises on a missing
     ledger; a poisoned one propagates, because a health failure must not read as "no pending work".
+
+    WORK, NOT HISTORY (review 2026-09-22, EK-13). This summed the length of every `splits`/`purges`
+    list the ledger ever recorded, so the same split re-proposed by N finalizes counted N times, and
+    a split or purge the operator had already applied stayed "pending" forever — the count only ever
+    grew. It is now one per proposed SOURCE concept, and only while that concept is UNGOVERNED: a
+    source the policy ledgers already carry a decision for — purged, split, or merged into another
+    concept, by the operator or by this stage — has had its work done, whatever the proposal said
+    (and a split or purge of it would be refused anyway: `record_concept_split` and the purge path of
+    `record_concept_alias` both refuse an aliased or purged source). A decision that is later
+    CLEARED makes its source ungoverned again, and the proposal is pending again: it is still
+    somebody's open question. Read under one governance snapshot, like `ratify_concept_merges`.
     """
     if not memory_dir:
         return {"splits": 0, "purges": 0}
     path = Path(memory_dir) / curation_ledger_file("concept")
     if not path.exists():
         return {"splits": 0, "purges": 0}
-    splits = purges = 0
+    proposed: dict[str, set[str]] = {"splits": set(), "purges": set()}
     for row in read_curation_rows(path, kind="concept"):
         proposals = row.get("proposals") or {}
-        for field, add in (("splits", 1), ("purges", 1)):
+        for field, sources in proposed.items():
             value = proposals.get(field)
-            if isinstance(value, list):
-                if field == "splits":
-                    splits += len(value) * add
-                else:
-                    purges += len(value) * add
-    return {"splits": splits, "purges": purges}
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                # The steward writes `{"from_concept": ...}` for both kinds; a bare slug is read as
+                # its own source so no historical row shape is silently dropped from the count.
+                source = normalize_key(item.get("from_concept") if isinstance(item, dict) else item)
+                if source:
+                    sources.add(source)
+    if not (proposed["splits"] or proposed["purges"]):
+        return {"splits": 0, "purges": 0}
+    snapshot = concept_governance_snapshot(memory_dir)
+    governed = set(snapshot["aliases"]) | set(snapshot["splits"])
+    return {field: len(sources - governed) for field, sources in proposed.items()}
 
 
 def _still_applicable(merge: ProposedMerge, snapshot: dict) -> Optional[str]:
@@ -399,17 +417,25 @@ def ratify_concept_merges(memory_dir, *, at: str = "", by: str = RATIFIER_ACTOR,
                           dry_run: bool = False) -> dict:
     """The stage: apply every still-applicable agent-proposed merge, then leave a receipt.
 
-    Returns `{"applied": [...], "skipped": [...], "pending": {...}, "receipt": bool}` where each
-    entry is `{"from", "to", "outcome", ...}`. Never raises for an absent ledger; a POISONED
-    governance ledger does raise, because "the policy is unreadable" must not be reported as "there
-    was nothing to do" (the same fail-closed stance `read_curation_rows` takes).
+    Returns `{"applied": [...], "skipped": [...], "pending": {...}, "receipt": bool,
+    "receipt_unchanged": bool}` where each entry is `{"from", "to", "outcome", ...}`. Never raises
+    for an absent ledger; a POISONED governance ledger does raise, because "the policy is
+    unreadable" must not be reported as "there was nothing to do" (the same fail-closed stance
+    `read_curation_rows` takes).
 
     `dry_run` performs every read and pre-check and writes nothing at all — not even the receipt —
     so the operator's preview and the background pass share one code path rather than two that agree.
+
+    ONE RECEIPT PER CHANGE, not per pass (review 2026-09-22, EK-13). Once any merge was ever
+    proposed, every later pass re-reports it — as `already_applied`, `withdrawn_by_operator`, ... —
+    so `applied or skipped` was true at EVERY finalize and a receipt re-listing every historical
+    proposal was appended each time: the log grew O(finalizes x proposals). A pass whose decisions
+    and pending work say exactly what the newest receipt already says now appends nothing and
+    reports `receipt_unchanged` instead; the first pass after anything moved is receipted as before.
     """
     if not memory_dir:
         return {"applied": [], "skipped": [], "pending": {"splits": 0, "purges": 0},
-                "receipt": False}
+                "receipt": False, "receipt_unchanged": False}
     merges = proposed_merges(memory_dir)
     applied: list[dict] = []
     skipped: list[dict] = []
@@ -447,23 +473,52 @@ def ratify_concept_merges(memory_dir, *, at: str = "", by: str = RATIFIER_ACTOR,
         decided = outcome in ("applied", "would_apply")
         (applied if decided else skipped).append(entry)
     result = {"applied": applied, "skipped": skipped,
-              "pending": pending_curation_work(memory_dir), "receipt": False}
+              "pending": pending_curation_work(memory_dir), "receipt": False,
+              "receipt_unchanged": False}
     if not dry_run and (applied or skipped):
         # The receipt is written AFTER the decisions, and only describes what actually landed. A
         # receipt written first would be a claim, and this stage has nothing to claim — its
         # decisions are already idempotent. A failed receipt therefore costs audit detail and never
         # policy correctness, which is why it is best-effort.
-        result["receipt"] = _append_ratification_receipt(memory_dir, result, by=by, at=at)
+        try:
+            latest = read_ratification_receipts(memory_dir)[-1:]
+        except (OSError, ValueError):
+            latest = []           # an unreadable audit log is no proof of "unchanged": write one
+        if latest and _receipt_signature(latest[0]) == _receipt_signature(result):
+            result["receipt_unchanged"] = True
+        else:
+            result["receipt"] = _append_ratification_receipt(memory_dir, result, by=by, at=at)
     return result
 
 
-def _append_ratification_receipt(memory_dir, result: dict, *, by: str, at: str) -> bool:
-    """Append one bounded audit row per pass to `concept_ratification_log.jsonl`.
+def _receipt_signature(row: dict) -> tuple:
+    """What a ratification receipt SAYS, without when or by whom: the decisions that landed, every
+    decline with its outcome, and the pending operator work. The comparison `ratify_concept_merges`
+    gates a new receipt on, so one pass's result and one stored row are read the same way. Total over
+    a hand-edited or legacy row: a field that is not the expected shape reads as empty, so such a row
+    matches only a pass that says the same (nothing) there."""
+    def _entries(value, *fields) -> list:
+        entries = value if isinstance(value, list) else []
+        return sorted(tuple(str(entry.get(field)) for field in fields)
+                      for entry in entries if isinstance(entry, dict))
 
-    Audit output, not policy: nothing reads it to decide anything, `load_concept_aliases` never sees
-    it, and it therefore uses `append_governance`'s lenient receipt-log path rather than joining the
-    strict operator-ledger vocabulary in `governance_health._PUBLIC_LEDGERS`. It carries no
-    `action_id` on purpose — every pass is a new observation, even when it changed nothing.
+    pending = row.get("pending")
+    return (_entries(row.get("applied"), "from", "to"),
+            _entries(row.get("skipped"), "from", "to", "outcome"),
+            sorted((str(key), str(value)) for key, value in pending.items())
+            if isinstance(pending, dict) else [])
+
+
+def _append_ratification_receipt(memory_dir, result: dict, *, by: str, at: str) -> bool:
+    """Append one bounded audit row for a pass whose outcome changed to `concept_ratification_log.jsonl`.
+
+    Audit output, not policy: `load_concept_aliases` never sees it and no decision reads it — the
+    one reader is `ratify_concept_merges`' own change gate, which only decides whether to write the
+    NEXT receipt (review 2026-09-22, EK-13). It therefore uses `append_governance`'s lenient
+    receipt-log path rather than joining the strict operator-ledger vocabulary in
+    `governance_health._PUBLIC_LEDGERS`. It carries no `action_id` on purpose — a receipt is an
+    observation of a pass, keyed by nothing; what keeps a pass that changed nothing from appending
+    one is that gate, comparing what the rows SAY.
 
     What it is FOR: the proposal provenance that deliberately does not ride on the alias row.
     `concept_aliases.jsonl` stays exactly the four-field policy record every reader already parses,

@@ -2029,12 +2029,17 @@ looplab concept-ratify MEMORY_DIR [--dry-run] [--limit 32] [--json]
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_curation_log.jsonl` |
 | `--dry-run` | off | Report what would be applied and write no policy and no receipt |
 | `--limit` | `32` | Max merges to apply in this pass (capped by the stage); the rest are ratified next pass |
-| `--json` | off | Emit `{applied, skipped, pending, receipt}` as JSON |
+| `--json` | off | Emit `{applied, skipped, pending, receipt, receipt_unchanged}` as JSON |
 
-Each pass appends one audit row to `concept_ratification_log.jsonl` carrying what landed (with the
-alias row's `action_id` and revisions, and the agent's own `why`), what was skipped and why, and how
-much split/purge work is still waiting on you. A poisoned governance ledger fails the pass closed
-rather than reporting "nothing to do".
+A pass whose outcome changed appends one audit row to `concept_ratification_log.jsonl` carrying what
+landed (with the alias row's `action_id` and revisions, and the agent's own `why`), what was skipped
+and why, and how much split/purge work is still waiting on you. A pass that says exactly what the
+newest row already says appends nothing and reports `receipt_unchanged` — every earlier merge is
+re-reported as `already_applied` on every pass, so writing one anyway grew the log by a copy of the
+whole proposal history per finalize. Pending work is one per proposed concept (not per proposal: the
+same split re-proposed by ten finalizes is one split), and a concept you have already purged, split or
+merged is not pending. A poisoned governance ledger fails the pass closed rather than reporting
+"nothing to do".
 
 ---
 
