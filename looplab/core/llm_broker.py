@@ -175,7 +175,7 @@ class ProviderCallMeter:
     the calls are, and `llm_request_permit` below is the ONE seam every outbound provider request of
     every client passes through — the same argument that put the run's reserve-commit budget on
     `borrow()`. `Settings.concurrent_research_max_calls` is the ceiling this was written for: it was
-    incremented once per repeated-research PASS in `engine/orchestrator.py::_research_overlap_loop`,
+    incremented once per repeated-research PASS in `engine/research_cadence.py::_research_overlap_loop`,
     and a pass is a multi-turn agentic think plus its forced emit, its consolidation and its memo
     verification — so a ceiling named "max calls" was counting somewhere between one and several
     dozen of them at a time, and undercounted real spend by exactly that factor (doc 27 P1).

@@ -2267,7 +2267,7 @@ def test_a_node_budget_wait_backs_off_instead_of_refolding_twice_a_second(tmp_pa
     """Each poll turn makes the main loop re-read and re-fold the WHOLE event log. A fork/inject head
     parked on an exhausted node budget waits for an operator's `budget_extend` — possibly for hours —
     so a fixed 0.5s tick meant O(total-events) work twice a second for that entire time."""
-    from looplab.engine.orchestrator import _BUDGET_WAIT_MAX_S, _BUDGET_WAIT_MIN_S
+    from looplab.engine.forced_requests import _BUDGET_WAIT_MAX_S, _BUDGET_WAIT_MIN_S
 
     eng = _engine(tmp_path / "budget-backoff", policy=GreedyTree(n_seeds=1, max_nodes=1))
     state = RunState(

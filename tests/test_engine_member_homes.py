@@ -19,7 +19,9 @@ import inspect
 import pytest
 
 from looplab.engine.orchestrator import Engine
+from looplab.engine.forced_requests import ForcedRequestsMixin
 from looplab.engine.reentry import ReentryMixin
+from looplab.engine.research_cadence import ResearchCadenceMixin
 from looplab.engine.setup_phase import SetupPhaseMixin
 from looplab.engine.width_settling import WidthSettlingMixin
 
@@ -39,6 +41,19 @@ REENTRY_MEMBERS = ("_run_start_pinned_values", "_run_start_settled_widths", "_re
 # reads, which moved WITH it (a function reads its globals from the module that defines IT).
 SETUP_PHASE_MEMBERS = ("_setup_phase", "_setup_manifest", "_env_fingerprint", "_dirty_inputs")
 SETUP_PHASE_MODULE_NAMES = ("_DIFF_DIGEST_CAP", "_DIRTY_STATUS_TIMEOUT_S", "_task_declared_env")
+
+# The concurrent-research overlap — the one-shot spawn beside the evaluations, its adaptive repeat
+# timer and the repeating loop — moved beside the serial cadence and the indivisible paid step all
+# three share (`_research_attempt_step`), ENG1-04 step 4a. It read no module-level name of
+# `orchestrator.py` beyond imports, so nothing moved with it.
+RESEARCH_OVERLAP_MEMBERS = ("_spawn_research", "_research_repeat_cadence", "_research_overlap_loop")
+
+# The operator's forced steering, served from its durable queues (fork, inject, forced ablation,
+# confirm) — ENG1-04 step 4b — and the poll geometry only `_defer_for_node_budget` reads.
+FORCED_REQUEST_MEMBERS = ("_serve_forced_requests", "_defer_for_node_budget",
+                          "_pending_forced_ablation", "_append_inject_failure",
+                          "_close_node_creating_forced_request_before_terminal_gate")
+FORCED_REQUEST_MODULE_NAMES = ("_BUDGET_WAIT_MIN_S", "_BUDGET_WAIT_MAX_S")
 
 
 def _homes(cls) -> dict[str, list[str]]:
@@ -127,6 +142,33 @@ def test_a_name_the_setup_phase_reads_has_no_second_spelling_on_the_orchestrator
         "code that reads it lives in `setup_phase.py`")
     assert vars(SetupPhaseMixin)["_dirty_inputs"].__globals__ is vars(setup_phase), (
         "the reader's globals are not `setup_phase`'s, so patching `setup_phase` would not reach it")
+
+
+@pytest.mark.parametrize("name", RESEARCH_OVERLAP_MEMBERS)
+def test_the_research_overlap_resolves_to_its_mixin(name):
+    assert ResearchCadenceMixin in Engine.__mro__
+    assert name not in vars(Engine), f"a copy of {name} in the Engine body shadows the mixin's"
+    assert inspect.getattr_static(Engine, name) is vars(ResearchCadenceMixin)[name]
+
+
+@pytest.mark.parametrize("name", FORCED_REQUEST_MEMBERS)
+def test_the_forced_requests_resolve_to_their_mixin(name):
+    assert ForcedRequestsMixin in Engine.__mro__
+    assert name not in vars(Engine), f"a copy of {name} in the Engine body shadows the mixin's"
+    # `getattr_static`: `_pending_forced_ablation` is a staticmethod (see the re-entry test above).
+    assert inspect.getattr_static(Engine, name) is vars(ForcedRequestsMixin)[name]
+
+
+@pytest.mark.parametrize("name", FORCED_REQUEST_MODULE_NAMES)
+def test_the_budget_poll_geometry_has_no_second_spelling_on_the_orchestrator(name):
+    """The setup phase's rule for its constants, for these two: `_defer_for_node_budget` reads them from
+    `forced_requests`' globals, and `tests/test_strategist.py` drives the backoff against that module.
+    A copy on `orchestrator` would make a patch of the old spelling succeed while reaching nothing."""
+    from looplab.engine import forced_requests, orchestrator
+
+    assert hasattr(forced_requests, name), f"{name} left `forced_requests.py` — re-point this guard"
+    assert not hasattr(orchestrator, name), f"orchestrator.{name} exists again and would reach nothing"
+    assert vars(ForcedRequestsMixin)["_defer_for_node_budget"].__globals__ is vars(forced_requests)
 
 
 def test_the_census_sees_a_copy_left_behind():

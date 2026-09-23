@@ -77,7 +77,7 @@ def at_creation_boundary(pending: int, *, while_evaluating: bool) -> bool:
     `research_cadence.py::_maybe_deep_research` is the conditional one, and the evidence for BOTH
     of its halves is in the same table: `research_completed (trigger=cadence)` is 27/5/2/14/6/9,
     alive in ALL SIX runs, because the CONCURRENT half of that one decision
-    (`orchestrator._spawn_research` -> `_due_research_trigger`) never carried the guard. So while
+    (`research_cadence._spawn_research` -> `_due_research_trigger`) never carried the guard. So while
     `concurrent_research` is ON the serial gate keeps the historical predicate: moving it would put
     a main-task think and a background think at the same node count with only a read-then-write
     window between their shared `_cadence_research_marks` check and their receipts — a double-spend

@@ -2478,16 +2478,31 @@ def test_fork_receipt_precedes_the_paid_producer(tmp_path):
     instead of silently duplicating an already-charged experiment. This mirrors
     `_claim_paid_finalize_step`: "persist the at-most-once boundary before dispatching a paid effect".
     """
-    import inspect
+    import ast
+
+    from _source_scan import function_tree
     from looplab.engine import orchestrator
 
-    src = inspect.getsource(orchestrator.Engine._serve_control_requests) \
-        if hasattr(orchestrator.Engine, "_serve_control_requests") else \
-        inspect.getsource(orchestrator)
-    fork_block = src[src.index('"kind": "improve", "parent_id": pid') - 2000:
-                     src.index('"kind": "improve", "parent_id": pid')]
-    assert "EV_FORK_DONE" in fork_block, (
-        "the fork_done receipt must be appended BEFORE the _create_node call that spends money")
+    # The method, wherever it lives (it left `orchestrator.py` for `forced_requests.py` in ENG1-04
+    # step 4b), read as CODE: the receipt's append and the paid improve build, by line. A text
+    # window before the build's dict used to stand in for "before", and a comment naming the event
+    # satisfied it.
+    tree = function_tree(orchestrator.Engine._serve_forced_requests)
+    receipts, builds = [], []
+    for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+        func = call.func
+        if (isinstance(func, ast.Attribute) and func.attr == "append" and call.args
+                and isinstance(call.args[0], ast.Name) and call.args[0].id == "EV_FORK_DONE"):
+            receipts.append(call.lineno)
+        if (isinstance(func, ast.Attribute) and func.attr == "_offload_node_build" and call.args
+                and isinstance(call.args[0], ast.Dict)
+                and any(isinstance(k, ast.Constant) and k.value == "kind"
+                        and isinstance(v, ast.Constant) and v.value == "improve"
+                        for k, v in zip(call.args[0].keys, call.args[0].values))):
+            builds.append(call.lineno)
+    assert receipts and builds, (receipts, builds)
+    assert min(receipts) < min(builds), (
+        "the fork_done receipt must be appended BEFORE the build that spends money")
 
     # and the two handlers stay order-tolerant, so the swap re-folds old logs identically
     s = EventStore(tmp_path / "events.jsonl")

@@ -23,11 +23,14 @@ does import is its import block's to say."""
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import re
 import statistics
 import uuid
 from typing import Iterable, NamedTuple, Optional
+
+import anyio
 
 from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
@@ -37,7 +40,7 @@ from looplab.core.cards import hypothesis_id
 # where `RunState.open_pure_beliefs` can apply it; re-exported so the name still resolves here.
 from looplab.core.cards import is_pure_belief  # noqa: F401
 from looplab.core.llm import BudgetExceeded
-from looplab.core.llm_broker import in_llm_lane
+from looplab.core.llm_broker import ProviderCallMeter, in_llm_lane, provider_call_meter
 from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.engine.cadence import at_creation_boundary, deep_research_window
@@ -872,7 +875,7 @@ class ResearchCadenceMixin:
                                converged_skips: int = 0) -> tuple[Optional[str], bool]:
         """ONE paid Deep-Research think — receipt, provider call, record — as a single INDIVISIBLE
         step. The one spelling shared by the serial cadence (`_run_deep_research`) and BOTH concurrent
-        seams (`orchestrator._spawn_research`, `orchestrator._research_overlap_loop`).
+        seams (`_spawn_research`, `_research_overlap_loop`).
 
         The receipt goes down BEFORE the provider call: the memo only becomes durable at
         `_record_deep_research`, and a kill in that window used to leave every trigger gate
@@ -1021,7 +1024,7 @@ class ResearchCadenceMixin:
                                 summary=f"(deep research failed: {exc})")
 
     # Every append below must stay in events.types.BACKGROUND_APPENDABLE: this method is invoked
-    # from the CONCURRENT research task (`orchestrator._spawn_research`), the one enforced
+    # from the CONCURRENT research task (`_spawn_research`), the one enforced
     # exception to engine invariant #1 ("only the main task appends"). The assertions make a
     # future selection-affecting append here fail fast instead of racing the event order.
     @in_llm_lane("deep_research")
@@ -1814,7 +1817,7 @@ class ResearchCadenceMixin:
         re-run finds already-merged aliases gone (converges).
 
         Phase 2: ALSO invoked from the concurrent eval-window background loop
-        (`orchestrator._research_overlap_loop`, gated on `concurrent_consolidate`) so the board the
+        (`_research_overlap_loop`, gated on `concurrent_consolidate`) so the board the
         repeated research keeps filling is deduped DURING a long eval, not only between nodes. That is
         safe only while Card-driven selection is disabled: `EV_HYPOTHESIS_MERGED` is in the explicit
         non-Card conditional background registry. Card mode invokes this method only from the joined
@@ -1993,3 +1996,271 @@ class ResearchCadenceMixin:
                 payload["finalize_scope"] = finalize_scope
             event = self.store.append(EV_REPORT_GENERATED, payload)
         return fold(self.store.read_all()), event.seq
+
+    def _spawn_research(self, tg, state: RunState) -> bool:
+        """Overlap a DUE deep-research 'think' with the in-flight eval(s), INDEPENDENT of max_parallel.
+        The memo is computed on a `state` snapshot in a worker thread, then RECORDED IMMEDIATELY when
+        research finishes — NOT coupled to the eval completing — so its directions steer the very next
+        proposal instead of landing ~an eval later. Recording from the research task is safe because
+        `_record_deep_research` admits only `BACKGROUND_APPENDABLE` event types and
+        `EventStore.append` serializes writers under an interprocess lock with collision-safe seq
+        derivation. Those records never rewrite the current champion, but their hints/open hypotheses
+        deliberately steer later proposals. No-op when concurrent_research is off.
+
+        Two modes: the library default fires ONCE per window when a trigger is due (== today,
+        byte-identical). With `concurrent_research_repeat` on, the overlapped think RE-RUNS on an
+        adaptive time cadence for the whole eval window (`_research_overlap_loop`) so a multi-day
+        training doesn't leave the reasoning agents idle after one memo — the caller cancels the
+        loop when the evals join (see `_dispatch_evals`).
+
+        RETURNS whether a research task was actually started, because the Card session's
+        `research_spawned` latch is set from it. The latch used to be set unconditionally by the
+        caller, which turned "we already started research for this eval window" into "we already
+        ASKED whether research was due, once". Those differ exactly when the answer was NO — and on a
+        long-eval GPU run that is the normal case: the cadence is counted in NODES, so the first
+        admission of a session sits at `n=1` while `deep_research_every` is 3. Measured on
+        `runs/rubert-dr-0807` (12-node budget, `deep_research_every=3`, `concurrent_research=True`,
+        hours per node): the session asked at n=1, latched, then admitted n=2 and n=3 without ever
+        re-asking, and the run recorded ZERO `research_attempted`/`research_completed` rows. The
+        serial `_maybe_deep_research` could not cover it either — it requires no pending nodes, and
+        under speculation there always are some. So the one feature built to use the idle reasoning
+        agents during a multi-hour training never ran on the workload it exists for.
+
+        That latch was HALF the defect. The other half was the window itself: even asked at every
+        admission, `_due_research_trigger` answered NO until three nodes existed. The shipped default
+        is now `deep_research_every=0` = no window at all (`engine/cadence.py::deep_research_window`),
+        so the FIRST eval admission of the run — `n=1`, the first multi-hour training — is a due
+        trigger and this method starts the think beside it. Nothing about the safety argument above
+        changes: the same `BACKGROUND_APPENDABLE` allow-list, the same capped `deep_research` broker
+        lane (`core/llm_broker.py::BACKGROUND_LANE_PRODUCERS`, one concurrent request), and the same
+        containment for ordinary failures. The global `BudgetExceeded` hard stop still propagates.
+        It just happens hours earlier."""
+        if not self.concurrent_research:
+            return False
+        # repeat is a continuation of a research episode, not an independent timer.
+        # Requiring a due cadence/strategist trigger here keeps a spelled-OFF cadence
+        # (``deep_research_every=-1``; ``0`` has meant "start immediately" since 2026-08-07) truly
+        # manual-only and prevents a long eval from silently starting paid research on its own.
+        rtrig = self._due_research_trigger(state)
+        if rtrig is None:
+            return False
+        # Defensive getattr: some tests build a partial Engine (no __init__) — a missing knob means
+        # the safe one-shot default (== today), exactly like the train-monitor gates.
+        if getattr(self, "_concurrent_research_repeat", False):
+            # Repeat mode: keep researching for the whole eval window. Pass the initially-due trigger
+            # so the FIRST pass fires promptly (matching one-shot promptness). `_due_research_trigger`
+            # already rejects a missing model, so an unavailable stage cannot spin stub memos either.
+            tg.start_soon(self._research_overlap_loop, rtrig)
+            return True
+
+        async def _bg(snap=state, trig=rtrig):
+            # Best-effort ordinary errors must not disturb the in-flight eval. BudgetExceeded is the
+            # global run hard stop and therefore must escape this task-group boundary.
+            try:
+                # Receipt first (the trigger gate must be spent BEFORE the provider call, or a kill
+                # between the model answering and the memo landing buys the same think twice), then
+                # the provider call, then the record — as ONE non-abandonable thread hop, never three
+                # awaits. A worker thread has no cancellation points, so a sibling eval that finishes
+                # (or raises) and unwinds this shared group cannot land a cancel BETWEEN spending the
+                # gate and landing the memo: `_research_attempt_step` documents why that split was
+                # not a rare-kill case but the normal path on any fast-eval task. Deliberately NOT
+                # abandon_on_cancel (the default): the DeepResearcher owns a paid client and mutable
+                # run-bound tools, and the record WRITES the event log — both must be joined before
+                # the eval window closes.
+                await anyio.to_thread.run_sync(
+                    functools.partial(self._research_attempt_step, snap, trig, manual=False))
+            except BudgetExceeded:
+                # Still raises, and still ends the run. What it no longer does is DISCARD the
+                # evaluation it was overlapping: `_dispatch_evals` hands this method a
+                # `_DeferredBudgetStop` facade, so the raise is captured and re-raised one join
+                # later, once that evaluation has landed its terminal. Under Card speculation the
+                # eval is in the run-scoped group instead and `Engine.run` drains it
+                # (`_drain_inflight_evaluation`). Either way the stop is unchanged; only the order
+                # is.
+                raise
+            except Exception:  # noqa: BLE001 — never let deep research disturb the eval
+                pass
+        tg.start_soon(_bg)
+        return True
+
+    def _research_repeat_cadence(self) -> float:
+        """Base interval (seconds) between REPEATED concurrent-research passes. Research is expensive
+        (multi-turn LLM + web/arXiv), so the config `concurrent_research_interval_s` is a FLOOR, not a
+        ceiling: the effective pace is max(config, ~5% of the per-experiment time budget). A two-day
+        eval is re-researched roughly hourly; a short eval's first tick outlasts it (so it fires once
+        or not at all). Falls back to the config interval when no budget is known."""
+        cfg = max(1.0, float(getattr(self, "_concurrent_research_interval_s", 1800.0) or 1800.0))
+        budget = None
+        fn = getattr(self, "_experiment_time_budget", None)
+        if callable(fn):
+            try:
+                budget = fn()
+            except Exception:  # noqa: BLE001 — cadence is advisory; a budget hiccup just uses the config
+                budget = None
+        if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+            derived = min(3600.0, max(300.0, float(budget) * 0.05))
+            return max(cfg, derived)         # research is costly: never MORE often than the config floor
+        return cfg
+
+    async def _research_overlap_loop(self, initial_trigger: Optional[str] = None) -> None:
+        """Repeated concurrent deep-research: keep the reasoning agents productive for the WHOLE eval
+        window (a multi-day training must not idle them after a single memo). Re-runs the overlapped
+        think on an adaptive cadence, records ONLY memos whose content is NEW (identical re-runs are
+        skipped so the log/hypothesis board don't bloat), backs off geometrically as the analysis
+        converges (capped so it always re-checks — new sibling-eval results or cross-run lessons can
+        land mid-window), and stops calling the LLM past the per-window cap. Its allowlisted
+        BACKGROUND_APPENDABLE records are order-tolerant and never rewrite the current champion, while
+        their hints/open hypotheses deliberately steer later proposals and are reconstructed by replay.
+        Runs in `_dispatch_evals`'s background task group; cancelled when the evals join — which is
+        exactly why each paid pass is a SINGLE indivisible `_research_attempt_step` hop."""
+        from looplab.engine.train_monitor import next_monitor_sleep
+        base = self._research_repeat_cadence()
+        # Fire promptly if research was already due at spawn (one-shot promptness); else wait a full
+        # cadence before the first deepening pass, so a short eval that outlasts no tick never researches.
+        next_sleep = 0.0 if initial_trigger else base
+        last_sig: Optional[str] = None
+        converged = 0
+        calls = 0
+        cap = self._concurrent_research_max_calls
+        trig = initial_trigger or "repeat"
+        while True:
+            await anyio.sleep(next_sleep)    # only cancellation (evals joined) unwinds the loop from here
+            try:
+                # Re-fold each tick (invariant #4): pick up sibling evals that finished + fresh hints.
+                # This snapshot read is pure and owns no paid/shared role, so cancellation may abandon
+                # only this read without permitting a late event/cost or rebinding run-scoped tools.
+                snap = await anyio.to_thread.run_sync(
+                    lambda: fold(self.store.read_all()), abandon_on_cancel=True)
+                # Overlap the hypothesis-board CONSOLIDATION too (Phase 2): repeated research keeps
+                # ADDING near-duplicate directions as open hypotheses, so dedup/merge them on the same
+                # loop instead of only between nodes. `_maybe_merge_hypotheses` self-gates (open board
+                # >= 4 AND grown >= 2 since its last pass) so it no-ops until there is something to
+                # merge. This overlap is allowed only for legacy Hypothesis/Policy selection;
+                # hypothesis_merged changes native Card ownership/readiness and therefore runs only
+                # later on Card mode's joined main-task cadence. NOT abandon_on_cancel — this is
+                # REQUIRED for safety, not style:
+                # an abandoned merge worker could append EV_HYPOTHESIS_MERGED (and set _last_hyp_merge_n)
+                # AFTER _dispatch_evals returns, concurrently with the main task's serial merge, which
+                # is exactly the race the "background joined before _run_cadences" argument rules out.
+                # READ THAT ARGUMENT NARROWLY: since F1f the eval task group is RUN-scoped, so a
+                # session returns while its evals burn and `_run_cadences` genuinely does turn beside
+                # a live evaluation — the premise "a join precedes every cadence turn" is no longer
+                # true of the outer loop. What still holds is the only thing this comment needs: THIS
+                # overlap loop lives in `_dispatch_evals`'s own group and is cancelled when the evals
+                # it accompanies join, so the serial merge it must not race is still on the far side
+                # of that join. F1i widened WHICH cadences may fire mid-eval and deliberately left the
+                # hypothesis merge alone, precisely because its safety rests on this join and not on
+                # the node-count gate.
+                # So eval-join WAITS for an in-flight consolidate — one hybrid-retrieval + one
+                # merge-decision LLM call, bounded by the endpoint timeout (comparable to the record
+                # thread, not shorter). The self-gate keeps this rare: a converged tick whose board did
+                # not grow no-ops fast. Runs before the research cap so a capped-out window still keeps
+                # the board tidy. No-op when off / no reflect client / board small.
+                if (getattr(self, "_concurrent_consolidate", False)
+                        and not getattr(self, "card_driven_selection", False)):
+                    await anyio.to_thread.run_sync(
+                        functools.partial(self._maybe_merge_hypotheses, snap))
+                if cap > 0 and calls >= cap:
+                    return                   # research LLM budget spent; the health monitor still runs
+                # WHAT `calls` COUNTS IS PROVIDER REQUESTS, not passes (doc 27 P1). This used to be a
+                # bare `calls += 1` per pass, and a pass is a multi-turn agentic think plus its forced
+                # emit and its memo verification — so a ceiling spelled `concurrent_research_max_calls`
+                # was counting between one and several dozen calls at a time and undercounted the spend
+                # it exists to bound by exactly that factor. `ProviderCallMeter` is debited inside
+                # `llm_request_permit`, the one seam every outbound request passes, so what lands here
+                # is what the pass actually asked the provider for.
+                #
+                # Counted as an ATTEMPT, before the call rather than after it returns. Incrementing
+                # only on success meant a provider that consistently RAISES (broken auth, endpoint
+                # down, or a failure after tokens were already charged) never touched
+                # `concurrent_research_max_calls` and was re-called every `base` seconds for the whole
+                # eval window — the one budget backstop, blind to exactly the failure mode that can
+                # spend money without producing anything. The `max(1, …)` floor and the `finally` are
+                # that property, kept exactly: a pass that raises before it reaches the provider (a
+                # refused thread hop, a role that fails to build) still spends one, so nothing can
+                # re-tick this loop for free.
+                pass_meter = ProviderCallMeter()
+                # ONE hop for the whole paid pass: receipt -> provider -> record. Only the FIRST pass
+                # carries the initially-due cadence/strategist trigger and thus a durable gate worth
+                # receipting; `_record_research_attempt` no-ops for the `repeat` passes that follow
+                # (their cadence is an in-process timer, not a folded marker).
+                #
+                # These three used to be three separate awaits, and the eval-join cancel below
+                # (`_dispatch_evals`/`_run_card_session`'s `finally`) then landed on the leading
+                # checkpoint of the RECORD hop: the gate was spent, the provider was paid AND waited
+                # for, and the finished memo was discarded. Not a rare kill — the normal path on any
+                # task whose evals finish faster than the research call (measured live: 4
+                # `research_attempted` / 0 `research_completed` over a 12-node run). A worker thread
+                # has no cancellation points, so folding the three into `_research_attempt_step` makes
+                # the cancel arrive only AFTER the memo is durable — see that method for the full
+                # argument and for why the shielded window stays bounded.
+                #
+                # Deliberately NOT abandon_on_cancel (unlike the pure reads above), for BOTH halves of
+                # the step: the DeepResearcher owns a paid client and mutable run-bound tools, so
+                # abandoning it permits post-finalization usage events and lets the next research pass
+                # rebind the same tools under a live call; and the record WRITES the event log (and may
+                # run a verify LLM pass), so abandoning it could append
+                # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly
+                # past finalize. Waiting for the append (bounded, far shorter than the compute path)
+                # is safer.
+                # THE ONE-SHOT TRIGGER IS CONSUMED HERE, at the same instant its DURABLE receipt is
+                # taken, and not at the bottom of the try. `_research_attempt_step` opens with
+                # `_record_research_attempt`, which spends the cadence/strategist gate BEFORE the
+                # provider call precisely so an interrupted think is not re-paid; leaving the
+                # in-process label set until every later statement succeeded made this loop
+                # disagree with that receipt on all three non-completing exits — the `except` below,
+                # `sig is None`, and the converged `continue` — each of which resumed the next tick
+                # still wearing the initial trigger and therefore wrote a SECOND `research_attempted`
+                # and bought the same think again.
+                #
+                # The captured `this_trig` still rides THIS pass, so the receipt, the memo's own
+                # `trigger` column and the span label are byte-identical to what they were; only the
+                # NEXT tick degrades to `repeat`, which is a real pass that still thinks and still
+                # records — it simply writes no second receipt for a gate already spent.
+                #
+                # A PRE-RECEIPT failure (the thread pool refusing the hop; the receipt append itself
+                # cannot raise — `_record_research_attempt` degrades to `attempt_id=None`) therefore
+                # spends the in-process label with nothing durable behind it. That is deliberate and
+                # costs nothing: the next tick's `repeat` pass records a memo, and the durable gate
+                # counts recorded memos as well as attempts (`_cadence_research_marks`), so the
+                # cadence advances either way. An explicit retry status for that window would be a
+                # second gate answering a question the receipt already answers.
+                this_trig, trig = trig, "repeat"
+                # The meter rides the CONTEXT into the worker thread (`anyio.to_thread.run_sync`
+                # copies it), so every request the pass makes below — the think, its tools' own
+                # calls, the verify — is debited to this window whatever lane it declares.
+                try:
+                    with provider_call_meter(pass_meter):
+                        sig, recorded = await anyio.to_thread.run_sync(
+                            functools.partial(self._research_attempt_step, snap, this_trig,
+                                              manual=False, last_sig=last_sig,
+                                              converged_skips=converged),
+                            abandon_on_cancel=False)
+                finally:
+                    calls += max(1, pass_meter.calls)
+                if sig is None:
+                    next_sleep = base
+                    continue
+                if not recorded:             # converged — same conclusions; don't re-record, just back off
+                    converged += 1
+                    # cap = max(base, 3600): the backoff must never drop BELOW the configured interval
+                    # FLOOR. next_monitor_sleep returns min(cap, base·2^k); with the default cap=3600 a
+                    # base>3600 (user set interval_s>1h) would be clamped to 3600 < base, re-calling the
+                    # LLM MORE often than the floor when converged. Raising the cap to base keeps the
+                    # floor honoured (for base>3600 the sleep just stays at base — still bounded by the cap).
+                    next_sleep = next_monitor_sleep(base, status="healthy", healthy_streak=converged,
+                                                    cap=max(base, 3600.0))
+                    continue
+                last_sig = sig
+                converged = 0
+                next_sleep = base
+                # `trig` was already consumed above, before the paid hop — see that comment.
+            except anyio.get_cancelled_exc_class():
+                raise                        # cooperative cancellation (evals joined) — must propagate
+            except BudgetExceeded:
+                raise                        # global hard stop; never turn it into a retry tick
+                                             # (captured, not cancelled, when `_dispatch_evals`
+                                             # spawned this loop — see `_DeferredBudgetStop`)
+            except Exception:  # noqa: BLE001 — an advisory tick hiccup must not disturb the eval
+                next_sleep = base
+                continue

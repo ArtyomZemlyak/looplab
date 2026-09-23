@@ -1,6 +1,6 @@
 """BACKGROUND_APPENDABLE (engine invariant #1's one enforced exception — docs/15 §P4.1).
 
-The concurrent-research task appends from a background coroutine (`orchestrator._spawn_research`
+The concurrent-research task appends from a background coroutine (`research_cadence._spawn_research`
 -> `research_cadence._record_deep_research`), which is safe ONLY while every such event type is
 selection-neutral and order-tolerant in the fold: its position in events.jsonl depends on the
 thread schedule, so if it could affect which node wins, replay would be nondeterministic.

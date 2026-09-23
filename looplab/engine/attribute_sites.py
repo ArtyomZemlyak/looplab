@@ -58,7 +58,7 @@ from __future__ import annotations
 LAZY_ENGINE_ATTRIBUTES: dict[str, tuple[str, ...]] = {
     # name -> every method that MINTS it (sorted), by `<module file>::<method>`.
     '_belief_refusal_said': ('research_cadence.py::_admissible_beliefs',),
-    '_budget_wait_s': ('orchestrator.py::_defer_for_node_budget',),
+    '_budget_wait_s': ('forced_requests.py::_defer_for_node_budget',),
     '_card_enrichment_attempted': ('research_cadence.py::_sync_card_enrichments',),
     '_card_scoring': ('strategy.py::_apply_strategy',),
     '_card_stage_attached_to': ('card_reservation.py::_stage_prepared_card',),

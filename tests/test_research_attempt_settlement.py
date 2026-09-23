@@ -1,6 +1,6 @@
 """A paid deep-research think must SETTLE — the gate is spent only when the memo lands.
 
-The concurrent-research seams (`orchestrator._spawn_research` one-shot, `_research_overlap_loop`
+The concurrent-research seams (`research_cadence._spawn_research` one-shot, `_research_overlap_loop`
 repeat) share the in-flight eval's task group, and that group is unwound as soon as the evals join
 (`_dispatch_evals`/`speculation._run_card_session` `finally`) or when an eval raises. The paid pass
 used to be THREE separate awaits — receipt (`research_attempted`, deliberately written BEFORE the
