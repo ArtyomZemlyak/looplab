@@ -2097,7 +2097,10 @@ def build_router(srv) -> APIRouter:
         return {**conversation, "node_id": str(nid), "attempt": read_attempt, "before": anchor,
                 "run_generation": after_generation or None, "cursor": stable_etag}
 
-    @router.get("/api/runs/{run_id}/log")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
+    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
+    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives.
+    @router.get("/api/runs/{run_id}/log", deprecated=True)
     def event_log(run_id: str, since: int = -1):
         """Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive
         seq lower bound. Returns the oldest-first envelopes past `since`, bounded by BOTH
@@ -3091,7 +3094,10 @@ def build_router(srv) -> APIRouter:
                 "code": "run_deletion_fence_unavailable",
                 "message": "Deletion ownership cannot be verified; settings were not written.",
             }) from exc
-    @router.get("/api/runs/{run_id}/cost")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
+    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
+    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives.
+    @router.get("/api/runs/{run_id}/cost", deprecated=True)
     def run_cost(run_id: str):
         rd = _run_dir(run_id)
         st = srv.state(rd)

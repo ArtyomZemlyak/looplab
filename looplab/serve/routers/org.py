@@ -432,7 +432,10 @@ def build_router(srv) -> APIRouter:
     def observe_run_deletion(run_id: str, operation_id: str):
         return get_run_deletion(srv, run_id, operation_id)
 
-    @router.delete("/api/runs/{run_id}")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): the compat
+    # tombstone both first-party clients left for `POST .../deletions` — it only ever refuses —
+    # and nothing in ui/src, the TUI or the CLI calls it.
+    @router.delete("/api/runs/{run_id}", deprecated=True)
     def legacy_delete_run(run_id: str):
         """Never let a bodyless request delete an uninspected replacement generation."""
         raise HTTPException(409, {

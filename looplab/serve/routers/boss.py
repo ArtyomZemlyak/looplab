@@ -553,7 +553,12 @@ def build_router(srv) -> APIRouter:
 
         return await anyio.to_thread.run_sync(_append)
 
-    @router.post("/api/runs/{run_id}/chat-compact")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
+    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
+    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives. NOTE:
+    # the `chat-log` 413 above still names it as the remedy, and the TUI — `chat-log`'s one
+    # first-party writer — never calls it; which of the two moves is an open product decision.
+    @router.post("/api/runs/{run_id}/chat-compact", deprecated=True)
     async def chat_compact(run_id: str, request: Request):
         """Summarize a stretch of older chat turns into ONE tight recap, so the boss's working memory
         stops growing turn-over-turn (the human↔boss history is re-sent in full each message). The UI
@@ -618,7 +623,10 @@ def build_router(srv) -> APIRouter:
 
         return await anyio.to_thread.run_sync(_work)
 
-    @router.post("/api/runs/{run_id}/chat")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
+    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
+    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives.
+    @router.post("/api/runs/{run_id}/chat", deprecated=True)
     async def chat(run_id: str, request: Request):
         """Advisory chat grounded on a run (and optionally one experiment node). Read-only — it
         never appends events; it's a thinking aid. The UI keeps the history and posts the full
@@ -657,7 +665,10 @@ def build_router(srv) -> APIRouter:
                           "system": sys_prompt, "user": user_msg, "completion": text,
                           "tokens": tokens}}
 
-    @router.post("/api/runs/{run_id}/suggest")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
+    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
+    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives.
+    @router.post("/api/runs/{run_id}/suggest", deprecated=True)
     async def suggest(run_id: str, request: Request):
         """Turn the chat discussion (or a free-form instruction) into a CONCRETE experiment idea
         (operator + params + rationale) the UI can drop straight into the inject-node dialog.

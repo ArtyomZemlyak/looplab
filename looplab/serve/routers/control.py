@@ -256,7 +256,11 @@ def build_router(srv) -> APIRouter:
     # sixty-third is new and deliberate: `test_control_reads_the_log_once.py` measures THIS route's
     # per-POST log read, so it is an instrument that dies with the route rather than a caller to
     # migrate. Each of the other sites is a contract to RE-VERIFY under `/commands`.
-    @router.post("/api/runs/{run_id}/control")
+    # DEPRECATED in OpenAPI too — no behaviour change (review 2026-09-22, SRV2-09): the compat
+    # route both first-party clients left for `POST .../commands`; nothing in ui/src, the TUI or
+    # the CLI calls it. The flag joins the `Deprecation`/`Link` headers below; retiring the route
+    # is still the open item above.
+    @router.post("/api/runs/{run_id}/control", deprecated=True)
     async def control(run_id: str, request: Request, response: Response):
         rd = _run_dir(run_id)
         body = await json_object(request, "control body")
@@ -413,7 +417,10 @@ def build_router(srv) -> APIRouter:
                 continue
         raise HTTPException(409, "run state changed repeatedly; retry resume")
 
-    @router.post("/api/runs/{run_id}/resume")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): the compat
+    # route both first-party clients left for `POST .../commands` (a `resume` command); nothing
+    # in ui/src, the TUI or the CLI calls it.
+    @router.post("/api/runs/{run_id}/resume", deprecated=True)
     def resume_run(run_id: str):
         rd = _run_dir(run_id)
         # The command sequencer excludes authoritative command workers while the lifecycle lock

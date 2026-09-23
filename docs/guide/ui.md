@@ -185,7 +185,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   appended once the cap is reached (`serve/routers/boss.py`: `_CHAT_LOG_MAX_BYTES` :72,
   `_CHAT_SUMMARY_GRACE_BYTES` :76, and the 413 branch at :560-570). Compact, append the returned
   recap as a `summary` turn, and carry on. Resetting the run also archives the transcript and starts a
-  fresh one, but it is the destructive option, not the first one.
+  fresh one, but it is the destructive option, not the first one. (No first-party client calls
+  `chat-compact` itself — the TUI writes `chat-log` but never compacts — so the route is marked
+  deprecated in the [API reference](api-reference.md); it is still served, unchanged, for a caller
+  that does.)
 - **Deep Research** — every run surface uses the same conclusion-first memo card. The newest memo is
   open and older memos are collapsed; the takeaway, provenance, evidence/claim counts and trust state
   remain visible in the header. Findings and next actions stay primary, while verified evidence,

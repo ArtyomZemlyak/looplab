@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-136 routes on 122 paths; 2 deprecated; 25 with a declared response model.
+136 routes on 122 paths; 13 deprecated; 25 with a declared response model.
 
 ### `/api`
 
@@ -35,11 +35,11 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/assistant/sessions/{sid}/cancel` | Stop an in-flight turn. Sets the session's cancel flag; the tool loop checks it at the next | — |  |
 | `POST` | `/api/assistant/sessions/{sid}/fork` | *Assistant Fork* (no docstring) | — |  |
 | `GET` | `/api/assistant/sessions/{sid}/fork/{action_id}` | *Assistant Fork Status* (no docstring) | — |  |
-| `POST` | `/api/assistant/sessions/{sid}/message` | One assistant turn. Persists the user turn, drives the read-only tool loop as a BACKGROUND | — |  |
+| `POST` | `/api/assistant/sessions/{sid}/message` | One assistant turn. Persists the user turn, drives the read-only tool loop as a BACKGROUND | — | yes |
 | `POST` | `/api/assistant/sessions/{sid}/message_stream` | Streaming variant: SSE of `token` (final-answer tokens), `step`, `todos`, then `done` (the | — |  |
 | `POST` | `/api/assistant/sessions/{sid}/share` | Mint a read-only share link. | — |  |
 | `DELETE` | `/api/assistant/sessions/{sid}/share` | Revoke every link for this chat. Revocation exists so taking a share back does not mean | — |  |
-| `GET` | `/api/assistant/sessions/{sid}/shares` | The owner's view of this chat's live links — never the tokens, only their terms. | — |  |
+| `GET` | `/api/assistant/sessions/{sid}/shares` | The owner's view of this chat's live links — never the tokens, only their terms. | — | yes |
 | `GET` | `/api/assistant/shared` | Header-carried public capability. | — |  |
 | `GET` | `/api/assistant/watches` | *List Watches* (no docstring) | — |  |
 | `POST` | `/api/assistant/watches` | Arm standing status/schedule/work from the UI (the agent uses the corresponding watch | — |  |
@@ -152,14 +152,14 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | method | path | summary | response model | deprecated |
 |---|---|---|---|---|
 | `GET` | `/api/runs` | *List Runs* (no docstring) | — |  |
-| `DELETE` | `/api/runs/{run_id}` | Never let a bodyless request delete an uninspected replacement generation. | — |  |
+| `DELETE` | `/api/runs/{run_id}` | Never let a bodyless request delete an uninspected replacement generation. | — | yes |
 | `PATCH` | `/api/runs/{run_id}` | Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged. | — |  |
 | `GET` | `/api/runs/{run_id}/agents_md` | DEPRECATED. Serve a run's AGENTS.md. | — | yes |
 | `GET` | `/api/runs/{run_id}/artifact` | Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by | — |  |
 | `GET` | `/api/runs/{run_id}/artifacts` | List files currently visible to the run, grouped by root. | — |  |
 | `GET` | `/api/runs/{run_id}/cards/{card_id}/trace` | One CARD's whole story: the research that proposed it, then every node it produced. | — |  |
-| `POST` | `/api/runs/{run_id}/chat` | Advisory chat grounded on a run (and optionally one experiment node). Read-only — it | — |  |
-| `POST` | `/api/runs/{run_id}/chat-compact` | Summarize a stretch of older chat turns into ONE tight recap, so the boss's working memory | — |  |
+| `POST` | `/api/runs/{run_id}/chat` | Advisory chat grounded on a run (and optionally one experiment node). Read-only — it | — | yes |
+| `POST` | `/api/runs/{run_id}/chat-compact` | Summarize a stretch of older chat turns into ONE tight recap, so the boss's working memory | — | yes |
 | `GET` | `/api/runs/{run_id}/chat-log` | The saved chat turns for this run, in order ({role:'user'\|'assistant'\|'action', …}). | — |  |
 | `POST` | `/api/runs/{run_id}/chat-log` | Append ONE chat turn (the verbatim feed entry: role/content/trace or role/action/status) | — |  |
 | `POST` | `/api/runs/{run_id}/command` | Action-router (Workstream C): turn a free-text instruction into EITHER a concrete control | — |  |
@@ -175,13 +175,13 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/concepts/lens/recovery/abandon` | Resolve one exactly identified orphan without possessing or replaying its paid key. | — |  |
 | `GET` | `/api/runs/{run_id}/config` | *Run Config* (no docstring) | `RunConfigResponse` |  |
 | `PUT` | `/api/runs/{run_id}/config` | Per-run settings edit: rewrite THIS run's config.snapshot.json so a later RESUME re-enters | `RunConfigUpdateResponse` |  |
-| `POST` | `/api/runs/{run_id}/control` | *Control* (no docstring) | — |  |
-| `GET` | `/api/runs/{run_id}/cost` | *Run Cost* (no docstring) | — |  |
+| `POST` | `/api/runs/{run_id}/control` | *Control* (no docstring) | — | yes |
+| `GET` | `/api/runs/{run_id}/cost` | *Run Cost* (no docstring) | — | yes |
 | `POST` | `/api/runs/{run_id}/deletions` | Delete one exact run generation through an operation-bound durable transaction. | — |  |
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
 | `GET` | `/api/runs/{run_id}/lifecycle` | Bounded identity/liveness probe used after a terminal SSE stream closes. | — |  |
-| `GET` | `/api/runs/{run_id}/log` | Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive | — |  |
+| `GET` | `/api/runs/{run_id}/log` | Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive | — | yes |
 | `GET` | `/api/runs/{run_id}/log-page` | Bounded timeline transport. Cursors survive append and fail closed across run reset. | — |  |
 | `GET` | `/api/runs/{run_id}/memory-attribution` | What a cascading delete WOULD remove from cross-run memory, and what it would keep. | — |  |
 | `POST` | `/api/runs/{run_id}/memory-purge` | Finish a cascade whose store was locked at the moment the run was deleted. | — |  |
@@ -197,13 +197,13 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
 | `POST` | `/api/runs/{run_id}/reset` | round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and | — |  |
 | `POST` | `/api/runs/{run_id}/resolve-activity-claims` | Guarded operator recovery for an ownership claim that cannot be proven dead. | — |  |
-| `POST` | `/api/runs/{run_id}/resume` | *Resume Run* (no docstring) | — |  |
+| `POST` | `/api/runs/{run_id}/resume` | *Resume Run* (no docstring) | — | yes |
 | `GET` | `/api/runs/{run_id}/reviews` | *List Reviews* (no docstring) | — |  |
 | `POST` | `/api/runs/{run_id}/reviews` | *Create Review* (no docstring) | — |  |
 | `DELETE` | `/api/runs/{run_id}/reviews/{link_id}` | *Revoke Review* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/spans/{sid}` | Bounded, redacted I/O projection for one observation; raw diagnostics stay in spans.jsonl. | — |  |
 | `GET` | `/api/runs/{run_id}/state` | Return the bounded public run state. | `PublicRunStateResponse` |  |
-| `POST` | `/api/runs/{run_id}/suggest` | Turn the chat discussion (or a free-form instruction) into a CONCRETE experiment idea | — |  |
+| `POST` | `/api/runs/{run_id}/suggest` | Turn the chat discussion (or a free-form instruction) into a CONCRETE experiment idea | — | yes |
 | `POST` | `/api/runs/{run_id}/supertask` | *Assign Supertask* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/trace` | *Trace* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/trace/by_trace/{trace_id}` | Spans of ONE operation's trace (by trace_id) as a tree, WITH capped I/O — powers the | — |  |
@@ -255,7 +255,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 | method | path | summary | response model | deprecated |
 |---|---|---|---|---|
-| `GET` | `/api/tasks` | Discover runnable task JSON files (the `examples/` catalogue by default, plus any in the | — |  |
+| `GET` | `/api/tasks` | Discover runnable task JSON files (the `examples/` catalogue by default, plus any in the | — | yes |
 
 ### `/api/validate`
 

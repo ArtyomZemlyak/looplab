@@ -1553,7 +1553,10 @@ def build_router(srv) -> APIRouter:
         return await anyio.to_thread.run_sync(_apply_secret)
 
     # ------------------------------------------------------------------ task catalogue
-    @router.get("/api/tasks")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
+    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
+    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives.
+    @router.get("/api/tasks", deprecated=True)
     def list_tasks():
         """Discover runnable task JSON files (the `examples/` catalogue by default, plus any in the
         run-root) so the launch dialog can offer a pick-list instead of a raw path.

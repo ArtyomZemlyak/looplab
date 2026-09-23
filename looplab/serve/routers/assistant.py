@@ -1277,7 +1277,10 @@ def build_router(srv) -> APIRouter:
                 pass
         return {"ok": True, "revoked": revoked}
 
-    @router.get("/api/assistant/sessions/{sid}/shares")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
+    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
+    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives.
+    @router.get("/api/assistant/sessions/{sid}/shares", deprecated=True)
     def assistant_shares(sid: str):
         """The owner's view of this chat's live links — never the tokens, only their terms."""
         with _session_lifecycle_lock:
@@ -1926,7 +1929,10 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such watch")
         return {"ok": True, "watch": _watch_public(record)}
 
-    @router.post("/api/assistant/sessions/{sid}/message")
+    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
+    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
+    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives.
+    @router.post("/api/assistant/sessions/{sid}/message", deprecated=True)
     async def assistant_message(sid: str, request: Request):
         """One assistant turn. Persists the user turn, drives the read-only tool loop as a BACKGROUND
         JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
