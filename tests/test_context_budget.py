@@ -159,3 +159,160 @@ def test_shrunk_tool_call_arguments_stay_valid_json():
     shrunk = out[1]["tool_calls"][0]["function"]["arguments"]
     parsed = json.loads(shrunk)                       # must NOT raise (still valid JSON)
     assert parsed["__elided_arguments_chars__"] == 5000 + len('{"path": "a.py", "content": ""}')
+
+
+# --- the TASK survives compaction (review 2026-09-22, TAT-04) ------------------------------------
+#
+# `compact_history` protected only the LEADING SYSTEM messages and `truncate_history` only system
+# messages and the last few turns — while almost every loop in this product carries its task in the
+# FIRST USER message (`[system: the role, user: the task]`). So the first compaction of a long loop
+# folded the task itself into a note that says "informational context, NOT instructions" (auto
+# summary), or middle-truncated / elided it to a marker (truncation): the model kept working on a
+# task it could no longer read, told in so many words not to treat what was left of it as one.
+
+_TASK = ("TASK: tune the retrieval model so RECALL@100 on the held-out split exceeds 0.80; edit only "
+         "config.yaml; never touch the scorer. " + "Constraints follow. " * 20)
+
+
+def _loop_history(turns: int = 12, result: int = 900) -> list[dict]:
+    msgs = [{"role": "system", "content": "You are the developer."},
+            {"role": "user", "content": _TASK}]
+    for i in range(turns):
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": f"c{i}", "type": "function",
+                                     "function": {"name": "read", "arguments": '{"p": "x"}'}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"r{i} " + "z" * result})
+    return msgs
+
+
+def test_compaction_keeps_the_task_verbatim_after_the_system_prompt():
+    """THE DEFECT, auto-summary path. Before the fix the task went into the summary note."""
+    msgs = _loop_history()
+    out = compact_history(msgs, max_chars=6_000, summarize=lambda _t: "SUMMARY")
+    assert out[0] is msgs[0] and out[1] is msgs[1], "the task must ride in the protected head"
+    assert out[2]["content"].startswith("[Summary of earlier steps")
+    assert sum(1 for m in out if m.get("content") == _TASK) == 1
+
+
+def test_truncation_keeps_the_task_verbatim():
+    """THE DEFECT, deterministic path: the task was the OLDEST non-protected message, so it was the
+    first one middle-truncated (or elided to a marker)."""
+    msgs = _loop_history()
+    out = truncate_history(msgs, max_chars=6_000)
+    assert out[1] is msgs[1]
+    assert sum(_msg_chars(m) for m in out) < sum(_msg_chars(m) for m in msgs)
+
+
+def test_a_task_bigger_than_half_the_budget_keeps_its_historical_treatment():
+    """Pinning a task that alone takes most of the budget would leave the loop's own turns no room:
+    truncation would elide every later turn to reach an unreachable target, and auto-summary would
+    pay for a summary on EVERY turn trying to fit. So such a task is not pinned — it is compacted
+    exactly as before (the same bytes), which is the lesser harm and a case the 1,000,000-char
+    default never reaches."""
+    msgs = _loop_history()
+    small_budget = 2 * _msg_chars(msgs[1]) - 1        # the task is just over half of it
+    out = truncate_history(msgs, max_chars=small_budget)
+    assert out[1] is not msgs[1] and out[1]["content"] != _TASK
+
+
+def _historical_head(messages, max_chars):
+    """The pre-fix rule: leading system messages only."""
+    head = 0
+    while head < len(messages) and messages[head].get("role") == "system":
+        head += 1
+    return head
+
+
+def test_the_bytes_move_only_where_compaction_was_losing_the_task(monkeypatch):
+    """The prompt-contract half, driven over 3,000 random loop histories (the shape the review's own
+    pairing probe used): run each through the fixed functions and through the SAME functions with
+    the protected head patched back to the historical rule. Wherever the historical run kept the
+    task byte for byte, the two outputs are identical; wherever they differ, it is because the
+    historical run altered the task and the fixed one kept it."""
+    import random
+
+    from looplab.core import context_budget as cb
+
+    rng = random.Random(0)
+    changed = 0
+    for trial in range(3_000):
+        msgs = [{"role": "system", "content": "sys" * rng.randint(1, 50)}]
+        if rng.random() < 0.9:                        # most loops open with a task …
+            msgs.append({"role": "user", "content": "task" * rng.randint(1, 60)})
+        cid = 0
+        for _ in range(rng.randint(0, 30)):           # … some open straight into the work
+            if rng.random() < 0.15:
+                msgs.append({"role": "user", "content": "Reminder " * rng.randint(1, 20)})
+            k = rng.randint(0, 3)
+            if not k:
+                msgs.append({"role": "assistant", "content": "prose" * rng.randint(1, 100)})
+                continue
+            calls = []
+            for _ in range(k):
+                cid += 1
+                calls.append({"id": f"c{cid}", "type": "function", "function": {
+                    "name": "read", "arguments": '{"p": "%s"}' % ("x" * rng.randint(1, 300))}})
+            msgs.append({"role": "assistant", "content": "", "tool_calls": calls})
+            for c in calls:
+                msgs.append({"role": "tool", "tool_call_id": c["id"],
+                             "content": "r" * rng.randint(1, 3000)})
+        budget = rng.choice([500, 2_000, 8_000, 20_000])
+        for name, fn in (("compact", lambda m: cb.compact_history(m, budget, lambda t: "summary")),
+                         ("compact_fail", lambda m: cb.compact_history(m, budget, lambda t: "")),
+                         ("truncate", lambda m: cb.truncate_history(m, budget))):
+            fixed = fn(msgs)
+            with monkeypatch.context() as patch:
+                patch.setattr(cb, "_protected_head", _historical_head)
+                historical = fn(msgs)
+            task = msgs[1] if len(msgs) > 1 and msgs[1].get("role") == "user" else None
+            kept = task is not None and any(m is task for m in historical)
+            if task is None or kept:
+                assert fixed == historical, (trial, name)
+            elif fixed != historical:
+                changed += 1
+                assert fixed[1] is task, (trial, name)
+    assert changed > 100, "the differential never exercised the defect it exists for"
+
+
+def test_a_long_real_loop_still_hands_the_model_its_task():
+    """End to end through `drive_tool_loop`: twelve tool turns under a small budget, both compaction
+    modes. What the model is sent on its LAST turn must still carry the task, verbatim, as a user
+    turn — not folded into a note that calls it 'NOT instructions', not truncated."""
+    from looplab.agents.tool_loop import drive_tool_loop
+
+    class _Tools:
+        def specs(self):
+            return [{"type": "function", "function": {
+                "name": "read", "description": "Read.", "parameters": {"type": "object",
+                                                                       "properties": {}}}}]
+
+        def execute(self, name, args):
+            return "z" * 900
+
+    class _Model:
+        def __init__(self):
+            self.turn = 0
+            self.last: list = []
+
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.turn += 1
+            self.last = [dict(m) for m in messages]
+            name = "read" if self.turn <= 12 else "emit"
+            return {"content": "", "tool_calls": [{"id": f"t{self.turn}", "type": "function",
+                                                   "function": {"name": name, "arguments": "{}"}}]}
+
+        def complete_text(self, messages):           # the summarizer
+            return "SUMMARY"
+
+    emit = {"type": "function", "function": {"name": "emit", "description": "Done.",
+                                             "parameters": {"type": "object", "properties": {}}}}
+    for auto_summary in (True, False):
+        model = _Model()
+        opening = [{"role": "system", "content": "You are the developer."},
+                   {"role": "user", "content": _TASK}]
+        drive_tool_loop(model, _Tools(), opening, emit, finalize=lambda a: "done",
+                        fallback=lambda m: "fallback", context_budget_chars=6_000,
+                        auto_summary=auto_summary, stuck_detection=False)
+        assert model.turn == 13
+        assert model.last[1] == {"role": "user", "content": _TASK}, auto_summary
+        assert sum(_msg_chars(m) for m in model.last) < 13 * 900, "compaction did run"

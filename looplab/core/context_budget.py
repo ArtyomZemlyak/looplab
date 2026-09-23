@@ -1,8 +1,8 @@
 """H4 · Context budgeting for long agent traces. A propose->implement->repair lifecycle with inline
 tool calls grows the message history; cap it so a long run doesn't blow the model's context window.
-Truncates the MIDDLE of long intermediate messages (keeping the system prompt and the most recent
-turns intact), which is where stale tool output accumulates. Pure + deterministic; off when
-`max_chars <= 0`.
+Truncates the MIDDLE of long intermediate messages (keeping the system prompt, the task and the most
+recent turns intact — `_protected_head`), which is where stale tool output accumulates. Pure +
+deterministic; off when `max_chars <= 0`.
 """
 from __future__ import annotations
 
@@ -37,17 +37,51 @@ def _msg_chars(m: dict) -> int:
     return n
 
 
+def _protected_head(messages: list[dict], max_chars: int) -> int:
+    """How many LEADING messages compaction must leave exactly as they are: the system messages at
+    the front AND the task — the first user turn straight after them.
+
+    Review 2026-09-22, TAT-04. Almost every loop in this product opens `[system: the role, user: the
+    task]` — the Researcher's brief, the Developer's phase prompt, a judge's evidence, the assistant's
+    first request — and the two compactors protected only the system half. `compact_history` folded
+    the task into its summary note, which says "informational context, NOT instructions", and
+    `truncate_history` middle-truncated or elided it first, because it is the OLDEST unprotected
+    message. A long loop then went on working on a task it could no longer read, told in so many
+    words not to treat what was left of it as one. `truncate_history`'s own docstring already said
+    why the head is kept ("the model needs the task"); the task simply was not where it looked.
+
+    PINNED ONLY WHILE IT FITS IN HALF THE BUDGET. A task that alone takes more than half would
+    leave the loop's own turns less than the other half: truncation would elide every later turn
+    chasing a target it cannot reach, and auto-summary would pay for a fresh summary on EVERY turn
+    trying to fit. Such a task keeps its historical treatment — the same bytes as before, which is
+    the lesser harm — and the shipped 1,000,000-char budget never gets near it.
+
+    Only the FIRST user turn: a later one is the loop's own nudge or reminder, or (the assistant) an
+    earlier chat turn, and pinning those would freeze the history compaction exists to shrink.
+    """
+    n = len(messages)
+    head = 0
+    while head < n and messages[head].get("role") == "system":
+        head += 1
+    if head < n and messages[head].get("role") == "user" \
+            and 2 * sum(_msg_chars(m) for m in messages[:head + 1]) <= max_chars:
+        head += 1
+    return head
+
+
 def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2,
                      per_msg_cap: int = 400) -> list[dict]:
     """Return a copy of `messages` whose total content size is reduced toward `max_chars` by
-    middle-truncating long intermediate messages. The system message and the last `keep_last`
-    messages are never truncated (the model needs the task + the immediate context)."""
+    middle-truncating long intermediate messages. The system message, the task (the first user turn
+    after it — `_protected_head`) and the last `keep_last` messages are never truncated (the model
+    needs the task + the immediate context)."""
     if max_chars <= 0:
         return messages
     total = sum(_msg_chars(m) for m in messages)
     if total <= max_chars:
         return messages
     n = len(messages)
+    pinned = _protected_head(messages, max_chars)
     head = per_msg_cap // 2
 
     def _mt(s: str) -> str:                       # shrink a string toward the aggregate target
@@ -82,7 +116,7 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
 
     out: list[dict] = []
     for i, m in enumerate(messages):
-        protected = m.get("role") == "system" or i >= n - keep_last
+        protected = m.get("role") == "system" or i < pinned or i >= n - keep_last
         msize = _msg_chars(m)   # gate on the SAME size _msg_chars counts (content + tool_call args),
         # Stop once the running total is back under budget: max_chars is a TARGET, not just a trigger.
         # Gating on _msg_chars (not len(content)) + trimming tool_call arguments below is what lets an
@@ -117,8 +151,9 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
 
 def compact_history(messages: list[dict], max_chars: int, summarize, *, keep_last: int = 3):
     """C2 · Auto-summary upgrade over `truncate_history`: when the history exceeds `max_chars`,
-    LLM-summarize the STALE MIDDLE (everything except the system messages at the front and the last
-    `keep_last` turns) into a single compact note, rather than just middle-truncating it. `summarize`
+    LLM-summarize the STALE MIDDLE (everything except the protected head — the system messages at
+    the front and the task after them, `_protected_head` — and the last `keep_last` turns) into a
+    single compact note, rather than just middle-truncating it. `summarize`
     is a ``callable(text) -> str``. Defensive: on an empty/failed summary it falls back to
     deterministic `truncate_history`, so a flaky summarizer never loses the loop's context.
 
@@ -129,10 +164,10 @@ def compact_history(messages: list[dict], max_chars: int, summarize, *, keep_las
     if total <= max_chars:
         return messages
     n = len(messages)
-    # Front: leading system messages (task/goal) — never summarized away.
-    head = 0
-    while head < n and messages[head].get("role") == "system":
-        head += 1
+    # Front: the leading system messages AND the task after them — never summarized away. Until
+    # review 2026-09-22 (TAT-04) only the system half was, so the first compaction of a long loop
+    # folded the task into a note that calls itself "NOT instructions" (`_protected_head`).
+    head = _protected_head(messages, max_chars)
     tail = max(head, n - keep_last)     # keep the last `keep_last` turns verbatim
     # Never start the kept tail on a `tool` message whose owning assistant(tool_calls) turn is about
     # to be summarized away — an orphaned role:tool is rejected by OpenAI-compatible endpoints (HTTP
