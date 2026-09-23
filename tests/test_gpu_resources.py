@@ -898,10 +898,12 @@ def test_the_serial_resource_wait_folds_only_when_the_log_moved(monkeypatch):
     """The tail gate (doc 25 ES-12): a quiet tick costs no fold, an APPENDED re-pin is still seen.
 
     The wait can last as long as another run holds the host pool, and it used to re-fold the whole
-    log on every bounded tick. Here six ticks pass and the loop folds four times: once at the
-    dispatch loop top, once entering the wait, once because the operator's re-pin moved the tail,
-    and once after the reservation is granted. Removing the gate makes it fold once per tick, which
-    is what this counts.
+    log on every bounded tick. Here six ticks pass and the loop folds TWICE: once at the dispatch
+    loop top and once because the operator's re-pin moved the tail. It folded four times until
+    review 2026-09-22 (EVT-04) — entering the wait and admitting the granted reservation each
+    re-folded a prefix whose tail had not moved; the wait's gate is now seeded with the loop-top
+    fold and admission reads through the same gate. Removing the gate makes it fold once per tick,
+    which is what this counts.
     """
     host = _PinRaceDispatchHost()
     card = types.SimpleNamespace(
@@ -951,9 +953,9 @@ def test_the_serial_resource_wait_folds_only_when_the_log_moved(monkeypatch):
     # The wait DID observe the re-pin: the last request asks for no GPU at all.
     assert [tick["gpus"] for tick in ticks] == [1, 1, 1, 1, 1, 0]
     assert len(host.started) == 1
-    assert len(folds) == 4, (
-        "the wait must fold at the loop top, on entering the wait, once because the re-pin moved "
-        f"the tail, and once on admission — six ticks folded {len(folds)} times")
+    assert len(folds) == 2, (
+        "the wait must fold at the loop top and once because the re-pin moved the tail — entering "
+        f"the wait and admission reuse an unmoved tail's fold — six ticks folded {len(folds)} times")
 
 
 def test_the_tail_gate_reuses_its_snapshot_and_refolds_the_moment_the_log_grows(tmp_path,

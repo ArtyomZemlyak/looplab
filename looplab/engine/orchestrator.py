@@ -5513,7 +5513,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         BY ONE LOOP and handed to nobody who keeps it (`_evaluate` takes a node id and re-folds).
         That is the whole difference from the rejected `fold_cached` on the store, which would have
         handed ONE `RunState` to a build worker thread and to `evaluate.py`'s `node.rerun_stage =
-        None` at the same time. Pass `None` on the first tick; hand back what this returned.
+        None` at the same time. Pass `None` on the first tick — or the `(tail_seq, state)` this same
+        loop has just folded, which is what the serial dispatch seeds it with (review 2026-09-22,
+        EVT-04) — and hand back what this returned.
         """
         events = self.store.read_all()
         tail = events[-1].seq if events else -1
@@ -5552,7 +5554,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     for a in evals:
                         if budget_stop:
                             break        # the ceiling fired: finish what is running, start nothing
-                        cur = fold(self.store.read_all())
+                        cur_events = self.store.read_all()
+                        cur = fold(cur_events)
                         if self._skip_if_aborted(a, cur):
                             continue
                         # Re-check the eval-compute budget BEFORE each eval (not just per loop
@@ -5578,7 +5581,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             # the cross-run host lease this wait lasts as long as ANOTHER run holds
                             # the pool (hours of training), and an unconditional re-fold per 0.5s
                             # tick was an O(total-events) busy-poll — the cost confirm F26 documents.
-                            waited_fold = None
+                            # SEEDED with the loop-top fold above, whose tail nothing has moved
+                            # since (review 2026-09-22, EVT-04): `None` here re-folded that identical
+                            # prefix on EVERY eval's first tick, 60 times in a 60-node toy run. The
+                            # gate still re-folds the moment anything appends.
+                            waited_fold = (cur_events[-1].seq if cur_events else -1, cur)
                             while True:
                                 if budget_stop_recheck(budget_stop):
                                     skip_eval = True
@@ -5621,7 +5628,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                                     reservation = None
                                     skip_eval = True
                                     break
-                                admitted = fold(self.store.read_all())
+                                # The admission re-check reads the log through the SAME gate
+                                # (EVT-04): everything it refuses on — abort, drop, reset, tombstone,
+                                # pause/stop/finish, a spent budget, a re-pin — lands by APPEND, so an
+                                # unmoved tail is the fold the tick just took. It used to re-fold
+                                # unconditionally, 60 identical prefixes in a 60-node toy run.
+                                waited_fold = self._fold_if_tail_moved(waited_fold)
+                                admitted = waited_fold[1]
                                 live = admitted.nodes.get(node.id)
                                 if self._skip_if_aborted(a, admitted):
                                     self._release_gpus(reservation.get("gpu_ids"))
@@ -6732,12 +6745,19 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         """Run proposal, reservation and implementation in one node-scoped handoff context."""
         from looplab.agents.agent import handoff_scope
 
+        folded = None
         if reserved is not None:
             trace_node_id = reserved.node_id
         else:
             trace_events = self.store.read_all()
             trace_state = fold(trace_events)
             trace_node_id = self._node_id_ceiling(trace_events, trace_state)
+            # ONE fold per unreserved build, not two (review 2026-09-22, EVT-04). The trace label is
+            # this fold's only use here, and `_create_node_scoped`, which only this method calls,
+            # folded the identical prefix again a few statements later for its proposal — measured,
+            # every one of those (44-60 per 60-node toy run) was a repeat. Handed down rather than
+            # cached: it is this call's own object, and nothing reads or writes it in between.
+            folded = (trace_events, trace_state)
         with self.tracer.span(
                 "create_node", new_trace=True, node_id=trace_node_id,
                 generation=0, operator=action.get("kind")), \
@@ -6757,7 +6777,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             with model_override(self._model_for_arm(action)):
                 return self._create_node_scoped(
                     action, roles, reserved, preproposed=preproposed,
-                    pretelemetry=pretelemetry)
+                    pretelemetry=pretelemetry, folded=folded)
 
     def _model_for_arm(self, action: dict) -> Optional[str]:
         """The model id an action's `_model` arm names, or None for the default arm / no arm /
@@ -6769,7 +6789,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         return entry[0] if entry else None
 
     def _create_node_scoped(self, action: dict, roles=None, reserved=None, preproposed=None,
-                            pretelemetry=None) -> None:
+                            pretelemetry=None, folded=None) -> None:
         # Variant-1 parallel build: `roles` is a per-build (researcher, developer) pair from the pool
         # (isolated per-build state so concurrent drafts don't clobber each other's hints/last_files);
         # `reserved` is a pre-reserved (state, id, kind, parents, parent_generations) tuple (the parallel
@@ -6778,8 +6798,15 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # the fan-out only IMPLEMENTS it. All default to the serial behaviour.
         researcher, developer = roles if roles is not None else (self.researcher, self.developer)
         if reserved is None:
-            proposal_events = self.store.read_all()
-            proposal_state = fold(proposal_events)
+            # `folded` is `_create_node`'s own `(events, state)` for this build (EVT-04): the same
+            # prefix this line used to re-read and re-fold. The gap it widens is a few statements
+            # with no I/O — nothing beside the paid propose this snapshot already outlives, which
+            # is what the reservation fences below exist for.
+            if folded is not None:
+                proposal_events, proposal_state = folded
+            else:
+                proposal_events = self.store.read_all()
+                proposal_state = fold(proposal_events)
             # Both halves of the score fence, from THIS fold — the paid propose below runs between
             # here and the reservation. See `card_reservation.scored_anchor`.
             _proposal_anchor_id, _proposal_anchor_attempt = scored_anchor(proposal_state)
