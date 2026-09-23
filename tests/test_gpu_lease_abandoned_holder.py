@@ -9,7 +9,6 @@ query are seams, because a real zombie and a real GPU are not something a unit t
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import sys
 from pathlib import Path
@@ -24,6 +23,10 @@ pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux") or not Path
 
 @pytest.fixture
 def held_lease(tmp_path):
+    # Function-local: `fcntl` does not exist on Windows, and a module-level import fails COLLECTION
+    # there before `pytestmark` can skip anything — which interrupts the whole shard, not this file
+    # (Windows run 66: all four shards, 0 tests run).
+    import fcntl
     path = tmp_path / "looplab-gpu-pool-test.lock"
     handle = open(path, "a+b")
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
