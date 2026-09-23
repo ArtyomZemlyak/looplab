@@ -19,6 +19,8 @@ import inspect
 import re
 from pathlib import Path
 
+import pytest
+
 from looplab.core.errors import BudgetExceeded
 from looplab.core.models import DEVELOPER_ERROR_PREFIX, is_developer_error
 
@@ -64,11 +66,73 @@ def test_the_developer_handler_re_raises_the_ceiling_before_the_blanket_catch():
                     "the same path -- either all of them re-raise or none of them do")
     assert any(isinstance(stmt, ast.Return) for g in guards for stmt in ast.walk(g)), (
         "the non-ending branch no longer returns the developer-crash sentinel")
-    # ORDER IS THE WHOLE FIX: a re-raise placed after `except Exception` never runs. Anchored on
-    # the FULL comment of the handler in question -- this file has three blanket handlers and
-    # `str.index` finds the first, which is a different one nine hundred lines earlier.
-    blanket = "except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup"
-    assert src.index("except OperatorRefusal as e:") < src.index(blanket)
+    # ORDER IS THE WHOLE FIX: a re-raise placed after `except Exception` never runs. That is now
+    # DRIVEN below (`test_a_ceiling_raised_inside_the_build_ends_the_run_instead_of_pausing_it`).
+    # It used to be `src.index("except OperatorRefusal as e:") < src.index(<the blanket handler's
+    # full line, noqa comment included>)` — anchored on a COMMENT to tell this handler from the
+    # file's two other blanket ones, and satisfied by any comment spelling `except OperatorRefusal
+    # as e:` above the blanket while the real clause sat after it (review 2026-09-22, TST-05).
+
+
+# The build session, driven through the ONE documented seam — `looplab.agents.agent.drive_tool_loop`
+# — as tests/test_repo_run_epilogue.py drives it: the stages and plan phases answer minimally, and
+# the implement session raises whatever the case under test says the provider raised.
+_FIXTURE = REPO / "tests" / "fixtures" / "repo_fixture"
+
+
+def _developer_whose_build_raises(monkeypatch, raised: BaseException):
+    import sys
+
+    import looplab.agents.agent as agent_mod
+    from looplab.adapters.repo_task import EvalSpec, LLMRepoDeveloper, RepoTask
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+        if name == "propose_plan":
+            return finalize({"steps": [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}]})
+        raise raised
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    task = RepoTask(id="r", goal="g", direction="max", editable_path=str(_FIXTURE),
+                    edit_surface=["*.py"], protect=[],
+                    eval=EvalSpec(command=[sys.executable, "main.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}))
+    return LLMRepoDeveloper(object(), task, plan_decompose=False)
+
+
+def _idea():
+    from looplab.core.models import Idea
+
+    return Idea(operator="draft", params={}, rationale="x")
+
+
+def _wrapped_ceiling():
+    from looplab.core.errors import ConfigRefusal
+
+    wrapped = ConfigRefusal("the session failed")
+    wrapped.__cause__ = BudgetExceeded("LLM spend ceiling reached: $1.0003 of the $1.0000")
+    return wrapped
+
+
+@pytest.mark.parametrize("make", [
+    # A BARE ceiling: taken by the `except BudgetExceeded: raise` clause.
+    lambda: BudgetExceeded("LLM spend ceiling reached: $1.0003 of the $1.0000"),
+    # A WRAPPED one: the only kind the `except OperatorRefusal` clause has left to decide, which it
+    # answers with `budget_stop_leaf`. Moving that clause AFTER the blanket `except Exception` would
+    # keep every clause the AST test above pins and still turn this ending into a crash sentinel.
+    _wrapped_ceiling,
+], ids=["bare", "wrapped"])
+def test_a_ceiling_raised_inside_the_build_ends_the_run_instead_of_pausing_it(monkeypatch, make):
+    """The order of the handlers, as behaviour: a spend ceiling reached inside the developer session
+    leaves `_run` as the exception it is. Returned as `(developer error: …)` it would PAUSE a run
+    that had reached its end — the 16 of 105 full-budget runs this module's docstring measured."""
+    raised = make()
+    dev = _developer_whose_build_raises(monkeypatch, raised)
+    with pytest.raises(type(raised)) as info:
+        dev._run(_idea())
+    assert info.value is raised
 
 
 def test_the_repair_path_re_raises_it_too():
@@ -94,14 +158,18 @@ def test_a_ceiling_refusal_would_otherwise_read_as_a_crash():
     assert "spend ceiling" in sentinel
 
 
-def test_both_handlers_still_catch_everything_else():
+def test_both_handlers_still_catch_everything_else(monkeypatch):
     """The blanket handler exists for a reason -- a developer hiccup must not crash the engine --
-    and narrowing it to nothing would trade one defect for a worse one."""
-    src = (REPO / "looplab" / "adapters" / "repo_developer.py").read_text(encoding="utf-8")
-    blanket = "except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup"
-    assert blanket in src
-    body = src.split(blanket, 1)[1][:600]
-    assert f"{{DEVELOPER_ERROR_PREFIX}} {{e}}" in body or "DEVELOPER_ERROR_PREFIX" in body, body[:300]
+    and narrowing it to nothing would trade one defect for a worse one.
+
+    DRIVEN (review 2026-09-22, TST-05): an ordinary exception out of the build session comes back as
+    the developer-crash sentinel, not as a raise. This used to be two substring pins — the blanket
+    handler's line WITH its noqa comment, then `DEVELOPER_ERROR_PREFIX` somewhere in the 600
+    characters after it — which a deleted handler still satisfied while the comment line survived."""
+    dev = _developer_whose_build_raises(monkeypatch, RuntimeError("a developer hiccup"))
+    out = dev._run(_idea())
+    assert is_developer_error(out), out
+    assert out.startswith(DEVELOPER_ERROR_PREFIX) and "a developer hiccup" in out, out
 
 
 def test_the_five_operator_refusals_are_not_alike():
