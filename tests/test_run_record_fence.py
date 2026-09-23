@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from _posix_gates import PROCFS
 from looplab.runtime import read_allowlist, read_fence
 from looplab.runtime.sandbox import run_argv
 from tests.factories import make_engine
@@ -153,6 +154,7 @@ def test_a_chdir_into_the_record_does_not_buy_a_bare_relative_write(tmp_path):
     assert any("events.jsonl" in line for line in read_fence.violations(run_dir))
 
 
+@PROCFS
 def test_a_write_rung_compares_the_RESOLVED_path_not_the_spelling(tmp_path):
     """THE SAME FORGERY through a name that does not LOOK like the record or the fence.
 

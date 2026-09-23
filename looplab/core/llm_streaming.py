@@ -165,6 +165,15 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
                            else (now - last[0] - gap > idle_limit))
                 if stalled:
                     killed[0] = True
+                    # OPEN[stream-idle-kill-unproven-on-windows] Winsock does NOT wake a recv()
+                    # already blocked in another thread on shutdown(SD_BOTH): on the Windows CI leg
+                    # (review 2026-09-22 round 2, run 35804658308) the real-socket drain of
+                    # tests/test_llm_streaming_surface.py was still blocked 10 s after this kill, so
+                    # there the kill rests on `resp.close()` below, which nothing drives against a
+                    # real httpx stream on Windows. Closing the raw socket there would abort the
+                    # receive, but it races httpcore's own close and is unverifiable from this POSIX
+                    # CI, so it is recorded rather than guessed at.
+                    # proof:absent:_unblock_on_winsock@looplab/core/llm_streaming.py
                     try:
                         sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
                     except Exception:  # noqa: BLE001

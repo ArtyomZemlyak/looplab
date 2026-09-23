@@ -22,6 +22,7 @@ import pytest
 
 from _windows_emulation import FakeMsvcrt, refuse_readonly_unlink
 from looplab.core.atomicio import rmtree_readonly_aware
+from _posix_gates import DIRECTORY_OPS_IGNORE_READONLY
 
 
 def _tree(tmp_path):
@@ -54,6 +55,7 @@ def test_a_readonly_file_is_removed_on_windows(tmp_path, monkeypatch):
     assert not root.exists()
 
 
+@DIRECTORY_OPS_IGNORE_READONLY
 def test_posix_behaviour_is_shutil_rmtree_unchanged(tmp_path, monkeypatch):
     """No attribute juggling off Windows: the same refusal propagates as `shutil.rmtree` raised it,
     and the refused file keeps its mode."""

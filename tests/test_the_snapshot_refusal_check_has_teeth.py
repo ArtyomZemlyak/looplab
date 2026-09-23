@@ -21,6 +21,7 @@ BENCH = Path(__file__).resolve().parents[1] / "benchmarks"
 sys.path.insert(0, str(BENCH))
 
 import sweep_claims  # noqa: E402
+from _posix_gates import BASH_HARNESS  # noqa: E402
 
 # Честный скрипт: отказ 1 на пропавшем назначении, 3 на занятом замке, ничего не пишет.
 HONEST = r'''#!/usr/bin/env bash
@@ -50,6 +51,7 @@ def _bench(tmp_path, body: str) -> Path:
     return root
 
 
+@BASH_HARNESS
 def test_the_honest_script_reports_the_claim_as_driven(tmp_path):
     """`False` здесь значит «утверждение списка устарело», то есть отказы проверены."""
     still_unchecked, detail = sweep_claims.check_snapshot_refusals(str(_bench(tmp_path, HONEST)))
@@ -58,6 +60,7 @@ def test_the_honest_script_reports_the_claim_as_driven(tmp_path):
     assert "held lock -> exit 3" in detail, detail
 
 
+@BASH_HARNESS
 def test_a_vanished_destination_reported_as_success_is_caught(tmp_path):
     """Ровно та поломка 2026-08-29: пустой бэкап под кодом 0."""
     body = HONEST.replace('  exit 1\n', '  exit 0\n')
@@ -66,6 +69,7 @@ def test_a_vanished_destination_reported_as_success_is_caught(tmp_path):
     assert "a vanished destination exited 0" in detail, detail
 
 
+@BASH_HARNESS
 def test_a_held_lock_that_does_not_exit_three_is_caught(tmp_path):
     """«Занято» обязано отличаться от «сломано», иначе таймер запишет отпечаток вместо повтора."""
     body = HONEST.replace('  exit 3\n', '  exit 7\n')
@@ -74,6 +78,7 @@ def test_a_held_lock_that_does_not_exit_three_is_caught(tmp_path):
     assert "a held lock exited 7, not 3" in detail, detail
 
 
+@BASH_HARNESS
 def test_a_refused_run_that_still_wrote_something_is_caught(tmp_path):
     """Отказ, оставивший каталог, — это наполовину записанный снимок, худший из исходов."""
     body = HONEST.replace('  echo "busy" >&2\n', '  mkdir -p "$dest/20260909-000000"\n  echo "busy" >&2\n')

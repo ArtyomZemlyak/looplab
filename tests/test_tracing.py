@@ -21,6 +21,7 @@ from looplab.core.tracing import (
     AsyncJsonlSpanExporter, JsonlSpanExporter, Tracer, current_ids)
 from looplab.agents.tool_loop import _trace_preview
 from looplab.events.traceview import build_trace_view, load_spans
+from _posix_gates import REPLACE_UNDER_AN_OPEN_HANDLE
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -1232,6 +1233,7 @@ def test_exporter_rejects_fifo_without_waiting_for_a_peer(tmp_path):
     assert time.monotonic() - started < 2.0
 
 
+@REPLACE_UNDER_AN_OPEN_HANDLE
 def test_exporter_revalidates_the_destination_after_its_append(tmp_path, monkeypatch):
     """A run-root replacement during export cannot be mistaken for a current-file commit."""
     from looplab.core import tracing

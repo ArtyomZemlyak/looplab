@@ -167,6 +167,7 @@ def _fingerprint(root: Path) -> str:
     return fp(root)
 
 
+@BASH_HARNESS
 def test_a_campaign_writing_its_runs_moves_the_fingerprint(tmp_path):
     root = tmp_path / "bench"
     (root / "meter").mkdir(parents=True)

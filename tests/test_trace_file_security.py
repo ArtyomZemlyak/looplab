@@ -11,6 +11,7 @@ import pytest
 
 from looplab.core.trace_files import open_private_trace_file, trace_file_identity
 from looplab.events.traceview import load_span_tail, load_spans, trace_file_revision
+from _posix_gates import REPLACE_UNDER_AN_OPEN_HANDLE
 
 
 def _span(*, sid: str = "span", text: str = "safe") -> dict:
@@ -70,6 +71,7 @@ def test_trace_reader_rejects_fifo_without_blocking(tmp_path):
     assert trace_file_revision(source) is None
 
 
+@REPLACE_UNDER_AN_OPEN_HANDLE
 def test_trace_open_rejects_path_replacement_after_descriptor_open(tmp_path):
     source = tmp_path / "spans.jsonl"
     replacement = tmp_path / "replacement.jsonl"

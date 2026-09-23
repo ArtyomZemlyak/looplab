@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _posix_gates import REPLACE_UNDER_AN_OPEN_HANDLE
 from looplab.events.traceview import (
     TRACE_CONVERSATION_SPAN_CAP,
     TRACE_DETAIL_SPAN_CAP,
@@ -1002,6 +1003,7 @@ def test_span_scan_fallback_does_not_invent_trace_cardinality(tmp_path, monkeypa
     assert {"trace_total_spans", "trace_visible_spans", "omitted_trace_spans"}.isdisjoint(projection)
 
 
+@REPLACE_UNDER_AN_OPEN_HANDLE
 def test_span_index_reads_one_inode_from_open_to_scan(tmp_path, monkeypatch):
     """A pathname replacement during open is rejected, then a clean retry reads the new inode.
 

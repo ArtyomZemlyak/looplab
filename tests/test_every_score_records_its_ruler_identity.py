@@ -162,6 +162,7 @@ def test_the_new_fields_do_not_reach_the_node_s_extra_metrics(monkeypatch, capsy
     assert json_line_extras(line, "speedup") == {"eval_seconds": 12.0}, json.loads(line)
 
 
+@CPU_AFFINITY
 def test_the_entry_name_is_the_one_the_patch_writes_and_the_guard_globs():
     """Three spellings of one file name, pinned to each other: `patch_baseline_cache.py` writes
     `<task>__<subset><regime>.json`, `_regime_mismatch` globs `<task>__<subset>__*.json`, and this

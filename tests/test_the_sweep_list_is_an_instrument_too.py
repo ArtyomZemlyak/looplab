@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
 
 import sweep_claims  # noqa: E402
+from _posix_gates import BASH_HARNESS  # noqa: E402
 
 
 def _baselines(bench: Path, n: int, regime="w22x1r3"):
@@ -347,6 +348,7 @@ def test_a_bench_without_the_script_does_not_silently_pass(tmp_path):
     assert ok is False and "cannot be driven" in detail, detail
 
 
+@BASH_HARNESS
 def test_a_bench_that_really_loses_the_evidence_reports_the_note_standing(tmp_path):
     """The check has to be able to say the note HOLDS, or it is a rubber stamp. A snapshot.sh whose
     archive_tree just copies -- no supersede -- must come back as the note standing."""
@@ -361,6 +363,7 @@ def test_a_bench_that_really_loses_the_evidence_reports_the_note_standing(tmp_pa
     assert ok is True and "NOT preserved" in detail, detail
 
 
+@BASH_HARNESS
 def test_a_superseded_file_holding_the_wrong_attempt_is_not_intact(tmp_path):
     """The check has to look INSIDE. A version that accepted any `.superseded-1` passed every
     fixture here, because the one that loses evidence writes no such file at all -- so "exists" and

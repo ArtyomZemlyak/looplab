@@ -30,6 +30,7 @@ import types
 import pytest
 
 from looplab.runtime import read_fence
+from _posix_gates import DIRECTORY_OPS_IGNORE_READONLY
 
 
 def _windows_os(cwd: str) -> types.ModuleType:
@@ -206,6 +207,7 @@ def test_a_top_level_directory_on_a_drive_is_as_broad_as_one_on_the_root(monkeyp
         assert not read_fence._too_broad(narrow), narrow
 
 
+@DIRECTORY_OPS_IGNORE_READONLY
 def test_posix_leaves_the_hardened_file_to_the_replace(tmp_path, monkeypatch):
     """Off Windows nothing is un-hardened: POSIX replaces a 0444 destination as a directory
     operation, which is what `install`'s own comment has always relied on."""

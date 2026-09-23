@@ -78,6 +78,27 @@ DIR_FSYNC = pytest.mark.posix_only(
 RENAMEAT2 = pytest.mark.posix_only(
     "Linux renameat2(RENAME_NOREPLACE) through libc (Windows: MoveFileExW without REPLACE_EXISTING)")
 
+# Replacing (`os.replace`/rename(2)) a file ANOTHER handle holds open: on POSIX the rename is a
+# directory operation and the open descriptor keeps the old inode, which is the race these tests
+# stage. Windows refuses the replace itself (a sharing violation) while any handle without
+# FILE_SHARE_DELETE is open, so the race cannot be staged there (review 2026-09-22 round 2).
+REPLACE_UNDER_AN_OPEN_HANDLE = pytest.mark.posix_only(
+    "replacing a file another handle holds open (Windows refuses the replace: a sharing violation)")
+
+# rename(2)/unlink(2) consult only the DIRECTORY's permissions, so a 0444 entry is replaced or
+# removed like any other. These tests pin the POSIX side of a platform branch -- that it does NOT
+# juggle the attribute -- whose Windows side (DeleteFileW/MoveFileEx refuse a READONLY entry) is
+# driven on every platform beside each one.
+DIRECTORY_OPS_IGNORE_READONLY = pytest.mark.posix_only(
+    "rename(2)/unlink(2) of a read-only entry (POSIX: a directory operation; Windows refuses it)")
+
+# `shutdown(SHUT_RDWR)` returning EOF to a `recv()` ALREADY BLOCKED in another thread. Linux does;
+# Winsock leaves the blocked receive waiting (measured on the Windows CI leg, run 35804658308: the
+# drain was still blocked 10 s after the shutdown). A test whose subject is that kernel behaviour is
+# gated; what the idle guard does on Windows is recorded where the guard lives.
+SHUTDOWN_WAKES_A_BLOCKED_RECV = pytest.mark.posix_only(
+    "shutdown(SHUT_RDWR) waking a recv() blocked in another thread (Winsock does not)")
+
 # An open that REFUSES a final symlink (`os.O_NOFOLLOW`, ELOOP). Windows has no such flag: its open
 # follows the link, and what refuses the swap there is the caller's identity check instead — which
 # is driven on every platform beside each gated test by taking the flag away.

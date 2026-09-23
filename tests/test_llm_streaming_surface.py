@@ -20,6 +20,7 @@ import openai
 
 from _source_scan import called_names
 from looplab.core import llm, llm_streaming
+from _posix_gates import SHUTDOWN_WAKES_A_BLOCKED_RECV
 
 # The exact names the legacy path owned. Re-adding one means re-adding a second streaming path, and
 # that is a decision someone should have to make on purpose.
@@ -71,6 +72,7 @@ def test_no_module_docstring_still_promises_two_sse_paths():
 
 # --------------------------------------------------- the contracts the deletion had to preserve
 
+@SHUTDOWN_WAKES_A_BLOCKED_RECV
 def test_the_idle_guard_kills_a_stream_that_goes_silent_on_a_REAL_socket():
     """The stall-kill, driven against a real blocked `recv()` — the module docstring's promised
     "real-socketpair test", which did not exist until 2026-08-05.
