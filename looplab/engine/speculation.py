@@ -610,9 +610,12 @@ class SpeculationMixin:
         swap would serve the previous function's answer to the new one — the "test still runs but no
         longer measures anything" failure CLAUDE.md warns about.
 
-        A folded `RunState` is treated as immutable by every consumer: no engine or search module
-        assigns to one of its attributes or mutates one of its containers, and this session already
-        hands ONE folded state to a background research task that outlives the turn.  Sharing the
+        A folded `RunState` served from this memo is treated as immutable by every consumer, and this
+        session already hands ONE folded state to a background research task that outlives the turn.
+        (It said "no engine or search module assigns to one of its attributes"; one does —
+        `evaluate.py`'s workdir phase clears `a.node.rerun_stage` in place — but on the attempt's
+        PRIVATE fold, `_eval_admit`'s own, never on a state this memo hands out; review 2026-09-22,
+        ENG1-15.)  Sharing the
         object between two readers of the same tail is therefore exactly the guarantee two equal
         copies gave.  Written only from the MAIN task (the worker-thread folds in
         `_producer_card_reservation` / `_prepare_raw_card_stage` deliberately do not go through here).

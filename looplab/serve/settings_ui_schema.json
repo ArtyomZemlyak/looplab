@@ -922,7 +922,7 @@
           "label": "↳ agent drives actions",
           "type": "bool",
           "default": true,
-          "help": "When Unified agent is on: let the agent pick the next macro action from a pure legal-action gate (it can never escape the pipeline). Off = the search policy still decides; the agent only fills the role slots."
+          "help": "When Unified agent is on: let the agent pick the next macro action from a pure legal-action gate (it can never escape the pipeline). Off = the search policy still decides; the agent only fills the role slots. Consulted only when Card-driven selection is off — that is on by default and wins, so with the shipped defaults this setting changes nothing."
         },
         {
           "key": "agent_max_turns",
