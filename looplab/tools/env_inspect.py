@@ -19,6 +19,7 @@ import io
 import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
+from typing import Optional
 
 from looplab.tools._base import RESULT_CAP, capabilities_for_specs, clip, fn_spec
 
@@ -532,3 +533,67 @@ def _resolve(dotted: str):
         except AttributeError as e:
             return None, str(e)
     return None, "no importable module prefix"
+
+
+# ---------------------------------------------------------------------- the environment fingerprint
+#
+# WHAT THE DEVELOPER IS TOLD BEFORE IT WRITES A LINE. Measured 2026-09-23: a MiniOneRec node wrote
+# `cache.key_cache` against transformers 5.7.0, which removed it -- the API it remembered was 4.x's.
+# `pkg_info` would have said 5.7.0 had it been asked, and nothing prompted the question. So the
+# versions of the packages the repo itself imports, as the TASK's interpreter reports them, are
+# stated up front. Measured, not remembered: one subprocess on that interpreter, cached per
+# (interpreter, import set) for the life of the process.
+_FINGERPRINT_SNIPPET = """
+import json, sys
+import importlib.metadata as md
+names = json.loads(sys.argv[1])
+std = set(getattr(sys, "stdlib_module_names", ()))
+try:
+    dists = md.packages_distributions()
+except Exception:
+    dists = {}
+seen, out = set(), []
+for name in names:
+    if name in std:
+        continue
+    for dist in (dists.get(name) or [name]):
+        if dist.lower() in seen:
+            continue
+        try:
+            version = md.version(dist)
+        except Exception:
+            continue
+        seen.add(dist.lower())
+        out.append(dist + " " + version)
+print(json.dumps({"python": sys.executable, "version": sys.version.split()[0], "packages": out}))
+"""
+_FINGERPRINT_CACHE: dict = {}
+_MAX_FINGERPRINT_NAMES = 40
+
+
+def environment_fingerprint(task_python: str, import_names) -> Optional[dict]:
+    """`{python, version, packages: ["dist version", ...]}` for the interpreter the task's code runs
+    under (`task_python`, or the engine's own when that is empty), restricted to `import_names`.
+    None when that interpreter cannot answer -- a missing block is better than a wrong one."""
+    python = str(task_python or "").strip() or sys.executable
+    names = tuple(sorted({str(n) for n in (import_names or ()) if str(n).isidentifier()}))
+    names = names[:_MAX_FINGERPRINT_NAMES]
+    key = (python, names)
+    if key in _FINGERPRINT_CACHE:
+        return _FINGERPRINT_CACHE[key]
+    import json
+    import subprocess
+    found = None
+    if os.path.isfile(python):
+        try:
+            done = subprocess.run([python, "-c", _FINGERPRINT_SNIPPET, json.dumps(list(names))],
+                                  capture_output=True, text=True, timeout=60, cwd="/",
+                                  env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
+            if done.returncode == 0 and done.stdout.strip():
+                parsed = json.loads(done.stdout.strip().splitlines()[-1])
+                if isinstance(parsed, dict) and isinstance(parsed.get("packages"), list):
+                    found = parsed
+        except (OSError, ValueError, subprocess.SubprocessError):
+            found = None
+    _FINGERPRINT_CACHE[key] = found
+    return found

@@ -1555,6 +1555,64 @@ class LLMRepoDeveloper:
             return f"(step {idx} error: {e})"
         return ""
 
+    def _repo_import_names(self) -> list:
+        """Top-level modules the editable repo imports, minus its OWN modules. Bounded: a repo is
+        read for its import lines, not parsed in full, and the scan stops at 400 files."""
+        import ast as _ast
+        from pathlib import Path as _P
+        names: set = set()
+        local: set = set()
+        seen_files = 0
+        for ed in (getattr(self, "_editables", None) or []):
+            root = _P(str((ed or {}).get("path") or ""))
+            if not root.is_dir():
+                continue
+            for entry in root.iterdir():
+                if entry.suffix == ".py":
+                    local.add(entry.stem)
+                elif entry.is_dir() and (entry / "__init__.py").exists():
+                    local.add(entry.name)
+            for py in sorted(root.rglob("*.py")):
+                if seen_files >= 400 or any(part.startswith(".") for part in py.parts):
+                    continue
+                seen_files += 1
+                try:
+                    tree = _ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+                except (SyntaxError, ValueError, OSError):
+                    continue
+                for node in _ast.walk(tree):
+                    if isinstance(node, _ast.Import):
+                        names.update(a.name.split(".", 1)[0] for a in node.names)
+                    elif isinstance(node, _ast.ImportFrom) and not node.level and node.module:
+                        names.add(node.module.split(".", 1)[0])
+        return sorted(n for n in names if n and n not in local)
+
+    def _environment_block(self) -> str:
+        """The versions the candidate's code will actually meet, stated before it writes a line.
+
+        Measured 2026-09-23: a node wrote transformers-4 API (`DynamicCache.key_cache`) against the
+        5.7.0 its eval ran on, and the probe that could have told it was never asked. Computed once
+        per developer, on the TASK's interpreter (`tools/env_inspect.py::environment_fingerprint`),
+        for the packages this repo imports. "" when that interpreter cannot answer."""
+        cached = getattr(self, "_environment_block_text", None)
+        if cached is not None:
+            return cached
+        text = ""
+        try:
+            from looplab.tools.env_inspect import environment_fingerprint
+            fp = environment_fingerprint(self._task_python(), self._repo_import_names())
+            if fp and fp.get("packages"):
+                text = ("THE ENVIRONMENT YOUR CODE RUNS IN (measured on its own interpreter, not "
+                        f"assumed): {fp.get('python')} -- Python {fp.get('version')}. Installed "
+                        "versions of the packages this repo imports: "
+                        + ", ".join(fp["packages"]) + ". Write against THESE versions: an API you "
+                        "remember from another release may have been renamed or removed here. When "
+                        "unsure, check it with pkg_info / py_api or run_probe before relying on it.\n\n")
+        except Exception:  # noqa: BLE001 - a missing block is better than a failed build
+            text = ""
+        self._environment_block_text = text
+        return text
+
     def _task_python(self) -> str:
         """`RepoTask.task_python` for this developer's task, "" when unknown. Lazy for the reason
         `_probe_call_counter` gives: many tests build this class through `__new__`."""
@@ -2445,6 +2503,7 @@ class LLMRepoDeveloper:
             + self.brief + "\n\n"
             + self._system_body(render)
             + operational_attention_points() + "\n\n"
+            + self._environment_block()
             # CONDITIONAL LIKE THE RESULTS HEADER BELOW once `prompt_truths` is on (review
             # 2026-09-22, Q-1): unconditionally, a README with no recipe rendered a header over
             # nothing. OFF keeps that empty section byte for byte.
