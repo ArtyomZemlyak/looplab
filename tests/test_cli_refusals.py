@@ -65,8 +65,12 @@ def test_the_marker_covers_every_member_of_the_refusal_family():
     """The registry check. Each of these is raised on purpose at an operator-facing boundary, and a
     member that loses the marker silently goes back to printing 40 frames — with every behavioural
     test below still green on the OTHER members."""
+    from looplab.engine.width_settling import CalibrationOverrideRefusal
+    from looplab.engine.workspace_seed import TrackedSeedTimeout
+
     for exc_type in (ConfigRefusal, EnvironmentRefusal, LLMError,
-                     RunStartPinError, SpeculationAuthorizationError, SettledWidthPinError):
+                     RunStartPinError, SpeculationAuthorizationError, SettledWidthPinError,
+                     CalibrationOverrideRefusal, TrackedSeedTimeout):
         assert issubclass(exc_type, OperatorRefusal), exc_type
 
     # …and the historical base of each site is preserved, so no existing `except` clause or
@@ -75,6 +79,8 @@ def test_the_marker_covers_every_member_of_the_refusal_family():
     assert issubclass(EnvironmentRefusal, RuntimeError)
     assert issubclass(LLMError, RuntimeError)
     assert issubclass(RunStartPinError, RuntimeError)
+    # A calibration run's live budget override was a bare RuntimeError (review 2026-09-22, ES1-12).
+    assert issubclass(CalibrationOverrideRefusal, RuntimeError)
 
 
 def test_a_config_refusal_prints_its_message_not_a_traceback(tmp_path):

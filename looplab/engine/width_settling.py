@@ -44,6 +44,7 @@ import logging
 import math
 from typing import Optional
 
+from looplab.core.errors import ConfigRefusal
 from looplab.core.llm_broker import LLMConcurrencyBroker, default_llm_lane_limits
 from looplab.core.models import RunState, effective_card_footprint
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_derived_width,
@@ -51,6 +52,19 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_deriv
 from looplab.events.types import EV_RUN_WIDTH_SETTLED
 
 _LOG = logging.getLogger(__name__)
+
+
+class CalibrationOverrideRefusal(ConfigRefusal, RuntimeError):
+    """A live `budget_extend` on a speculation-CALIBRATION run: refused, as a deliberate refusal.
+
+    It was a bare `RuntimeError` (review 2026-09-22, ES1-12), which the CLI boundary classifies as a
+    bug — a traceback at exit 1 with the operator's one actionable sentence on its last line. The
+    condition is a property of the operator's own input (a control they appended to a run whose
+    whole execution envelope is receipt-bound), which is exactly `core/errors.py::OperatorRefusal`'s
+    bar, so it is a `ConfigRefusal` now and prints as that sentence at exit 2. `RuntimeError` stays a
+    base for the family's own reason: every historical `except RuntimeError` /
+    `pytest.raises(RuntimeError)` keeps its meaning (`tests/test_speculation_runtime_gate.py`).
+    """
 
 
 class WidthSettlingMixin:
@@ -264,9 +278,12 @@ class WidthSettlingMixin:
         # budget_extend control event, not an agent_control-governed knob — applied as-is.
         _bo = state.budget_overrides
         if self._speculation_gate_calibration and _bo:
-            raise RuntimeError(
+            raise CalibrationOverrideRefusal(
                 "Card speculation calibration forbids runtime budget/resource overrides; "
-                "max_nodes and the complete execution envelope are receipt-bound")
+                "max_nodes and the complete execution envelope are receipt-bound. This run's log "
+                f"carries a budget_extend for {', '.join(sorted(map(str, _bo)))}. A calibration "
+                "run cannot be re-shaped live: launch a fresh --speculation-gate-calibration run, "
+                "or run the workload without that flag to keep live budget controls")
 
         def _finite_ceiling(key: str, fallback: Optional[float]) -> Optional[float]:
             raw = _bo.get(key)

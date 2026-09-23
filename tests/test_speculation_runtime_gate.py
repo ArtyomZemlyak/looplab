@@ -539,6 +539,34 @@ def test_calibration_bootstrap_blocks_strategy_and_budget_mutation(tmp_path, mon
         engine._apply_control_overrides(fold(engine.store.read_all()))
 
 
+def test_a_live_budget_override_on_a_calibration_run_is_a_typed_operator_refusal(
+        tmp_path, monkeypatch):
+    """Review 2026-09-22, ES1-12: the refusal is about the OPERATOR's own control, so it is a TYPE.
+
+    It was a bare `RuntimeError`, which the CLI boundary (`cli/__init__.py::_RefusalBoundaryGroup`)
+    classifies as a bug: exit 1 and a traceback, with the one sentence the operator needs on its last
+    line. As a `ConfigRefusal` it prints as that sentence at exit 2 — and it keeps `RuntimeError` as
+    a base, so the historical `except RuntimeError` / `pytest.raises(RuntimeError)` (the test above)
+    still hold, which is the family's own rule (`core/errors.py::OperatorRefusal`).
+    """
+    from looplab.cli import deliberate_refusals, refusal_report
+    from looplab.core.errors import ConfigRefusal, OperatorRefusal
+
+    engine = _calibration_engine(tmp_path / "typed-refusal", monkeypatch, depth=1)
+    engine.store.append("budget_extend", {"add_nodes": 1, "max_seconds": 600})
+    with pytest.raises(ConfigRefusal) as caught:
+        engine._apply_control_overrides(fold(engine.store.read_all()))
+    refusal = caught.value
+    assert isinstance(refusal, OperatorRefusal) and isinstance(refusal, RuntimeError)
+    # What the CLI boundary does with it: ONE refusal, rendered as its own sentence.
+    assert deliberate_refusals(refusal) == [refusal]
+    report = refusal_report(refusal)
+    assert report.startswith("Refused: ") and "\n" not in report, report
+    # It names what was refused — the operator's own keys — and what to do instead.
+    assert "add_nodes" in report and "max_seconds" in report, report
+    assert "--speculation-gate-calibration" in report, report
+
+
 @pytest.mark.parametrize("event_type,data", [
     ("budget_extend", {"add_nodes": 1}),
     ("budget_extend", {"timeout": 99.0, "eval_parallel": 2}),
