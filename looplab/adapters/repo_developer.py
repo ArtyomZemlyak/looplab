@@ -899,6 +899,10 @@ class LLMRepoDeveloper:
         # refusal into a prompt block would teach the model that the measurement is broken.
         self._step_feedback_command = str(step_feedback_command or "").strip()
         self._probe_repo_spec = rs if (probe or self._dev_commands) else None
+        # The interpreter the candidate's code runs under ("" = the engine's). Kept apart from
+        # `_probe_repo_spec`, which is None when the probe is off -- and `env_inspect`, which always
+        # runs, must answer about the same environment the probe would.
+        self._task_python_path = str(rs.get("task_python") or "")
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
         self.last_footprint: dict | None = None
@@ -1367,7 +1371,7 @@ class LLMRepoDeveloper:
         # "names what this toolset already holds". A count-publishing block cannot express "how much
         # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
         # one exists the honest state is no block rather than an empty string and a false comment.
-        read_only = CompositeTools([EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
+        read_only = CompositeTools([EnvInspectTools(self._grader_packages(), task_python=self._task_python())] + self._scout_tools(write))
         plan_user += extra
         plan_user += self._established_block()
         messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
@@ -1504,7 +1508,7 @@ class LLMRepoDeveloper:
             # implement steps CONSUME the stages/plan briefs, but don't
             # contribute (their writes add length faster than signal, and the last step is terminal) —
             # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
-            run_phase(self.client, CompositeTools([write, EnvInspectTools(self._grader_packages())] + self._scout_tools(write)),
+            run_phase(self.client, CompositeTools([write, EnvInspectTools(self._grader_packages(), task_python=self._task_python())] + self._scout_tools(write)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
                       validate=validate,
@@ -1518,6 +1522,11 @@ class LLMRepoDeveloper:
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
         return ""
+
+    def _task_python(self) -> str:
+        """`RepoTask.task_python` for this developer's task, "" when unknown. Lazy for the reason
+        `_probe_call_counter` gives: many tests build this class through `__new__`."""
+        return str(getattr(self, "_task_python_path", "") or "")
 
     def _probe_call_counter(self) -> dict:
         """The run-scoped probe tally handed to every `DevProbeTools` this developer builds.
@@ -2255,7 +2264,7 @@ class LLMRepoDeveloper:
         # "names what this toolset already holds". A count-publishing block cannot express "how much
         # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
         # one exists the honest state is no block rather than an empty string and a false comment.
-        read_only = CompositeTools([EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
+        read_only = CompositeTools([EnvInspectTools(self._grader_packages(), task_python=self._task_python())] + self._scout_tools(write))
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
 
@@ -2490,7 +2499,7 @@ class LLMRepoDeveloper:
             # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
             # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
             # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
-            tools = CompositeTools([write, EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
+            tools = CompositeTools([write, EnvInspectTools(self._grader_packages(), task_python=self._task_python())] + self._scout_tools(write))
             # ONE BOUNCE PER SESSION, shared by the build rule and the repair rule below. A second
             # would spend the session arguing instead of editing, and the model has already been
             # told exactly what to do; `agent_emit_force` bounds the loop but must not be what stops

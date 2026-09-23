@@ -311,6 +311,23 @@ def allowlist_masks(abi: Optional[int]) -> tuple:
     return _READ, _WRITE | extra, _HANDLED | extra
 
 
+# WHAT A PROBE'S SCRATCH DIRECTORY MAY HAVE DONE TO IT, and nothing else. Measured 2026-09-23: on a
+# task interpreter with transformers installed, `import transformers` died in the probe because its
+# dependency `filelock` makes a temporary directory AT IMPORT to test how the filesystem treats
+# symlinks. A rung that grants nothing anywhere makes every such library unimportable, and the probe
+# exists to import them. Regular files, directories and symlinks, and truncation where the kernel
+# polices it -- the ordinary life of a temp dir. NOT device nodes, FIFOs or sockets, which no import
+# needs, and NOT `FS_REFER`, which this ruleset does not handle and so cannot grant (a rename across
+# directories stays refused; one inside a directory does not need it).
+SCRATCH_GRANT = FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_DIR | FS_MAKE_REG | FS_MAKE_SYM
+
+
+def scratch_grant(abi: Optional[int]) -> int:
+    """`SCRATCH_GRANT` on a kernel of ABI `abi`, plus `FS_TRUNCATE` where the ruleset handles it.
+    Always a subset of `no_mutation_handled(abi)`: a rule may only grant what its ruleset handles."""
+    return (SCRATCH_GRANT | (abi_access(abi) & FS_TRUNCATE)) & no_mutation_handled(abi)
+
+
 def no_mutation_handled(abi: Optional[int]) -> int:
     """`NO_MUTATION_HANDLED` on a kernel of ABI `abi`: the ABI-1 base plus `abi_access(abi)`.
 
@@ -572,17 +589,23 @@ except OSError as exc:
 #     overclaimed guarantee is worse than a stated limit — and a SILENT reduced guarantee is worse
 #     than both.
 _NO_MUTATION_SOURCE = '''\
-def _looplab_no_mutation_ruleset():
+def _looplab_no_mutation_ruleset(scratch=None):
     """Kernel rung: deny every filesystem MUTATION, for this process and anything it starts.
 
-    Returns None on success, or a one-line reason it could not be applied. Grants nothing and
-    handles no read bit, so it cannot refuse a read — see `runtime/landlock.py::NO_MUTATION_HANDLED`.
+    Returns None on success, or a one-line reason it could not be applied. Handles no read bit, so it
+    cannot refuse a read — see `runtime/landlock.py::NO_MUTATION_HANDLED`. Grants nothing, EXCEPT
+    beneath `scratch` when one is given: one disposable directory the caller owns and deletes, where
+    `runtime/landlock.py::SCRATCH_GRANT` is allowed so an import that makes a temp file still runs.
     """
     import ctypes
     import os
 
     class _Attr(ctypes.Structure):
         _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+    class _Rule(ctypes.Structure):
+        _pack_ = 1
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
 
     try:
         lib = ctypes.CDLL(None, use_errno=True)
@@ -596,6 +619,22 @@ def _looplab_no_mutation_ruleset():
         return ("landlock_create_ruleset failed: %%s (Landlock needs Linux 5.13+ with "
                 "CONFIG_SECURITY_LANDLOCK=y)" %% os.strerror(ctypes.get_errno()))
     try:
+        if scratch is not None:
+            # A FAILED grant is a refusal to run, not a quieter rung: the caller has told its
+            # program that TMPDIR is writable, and a scratch the kernel still refuses would turn
+            # every temp file into a PermissionError that reads as a broken library.
+            try:
+                pfd = os.open(scratch, os.O_PATH | os.O_CLOEXEC)
+            except OSError as exc:
+                return "scratch %%r cannot be opened: %%s" %% (scratch, exc)
+            try:
+                rule = _Rule(allowed_access=%(scratch_grant)d, parent_fd=pfd)
+                ctypes.set_errno(0)
+                if lib.syscall(ctypes.c_long(%(add)d), ctypes.c_int(fd), ctypes.c_uint32(1),
+                               ctypes.byref(rule), ctypes.c_uint32(0)) != 0:
+                    return "landlock_add_rule(scratch) failed: %%s" %% os.strerror(ctypes.get_errno())
+            finally:
+                os.close(pfd)
         ctypes.set_errno(0)
         if lib.prctl(ctypes.c_int(38), ctypes.c_ulong(1), ctypes.c_ulong(0),
                      ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:   # PR_SET_NO_NEW_PRIVS
@@ -767,7 +806,9 @@ def no_mutation_source(abi=_THIS_KERNEL) -> str:
     probe's launcher is generated and started on the same box — so `FS_TRUNCATE` is refused where
     the kernel can police it and never asked for where it would EINVAL the whole rung."""
     return _NO_MUTATION_SOURCE % {"handled": no_mutation_handled(_resolve_abi(abi)),
+                                  "scratch_grant": scratch_grant(_resolve_abi(abi)),
                                   "create": _SYS_LANDLOCK_CREATE_RULESET,
+                                  "add": _SYS_LANDLOCK_ADD_RULE,
                                   "restrict": _SYS_LANDLOCK_RESTRICT_SELF}
 
 

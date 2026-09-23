@@ -229,6 +229,48 @@ _MAX_REPLICA_BYTES = 4_000_000
 # sandbox tiers use; the model-facing cut is `stream_tails`, below.
 _MAX_OUTPUT = 64_000
 
+
+# THE PROBE'S SCRATCH: one directory inside its disposable root, handed to the child as TMPDIR, which
+# is the only place the child may write. Measured 2026-09-23, `import transformers` on a real task
+# interpreter died in the probe: its dependency `filelock` creates a temp directory AT IMPORT to test
+# symlink behaviour, and a probe that could write nowhere could not import the library the node was
+# about to use. The rule the no-write rungs serve -- "nothing a probe does can reach the record" --
+# holds for a directory the engine deletes when the probe ends and that is not the node's workdir.
+_SCRATCH_BYTES = 64 * 1024 * 1024
+# Which arguments of the `shutil.*` events this module adds to `_MUTATE` are the paths it MUTATES --
+# the destination for a copy (reading the source is a read), both for a move, the tree for rmtree.
+# `os.startfile` has no row on purpose: it opens something with the shell and is never allowed.
+_SHUTIL_PATH_ARGS = {
+    "shutil.copyfile": ((1, None),), "shutil.copymode": ((1, None),),
+    "shutil.copystat": ((1, None),), "shutil.copytree": ((1, None),),
+    "shutil.move": ((0, None), (1, None)), "shutil.rmtree": ((0, 1),),
+    "shutil.unpack_archive": ((1, None),),
+}
+
+# `-P` (PYTHONSAFEPATH) exists from CPython 3.11. The engine's own interpreter always has it; a TASK's
+# interpreter may not -- the MiniOneRec env this was built for is 3.10, where `-P` is "Unknown option"
+# and the probe would never start. Asked once per interpreter and cached; an interpreter that cannot
+# answer gets no flag, and the launcher removes its own directory from `sys.path` itself, which is
+# the whole of what the flag does here.
+_SAFE_PATH_FLAG_CACHE: dict = {}
+
+
+def _safe_path_flag(python: str) -> list:
+    if python == sys.executable:
+        return ["-P"] if sys.version_info >= (3, 11) else []
+    if python not in _SAFE_PATH_FLAG_CACHE:
+        version = (0, 0)
+        try:
+            import subprocess
+            done = subprocess.run([python, "-c", "import sys; print(*sys.version_info[:2])"],
+                                  capture_output=True, text=True, timeout=30, cwd="/")
+            if done.returncode == 0:
+                version = tuple(int(x) for x in done.stdout.split()[:2])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        _SAFE_PATH_FLAG_CACHE[python] = ["-P"] if version >= (3, 11) else []
+    return list(_SAFE_PATH_FLAG_CACHE[python])
+
 # The refusal text the generated launcher raises. Like the read fence's, it NAMES THE FIX, because
 # its reader is a model deciding what to do next — not a human tailing a log.
 PROBE_REFUSAL = (
@@ -284,6 +326,16 @@ import os
 import runpy
 import sys
 
+# What `-P` does on 3.11+, done by hand for the interpreters that predate it. The engine passes `-P`
+# only where it exists (`_safe_path_flag`); a task's own interpreter may be older, and there CPython
+# prepends this script's directory -- the probe's scratch, holding `probe.py` and this file -- ahead
+# of every real module. Idempotent: under `-P` the entry is not there to remove. Run as `-c` there is
+# no `__file__` and no script directory on the path either, so there is nothing to remove.
+_LAUNCHER_FILE = globals().get("__file__")
+if _LAUNCHER_FILE and sys.path and os.path.realpath(sys.path[0] or os.curdir) == os.path.dirname(
+        os.path.realpath(_LAUNCHER_FILE)):
+    del sys.path[0]
+
 _REFUSAL = %(refusal)r
 _PROGRAM = %(program)r
 
@@ -330,6 +382,42 @@ _WRITE_FLAGS = (getattr(os, "O_WRONLY", 1) | getattr(os, "O_RDWR", 2) | getattr(
                 | getattr(os, "O_TRUNC", 512) | getattr(os, "O_APPEND", 1024))
 
 
+# ONE directory this probe may write under, or None: its own TMPDIR, inside the probe's disposable
+# root, deleted with it. Every rung still refuses a write ANYWHERE ELSE. See `dev_probe.py::_SCRATCH_*`.
+_SCRATCH = %(scratch)r
+# `{event: ((path_index, dir_fd_index), ...)}` -- WHICH arguments of a mutation event are paths, so a
+# mutation can be allowed when every path it touches is under `_SCRATCH`. The `os.*` rows are spliced
+# from `read_fence.MUTATION_EVENTS`; the `shutil.*` rows are this module's (`_SHUTIL_PATH_ARGS`).
+_PATH_ARGS = %(path_args)r
+
+
+def _under_scratch(path, dir_fd=None):
+    if _SCRATCH is None or path is None or isinstance(path, int):
+        return False
+    try:
+        path = os.fsdecode(os.fspath(path))
+        # `shutil.rmtree` walks by descriptor (`dir_fd=` on every unlink), which is exactly how a
+        # `TemporaryDirectory` cleans up. The kernel names that descriptor's directory in /proc.
+        if isinstance(dir_fd, int) and dir_fd >= 0 and not os.path.isabs(path):
+            path = os.path.join(os.readlink("/proc/self/fd/%%d" %% dir_fd), path)
+        full = os.path.realpath(path)
+    except Exception:      # noqa: BLE001 -- anything unresolvable is not provably inside
+        return False
+    return full == _SCRATCH or full.startswith(_SCRATCH + os.sep)
+
+
+def _all_under_scratch(event, args):
+    shapes = _PATH_ARGS.get(event)
+    if not shapes:
+        return False
+    for path_i, fd_i in shapes:
+        path = args[path_i] if path_i < len(args) else None
+        dir_fd = args[fd_i] if (fd_i is not None and fd_i < len(args)) else None
+        if not _under_scratch(path, dir_fd):
+            return False
+    return True
+
+
 def _refuse(what):
     raise LoopLabProbeRefused(_REFUSAL.replace("{what}", what))
 
@@ -342,13 +430,16 @@ def _hook(event, args):
         mode = args[1] if len(args) > 1 else None
         if mode is None:
             flags = args[2] if len(args) > 2 else 0
-            if isinstance(flags, int) and (flags & _WRITE_FLAGS):
+            if isinstance(flags, int) and (flags & _WRITE_FLAGS) and not _under_scratch(args[0]):
                 _refuse("write files")
             return
-        if isinstance(mode, str) and ("w" in mode or "a" in mode or "x" in mode or "+" in mode):
+        if (isinstance(mode, str) and ("w" in mode or "a" in mode or "x" in mode or "+" in mode)
+                and not _under_scratch(args[0])):
             _refuse("write files")
         return
     if event in _MUTATE:
+        if _all_under_scratch(event, args):
+            return
         _refuse("create, move or delete files")
     if event in _EXEC:
         _refuse("start another program")
@@ -397,7 +488,7 @@ for _fname in _UNAUDITED_MUTATORS:
 # only one that can be missing, and refusing would break the probe surface on a kernel without
 # Landlock instead of narrowing what it claims. One line, on the probe's own stderr, which is where
 # both the model and the operator read it.
-_LL_REASON = %(landlock_fn)s()
+_LL_REASON = %(landlock_fn)s(_SCRATCH)
 if _LL_REASON:
     sys.stderr.write(
         "LOOPLAB probe: the kernel no-write rung could not be applied (%%s). The audit hook and "
@@ -424,10 +515,16 @@ sys.path.insert(0, os.getcwd())
 # creation/truncation/unlink and this covers everything the hook cannot see. Set AFTER the hook so
 # the hook owns every case it can explain, and inherited by anything the process manages to start.
 # stdout/stderr are pipes, which RLIMIT_FSIZE does not govern, so the probe can still answer.
+#
+# With a scratch granted the cap is `%(scratch_bytes)d` bytes instead of 0 -- but ONLY when the kernel
+# rung above applied. RLIMIT_FSIZE is per-process, not per-directory, so it cannot tell scratch from
+# anywhere else; what confines the bytes to scratch is Landlock. On a box without it the scratch keeps
+# its files EMPTY rather than letting a native writer put bytes anywhere on the filesystem.
 try:
     import resource
 
-    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+    _FSIZE = %(scratch_bytes)d if (_SCRATCH is not None and not _LL_REASON) else 0
+    resource.setrlimit(resource.RLIMIT_FSIZE, (_FSIZE, _FSIZE))
 except Exception:      # noqa: BLE001 — no `resource` module (Windows): the audit hook stands alone
     pass
 # No .pyc anywhere: importing a replica module would otherwise try to write __pycache__ and be
@@ -568,7 +665,7 @@ def _shared_temp_root(path: str) -> bool:
 
 
 def render_launcher(program_path: str, read_allow: Optional[tuple] = None,
-                    read_deny: tuple = ()) -> str:
+                    read_deny: tuple = (), scratch: Optional[str] = None) -> str:
     """The generated launcher source for one probe. Split out so the boundary can be read, diffed
     and driven directly by `tests/test_dev_probe.py` rather than only through a subprocess.
 
@@ -582,6 +679,10 @@ def render_launcher(program_path: str, read_allow: Optional[tuple] = None,
                         # someone
                         # reorders a table is a diff nobody can read.
                         "mutations": tuple(sorted(read_fence.MUTATION_EVENTS)),
+                        "scratch": (None if scratch is None else os.path.realpath(str(scratch))),
+                        "scratch_bytes": _SCRATCH_BYTES,
+                        "path_args": dict(sorted({**read_fence.MUTATION_EVENTS,
+                                                  **_SHUTIL_PATH_ARGS}.items())),
                         "landlock": landlock.no_mutation_source(),
                         "landlock_fn": landlock.NO_MUTATION_FUNCTION,
                         "seccomp": seccomp.no_mutation_source(),
@@ -776,6 +877,76 @@ class DevProbeTools:
                 return package
         return None
 
+    def _interpreter(self) -> tuple:
+        """`(python, note)`: the TASK's interpreter when it declared one that exists, else the engine's.
+
+        The probe exists to answer "does this work HERE", and here is where the candidate's code
+        runs -- `RepoTask.task_python`, carried in the repo spec. Until 2026-09-23 it was always
+        `sys.executable`, on the argument that `env_inspect` imports in the engine's interpreter and
+        the two should agree; they did agree, and both were wrong for any task with its own env: a
+        MiniOneRec node could not have checked `transformers.DynamicCache` in a probe because the
+        engine's venv has no transformers, and the eval's conda env has 5.7.0.
+
+        Compared as WRITTEN paths, not realpaths: two venvs over one base interpreter resolve to the
+        same binary and have different site-packages, which is the entire difference that matters.
+        A declared interpreter that is missing is NOT silently swapped -- the result says so, since
+        an answer about the engine's packages read as an answer about the task's is the defect."""
+        declared = str((self.repo_spec or {}).get("task_python") or "").strip()
+        if not declared or os.path.normcase(os.path.abspath(declared)) == os.path.normcase(
+                os.path.abspath(sys.executable)):
+            return sys.executable, ""
+        if os.path.isfile(declared) and os.access(declared, os.X_OK):
+            return declared, f" [ran on the task's interpreter {declared}]"
+        return sys.executable, (f" [the task's interpreter {declared} does not exist, so this ran on "
+                                f"the ENGINE's {sys.executable} -- its packages may not be your task's]")
+
+    def _resolve_graders_in(self, python: str) -> str:
+        """Re-resolve the fenced GRADER packages in the interpreter the probe will run; "" when fine.
+
+        `grader_package_roots` resolves them in the ENGINE's interpreter, which was sound while the
+        probe ran there. On the task's interpreter the grader may be installed somewhere else, and a
+        fence over the engine's copy leaves the task's copy readable -- the grader fence removed
+        without a word. So the directories are asked of `python` itself and ADDED to the engine's.
+        FAILS CLOSED: an interpreter that cannot answer refuses the probe rather than running it
+        behind a fence built for another environment."""
+        if python == sys.executable or not self.protect_roots:
+            return ""
+        if getattr(self, "_graders_resolved_for", None) == python:
+            return ""
+        import json
+        import subprocess
+        names = sorted(self.protect_roots)
+        code = ("import importlib.util, json, sys\n"
+                "out = {}\n"
+                "for n in json.loads(sys.argv[1]):\n"
+                "    try:\n"
+                "        s = importlib.util.find_spec(n)\n"
+                "    except Exception:\n"
+                "        s = None\n"
+                "    if s is not None and s.submodule_search_locations:\n"
+                "        out[n] = list(s.submodule_search_locations)\n"
+                "print(json.dumps(out))\n")
+        found = None
+        try:
+            done = subprocess.run([python, "-c", code, json.dumps(names)], capture_output=True,
+                                  text=True, timeout=60, cwd="/")
+            if done.returncode == 0 and done.stdout.strip():
+                found = json.loads(done.stdout.strip().splitlines()[-1])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            found = None
+        if not isinstance(found, dict):
+            return ("(run_probe refused: this task fences its grader package(s) "
+                    f"{', '.join(names)}, and the probe runs on the task's interpreter {python}, "
+                    "which could not say where they are installed. A fence built for another "
+                    "environment is no fence, so the probe does not run. This is not a missing tool: "
+                    "ask the operator to check that interpreter starts.)")
+        for name, dirs in found.items():
+            norm = tuple(n for n in (read_fence._norm_root(d) for d in (dirs or ())) if n)
+            if norm and name in self.protect_roots:
+                self.protect_roots[name] = tuple(dict.fromkeys(self.protect_roots[name] + norm))
+        self._graders_resolved_for = python
+        return ""
+
     def bind_state(self, state=None, parent=None) -> None:
         return None
 
@@ -877,19 +1048,30 @@ class DevProbeTools:
         # `mkdtemp`, and a `finally` that removes it: the probe's whole world is disposable, which is
         # the reason it needs no durable event (see the module docstring). The engine PROCESS creates
         # and destroys it — the probe itself cannot, by rule 2.
+        python, python_note = self._interpreter()
+        refusal = self._resolve_graders_in(python)
+        if refusal:
+            return refusal
         root = Path(tempfile.mkdtemp(prefix="looplab-probe-"))
         try:
             work = root / "work"
             work.mkdir()
             fence_dir = root / "fence"
             fence_dir.mkdir()
+            # The child's TMPDIR and its only writable place; see `_SCRATCH_BYTES`. Inside `root`, so
+            # the `finally` below removes it with everything else, and never the replica `work`.
+            scratch = root / "scratch"
+            scratch.mkdir()
             replica_note = self._replicate(work)
             program = root / "probe.py"
             program.write_text(code, encoding="utf-8")
             launcher = root / "probe_launcher.py"
+            read_allow = self._read_allow(work)
+            if read_allow is not None:
+                read_allow = tuple(read_allow) + (str(scratch),)
             launcher.write_text(
-                render_launcher(str(program), read_allow=self._read_allow(work),
-                                read_deny=self._read_deny()),
+                render_launcher(str(program), read_allow=read_allow,
+                                read_deny=self._read_deny(), scratch=str(scratch)),
                 encoding="utf-8")
             from looplab.runtime.sandbox import run_argv
             env = {
@@ -899,6 +1081,9 @@ class DevProbeTools:
                 # Rule 4. A run's evals hold real devices for hours behind a host-wide pool lease;
                 # a probe that allocated on one would break a SIBLING node's training.
                 "CUDA_VISIBLE_DEVICES": "",
+                # Every spelling `tempfile.gettempdir` consults, so a library asks for the scratch
+                # and not for a machine temp dir the child may not write.
+                "TMPDIR": str(scratch), "TEMP": str(scratch), "TMP": str(scratch),
             }
             # The fence gets a directory of its OWN, holding exactly `sitecustomize.py`. That
             # directory goes on PYTHONPATH, and `read_fence`'s own docstring states the rule this
@@ -921,13 +1106,14 @@ class DevProbeTools:
             # unaffected, and the launcher puts the replica cwd on the path explicitly instead.
             signal = CancelSignal(cancel_check)
             rc, out, err, timed_out = run_argv(
-                [sys.executable, "-P", str(launcher)], str(work), to, env=env,
+                [python, *_safe_path_flag(python), str(launcher)], str(work), to, env=env,
                 max_output_bytes=_MAX_OUTPUT, cancel=signal)
             cancelled = signal.is_set()
             timed_out = bool(timed_out and not cancelled)
         finally:
             shutil.rmtree(root, ignore_errors=True)
-        return self._project(rc, out, err, timed_out, to, replica_note, cancelled=cancelled)
+        return self._project(rc, out, err, timed_out, to, replica_note + python_note,
+                             cancelled=cancelled)
 
     def _install_fence(self, fence_dir: Path) -> bool:
         """Render THIS run's source-tree read fence into the probe's own fence directory.
@@ -1108,10 +1294,22 @@ class DevProbeTools:
                     "read — the hook denies the grader by PREFIX and needs no tier to punch, at the "
                     "price of leaving every read outside the fenced roots unpoliced.")
         tiers = tuple(path for path in self._interpreter_allow() if not _shared_temp_root(path))
+        # THE TASK'S DECLARED MOUNTS, from the one enumeration of them, and NOT through `allow`.
+        # `fence_inputs` drops every allow entry that lies under no editable root -- right for the
+        # HOOK, a deny-prefix fence that never looks outside the roots, and exactly wrong for THIS
+        # list, which the kernel rung takes as the whole of what may be read. So a `data:` mount
+        # beside the source tree rather than inside it never reached the kernel, and the docstring
+        # above ("a task that genuinely needs a temp path DECLARES it as a mount, which arrives in
+        # `allow`") described a path that did not exist. Measured 2026-09-23 on a MiniOneRec run:
+        # the checkpoint, the catalog and the warmup file were `data: {assets: ...}` under
+        # /var/tmp, readable by every eval of the run and `PermissionError` to every probe. Projected
+        # through `confine_grants` with everything else, so a mount that CONTAINS a root is still
+        # refused -- the containment rule does not care which list a grant arrived from.
+        mounts = tuple(src for src, _mode in read_allowlist.mount_sources(self._fence_spec()))
         # The probe's own disposable replica, added AFTER the temp filter and never through it: it
         # lives under `mkdtemp`, i.e. under exactly the tier that filter exists to drop.
         grants, refused = read_fence.confine_grants(
-            tuple(allow) + tiers + (str(work_root), str(Path(work_root).parent)), roots)
+            tuple(allow) + mounts + tiers + (str(work_root), str(Path(work_root).parent)), roots)
         if refused:
             raise ProbeRefusal(
                 "refused to run: read confinement cannot be built for this task — "

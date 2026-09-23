@@ -16,6 +16,8 @@ import importlib.metadata as _md
 import importlib.util
 import inspect
 import io
+import os
+import sys
 from contextlib import redirect_stderr, redirect_stdout
 
 from looplab.tools._base import RESULT_CAP, capabilities_for_specs, clip, fn_spec
@@ -82,6 +84,52 @@ def _suggest(name: str) -> str:
 PACKAGE_NAMING_SLOTS = ("name", "target", "module", "package")
 
 
+# Self-contained programs for the task's interpreter (`EnvInspectTools._in_task`), which can import
+# nothing of ours. Same answer shapes as `_pkg_info` / `_gpu_info` below, so a Developer reads one
+# format whichever interpreter answered.
+_PKG_INFO_SNIPPET = """
+import importlib, importlib.util, sys
+import importlib.metadata as md
+name = sys.argv[1]
+top = name.split(".", 1)[0]
+for cand in (name, top):
+    try:
+        ver = md.version(cand)
+    except md.PackageNotFoundError:
+        continue
+    try:
+        summary = (md.metadata(cand) or {}).get("Summary", "")
+    except Exception:
+        summary = ""
+    spec = importlib.util.find_spec(top)
+    print(f"{cand} {ver}\\nsummary: {summary}\\nlocation: {spec.origin if spec and spec.origin else ''}")
+    sys.exit(0)
+try:
+    mod = importlib.import_module(top)
+    print(f"{top} {getattr(mod, '__version__', '(no __version__)')}\\nlocation: {getattr(mod, '__file__', '')}")
+except Exception:
+    print(f"({name}: not installed)")
+"""
+_GPU_INFO_SNIPPET = """
+try:
+    import torch
+except Exception:
+    print("(no torch installed — cannot query GPUs)")
+    raise SystemExit(0)
+if not torch.cuda.is_available():
+    print("(no CUDA GPU available — CPU only)")
+    raise SystemExit(0)
+n = torch.cuda.device_count()
+print(f"CUDA available: {n} GPU(s)")
+for i in range(n):
+    try:
+        p = torch.cuda.get_device_properties(i)
+        print(f"  cuda:{i} = {p.name}, {round(p.total_memory / 1024**3, 1)} GiB")
+    except Exception as e:
+        print(f"  cuda:{i} = (props unavailable: {e})")
+"""
+
+
 class EnvInspectTools:
     """ToolProvider (specs()/execute()) giving the Developer read-only visibility into the ACTUAL
     installed Python environment, so it grounds generated code in the real API instead of guessing.
@@ -116,11 +164,23 @@ class EnvInspectTools:
               "is fenced from reading it. Reading the checker, the timer or the scorer would make "
               "any result meaningless. It IS installed -- this is a fence, not a missing package.)")
 
-    def __init__(self, deny_packages=()):
+    def __init__(self, deny_packages=(), task_python: str = ""):
         # Normalized to TOP-LEVEL names once, at construction: every call site compares against
         # `_top(...)` of whatever the model named, so `AlgoTuner.utils.isolated_benchmark` and a
         # bare `AlgoTuner` are one rule and neither spelling can slip past the other.
         self._deny = frozenset(_top(str(n)) for n in (deny_packages or ()) if str(n).strip())
+        # THE TASK'S INTERPRETER, when the task has its own (`RepoTask.task_python`). Every answer
+        # here used to come from the ENGINE's interpreter, which for a task with its own env is a
+        # confident answer about the wrong environment: measured 2026-09-23, a MiniOneRec eval ran on
+        # a conda env with transformers 5.7.0 while `pkg_info("transformers")` here said "(not
+        # installed)" and `gpu_info` said "(no torch installed)" on a box with an L40S. The two tools
+        # that answer about VERSIONS and DEVICES now ask the task's interpreter; the three that read
+        # SOURCE still read the engine's copy and say so on every answer, naming `run_probe` -- which
+        # runs on the task's interpreter -- as the authoritative channel.
+        tp = str(task_python or "").strip()
+        same = (not tp) or os.path.normcase(os.path.abspath(tp)) == os.path.normcase(
+            os.path.abspath(sys.executable))
+        self._task_python = "" if same else tp
 
     def _fenced(self, named: str) -> str:
         """The refusal for `named`, or "" when it is allowed. Total over all four package tools."""
@@ -204,27 +264,59 @@ class EnvInspectTools:
                     if refusal:
                         return refusal
             if name == "pkg_info":
+                if self._task_python:
+                    return self._in_task(_PKG_INFO_SNIPPET, str(args.get("name", "")).strip(),
+                                         gpu=False) or "(pkg_info: give a package name)"
                 return self._pkg_info(str(args.get("name", "")))
-            if name == "py_api":
-                return self._py_api(str(args.get("target", "")))
-            if name == "read_installed":
-                # `lines` is the documented window param (consistent with read_file/repo_read);
-                # `max_lines` stays accepted — older transcripts/models still pass it. Explicit
-                # None-coalesce (not .get(default=…)): a model that sends `"lines": null` alongside
-                # `max_lines` must fall through to max_lines, but a present-but-null key would
-                # satisfy .get() and mask it.
-                lines = args.get("lines")
-                if lines is None:
-                    lines = args.get("max_lines")
-                return self._read_installed(str(args.get("module", "")),
-                                            args.get("start_line"), lines)
-            if name == "grep_installed":
-                return self._grep_installed(str(args.get("query", "")), str(args.get("package", "")),
-                                            args.get("max_hits"))
             if name == "gpu_info":
+                if self._task_python:
+                    return self._in_task(_GPU_INFO_SNIPPET, "", gpu=True)
                 return self._gpu_info()
+            if self._task_python and name in ("py_api", "read_installed", "grep_installed"):
+                return self._engine_side_note() + self._dispatch_source(name, args)
+            return self._dispatch_source(name, args)
         except Exception as e:  # noqa: BLE001 — a read-only probe must never crash the tool loop
             return f"(inspect error: {type(e).__name__}: {e})"
+
+    def _engine_side_note(self) -> str:
+        return (f"(NOTE: this answer comes from the ENGINE's interpreter {sys.executable}, not from "
+                f"{self._task_python}, where your code runs -- its packages and versions may differ. "
+                "For an answer about YOUR environment, check it with run_probe, which runs there.)\n")
+
+    def _in_task(self, snippet: str, arg: str, *, gpu: bool) -> str:
+        """Run one self-contained snippet on the task's interpreter and return what it printed."""
+        if not os.path.isfile(self._task_python):
+            return (f"(the task's interpreter {self._task_python} does not exist, so this cannot be "
+                    "answered for your environment)")
+        import subprocess
+        env = dict(os.environ)
+        if not gpu:
+            env["CUDA_VISIBLE_DEVICES"] = ""
+        done = subprocess.run([self._task_python, "-c", snippet, arg], capture_output=True,
+                              text=True, timeout=120, cwd="/", env=env)
+        out = (done.stdout or "").strip()
+        if done.returncode != 0 and not out:
+            tail = "\n".join((done.stderr or "").strip().splitlines()[-6:])
+            return f"(inspect error on {self._task_python}: {tail})"
+        return out
+
+    def _dispatch_source(self, name: str, args: dict) -> str:
+        if name == "py_api":
+            return self._py_api(str(args.get("target", "")))
+        if name == "read_installed":
+            # `lines` is the documented window param (consistent with read_file/repo_read);
+            # `max_lines` stays accepted — older transcripts/models still pass it. Explicit
+            # None-coalesce (not .get(default=…)): a model that sends `"lines": null` alongside
+            # `max_lines` must fall through to max_lines, but a present-but-null key would
+            # satisfy .get() and mask it.
+            lines = args.get("lines")
+            if lines is None:
+                lines = args.get("max_lines")
+            return self._read_installed(str(args.get("module", "")),
+                                        args.get("start_line"), lines)
+        if name == "grep_installed":
+            return self._grep_installed(str(args.get("query", "")), str(args.get("package", "")),
+                                        args.get("max_hits"))
         return f"(unknown tool: {name})"
 
     @staticmethod

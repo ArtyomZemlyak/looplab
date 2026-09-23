@@ -240,15 +240,44 @@ def test_a_probe_cannot_read_outside_its_own_workdir(outside):
 
 
 def test_the_kernel_backstop_is_armed_independently_of_the_audit_hook():
-    """RLIMIT_FSIZE 0 is what holds when the hook cannot see the write — a C extension going
-    straight to the syscall, or an audit event CPython adds after this was written.
+    """A write the hook CANNOT see puts no bytes on disk outside the probe's own scratch.
 
-    It is NOT a superset of the hook and the module docstring says so: mutating the hook's write
-    rules out while leaving this in place still lets a raw `open` create an EMPTY file and truncate
-    an existing one to zero (measured — four tests above go red). The rlimit bounds CONTENT; the hook
-    bounds EXISTENCE. Both, or neither claim holds."""
-    out = _probe("import resource; print('FSIZE', resource.getrlimit(resource.RLIMIT_FSIZE))")
-    assert "FSIZE (0, 0)" in out
+    Until 2026-09-23 this pinned `RLIMIT_FSIZE (0, 0)`, which held the guarantee for every path at
+    once -- and made every library that writes a temp file at IMPORT unimportable (`filelock`, under
+    `transformers`). The probe now owns one scratch directory, its TMPDIR, and the byte limit is
+    raised to `_SCRATCH_BYTES` ONLY where the Landlock rung applied: RLIMIT_FSIZE is per-process and
+    cannot tell scratch from anywhere else, so what confines the bytes is the kernel ruleset. Where
+    that rung is missing the limit stays 0, so the scratch holds empty files and nothing else moves.
+
+    So the property is asserted as the WRITE, not as the rlimit, and through libc so the audit hook
+    never sees it: bytes land in the scratch and are refused beside it."""
+    out = _probe(
+        "import ctypes, os, resource, tempfile\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        "def raw(path):\n"
+        "    fd = libc.open(path.encode(), os.O_CREAT | os.O_WRONLY, 0o600)\n"
+        "    if fd < 0:\n"
+        "        return 'refused'\n"
+        "    n = libc.write(fd, b'x' * 100, 100)\n"
+        "    libc.close(fd)\n"
+        "    return 'wrote %d' % n\n"
+        "print('SCRATCH', raw(os.path.join(tempfile.gettempdir(), 'inside.bin')))\n"
+        "print('OUTSIDE', raw(os.path.join(os.path.dirname(tempfile.gettempdir()), 'beside.bin')))\n"
+        "print('FSIZE', resource.getrlimit(resource.RLIMIT_FSIZE)[0])\n")
+    assert "SCRATCH wrote 100" in out, out
+    assert "OUTSIDE refused" in out, out
+    assert "FSIZE 67108864" in out, out
+
+
+def test_without_the_kernel_rung_the_scratch_holds_no_bytes():
+    """The other half of the rule above, read off the launcher itself: the byte limit is lifted only
+    when the Landlock rung reported success, so a box without it keeps RLIMIT_FSIZE 0."""
+    from looplab.tools.dev_probe import render_launcher
+    src = render_launcher("/p.py", scratch="/tmp/s")
+    assert "_FSIZE = 67108864 if (_SCRATCH is not None and not _LL_REASON) else 0" in src
+    assert "resource.setrlimit(resource.RLIMIT_FSIZE, (_FSIZE, _FSIZE))" in src
+    # And with no scratch at all the launcher is the historical one: nothing writable, anywhere.
+    assert "_SCRATCH = None" in render_launcher("/p.py")
 
 
 # ------------- rule 2, the EXISTENCE half: what neither the audit hook nor RLIMIT_FSIZE can see

@@ -28,6 +28,10 @@ from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
 
+# A python interpreter's basename, as `engine/eval_stages.py::_PY_INTERPRETER_RE` spells it (same set,
+# `.exe` for Windows). `RepoTask.task_python` reads a command's argv[0] with it.
+_PY_ARGV0 = re.compile(r"^(python|pypy)[\d.]*(\.exe)?$", re.I)
+
 
 # HOISTED ABOVE THE MODELS (2026-09-02), not because the placement reads better but because
 # `refuse_unknown_task_keys` is referenced by a decorator on `ReferenceSpec` below and a
@@ -1092,6 +1096,18 @@ class EvalSpec(BaseModel):
     # this model — the Developer has no surface for it, by design. Secrets are REFUSED; see
     # `core/envsafe.py::validate_env_map`, the ONE rule all three declaring levels go through.
     env: dict[str, str] = Field(default_factory=dict)
+    # THE INTERPRETER THE CANDIDATE'S CODE RUNS UNDER, when it is not the engine's. Absolute path;
+    # empty (the default) derives it from the commands above -- see `RepoTask.task_python`.
+    #
+    # WHY A TASK FACT AND NOT AN ENGINE ONE. The Developer's probe answered every question in the
+    # ENGINE's interpreter, and a repo task usually brings its own. Measured 2026-09-23 on a MiniOneRec
+    # inference run: the eval ran on a conda env with transformers 5.7.0, the engine's venv had no
+    # transformers at all, and a node that wrote `cache.key_cache` -- an attribute transformers 5
+    # removed -- could not have checked it with a probe even had it tried, because `import
+    # transformers` in the probe would have raised ModuleNotFoundError. It died at eval warmup instead,
+    # hours later, behind a fallback that printed one line. Operator-authored like the rest of this
+    # model. Existence is NOT checked here: a task may build its env in `setup`, after admission.
+    python: str = ""
     # INSTALLED packages the Developer's environment inspector may not read -- the GRADER FENCE.
     # `tools/env_inspect.py` answers "what does this installed library look like", and an eval
     # harness pip-installed into the same venv is, to it, just another library: `read_installed` /
@@ -1290,6 +1306,16 @@ class EvalSpec(BaseModel):
         if float(v) < 0:
             raise ValueError("drift_tolerance must be >= 0")
         return float(v)
+
+    @field_validator("python")
+    @classmethod
+    def _python_is_absolute(cls, v):
+        # Absolute or nothing: a bare `python` would be resolved on the ENGINE's PATH, which is the
+        # very interpreter this field exists to stop answering for the task.
+        v = str(v or "").strip()
+        if v and not os.path.isabs(v):
+            raise ValueError("eval.python must be an absolute path to the task's interpreter")
+        return v
 
     @field_validator("web_deny")
     @classmethod
@@ -2179,9 +2205,53 @@ class RepoTask(BaseModel):
             "data": {name: spec.model_dump() for name, spec in self.data.items()},
             "developer_commands": [spec.model_dump() for spec in self.developer_commands],
             "eval_env": dict(self.eval.env) if self.eval is not None else {},
+            # The interpreter the probe answers in -- "" keeps it on the engine's own.
+            "task_python": self.task_python(),
             # Back-compat single-seed hint (first editable): consumers that still seed one dir.
             "editable_path": mounts[0]["path"] if mounts else "",
         }
+
+    def task_python(self) -> str:
+        """The interpreter the candidate's code runs under, or "" when that is the engine's own.
+
+        `eval.python` when the operator declared it. Otherwise the FIRST python interpreter named
+        as argv[0] by the task's own commands, most candidate-specific first: an operator stage,
+        then `eval.command`, then the host scorer (which imports the candidate in the arrangements
+        that have one, and is the last resort because it need not). An absolute argv[0] is taken as
+        written; a bare `python3` is resolved only on a PATH the TASK declares, never on the
+        engine's -- resolving it there returns the engine's interpreter, which is the answer this
+        method exists to replace. A task that names no interpreter keeps "" and the probe stays on
+        `sys.executable`, byte-identical to before.
+
+        Not checked for existence: a task may build its env in `setup`. The probe checks at use and
+        says so when the path is missing (`tools/dev_probe.py::DevProbeTools._interpreter`)."""
+        ev = self.eval
+        if ev is None:
+            return ""
+        if ev.python:
+            return ev.python
+        import shutil
+        declared = []
+        for stage in ev.stages or ():
+            if isinstance(stage, dict):
+                declared.append((stage.get("command"), {**ev.env, **(stage.get("env") or {})}))
+        declared.append((ev.command, dict(ev.env)))
+        if ev.host_scorer is not None:
+            declared.append((ev.host_scorer.command, {**ev.env, **ev.host_scorer.env}))
+        for argv, env in declared:
+            if not argv or not isinstance(argv, list) or not isinstance(argv[0], str):
+                continue
+            argv0 = argv[0].strip()
+            if not _PY_ARGV0.match(argv0.replace("\\", "/").rsplit("/", 1)[-1]):
+                continue
+            if os.path.isabs(argv0):
+                return argv0
+            path = str(env.get("PATH") or "")
+            if path:
+                found = shutil.which(argv0, path=path)
+                if found:
+                    return os.path.abspath(found)
+        return ""
 
     def _bounds(self) -> dict:
         return {k: (float(lo), float(hi)) for k, (lo, hi) in self.params.items()}
