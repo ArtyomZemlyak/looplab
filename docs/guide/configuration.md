@@ -629,7 +629,7 @@ run, in `events.jsonl`, under the key `speculation`. No GPU calibration ceremony
 |---|---|
 | `speculation.depth` | The run's resolved `speculation_depth` (`0` when speculation was off — every other key is then `0` too) |
 | `speculation.requested` | Prefetch requests the consumer issued |
-| `speculation.committed` / `.stale` / `.producer_failed` | Producer outcomes: a build landed / was already stale at commit / the producer failed |
+| `speculation.committed` / `.stale` / `.producer_failed` | Producer outcomes: a build landed / the head closed with no node for a reason that is not the Card's (`card_build_done.skipped_reason` names it — stale at commit, or `producer_unavailable`: no producer pair could be built) / the producer ran and failed (the Card is then serial-only) |
 | `speculation.evaluated` | Speculative builds that were admitted and really ran — correct predictions, ordinary experiments |
 | `speculation.discarded` | Speculative builds the **build lifecycle** threw away without an experiment coming out — superseded by the freshness gate, frozen, batch-cancelled, a build crash, a lost commit, a proposal that could not form an action (a miss). **Not** a speculative node that ran and failed: that is an experiment result |
 | `speculation.abandoned` | Committed prefetches still **pending** when the run finished — the consumer stopped admitting fresh work (operator `stop`, wall deadline, `max_eval_seconds` crossed) and these were never terminalized |
