@@ -450,3 +450,118 @@ def test_the_walk_takes_a_whole_task_and_is_empty_when_there_are_no_readers():
     assert eval_reader_path_errors(object()) == []                   # the stubbed-loader case
     assert eval_reader_path_errors({"metric": _PATHLESS}) == []      # a bare dict is not an EvalSpec
     assert eval_reader_path_errors(EvalSpec(command=["python", "t.py"])) == []
+
+
+# ------------------------------------------- 8. the reader VOCABULARY (review 2026-09-22, RTA-06)
+#
+# Doc 50 RA-04, still live: a reader spec was checked for its `path` and its `labels`, and for
+# nothing else it says. So a `stdout_regex` with no `pattern` — or a `patern` — validated, and every
+# read returned None; a constraint whose bound was typed `mx` was never enforced; a `metrics` entry
+# whose kind was a typo, or not a string at all, was dropped from every node's report. Each is the
+# pathless-`file_json` failure one reader over, and each is reproduced below against the real
+# `run_command_eval` BEFORE its refusal is asserted — the refusal is only worth having in front of a
+# real silent loss.
+
+_REGEX_NO_PATTERN = {"kind": "stdout_regex", "patern": "metric=([0-9.]+)"}
+
+
+def test_a_regex_reader_without_a_pattern_reads_nothing_then_is_refused(tmp_path):
+    """RA-04's own example, as the PRIMARY reader (every node fails no_metric) and in a gate slot."""
+    (tmp_path / "p.py").write_text(_PROG, encoding="utf-8")
+    assert run_command_eval([sys.executable, "p.py"], str(tmp_path), 60,
+                            _REGEX_NO_PATTERN).metric is None
+    assert _eval(tmp_path, metrics={"m": _REGEX_NO_PATTERN}).extra_metrics is None
+    for payload in ({"metric": _REGEX_NO_PATTERN}, {"metrics": {"m": _REGEX_NO_PATTERN}}):
+        with pytest.raises(ValueError, match="needs a `pattern`") as ei:
+            RepoTask(**_task(**payload))
+        assert '"kind": "stdout_regex", "pattern":' in _msg(ei), "the corrected spec is shown"
+
+
+def test_a_pattern_that_can_never_capture_is_refused_too(tmp_path):
+    """A regex with NO capture group reads `group(1)`, gets IndexError, and the reader turns that into
+    None on every node — observationally the missing pattern again."""
+    no_group = {"kind": "stdout_regex", "pattern": "metric"}
+    assert _eval(tmp_path, metrics={"m": no_group}).extra_metrics is None
+    with pytest.raises(ValueError, match="capture group"):
+        RepoTask(**_task(metrics={"m": no_group}))
+    with pytest.raises(ValueError, match="does not compile"):
+        RepoTask(**_task(metric={"kind": "stdout_regex", "pattern": "metric=(["}))
+    # …while the `key` fallback the reader itself honours stays accepted.
+    RepoTask(**_task(metric={"kind": "stdout_regex", "key": "RECALL@100: ([0-9.]+)"}))
+
+
+def test_a_typod_constraint_bound_is_never_enforced_then_is_refused(tmp_path):
+    """The quietest of them: `lat` is 7.0, the operator meant `max: 5`, typed `mx`, and no node was
+    ever marked infeasible — the gate the operator declared did not exist."""
+    typo = dict(_WITH_PATH, name="lat", mx=5.0)
+    assert _eval(tmp_path, constraints=[typo]).violations is None
+    assert _eval(tmp_path, constraints=[dict(_WITH_PATH, name="lat", max=5.0)]).violations
+    with pytest.raises(ValueError, match="'mx'") as ei:
+        RepoTask(**_task(constraints=[typo]))
+    assert "eval.constraints[0]" in _msg(ei) and "max" in _msg(ei), "names the slot and the keys"
+
+
+def test_a_gate_readers_kind_must_name_a_reader(tmp_path):
+    """An unknown kind — a typo, or a LIST the reader table cannot even hash — silently reads nothing
+    in every gate slot. The primary slot has refused this since doc 25; the three gates never did."""
+    for bad in ({"kind": "file_jsn", "path": "metrics.json", "key": "lat"},
+                {"kind": ["file_json"], "path": "metrics.json", "key": "lat"}):
+        assert _eval(tmp_path, metrics={"lat": bad}).extra_metrics is None
+        for payload in ({"metrics": {"lat": bad}}, {"cross_check": bad},
+                        {"constraints": [dict(bad, name="lat", max=10.0)]}):
+            with pytest.raises(ValueError, match="is not a metric reader"):
+                RepoTask(**_task(**payload))
+
+
+def test_the_vocabulary_admits_every_key_a_slot_reads():
+    """No false refusal: each slot's own keys (`direction`, `name`/`min`/`max`), every reader's own
+    keys, the `_` comment convention and the composable `reader:` spelling all still validate."""
+    RepoTask(**_task(
+        metric={"kind": "file_regex", "path": "metrics.json", "pattern": "m=([0-9.]+)", "group": 1},
+        metrics={"lat": dict(_WITH_PATH, direction="min", _note="p95 over the batch")},
+        constraints=[dict(_WITH_PATH, name="lat", max=10.0, min=0.0)],
+        cross_check={"kind": "stdout_json", "key": "metric"}))
+    validate_task({"id": "t", "goal": "g", "direction": "max", "repo": "examples/repo_example",
+                   "cmd": {"command": ["python", "ttrain.py"],
+                           "metrics": {"lat": {"reader": "stdout_regex", "key": "lat=([0-9.]+)"}}}})
+
+
+def test_the_vocabulary_refusal_is_grandfathered_on_reload(tmp_path):
+    """RTA-05's asymmetry, applied to the reader vocabulary: refused on SUBMIT, and a run whose
+    recorded snapshot already carries such a spec still resumes — the problem REPORTED by the walk
+    `resume` prints as warnings, never raised."""
+    snap = tmp_path / "task.snapshot.json"
+    snap.write_text(json.dumps(_task(constraints=[dict(_WITH_PATH, name="lat", mx=5.0)],
+                                     metrics={"m": _REGEX_NO_PATTERN})), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_task(snap)
+    task = load_task(snap, existing_run=True)
+    warnings = eval_reader_path_errors(task)
+    assert any("'mx'" in w for w in warnings) and any("`pattern`" in w for w in warnings)
+
+
+def test_the_reader_vocabulary_is_the_readers_own(monkeypatch):
+    """Two-way, so the table cannot drift from the functions that decide it: one row per reader in
+    `METRIC_READERS`, every key a reader turns into a PATH in its row, and every literal key each
+    reader function reads off its `spec` in the union of the rows of the kinds it serves (a key a
+    reader reads that its row lacks would be REFUSED at submit — a false refusal, not a typo)."""
+    import ast
+    import inspect
+    import textwrap
+
+    from looplab.runtime import command_eval as ce
+
+    assert set(ce.READER_KEYS) == set(ce.METRIC_READERS)
+    for kind, keys in ce.READER_PATH_KEYS.items():
+        assert set(keys) <= ce.READER_KEYS[kind], kind
+    served: dict = {}
+    for kind, fn in ce.METRIC_READERS.items():
+        served.setdefault(fn, set()).add(kind)
+    for fn, kinds in served.items():
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        read = {node.args[0].value for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and getattr(node.func.value, "id", "") == "spec"
+                and node.args and isinstance(node.args[0], ast.Constant)}
+        vocabulary = set().union(*(ce.READER_KEYS[k] for k in kinds))
+        assert read and read <= vocabulary, (fn.__name__, read - vocabulary)

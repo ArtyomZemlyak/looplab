@@ -309,8 +309,27 @@ _PATTERNLESS_COST = {slot: "Without a usable `pattern`" + text[len("Without `pat
 _GATE_READER_SLOTS = frozenset({"metrics", "constraints", "cross_check"})
 
 
+# The keys a GATE slot's reader spec may carry BESIDE the reader's own vocabulary
+# (`runtime/command_eval.py::READER_KEYS`): these are the SLOT's facts, read by the code that owns the
+# slot — `command_eval` reads `direction` off an `eval.metrics` entry (which way that secondary axis is
+# better) and `name`/`min`/`max` off a constraint (`_violations`). A key in neither vocabulary is read
+# by nothing and is refused at submit (review 2026-09-22, RTA-06): a constraint whose bound was typed
+# `mx` validated and was never enforced.
+_SLOT_READER_KEYS = {
+    "metrics": frozenset({"direction"}),
+    "constraints": frozenset({"name", "min", "max"}),
+    "cross_check": frozenset(),
+}
+
+
 def eval_reader_path_errors(task_or_spec) -> list[str]:
-    """Every "this reader can never read anything" problem in an EvalSpec, one message per reader.
+    """Every "this reader can never read anything" problem in an EvalSpec, one message per problem.
+
+    Since review 2026-09-22 (RTA-06; doc 50 RA-04) that includes a regex reader with no usable
+    `pattern` (`command_eval.metric_spec_pattern_error`, every slot) and, in the three GATE slots, a
+    kind that names no reader or a key that nothing reads (`command_eval.metric_spec_vocabulary_error`
+    against `READER_KEYS` + `_SLOT_READER_KEYS`) — each a declaration that silently disappears. Same
+    walk, so the same asymmetry: refused at submit, a WARNING on `resume` for a run that recorded one.
 
     Walks `EvalSpec.readers()` (the single enumeration of the reader slots) and asks
     `runtime/command_eval.metric_spec_path_error` — the authority that lives beside the reader table
@@ -332,12 +351,18 @@ def eval_reader_path_errors(task_or_spec) -> list[str]:
     text as a warning for a run that was started before the refusal existed (see `_readers_usable`).
     """
     from looplab.runtime.command_eval import (host_score_labels_error, metric_spec_path_error,
-                                              metric_spec_pattern_error)
+                                              metric_spec_pattern_error,
+                                              metric_spec_vocabulary_error)
     spec = task_or_spec.eval if isinstance(task_or_spec, RepoTask) else task_or_spec
     if not isinstance(spec, EvalSpec):
         return []
     out: list[str] = []
     for label, slot, reader in spec.readers():
+        if slot in _GATE_READER_SLOTS:
+            # FIRST, because an unknown kind makes every rule below it moot: nothing reads the spec.
+            vocab_err = metric_spec_vocabulary_error(reader, slot_keys=_SLOT_READER_KEYS[slot])
+            if vocab_err:
+                out.append(f"{label}: {vocab_err}")
         err = metric_spec_path_error(reader, consequence=_PATHLESS_COST[slot])
         if err:
             out.append(f"{label}: {err}")

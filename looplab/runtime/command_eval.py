@@ -776,6 +776,59 @@ _PATH_EXAMPLES = {
 }
 
 
+# EVERY key each reader reads — its whole VOCABULARY — and the only enumeration of it (review
+# 2026-09-22, RTA-06; doc 50 RA-04). It sits beside `METRIC_READERS`, `READERS_REQUIRING_PATH` and
+# `READER_PATH_KEYS` for their reason: it is a per-reader fact, decided by the reader functions above
+# (`tests/test_eval_reader_paths.py` holds each function's `spec` reads to its kind's row by AST, and
+# the row set to the reader table, both ways). What it is FOR: a key a reader never reads is not an
+# error the reader can report — it is simply ignored, so a typo in a declaration VANISHES. Measured
+# with the readers as they are: `{"kind": "stdout_regex", "patern": …}` reads nothing on every node,
+# and a constraint whose bound is typed `mx` is never enforced — the gate the operator declared does
+# not exist, and nothing anywhere says so. The slot-level keys a reader spec may ALSO carry
+# (`direction` on an `eval.metrics` entry, `name`/`min`/`max` on a constraint) are the SLOT's facts
+# and live with the slots (`adapters/repo_task.py::_SLOT_READER_KEYS`).
+READER_KEYS = {
+    "stdout_json": frozenset({"kind", "key"}),
+    "stdout_regex": frozenset({"kind", "pattern", "key", "group"}),
+    "file_json": frozenset({"kind", "path", "key"}),
+    "file_regex": frozenset({"kind", "path", "pattern", "key", "group"}),
+    "host_score": frozenset({"kind", "predictions", "labels", "scorer", "key"}),
+    "adapter": frozenset({"kind", "path", "timeout"}),
+}
+
+
+def metric_spec_vocabulary_error(spec, *, slot_keys: frozenset = frozenset()) -> Optional[str]:
+    """Why `spec` declares something no reader will read — or None when every key is read.
+
+    Two halves, in the order they can be decided. The KIND first: an unknown one (a typo, or a
+    non-string `spec_kind` cannot even hash) reads nothing — `read_metric` returns None, which a
+    gate slot turns into a dropped metric, an unverifiable constraint or a drift failure on every
+    node. Then the KEYS: anything outside the reader's `READER_KEYS` row and the slot's own
+    `slot_keys` is ignored by every reader, so what it says is dropped. A key starting with `_` is a
+    COMMENT (`refuse_unknown_task_keys`' convention), never refused.
+
+    Asked of the three GATE slots (`metrics`, `constraints`, `cross_check`); the primary `metric`
+    has its own kind refusal (`EvalSpec._valid_metric_kind`) and a wider vocabulary of its own.
+    """
+    if not isinstance(spec, dict):
+        return None
+    kind = spec_kind(spec)
+    if kind not in READER_KEYS:
+        return (f"`kind` {spec.get('kind')!r} is not a metric reader, so this reader reads nothing "
+                f"on every node. Use one of {sorted(READER_KEYS)} (HOW to read the value, e.g. "
+                f"stdout_json).")
+    allowed = READER_KEYS[kind] | slot_keys
+    unknown = sorted(str(k) for k in spec
+                     if not (isinstance(k, str) and (k.startswith("_") or k in allowed)))
+    if not unknown:
+        return None
+    one = len(unknown) == 1
+    return (f"unknown key{'' if one else 's'} {', '.join(repr(k) for k in unknown)} for a "
+            f"{kind!r} reader: nothing reads {'it' if one else 'them'}, so what "
+            f"{'it declares' if one else 'they declare'} is silently dropped. Known keys here: "
+            f"{', '.join(sorted(allowed))}.")
+
+
 def _nonstring_path_slot(spec) -> Optional[tuple]:
     """The first `(key, value)` of `spec` that names a metric-source FILE but is not a string.
 
