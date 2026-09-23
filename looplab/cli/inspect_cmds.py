@@ -601,6 +601,7 @@ def tensorboard(
     training framework logged (loss, recall@k, grad norms, lr, …), one comparable run per experiment.
     RepoTask training scripts (e.g. PyTorch Lightning's TensorBoardLogger) write event files under each
     node's workdir; this points TensorBoard at nodes/ so every node shows up."""
+    import importlib.util
     import shutil
     import subprocess
     import sys
@@ -608,13 +609,19 @@ def tensorboard(
     if not logdir.exists():
         logdir = run_dir
     exe = shutil.which("tensorboard")
+    # E2E sweep 2026-09-23: with the package absent this printed "Serving TensorBoard ..." and exited
+    # 0 after the child died on the import. Refuse like `export-mlflow`; report the server's status.
+    if exe is None and importlib.util.find_spec("tensorboard") is None:
+        typer.echo("TensorBoard not installed: pip install tensorboard"); raise typer.Exit(1)
     cmd = ([exe] if exe else [sys.executable, "-m", "tensorboard.main"]) + \
           ["--logdir", str(logdir), "--port", str(port), "--host", host]
     typer.echo(f"Serving TensorBoard for {run_dir} on http://{host}:{port}  (logdir={logdir})")
     try:
-        subprocess.run(cmd)
+        status = subprocess.run(cmd).returncode
     except KeyboardInterrupt:
-        pass
+        return
+    if status:
+        raise typer.Exit(status)
 
 
 @app.command(name="landlock-check")

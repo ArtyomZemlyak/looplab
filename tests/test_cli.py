@@ -217,6 +217,42 @@ def test_every_help_placeholder_survives_the_markdown_renderer():
     assert lost == {}, f"--help dropped these placeholders (wrap them in backticks): {lost}"
 
 
+def test_tensorboard_refuses_when_it_is_not_installed_instead_of_claiming_to_serve(
+        tmp_path, monkeypatch):
+    """E2E sweep 2026-09-23 (flow E): on a box without the package, `looplab tensorboard RUN`
+    printed "Serving TensorBoard for RUN on http://127.0.0.1:16006", then the child died with
+    `No module named 'tensorboard'` — and the command exited 0. Nothing was served. The same
+    "not installed" shape `export-mlflow` and `ui` already answer, and nothing is spawned."""
+    import importlib.util
+    import shutil
+    import subprocess
+
+    spawned = []
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a, **k: None if name == "tensorboard"
+                        else real_find_spec(name, *a, **k))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: spawned.append(a))
+    result = runner.invoke(app, ["tensorboard", str(tmp_path)])
+    assert result.exit_code == 1, result.output
+    assert "not installed" in result.output and "Serving" not in result.output
+    assert spawned == []
+
+
+def test_tensorboard_exits_with_the_status_of_the_server_it_ran(tmp_path, monkeypatch):
+    """The other half: an installed TensorBoard that FAILS (a taken port, a bad logdir) used to be
+    reported as success because `subprocess.run`'s status was dropped. Its exit code is the answer."""
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/tensorboard")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 3))
+    result = runner.invoke(app, ["tensorboard", str(tmp_path)])
+    assert result.exit_code == 3, result.output
+
+
 def test_atlas_and_claims_accept_d8_only_memory(tmp_path):
     import json
 
