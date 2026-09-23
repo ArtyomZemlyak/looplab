@@ -206,7 +206,7 @@ def _fixture_git_reports_dirty(repo) -> bool:
     probe declined to skip, the product's call timed out, `_dirty_inputs` returned `[]` and the test
     failed `assert 0 == 1` pointing at the product. That is exactly the red this function exists to
     prevent, and it happened in the full-suite pass that gated b745e538. The bound now has ONE
-    spelling, `orchestrator._DIRTY_STATUS_TIMEOUT_S`, imported here; the env is the product's
+    spelling, `setup_phase._DIRTY_STATUS_TIMEOUT_S`, imported here; the env is the product's
     `git_subprocess_env()` for the same reason, since a probe run under a different environment is
     not running the product's command.
 
@@ -219,7 +219,9 @@ def _fixture_git_reports_dirty(repo) -> bool:
     """
     import subprocess
 
-    from looplab.engine.orchestrator import _DIRTY_STATUS_TIMEOUT_S
+    # `_dirty_inputs` and the bound it reads live in `engine/setup_phase.py` since review 2026-09-22
+    # ENG1-04 step 3 (they were `engine/orchestrator.py`'s, which keeps no copy).
+    from looplab.engine.setup_phase import _DIRTY_STATUS_TIMEOUT_S
     from looplab.runtime.sandbox import git_subprocess_env
 
     try:
@@ -239,7 +241,7 @@ def test_the_probe_is_bounded_exactly_like_the_code_it_certifies(tmp_path, monke
     """
     import subprocess
 
-    from looplab.engine.orchestrator import _DIRTY_STATUS_TIMEOUT_S
+    from looplab.engine.setup_phase import _DIRTY_STATUS_TIMEOUT_S
     from looplab.runtime.sandbox import git_subprocess_env
 
     seen = {}
@@ -348,7 +350,10 @@ def test_dirty_inputs_caps_a_huge_tracked_diff(tmp_path, monkeypatch):
     # A heavy TRACKED+modified text file is hashed incrementally and capped: with a tiny cap the
     # digest is marked `~` (truncated) rather than buffering the whole patch.
 
-    from looplab.engine import orchestrator
+    # `_dirty_inputs` reads the cap from the module that DEFINES it: `engine/setup_phase.py` since
+    # review 2026-09-22 ENG1-04 step 3. `orchestrator` keeps no copy, so patching the old spelling is
+    # an AttributeError rather than a patch that silently reaches nothing.
+    from looplab.engine import setup_phase
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -360,7 +365,7 @@ def test_dirty_inputs_caps_a_huge_tracked_diff(tmp_path, monkeypatch):
     _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
     (repo / "data.txt").write_text("x\n" * 100000)                 # tracked -> a large real diff
 
-    monkeypatch.setattr(orchestrator, "_DIFF_DIGEST_CAP", 4096)    # force truncation cheaply
+    monkeypatch.setattr(setup_phase, "_DIFF_DIGEST_CAP", 4096)     # force truncation cheaply
     out = _mk_engine(tmp_path / "run")._dirty_inputs({str(repo / "data.txt"): {}})
     assert out[0]["diff_digest"].endswith("~")                     # capped => truncation marked
     assert len(out[0]["diff_digest"]) == 17                        # 16 hex + the '~'

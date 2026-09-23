@@ -387,7 +387,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # `speculation_depth` and its gate receipts. Last-write-wins let a spliced/duplicated second row
     # INVERT the objective or relax the trust gate after nodes already existed — silently rewriting how
     # every prior result is ranked. This gate mirrors the producer exactly: the engine appends
-    # `run_started` only `if not state.run_id` (engine/orchestrator.py::Engine._setup_phase), so on any log it wrote this is a
+    # `run_started` only `if not state.run_id` (engine/setup_phase.py::_setup_phase), so on any log it wrote this is a
     # no-op. Keyed on `run_id` rather than "have I seen one" for the same reason: a row that never
     # established identity is not an anchor and must not shadow the real start that follows it.
     if st.run_id:

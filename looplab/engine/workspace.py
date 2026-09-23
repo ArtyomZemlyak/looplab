@@ -228,7 +228,7 @@ class WorkspaceSeeder:
         """The real filesystem paths behind `workspace_fingerprint`'s LABEL keys.
 
         The fingerprint keys on `editable:<name>` / `data:<name>` / `ref:<name>` because it is READ
-        BY LABEL. `orchestrator._dirty_inputs` keys on the PATH — it does `Path(src)` and runs
+        BY LABEL. `setup_phase.py::_dirty_inputs` keys on the PATH — it does `Path(src)` and runs
         `git -C <root> status --porcelain` — so handing it the fingerprint MAP resolved every source
         to `Path("editable:foo").parent`, i.e. `"."`, the engine's own CWD. Two records were wrong
         for the one reason: `run_started.dirty_inputs` enumerated LoopLab's own checkout (or, off a
@@ -255,7 +255,7 @@ class WorkspaceSeeder:
         """The editable source tree a NUMBER was produced on — HEAD *and* the uncommitted work.
 
         `workspace_fingerprint` above is `git rev-parse HEAD` per source, and its own sibling
-        (`orchestrator._dirty_inputs`) says in its docstring that HEAD "is blind to uncommitted
+        (`setup_phase.py::_dirty_inputs`) says in its docstring that HEAD "is blind to uncommitted
         work". That is fine for its job — detecting that the operator's repo MOVED between a run's
         start and a resume — and it is not fine for this one.
 

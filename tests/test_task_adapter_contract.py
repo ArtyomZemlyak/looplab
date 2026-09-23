@@ -42,7 +42,7 @@ _REQUIRED = {"id", "goal", "direction", "build_roles"}
 # Plain DATA FIELDS of the composable task model (not optional behaviour hooks): probed by the
 # lessons fingerprinting with defaults for legacy snapshots — legitimate reads, not hook seams.
 #
-# `eval` joined them on 2026-09-04 with `orchestrator.py::_task_declared_env`, and it belongs here
+# `eval` joined them on 2026-09-04 with `setup_phase.py::_task_declared_env`, and it belongs here
 # rather than in `TASK_OPTIONAL_HOOKS` for that classification's own reason: it is a SECTION of the
 # task model (`RepoTask.eval` -> `EvalSpec`), not behaviour the engine calls. It is duck-typed only
 # because not every task model has one, which is the same reason `kind`/`metric` are read this way.

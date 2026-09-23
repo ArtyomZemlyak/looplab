@@ -428,6 +428,8 @@ _LAYOUT = {
     "width_settling": "engine",
     # The run-start pins and the re-entry checks that read them back (ENG1-04 step 2).
     "reentry": "engine",
+    # The run's one-time setup phase: `run_started`, provenance, the leakage stop (ENG1-04 step 3).
+    "setup_phase": "engine",
     "tui": "serve",
     "tui_api": "serve",
     "tui_format": "serve",

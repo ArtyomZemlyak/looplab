@@ -36,9 +36,6 @@ looplab/engine/novelty.py::NoveltyGateMixin._propose_batch#1
 looplab/engine/orchestrator.py::Engine.__init__#0
 looplab/engine/orchestrator.py::Engine.__init__#4
 looplab/engine/orchestrator.py::Engine._create_node_scoped#0
-looplab/engine/orchestrator.py::Engine._dirty_inputs._diff_digest#1
-looplab/engine/orchestrator.py::Engine._dirty_inputs._diff_digest#2
-looplab/engine/orchestrator.py::Engine._dirty_inputs._diff_digest#3
 looplab/engine/proposal_cues.py::ProposalCuesMixin._cue_cross_run_advisory#0
 looplab/engine/proposal_cues.py::ProposalCuesMixin._set_complexity_hint#0
 looplab/engine/proposal_cues.py::ProposalCuesMixin._set_complexity_hint#1
@@ -47,6 +44,9 @@ looplab/engine/proposal_cues.py::ProposalCuesMixin._stamp_gpu_budget_hint#0
 looplab/engine/proposal_cues.py::ProposalCuesMixin._stamp_gpu_budget_hint#1
 looplab/engine/proposal_cues.py::ProposalCuesMixin._stamp_novelty_hint#0
 looplab/engine/proposal_cues.py::ProposalCuesMixin._stamp_time_budget_hint#0
+looplab/engine/setup_phase.py::SetupPhaseMixin._dirty_inputs._diff_digest#1
+looplab/engine/setup_phase.py::SetupPhaseMixin._dirty_inputs._diff_digest#2
+looplab/engine/setup_phase.py::SetupPhaseMixin._dirty_inputs._diff_digest#3
 looplab/engine/verifier_tiebreak.py::VerifierTiebreakMixin._maybe_verify_ties#0
 looplab/events/eventstore.py::EventStore.read_all#0
 looplab/events/mlflow_export.py::available#0

@@ -33,8 +33,8 @@ not a pin. `_ack_commands` runs on every loop turn, not only at re-entry. `_reco
 closes the build-reservation ledger, and the inject lane and the CLI's fatal-error recovery run it too.
 The STARTUP resolvers (`_resolve_llm_parallel`, `_resolve_speculation_depth`) stay beside
 `Engine.__init__`, their only caller: they resolve the AUTO sentinels this module then pins or adopts.
-`_setup_phase`, which appends the `run_started` these values ride in, is the setup cluster (ENG1-04
-step 3).
+`_setup_phase`, which appends the `run_started` these values ride in, is `setup_phase.py`'s
+(`SetupPhaseMixin`, ENG1-04 step 3): it writes the row, and this module decides what the row pins.
 
 The bodies are byte-for-byte what `orchestrator.py` held (moved by AST line range and asserted
 verbatim), and in a mixin `self` IS the Engine, so no call site changed. The observable differences are

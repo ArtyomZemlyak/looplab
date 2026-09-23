@@ -24,7 +24,9 @@ import types
 
 import pytest
 
-from looplab.engine.orchestrator import _task_declared_env
+# The predicate lives beside the one phase that asks it, `_setup_phase`, in `engine/setup_phase.py`
+# since review 2026-09-22 ENG1-04 step 3 (it was `engine/orchestrator.py`'s, which keeps no copy).
+from looplab.engine.setup_phase import _task_declared_env
 
 
 def _task(env):
@@ -114,7 +116,7 @@ def test_it_is_a_notice_and_refuses_nothing():
     """Nothing raises, nothing exits, nothing is skipped — the run that trips this is CORRECT."""
     import inspect
 
-    from looplab.engine import orchestrator
+    from looplab.engine import setup_phase
     src = inspect.getsource(_task_declared_env)
     assert "raise" not in src
-    assert "sys.exit" not in inspect.getsource(orchestrator._task_declared_env)
+    assert "sys.exit" not in inspect.getsource(setup_phase._task_declared_env)

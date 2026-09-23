@@ -20,6 +20,7 @@ import pytest
 
 from looplab.engine.orchestrator import Engine
 from looplab.engine.reentry import ReentryMixin
+from looplab.engine.setup_phase import SetupPhaseMixin
 from looplab.engine.width_settling import WidthSettlingMixin
 
 # name -> why a class earlier in `Engine.__mro__` deliberately re-defines a later class's member.
@@ -33,6 +34,11 @@ WIDTH_SETTLING_MEMBERS = ("_proposal_footprints", "_settle_proposal_width",
 REENTRY_MEMBERS = ("_run_start_pinned_values", "_run_start_settled_widths", "_repin_declared_env",
                    "_repin_settled_widths", "_recorded_settled_width",
                    "_require_pinned_speculation_receipt", "_reentry_repin")
+
+# The run's one-time setup phase, moved in ENG1-04 step 3 — and the module-level names only its code
+# reads, which moved WITH it (a function reads its globals from the module that defines IT).
+SETUP_PHASE_MEMBERS = ("_setup_phase", "_setup_manifest", "_env_fingerprint", "_dirty_inputs")
+SETUP_PHASE_MODULE_NAMES = ("_DIFF_DIGEST_CAP", "_DIRTY_STATUS_TIMEOUT_S", "_task_declared_env")
 
 
 def _homes(cls) -> dict[str, list[str]]:
@@ -95,6 +101,32 @@ def test_a_refusal_the_mixin_raises_is_caught_under_the_spelling_the_cli_imports
     for name in ("RunStartPinError", "SpeculationAuthorizationError", "SettledWidthPinError"):
         assert getattr(orchestrator, name) is getattr(reentry, name), (
             f"orchestrator.{name} is not the class `reentry.py` raises — a stale copy shadows it")
+
+
+@pytest.mark.parametrize("name", SETUP_PHASE_MEMBERS)
+def test_the_setup_phase_resolves_to_its_mixin(name):
+    assert SetupPhaseMixin in Engine.__mro__
+    assert name not in vars(Engine), f"a copy of {name} in the Engine body shadows the mixin's"
+    assert inspect.getattr_static(Engine, name) is vars(SetupPhaseMixin)[name]
+
+
+@pytest.mark.parametrize("name", SETUP_PHASE_MODULE_NAMES)
+def test_a_name_the_setup_phase_reads_has_no_second_spelling_on_the_orchestrator(name):
+    """The move's one way to narrow a test's patch SILENTLY. `_dirty_inputs` reads `_DIFF_DIGEST_CAP`
+    from its own module's globals, so `tests/test_setup_completion.py` patches `setup_phase` — and that
+    test is the driven half: a cap that does not reach the reader leaves a 200 KB diff hashed whole and
+    its `endswith("~")` red. What it cannot see is a SECOND spelling: a "back-compat" copy or re-export
+    on `orchestrator` makes `monkeypatch.setattr(orchestrator, name, …)` succeed while reaching
+    nothing, so a test written against the old spelling passes over an unexercised branch. With no
+    copy that patch is an AttributeError, which is the property pinned here for all three names."""
+    from looplab.engine import orchestrator, setup_phase
+
+    assert hasattr(setup_phase, name), f"{name} left `setup_phase.py` — re-point this guard"
+    assert not hasattr(orchestrator, name), (
+        f"orchestrator.{name} exists again: patching that spelling would reach nothing, because the "
+        "code that reads it lives in `setup_phase.py`")
+    assert vars(SetupPhaseMixin)["_dirty_inputs"].__globals__ is vars(setup_phase), (
+        "the reader's globals are not `setup_phase`'s, so patching `setup_phase` would not reach it")
 
 
 def test_the_census_sees_a_copy_left_behind():

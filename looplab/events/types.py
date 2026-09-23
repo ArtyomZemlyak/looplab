@@ -435,7 +435,7 @@ EV_CONCEPT_LENS_FAILED = "concept_lens_failed"        # retry-safe pre-provider 
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
 # The SETUP phase's `setup_started`/`setup_step` pair exists because the pre-node work "is otherwise
-# silent between run_started and the first node" (orchestrator.py's own comment at the append site).
+# silent between run_started and the first node" (setup_phase.py's own comment at the append site).
 # Every other multi-minute stretch of a run had the same hole and no such pair, so an operator watching
 # a live run saw a frozen panel for the whole of it. `phase_progress` is that same idea generalized
 # ONCE, rather than a new event type per silent stretch: a beacon a long operation emits at each of its
