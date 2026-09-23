@@ -3365,6 +3365,11 @@ def test_the_card_build_span_names_its_request_and_the_node_names_that_trace(tmp
     _start(engine)
     _add_ready_draft(engine)
     node_id = _commit_speculative_node(engine)
+    # Spans export ASYNCHRONOUSLY (`core/tracing.py::AsyncJsonlSpanExporter`): settle before reading,
+    # as `test_paid_calls_are_spanned.py` does. Without it the read raced the exporter's worker and,
+    # on a loaded box, found `card_build` written and `materialize_node` not yet (829 passed, this one
+    # red, then green alone — the file, not the engine, was behind).
+    assert engine.tracer.force_flush(timeout_millis=5_000)
 
     spans_path = Path(tmp_path / "claim") / "spans.jsonl"
     rows = [json.loads(line) for line in
