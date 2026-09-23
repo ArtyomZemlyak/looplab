@@ -79,6 +79,7 @@ def in_house_repo_developer(task: TaskAdapter, settings, client, *, param_search
             or not task.repo_spec().get("editables")):
         return None
     from looplab.adapters.repo_task import LLMRepoDeveloper
+    from looplab.adapters.repo_developer import phase_context_enabled
     from looplab.tools.dev_commands import DeveloperCommandRuntime
     from looplab.agents.agent import loop_opts_from_settings as _loop_opts
     return LLMRepoDeveloper(  # C4: plan decomposition + hard per-session backstop
@@ -101,7 +102,8 @@ def in_house_repo_developer(task: TaskAdapter, settings, client, *, param_search
         # Snapshot the eval trust tier here; the role/tool never reads live Settings.
         command_runtime=DeveloperCommandRuntime.from_settings(settings),
         evidence_envelope=envelope_enabled(settings),   # TAT-02: every phase's tool results fenced
-        prompt_truths=developer_prompt_truths_enabled(settings))   # Q-1: its prompts say what holds
+        prompt_truths=developer_prompt_truths_enabled(settings),   # Q-1: its prompts say what holds
+        phase_context=phase_context_enabled(settings))  # Q-2: plan/steps get the single session's context
 
 
 def external_cli_developer(task: TaskAdapter, settings, developer, *, param_search: bool,

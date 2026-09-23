@@ -1183,6 +1183,13 @@
           "help": "Keep the stage-pipeline block in the Developer's system prompt — ~5,000 characters about GPU training, checkpoints, shards and train.py, plus how to declare a multi-stage eval. Leave ON for repo tasks with a real pipeline; it is what teaches declare_stages. Turn OFF for tasks whose eval declares a SINGLE stage: measured on AlgoTune 2026-08-28, declare_stages was called 0 times across six runs while the block cost 4.8–6.0% of each $1 run. ON reproduces the historical prompt byte for byte, which a resumed run needs."
         },
         {
+          "key": "developer_phase_context",
+          "label": "Decomposed build: context in every phase",
+          "type": "bool",
+          "default": true,
+          "help": "When the repo Developer splits a build into a plan and per-step sessions, each of them is handed what the single-session build always had: the wall-clock budget, the GPU fence and count, an ensemble's other lineages — and the plan also the pipeline the stages phase declared and the files the node starts from; each step sees the whole plan with itself marked, and the read-only stages phase is no longer told it writes files. Off = the pre-2026-09-23 prompts, byte for byte."
+        },
+        {
           "key": "established_context",
           "label": "Carry earlier phases' reads into each new phase",
           "type": "bool",

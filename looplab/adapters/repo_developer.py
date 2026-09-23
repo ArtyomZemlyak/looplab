@@ -508,6 +508,29 @@ _REPO_DEV_STEP_FEEDBACK_BLOCK = (
 _REPO_DEV_BASELINE_LINE = (
     "\nMEASURED STARTING POINT: {note}. That is the number your edits have to beat; a change that "
     "does not move it is not an improvement.\n")
+# The working set, for the PLAN phase (`Settings.developer_phase_context`). Every step session is
+# told which files its workspace holds ("Files CURRENTLY in the workspace …"); the planner, which
+# decides what those steps change, was not — and on an improve the system prompt's REPOSITORY SOURCE
+# preview is the repo AS SEEDED (`_repo_context` reads the editable source on disk), not the parent
+# solution the node actually starts from. Its own sentence rather than the step's, because the
+# step's names "whatever earlier steps wrote" and no step has run yet.
+_REPO_DEV_PLAN_WORKING_SET = (
+    "\nFiles CURRENTLY in this node's working set (what it starts from — on an improve, the parent "
+    "solution; read_file returns THESE, while the REPOSITORY SOURCE preview in your instructions "
+    "shows the repository as seeded): {files}")
+
+
+def phase_context_enabled(settings) -> bool:
+    """`Settings.developer_phase_context` as the constructor argument `LLMRepoDeveloper` takes.
+
+    ONE reader (CLAUDE.md "Prompt strings are contracts"), beside the class whose prompts it
+    decides. Absent means OFF — the historical per-phase prompts byte for byte — so a duck-typed
+    settings stub reads what the constructor default, the class default and a pre-field snapshot
+    (through its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row) all read.
+    """
+    return bool(getattr(settings, "developer_phase_context", False))
+
+
 _REPO_DEV_REPAIR_BLOCK = (
     "\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) with "
     "MINIMAL edit_file hunks on the offending file(s) (re-write a file only if it is beyond patching). "
@@ -776,6 +799,9 @@ class LLMRepoDeveloper:
     # `Settings.prompt_truths_developer` (review 2026-09-22, Q-1), a CLASS default for the same
     # reason: OFF renders every phase's historical bytes.
     _prompt_truths = False
+    # The decomposed build's per-phase context (`Settings.developer_phase_context`; review
+    # 2026-09-23, Q-2). A CLASS default too, so a `__new__` instance renders the historical phases.
+    _phase_context = False
 
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
@@ -786,7 +812,8 @@ class LLMRepoDeveloper:
                  probe: bool = False, probe_timeout_s: float = 60.0,
                  probe_confine: bool = True, probe_max_calls: int = 0, command_runtime=None,
                  step_feedback_command: str = "", established=None,
-                 evidence_envelope: bool = False, prompt_truths: bool = False):
+                 evidence_envelope: bool = False, prompt_truths: bool = False,
+                 phase_context: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
@@ -798,6 +825,14 @@ class LLMRepoDeveloper:
         # (`_reject_kwargs`). OFF at the constructor because it changes prompts (CLAUDE.md);
         # `agents/developer_backends.py` passes `Settings.prompt_truths_developer`.
         self._prompt_truths = bool(prompt_truths)
+        # WHAT EACH PHASE OF THE DECOMPOSED BUILD IS HANDED (review 2026-09-23, Q-2). ON, the plan
+        # and every plan step receive the decision context the single-session implement always
+        # carried — the wall-clock budget, the GPU fence and count, an ensemble's co-parents, and
+        # (the plan) the declared pipeline and the working set — and the read-only STAGES phase is
+        # told it cannot write, as the plan phase already is. See `_run_fresh`. OFF at the
+        # constructor because it changes prompts; `agents/developer_backends.py` passes
+        # `phase_context_enabled(settings)`.
+        self._phase_context = bool(phase_context)
         # THE FENCE ON WHAT EVERY PHASE'S TOOLS RETURN (`core/evidence.py`; review 2026-09-22,
         # TAT-02): the task repository and this node's staged files through the scouts, the
         # environment, the operator's dev commands run over candidate code, the probe — text the
@@ -1260,10 +1295,15 @@ class LLMRepoDeveloper:
                             "required": ["title"]}}},
                         ["steps"])
 
-    def _propose_plan(self, system: str, idea: Idea, write=None, baseline_note: str = "") -> list:
+    def _propose_plan(self, system: str, idea: Idea, write=None, baseline_note: str = "", *,
+                      extra: str = "") -> list:
         """Plan phase: a READ-ONLY stage — the developer inspects the real code/experiments (it CANNOT
         write here), and its only exit is `propose_plan` (the ordered atomic plan). Returns a list of
-        {title, detail}; [] on empty/failure so the caller falls back to one session."""
+        {title, detail}; [] on empty/failure so the caller falls back to one session.
+
+        `extra` is the phase context `_run_fresh` hands it under `developer_phase_context` (the
+        declared pipeline, the working set, the build's decision context), appended just before the
+        established block; "" (OFF, and every direct caller) is the historical user turn."""
         from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         # §153 measured what the unwired version cost: `write_file` was called 51 times from this
@@ -1328,6 +1368,7 @@ class LLMRepoDeveloper:
         # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
         # one exists the honest state is no block rather than an empty string and a false comment.
         read_only = CompositeTools([EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
+        plan_user += extra
         plan_user += self._established_block()
         messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
         try:
@@ -1426,12 +1467,13 @@ class LLMRepoDeveloper:
 
     def _run_step(self, idea: Idea, step: dict, idx: int, total: int, write, system: str,
                   stage_note: str = "", baseline_note: str = "", feedback: str = "",
-                  validate=None) -> str:
+                  validate=None, *, extra: str = "") -> str:
         """Execute ONE atomic plan step in a FRESH bounded session, on top of the files accumulated so
         far (carried in `write.files`; syntax is validated per write by the write tool). A step's own
         error never aborts the plan — later steps + the eval still run on whatever got written.
         `stage_note` restates the node's ACTUAL declared pipeline (or its absence) so a step session
-        never assumes a train stage the stages phase didn't produce."""
+        never assumes a train stage the stages phase didn't produce. `extra` is the build's decision
+        context under `developer_phase_context` (see `_run_fresh`); "" is the historical turn."""
         from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         done_so_far = ", ".join(write.files) or "(none yet)"
@@ -1455,6 +1497,7 @@ class LLMRepoDeveloper:
             step_user += _REPO_DEV_STEP_FEEDBACK_BLOCK.format(
                 name=self._step_feedback_command_name() or "the operator's evaluation",
                 output=feedback)
+        step_user += extra
         step_user += self._established_block()
         messages = [{"role": "system", "content": system}, {"role": "user", "content": step_user}]
         try:
@@ -2193,6 +2236,14 @@ class LLMRepoDeveloper:
         from looplab.tools.env_inspect import EnvInspectTools
         from looplab.runtime.command_eval import validate_stages
         import json as _json
+        # THIS PHASE IS READ-ONLY TOO, and its system prompt said the opposite. `_propose_plan` has
+        # handed its model `read_only_intro(system)` since doc 56 §153 measured the cost of the
+        # promise (51 `write_file` calls from `plan`, all 51 errors); the toolset below has no writer
+        # either, so the stages phase was the one read-only phase still told "You improve … by
+        # WRITING code with the write_file and edit_file tools". Under `developer_phase_context`
+        # (review 2026-09-23, Q-2) it gets the same truth; OFF keeps the historical system prompt.
+        if getattr(self, "_phase_context", False):
+            system = read_only_intro(system)
         ev, has_cmd = self._cmd_context()
         reserved = ("score",)   # `score` is ALWAYS the engine-appended final stage — consume-side reserves it too
         # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo.
@@ -2476,7 +2527,8 @@ class LLMRepoDeveloper:
 
             if is_fresh_repo:
                 self._run_fresh(idea, write, system, messages, tools, stage_note=stage_note,
-                                base_note=base_note, validate_build=_validate_build)
+                                base_note=base_note, validate_build=_validate_build,
+                                co_parents=co_parents, base=base)
             else:
                 # repair / toy single session — terminal, so no summary (and repair isn't in a scope
                 # anyway when it runs inline during eval; the debug-operator repair gets an empty ledger).
@@ -2690,8 +2742,61 @@ class LLMRepoDeveloper:
         return self._stage_note(operator_stages, declared, carried_over,
                                 manifest_protected)
 
+    def _phase_extras(self, idea: Idea, write, *, stage_note: str, co_parents=(),
+                      base: Optional[dict] = None) -> tuple:
+        """`(plan_extra, step_extra)`: what the decomposed build's PLAN and each plan STEP are
+        handed beyond their historical user turns — `("", "")` unless `developer_phase_context`.
+
+        THE DECOMPOSITION DROPPED WHAT THE SINGLE SESSION CARRIED (review 2026-09-23, Q-2). `_run`'s
+        `user` — the single-session implement — carries the wall-clock budget note, the GPU fence
+        and count, and an ensemble's co-parent block; on the default path (`developer_plan_decompose`
+        and a plan of >= `developer_plan_min_steps` steps) that message is never sent, and the plan
+        and step sessions that replace it carried none of the three. Rendered and metered through
+        the real phases: on the decomposed path an ensemble build and an improve build sent
+        byte-identical prompts (the co-parent reached no request), and the fence note — written for
+        a node whose own training launcher overwrote `CUDA_VISIBLE_DEVICES` — and the budget note —
+        written for a 48-hour `train` on a 6-hour budget — reached only the stages phase, never the
+        sessions that write the launcher and the loop. The planner was also never told the pipeline
+        the stages phase had just declared (every step is), nor which files the working set holds.
+
+        The SAME renderers the single session uses (`_time_budget_note`, `_gpu_footprint_note`,
+        `co_parent_block` over the same `base`), so the two paths cannot come to state different
+        budgets or different lineages. The co-parent block goes to EVERY step and not only the plan
+        because a step cannot read it any other way: the scouts answer from this node's overlay and
+        the seeded repo, and a co-parent's files are in neither.
+        """
+        if not getattr(self, "_phase_context", False):
+            return "", ""
+        decision = (self._time_budget_note() + self._gpu_footprint_note(idea)
+                    + (co_parent_block(co_parents, base or {}) if co_parents else ""))
+        working = _REPO_DEV_PLAN_WORKING_SET.format(files=", ".join(write.files) or "(none yet)")
+        return stage_note + working + decision, decision
+
+    def _plan_outline(self, steps: list, idx: int) -> str:
+        """The whole plan as a STEP session reads it — every title, this one marked — or "" when
+        `developer_phase_context` is off.
+
+        A step is told "Do the minimum for this step; later steps handle the rest" and was shown
+        only its OWN title and detail, so "the rest" named nothing it could see. The symptoms are on
+        the record in `plan_step_attribution`'s docstring — on the 20-task `runs-B` corpus ALL 46
+        plan-driven builds had a step that wrote nothing or a file finished by a LATER step than the
+        plan assigns it (46 no-op steps of 113, 22 rewrites across 18 builds) — and a step that
+        cannot see the plan cannot tell a later step's work from its own, in either direction.
+        Titles only (the detail of THIS step is already above), each cut where the durable
+        `plan_steps` row cuts it, so the outline costs a few hundred characters per session.
+        """
+        if not getattr(self, "_phase_context", False) or not steps:
+            return ""
+        rows = []
+        for n, step in enumerate(steps, 1):
+            title = str((step or {}).get("title") or (step or {}).get("detail") or "")[:160]
+            rows.append(f"  {n}. {title}" + ("   <- THIS STEP" if n == idx else ""))
+        return ("\n\nTHE WHOLE PLAN (from your PLAN phase; one session per step, in this order — "
+                "earlier steps have run, later ones will):\n" + "\n".join(rows))
+
     def _run_fresh(self, idea: Idea, write, system: str, messages: list, tools, *,
-                   stage_note: str, base_note: str, validate_build) -> None:
+                   stage_note: str, base_note: str, validate_build, co_parents=(),
+                   base: Optional[dict] = None) -> None:
         """PLAN + IMPLEMENT for a fresh repo build — the second half of the three-phase path.
 
         Extracted from `_run` (doc 25 RA-07), which recommended exactly this cut. The artefact
@@ -2701,16 +2806,23 @@ class LLMRepoDeveloper:
         second construction here could silently drift from it, `stage_note` because every plan
         step must be told the SAME pipeline the user message asserted, and `validate_build`
         because the one-bounce budget is shared with the repair rule and cannot be per-phase.
+
+        `co_parents`/`base` are the ensemble's other lineages and the primary parent's files, for
+        the one block of the single session's user turn that is theirs (`co_parent_block`); only
+        `developer_phase_context` reads them here (see `_phase_extras`).
         """
         from looplab.agents.agent import run_phase
         from looplab.core import tracing
+        plan_extra, step_extra = self._phase_extras(idea, write, stage_note=stage_note,
+                                                    co_parents=co_parents, base=base)
         # PLAN is the Developer's second sub-phase (its own trace band). IMPLEMENT runs under
         # the orchestrator's "implement" span (so its generations band there, and non-repo
         # developers keep that band unchanged).
         steps = []
         if getattr(self, "_plan_decompose", False):
             with tracing.operation("plan"):
-                steps = self._propose_plan(system, idea, write, baseline_note=base_note)
+                steps = self._propose_plan(system, idea, write, baseline_note=base_note,
+                                           extra=plan_extra)
         if len(steps) >= getattr(self, "_plan_min_steps", 2):
             # A step error deliberately can't abort the plan — later steps and the eval still
             # run on whatever got written. But it must not vanish either: discarded, a later
@@ -2744,7 +2856,8 @@ class LLMRepoDeveloper:
                         baseline_note=base_note, feedback=feedback,
                         # The manifest-vs-script bounce belongs to the LAST step, which is
                         # the one already told to make the entrypoint run end to end.
-                        validate=validate_build if i == len(steps) else None)
+                        validate=validate_build if i == len(steps) else None,
+                        extra=self._plan_outline(steps, i) + step_extra)
                 step_cutoff = str(getattr(self, "last_budget_exhausted", "") or "").strip()
                 # Compare CONTENT, not just presence: `edit_file` patches in place, and a
                 # step that rewrote a file byte-for-byte changed nothing and must not be

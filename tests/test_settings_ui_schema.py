@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 219
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 220
+    # 219 -> 220 on 2026-09-23: `developer_phase_context` (review 2026-09-23, Q-2) -- the
+    # decomposed repo build's plan and step sessions get the context the single session had. A
+    # ROW because it changes a PROMPT and OFF is the historical bytes. Verified by INTERSECTION:
+    # 219 keys common to the previous keyset plus exactly that one, none removed.
     # 218 -> 219 on 2026-09-23: `prompt_truths_developer` (review 2026-09-22, Q-1) -- the
     # Developer's prompts say only what holds (the stage `expect` parts, no empty commands section,
     # no "idea" in a refused manifest's bounce, no fall-back line against the auto-install). A ROW
@@ -418,7 +422,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 253 -> 254 on 2026-09-23: `prompt_truths_developer` (review 2026-09-22, Q-1; a curated row,
     # so BOTH counts move together). An AST scan of `Settings`' annotated assignments against the
     # pre-change tree reports exactly `['prompt_truths_developer']` added and `[]` removed.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 254
+    # 254 -> 255 on 2026-09-23: `developer_phase_context` (review 2026-09-23, Q-2; a curated row,
+    # so BOTH counts move together). An AST scan of `Settings`' annotated assignments against the
+    # pre-change tree reports exactly `['developer_phase_context']` added and `[]` removed.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 255
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

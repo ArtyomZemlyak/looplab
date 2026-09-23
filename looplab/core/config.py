@@ -2589,6 +2589,22 @@ class Settings(BaseSettings):
     # `declare_stages` was called 0 times across six probes while the block cost 4.8-6.0 % of each
     # $1 run -- 5,001 characters of GPU-training advice to a role with one `score` stage.
     developer_stage_guidance: bool = True
+    # THE DECOMPOSED BUILD'S PER-PHASE CONTEXT (review 2026-09-23, Q-2). On the default path
+    # (plan decomposition, a plan of >= `developer_plan_min_steps` steps) the single-session
+    # implement is never sent, and the plan and step sessions that replace it carried none of three
+    # blocks it always had: the wall-clock budget note, the GPU fence and count, an ensemble's
+    # co-parent code and traces — so a decomposed ensemble build sent byte-identical prompts to an
+    # improve (the other lineage reached no request), and the notes written for the session that
+    # writes the launcher and the loop reached only the stages phase. The plan was never told the
+    # pipeline the stages phase declared, nor the working set; each step saw only its own title
+    # while told "later steps handle the rest"; and the read-only STAGES phase was still told it
+    # WRITES with write_file/edit_file (the plan has had `read_only_intro` since doc 56 §153). ON,
+    # each phase gets them (`adapters/repo_developer.py::LLMRepoDeveloper._phase_extras` and
+    # `_plan_outline`). It changes PROMPTS and buys no call, so `false` reproduces every phase BYTE
+    # FOR BYTE (`tests/test_developer_phase_context.py` pins the sha256), the constructor defaults
+    # it OFF, and a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). One
+    # reader: `adapters/repo_developer.py::phase_context_enabled`.
+    developer_phase_context: bool = True
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
@@ -3537,6 +3553,14 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # is told mid-log. (c) is `False`, pointable at every commit before this one;
     # `tests/test_developer_prompt_truths.py` holds that `false` is the historical bytes.
     "prompt_truths_developer": False,
+    # THE DECOMPOSED BUILD'S PER-PHASE CONTEXT, added 2026-09-23 defaulting ON (review 2026-09-22
+    # wave, Q-2). (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, the repo
+    # Developer's plan and step sessions gain the wall-clock, GPU and co-parent blocks (the plan also
+    # the declared pipeline and the working set) and the stages phase's system prompt stops
+    # promising write tools, so a resumed run would change what its Developer is told mid-log.
+    # (c) is `False`, pointable at every commit before this one; `tests/test_developer_phase_context.py`
+    # pins that `false` renders every phase byte for byte.
+    "developer_phase_context": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

@@ -225,7 +225,14 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               calibration replicate: the profile's toy backend builds the task's own roles (no
 #               repo Developer, no dataset brief), re-pinned anyway because the digest binds the
 #               COMPLETE non-variant envelope.
-_EXPECTED_DIGEST = "sha256:0762650041cd609a637597feb5eada5d8878386380f020c220b417efc2c9501f"
+#   2026-09-23  + developer_phase_context (review 2026-09-23, Q-2: the decomposed repo build's plan
+#               and step sessions get the context the single-session implement always had). The
+#               'field set changed too' branch, verified the prescribed way: an AST scan of
+#               `Settings`' annotated assignments against the pre-change tree reports exactly
+#               `['developer_phase_context']` added and `[]` removed. `_EXPECTED_FIELD_COUNT` goes
+#               251 -> 252 and both pins are re-set. INERT for a calibration replicate (the toy
+#               backend builds no repo Developer); re-pinned on the same COMPLETE-envelope rule.
+_EXPECTED_DIGEST = "sha256:01c5bd12f705c82489f9b905086fc11513fb9c0888004767afa8316dbce4972a"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -709,7 +716,8 @@ _EXPECTED_DIGEST = "sha256:0762650041cd609a637597feb5eada5d8878386380f020c220b41
 #   2026-09-23  + propose_brief_fit (Q-3): 248 -> 249; see the digest history above.
 #   2026-09-23  + prompt_truths_judges (review 2026-09-22, Q-1): 249 -> 250.
 #   2026-09-23  + prompt_truths_developer (review 2026-09-22, Q-1): 250 -> 251.
-_EXPECTED_FIELD_COUNT = 251
+#   2026-09-23  + developer_phase_context (review 2026-09-23, Q-2): 251 -> 252.
+_EXPECTED_FIELD_COUNT = 252
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

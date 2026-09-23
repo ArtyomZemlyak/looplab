@@ -107,7 +107,7 @@ def test_neither_module_is_a_god_module_again():
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
     for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 399),
-                     ("agents/developer_backends.py", 196),
+                     ("agents/developer_backends.py", 198),
                      ("adapters/task_schema.py", 231)):
     #
     # 2026-08-29, MERGE with master: master's 530 is KEPT and not raised. The merged file is 529
@@ -200,6 +200,12 @@ def test_neither_module_is_a_god_module_again():
     # `inspect` import it needs, and the reader joining the module-level import, which wraps —
     # 393 -> 398 measured. Composition again, not a second domain; both raises pay for exactly the
     # lines spent and keep one line of headroom.
+    #
+    # 196 -> 198, 2026-09-23, review 2026-09-23 Q-2 (the decomposed repo build's per-phase
+    # context): the TAT-02 shape once more in the module named for the backend it wires — ONE
+    # keyword on the `LLMRepoDeveloper` construction, `phase_context=phase_context_enabled(settings)`,
+    # and the function-local import of that reader from `adapters/repo_developer.py`. 195 -> 197
+    # measured; the raise pays for exactly those two lines and keeps one line of headroom.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 
