@@ -50,7 +50,9 @@ such call site, fenced or exempt with its reason, under a two-way guard
 Text the model did not write can also reach a prompt WITHOUT being a tool result, and those sites
 take the same switch and the same `fence_untrusted` (review 2026-09-22, doc 66 §6.4): the pages the
 ALREADY-ESTABLISHED block carries into the next phase's task message
-(`agents/established.py::EstablishedContext`, switched on by `established_context_from_settings`).
+(`agents/established.py::EstablishedContext`, switched on by `established_context_from_settings`),
+and a remote MCP server's self-description in the tool schema the assistant is offered
+(`tools/mcp_tools.py::model_facing_mcp_spec`, doc 50 TO-06, switched on by `build_tools`).
 The Boss and the assistant predate the flag and are unconditional; nothing about them moved —
 `serve/llm_context.py` re-exports the builder and the label under the names its tests import, and
 `agents/tool_loop.py` re-exports the fence, so both spellings name the SAME objects.
@@ -418,7 +420,9 @@ EVIDENCE_CONSUMERS: dict[str, EvidenceConsumer] = {
                          " in cli/run_cmds.py::run.",
                          _T + "test_the_cli_genesis_author_fences_the_files_it_scouts"),
     "serve/assistant.py::run_turn -> drive_tool_loop":
-        EvidenceConsumer(FENCED, "The assistant: run logs, traces, files, the web." + _ALWAYS,
+        EvidenceConsumer(FENCED, "The assistant: run logs, traces, files, the web, and every MCP"
+                         " tool — the only loop MCP tools reach (tests/test_mcp_evidence_fence.py"
+                         " holds that)." + _ALWAYS,
                          "tests/test_tool_results_are_fenced.py::test_the_assistant_passes_it"),
     "serve/scope_report.py::generate_scope_report -> drive_tool_loop":
         EvidenceConsumer(FENCED, "The cross-run scope report: run goals, labels, drilled nodes."

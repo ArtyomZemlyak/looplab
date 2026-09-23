@@ -1008,7 +1008,12 @@ arrive unfenced unnoticed. `tests/test_evidence_consumer_fences.py` drives the c
 first pages of files an earlier phase read into the next phase's task message; with the envelope on,
 each carried page rides inside the fence (the header and the index rows stay outside it), so a file
 that forges `END UNTRUSTED_RUN_EVIDENCE` cannot close evidence it never opened. The store takes the
-switch from the run's Settings, so a pre-field snapshot keeps its historical bytes.
+switch from the run's Settings, so a pre-field snapshot keeps its historical bytes. A remote **MCP**
+server's self-description is prompt text too: the assistant (the only loop MCP tools reach, and one
+that fences every tool RESULT unconditionally) is offered each MCP tool's description with its
+invisible characters (Unicode format and control characters, newline and tab kept) removed and the
+rest inside the fence, and each parameter's description and title with its invisible characters
+removed — under the server's `evidence_envelope`; off, the server's own schema byte for byte.
 
 ## Knowledge, skills & prompts
 

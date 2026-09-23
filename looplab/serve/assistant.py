@@ -2062,6 +2062,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         # set by default. The resolved config is handed to `cached()` so the connect-once map is
         # keyed on THIS party's configuration and never re-reads a different one (doc 27).
         try:
+            from looplab.core.evidence import envelope_enabled
             from looplab.serve.principal import mcp_config_scope
             from looplab.tools.mcp_tools import McpTools, GatedMcpTools, principal_mcp_config
             scope, _mcp_why = mcp_config_scope(principal)
@@ -2072,7 +2073,14 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
             if cfg:
                 m = McpTools.cached(cfg)  # connect ONCE per configuration, not per turn
                 if m.specs():
-                    providers.append(GatedMcpTools(m, mode=mode, approver=approver))
+                    # A remote server's self-description is prompt text this toolset puts in front
+                    # of the model on every turn; under the evidence envelope (the server's Settings,
+                    # like every other assistant toggle) the model is offered it fenced and without
+                    # invisible characters (review 2026-09-22, doc 50 TO-06). Its RESULTS need no
+                    # switch here: `run_turn` fences every tool result unconditionally.
+                    providers.append(GatedMcpTools(
+                        m, mode=mode, approver=approver,
+                        evidence_envelope=envelope_enabled(settings)))
         except Exception:  # noqa: BLE001 - MCP is optional; never break the toolset
             pass
     return CompositeTools(providers)
