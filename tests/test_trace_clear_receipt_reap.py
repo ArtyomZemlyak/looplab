@@ -5,15 +5,16 @@ sidecars, reset receipts and lifecycle locks — and not the fifth. A trace clea
 `.trace-clear.<run key>.<tc_…>.json` beside the run and nothing ever removed one.
 
 That is worse than clutter, and the reason is in `trace_clear.py` itself: every NEW clear of a run
-globs its siblings and strict-loads each, raising 503 on any that will not parse. One malformed
-leftover therefore refuses every future clear of that run, permanently — and the directory it
+globs its siblings and strict-loads each. It raised 503 on any that would not parse, so one
+malformed leftover refused every future clear of that run, permanently (since review 2026-09-22,
+SRV1-11, the clear skips such a sibling and names it in its answer) — and the directory it
 accumulates in is the one the run list stats on every poll.
 
 The refusals are the interesting half, and they are the deletion receipt's refusals: `pending` is
 live state a retry resumes from, `superseded` is the only record that an operator's clear was
 overtaken, a succeeded receipt still answers a retry idempotently until it goes cold, and an
-UNREADABLE one is kept and said so — it is precisely the file breaking this run's clears, so the
-sweep must not quietly make the symptom disappear.
+UNREADABLE one is kept and said so — it is the one record of an operation that went wrong, which
+every clear of the run now names as skipped, so the sweep must not quietly make it disappear.
 """
 from __future__ import annotations
 
@@ -81,9 +82,9 @@ def test_a_succeeded_receipt_still_answers_a_retry_while_it_is_warm(tmp_path):
 
 
 def test_an_unreadable_receipt_is_kept_and_named(tmp_path):
-    """THE ONE THIS EXISTS FOR. A malformed sibling 503s every future clear of the run, so it must
-    be findable — reaping it would make the symptom vanish and leave the operator with a clear that
-    started working again for no stated reason.
+    """THE ONE THIS EXISTS FOR. A malformed sibling is named as skipped by every future clear of the
+    run (it 503'd them all until review 2026-09-22, SRV1-11), so it must be findable — reaping it
+    would erase the only record of the operation that went wrong.
 
     MUTATION: remove it as junk -> the sweep silently repairs a fault nobody diagnosed.
     """

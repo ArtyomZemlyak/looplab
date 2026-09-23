@@ -215,25 +215,26 @@ def _plan_trace_clear_receipt(path: Path, now: float, grace_s: float) -> dict[st
 
     A trace clear publishes `.trace-clear.<run key>.<tc_…>.json` beside the run — in the directory
     the run list stats on every poll — and nothing ever removed one. Worse than clutter: every NEW
-    clear of that run globs its siblings and strict-loads each, raising 503 on any that will not
-    parse, so ONE malformed leftover refuses every future clear of that run forever.
+    clear of that run globs its siblings and strict-loads each. That scan raised 503 on any that
+    would not parse, so ONE malformed leftover refused every future clear of the run; since review
+    2026-09-22, SRV1-11, it skips such a sibling and names it in the clear's answer instead.
 
     Same shape as the deletion and reset receipts, and the refusals are the same too. `pending` is
     live state a retry resumes from; `superseded` is the record that an operator's clear was
     overtaken and is the only place that fact survives. Only a SUCCEEDED, cold receipt goes — and a
     succeeded one still answers a retry idempotently until it does, which is what the grace buys.
 
-    An unreadable receipt is KEPT and said so, never removed to tidy the directory: it is exactly
-    the file that is breaking this run's clears, so an operator needs to find it rather than have
-    the sweep quietly make the symptom go away.
+    An unreadable receipt is KEPT and said so, never removed to tidy the directory: it is the one
+    record of an operation that went wrong — every clear of this run steps over it and names it —
+    so an operator needs to find it rather than have the sweep quietly make the evidence go away.
     """
     cold, age = _age_ok(path, now, grace_s)
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError) as exc:
         return _entry(path, "trace_clear_receipt", False,
-                      f"unreadable receipt ({type(exc).__name__}); it is what breaks this run's "
-                      "clears, so it is left for inspection", age)
+                      f"unreadable receipt ({type(exc).__name__}); every clear of this run skips "
+                      "it and names it, so it is left for inspection", age)
     if not isinstance(value, dict):
         return _entry(path, "trace_clear_receipt", False, "receipt is not an object", age)
     status = value.get("status")

@@ -887,3 +887,63 @@ def test_a_dead_stagings_temporary_is_reclaimed_before_the_next_one(tmp_path):
             "the sweep must not eat the staging it is about to publish")
     finally:
         prepared.cleanup()
+
+
+# --------------------------------------------------------------------------- a broken SIBLING receipt
+
+@pytest.mark.parametrize("body", [b"{not json", b"[]\n", b'{"version": 2, "status": "pending"}'])
+def test_a_malformed_sibling_receipt_is_skipped_and_reported_not_a_503_for_every_clear(
+        tmp_path, body):
+    """Review 2026-09-22, SRV1-11. The pending-lifecycle scan strict-loaded EVERY sibling receipt of
+    the run and raised on the first one it could not read, so one malformed leftover — another
+    operation's, which this clear never reads or writes — refused every future clear of the run
+    with a 503 that named no file. The scan asks one question ("is a readable PENDING receipt
+    resolving this exact lifecycle?"); a sibling that cannot be read cannot be that receipt, and
+    its own operation's retries still meet the loader's refusal. So it is skipped, logged, and
+    NAMED in the answer — and left in place for inspection (the reaper keeps it too).
+
+    MUTATION: re-raise out of the scan's `except HTTPException` -> 503 trace_clear_receipt_unavailable."""
+    srv, rd = _run(tmp_path)
+    sibling = tc._trace_clear_receipt_path(srv, rd, "tc_" + "e" * 32)
+    sibling.write_bytes(body)
+
+    answer = tc.durable_clear_node_trace(srv, "demo", 0, {
+        "expected_generation": srv.commands.generation,
+        "expected_trace_revision": tc.trace_file_revision(rd / "spans.jsonl"),
+        "node_generation": 0, "operation_id": "tc_" + "f" * 32,
+    }, known_engine_liveness=lambda rd_arg, operation: False)
+
+    assert answer["status"] == "succeeded" and answer["removed"] == 1, answer
+    assert answer["skipped_receipts"] == [{
+        "operation_id": "tc_" + "e" * 32, "code": "trace_clear_receipt_unavailable"}]
+    assert sibling.read_bytes() == body, "the broken sibling is evidence, not ours to rewrite"
+    # The clear's OWN receipt is still held to the strict loader: its identity is what it rests on.
+    own = json.loads(tc._trace_clear_receipt_path(srv, rd, "tc_" + "f" * 32).read_text())
+    assert own["status"] == "succeeded"
+
+
+def test_a_clean_run_reports_no_skipped_receipts(tmp_path):
+    """The key is the signal: absent when nothing was skipped, like every other optional field."""
+    srv, rd = _run(tmp_path)
+    answer = tc.durable_clear_node_trace(srv, "demo", 0, {
+        "expected_generation": srv.commands.generation,
+        "expected_trace_revision": tc.trace_file_revision(rd / "spans.jsonl"),
+        "node_generation": 0, "operation_id": "tc_" + "9" * 32,
+    }, known_engine_liveness=lambda rd_arg, operation: False)
+    assert "skipped_receipts" not in answer
+
+
+def test_the_clears_own_malformed_receipt_still_refuses(tmp_path):
+    """Skipping is for SIBLINGS. The requester's own receipt is the record a retry resumes from, so
+    an unreadable one still refuses rather than minting a fresh operation over it."""
+    srv, rd = _run(tmp_path)
+    tc._trace_clear_receipt_path(srv, rd, "tc_" + "4" * 32).write_bytes(b"{not json")
+    with pytest.raises(HTTPException) as exc:
+        tc.durable_clear_node_trace(srv, "demo", 0, {
+            "expected_generation": srv.commands.generation,
+            "expected_trace_revision": tc.trace_file_revision(rd / "spans.jsonl"),
+            "node_generation": 0, "operation_id": "tc_" + "4" * 32,
+        }, known_engine_liveness=lambda rd_arg, operation: False)
+    assert exc.value.status_code == 503
+    assert _detail(exc)["code"] == "trace_clear_receipt_unavailable"
+    assert (rd / "spans.jsonl").read_text(encoding="utf-8") == SPANS

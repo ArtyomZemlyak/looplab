@@ -17,6 +17,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -51,6 +52,7 @@ from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 
 _TRACE_CLEAR_OPERATION_RE = re.compile(r"^tc_[0-9a-f]{32}$")
 _TRACE_CLEAR_RECEIPT_MAX_BYTES = 64 * 1024
+_log = logging.getLogger("looplab.server")
 
 
 def _trace_clear_receipt_lstat(path: Path) -> Optional[os.stat_result]:
@@ -176,22 +178,56 @@ def _load_trace_clear_receipt(path: Path) -> Optional[dict[str, Any]]:
     return value
 
 
+def _sibling_operation_id(name: str, run_key: str) -> Optional[str]:
+    """The `tc_…` id a receipt NAME carries, or None when the name is not one the writer emits."""
+    head = f"{_TRACE_CLEAR_RECEIPT_PREFIX}{run_key}."
+    if not (name.startswith(head) and name.endswith(".json")):
+        return None
+    operation = name[len(head):-len(".json")]
+    return operation if _TRACE_CLEAR_OPERATION_RE.fullmatch(operation) else None
+
+
 def _pending_trace_clear_for_lifecycle(
         srv, rd: Path, *, receipt_path: Path, expected_generation: str,
         expected_trace_revision: str, nid: int,
-        node_generation: int) -> Optional[dict[str, Any]]:
+        node_generation: int,
+        skipped: Optional[list[dict[str, Any]]] = None) -> Optional[dict[str, Any]]:
+    """A readable PENDING sibling receipt resolving this exact lifecycle, or None.
+
+    A SIBLING THIS SCAN CANNOT READ IS SKIPPED AND REPORTED, never this clear's refusal (review
+    2026-09-22, SRV1-11). The scan strict-loaded every sibling and let the first refusal escape,
+    so ONE malformed leftover — another operation's receipt, which this clear never reads or
+    writes — refused every future clear of the run with a 503 naming no file, permanently. The
+    question asked here is only "is a pending receipt already resolving this lifecycle?", and a
+    receipt that will not load cannot be one that resolves anything: its own operation's retries
+    meet the same loader refusal, so it can neither resume nor mutate. What skipping CAN cost is a
+    second operation id over one logical clear whose first attempt left no readable record, and the
+    trace-revision CAS below still refuses a clear over a trace that moved. Every skip is logged
+    and, through `skipped`, NAMED in the successful answer; the file is left where it is for an
+    operator to inspect (`service_reaper.py::_plan_trace_clear_receipt` keeps it too).
+    """
     sequence_path = srv.commands._sequence_path(rd)
     pattern = f"{_TRACE_CLEAR_RECEIPT_PREFIX}{sequence_path.stem}.tc_*.json"
     for path in sequence_path.parent.parent.glob(pattern):
         if path == receipt_path:
             continue
-        # A pre-upgrade run directory may already occupy the now-reserved namespace; it is not a
-        # receipt. Symlinks and other suspicious matching entries still fail closed in the loader.
-        info = _trace_clear_receipt_lstat(path)
-        if (info is not None and stat.S_ISDIR(info.st_mode)
-                and not is_reparse(info)):
+        try:
+            # A pre-upgrade run directory may already occupy the now-reserved namespace; it is
+            # not a receipt.
+            info = _trace_clear_receipt_lstat(path)
+            if (info is not None and stat.S_ISDIR(info.st_mode)
+                    and not is_reparse(info)):
+                continue
+            receipt = _load_trace_clear_receipt(path)
+        except HTTPException as exc:
+            code = exc.detail.get("code") if isinstance(exc.detail, dict) else None
+            operation = _sibling_operation_id(path.name, sequence_path.stem)
+            _log.warning(
+                "trace clear of %s skipped an unreadable sibling receipt (operation %s, %s); "
+                "it is left in place for inspection", rd.name, operation, code)
+            if skipped is not None:
+                skipped.append({"operation_id": operation, "code": code})
             continue
-        receipt = _load_trace_clear_receipt(path)
         if (receipt is not None
                 and receipt.get("status") == "pending"
                 and receipt.get("expected_generation") == expected_generation
@@ -871,6 +907,9 @@ def durable_clear_node_trace(
             # strict-write ambiguity where `pending` became visible but its parent fsync failed:
             # no trace mutation or terminal response may rely on that unconfirmed directory entry.
             _save_trace_clear_receipt(receipt_path, receipt)
+        # Sibling receipts the scan below could not read — skipped, logged, and named in the answer
+        # (review 2026-09-22, SRV1-11; see `_pending_trace_clear_for_lifecycle`).
+        skipped_receipts: list[dict[str, Any]] = []
         if not recovering:
             pending = _pending_trace_clear_for_lifecycle(
                 srv, rd,
@@ -879,6 +918,7 @@ def durable_clear_node_trace(
                 expected_trace_revision=expected_trace_revision,
                 nid=nid,
                 node_generation=node_generation,
+                skipped=skipped_receipts,
             )
             if pending is not None:
                 raise _trace_clear_pending(
@@ -1024,9 +1064,13 @@ def durable_clear_node_trace(
                     # another deletion. The staged result contains no authority of its own and may be
                     # discarded after any failure; recovery reconstructs it from source + receipt.
                     _save_trace_clear_receipt(receipt_path, receipt)
-                    return _apply_prepared_trace_clear(
+                    answer = _apply_prepared_trace_clear(
                         srv, rd, sp, receipt_path, receipt,
                         current=prepared.source, prepared=prepared)
+                    # ADDITIVE and only when non-empty — the key is the signal, like every other
+                    # optional field on this answer: which broken siblings this clear stepped over.
+                    return ({**answer, "skipped_receipts": skipped_receipts}
+                            if skipped_receipts else answer)
                 finally:
                     prepared.cleanup()
         except EventStoreLockError as exc:
