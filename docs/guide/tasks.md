@@ -866,15 +866,23 @@ derived from those same two predicates, never re-read off the rows (`engine/cham
 
 **And since 2026-09-06 the row also says HOW MUCH of the number the intended protocol supports**
 (doc 52 row 22): `mislead_gap` is Protocol Validity's pair — `exploit` (the champion, crowned under
-whatever rungs the run was configured with) beside `intended` (the best node the record says nothing
-against: feasible, no hard reward-hack/leakage signal, measured rather than salvaged) and their `gap`
-in the run's direction, positive when the published number is better than the intended protocol
-supports and `0` when the champion is itself an intended node. `excluded` counts the scored nodes
-the filter dropped, so a clean run (`gap: 0`, `excluded: 0`) reads differently from a run whose
-champion happened to be clean while half its population was flagged; `intended`/`gap` are `null`
-when no node survives the filter, and the whole record is `null` without a champion. It is derived
-from the same two predicates as the caveats (`hard_flagged_ids`, `metric_unmeasured`), for the same
-reason.
+whatever rungs the run was configured with) beside `intended` (the node the SAME selector would have
+crowned had the run excluded every node the record says something against — its pick over its own
+eligible population with every hard reward-hack/leakage signal as the flag set and without the
+`select`-admitted salvages, so a confirmed mean, the confirm certificate and a holdout pick decide it
+exactly as they decide the champion) and their `gap` in the run's direction, positive when the
+published number is better than the intended protocol supports and `0` when the champion is itself an
+intended node. `scored` is the run's live measurements (evaluated, not tombstoned, not aborted) and
+`excluded` the ones outside the intended population, so a clean run (`gap: 0`, `excluded: 0`) reads
+differently from a run whose champion happened to be clean while half its population was flagged;
+`intended`/`gap` are `null` when no node survives the filter, and the whole record is `null` without
+a champion. A NEGATIVE gap is possible only when the champion is not an intended node and the
+selector ranked it above the intended pick on a key other than the published number (a confirmed
+mean, a holdout score, the certificate, an approval) — the honest difference between the two
+protocols' published numbers, reported rather than clamped. It asks the fold's own selector
+(`events/replay.py::select_best_node` over `promotion_eligible_nodes`) rather than re-deriving it —
+until 2026-09-22 it took the raw-metric maximum over every node carrying a metric, and a confirm-phase
+demotion or a tombstone read as a negative inflation on ordinary runs (record `version: 2`).
 Measured over the 46 preserved runs when it shipped: 37 carry a best metric and none of them is
 caveated by either, so those two fence a reachable state rather than describing the corpus.
 

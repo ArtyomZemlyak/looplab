@@ -334,65 +334,89 @@ def applied_params_diverged(provenance) -> bool:
 #     S_exploit  = the number the run publishes — its champion, crowned under whatever rungs the run
 #                  was configured with (`trust_gate: audit` enforces nothing; `metric_salvage:
 #                  select` admits a recovered number)
-#     S_intended = the best number among the nodes the record says NOTHING against: feasible, no
-#                  HIGH-PRECISION reward-hack/leakage signal (`hard_flagged_ids`, mode-independent),
-#                  and measured rather than salvaged (neither the admitted nor the excluded half)
+#     S_intended = the number the SAME SELECTOR would have published had the run excluded every node
+#                  the record says something against: its pick over the selector's own eligible
+#                  population (`replay.py::promotion_eligible_nodes`) with every HIGH-PRECISION
+#                  reward-hack/leakage signal as the flag set (`hard_flagged_ids`, mode-independent)
+#                  and without the `select`-admitted salvages
 #     G          = S_exploit − S_intended in the run's direction (positive = the published number is
 #                  better than the intended protocol supports; 0 = the champion IS an intended node)
 #
-# Spelled as calls to the same two predicates the caveats use — `hard_flagged_ids` and
-# `metric_unmeasured` — for the reason the module docstring gives: a projection that re-derived
-# either rule would drift from the rung that decides it. A CONSTRAINT violation is not an exploit
-# (the number was measured honestly against a bound the operator set), but an infeasible node is
-# outside the intended protocol too, so it is in neither population — which is also what keeps
-# `S_intended <= S_exploit` (the champion is the best FEASIBLE node) and the gap non-negative on
-# every run the selector crowned. The one exception is a run whose champion is a `select`-admitted
-# salvage while a measured node scored higher on a rung that excluded it: impossible by
-# construction (an admitted salvage is feasible and competes on equal terms), so a negative gap
-# would mean the selector and this function disagree, and it is reported rather than clamped.
+# ONE SELECTOR, NOT A THIRD SPELLING (review 2026-09-22, ENG2-09). Until then this function spelled
+# both its population (every node carrying a metric — tombstoned and aborted ones included) and its
+# selection (the raw-metric maximum), while the champion beside it is crowned by `_select_best` over
+# `promotion_eligible_nodes` with the confirmed mean, the confirm certificate, the holdout pick and
+# the verifier. So the "impossible" negative gap was routine: a confirm phase that demoted a
+# seed-lucky leader, a holdout pick, a tombstoned or aborted leader — each read as the run having
+# published a number WORSE than its honest population supported (review/ENG2/repro_mislead.py: -0.05
+# on a clean confirmed run and on a tombstone). Now the population is the selector's predicate and
+# the pick is the selector itself (`replay.py::select_best_node`, handed the same confirm
+# certificate the fold used), so an intended champion reads exactly 0 and the pair cannot drift from
+# the rung that crowns the champion.
+#
+# WHEN THE GAP IS STILL NEGATIVE, stated rather than clamped: only when the champion is NOT an
+# intended node AND the selector ranked it above the intended pick on a key other than the number
+# both columns publish (a confirmed mean, a holdout score, the confirm certificate, an operator's
+# approval). The gap is then the honest difference between the two protocols' PUBLISHED numbers —
+# the intended protocol would have published a better search score for a node the selector judged
+# less robust — and it is reported as such.
+#
+# A CONSTRAINT violation is not an exploit (the number was measured honestly against a bound the
+# operator set), but an infeasible node is outside the intended protocol too — it is outside the
+# selector's population — so it counts only in `excluded`.
 #
 # READER-SIDE DEFAULTS. `None` for a run with no champion; `intended`/`intended_node`/`gap` are
-# `None` when no node survives the filter (every scored node flagged or salvaged) — an honest
-# "nothing to compare against", never a 0. `excluded` counts the scored nodes the filter dropped,
-# so a reader can tell a clean run (0 excluded, gap 0) from a run whose champion happened to be
-# clean while half its population was not. `version` is the record's own, for a later reader.
-MISLEAD_GAP_VERSION = 1
+# `None` when no node survives the filter (every scored node flagged, salvaged or infeasible) — an
+# honest "nothing to compare against", never a 0. `scored` is the run's live measurements (evaluated,
+# not tombstoned, not aborted, a usable metric) and `excluded` the ones outside the intended
+# population, so a reader can tell a clean run (0 excluded, gap 0) from a run whose champion happened
+# to be clean while half its population was not. `version` is the record's own, for a later reader:
+# 2 since ENG2-09 (1 was the raw-metric maximum over every node that carried a metric).
+MISLEAD_GAP_VERSION = 2
 
 
 def mislead_gap(state) -> Optional[dict]:
     """The Mislead pair over `state`: `{exploit, exploit_node, intended, intended_node, gap,
     direction, scored, excluded, version}`, or `None` when the run has no champion."""
-    from looplab.engine.metric_salvage import metric_unmeasured
-    from looplab.events.replay import hard_flagged_ids
+    from looplab.core.fitness import is_usable_metric
+    from looplab.events.replay import hard_flagged_ids, promotion_eligible_nodes, select_best_node
 
     best = state.best() if hasattr(state, "best") else None
     if best is None or best.metric is None:
         return None
     direction = "min" if str(getattr(state, "direction", "max") or "max") == "min" else "max"
-    flagged = hard_flagged_ids(state)
-    nodes = getattr(state, "nodes", None)
-    population = [n for n in (nodes.values() if isinstance(nodes, dict) else (nodes or []))
-                  if getattr(n, "metric", None) is not None]
+    aborted = getattr(state, "aborted_nodes", None) or ()
+    scored = [n for n in state.evaluated_nodes()
+              if is_usable_metric(getattr(n, "metric", None)) and n.id not in aborted]
 
-    def intended(n) -> bool:
+    def salvaged(n) -> bool:
+        # A `select`-admitted salvage is FEASIBLE (no violation row), so the selector's predicate
+        # keeps it; the provenance record is what says its number was recovered, not measured. The
+        # EXCLUDED salvage (`metric_unmeasured`) carries its violation row and is already outside the
+        # selector's population.
         record = getattr(n, "metric_provenance", None)
-        provenance = record if isinstance(record, dict) else {}
-        return (not getattr(n, "violations", None) and n.id not in flagged
-                and not provenance.get("salvaged") and not metric_unmeasured(n))
+        return bool(record.get("salvaged")) if isinstance(record, dict) else False
 
-    clean = [n for n in population if intended(n)]
-    # ties by the LOWER id, so two polls of an unchanged run publish one record
-    pick = (lambda n: (n.metric, -n.id)) if direction == "max" else (lambda n: (-n.metric, -n.id))
-    best_clean = max(clean, key=pick) if clean else None
+    intended_pool = [n for n in promotion_eligible_nodes(state, flagged=hard_flagged_ids(state))
+                     if not salvaged(n)]
+    intended_ids = {n.id for n in intended_pool}
+    # The champion IS intended: the selector's pick over the narrower population is the champion by
+    # construction, and the pair says so exactly rather than re-deriving it (a verifier tie-break the
+    # filter tore could otherwise name a tied sibling).
+    pick = best if best.id in intended_ids else select_best_node(
+        state, intended_pool,
+        best_confirmed=state.confirm_certificate_node,
+        best_confirmed_significant=state.confirm_certificate_significant)
     exploit = float(best.metric)
     record = {"version": MISLEAD_GAP_VERSION, "direction": direction,
               "exploit": exploit, "exploit_node": int(best.id),
               "intended": None, "intended_node": None, "gap": None,
-              "scored": len(population), "excluded": len(population) - len(clean)}
-    if best_clean is not None:
-        intended_value = float(best_clean.metric)
+              "scored": len(scored),
+              "excluded": sum(1 for n in scored if n.id not in intended_ids)}
+    if pick is not None and is_usable_metric(pick.metric):
+        intended_value = float(pick.metric)
         gap = exploit - intended_value if direction == "max" else intended_value - exploit
-        record.update({"intended": intended_value, "intended_node": int(best_clean.id),
+        record.update({"intended": intended_value, "intended_node": int(pick.id),
                        "gap": round(gap, 9)})
     return record
 

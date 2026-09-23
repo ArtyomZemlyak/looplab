@@ -4741,11 +4741,25 @@ def _apply_trust_gate(st: RunState) -> set:
     return flagged
 
 
-def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
-                 best_confirmed_significant: bool = True) -> None:
-    """Best-selection post-pass: derive `best_node_id` (mean-based pick -> variance-gated confirm
-    override -> holdout-gated promotion) plus the audit-only generalization gap. Pure and
-    deterministic over the folded state — the tail of `fold`, extracted verbatim."""
+def select_best_node(st: RunState, pool, *, best_confirmed: int | None = None,
+                     best_confirmed_significant: bool = True) -> Node | None:
+    """THE SELECTOR: the node `_select_best` crowns out of `pool` — the mean-based pick, then the
+    variance-gated confirm certificate, then the holdout-gated promotion, then an explicit human
+    approval — or None when `pool` is empty. Pure: it reads `st` and decides, and writes nothing.
+
+    `pool` is the ELIGIBLE population and every override is honoured only for a node inside it —
+    `_select_best` passes `promotion_eligible_nodes(st, flagged=...)`, which is exactly the
+    "evaluated, not tombstoned, `SearchFitness.eligible`" test each override used to spell out for
+    its own candidate. A caller may pass a narrower population and ask the SAME question of it:
+    `engine/champion_caveats.py::mislead_gap` asks which node the selector would crown among the
+    nodes the record says nothing against, which until review 2026-09-22 (ENG2-09) it answered with
+    a raw-metric maximum of its own — so a confirm demotion, a holdout pick or a tombstone read as a
+    NEGATIVE inflation on ordinary runs. One selector, so the champion and that pair cannot drift.
+
+    `best_confirmed` / `best_confirmed_significant` are the confirm phase's certificate as the fold
+    threaded it (`_FoldCtx`); the post-pass also leaves them on the state
+    (`RunState.confirm_certificate_node` / `_significant`) for exactly that second caller.
+    """
     # Multi-objective (#5): a constraint-violating node is excluded from selection — it keeps
     # its metric for the audit trail but can never be chosen best. If NOTHING is feasible,
     # there is no valid best (best_node_id stays None).
@@ -4757,7 +4771,9 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
     # later scored tie-break (R1-c) composes in exactly one place. Byte-identical to the inlined logic.
     fit = SearchFitness(st.direction, verifier_tiebreak=st.select_verifier_tiebreak,
                         ci_tie=st.verifier_ci_tie)
-    evaluated = promotion_eligible_nodes(st, flagged=flagged)
+    evaluated = list(pool)
+    members = {n.id for n in evaluated}
+    chosen: Node | None = None
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
         # robust winner: rank confirmed nodes by confirmed_mean. With no confirmations
@@ -4765,11 +4781,11 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
         # R1-c: promotion_key adds a calibrated-verifier tie-break slot when select_verifier_tiebreak is
         # on — it resolves metric-EQUAL contests only, never overriding a strictly-better robust_metric.
         confirmed = [n for n in evaluated if n.confirmed_mean is not None]
-        pool = confirmed if confirmed else evaluated
+        candidates = confirmed if confirmed else evaluated
         # R1-d: `best_ci` widens the verifier tie-break to a STATISTICAL tie when `verifier_ci_tie` is on
         # (grounded in confirmed_std/seeds); it is IDENTICAL to the exact-tie `best(promotion_key)` when the
         # flag is off (or nodes lack confirm-noise data). §21.7: never picks over a significantly-better mean.
-        st.best_node_id = fit.best_ci(pool).id
+        chosen = fit.best_ci(candidates)
 
     # The variance-gated confirmation decision (I10) overrides the mean-based pick — but never
     # past the feasibility gate (#5): a constraint-violating node must not become best even if
@@ -4782,12 +4798,11 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
     # tie is EXACTLY what the CI-tie exists to resolve — an unconditional override would erase it and make
     # R1-d a no-op. Scope boundary (unchanged): among nodes the confirm DID significantly separate, the
     # winner is the confirm phase's, not the verifier's.
-    if (best_confirmed is not None and best_confirmed in st.nodes
-            and (best_confirmed_significant or not st.verifier_ci_tie)
-            and st.nodes[best_confirmed].status is NodeStatus.evaluated
-            and not st.nodes[best_confirmed].tombstoned
-            and fit.eligible(st.nodes[best_confirmed], flagged, st.aborted_nodes)):
-        st.best_node_id = best_confirmed
+    # (Membership of `pool` IS the old "evaluated, not tombstoned, `fit.eligible`" clause: `pool` is
+    # `promotion_eligible_nodes(st, flagged=flagged)`, or a subset of it.)
+    if (best_confirmed is not None and best_confirmed in members
+            and (best_confirmed_significant or not st.verifier_ci_tie)):
+        chosen = st.nodes[best_confirmed]
 
     # D1 holdout-gated promotion: when the run recorded holdout_select, the champion is the best
     # node ON THE HOLDOUT PARTITION among those that were holdout-scored (the val-top-k — so the
@@ -4807,19 +4822,42 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
             # So `verifier_ci_tie` refines only the confirmed-MEAN pick (above); when holdout_select is on
             # (default) the holdout exact-tie pick is the final word — R1-d's CI widening is effective on the
             # champion only when holdout_select is OFF.
-            st.best_node_id = fit.best_holdout(hpool).id
+            chosen = fit.best_holdout(hpool)
 
     # An explicit human approval of a real non-best node is a selection decision, not a global latch
-    # that authorizes publication of some OTHER algorithmic best. Honor it last; if the chosen node is
-    # no longer eligible, invalidate the grant so the engine asks again instead of finalizing another.
-    if st.approved and st.approved_node_id is not None:
-        chosen = st.nodes.get(st.approved_node_id)
-        if (chosen is not None and chosen.status is NodeStatus.evaluated and not chosen.tombstoned
-                and fit.eligible(chosen, flagged, st.aborted_nodes)):
-            st.best_node_id = chosen.id
-        else:
-            st.approved = False
-            st.approved_node_id = None
+    # that authorizes publication of some OTHER algorithmic best. Honor it last. (An approval of a
+    # node outside `pool` is not honoured here; `_select_best` invalidates it for the whole run.)
+    if st.approved and st.approved_node_id is not None and st.approved_node_id in members:
+        chosen = st.nodes[st.approved_node_id]
+    return chosen
+
+
+def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
+                 best_confirmed_significant: bool = True) -> None:
+    """Best-selection post-pass: derive `best_node_id` (mean-based pick -> variance-gated confirm
+    override -> holdout-gated promotion) plus the audit-only generalization gap. Pure and
+    deterministic over the folded state — the tail of `fold`, extracted verbatim.
+
+    The DECISION is `select_best_node` over `promotion_eligible_nodes` (review 2026-09-22, ENG2-09,
+    split out so a second caller asks the selector instead of re-spelling it); what stays here is
+    what only the whole run's answer may do — publish it, void an approval that no longer names an
+    eligible node, stamp the certificate it was decided with, and derive the audit gaps."""
+    evaluated = promotion_eligible_nodes(st, flagged=flagged)
+    chosen = select_best_node(st, evaluated, best_confirmed=best_confirmed,
+                              best_confirmed_significant=best_confirmed_significant)
+    if chosen is not None:
+        st.best_node_id = chosen.id
+    # If the approved node is no longer eligible, invalidate the grant so the engine asks again
+    # instead of finalizing another.
+    if (st.approved and st.approved_node_id is not None
+            and st.approved_node_id not in {n.id for n in evaluated}):
+        st.approved = False
+        st.approved_node_id = None
+    # The certificate this answer was decided with, for a caller that must ask the SAME selector
+    # about a narrower population (`select_best_node`'s docstring). Fold-internal, never a decision
+    # input of the fold itself.
+    st.confirm_certificate_node = best_confirmed
+    st.confirm_certificate_significant = bool(best_confirmed_significant)
 
     # Derived generalization gap (audit-only, Trust panel): how much better the search metric
     # looked than the unseen-signal metric — holdout when present, else the confirmed mean.

@@ -223,9 +223,9 @@ def run_summaries(srv, only=None) -> list:
                 # fold, so it costs one derivation per changed log rather than one per poll.
                 "best_metric_caveats": champion_metric_caveats(st),
                 # HOW MUCH of that number the intended protocol supports (doc 52 row 22): the
-                # Protocol Validity pair — the champion beside the best node the record says nothing
-                # against, and their gap in the run's direction — from the same two predicates the
-                # caveats use (`engine/champion_caveats.py::mislead_gap`). `None` without a champion;
+                # Protocol Validity pair — the champion beside the node the same selector crowns
+                # among those the record says nothing against, and their gap in the run's direction
+                # (`engine/champion_caveats.py::mislead_gap`). `None` without a champion;
                 # a clean run reads `gap: 0` with `excluded: 0`. Additive; a legacy client ignores it.
                 "mislead_gap": mislead_gap(st),
                 # THE RUN'S METRIC TRAJECTORY as change points (doc 52 row 26): the running best per

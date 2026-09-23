@@ -2246,6 +2246,15 @@ class RunState(BaseModel):
     # the COARSE field, and must keep reading it: the class is the engine's, the sentence is prose.
     stop_detail: Optional[str] = None
     confirmed_done: bool = False          # the multi-seed confirmation phase completed (I12)
+    # The confirm phase's CERTIFICATE exactly as `replay.py::_select_best` read it — its node id
+    # and whether it was significant — stamped by that post-pass from the fold's own context.
+    # Fold-internal (`exclude=True`, so every dump is byte-identical) and never a decision input of
+    # the fold itself: it exists so a consumer that asks the SELECTOR about a narrower population
+    # (`replay.py::select_best_node`, from `engine/champion_caveats.py::mislead_gap`) passes the same
+    # certificate the champion was crowned with, instead of a third spelling of the selection that
+    # leaves it out (review 2026-09-22, ENG2-09).
+    confirm_certificate_node: Optional[int] = Field(default=None, exclude=True)
+    confirm_certificate_significant: bool = Field(default=True, exclude=True)
     # P0-2 search epoch: bumped when a FINISHED run is reopened (resume/run_reopened). The nodes
     # added after a reopen are a fresh candidate set, so the prior confirmation/approval COMPLETION
     # (confirmed_done/approved below) must not carry over — else a better new candidate can never be
