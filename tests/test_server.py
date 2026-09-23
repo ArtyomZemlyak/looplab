@@ -1354,6 +1354,51 @@ def test_reset_replays_legacy_snapshot_with_off_defaults_and_explicit_null_alias
     assert snapshot.read_bytes() == before
 
 
+def test_reset_refuses_a_snapshot_key_this_build_does_not_know(tmp_path, monkeypatch):
+    """Review 2026-09-22, CORE-03. Replay re-launches the run from its recorded settings, so it
+    spends; it used to freeze `settings_from_snapshot(raw).masked_snapshot()` into its receipt,
+    which DROPPED every key this build did not know — a newer build's spend cap among them — and
+    relaunched without it. Refused before anything is archived or spawned. MUTATION: drop
+    `refuse_unknown=True` from `_prepare_receipt` -> 200 and a spawned replacement engine."""
+    from looplab.serve.routers import control as control_router
+
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _make_resumable(rd)
+    snapshot = rd / "config.snapshot.json"
+    snapshot.write_text(json.dumps({"timeout": 30.0, "llm_spend_cap_from_a_newer_build": 0.25}),
+                        encoding="utf-8")
+    before = (rd / "events.jsonl").read_bytes()
+    spawns = []
+    monkeypatch.setattr(control_router, "_spawn_engine", lambda *a, **kw: spawns.append((a, kw)))
+    with TestClient(make_app(tmp_path)) as client:
+        response = client.post("/api/runs/demo/reset")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "replay_config_invalid"
+    assert not spawns, "a replacement engine was launched on settings that dropped a key"
+    assert (rd / "events.jsonl").read_bytes() == before
+    assert not list(rd.glob("*.reset-*")), "Replay archived the run before refusing it"
+
+
+def test_reset_replays_a_snapshot_carrying_a_RETIRED_setting(tmp_path, monkeypatch):
+    """A key an OLDER build wrote is not unknown: `inline_repair_stuck_repeat` was retired on
+    2026-08-05, and a run recorded before that must stay replayable."""
+    from looplab.serve.routers import control as control_router
+
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _make_resumable(rd)
+    (rd / "config.snapshot.json").write_text(
+        json.dumps({"timeout": 30.0, "inline_repair_stuck_repeat": 4}), encoding="utf-8")
+    replacement = _replacement_spawn(rd, pid=4243)
+    monkeypatch.setattr(control_router, "_spawn_engine", replacement)
+    with TestClient(make_app(tmp_path)) as client:
+        response = client.post("/api/runs/demo/reset")
+
+    assert response.status_code == 200, response.text
+
+
 def test_resume_shutdown_hook_precedes_jupyter_reaper(tmp_path, monkeypatch):
     """DRIVEN, where it used to read the ORDER off `app.router.on_shutdown`'s handler names.
 

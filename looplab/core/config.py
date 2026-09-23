@@ -18,6 +18,7 @@ from pathlib import Path
 from pydantic import Field, PrivateAttr, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from looplab.core.errors import ConfigRefusal
 # Single sources shared with the LLM resolver — see core/llm.py.
 from looplab.core.llm import AGENT_STAGE_KEYS, DEFAULT_HEADER_TIMEOUT_S
 from looplab.core.models import FAILURE_REASONS, REPAIRABLE_REASONS
@@ -2984,21 +2985,83 @@ class Settings(BaseSettings):
 
 
 # The config snapshot's document-format version, written by `masked_snapshot` and enforced by
-# `settings_from_snapshot`. Bump it when a snapshot written by this binary would be MISREAD by an
-# older one — i.e. when a new field changes paid, concurrency or selection behaviour and silently
-# defaulting it would resume the same event history under different semantics. `Settings` is
-# `extra="ignore"`, so without this an older binary drops what it does not recognize and resumes
-# anyway, with no diagnostic; a version it does not know is now a loud refusal instead.
+# `settings_from_snapshot`.
+#
+# WHAT A SNAPSHOT THIS BUILD DOES NOT FULLY UNDERSTAND IS ALLOWED TO DO — the ONE policy, stated
+# here and cited everywhere else (review 2026-09-22, CORE-03: it was four statements holding three
+# policies — this comment said "bump on every paid field", `appconfig.refuse_unknown_settings_keys`
+# said resume "must keep extra='ignore'", `docs/guide/configuration.md` said a newer snapshot is
+# refused, and a BACKLOG closure note said `settings_from_snapshot` refuses an unknown KEY, which
+# it never did). `Settings` is `extra="ignore"`, so a key this build does not declare is DROPPED
+# unless something refuses it, and dropping one resumes the same event history under different
+# paid, concurrency or selection semantics with no diagnostic. So:
+#
+#   * a FORMAT newer than `CONFIG_SNAPSHOT_SCHEMA` is refused on EVERY path
+#     (`ConfigSnapshotVersionError`) — its keys may not mean what this build thinks;
+#   * a KEY this build does not know (`unknown_snapshot_keys`: not a `Settings` field, not the
+#     document's own marker, not a setting this build RETIRED) is refused on the paths that SPEND
+#     the run's money — resume, finalize and its recovery, Replay — through
+#     `settings_from_snapshot(..., refuse_unknown=True)`, and read leniently everywhere else (the
+#     server's config view, the diagnostics that only need the recorded endpoint), where nothing
+#     depends on what is dropped and refusing would make a run unreadable;
+#   * so the number is bumped only for a FORMAT change or a changed MEANING of an existing key. A
+#     NEW key needs no bump from v3 on: every v3+ reader refuses it where it matters.
+#
 # Version 1 was the first VERSIONED format. Version 2 adds the explicit
 # `task_facets_finalize` treatment bit: an older binary would otherwise ignore that new field and
-# resume a fresh default-off run with the historical paid facet call enabled. An absent key still
+# resume a fresh default-off run with the historical paid facet call enabled. VERSION 3 (2026-09-23)
+# is the bump of the key rule itself. A v2 reader refuses no unknown key, and 53 `Settings` fields
+# were added after v2 (2026-08-10) without a bump — `llm_budget_usd`, `llm_cost_limit`,
+# `llm_token_limit`, `node_open_budget_floor_usd`, `read_fence`, `landlock`, `syscall_fence`,
+# `model_arms` among them — so a v2 binary resuming today's snapshot dropped all of them, a capped
+# run resuming UNCAPPED. Bumping once makes every such binary refuse instead. An absent key still
 # means a pre-versioning snapshot and remains readable through `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`.
-CONFIG_SNAPSHOT_SCHEMA = 2
+CONFIG_SNAPSHOT_SCHEMA = 3
 CONFIG_SNAPSHOT_SCHEMA_KEY = "config_snapshot_schema"
+# Keys the snapshot DOCUMENT carries that are not `Settings` fields: its own format marker.
+SNAPSHOT_DOCUMENT_KEYS = frozenset({CONFIG_SNAPSHOT_SCHEMA_KEY})
+# Settings this build RETIRED. A snapshot written before the retirement carries the key and nothing
+# reads it; listing it is what lets `unknown_snapshot_keys` tell a key an OLDER build wrote from one
+# a NEWER build wrote — the one distinction a name alone cannot make. Derived 2026-09-23 from every
+# revision of `class Settings` in the full history (303 revisions of this file and of its pre-split
+# `looplab/config.py`): exactly these two declared names are gone. REMOVING a `Settings` field
+# means adding its row here in the same change, or every snapshot that carries it stops resuming;
+# `tests/test_config.py` holds this list and the live fields disjoint.
+RETIRED_SETTINGS: dict[str, str] = {
+    "inline_repair_stuck_repeat": (
+        "retired 2026-08-05: the per-signature anti-stuck count gave way to the crash-triage "
+        "model's `abandon` verdict under the hard `inline_repair_attempts` cap"),
+    "speculative_pipeline": (
+        "declared on 2026-06-28 and removed on 2026-06-29; a snapshot from that day carries it"),
+}
 
 
-class ConfigSnapshotVersionError(ValueError):
-    """A config snapshot was written by a NEWER binary than the one reading it."""
+class ConfigSnapshotVersionError(ConfigRefusal):
+    """A config snapshot was written by a NEWER binary than the one reading it.
+
+    A `ConfigRefusal` (still a `ValueError` to every existing catcher) since review 2026-09-22,
+    CORE-03: the refusal is about the operator's own run and its whole content is the message, so
+    the CLI prints it as one line at exit 2 instead of a traceback at exit 1."""
+
+
+class ConfigSnapshotUnknownKeysError(ConfigSnapshotVersionError):
+    """A snapshot key this build does not know, on a path that spends (`unknown_snapshot_keys`).
+
+    A subclass of the version refusal because it is the same fact caught one level finer: the
+    document was written by a build that knows something this one does not (or was hand-edited),
+    and resuming here would silently drop it."""
+
+
+def unknown_snapshot_keys(data) -> list[str]:
+    """The snapshot keys THIS build does not know, sorted. See `CONFIG_SNAPSHOT_SCHEMA` for the one
+    policy that reads it: not a `Settings` field, not a `SNAPSHOT_DOCUMENT_KEYS` marker, not a
+    `RETIRED_SETTINGS` name. Empty means everything the document says, this build reads."""
+    if not isinstance(data, dict):
+        return []
+    fields = Settings.model_fields
+    return sorted(str(key) for key in data
+                  if key not in fields and key not in SNAPSHOT_DOCUMENT_KEYS
+                  and key not in RETIRED_SETTINGS)
 
 
 # Pre-versioned snapshots are full Settings dumps, so absence is a reliable per-field version marker.
@@ -3496,7 +3559,7 @@ def config_snapshot_schema(data: dict) -> int:
     return raw
 
 
-def settings_from_snapshot(data: dict) -> Settings:
+def settings_from_snapshot(data: dict, *, refuse_unknown: bool = False) -> Settings:
     """Build re-entry Settings from a masked snapshot under its historical missing-field contract.
 
     Fails closed on a snapshot written by a NEWER binary. `Settings` is `extra="ignore"`, so such a
@@ -3506,13 +3569,27 @@ def settings_from_snapshot(data: dict) -> Settings:
     dropping. Older and pre-versioning snapshots keep loading exactly as before, with one narrow
     compatibility exception: obsolete unified-agent stage keys and historically accepted
     non-string/blank override values are warned and removed from the effective copy while the
-    snapshot evidence remains untouched."""
+    snapshot evidence remains untouched.
+
+    `refuse_unknown=True` is the SPENDING-path half of the one policy stated at
+    `CONFIG_SNAPSHOT_SCHEMA` (review 2026-09-22, CORE-03): a key `unknown_snapshot_keys` names is
+    refused rather than dropped. The format marker alone could not do this — it has to be bumped by
+    hand, and 53 fields went in after v2 without one, so a v2 snapshot's number said nothing about
+    `llm_cost_limit`. Resume, finalize and Replay pass it; read-only callers leave it off."""
     found = config_snapshot_schema(data)
     if found > CONFIG_SNAPSHOT_SCHEMA:
         raise ConfigSnapshotVersionError(
             f"this run's config.snapshot.json declares format v{found}, but this build understands "
             f"at most v{CONFIG_SNAPSHOT_SCHEMA}. It was written by a newer LoopLab; resuming here "
             "would silently drop settings this build does not know. Upgrade LoopLab to resume it.")
+    if refuse_unknown:
+        unknown = unknown_snapshot_keys(data)
+        if unknown:
+            raise ConfigSnapshotUnknownKeysError(
+                f"this run's config.snapshot.json carries setting{'' if len(unknown) == 1 else 's'} "
+                f"this build does not know: {', '.join(repr(k) for k in unknown)}. Continuing "
+                "would silently drop what they control (a spend cap among them). Upgrade LoopLab "
+                "to continue this run; if a key is a hand-edit typo, fix it in the snapshot.")
     migrated = _canonicalize_snapshot_size_caps(_canonicalize_snapshot_reasoning(
         _filter_unknown_snapshot_agent_stages(migrate_config_snapshot(data))))
     migrated.pop("llm_api_key", None)

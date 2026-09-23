@@ -289,6 +289,15 @@ from the folded `run_started` record;
 `trust_gate_changed` owns later trust-gate edits. Those event-pinned semantics win over a stale or hand-edited
 snapshot.
 
+**A snapshot key this build does not know is refused, not dropped.** `resume`, `finalize` and the
+server's Replay spend the run's money under these settings, so a key that is neither a current
+`Settings` field nor one this build retired (`core/config.py::RETIRED_SETTINGS`) stops them with one
+line at exit 2 naming the key — it was written by a newer LoopLab (or hand-edited), and loading it
+would silently drop what it controls, a spend cap among them. Upgrade LoopLab to continue the run.
+Read-only commands (`inspect`, the diagnostics, the server's config view) still load such a
+snapshot. The snapshot's format marker moved to v3 for the same reason, so a LoopLab from before this
+rule refuses today's snapshots outright instead of dropping the 53 settings added since v2.
+
 **The concurrency WIDTHS are pinned too, and AUTO is what makes that safe.** `eval_parallel` and
 `llm_parallel` ship the AUTO sentinel `0`, and `speculation_depth` spells the same thing `-1` —
 which it has also **shipped** since 2026-08-05 (`0` is its explicit off switch). AUTO resolves off

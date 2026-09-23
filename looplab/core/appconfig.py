@@ -123,11 +123,13 @@ def refuse_unknown_settings_keys(source, *, layer: str) -> None:
     a `Settings` with `max_nodes = 8` and printed no diagnostic, and the run then did eight nodes
     while its config file said thirty.
 
-    LAUNCH ONLY, and that boundary is the whole reason this is safe to make strict. `build_settings`
-    has exactly one caller (`cli/run_cmds.py::run`); resume reads `config.snapshot.json` through
-    `_settings_for_run`, which must keep `extra="ignore"` so an older binary can still load a
-    snapshot written by a newer one. Refusing at launch and ignoring on resume is not an
-    inconsistency — the operator is present for one and absent for the other.
+    LAUNCH ONLY. `build_settings` has exactly one caller (`cli/run_cmds.py::run`). A run's recorded
+    `config.snapshot.json` is a different document with its own rule, stated ONCE at
+    `core/config.py::CONFIG_SNAPSHOT_SCHEMA` (review 2026-09-22, CORE-03): a key this build does not
+    know is refused on the paths that spend — resume, finalize, Replay — and read leniently on the
+    read-only ones. This paragraph used to say resume "must keep extra='ignore' so an older binary
+    can still load a snapshot written by a newer one", which is exactly how an older build resumed
+    a newer run without the `llm_cost_limit` it could not read.
 
     The legacy parallelism aliases need no exception: `max_parallel` and `parallel_build` are both
     DECLARED fields, so the canonicalizer's promoted keys and the legacy spellings are all real.

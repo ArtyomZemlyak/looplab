@@ -312,9 +312,11 @@ def test_snapshot_v2_pins_the_task_facet_paid_treatment_and_v1_keeps_history():
     from looplab.core.config import (CONFIG_SNAPSHOT_SCHEMA, CONFIG_SNAPSHOT_SCHEMA_KEY,
                                      Settings, settings_from_snapshot)
 
-    assert CONFIG_SNAPSHOT_SCHEMA == 2
+    # `>= 2`, not `== 2`: v3 (review 2026-09-22, CORE-03) moved the number on; what this test owns
+    # is that a CURRENT snapshot carries the field and a v1 one keeps its historical treatment.
+    assert CONFIG_SNAPSHOT_SCHEMA >= 2
     current = Settings(cross_run_curation=True, task_facets_finalize=False).masked_snapshot()
-    assert current[CONFIG_SNAPSHOT_SCHEMA_KEY] == 2
+    assert current[CONFIG_SNAPSHOT_SCHEMA_KEY] == CONFIG_SNAPSHOT_SCHEMA
     assert current["task_facets_finalize"] is False
     assert settings_from_snapshot(current).task_facets_finalize is False
 
@@ -326,6 +328,82 @@ def test_snapshot_v2_pins_the_task_facet_paid_treatment_and_v1_keeps_history():
     restored_v1 = settings_from_snapshot(v1)
     assert restored_v1.cross_run_curation is True
     assert restored_v1.task_facets_finalize is True
+
+
+def test_an_unknown_snapshot_key_is_REFUSED_where_the_run_spends_and_read_where_it_does_not():
+    """Review 2026-09-22, CORE-03. `Settings` is `extra="ignore"`, and the format marker had not
+    moved since v2 while 53 fields were added — so an older build resuming a newer run's snapshot
+    dropped what it did not know, `llm_cost_limit` and `llm_token_limit` among them, and resumed a
+    capped run UNCAPPED with no diagnostic. The refusal is keyed on the KEY, not on a number someone
+    has to remember to bump. MUTATION: skip the `refuse_unknown` branch -> the future cap below is
+    silently dropped and the resumed Settings carry no trace of it."""
+    from looplab.core.config import ConfigSnapshotUnknownKeysError, unknown_snapshot_keys
+    from looplab.core.errors import ConfigRefusal, OperatorRefusal
+
+    snap = Settings(llm_budget_usd=1.0, max_nodes=5).masked_snapshot()
+    future = {**snap, "llm_spend_cap_from_a_newer_build": 0.25}
+    assert unknown_snapshot_keys(future) == ["llm_spend_cap_from_a_newer_build"]
+
+    with pytest.raises(ConfigSnapshotUnknownKeysError,
+                       match="llm_spend_cap_from_a_newer_build") as caught:
+        settings_from_snapshot(future, refuse_unknown=True)
+    # A deliberate refusal is a TYPE: one line at exit 2, and still a ValueError to old catchers.
+    assert isinstance(caught.value, ConfigRefusal) and isinstance(caught.value, OperatorRefusal)
+    assert isinstance(caught.value, ValueError)
+
+    # The read-only paths stay lenient: the recorded endpoint and budget are still what they read.
+    lenient = settings_from_snapshot(future)
+    assert lenient.max_nodes == 5 and lenient.llm_budget_usd == 1.0
+
+
+def test_the_document_marker_and_every_RETIRED_setting_are_known_keys():
+    """A key an OLDER build wrote is not a key a NEWER build wrote, and a name alone cannot tell
+    them apart — `RETIRED_SETTINGS` is what can. Without it, every snapshot written before a field
+    was removed would become unresumable the day this refusal landed (a pre-2026-08-05 run carries
+    `inline_repair_stuck_repeat`)."""
+    from looplab.core.config import (CONFIG_SNAPSHOT_SCHEMA_KEY, RETIRED_SETTINGS,
+                                     SNAPSHOT_DOCUMENT_KEYS, unknown_snapshot_keys)
+
+    snap = Settings().masked_snapshot()
+    assert CONFIG_SNAPSHOT_SCHEMA_KEY in snap and CONFIG_SNAPSHOT_SCHEMA_KEY in SNAPSHOT_DOCUMENT_KEYS
+    assert unknown_snapshot_keys(snap) == [], "a snapshot this build wrote must be all-known"
+    old = {**snap, **{name: 4 for name in RETIRED_SETTINGS}}
+    assert unknown_snapshot_keys(old) == []
+    assert settings_from_snapshot(old, refuse_unknown=True).max_nodes == snap["max_nodes"]
+    assert {"inline_repair_stuck_repeat", "speculative_pipeline"} <= set(RETIRED_SETTINGS)
+
+
+def test_a_retired_setting_is_never_also_a_live_field():
+    """Re-adding a retired name as a field must take it off the retired list in the same change,
+    or the list stops meaning "nothing reads this"."""
+    from looplab.core.config import RETIRED_SETTINGS, SNAPSHOT_DOCUMENT_KEYS
+
+    assert not set(RETIRED_SETTINGS) & set(Settings.model_fields)
+    assert not SNAPSHOT_DOCUMENT_KEYS & set(Settings.model_fields)
+    assert all(isinstance(why, str) and why.strip() for why in RETIRED_SETTINGS.values())
+
+
+def test_v3_is_the_bump_that_makes_every_older_reader_refuse_this_builds_snapshot():
+    """The unknown-key refusal protects the builds that HAVE it. The ones already deployed read at
+    most v2 and refuse no unknown key, so the only thing that stops them dropping today's caps is
+    the one rule they do have: a format newer than they understand is refused."""
+    from looplab.core.config import CONFIG_SNAPSHOT_SCHEMA, CONFIG_SNAPSHOT_SCHEMA_KEY
+
+    assert CONFIG_SNAPSHOT_SCHEMA == 3
+    assert Settings(llm_cost_limit=0.5).masked_snapshot()[CONFIG_SNAPSHOT_SCHEMA_KEY] > 2
+
+
+def test_a_newer_format_is_an_operator_refusal_not_a_traceback():
+    """It was a bare `ValueError`, so the CLI printed a traceback at exit 1 for a refusal whose whole
+    content is its message ("upgrade LoopLab to resume it")."""
+    from looplab.core.config import (CONFIG_SNAPSHOT_SCHEMA, CONFIG_SNAPSHOT_SCHEMA_KEY,
+                                     ConfigSnapshotVersionError)
+    from looplab.core.errors import OperatorRefusal
+
+    newer = {**Settings().masked_snapshot(), CONFIG_SNAPSHOT_SCHEMA_KEY: CONFIG_SNAPSHOT_SCHEMA + 1}
+    with pytest.raises(ConfigSnapshotVersionError) as caught:
+        settings_from_snapshot(newer)
+    assert isinstance(caught.value, OperatorRefusal) and isinstance(caught.value, ValueError)
 
 
 def test_a_pre_versioning_snapshot_still_resumes_unchanged():

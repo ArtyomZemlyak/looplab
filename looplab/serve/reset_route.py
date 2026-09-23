@@ -203,7 +203,9 @@ def _frozen_launch(
     try:
         # STRICT on purpose, and NOT a missing `existing_run=True` (see `_prepare_receipt`).
         load_task(stage)
-        replay_settings = settings_from_snapshot(record["effective_config"])
+        # A receipt a NEWER build froze can carry keys this one does not know; relaunching on it
+        # would drop them exactly as `_prepare_receipt` now refuses to (CORE-03).
+        replay_settings = settings_from_snapshot(record["effective_config"], refuse_unknown=True)
     except Exception as exc:  # noqa: BLE001 - a committed operation remains fail-closed
         raise HTTPException(503, {
             "code": "reset_frozen_inputs_unavailable",
@@ -300,7 +302,13 @@ def _prepare_receipt(
             raw_config = json.loads(config_bytes.decode("utf-8"))
             if not isinstance(raw_config, dict):
                 raise ValueError("config snapshot must be an object")
-            effective_config = settings_from_snapshot(raw_config).masked_snapshot()
+            # `refuse_unknown`: Replay relaunches the run, so it SPENDS. Freezing
+            # `settings_from_snapshot(...).masked_snapshot()` into the receipt used to DROP every
+            # key this build does not know — a newer build's spend cap among them — and relaunch
+            # without it (review 2026-09-22, CORE-03; the policy is at
+            # `core/config.py::CONFIG_SNAPSHOT_SCHEMA`). Same 409 as any invalid configuration.
+            effective_config = settings_from_snapshot(
+                raw_config, refuse_unknown=True).masked_snapshot()
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(409, {
                 "code": "replay_config_invalid",

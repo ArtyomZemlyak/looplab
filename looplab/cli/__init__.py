@@ -415,7 +415,11 @@ def load_run_settings(run_dir, *, strict: bool, require_snapshot: bool = False) 
       because a raw JSONDecodeError/ValidationError traceback tells the operator nothing about WHICH
       file to fix. Falling back to ambient Settings here would silently drop run-only flags
       (require_approval, trust_mode, confirm_*, eval_trust_mode, backend, …) — e.g. finishing a
-      paused not-yet-approved run without any approval.
+      paused not-yet-approved run without any approval. These are the paths that SPEND, so they are
+      also where a snapshot KEY this build does not know is refused rather than dropped
+      (`refuse_unknown=True`; the one policy is stated at `core/config.py::CONFIG_SNAPSHOT_SCHEMA`,
+      review 2026-09-22 CORE-03) — an older build used to resume a newer run's snapshot without
+      the `llm_cost_limit` it could not read.
     * ``strict=False`` (read-only diagnostics) — the snapshot supplies endpoint/model PROVENANCE so a
       diagnostic reaches the endpoint recorded for that run. An absent or unreadable snapshot must
       not stop someone from reading an old or partially-written run, so it degrades to ambient.
@@ -460,7 +464,7 @@ def load_run_settings(run_dir, *, strict: bool, require_snapshot: bool = False) 
                 "or copy one from another run of the same task and edit it.")
         return Settings()
     if strict:
-        return _settings_from_config_snapshot(snap)
+        return _settings_from_config_snapshot(snap, refuse_unknown=True)
     try:
         return _settings_from_config_snapshot(snap)
     except Exception:  # noqa: BLE001 — any snapshot issue -> ambient fallback for a read-only path
@@ -501,12 +505,14 @@ def _settings_for_run(run_dir=None, model=None):
     return settings
 
 
-def _settings_from_config_snapshot(config_snap: Path) -> Settings:
+def _settings_from_config_snapshot(config_snap: Path, *, refuse_unknown: bool = False) -> Settings:
     """Load `config.snapshot.json` into Settings, mapping every failure to a one-line BadParameter.
 
     A corrupt or hand-edited snapshot is an operator-facing input error, not an internal fault: raw
     JSONDecodeError/ValidationError tracebacks tell the operator nothing about WHICH file to fix.
     Shared by `run`'s finalization recovery and by `resume`/`finalize`, which read the same file.
+    `refuse_unknown` is passed through to `settings_from_snapshot`; its refusal is already an
+    `OperatorRefusal`, so it reaches the CLI boundary as one line at exit 2 without a mapping here.
     """
     import json
 
@@ -523,7 +529,7 @@ def _settings_from_config_snapshot(config_snap: Path) -> Settings:
         raise typer.BadParameter(
             f"cannot load original config snapshot {config_snap}: expected a JSON object")
     try:
-        return settings_from_snapshot(config_data)
+        return settings_from_snapshot(config_data, refuse_unknown=refuse_unknown)
     except ValidationError as exc:
         raise typer.BadParameter(
             f"cannot load original config snapshot {config_snap}: {exc}") from exc

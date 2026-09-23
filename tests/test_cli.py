@@ -577,6 +577,76 @@ def test_run_authorization_preflight_precedes_snapshot_and_reopen_writes(tmp_pat
     assert (run_dir / "task.snapshot.json").read_bytes() == before[2]
 
 
+def _snapshot_run(run_dir, **extra):
+    """A toy run on disk whose `config.snapshot.json` is a real snapshot plus `extra` keys."""
+    import json
+
+    from looplab.adapters.toytask import ToyTask
+    from looplab.core.config import Settings
+    from looplab.events.eventstore import EventStore
+
+    run_dir.mkdir()
+    task = ToyTask()
+    (run_dir / "task.snapshot.json").write_text(
+        json.dumps(task.model_dump(mode="json")), encoding="utf-8")
+    (run_dir / "config.snapshot.json").write_text(json.dumps(
+        {**Settings(backend="toy", max_nodes=3).masked_snapshot(), **extra}), encoding="utf-8")
+    EventStore(run_dir / "events.jsonl").append("run_started", {
+        "run_id": run_dir.name, "task_id": task.id, "goal": task.goal,
+        "direction": task.direction})
+    return {name: (run_dir / name).read_bytes()
+            for name in ("events.jsonl", "config.snapshot.json", "task.snapshot.json")}
+
+
+def test_resume_refuses_a_snapshot_key_this_build_does_not_know_before_it_writes(tmp_path):
+    """Review 2026-09-22, CORE-03: an older build resumed a newer run's snapshot by DROPPING every
+    key it did not know — `llm_cost_limit` / `llm_token_limit` among them — so a capped run
+    continued uncapped. Resume is where the run spends, so it refuses: one line, exit 2, nothing
+    written. MUTATION: drop `refuse_unknown=True` from `load_run_settings`'s strict path -> the
+    resume proceeds (exit 0) on Settings that never heard of the cap."""
+    run_dir = tmp_path / "newer-snapshot"
+    before = _snapshot_run(run_dir, llm_spend_cap_from_a_newer_build=0.25)
+
+    result = runner.invoke(app, ["resume", str(run_dir)])
+
+    assert result.exit_code == REFUSAL_EXIT_CODE, result.output
+    assert "llm_spend_cap_from_a_newer_build" in result.output
+    assert {name: (run_dir / name).read_bytes() for name in before} == before
+
+
+def test_finalize_refuses_the_same_unknown_key_instead_of_wrapping_up_without_it(tmp_path):
+    """Finalize runs PAID stewards under these settings, so it is a spending path too. (It records
+    its stop intent before it reads the snapshot, as it always has; what it must not do is the
+    wrap-up.)"""
+    from looplab.events.eventstore import EventStore
+
+    run_dir = tmp_path / "newer-snapshot-finalize"
+    _snapshot_run(run_dir, llm_spend_cap_from_a_newer_build=0.25)
+
+    result = runner.invoke(app, ["finalize", str(run_dir)])
+
+    assert result.exit_code == REFUSAL_EXIT_CODE, result.output
+    assert "llm_spend_cap_from_a_newer_build" in result.output
+    types = [event.type for event in EventStore(run_dir / "events.jsonl").read_all()]
+    assert "run_finished" not in types, "the wrap-up ran on settings that dropped a key"
+
+
+def test_a_read_only_loader_keeps_the_recorded_snapshot_and_a_retired_key_resumes(tmp_path):
+    """The two halves of the one policy that are NOT refusals. A read-only command still reads the
+    run's own snapshot (`max_nodes=3`), not ambient defaults, when it carries a key this build does
+    not know; and a key an OLDER build wrote — a setting this build retired — is no reason to
+    refuse a resume at all."""
+    from looplab.cli import load_run_settings
+
+    newer = tmp_path / "newer"
+    _snapshot_run(newer, llm_spend_cap_from_a_newer_build=0.25)
+    assert load_run_settings(newer, strict=False).max_nodes == 3
+
+    older = tmp_path / "older"
+    _snapshot_run(older, inline_repair_stuck_repeat=4)
+    assert load_run_settings(older, strict=True, require_snapshot=True).max_nodes == 3
+
+
 def test_run_set_unknown_key_errors(tmp_path):
     result = runner.invoke(app, [
         "run", "--no-genesis", "--kind", "quadratic", "--goal", "g", "--out", str(tmp_path / "r"),

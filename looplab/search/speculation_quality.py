@@ -1800,7 +1800,10 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
     #     still fatal". Subtracting unknown names without it turns this into a no-op.
     #   * a field THIS BINARY DOES NOT UNDERSTAND is present -> still fatal, because a snapshot
     #     written by a newer LoopLab may carry semantics this build would silently drop. That is the
-    #     same fail-closed rule `core/config.py::settings_from_snapshot` already applies on resume.
+    #     direction `core/config.py::settings_from_snapshot(refuse_unknown=True)` takes on resume,
+    #     finalize and Replay — since review 2026-09-22 (CORE-03); before it that function refused
+    #     only a newer FORMAT, and this sentence was false. Those paths also grandfather
+    #     `RETIRED_SETTINGS`; this exactness check does not.
     # A field this binary declares that an OLDER snapshot predates is absent-and-fine, which is the
     # whole of the change.
     known_config_fields = (

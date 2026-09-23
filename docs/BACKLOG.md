@@ -4555,7 +4555,11 @@ that is a statement about two DIFFERENT sets, not about a version.
     refuses every calibration run, which is the original defect with the sign flipped, and is
     exactly what the first cut of this did.
   * a key THIS BINARY does not understand, present — still fatal, the same fail-closed rule
-    `core/config.py::settings_from_snapshot` applies on resume.
+    `core/config.py::settings_from_snapshot` applies on resume. *(Correction 2026-09-23, review
+    2026-09-22 CORE-03: when this was written that function refused only a newer FORMAT and
+    silently dropped an unknown KEY. It refuses one now — on resume, finalize and Replay, through
+    `refuse_unknown=True`, grandfathering `RETIRED_SETTINGS` — and the one policy is stated at
+    `core/config.py::CONFIG_SNAPSHOT_SCHEMA`.)*
 
   **The exactness that matters was never this check**, which is what makes the narrowing safe:
   `speculation_runtime_scope_digest(config)` digests the whole snapshot document and compares it to
