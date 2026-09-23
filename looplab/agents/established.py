@@ -27,12 +27,26 @@ One store per RUN, shared by every role the factory builds (the Developer's phas
 threads under `llm_parallel`, hence the lock); it records through the tool loop's per-call
 `on_tool_result` hook, keyed on `(tool, path)` the way `tool_loop._READ_TOOL_PATH_SLOTS` keys the
 read-loop nudge — the two are one reading of "which tools return a file".
+
+A CARRIED PAGE IS TEXT THE MODEL DID NOT WRITE (review 2026-09-22, doc 66 §6.4 — the remainder of
+TAT-02 and doc 50 TO-06's boundary). The block lands in a chain root's USER turn, the message the
+phase reads as its task, and what it carries is repository text, a candidate's staged code or a
+data sample. The same bytes reached the model a phase earlier as a `read_file` result fenced under
+`Settings.evidence_envelope`; carried forward they arrived bare, so a file ending in the fence's own
+`END UNTRUSTED_RUN_EVIDENCE` and an instruction read as the loop speaking inside the task. With the
+envelope on (`evidence_envelope`, OFF at the constructor, turned on by the one Settings reader
+`established_context_from_settings` from `core/evidence.py::envelope_enabled`) each carried page is
+`fence_untrusted(<page>, EVIDENCE_LABEL)`; the header and the index rows are engine text and stay
+outside it. Fence only — no prompt wording moves, and OFF (a pre-field snapshot's LEGACY row) is
+every historical byte.
 """
 from __future__ import annotations
 
 import hashlib
 import threading
 from typing import Callable, Optional
+
+from looplab.core.evidence import EVIDENCE_LABEL, envelope_enabled, fence_untrusted
 
 # The readers whose result is a FILE, and the ledger key for one of their calls: BOTH imported from
 # `agents/tool_loop.py`, which owns them. This module carried a four-entry copy of that table and a
@@ -182,8 +196,16 @@ def _refusal_prefixes() -> tuple:
 class EstablishedContext:
     """The per-run ledger of file reads, and the block a new chain is seeded with."""
 
+    # The untrusted-evidence fence on every carried page (see the module docstring). A CLASS default
+    # too, so an instance built without `__init__` reads OFF — the historical bytes.
+    evidence_envelope = False
+
     def __init__(self, budget_bytes: int = DEFAULT_BUDGET_BYTES,
-                 item_bytes: int = DEFAULT_ITEM_BYTES):
+                 item_bytes: int = DEFAULT_ITEM_BYTES, *, evidence_envelope: bool = False):
+        # OFF at the constructor, because it changes a prompt (CLAUDE.md "Prompt strings are
+        # contracts"); `established_context_from_settings` passes `envelope_enabled(settings)`, so a
+        # run's pages are fenced exactly when its tool results are, and a pre-field run is not.
+        self.evidence_envelope = bool(evidence_envelope)
         self.budget_bytes = max(0, int(budget_bytes))
         # DERIVED, never larger than the budget: an operator lowering `established_context_bytes`
         # below the item cap got a store that still ACCEPTED 6 KiB pages and whose `render` could
@@ -379,6 +401,13 @@ class EstablishedContext:
             elsewhere = row.get("workspace") != here
             content = None if elsewhere else row["content"]
             if content is not None:
+                # FENCED under the envelope (review 2026-09-22, doc 66 §6.4): this page is going
+                # into the phase's TASK message, and a file that forges `END UNTRUSTED_RUN_EVIDENCE`
+                # would otherwise end the evidence it never opened and speak as the loop. Only the
+                # file's bytes go inside; the sha stays theirs, and the fenced size is what the
+                # budget is charged (a fence is ~50 bytes the cap must still hold).
+                if self.evidence_envelope:
+                    content = fence_untrusted(content, EVIDENCE_LABEL)
                 body = (f"\n--- `{row['path']}` ({row['tool']}; {times}; first page verbatim, "
                         f"sha {row['sha']}) ---\n{content}\n")
                 size = len(body.encode("utf-8"))
@@ -419,6 +448,10 @@ def established_context_from_settings(settings) -> Optional[EstablishedContext]:
 
     Keyed on the settings object the roles were built from, so a run that deliberately builds roles
     from a DIFFERENT `Settings` (the speculation-calibration profile) still gets its own.
+
+    It is also where the store's fence is switched on (review 2026-09-22, doc 66 §6.4): the same
+    `envelope_enabled(settings)` every role builder reads, so a run's carried pages are fenced
+    exactly when the tool results they were read as are.
     """
     if not bool(getattr(settings, "established_context", False)):
         return None
@@ -426,7 +459,8 @@ def established_context_from_settings(settings) -> Optional[EstablishedContext]:
     if isinstance(existing, EstablishedContext):
         return existing
     store = EstablishedContext(
-        budget_bytes=int(getattr(settings, "established_context_bytes", DEFAULT_BUDGET_BYTES)))
+        budget_bytes=int(getattr(settings, "established_context_bytes", DEFAULT_BUDGET_BYTES)),
+        evidence_envelope=envelope_enabled(settings))
     try:
         object.__setattr__(settings, _SETTINGS_STORE_ATTR, store)
     except Exception:  # noqa: BLE001 - a settings object that refuses the cache still gets a store

@@ -1003,6 +1003,13 @@ transitively, of every function that passes its own `tools` parameter into one โ
 site with no row or on a row whose site is gone, so the next loop over a candidate's code cannot
 arrive unfenced unnoticed. `tests/test_evidence_consumer_fences.py` drives the consumers it added.
 
+**Text that reaches a prompt without being a tool result** is fenced by the same switch too
+(review 2026-09-22, doc 66 ยง6.4). The ALREADY-ESTABLISHED block (`established_context`) carries the
+first pages of files an earlier phase read into the next phase's task message; with the envelope on,
+each carried page rides inside the fence (the header and the index rows stay outside it), so a file
+that forges `END UNTRUSTED_RUN_EVIDENCE` cannot close evidence it never opened. The store takes the
+switch from the run's Settings, so a pre-field snapshot keeps its historical bytes.
+
 ## Knowledge, skills & prompts
 
 Give the agentic Researcher extra context and tools:
