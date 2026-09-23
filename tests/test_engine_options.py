@@ -12,6 +12,12 @@ identical to the OLD cli.py::_engine kwarg-by-kwarg passthrough:
 """
 from __future__ import annotations
 
+import dataclasses
+import functools
+import tempfile
+import typing
+from pathlib import Path
+
 from looplab.adapters.toytask import ToyTask
 from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.config import Settings
@@ -31,187 +37,141 @@ def _mk_engine(run_dir, **kw) -> Engine:
                   **kw)
 
 
-# EngineOptions field -> the Engine attribute it lands on (digest_char_cap is special-cased:
-# it is stamped onto the researcher, not the engine). Enumerated as a FIXED list on purpose —
-# a new knob must be added here for the differential test to keep covering it.
-ATTR_BY_FIELD = {
-    "max_parallel": "max_parallel",
-    "parallel_build": "parallel_build",
-    # Layer-2 canonical parallelism names — None default resolves to the legacy attr, so they land on the
-    # `_eval_parallel`/`_llm_parallel` read-through aliases (which hold the settled runtime value).
-    "eval_parallel": "_eval_parallel",
-    "llm_parallel": "_llm_parallel",
-    "train_monitor": "_train_monitor",
-    "train_monitor_interval_s": "_train_monitor_interval_s",
-    "train_monitor_kill": "_train_monitor_kill",
-    "train_monitor_kill_confidence": "_train_monitor_kill_confidence",
-    "train_monitor_tools": "_train_monitor_tools",
-    "train_monitor_contract": "_train_monitor_contract",
-    "repair_log_tools": "_repair_log_tools",
-    "stage_check_tools": "_stage_check_tools",
-    # The untrusted-evidence fence on the engine's own judges' tool results (review 2026-09-22,
-    # TAT-02), read by `engine/shared.py::judge_evidence_kwargs`.
-    "evidence_envelope": "_evidence_envelope",
-    "asha_live": "_asha_live",
-    "asha_live_kill": "_asha_live_kill",
-    "asha_live_quantile": "_asha_live_quantile",
-    "asha_live_min_siblings": "_asha_live_min_siblings",
-    "asha_live_kill_confidence": "_asha_live_kill_confidence",
-    "timeout": "timeout",
-    "max_eval_timeout": "max_eval_timeout",
-    "sweep_timeout_mult": "sweep_timeout_mult",
-    "eval_stall_timeout_s": "eval_stall_timeout_s",
-    "single_command_divergence_watch": "_single_command_divergence_watch",
-    "eval_deadline_grace_s": "eval_deadline_grace_s",
-    "eval_env": "_eval_env",
-    "confirm_top_k": "confirm_top_k",
-    "confirm_seeds": "confirm_seeds",
-    "confirm_seed_base": "confirm_seed_base",
-    # The eval NOISE FLOOR's repeat count (`engine/noise_floor.py`, doc 52 row 11). Same name on
-    # the Engine: it is clamped there (0 and 1 both mean off), not renamed.
-    "eval_noise_seeds": "eval_noise_seeds",
-    "max_seconds": "max_seconds",
-    "max_eval_seconds": "max_eval_seconds",
-    # The run's LLM spend caps, reserved at the broker's permit (`core/llm_budget.py`, doc 52 row 15).
-    "llm_cost_limit": "_llm_cost_limit",
-    "llm_token_limit": "_llm_token_limit",
-    # The plan's endgame reserve (`engine/plan.py`, doc 52 row 18).
-    "endgame_reserve_frac": "_endgame_reserve_frac",
-    # The operator x model router's arms, parsed once at construction (`search/policy.py::parse_model_arms`).
-    "model_arms": "_model_arms",
-    "memory_dir": "memory_dir",
-    "require_approval": "require_approval",
-    "archive_resolution": "archive_resolution",
-    "eval_trust_mode": "eval_trust_mode",
-    "trust_mode": "trust_mode",
-    "docker_image": "docker_image",
-    "sandbox_memory": "sandbox_memory",
-    "sandbox_cpus": "sandbox_cpus",
-    "sandbox_readonly_rootfs": "sandbox_readonly_rootfs",
-    "seed_mode": "_seed_mode",
-    "read_fence": "_read_fence",
-    "n_seeds": "n_seeds",
-    "max_nodes": "max_nodes",
-    "policy_name": "_policy_name",
-    "ablate_every": "_ablate_every",
-    "strategist_every": "strategist_every",
-    "concept_retag_every": "concept_retag_every",
-    "deep_research_every": "deep_research_every",
-    "concurrent_research": "concurrent_research",
-    "concurrent_research_repeat": "_concurrent_research_repeat",
-    "concurrent_research_interval_s": "_concurrent_research_interval_s",
-    "concurrent_research_max_calls": "_concurrent_research_max_calls",
-    "concurrent_consolidate": "_concurrent_consolidate",
-    "report_every": "report_every",
-    "merge_mode": "_merge_mode",
-    "complexity_cue": "_complexity_cue",
-    "budget_aware": "_budget_aware",
-    "failure_reflection": "_failure_reflection",
-    "watchdog_reflection": "_watchdog_reflection",
-    "deep_repair": "_deep_repair",
-    "localize_faults": "_localize_faults",
-    "feature_engineering": "_feature_engineering",
-    "ablate_code_blocks": "_ablate_code_blocks",
-    "proxy_kill_fraction": "proxy_kill_fraction",
-    "reward_hack_detect": "reward_hack_detect",
-    "trust_gate": "trust_gate",
-    "code_leakage_detect": "_code_leakage_detect",
-    "critic_check": "_critic_check",
-    "redact_output": "_redact_output",
-    # The legacy alias has no attribute of its own (review 2026-09-22, CORE-08): what it moves is
-    # the mode, forced to "algo".
-    "novelty_gate": "_novelty_mode",
-    "novelty_epsilon": "_novelty_epsilon",
-    "reflection_priors": "_reflection_priors",
-    "comparative_lessons": "_comparative_lessons_on",
-    "lessons_every": "lessons_every",
-    "lessons_refresh_every": "lessons_refresh_every",
-    "track_hypotheses": "_track_hypotheses",
-    "surrogate_explore": "_surrogate_explore",
-    "unified_agent": "unified_agent",
-    "agent_drives_actions": "agent_drives_actions",
-    "card_driven_selection": "card_driven_selection",
-    "exploit_strong_node_quantile": "exploit_strong_node_quantile",
-    "regime_prior": "regime_prior",
-    "proposal_width": "_proposal_width",
-    "gpu_footprint_cue": "_gpu_footprint_cue",
-    "speculation_depth": "speculation_depth",
-    "speculation_gate_receipt": "speculation_gate_receipt",
-    "inline_repair": "_inline_repair",
-    "inline_repair_attempts": "_inline_repair_attempts",
-    "inline_repair_reasons": "_inline_repair_reasons",
-    "auto_install_deps": "_auto_install_deps",
-    "dep_install_timeout": "_dep_install_timeout",
-    "agent_control": "_agent_control",
-    "holdout_fraction": "_holdout_fraction",
-    "holdout_select": "_holdout_select",
-    "holdout_top_k": "_holdout_top_k",
-    "debug_depth": "_debug_depth",
-    "operator_bandit": "_operator_bandit",
-    # The rest of the run-level policy knobs a Strategist rebuild hands the new policy
-    # (`search/policy.py::policy_knobs`, review 2026-09-22 SCJ-01).
-    "asha_eta": "_asha_eta",
-    "asha_rung_nodes": "_asha_rung_nodes",
-    "mcts_cost_weight": "_mcts_cost_weight",
-    "mcts_value_weight": "_mcts_value_weight",
-    "novelty_mode": "_novelty_mode",
-    "novelty_semantic": "_novelty_semantic",
-    "novelty_semantic_threshold": "_novelty_semantic_threshold",
-    "research_verify": "_research_verify",
-    "memo_verdict_cue": "_memo_verdict_cue",
-    "lesson_operator_scope": "_lesson_operator_scope",
-    "workdir_audit": "_workdir_audit",
-    "trace_llm_io": "_trace_llm_io",
-    "select_verifier": "_select_verifier",
-    "verifier_ci_tie": "_verifier_ci_tie",
-    "select_verifier_samples": "_select_verifier_samples",
-    "coverage_context": "_coverage_context",
-    "cadence_while_evaluating": "_cadence_while_evaluating",
-    "concept_pivot": "_concept_pivot",
-    "graded_novelty": "_graded_novelty",
-    "novelty_literature": "_novelty_literature",
-    "steady_state_build": "_steady_state_build",
-    "capability_expansion": "_capability_expansion",
-    "fingerprint_universal": "_fingerprint_universal",
-    "cross_run_concepts": "_cross_run_concepts",
-    "concept_run_base": "_concept_run_base",
-    "cross_run_advisory": "_cross_run_advisory",
-    "cross_run_curation": "_cross_run_curation",
-    "task_facets_finalize": "_task_facets_finalize",
-    "cross_run_curation_auto": "_cross_run_curation_auto",
-    "concept_tidy": "_concept_tidy",
-    "cross_run_read_tools": "_cross_run_read_tools",
-    "phase_handoff_summary": "_phase_handoff_summary",
-    "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
-    # F8: the cadence at which the repair critic is consulted. It is NOT a bound — the critic can
-    # only stop the loop, never extend it — which is why it sits beside the repair knobs rather than
-    # among the budgets.
-    "repair_critic_after": "_repair_critic_after",
-    "systemic_failure_stop": "systemic_failure_stop",
-    "developer_crash_pause_after": "developer_crash_pause_after",
-    "node_open_budget_floor_usd": "node_open_budget_floor_usd",
-    # Metric salvage: the Engine attribute is public (the mixin declares it as a class attribute so
-    # a test or a resumed subclass can set it directly), so both names are the same.
-    "metric_salvage": "metric_salvage",
-    "metric_salvage_repair": "metric_salvage_repair",
-    # Metric provenance. `metric_subject` is public for the same reason `metric_salvage` is — three
-    # mixins read it as a plain attribute and a test or a resumed subclass sets it directly — while
-    # `landlock` is private beside `_read_fence`, its sibling boundary: nothing outside
-    # `engine/resources.py` reads it, and it is settled at construction.
-    "metric_subject": "metric_subject",
-    # Public for the same reason `metric_subject` is: `engine/evaluate.py` reads it as a plain
-    # attribute at the one place the `node_evaluated` payload is built, and a test sets it directly.
-    "auto_extra_metrics": "auto_extra_metrics",
-    "landlock": "_landlock",
-    # Private for the same reason `landlock` is: settled at construction, read by `resources.py`.
-    "syscall_fence": "_syscall_fence",
+# EngineOptions field -> the Engine attribute it lands on, DERIVED by driving `Engine.__init__`
+# (review 2026-09-22, ENG1-03). It was a hand-kept copy — 145 rows beside 146 fields — and CLAUDE.md
+# billed every new knob one row here; a copy is only ever as right as its last edit, and the SEVEN
+# ROWS note in `test_from_settings_matches_old_cli_kwarg_mapping` measured what a row alone bought.
+# Now each field is given a non-default value and the attribute that MOVES is the answer: the one
+# declaration is the code that lands the knob, and the derivation is itself the property test over
+# every field (`test_every_engine_options_field_is_covered`) — a field wired to nothing moves nothing
+# and is NAMED, instead of being compared as its default against itself. It reproduced all 145
+# hand-kept rows on the day it replaced them.
+#
+# The naming notes the hand map carried, which were about the Engine's attribute names rather than
+# about the map, kept here:
+#   * `eval_parallel`/`llm_parallel` land on `_eval_parallel`/`_llm_parallel`, the settled runtime
+#     widths; `max_parallel`/`parallel_build` are the legacy read-through aliases of the same two.
+#   * the legacy `novelty_gate` alias has no attribute of its own (review 2026-09-22, CORE-08): what
+#     it moves is the mode, forced to "algo".
+#   * `metric_salvage` is public: the mixin declares it as a class attribute so a test or a resumed
+#     subclass can set it directly. `metric_subject` is public for the same reason — three mixins
+#     read it as a plain attribute — and so is `auto_extra_metrics` (`engine/evaluate.py` reads it at
+#     the one place the `node_evaluated` payload is built). `landlock` and `syscall_fence` are private
+#     beside `_read_fence`, their sibling boundary: settled at construction, read by `resources.py`.
+#   * `eval_noise_seeds` keeps its name on the Engine: it is clamped there (0 and 1 both mean off).
+#   * digest_char_cap is special-cased: it is stamped onto the RESEARCHER, not the engine.
+#
+# The only hand-kept data left is a VALUE for each field whose generic non-default is refused or
+# settled straight back to the default, and the one field that moves only beside another. A new knob
+# needs a row here only when the derivation names it.
+_PERTURBED_VALUE = {
+    "trust_gate": "gate",           # anything outside audit|gate|block is a ConfigRefusal
+    "metric_salvage": "select",     # an unknown mode settles to the default `audit`
+    "metric_subject": "require",    # an unknown rung settles to the default `audit`
 }
+_PERTURBED_BESIDE = {
+    # `agent_drives_actions = unified_agent and agent_drives_actions`: inert without the facade.
+    "agent_drives_actions": {"unified_agent": True},
+}
+_NOT_ON_THE_ENGINE = frozenset({"digest_char_cap"})
+_VALUE_TYPES = (bool, int, float, str, type(None), tuple, list, dict, set, frozenset)
+_ABSENT = object()
 
 
-def test_every_engine_options_field_is_covered():
-    """The attribute map + digest_char_cap must cover EngineOptions exactly, so a new field can't
-    silently dodge the differential comparison below."""
-    assert set(ATTR_BY_FIELD) | {"digest_char_cap"} == set(EngineOptions.__dataclass_fields__)
+def _perturbed(f: dataclasses.Field, hint):
+    """A valid NON-default value for one EngineOptions field, derived from its default and type."""
+    if f.name in _PERTURBED_VALUE:
+        return _PERTURBED_VALUE[f.name]
+    default = f.default if f.default is not dataclasses.MISSING else f.default_factory()
+    if default is None:                              # Optional[X]: a value of X
+        kind = next((a for a in typing.get_args(hint) if a is not type(None)), None)
+        kind = typing.get_origin(kind) or kind
+        if kind is str:
+            return str(Path(tempfile.gettempdir()) / f"looplab-perturbed-{f.name}")
+        by_kind = {bool: True, int: 2, float: 60.0, dict: {}}
+        assert kind in by_kind, f"no generic non-default for {f.name}: {hint} — add a _PERTURBED_VALUE row"
+        return by_kind[kind]
+    if isinstance(default, bool):
+        return not default
+    if isinstance(default, int):
+        return default + 2               # +2, not +1: `eval_noise_seeds` reads 1 as off, like 0
+    if isinstance(default, float):
+        return default + 0.25
+    if isinstance(default, str):
+        return f"{default}-perturbed" if default else "perturbed"
+    if isinstance(default, dict):
+        return {"PERTURBED_KNOB": "1"}
+    assert isinstance(default, tuple), f"no generic non-default for {f.name}: {default!r}"
+    return default[:1]
+
+
+def _landed(engine, names: frozenset) -> dict:
+    """Every plain-data attribute a constructed Engine holds, plus the read-through properties named
+    after a field (`max_parallel`, `parallel_build`) — the only properties a knob can land on."""
+    out = {k: v for k, v in vars(engine).items() if isinstance(v, _VALUE_TYPES)}
+    for name in names:
+        if isinstance(getattr(type(engine), name, None), property):
+            out[name] = getattr(engine, name)
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def attr_by_field() -> dict:
+    """EngineOptions field -> the Engine attribute it lands on, found by moving each field and looking.
+
+    The attribute that moved is named `<field>` (a public knob) or `_<field>`, preferred in that
+    order; otherwise it is the ONE attribute that moved (`novelty_gate` -> `_novelty_mode`,
+    `comparative_lessons` -> `_comparative_lessons_on`). A field that moves nothing, or several
+    attributes none of which carries its name, fails the derivation BY NAME."""
+    hints = typing.get_type_hints(EngineOptions)
+    fields = [f for f in dataclasses.fields(EngineOptions) if f.name not in _NOT_ON_THE_ENGINE]
+    names = frozenset(n for f in fields for n in (f.name, "_" + f.name))
+    out, problems = {}, []
+    with tempfile.TemporaryDirectory() as tmp:
+        runs = iter(range(10 ** 6))
+
+        def landed(**kw) -> dict:
+            return _landed(_mk_engine(Path(tmp) / str(next(runs)) / "run", **kw), names)
+
+        # An attribute that differs between two IDENTICAL constructions is nobody's field.
+        first, second = landed(), landed()
+        noise = {k for k in set(first) | set(second) if first.get(k, _ABSENT) != second.get(k, _ABSENT)}
+        for f in fields:
+            beside = _PERTURBED_BESIDE.get(f.name, {})
+            base = landed(**beside) if beside else first
+            after = landed(**beside, **{f.name: _perturbed(f, hints[f.name])})
+            moved = sorted(k for k in set(base) | set(after)
+                           if k not in noise and base.get(k, _ABSENT) != after.get(k, _ABSENT))
+            named = [a for a in (f.name, "_" + f.name) if a in moved]
+            if named:
+                out[f.name] = named[0]
+            elif len(moved) == 1:
+                out[f.name] = moved[0]
+            else:
+                problems.append(f"{f.name}: moved {moved or 'nothing'}")
+    assert not problems, (
+        "EngineOptions field(s) whose non-default value does not land on ONE identifiable Engine "
+        f"attribute — unwired, or wired somewhere this derivation cannot name: {problems}")
+    return out
+
+
+def test_every_engine_options_field_is_covered(tmp_path):
+    """THE PROPERTY OVER EVERY FIELD, driven: each `EngineOptions` field but the researcher-stamped
+    `digest_char_cap` moves exactly one identifiable Engine attribute when given a non-default value,
+    so no field is wired to nothing and none can dodge the differential comparison below.
+
+    It used to be a coverage check over the hand-kept map, which a field wired to nothing passed as
+    long as somebody had typed its row (review 2026-09-22, ENG1-03)."""
+    derived = attr_by_field()
+    assert set(derived) | _NOT_ON_THE_ENGINE == set(EngineOptions.__dataclass_fields__)
+    engine = _mk_engine(tmp_path / "run")
+    assert all(hasattr(engine, attr) for attr in derived.values())
+    # …and the one field that lands elsewhere lands where it says, so the property is total.
+    assert engine.researcher._digest_cap == EngineOptions().digest_char_cap
+    assert _mk_engine(tmp_path / "cap", digest_char_cap=7).researcher._digest_cap == 7
+    # The two irregular landings the hand map spelled out by hand, re-derived rather than typed.
+    assert derived["novelty_gate"] == "_novelty_mode"
+    assert derived["comparative_lessons"] == "_comparative_lessons_on"
 
 
 def test_the_inert_structured_claims_knob_no_longer_reaches_the_engine(tmp_path):
@@ -233,12 +193,13 @@ def test_the_inert_structured_claims_knob_no_longer_reaches_the_engine(tmp_path)
 def test_the_legacy_novelty_gate_is_read_once_into_the_mode_and_not_relayed(tmp_path):
     """Review 2026-09-22, CORE-08 (ENG1-03 counted it too). `novelty_gate=True` is the legacy alias
     that forces `_novelty_mode = "algo"` at construction, and it was ALSO stored as `_novelty_gate`,
-    which nothing in the tree reads — a relay whose only reader was this file's `ATTR_BY_FIELD`
-    row. The alias still works; the row now names the attribute the knob actually moves."""
+    which nothing in the tree reads — a relay whose only reader was this file's then hand-kept
+    `ATTR_BY_FIELD` row. The alias still works; the map — derived since ENG1-03 — names the attribute
+    the knob actually moves."""
     eng = _mk_engine(tmp_path / "r", novelty_gate=True, novelty_mode="llm")
     assert eng._novelty_mode == "algo"
     assert not hasattr(eng, "_novelty_gate")
-    assert ATTR_BY_FIELD["novelty_gate"] == "_novelty_mode"
+    assert attr_by_field()["novelty_gate"] == "_novelty_mode"
 
 
 def test_task_facets_finalize_is_fresh_default_off_and_maps_explicit_opt_in():
@@ -289,8 +250,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         card_driven_selection=False,
         speculation_depth=4,
         task_facets_finalize=True,
-        # SEVEN ROWS THAT PAID FOR THEMSELVES AND WERE NEVER SPENT (2026-09-08). CLAUDE.md names
-        # the `ATTR_BY_FIELD` row as the cost that keeps this differential covering a new knob, but
+        # SEVEN ROWS THAT PAID FOR THEMSELVES AND WERE NEVER SPENT (2026-09-08). CLAUDE.md named
+        # the (then hand-kept) `ATTR_BY_FIELD` row as the cost that keeps this differential
+        # covering a new knob, but
         # a row alone buys nothing here: the comparison is old-kwarg Engine vs options Engine, so a
         # field absent from BOTH blocks, or present at its default in both, is compared as its
         # default against itself. Severing `syscall_fence` and `llm_cost_limit` in the tree left
@@ -453,7 +415,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     new = _mk_engine(tmp_path / "new", options=EngineOptions.from_settings(settings))
 
     mismatches = {attr: (getattr(old, attr), getattr(new, attr))
-                  for attr in ATTR_BY_FIELD.values()
+                  for attr in attr_by_field().values()
                   if getattr(old, attr) != getattr(new, attr)}
     assert not mismatches, f"old-kwarg vs options engines diverge: {mismatches}"
     # digest_char_cap is stamped onto the researcher, not stored on the engine.
@@ -464,8 +426,8 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     # severing a wiring breaks BOTH sides identically and the comparison still matches: with
     # `self._syscall_fence = "off"` and `self._llm_cost_limit = 0.0` hard-coded in the tree — the
     # syscall fence and the run's USD reserve cap both disabled — this file stayed green. So the
-    # `ATTR_BY_FIELD` row, which CLAUDE.md names as the cost that keeps a new knob covered here,
-    # bought nothing on its own. This is the half that makes it real, and it is TOTAL rather than
+    # (then hand-kept) `ATTR_BY_FIELD` row, which CLAUDE.md named as the cost that keeps a new knob
+    # covered here, bought nothing on its own. This is the half that makes it real, and it is TOTAL rather than
     # the six-line spot-check it replaces: every field given a non-default `Settings` value above
     # must leave its engine attribute off the bare-library default.
     #
@@ -476,7 +438,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     library = EngineOptions()
     fresh = Settings()
     unmoved = []
-    for field, attr in sorted(ATTR_BY_FIELD.items()):
+    for field, attr in sorted(attr_by_field().items()):
         asked = getattr(settings, field, None)
         if asked == getattr(fresh, field, None):
             continue                       # left at its default above: this rule says nothing

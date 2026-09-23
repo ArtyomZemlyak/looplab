@@ -1,7 +1,7 @@
 """A knob's `getattr` DEFAULT is the value a real `Engine(...)` settles it to (review 2026-09-22, ENG1-03).
 
 THE SHAPE. Every `EngineOptions` field lands on one Engine attribute
-(`tests/test_engine_options.py::ATTR_BY_FIELD`). A reader that cannot be sure the attribute exists — a
+(`tests/test_engine_options.py::attr_by_field`). A reader that cannot be sure the attribute exists — a
 module function handed an `engine`, a mixin method a test drives on `Engine.__new__(Engine)` — spells
 the read `getattr(engine, "<knob>", <default>)`, and that default is a SECOND declaration of the knob's
 value with nothing tying it to the first. The engine default moved — a feature shipped off and was
@@ -54,7 +54,7 @@ from looplab.engine.attribute_sites import UNSETTLED_KNOB_DEFAULTS
 from looplab.engine.orchestrator import Engine
 from tests._source_scan import PKG, iter_trees
 from tests.factories import make_engine
-from tests.test_engine_options import ATTR_BY_FIELD
+from tests.test_engine_options import attr_by_field
 
 # A module function's engine parameter is spelled one of these — the package's convention, and the
 # census teeth below prove a differently-named handle is invisible to it, which is why it matters.
@@ -177,7 +177,7 @@ def agrees(value, settled) -> bool:
 
 
 def knob_attributes() -> frozenset:
-    return frozenset(ATTR_BY_FIELD.values())
+    return frozenset(attr_by_field().values())
 
 
 # ---------------------------------------------------------------------------- the rule
