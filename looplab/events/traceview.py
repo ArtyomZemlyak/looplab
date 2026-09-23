@@ -18,6 +18,7 @@ from typing import Optional
 
 from looplab.core.models import RunState
 from looplab.core.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.tracing import retained_input_window
 from looplab.core.trace_files import (
     TRACE_JSONL_ROW_MAX_BYTES,
     iter_bounded_trace_jsonl_lines as _iter_bounded_trace_jsonl_lines,
@@ -1394,7 +1395,9 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
 
 def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict]:
     """Reconstruct the complete retained `input` of every delta-encoded generation in `spans` from its
-    `input_from` chain (see `tracing.generation`): full = reconstruct(input_from)[:input_carry] + delta.
+    `input_from` chain (see `tracing.generation`): full = reconstruct(input_from)[:input_carry] + delta,
+    then bounded by the retention window (`tracing.retained_input_window`, newest 64 messages / 64 000
+    characters), which the writer no longer applies before encoding (review 2026-09-22, CORE-02).
     Returns spans with `input` expanded and the `input_carry`/`input_from` bookkeeping dropped, so a
     reader (the single-observation view, the per-op trace tree) sees the complete diagnostic projection
     retained by tracing. Capture-time redaction and projection caps still apply, so this must not be
@@ -1503,7 +1506,14 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
         a = s.get("attributes")
         if isinstance(a, dict) and "input_carry" in a and s.get("kind") == "generation":
             na = {k: v for k, v in a.items() if k not in ("input_carry", "input_from")}
-            na["input"] = _full(s.get("span_id"))
+            # The RETENTION WINDOW is applied HERE, on the reconstruction, and never to a memoized
+            # level above: a chain is rebuilt from complete prefixes and bounded once, at the leaf.
+            # Since review 2026-09-22 (CORE-02) the writer stores deltas over the RAW conversation,
+            # so a long tool loop reconstructs to its whole history; this is the same newest-64 /
+            # 64 000-char window the writer used to apply before encoding (one arithmetic,
+            # `core/tracing.py::retained_input_window`), and the identity on every older trace,
+            # whose writer had windowed each stored list already.
+            na["input"] = retained_input_window(_full(s.get("span_id")))
             if partial.get(s.get("span_id")):
                 na["input_partial"] = True             # an ancestor was missing → `input` is truncated
             out.append({**s, "attributes": na})

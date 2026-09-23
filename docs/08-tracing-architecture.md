@@ -46,7 +46,22 @@ prefix of this one), it stores only the appended tail plus a back-ref — `input
 at the source (one append-only file, no separate blob store). Within the safe projection pipeline, the
 trace reader reconstructs the complete **retained diagnostic input** when its chain is present
 (`traceview.hydrate_inputs`) and marks an incomplete chain `input_partial`. This is not a promise of
-byte-exact provider I/O. `build_conversation` needs no reconstruction (it
+byte-exact provider I/O.
+
+**The extension is decided on the RAW conversation, and the retention window is the reader's**
+(review 2026-09-22, CORE-02). The retained input is bounded to the newest 64 messages and 64 000
+characters. That window used to be applied BEFORE encoding, so once a tool loop outgrew it the window
+slid, the stored prefix stopped matching, and every later turn stored a full ~64 KB base — measured
+on a 30-turn loop, `input_carry` 0 from turn 17 and rows of 4 KB becoming 66 KB, with each message
+re-sanitized on every turn it stayed in view. Now `generation` compares immutable per-message keys of
+the raw messages (`_message_identities`), sanitizes only the APPENDED messages (each message crosses
+the redactor once), and stores `input_carry` = the number of messages the previous generation's
+reconstruction holds; `hydrate_inputs` applies the same window
+(`tracing.retained_input_window`) to what it reconstructs. Over rows read raw that is exactly the
+input the old writer stored, and it is the identity on older traces, which were windowed at write
+time. `benchmarks/trace_generation_cost.py` is the ruler: on a 30-turn loop the caller-thread cost
+went from ~72 ms to ~1.7 ms per generation and the stored input from 987 KB to 116 KB.
+`build_conversation` needs no reconstruction (it
 treats `input_carry == 0` as the sub-loop request boundary and shows that base's full initial context
 once, then each generation's delta). Old logs (no `input_carry`)
 are read unchanged. Correctness never depends on the write-time chain surviving thread/task hops — a

@@ -28,6 +28,23 @@ jobs, so absolute milliseconds move with load; the counts do not):
                      rows 4.2 KB to turn 16, then 66 KB (input_carry 0 from turn 17)
                      up to 35 redactions of one message over 30 turns
 
+and after each of its three commits (30 turns, interleaved with a HEAD run on the same box):
+
+                          HEAD     + env cache   + trusted setter   + raw-list delta
+    ms / generation       72       32            19                 1.7
+    ms at turn 30         118      51            25                 1.7
+    env walks / gen       145.6    0.03          0.03               0.03
+    redactions / gen      145.6    145.6         67.4               19.1
+    one message, max      35       35            19                 2 (once as a message,
+                                                                       once in the output
+                                                                       this bench echoes it in)
+    row at turn 30        66 KB    66 KB         66 KB              4.3 KB (input_carry 58)
+    stored input          987 KB   987 KB        993 KB             116 KB
+
+The 993 KB is not a regression: it is the newest message of every near-budget base, which the
+second sanitization pass used to drop. At 60 turns the last column is 1.7 ms and 227 KB against
+93 ms and 2.96 MB.
+
 Usage:
     python benchmarks/trace_generation_cost.py [ROOT] [--turns N] [--repeat R]
 

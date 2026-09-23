@@ -476,9 +476,14 @@ def test_deep_chain_hydrates_without_recursion(tmp_path):
                      "attributes": {"node_id": 0, "input": delta, "input_carry": carry, "input_from": frm},
                      "events": [], "status": "OK", "start": float(k + 1), "duration_s": 1.0})
     expected_last = [{"role": "user", "content": f"m{k}"} for k in range(n)]     # full grown history
+    # ...BOUNDED at the leaf by the retention window (review 2026-09-22, CORE-02): the writer no
+    # longer windows before encoding, so the READER applies the same newest-64 window after the whole
+    # chain is rebuilt. The chain itself is still walked end to end — the window keeps its tail.
+    window = tracing._TRACE_MESSAGES_MAX
     for order in ([r] + gens, [r] + list(reversed(gens))):                       # file order AND reversed
         hyd = {h["span_id"]: h for h in hydrate_inputs(order)}
-        assert hyd[f"g{n-1}"]["attributes"]["input"] == expected_last
+        assert hyd[f"g{n-1}"]["attributes"]["input"] == expected_last[-window:]
+        assert hyd[f"g{window - 1}"]["attributes"]["input"] == expected_last[:window]
         assert hyd["g0"]["attributes"]["input"] == [{"role": "user", "content": "m0"}]
 
 
@@ -750,3 +755,290 @@ def test_already_normalized_spans_are_not_re_redacted_by_conversation(monkeypatc
 
     tv.build_conversation(state, spans, 0)
     assert len(calls) >= len(spans)
+
+
+# ------------------------------------------------------------------------------------------------
+# THE DELTA SURVIVES A CONVERSATION LONGER THAN THE RETENTION WINDOW (review 2026-09-22, CORE-02).
+#
+# The writer compared the WINDOWED projection (`_trace_messages`: newest 64 messages / 64 000 chars)
+# with the previous generation's. Past the window the window slid, the prefix compare failed, and
+# every later turn stored a full ~64 KB base: `input_carry` 0 from turn 17 of a 30-turn tool loop,
+# rows of 4 KB became 66 KB, and each message crossed the redactor once per turn it stayed in view.
+# The extension is now decided on the RAW conversation, only appended messages are sanitized, and
+# the window moved to the reader (`tracing.retained_input_window`, applied by `hydrate_inputs`).
+
+from looplab.core import redact  # noqa: E402
+from looplab.core.tracing import AsyncJsonlSpanExporter  # noqa: E402
+
+_FIXTURE_V1 = Path(__file__).parent / "data" / "trace_delta_v1_spans.jsonl"
+
+SHAPED = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2"            # a known credential SHAPE
+ENTROPY = "aZ9k2Lp7qW3xYt5Rb8Nc1Vd6Mf0Gh4J"             # masked only by the entropy pass
+SHAPELESS = "hunter2hunter2ZZqq"                         # masked only by the env identity screen
+
+
+def _long_tool_loop(tracer, n_turns: int, *, opening_extra: str = "", echo_at: int = -1,
+                    reset_at: int = -1):
+    """A `drive_tool_loop`-shaped conversation: ONE list grown in place, ~3.5 KB appended per turn,
+    so the 64 000-char window is outgrown from turn 17. Returns the history as sent at each turn."""
+    history = [{"role": "system", "content": "SYS " + "rules " * 700 + opening_extra},
+               {"role": "user", "content": "TASK " + "spec " * 1_200}]
+    sent = []
+    with tracer.span("create_node", new_trace=True, node_id=0):
+        for phase, turns in (("implement", range(n_turns if reset_at < 0 else reset_at)),
+                             ("repair", range(reset_at, n_turns) if reset_at >= 0 else ())):
+            if phase == "repair":                 # a context reset: the SAME opening, a new task
+                history = [history[0], {"role": "user", "content": "REPAIR " + "fix " * 300}]
+            with tracing.operation(phase):
+                for k in turns:
+                    sent.append([dict(m) for m in history])
+                    with tracing.generation(op="chat", model="m", messages=history) as gen:
+                        gen.output(f"{phase} turn {k} " + "answer " * 20)
+                    tool = f"result {k}: " + "line of output " * 200
+                    if k == echo_at:
+                        tool += " " + opening_extra
+                    history.append({"role": "assistant", "content": f"turn {k}: " + "plan " * 100})
+                    history.append({"role": "tool", "content": tool})
+    return sent
+
+
+def _raw_generations(path):
+    return [row for row in iter_jsonl(path) if row.get("kind") == "generation"]
+
+
+def test_the_delta_survives_a_conversation_longer_than_the_window(tmp_path):
+    path = tmp_path / "spans.jsonl"
+    sent = _long_tool_loop(Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True), 40)
+    assert sum(len(m["content"]) for m in sent[-1]) > 2 * tracing._TRACE_TEXT_CAP   # premise
+    gens = _raw_generations(path)
+    assert gens[0]["attributes"]["input_carry"] == 0
+    for prev, gen in zip(gens, gens[1:]):
+        attrs = gen["attributes"]
+        assert attrs["input_from"] == prev["span_id"] and attrs["input_carry"] > 0, (
+            "the chain broke once the conversation outgrew the window: a full base was stored")
+        assert len(attrs["input"]) == 2                     # exactly the two appended messages
+    # BOUNDED per generation: no row carries more than its own turn, however long the history.
+    input_bytes = [len(json.dumps(g["attributes"]["input"])) for g in gens]
+    turn_bytes = max(len(json.dumps(sent[k + 1][-2:])) for k in range(len(sent) - 1))
+    assert max(input_bytes[1:]) <= turn_bytes + 64
+    # ...so the file grows LINEARLY in the conversation, where it grew by ~64 KB per turn before.
+    assert sum(input_bytes) < 1.2 * len(json.dumps(sent[-1]))
+
+
+def test_the_reader_window_is_the_window_the_writer_used_to_store(tmp_path):
+    """Chain + window, isolated from the browser projection: over the RAW rows, turn k's hydrated
+    input is exactly `_trace_messages(what turn k sent)` — the retention window the old writer
+    stored — for every turn, before and after the window is outgrown and across a context reset."""
+    path = tmp_path / "spans.jsonl"
+    sent = _long_tool_loop(Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True), 40,
+                           reset_at=30)
+    rows = _raw_generations(path)
+    hydrated = hydrate_inputs(rows, _normalized=True)        # raw on purpose: see the docstring
+    assert len(hydrated) == len(sent) == 40
+    for k, (row, messages) in enumerate(zip(hydrated, sent)):
+        assert row["attributes"]["input"] == tracing._trace_messages(messages), f"turn {k}"
+        assert not row["attributes"].get("input_partial")
+    assert [r["attributes"]["input_carry"] == 0 for r in rows].count(True) == 2   # two sub-loops
+
+
+def test_a_base_beyond_the_window_chains_on_what_it_stored(tmp_path):
+    """`input_carry` counts the messages the parent's RECONSTRUCTION holds, not the raw count it was
+    sent: a conversation that opens past the window stores a windowed base, and its deltas carry
+    exactly that base."""
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True)
+    history = [{"role": "user", "content": f"resumed {i} " + "context " * 150} for i in range(100)]
+    sent = []
+    with tracer.span("resume", new_trace=True, node_id=0):
+        for k in range(4):
+            sent.append([dict(m) for m in history])
+            with tracing.generation(op="chat", model="m", messages=history):
+                pass
+            history.append({"role": "assistant", "content": f"turn {k}"})
+            history.append({"role": "tool", "content": f"tool {k}"})
+    rows = _raw_generations(path)
+    stored_base = len(rows[0]["attributes"]["input"])
+    assert stored_base < 100                                   # premise: the base was windowed
+    assert [r["attributes"]["input_carry"] for r in rows] == [
+        0, stored_base, stored_base + 2, stored_base + 4]
+    hydrated = hydrate_inputs(rows, _normalized=True)
+    for k, (row, messages) in enumerate(zip(hydrated, sent)):
+        assert row["attributes"]["input"] == tracing._trace_messages(messages), f"turn {k}"
+
+
+def test_a_history_rewritten_in_place_is_a_new_base_not_a_delta(tmp_path):
+    """`drive_tool_loop` compacts ONE list in place (`messages[:] = ...`) and a message's dict may
+    be the same object with new content. The extension check compares immutable keys taken when
+    the previous generation was recorded, so a rewrite is a reset — never a delta that carries the
+    pre-rewrite text forward as if it had been sent again."""
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True)
+    history = [{"role": "system", "content": "SYS"},
+               {"role": "tool", "content": "LONG ORIGINAL TOOL OUTPUT " * 20}]
+    sent = []
+    with tracer.span("loop", new_trace=True, node_id=0):
+        for k in range(3):
+            if k == 2:
+                history[1]["content"] = "[compacted: 1 tool result summarized]"   # SAME dict
+            sent.append([dict(m) for m in history])
+            with tracing.generation(op="chat", model="m", messages=history):
+                pass
+            history.append({"role": "assistant", "content": f"turn {k}"})
+    rows = _raw_generations(path)
+    assert [r["attributes"]["input_carry"] for r in rows][0:2] == [0, 2]
+    assert rows[2]["attributes"]["input_carry"] == 0, "a rewritten history was chained as a delta"
+    hydrated = hydrate_inputs(rows, _normalized=True)
+    assert hydrated[2]["attributes"]["input"] == tracing._trace_messages(sent[2])
+    assert "LONG ORIGINAL" not in json.dumps(hydrated[2]["attributes"]["input"])
+
+
+def test_each_message_crosses_the_redactor_once_over_the_whole_loop(tmp_path, monkeypatch):
+    """Not once per turn it stays in view: a message is sanitized when it is APPENDED."""
+    seen: dict[int, int] = {}
+    real = redact._redact_persisted
+
+    def counting(value, **kw):
+        if isinstance(value, str) and value.startswith(("turn ", "result ")):
+            turn = int(value.split(" ", 2)[1].rstrip(":"))
+            seen[turn] = seen.get(turn, 0) + 1
+        return real(value, **kw)
+
+    monkeypatch.setattr(redact, "_redact_persisted", counting)
+    _long_tool_loop(Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"), run_id="r",
+                           capture_llm_io=True), 30)
+    # turn k's assistant + tool message are appended once (seen by generation k+1); the last
+    # turn's pair is never sent. Two redactions per turn, whatever the history length.
+    assert seen == {k: 2 for k in range(29)}, (
+        "a message already persisted was sanitized again on a later turn")
+
+
+def test_a_long_loop_shows_one_request_per_sub_loop(tmp_path):
+    """The conversation view keys its request boundary on `input_carry == 0`; every slid base the
+    old writer stored past the window re-emitted the request on each turn."""
+    path = tmp_path / "spans.jsonl"
+    _long_tool_loop(Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True), 40,
+                    reset_at=30)
+    st = RunState(run_id="demo", task_id="t", goal="g", direction="min")
+    convo = build_conversation(st, load_spans(path), 0)
+    requests = [(stage["label"], t) for stage in convo["stages"] for t in stage["turns"]
+                if t["type"] == "request"]
+    assert [label for label, _ in requests] == ["implement", "repair"]
+
+
+@pytest.mark.parametrize("entropy_pass", [True, False], ids=["entropy-on", "entropy-off"])
+def test_a_secret_in_message_one_never_reaches_any_persisted_trace_byte(
+        tmp_path, monkeypatch, entropy_pass):
+    """Three secret classes in message 1 of a 40-turn loop (echoed again by a turn-20 tool result,
+    re-based by a context reset at turn 30), through the PRODUCTION async exporter; then every file
+    the exporter left is read back whole. Stored once is not stored unmasked: the one pass a message
+    now gets is the full screen. `entropy-off` disables that one pass at the redactor itself and
+    must leave the shape and the env value masked — and its entropy token visible, or the knob is
+    not live and the parametrization proves nothing."""
+    monkeypatch.setenv("C2FIXTURE_DB_PASSWORD", SHAPELESS)
+    if not entropy_pass:
+        real = redact.redact_secrets
+        monkeypatch.setattr(redact, "redact_secrets",
+                            lambda text, **kw: real(text, **{**kw, "entropy": False}))
+    secrets = f"key {SHAPED} blob {ENTROPY} pw {SHAPELESS}"
+    exporter = AsyncJsonlSpanExporter(tmp_path / "spans.jsonl")
+    tracer = Tracer(exporter, run_id="r", capture_llm_io=True)
+    _long_tool_loop(tracer, 40, opening_extra=secrets, echo_at=20, reset_at=30)
+    assert tracer.shutdown()
+    persisted = b"".join(p.read_bytes() for p in sorted(tmp_path.rglob("*")) if p.is_file())
+    assert len(_raw_generations(tmp_path / "spans.jsonl")) == 40
+    assert SHAPED.encode() not in persisted and b"sk-***" in persisted
+    assert SHAPELESS.encode() not in persisted and b"REDACTED_ENV" in persisted
+    assert (ENTROPY.encode() in persisted) is (not entropy_pass)
+    # ...and the READ side hands a browser none of them either (its own screen runs on top).
+    shown = json.dumps(hydrate_inputs(load_spans(tmp_path / "spans.jsonl"), _normalized=True))
+    assert SHAPED not in shown and SHAPELESS not in shown
+
+
+def _v1_sent():
+    """The conversation `tests/data/trace_delta_v1_spans.jsonl` was written from — by the
+    PRE-CORE-02 writer (2026-09-23): an implement sub-loop long enough that the 64-message window
+    slid (its turns 32 and 33 are stored as full bases), then a repair sub-loop."""
+    out = []
+    for phase, turns, task in (("implement", 34, "TASK fix the failing test in src/app.py"),
+                               ("repair", 3, "REPAIR the import error in src/app.py")):
+        history = [{"role": "system", "content": "SYS you are the developer; answer briefly."},
+                   {"role": "user", "content": task}]
+        for k in range(turns):
+            out.append([dict(m) for m in history])
+            history = history + [
+                {"role": "assistant", "content": f"{phase} {k}: read src/mod_{k}.py"},
+                {"role": "tool", "content": f"src/mod_{k}.py: def f_{k}(): return {k}"}]
+    return out
+
+
+def _plain_chain(rows) -> dict:
+    """The chain rebuilt from the ROWS ALONE — `parent[:input_carry] + input`, no window, no code
+    under test — so a reader change cannot move the reference along with the result."""
+    by_id = {row["span_id"]: row for row in rows}
+    memo: dict = {}
+
+    def full(sid):
+        if sid not in memo:
+            attrs = by_id[sid]["attributes"]
+            parent = attrs.get("input_from")
+            memo[sid] = (full(parent)[:attrs["input_carry"]] if parent else []) + attrs["input"]
+        return memo[sid]
+
+    return {row["span_id"]: full(row["span_id"]) for row in rows}
+
+
+def test_an_old_format_trace_still_reads(tmp_path):
+    """Real bytes from the previous writer, windowed at WRITE time with slid bases. The reader's
+    window must be the identity on them: every turn still hydrates to exactly the retained input
+    that writer stored, and the projections that read it still build."""
+    sent = _v1_sent()
+    rows = _raw_generations(_FIXTURE_V1)
+    assert [r["attributes"]["input_carry"] for r in rows].count(0) == 4   # premise: 2 slid bases
+    hydrated = hydrate_inputs(rows, _normalized=True)
+    assert len(hydrated) == len(sent)
+    stored = _plain_chain(rows)
+    assert max(len(v) for v in stored.values()) == tracing._TRACE_MESSAGES_MAX   # a FULL window
+    for k, (row, messages) in enumerate(zip(hydrated, sent)):
+        # The identity on what the old writer stored (independent of today's window code)...
+        assert row["attributes"]["input"] == stored[row["span_id"]], f"turn {k}"
+        # ...which is, for this conversation, the retention window of what the turn sent.
+        assert row["attributes"]["input"] == tracing._trace_messages(messages), f"turn {k}"
+    spans = load_spans(_FIXTURE_V1)
+    st = RunState(run_id="fixture-v1", task_id="t", goal="g", direction="min")
+    convo = build_conversation(st, spans, 0)
+    labels = [s["label"] for s in convo["stages"]]
+    assert labels == ["implement", "repair"]
+    view = build_trace_view(st, hydrate_inputs(spans, _normalized=True))
+    assert view["nodes"]["0"]
+
+
+def test_the_span_detail_route_reads_a_long_new_format_chain(tmp_path):
+    """The one live route that hydrates ONE observation, over its bounded trace window."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    sent = _long_tool_loop(Tracer(JsonlSpanExporter(rd / "spans.jsonl"), run_id="demo",
+                                  capture_llm_io=True), 40)
+    last = _raw_generations(rd / "spans.jsonl")[-1]
+    assert last["attributes"]["input_carry"] > 0                # premise: a delta, 39 levels deep
+    body = TestClient(make_app(tmp_path)).get(f"/api/runs/demo/spans/{last['span_id']}").json()
+    shown = body["attributes"]["input"]
+    # The route hydrates PROJECTED spans (each message already capped at 2 000 chars), so the
+    # read-time window's 64 000-char budget spans more of them than the writer's window over full
+    # messages did — exact equality is pinned over raw rows above. What must hold here: the chain
+    # was walked (the head is a message from deep in the loop, not a lone delta) and then WINDOWED
+    # (the head is not the system prompt the 40-level reconstruction starts from).
+    assert 0 < len(shown) <= 10
+    assert shown[0]["content"].startswith(("result ", "turn ")), shown[0]["content"][:40]
+    head_turn = int(shown[0]["content"].split(" ", 2)[1].rstrip(":"))
+    assert head_turn < len(sent) - 2, "only the last delta was shown: the chain was not walked"
+    assert not any(m["content"].startswith(("SYS ", "TASK ")) for m in shown), (
+        "the reconstruction reached the reader unwindowed")
+    assert body["attributes"]["input_partial"] is True          # head/tail of a longer input
+    assert "input_carry" not in body["attributes"]

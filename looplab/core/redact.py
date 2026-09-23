@@ -439,6 +439,37 @@ def _truncation_marker(text: str) -> str:
     return f"\n[redacted preview: original_chars={len(text)} sha256={digest}]"
 
 
+# The receipt `_truncation_marker` writes, recognised at the END of a stored text. Beside it on
+# purpose: a change to the f-string above that is not mirrored here makes `_rebound_redacted_text`
+# fall back to a fresh receipt — a degraded receipt, never an unbounded or unredacted text.
+_TRUNCATION_RECEIPT = re.compile(
+    r"\n\[redacted preview: original_chars=\d+ sha256=[0-9a-f]{64}\]\Z")
+
+
+def _rebound_redacted_text(text: str, max_chars: int) -> str:
+    """Cut a text that ALREADY crossed `_redact_persisted` to a smaller cap, keeping its receipt.
+
+    For a reader that re-applies a budget to stored text (`core/tracing.py::retained_input_window`,
+    review 2026-09-22, CORE-02). A stored text that was cut carries the receipt of the ORIGINAL
+    redacted text; re-running `_bounded_redacted_text` over it would hash the stored prefix and its
+    receipt instead, so `original_chars` would describe the first cut, not the message. Keeping the
+    receipt and shortening only the visible prefix gives exactly what bounding the original to the
+    new cap would have: the same prefix, the same receipt — no redaction runs, and none is needed.
+    A receipt FRAGMENT (a first cut below the receipt's own length) is not recognisable and gets a
+    fresh receipt over itself: still bounded, only less informative.
+    """
+    cap = max(0, int(max_chars))
+    if len(text) <= cap:
+        return text
+    found = _TRUNCATION_RECEIPT.search(text)
+    if found is None:
+        return _bounded_redacted_text(text, cap)[0]
+    marker = found.group(0)
+    if len(marker) >= cap:
+        return marker[-cap:] if cap else ""
+    return text[:cap - len(marker)] + marker
+
+
 def truncation_receipt_chars(text) -> int:
     """How much of a `max_chars` budget the truncation receipt would consume for `text`.
 

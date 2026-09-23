@@ -339,7 +339,10 @@ each generation's recorded input a near-duplicate of the last. That input is now
 write time — a generation that only appended to the prior turn stores just the appended messages plus a
 back-reference — so `spans.jsonl` itself is ~6× smaller before the index even applies; the trace views
 reconstruct the stored canonicalized/redacted diagnostic representation on demand. It is not byte-exact
-provider I/O, and older JSONL is not rewritten by this encoding.
+provider I/O, and older JSONL is not rewritten by this encoding. The append is decided on the raw
+messages, so the encoding holds however long a loop runs (each message is redacted once, when it is
+appended), and the reconstruction is bounded to the newest 64 messages / 64 000 characters when it
+is read.
 
 All browser-facing trace routes apply another explicit response budget (span/detail/conversation caps) and
 return route-specific `projection` metadata. Individual spans carry `_projection` counters when fields, text,

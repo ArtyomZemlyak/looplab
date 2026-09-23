@@ -474,3 +474,38 @@ def test_the_crash_triage_rationale_is_redacted_like_its_two_sibling_verdicts(tm
     assert "from the environment" in joined            # the diagnosis itself survives
     # ...and nothing else in the whole log kept it either.
     assert secret not in (run_dir / "events.jsonl").read_text()
+
+
+# ------------------------------------------------------------------------------------------------
+# `_rebound_redacted_text` (review 2026-09-22, CORE-02): a READER cutting already-stored text to a
+# smaller cap keeps the receipt of the ORIGINAL text. The rule is statable, so it is tested as one:
+# for every first cut `a` whose receipt fits, and every later cap `b <= a`, re-bounding the stored
+# text equals bounding the original to `b` — byte for byte, receipt included.
+
+@pytest.mark.parametrize("size", [0, 40, 95, 96, 200, 1_000])
+def test_rebounding_a_stored_cut_equals_cutting_the_original(size):
+    from looplab.core.redact import (_bounded_redacted_text, _rebound_redacted_text,
+                                     _truncation_marker)
+
+    original = "".join(chr(ord("a") + i % 26) for i in range(size)) + " tail"
+    receipt = len(_truncation_marker(original))
+    exact = 0
+    for first in sorted(set(range(0, len(original) + 2, 7)) | {len(original)}):
+        stored, cut = _bounded_redacted_text(original, first)
+        for later in range(0, first + 1, 5):
+            again = _rebound_redacted_text(stored, later)
+            assert len(again) <= later, (first, later)
+            # A first cut that kept its WHOLE receipt (or cut nothing) is reproduced exactly; one
+            # below the receipt's own length stored only a fragment of it (see the docstring).
+            if not cut or first > receipt:
+                assert again == _bounded_redacted_text(original, later)[0], (first, later)
+                exact += 1
+    assert exact, "the grid never exercised the exact case"
+
+
+def test_rebounding_never_redacts_and_never_grows():
+    from looplab.core.redact import _rebound_redacted_text
+
+    plain = "password=already-masked-upstream " * 10        # would be masked by a redactor
+    assert _rebound_redacted_text(plain, 10_000) == plain   # a fit is returned untouched
+    assert len(_rebound_redacted_text(plain, 50)) == 50

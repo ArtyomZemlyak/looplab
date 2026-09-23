@@ -48,8 +48,9 @@ from typing import Mapping, Optional
 
 import orjson
 
-from looplab.core.redact import (bounded_redacted_tree, is_secret_key_name,
-                                 redact_persisted_identity, redact_persisted_text)
+from looplab.core.redact import (_persisted_input, _rebound_redacted_text, bounded_redacted_tree,
+                                 is_secret_key_name, redact_persisted_identity,
+                                 redact_persisted_text)
 from looplab.core.trace_append import (
     SPAN_APPEND_JOURNAL_MAX_BYTES, SPAN_APPEND_JOURNAL_NAME,
     SPAN_APPEND_RECEIPT_SCHEMA)
@@ -217,8 +218,16 @@ def _trace_label(value, *, cap: int) -> str:
     return _trace_text(value, cap=cap, single_line=True).replace("\n", " ")
 
 
-def _trace_messages(messages) -> list[dict]:
-    """Keep a globally bounded, newest-first-budgeted suffix of one replayed conversation."""
+def _budgeted_messages(messages, text) -> list[dict]:
+    """THE retention window over one replayed conversation: at most `_TRACE_MESSAGES_MAX` messages
+    and one aggregate `_TRACE_TEXT_CAP` character budget, spent newest-first.
+
+    `text(value, cap, single_line)` is what one field persists as within `cap` characters. The
+    WRITER passes the durable sanitizer (`_trace_messages`); the READER passes a pure bounder over
+    text that already crossed it (`retained_input_window`). One arithmetic for both, and that is the
+    point: the window re-applied at read time to rows this writer stored is exactly the window it
+    stores, and applying it to rows an older writer windowed at write time changes nothing.
+    """
     if not isinstance(messages, (list, tuple)):
         return []
     remaining = _TRACE_TEXT_CAP
@@ -229,13 +238,86 @@ def _trace_messages(messages) -> list[dict]:
         if remaining <= 0:
             break
         message = raw if isinstance(raw, dict) else {"role": "user", "content": raw}
-        role = _trace_text(message.get("role", "user"), cap=min(32, remaining), single_line=True)
+        role = text(message.get("role", "user"), min(32, remaining), True)
         remaining = max(0, remaining - len(role))
-        content = _trace_text(_as_text(message.get("content")), cap=remaining)
+        content = text(_as_text(message.get("content")), remaining, False)
         remaining = max(0, remaining - len(content))
         newest.append({"role": role, "content": content})
     newest.reverse()
     return newest
+
+
+def _trace_messages(messages) -> list[dict]:
+    """Keep a globally bounded, newest-first-budgeted suffix of one replayed conversation."""
+    return _budgeted_messages(messages, lambda value, cap, single_line: _trace_text(
+        value, cap=cap, single_line=single_line))
+
+
+def _bound_durable_text(value, cap: int, single_line: bool) -> str:
+    """Bound text that ALREADY crossed the durable sanitizer: the cap and its receipt, no redaction.
+
+    A message the writer cut keeps the receipt of its ORIGINAL redacted text
+    (`redact._rebound_redacted_text`), so the oldest message of a stored base, cut again when later
+    turns crowd the window, reads exactly as the writer's own window would have cut it. Every
+    receipt digests redacted text, so re-bounding can no more become an oracle for a secret than the
+    write-time bound could. `single_line` needs nothing here: a stored role was collapsed when it
+    was sanitized.
+    """
+    return _rebound_redacted_text(value if isinstance(value, str) else _as_text(value), cap)
+
+
+def retained_input_window(messages) -> list[dict]:
+    """The retention window, applied at READ time to a reconstructed generation input.
+
+    Review 2026-09-22 (CORE-02): `generation` used to apply this window at WRITE time, before its
+    delta encoding, so once a conversation outgrew it the window slid, the stored prefix stopped
+    matching and every later turn stored a full ~64 KB base (`input_carry` 0 from turn 17 of a
+    30-turn tool loop). The writer now stores deltas over the RAW conversation and
+    `events/traceview.py::hydrate_inputs` applies this to what it reconstructs, so every reader still
+    gets an input inside the same bound while the file stores each message once. Over rows read RAW
+    it is exactly the window the writer used to store. Over the browser's rows, which the projection
+    has already cut to 2 000 characters a message, the same character budget admits more of them —
+    still never more than 64, and never a character past the budget.
+
+    `messages` must be durable text (read back from `spans.jsonl`): this BOUNDS, it does not redact.
+    Idempotent, and the identity on any input the writer windowed itself.
+    """
+    return _budgeted_messages(messages, _bound_durable_text)
+
+
+def _content_identity(content):
+    """What one raw message's content contributes to its stored projection, as an immutable value.
+
+    `str` is the content the tool loops send and is returned AS IS — the caller's own object, so the
+    extension check compares it by identity first and copies nothing. A value `_as_text` cannot
+    render gets a fresh sentinel, which equals nothing: that message can never be the unchanged
+    prefix of an extension, so the generation stores a base and `_trace_messages` meets the value
+    exactly where it always did.
+    """
+    if type(content) is str:
+        return content
+    try:
+        return _as_text(content)
+    except (TypeError, ValueError):
+        return object()
+
+
+def _message_identities(messages) -> list[tuple]:
+    """One `(role, content)` key per RAW message: the extension check's input.
+
+    Immutable on purpose. `drive_tool_loop` grows ONE list in place and compacts it by slice
+    assignment, so a reference to the caller's list (or its dicts) would compare the conversation
+    against itself after a compaction rewrote it. Two messages with equal keys persist identically,
+    because the key is exactly what `_trace_messages` reads from a message.
+    """
+    if not isinstance(messages, (list, tuple)):
+        return []
+    identities = []
+    for raw in messages:
+        message = raw if isinstance(raw, dict) else {"role": "user", "content": raw}
+        identities.append((_persisted_input(message.get("role", "user")),
+                           _content_identity(message.get("content"))))
+    return identities
 
 
 def sanitize_trace_value(value, *, max_chars: int = _TRACE_TEXT_CAP,
@@ -323,14 +405,17 @@ _generation_ctx: contextvars.ContextVar = contextvars.ContextVar(
 # Copied across task/thread spawns like the other contextvars.
 _phase_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_phase", default=None)
 
-# Prior generation in THIS context, as (span_id, trace_id, full_input_list) — the seam for delta-encoded
-# LLM input (see `generation`). The agent tool-loop re-sends the WHOLE growing conversation on every
-# turn, so storing each generation's full `input` makes ~90% of spans.jsonl a re-send of the same
-# messages. Instead, when a generation STRICTLY EXTENDS the prior one (only appended messages), we store
-# just the appended tail + a back-ref, shrinking spans.jsonl ~6x; the trace views reconstruct the full
-# input from the chain when a single observation is expanded. Copied across task/thread spawns like the
-# other contextvars — but even if a copy is stale, a trace-id mismatch just resets the chain to a full
-# base, so correctness never depends on propagation, only compression does.
+# Prior generation in THIS context, as (span_id, trace_id, raw_message_identities, retained_len) — the
+# seam for delta-encoded LLM input (see `generation`). The agent tool-loop re-sends the WHOLE growing
+# conversation on every turn, so storing each generation's full `input` makes ~90% of spans.jsonl a
+# re-send of the same messages. Instead, when a generation STRICTLY EXTENDS the prior one (only
+# appended messages), we store just the appended tail + a back-ref, shrinking spans.jsonl ~6x; the trace
+# views reconstruct the full input from the chain when a single observation is expanded. The chain is
+# kept over the RAW conversation (`_message_identities`), not over its windowed projection, and
+# `retained_len` is how many messages the prior generation's reconstruction holds — the next carry.
+# Copied across task/thread spawns like the other contextvars — but even if a copy is stale, a trace-id
+# mismatch just resets the chain to a full base, so correctness never depends on propagation, only
+# compression does.
 _prev_gen: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_prev_gen", default=None)
 
 
@@ -879,8 +964,7 @@ def generation(*, op: str, model: str, messages: Optional[list] = None,
     with tr.span("generation", kind="generation", **attrs) as h:
         if messages is not None and llm_capture_enabled():
             # Generation input replays tool observations on the next turn. Sanitize the
-            # whole conversation here, not only the dedicated tool span, before delta encoding/OTel.
-            cur = _trace_messages(messages)
+            # conversation here, not only the dedicated tool span, before delta encoding/OTel.
             # Delta-encode the re-sent history: when this generation STRICTLY EXTENDS the prior one IN
             # THIS TRACE (only appended to it), store just the appended tail, plus a back-ref
             # (`input_from`) + carried-prefix count (`input_carry`). A fresh trace / sub-loop whose
@@ -900,18 +984,37 @@ def generation(*, op: str, model: str, messages: Optional[list] = None,
             # context (system+user), so compression is unaffected — the grown history stays delta'd.
             # Require np > 0: a zero-length carry saves nothing and would leave a dangling `input_from`
             # with carry=0, so `input_from is not None` on disk always implies a real carried prefix.
+            #
+            # THE EXTENSION IS DECIDED ON THE RAW CONVERSATION, and the window is the READER's (review
+            # 2026-09-22, CORE-02). This used to compare the WINDOWED projection (`_trace_messages`,
+            # newest 64 messages / 64 000 chars) with the previous one. Once a conversation outgrew the
+            # window the window SLID, its first message changed, the prefix compare failed, and every
+            # later turn stored a full ~64 KB base: `input_carry` 0 from turn 17 of a 30-turn tool loop,
+            # 4 KB rows become 66 KB ones — the very re-send this encoding exists to remove, on exactly
+            # the long loops where it costs most. It also sanitized the whole window on every turn, so
+            # one message crossed the redactor once per turn it stayed in view. Now the raw messages
+            # are compared by `_message_identities` (immutable keys, identity-fast), only the APPENDED
+            # ones are sanitized, `input_carry` counts the prior generation's STORED messages, and
+            # `retained_input_window` re-applies the same window after `hydrate_inputs` reconstructs
+            # the chain — so every reader still gets an input inside the bound it always had.
+            identities = _message_identities(messages)
             np = len(prev[2]) if prev is not None else 0
-            # `_set_sanitized`: `cur` IS the sanitizer's output (see `SpanHandle._safe` for what a
+            # `_set_sanitized`: `stored` IS the sanitizer's output (see `SpanHandle._safe` for what a
             # second pass through `set` cost), the carry an int, the back-ref a span id we minted.
-            if prev is not None and prev[1] == tid and np > 0 and len(cur) >= np and cur[:np] == prev[2]:
-                h._set_sanitized("input", cur[np:])
-                h._set_sanitized("input_carry", np)
+            if (prev is not None and prev[1] == tid and np > 0 and prev[3] > 0
+                    and len(identities) >= np and identities[:np] == prev[2]):
+                stored = _trace_messages(messages[np:])
+                h._set_sanitized("input", stored)
+                h._set_sanitized("input_carry", prev[3])
                 h._set_sanitized("input_from", prev[0])
+                retained = prev[3] + len(stored)
             else:
-                h._set_sanitized("input", cur)
+                stored = _trace_messages(messages)
+                h._set_sanitized("input", stored)
                 h._set_sanitized("input_carry", 0)
                 h._set_sanitized("input_from", None)
-            _prev_gen.set((sid, tid, cur))
+                retained = len(stored)
+            _prev_gen.set((sid, tid, identities, retained))
         yield ObservationHandle(h)
 
 
