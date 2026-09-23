@@ -2174,6 +2174,7 @@ Where each concept lives in the code:
 | Card identity: versioned action/idea digests, ownership receipts, `Card` + its provenance | `core/cards.py` (re-exported through `core/models.py`) |
 | Layered settings + masked snapshot | `core/config.py` |
 | Append-only log / pure fold / SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
+| The fold's handler families (each owns its `HANDLERS` rows; `replay.py` keeps `fold`, the merged table, the node lifecycle and the run-state transitions) | `events/replay_ctx.py` (fold context + lifecycle-generation rules), `events/replay_concepts.py`, `events/replay_journals.py`, `events/replay_cards.py`, `events/replay_selection.py`, `events/replay_requests.py` |
 | Derived Card ledger (fold-time receipt bounds + the `derive_cards` post-pass) | `events/card_ledger.py` |
 | Sandbox seam + subprocess/Docker bodies | `runtime/sandbox.py` |
 | Researcher/Developer roles (LLM; the toy pair is `agents/toy_roles.py`, the prompts `agents/role_prompts.py`, the state brief `agents/state_brief.py`, the wrappers `agents/role_wrappers.py`) | `agents/roles.py`, `agents/toy_roles.py`, `agents/unified_agent.py` |
