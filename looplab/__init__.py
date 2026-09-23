@@ -340,6 +340,9 @@ _LAYOUT = {
     "regression": "adapters",
     "repair_verify": "engine",  # did a repair DO what its rationale said? (deterministic rung)
     "replay": "events",
+    # The fold's handler families split out of `replay` (review 2026-09-22, EVT-12), and the
+    # context/generation vocabulary they all read.
+    "replay_ctx": "events",
     "stop_account": "events",
     "repo_developer": "adapters",
     "repo_task": "adapters",
