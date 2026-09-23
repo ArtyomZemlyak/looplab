@@ -101,7 +101,11 @@ def _run(tmp_path: Path, *, spans: str | None = SPANS) -> tuple[_StubSrv, Path]:
     rd.mkdir(parents=True)
     (rd / "events.jsonl").write_text("", encoding="utf-8")
     if spans is not None:
-        (rd / "spans.jsonl").write_text(spans, encoding="utf-8")
+        # `newline=""`: every receipt below holds the trace to a digest of THESE bytes
+        # (`_digest(SPANS)`), and a text-mode write puts "\r\n" on disk on Windows — the product
+        # then rightly saw a different trace (CI run 35804658308, review 2026-09-22 round 2: six
+        # rows of this file, e.g. a source digest a6b7b98ecc24… where 151d171548bc… was recorded).
+        (rd / "spans.jsonl").write_text(spans, encoding="utf-8", newline="")
     return _StubSrv(root), rd
 
 
@@ -558,7 +562,7 @@ def test_recovery_completes_without_deleting_twice_when_the_replacement_already_
     path, receipt = _pending(srv, rd)
     (rd / "spans.jsonl").write_text(
         '{"span_id": "b", "attributes": {"node_id": 1}}\n'
-        '{"span_id": "c", "attributes": {}}\n', encoding="utf-8")
+        '{"span_id": "c", "attributes": {}}\n', encoding="utf-8", newline="")   # held to a digest
     answer = tc._apply_prepared_trace_clear(srv, rd, rd / "spans.jsonl", path, receipt)
     assert answer == {"ok": True, "status": "succeeded", "operation_id": receipt["id"],
                       "removed": 1, "kept": 2}
