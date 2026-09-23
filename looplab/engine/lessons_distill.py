@@ -27,7 +27,8 @@ from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
 from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
 from looplab.events.eventstore import interprocess_lock, read_jsonl_lenient
-from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED
+from looplab.events.types import (EV_LESSONS_DISTILLED, EV_LESSONS_STORE_UNAVAILABLE,
+                                  EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED)
 
 
 # The rank the two reflection prompts show as "Experiments (best first)", and the one place the
@@ -280,40 +281,58 @@ class LessonDistillMixin:
             # The duplicate check and append are one transaction.  Concurrent finalizers can
             # otherwise both observe absence and append the same note, while a crash-torn last line
             # can swallow the next valid record for every line-oriented reader.
-            with interprocess_lock(Path(str(npath) + ".lock")):
-                run_uid = getattr(final, "run_uid", "")
-                # NOT `core/run_identity.py::row_belongs_to_run`, deliberately (review 2026-09-22,
-                # ENG3-01 folded the other uid-first spellings). This key must also de-dup the
-                # crash-retry of a run that recorded NO name — a log with no `run_started`, which
-                # the crash-retry test in `tests/test_lessons_fingerprint.py` drives — and the
-                # attribution rule refuses to attribute on an empty name, so folding it re-appended
-                # that note on every retry (measured: 2 notes for one finish, where 1 is pinned).
-                _dup = _has_finish_seq and any(
-                    o.get("finish_seq") == finish_seq and (
-                        o.get("run_uid") == run_uid if run_uid
-                        else (not o.get("run_uid") and o.get("run_id") == final.run_id))
-                    for o in read_jsonl_lenient(npath))
-                if not _dup:
-                    rec = {
-                        "task_id": final.task_id,
-                        "note": note,
-                        "direction": final.direction,
-                        "fingerprint": fp,
-                        "run_id": final.run_id,
-                    }
-                    if run_uid:
-                        rec["run_uid"] = run_uid
-                    if _has_finish_seq:
-                        rec["finish_seq"] = finish_seq
-                    # Concept shelf, additive + reader-defaulted (invariant 5). Run-WIDE on purpose,
-                    # unlike a lesson's or a case's: a meta-note summarizes the whole run ("what won,
-                    # and why"), so the run's whole concept set is the honest scope of the claim.
-                    # Dropped when empty — absence is what the reader treats as untagged, and it keeps
-                    # the de-dup key (run_uid, finish_seq), while keeping legacy rows readable.
-                    from looplab.engine.concept_shelf import state_concepts
-                    if (concepts := state_concepts(final)):
-                        rec["concepts"] = concepts
-                    append_jsonl_bytes_locked(npath, orjson.dumps(rec))
+            #
+            # `required=True`, like every sibling write of a shared store (review 2026-09-22, EK-14).
+            # It was the lock's default, `required=False`, and on a filesystem without advisory locks
+            # that DEGRADES to an unlocked no-op — so the check-then-append above ran unlocked,
+            # silently, while `append_lessons` on the same mount refused. The disclosure is the
+            # sibling's too, split the same way (`lessons.py::LessonMemory.append_lessons`): an
+            # unwritable store (OSError) is `lessons_store_unavailable`, whose own contract names this
+            # file, and the note is skipped — advisory memory never fails the run; an UNAVAILABLE lock
+            # (`EventStoreLockError`) is not degraded, because "no lock, no unlocked mutation of a
+            # file every concurrent run appends to" is a safety contract, and it now fails here,
+            # before the paid lesson reflection below, instead of after it at the lessons append.
+            try:
+                with interprocess_lock(Path(str(npath) + ".lock"), required=True):
+                    run_uid = getattr(final, "run_uid", "")
+                    # NOT `core/run_identity.py::row_belongs_to_run`, deliberately (review
+                    # 2026-09-22, ENG3-01 folded the other uid-first spellings). This key must also
+                    # de-dup the crash-retry of a run that recorded NO name — a log with no
+                    # `run_started`, which the crash-retry test in `tests/test_lessons_fingerprint.py`
+                    # drives — and the attribution rule refuses to attribute on an empty name, so
+                    # folding it re-appended that note on every retry (measured: 2 notes for one
+                    # finish, where 1 is pinned).
+                    _dup = _has_finish_seq and any(
+                        o.get("finish_seq") == finish_seq and (
+                            o.get("run_uid") == run_uid if run_uid
+                            else (not o.get("run_uid") and o.get("run_id") == final.run_id))
+                        for o in read_jsonl_lenient(npath))
+                    if not _dup:
+                        rec = {
+                            "task_id": final.task_id,
+                            "note": note,
+                            "direction": final.direction,
+                            "fingerprint": fp,
+                            "run_id": final.run_id,
+                        }
+                        if run_uid:
+                            rec["run_uid"] = run_uid
+                        if _has_finish_seq:
+                            rec["finish_seq"] = finish_seq
+                        # Concept shelf, additive + reader-defaulted (invariant 5). Run-WIDE on
+                        # purpose, unlike a lesson's or a case's: a meta-note summarizes the whole
+                        # run ("what won, and why"), so the run's whole concept set is the honest
+                        # scope of the claim. Dropped when empty — absence is what the reader treats
+                        # as untagged, and it keeps the de-dup key (run_uid, finish_seq), while
+                        # keeping legacy rows readable.
+                        from looplab.engine.concept_shelf import state_concepts
+                        if (concepts := state_concepts(final)):
+                            rec["concepts"] = concepts
+                        append_jsonl_bytes_locked(npath, orjson.dumps(rec))
+            except OSError as e:  # advisory cross-run memory cannot fail the run
+                self._e.store.append(EV_LESSONS_STORE_UNAVAILABLE, {
+                    "mode": "write", "phase": "reflection_note", "count": 1,
+                    "error": str(e)[:300]})
 
         # M3 · lessons (incl. failures) with an M2 fingerprint. Memory of what DIDN'T work is as
         # valuable as what did (DS-Agent / MARS / ML-Master): it stops a later run re-treading a dead

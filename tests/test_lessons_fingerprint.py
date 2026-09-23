@@ -77,6 +77,97 @@ def test_reflection_note_after_torn_tail_keeps_new_record_readable(tmp_path):
     assert rows[0]["note"] == "new durable note"
 
 
+def _finished_reflection_engine(tmp_path, mem):
+    """A one-node finished run whose reflection writes a meta-note and nothing paid."""
+    task = ToyTask.load(TASK)
+    researcher, developer = task.build_roles()
+    eng = Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 reflection_priors=True, memory_dir=str(mem))
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    eng.store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    eng.store.append("run_finished", {"reason": "done", "finalization_required": True})
+    eng._causal_meta_note = lambda *_args: "a durable note"  # type: ignore[method-assign]
+    eng._comparative_lessons_on = False
+    return eng
+
+
+def test_the_meta_note_is_never_written_without_its_lock(tmp_path, monkeypatch):
+    """Review 2026-09-22, EK-14. On a filesystem without advisory locks `interprocess_lock` degrades
+    to an unlocked no-op for an ORDINARY caller and raises `EventStoreLockError` for a `required` one.
+    The meta-note's check-then-append took the ordinary default, so there it ran unlocked and silently,
+    while every sibling store write on the same mount refused. The double below IS that documented
+    capability gap, confined to the meta-note's lock (every other lock is the real one).
+
+    It also pins WHERE the refusal lands: before the paid lesson reflection, not after it at the
+    lessons append (which refuses on the same mount). MUTATION: drop `required=True` -> the note is
+    written unlocked and the reflection is paid for."""
+    from contextlib import contextmanager
+
+    from looplab.engine import lessons_distill
+    from looplab.events.eventstore import EventStoreLockError
+
+    real_lock = lessons_distill.interprocess_lock
+    requested = []
+
+    @contextmanager
+    def _no_advisory_locks(lock_path, *, required=False, blocking=True):
+        if not str(lock_path).endswith("meta_notes.jsonl.lock"):
+            with real_lock(lock_path, required=required, blocking=blocking):
+                yield
+            return
+        requested.append(required)
+        if required:
+            raise EventStoreLockError(lock_path, OSError("advisory locks are not supported"))
+        yield                                           # the ordinary caller's degradation
+
+    monkeypatch.setattr(lessons_distill, "interprocess_lock", _no_advisory_locks)
+    mem = tmp_path / "mem"
+    eng = _finished_reflection_engine(tmp_path, mem)
+    paid = []
+    eng._reflect_lessons = lambda *_args: paid.append(1) or []  # type: ignore[method-assign]
+
+    from looplab.events.replay import fold
+    with pytest.raises(EventStoreLockError):
+        eng._write_reflection_note(fold(eng.store.read_all()))
+    assert requested == [True]
+    assert not (mem / "meta_notes.jsonl").exists(), "the note was written without its lock"
+    assert paid == [], "the reflection was paid for on a mount whose lesson append must refuse"
+
+
+def test_an_unwritable_meta_note_store_is_disclosed_and_the_reflection_goes_on(tmp_path,
+                                                                              monkeypatch):
+    """The sibling's OTHER half (`LessonMemory.append_lessons`): the shared store is on a different
+    filesystem from the run, and a full/read-only mount there is advisory memory lost, not a failed
+    finalize — disclosed as `lessons_store_unavailable`, whose contract names `meta_notes.jsonl`. The
+    OSError used to propagate out of the reflection and fail the finalization step. MUTATION: drop
+    the `except OSError` -> the reflection raises and no `reflection_note` marker is written."""
+    from looplab.engine import lessons_distill
+    from looplab.events.types import EV_LESSONS_STORE_UNAVAILABLE, EV_REFLECTION_NOTE
+
+    real_append = lessons_distill.append_jsonl_bytes_locked
+
+    def _full_disk(path, payload):
+        if str(path).endswith("meta_notes.jsonl"):
+            raise OSError(28, "No space left on device")
+        return real_append(path, payload)
+
+    monkeypatch.setattr(lessons_distill, "append_jsonl_bytes_locked", _full_disk)
+    mem = tmp_path / "mem"
+    eng = _finished_reflection_engine(tmp_path, mem)
+    eng._reflect_lessons = lambda *_args: []  # type: ignore[method-assign]
+
+    from looplab.events.replay import fold
+    eng._write_reflection_note(fold(eng.store.read_all()))
+    events = eng.store.read_all()
+    [unavailable] = [e.data for e in events if e.type == EV_LESSONS_STORE_UNAVAILABLE]
+    assert unavailable["mode"] == "write" and unavailable["phase"] == "reflection_note"
+    assert "No space left" in unavailable["error"]
+    assert any(e.type == EV_REFLECTION_NOTE for e in events), "the reflection did not complete"
+
+
 def test_fingerprint_similar_beats_different():
     a = task_fingerprint("regression", "min", "select polynomial degree and ridge lambda for CV MSE",
                          metric="mse", param_names=["degree", "lam"])
