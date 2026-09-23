@@ -308,8 +308,10 @@ class UnifiedAgent(WrapsDeveloper):
 
         `extra_tools` is a PER-CALL provider merged over the standing pilot toolset for this emit
         only, and `extra_turns` the turn grant that comes with it. Both default to the identity: with
-        no extra provider the loop is handed `self._pilot_tools` itself (not a one-element composite,
-        which would be a different object with a different `specs()` ordering) and `self._loop_opts`
+        no extra provider the loop is handed `self._pilot_tools` itself — or, when this call binds a
+        run state, a per-call VIEW of it offering the same specs in the same order
+        (`tool_loop.bound_toolset`, review 2026-09-22 TAT-08) — not a one-element composite, which
+        would be a different object with a different `specs()` ordering, and `self._loop_opts`
         unchanged, so every existing caller's request is byte-identical. The pilot toolset is FIRST in
         the composite because `CompositeTools` dedups first-provider-wins: a per-call provider must
         never be able to shadow a standing tool by reusing its name.
@@ -328,9 +330,15 @@ class UnifiedAgent(WrapsDeveloper):
         configured budget on purpose: shortening an operator's explicit finite wall is the same sin as
         `0 + n`, read from the other end. 0 (the default) leaves every existing caller byte-identical.
         """
-        if bind_state and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
-            self._pilot_tools.bind_state(state, None)
         tools = self._pilot_tools
+        if bind_state and tools is not None and hasattr(tools, "bind_state"):
+            # A PER-CALL VIEW bound to THIS call's state, never the shared toolset (review
+            # 2026-09-22, TAT-08): the triage judge runs in a worker thread per failing node, so two
+            # of them bound two different admission folds onto ONE object and the first read the
+            # second's run — one where its own node may not exist yet. `bound_toolset` explains why
+            # a shallow view is sound; the specs it offers are the shared toolset's, in order.
+            from looplab.agents.tool_loop import bound_toolset
+            tools = bound_toolset(tools, state)
         loop_opts = self._loop_opts
         if extra_tools is not None:
             from looplab.agents.agent import CompositeTools
@@ -338,10 +346,10 @@ class UnifiedAgent(WrapsDeveloper):
             # the pilot's own setting forward instead. Dropping it would let one phase of a run
             # offer tools every other phase withholds, which is worse than either policy applied
             # consistently. `False` when the pilot is a bare provider, which is what it had.
-            tools = (CompositeTools([self._pilot_tools, extra_tools],
+            tools = (CompositeTools([tools, extra_tools],
                                     hide_empty_tools=bool(getattr(
                                         self._pilot_tools, "hide_empty_tools", False)))
-                     if self._pilot_tools is not None else extra_tools)
+                     if tools is not None else extra_tools)
             _configured = int(getattr(loop_opts, "max_turns", 0) or 0)
             if _configured > 0 and extra_turns > 0:
                 loop_opts = loop_opts.replace(max_turns=_configured + int(extra_turns))

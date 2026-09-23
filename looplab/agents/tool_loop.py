@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import hashlib
 import itertools
 import difflib
@@ -265,6 +266,42 @@ class CompositeTools:
         for p in self.providers:
             if hasattr(p, "bind_state"):
                 p.bind_state(state, parent)
+
+
+def bound_toolset(tools, state, parent=None):
+    """`tools` as a PER-CALL VIEW bound to `state`; the object handed in is never rebound.
+
+    Review 2026-09-22, TAT-08. `bind_state` MUTATES a provider (`RunTools.state = state`), and a
+    role hands the SAME toolset object to every call it makes: the unified facade's `_pilot_tools`
+    serves the pilot on the engine's loop thread AND the crash-triage judge, which since doc 52 row
+    12 runs in a worker thread per failing node. Two concurrent triages bind two different admission
+    folds (`EvalAttempt.state`) onto that one object, so the first judge reads the second one's run —
+    and a node admitted before the other was even created is ABSENT from it: its `read_experiment` on
+    its own node answered "(no experiment #N)". A view gives each call its own binding without a
+    lock, so the paid calls the offload exists to run side by side stay side by side.
+
+    SHALLOW on purpose: a view shares everything but the binding, so a provider's clients and stores
+    stay one object. The hook's contract (`tools/_base.py`) is what makes that sound — `bind_state`
+    REBINDS attributes on the provider it is called on, it does not mutate shared containers. The
+    price is that an attribute a provider memoizes across calls (`CrossRunTools`' capsule read) is
+    now memoized per call — recomputed at most once, and only by a call that uses the tool. A provider
+    with no `bind_state` has nothing to bind and is shared as it is. A `CompositeTools` is viewed all
+    the way down, keeping its route, its capabilities and its spec ORDER, which is what the model is
+    offered.
+    """
+    if tools is None:
+        return None
+    if isinstance(tools, CompositeTools):
+        views = {id(p): bound_toolset(p, state, parent) for p in tools.providers}
+        view = copy.copy(tools)
+        view.providers = [views[id(p)] for p in tools.providers]
+        view._route = {name: views[id(p)] for name, p in tools._route.items()}
+        return view
+    if not callable(getattr(tools, "bind_state", None)):
+        return tools
+    view = copy.copy(tools)
+    view.bind_state(state, parent)
+    return view
 
 
 def compose_tools(providers: list, settings):
