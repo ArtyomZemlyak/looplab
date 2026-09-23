@@ -146,8 +146,15 @@ def test_the_survey_counts_what_would_go_and_what_would_stay_and_why(memory):
     lessons = next(s for s in report["stores"] if s["file"] == "lessons.jsonl")
     assert lessons["reasons"] == [
         {"reason": "consolidated: it carries evidence from other runs", "rows": 1}]
-    # The two never-cascaded tiers are stated, not left for the operator to infer from silence.
-    assert {p["store"] for p in report["preserved"]} == {"skills", "curation_logs"}
+    # The never-cascaded tiers are stated, not left for the operator to infer from silence — EVERY
+    # one the store registry marks preserved (review 2026-09-22, ENG3-07: there used to be two
+    # stated, while seven more stores sat on no list at all), each with its reason and its files.
+    from looplab.engine.memory_stores import PRESERVED, MEMORY_STORES
+    preserved = {p["store"]: p for p in report["preserved"]}
+    assert {"skills", "curation_logs"} <= set(preserved)
+    assert sorted(name for p in preserved.values() for name in p["files"]) == sorted(
+        s.name for s in MEMORY_STORES if s.policy == PRESERVED)
+    assert all(p["reason"] for p in preserved.values())
 
 
 def test_the_survey_is_empty_rather_than_wrong_when_there_is_no_memory_dir(tmp_path):
@@ -478,3 +485,79 @@ def test_the_disclosure_scans_exactly_what_the_deletion_decided_on(memory):
 
     _write(memory / "lessons.jsonl", [row])
     assert attributable_memory(memory, GONE, GONE_UID)["identity"] == "mixed"
+
+
+# ------------------------------------------- the stores that were on no list (review 2026-09-22, ENG3-07)
+
+def test_a_utility_row_is_the_runs_own_measurement_and_goes_with_it():
+    """`lesson_utility.jsonl` rows are per (run, lesson) and never merged, so ownership IS the rule —
+    including when the lesson measured belongs to a run that survives."""
+    from looplab.serve.memory_cascade import utility_keep_reason
+
+    own = {"lesson_id": "les-a", "run_id": GONE, "run_uid": GONE_UID, "shown": 8, "cited": 0}
+    theirs = dict(own, run_id=KEPT, run_uid=KEPT_UID)
+    assert utility_keep_reason(own, DOOMED) == ""
+    assert utility_keep_reason(theirs, DOOMED) == NOT_THIS_RUN
+
+
+def test_a_seeded_regime_row_is_never_a_runs_to_take(memory):
+    """`benchmarks/regime_table.py --seed-ledger` stamps the PROBE directory as `run_id`, no uid, and
+    the archived log as `seeded_from`. A run that merely shares the probe's directory name must not
+    take it — and to `memory-orphans` every seeded row's "run" is gone by construction, so without
+    this rule the first sweep would delete the whole seed."""
+    from looplab.serve.memory_cascade import regime_keep_reason
+
+    lived = {"task_id": "t", "direction": "max", "run_id": GONE, "run_uid": GONE_UID,
+             "regimes": {"plain": {"n": 3, "median": 1.0, "max": 1.2, "min": 0.8}}, "nodes": 3}
+    seeded = {"task_id": "t", "direction": "max", "run_id": GONE,
+              "seeded_from": f"/archive/model-probes/{GONE}/runs/r1/run/events.jsonl",
+              "regimes": {"jit": {"n": 2, "median": 2.0, "max": 2.5, "min": 1.5}}, "nodes": 2}
+    assert regime_keep_reason(lived, DOOMED) == ""
+    assert "seeded" in regime_keep_reason(seeded, DOOMED)
+    assert regime_keep_reason(dict(lived, run_uid=KEPT_UID), DOOMED) == NOT_THIS_RUN
+
+    _write(memory / "regime_contrast.jsonl", [lived, seeded])
+    receipt = purge_attributable_memory(memory, GONE, GONE_UID)
+    assert receipt["deleted"] == 1 and receipt["kept"] == 1
+    rows = [orjson.loads(l) for l in (memory / "regime_contrast.jsonl").read_bytes().splitlines()
+            if l.strip()]
+    assert [row.get("seeded_from") for row in rows] == [seeded["seeded_from"]]
+
+
+def test_the_orphan_survey_sees_every_tier_and_the_sweep_leaves_the_preserved_ones(tmp_path):
+    """`orphan_survey` walked the same hand-kept five stores the purge did, so rows a GONE run left in
+    `lesson_utility.jsonl` / `regime_contrast.jsonl` were invisible to `looplab memory-orphans` and
+    survived every sweep. Now every CASCADED registry store is counted and swept, and every PRESERVED
+    one is listed with its reason — and left byte-for-byte alone by the sweep."""
+    from looplab.engine.memory_stores import cascaded_tiers, preserved_tiers
+    from looplab.serve.memory_cascade import (orphan_survey, purge_orphan_identities,
+                                              render_orphan_survey)
+    from tests._memory_store_rows import plant_every_store, rows_of, snapshot_preserved
+
+    runs = tmp_path / "runs"
+    (runs / KEPT).mkdir(parents=True)
+    (runs / KEPT / "events.jsonl").write_text(json.dumps(
+        {"seq": 0, "ts": 0, "v": 1, "type": "run_started", "data": {"run_uid": KEPT_UID}}) + "\n")
+    store = tmp_path / "memory"
+    store.mkdir()
+    plant_every_store(store, run_id=GONE, run_uid=GONE_UID, survivor_id=KEPT,
+                      survivor_uid=KEPT_UID)
+    preserved_before = snapshot_preserved(store)
+
+    survey = orphan_survey(store, runs)
+    counted = {entry["file"]: entry for entry in survey["stores"]}
+    assert set(counted) == {name for name, _label in cascaded_tiers()}
+    assert all(entry["orphan_rows"] == 1 and entry["live_rows"] == 1
+               for entry in counted.values()), counted
+    assert survey["identities"] == [
+        {"run_id": GONE, "run_uid": GONE_UID, "rows": len(cascaded_tiers())}]
+    assert [(tier["store"], tier["reason"]) for tier in survey["preserved"]] == list(
+        preserved_tiers())
+    printed = "\n".join(render_orphan_survey(survey))
+    assert all(f"preserved: {reason}" in printed for _group, reason in preserved_tiers())
+
+    receipt = purge_orphan_identities(store, survey["identities"])
+    assert receipt["deleted"] == len(cascaded_tiers()) and not receipt["failures"]
+    for name, _label in cascaded_tiers():
+        assert [row["run_id"] for row in rows_of(store, name)] == [KEPT], name
+    assert snapshot_preserved(store) == preserved_before

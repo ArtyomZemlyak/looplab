@@ -2092,13 +2092,15 @@ looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
 ## `memory-orphans`
 
 Report — and only with `--apply`, remove — cross-run memory rows whose run no longer exists. Nothing
-runs it automatically, on purpose: the five stores are SHARED and the purge is irreversible, so it
+runs it automatically, on purpose: the cascaded stores are SHARED and the purge is irreversible, so it
 shows the whole answer before it writes anything. A run deleted through the UI cascades only when the
 operator asks; a store full of rows from runs removed OUTSIDE the UI (an `rm -rf`, a temp dir, a
 worktree) has no deletion to hang off, and this is the sweep for that case. The attribution, the tier
 predicates that keep shared evidence, and the rule that refuses to call a uid-carrying row orphaned
 when a surviving run cannot be read are `serve/memory_cascade.py`'s (`purge_orphan_identities`,
-`orphan_survey`).
+`orphan_survey`). WHICH stores are swept is `engine/memory_stores.py::MEMORY_STORES`: every store it
+marks cascaded is counted, and every store it marks preserved is listed with the reason no sweep
+touches it (`preserved` in `--json`).
 
 ```bash
 looplab memory-orphans MEMORY_DIR [--runs-root runs] [--apply] [--limit 25] [--json]

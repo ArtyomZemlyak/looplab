@@ -261,9 +261,9 @@ def build_router(srv) -> APIRouter:
         receipt — because by the time this is worth calling the run directory is gone and neither can
         be recovered from the run id alone. That is also why it is not "keyed by run id and needs no
         fence": a bare run id names a directory NAME, which the next run reuses, and this endpoint
-        irreversibly rewrites five shared stores. It refuses without an identity rather than guessing
-        one, and when the run still exists it re-reads the identity from the run and requires the
-        body to agree.
+        irreversibly rewrites every cascaded shared store. It refuses without an identity rather
+        than guessing one, and when the run still exists it re-reads the identity from the run and
+        requires the body to agree.
         """
         body = await json_object(request)
         extra = set(body) - {"run_uid", "memory_dir"}
@@ -304,12 +304,12 @@ def build_router(srv) -> APIRouter:
             # THE STORE IS NOT THE CALLER'S TO CHOOSE. Everything else on this router routes a path
             # through `_plain_run_dir`'s containment guard; this one arrives from the request body and
             # goes straight to a destructive rewrite — `purge_attributable_memory` checks only
-            # `base.is_dir()` and then rewrites five `.jsonl` files under it, and with no `run_uid`
-            # the ownership test degrades to matching a row's bare `run_id`, which a reused directory
-            # name satisfies. Containment would not have helped: an absolute path to somebody else's
-            # store contains no traversal. So the check is membership in what this SERVER can name,
-            # which is also why the refusal is separate from the identity one above — "I do not know
-            # that store" and "you told me nothing" are different answers.
+            # `base.is_dir()` and then rewrites every cascaded `.jsonl` store under it, and with no
+            # `run_uid` the ownership test degrades to matching a row's bare `run_id`, which a reused
+            # directory name satisfies. Containment would not have helped: an absolute path to
+            # somebody else's store contains no traversal. So the check is membership in what this
+            # SERVER can name, which is also why the refusal is separate from the identity one above —
+            # "I do not know that store" and "you told me nothing" are different answers.
             store = memory_dir or _memory_dir()
             # `known_memory_dirs` is EVALUATED LAZILY, past the two cheap answers. It scans the whole
             # runs root and JSON-parses every surviving run's `config.snapshot.json` — ~100 syscalls

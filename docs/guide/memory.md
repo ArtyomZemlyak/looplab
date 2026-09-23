@@ -698,7 +698,9 @@ obvious implementation would be wrong. A consolidated lesson keeps the newest co
 while carrying other runs' support in `evidence_count`/`evidence_refs`; deleting it on the strength
 of that `run_id` would destroy corroboration earned by runs that still exist. `serve/memory_cascade.py`
 states one predicate per store, and everything that fails a predicate is kept **and counted with a
-reason** shown in the dialog before you agree:
+reason** shown in the dialog before you agree. WHICH stores are cascaded at all is one registry,
+`engine/memory_stores.py::MEMORY_STORES` — one row per file under `memory_dir`, with its deletion
+policy — and the dialog lists every preserved store by name with its reason:
 
 | Store | Deleted when | Kept when |
 |---|---|---|
@@ -707,8 +709,14 @@ reason** shown in the dialog before you agree:
 | `cases.jsonl` | this run wrote it (the group's `active` champion is re-elected over what survives) | — |
 | `research_claims.jsonl` | this run wrote it | another run's curation decision was computed over that claim pool |
 | `concept_capsules.jsonl` | this run wrote it | any of its concepts was merged into a shared concept family |
+| `lesson_utility.jsonl` | this run wrote it — its own shown/cited counts, which would otherwise keep ranking and forgetting other runs' lessons | — |
+| `regime_contrast.jsonl` | this run wrote it | the row was seeded from an archived run's log (`seeded_from`, `benchmarks/regime_table.py --seed-ledger`) |
 | `skills/` | never | an auto-skill is promoted only across two differently-fingerprinted tasks, so it is cross-run by construction |
-| `*_curation_log.jsonl` | never | append-only governance audit |
+| `*_curation_log.jsonl`, `concept_ratification_log.jsonl` | never | append-only governance audit |
+| `claim_decisions.jsonl`, `concept_aliases.jsonl`, `concept_splits.jsonl`, `task_facets.jsonl` | never | operator policy, keyed by the claim, concept or task it governs — no row names a run |
+| `.curation_invocations/` | never | at-most-once receipts for paid steward calls: removing one lets a settled paid call be bought again |
+| `exploits.jsonl` | never | the reward-hack ruleset `looplab harden` grows: operator-built, written by no run |
+| `memora_cache.json` | never | a content-addressed cache of model-written abstractions: no entry names a run |
 
 The purge runs **after** the run is durably gone, never before: a deletion that then refuses would
 otherwise have destroyed the evidence of a run you still have. It is idempotent (“remove every row
@@ -756,6 +764,8 @@ runs that no longer exist, and it is not a cascade failure.
 `looplab memory-orphans <memory_dir> --runs-root runs` is the deliberate sweep for it. It reports
 every row whose run is gone, grouped by the run that wrote it, and **writes nothing without
 `--apply`**. Nothing runs it automatically: these stores are shared and the purge is irreversible.
+It walks the same registry the cascade does — every cascaded store is counted, and every preserved
+one is listed with the reason no sweep touches it.
 
 Two properties make it safe to point at a live store:
 

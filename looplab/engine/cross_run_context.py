@@ -23,12 +23,16 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from looplab.engine.memory_stores import governed_source_names
 from looplab.trust.cross_run import sanitize_cross_run_projection
 
 # The three governed stores every live cross-run projection reads. Kept here because
 # `project_governed_sources` takes them as a tuple and a caller that lists two of the three gets a
 # projection governed by a partial ledger — with no error, just quietly weaker guarantees.
-CROSS_RUN_SOURCE_NAMES = ("concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl")
+# DERIVED from the store registry's `governed_source` flag (review 2026-09-22, ENG3-07), the same flag
+# `governance_health._GOVERNED_SOURCE_NAMES` reads, so the list the builders pass and the list the
+# ledger accepts can no longer be two hand-kept copies of one trio.
+CROSS_RUN_SOURCE_NAMES = governed_source_names()
 
 
 def advisory_enabled(engine) -> bool:

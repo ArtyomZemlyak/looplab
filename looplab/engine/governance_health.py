@@ -13,6 +13,8 @@ from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import TypeVar
 from looplab.core.jsonutil import valid_digest_ref
+from looplab.engine.memory_stores import (
+    curation_ledger_scopes, governance_ledger_files, governed_source_names)
 
 _ProjectionT = TypeVar("_ProjectionT")
 
@@ -165,18 +167,13 @@ def validate_local_revisions(rows: list[dict], *, ledger: str) -> None:
                 ledger, "revision_mismatch", line=position)
 
 
-_CURATION_LEDGER_SCOPES = {
-    "concept_curation_log.jsonl": ("concept", "concept_curation"),
-    "claim_curation_log.jsonl": ("claim", "claim_curation"),
-    "task_facets_curation_log.jsonl": ("facets", "task_facets_curation"),
-}
-_GOVERNANCE_LEDGER_FILES = {
-    "concept_aliases.jsonl": "concept_aliases",
-    "concept_splits.jsonl": "concept_splits",
-    "claim_decisions.jsonl": "claim_decisions",
-    "task_facets.jsonl": "task_facets",
-    **{name: ledger for name, (_kind, ledger) in _CURATION_LEDGER_SCOPES.items()},
-}
+# DERIVED from the one store registry (review 2026-09-22, ENG3-07). Both tables were written out
+# here by hand — four strict ledgers plus the three paid-curation histories — as one of five partial
+# lists of what lives under `memory_dir`, each complete only for its own purpose. A ledger now gains
+# its strict-reader name and steward kind in `engine/memory_stores.py::MEMORY_STORES`, which is also
+# where its deletion policy is stated.
+_CURATION_LEDGER_SCOPES = curation_ledger_scopes()
+_GOVERNANCE_LEDGER_FILES = governance_ledger_files()
 
 
 def curation_ledger_scope(log_name: str) -> tuple[str, str]:
@@ -661,9 +658,9 @@ def cross_run_governance_snapshot(memory_dir) -> dict:
         memory_dir, lambda governance: governance, include_concepts=True)
 
 
-_GOVERNED_SOURCE_NAMES = frozenset((
-    "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl",
-))
+# The same trio `cross_run_context.CROSS_RUN_SOURCE_NAMES` names — both are now one registry flag
+# (`engine/memory_stores.py`, review 2026-09-22, ENG3-07) instead of two hand-kept copies.
+_GOVERNED_SOURCE_NAMES = frozenset(governed_source_names())
 
 
 def _empty_governance_snapshot() -> dict:

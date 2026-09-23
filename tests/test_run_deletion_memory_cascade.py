@@ -230,3 +230,56 @@ def test_a_retry_after_the_workspace_is_gone_finishes_the_cascade_uid_keyed(tmp_
     assert memory_receipt["memory_dir"] == str(memory)
     assert memory_receipt["ok"] is True
     assert _statements(memory) == ["folded", "theirs"], "the purge stays idempotent"
+
+
+def test_a_cascaded_deletion_leaves_no_row_of_the_run_in_any_cascaded_store(tmp_path, monkeypatch):
+    """EVERY store under `memory_dir`, through the real deletion route (review 2026-09-22, ENG3-07).
+
+    The cascade used to walk a hand-kept list of five stores. `lesson_utility.jsonl` and
+    `regime_contrast.jsonl` were on no list at all although every row names the run that wrote it, so
+    a deleted run's "shown 8, cited 0" went on making `filter_useless` forget a surviving run's lesson
+    and its regime medians went on steering `regime_prior` — and the preview the operator consented
+    to never mentioned either store. Now every store is a row of `engine/memory_stores.py`: each
+    CASCADED one must come out with no row of the deleted run and every row of the survivor, and each
+    PRESERVED one must be byte-identical afterwards AND named, with its reason, in the preview.
+    """
+    from looplab.engine.memory_stores import cascaded_tiers, preserved_tiers
+    from tests._memory_store_rows import (plant_every_store, preserved_stores, rows_of,
+                                          snapshot_preserved)
+
+    run_dir = _run(tmp_path)
+    (run_dir / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_uid":"uid-gone-every-store"}}\n',
+        encoding="utf-8")
+    memory = tmp_path / "xmem"
+    memory.mkdir()
+    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(memory))
+    plant_every_store(memory, run_id=GONE, run_uid="uid-gone-every-store",
+                      survivor_id=KEPT, survivor_uid="uid-kept-every-store")
+    preserved_before = snapshot_preserved(memory)
+    assert set(preserved_before) == {store.name for store in preserved_stores()}
+    client = TestClient(make_app(tmp_path))
+
+    preview = client.get(f"/api/runs/{GONE}/memory-attribution").json()
+    surveyed = {store["file"]: store for store in preview["stores"]}
+    assert set(surveyed) == {name for name, _label in cascaded_tiers()}, (
+        "the preview the operator consents to must name every store the purge will rewrite")
+    assert all(store["deletable"] == 1 for store in surveyed.values()), surveyed
+    disclosed = {tier["store"]: tier for tier in preview["preserved"]}
+    assert set(disclosed) == {group for group, _reason in preserved_tiers()}
+    assert all(tier["reason"] for tier in disclosed.values()), "a preserved store says WHY"
+    assert sorted(name for tier in disclosed.values() for name in tier["files"]) == sorted(
+        store.name for store in preserved_stores()), "every preserved store is disclosed by name"
+
+    response = client.post(f"/api/runs/{GONE}/deletions",
+                           json={**_identity(run_dir), "delete_memory": True})
+    assert response.status_code == 200, response.text
+    receipt = response.json()["memory"]
+    assert receipt["ok"] is True and receipt["identity"] == "run_uid"
+    assert receipt["deleted"] == len(cascaded_tiers())
+
+    for name, _label in cascaded_tiers():
+        rows = rows_of(memory, name)
+        assert [row["run_id"] for row in rows] == [KEPT], (
+            f"{name}: the deleted run's row survived, or the surviving run's row did not")
+    assert snapshot_preserved(memory) == preserved_before, "a preserved store was rewritten"

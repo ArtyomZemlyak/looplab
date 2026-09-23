@@ -44,8 +44,8 @@ def memory_orphans_cmd(
 ):
     """Report — and only with `--apply`, remove — cross-run memory rows whose run no longer exists.
 
-    NOT run automatically by anything, and deliberately so: the five stores are SHARED and the purge
-    is irreversible, so it shows the whole answer before it writes anything. A run's deletion
+    NOT run automatically by anything, and deliberately so: the cascaded stores are SHARED and the
+    purge is irreversible, so it shows the whole answer before it writes anything. A run's deletion
     cascades only when the operator asks; a store full of rows from runs removed OUTSIDE the UI (a
     `rm -rf`, a temp dir, a worktree) has no deletion to hang off at all, and this is the sweep for
     that case. The attribution, the tier predicates that keep shared evidence, and the `blind` rule

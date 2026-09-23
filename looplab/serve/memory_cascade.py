@@ -23,14 +23,27 @@ Hence every tier below states, in one predicate, what "this run alone" means for
 that fails the predicate is KEPT and COUNTED with a reason — a cascade that quietly skips rows is
 indistinguishable from one that quietly deletes the wrong ones.
 
-Two tiers are never cascaded at all:
+WHICH stores are cascaded at all is not decided here. It is a row per store in
+`engine/memory_stores.py::MEMORY_STORES`, and `CASCADED_TIERS` / `PRESERVED_TIERS` below are views of
+it (review 2026-09-22, ENG3-07). They used to be hand-kept lists of five and two, and the two
+run-owned stores on neither — `lesson_utility.jsonl`, `regime_contrast.jsonl`, every row naming the
+run that wrote it — kept a deleted run's citation counts ranking and FORGETTING surviving runs' lessons
+(`lesson_hygiene.filter_useless`) and its regime medians steering `regime_prior`, while neither the
+preview nor `orphan_survey` ever named them. What is never cascaded is now a registry row with its
+reason, disclosed by group on every survey:
 
 * `skills/` — an auto-skill is promoted only once a SECOND, differently-fingerprinted task confirms
   it (`memory.write_auto_skill`), so a promoted skill is cross-run by construction, and its stored
   `fingerprints` list is the evidence. Candidates are left too: they are the record of what has been
   claimed once and awaits confirmation, and they name no run.
-* the curation logs (`*_curation_log.jsonl`, `claim_decisions.jsonl`) — append-only audit. An audit
-  that deletes its own entries is not an audit.
+* the curation logs (`*_curation_log.jsonl`, `concept_ratification_log.jsonl`) — append-only audit.
+  An audit that deletes its own entries is not an audit.
+* the governance ledgers (`claim_decisions.jsonl`, `concept_aliases.jsonl`, `concept_splits.jsonl`,
+  `task_facets.jsonl`) — operator policy, keyed by the claim, concept or task it governs; no row
+  names a run, so there is nothing a run's deletion could own.
+* the paid-curation claim receipts, the `looplab harden` exploit suite and the abstraction cache —
+  an at-most-once gate, an operator-built ruleset and a content-addressed cache, none of them a
+  run's account of its own work.
 
 The purge is idempotent by construction: it is "remove every row attributable solely to R", so
 running it twice is running it once, and a retry after a partial failure is safe.
@@ -44,16 +57,26 @@ from typing import Any, Callable, Iterable, Optional
 from looplab.core.run_identity import row_belongs_to_run
 from looplab.core.jsonlio import (
     read_jsonl_lenient, replace_jsonl_rows_atomic_preserving_quarantine)
+from looplab.engine.memory_stores import cascaded_tiers, preserved_files, preserved_tiers
 
 # Bump when a tier's predicate changes meaning, so a stored receipt is never read under a rule it
 # was not computed with.
 MEMORY_CASCADE_SCHEMA = 1
 
 # The stores that are never touched, and why — surfaced to the operator rather than left implicit.
-PRESERVED_TIERS: tuple[tuple[str, str], ...] = (
-    ("skills", "auto-skills are promoted only across two differently-fingerprinted tasks"),
-    ("curation_logs", "append-only governance audit"),
-)
+# `(group, reason)`, DERIVED from the store registry (review 2026-09-22, ENG3-07): a store the
+# registry marks PRESERVED is disclosed here by construction, never by somebody remembering to.
+PRESERVED_TIERS: tuple[tuple[str, str], ...] = preserved_tiers()
+
+
+def _preserved_disclosure() -> list[dict]:
+    """The preserved groups as every survey states them: the group, WHY, and the stores it covers.
+
+    `files` is additive to the historical `{store, reason}` pair. Without it `curation_logs` was the
+    only word an operator saw for four files, and a group named nowhere in the tree cannot be checked
+    against the store it is supposed to explain."""
+    return [{"store": group, "reason": reason, "files": list(preserved_files(group))}
+            for group, reason in PRESERVED_TIERS]
 
 
 # A row that was never this run's is not a "skip" — it is somebody else's row, and counting it as
@@ -298,14 +321,14 @@ def known_memory_dirs(runs_root: str | Path, *, fallback_memory_dir: str = "") -
     The purge takes `memory_dir` from the request body, because after the run is deleted its own
     record is gone and the receipt is the only place the value survives (see `run_memory_identity`).
     That is a caller-supplied absolute PATH reaching a destructive rewrite: `purge_attributable_memory`
-    checks only `base.is_dir()` and then rewrites five `.jsonl` files under it, and with no `run_uid`
-    the ownership test degrades to matching a row's bare `run_id`. A body naming a directory this
-    server was never told about could therefore delete another operator's legacy rows — which matters
-    most on the shared-origin deployment `serve/server.py` itself warns about, where one browser
-    principal reaches the control plane and the cross-origin guard does not apply. Every OTHER path
-    input on that router goes through the deletion transaction's containment guard; this one had none,
-    and a containment guard would not have helped anyway, since an absolute path to somebody else's
-    store contains no traversal.
+    checks only `base.is_dir()` and then rewrites every cascaded `.jsonl` store under it, and with
+    no `run_uid` the ownership test degrades to matching a row's bare `run_id`. A body naming a
+    directory this server was never told about could therefore delete another operator's legacy
+    rows — which matters most on the shared-origin deployment `serve/server.py` itself warns about,
+    where one browser principal reaches the control plane and the cross-origin guard does not apply.
+    Every OTHER path input on that router goes through the deletion transaction's containment guard;
+    this one had none, and a containment guard would not have helped anyway, since an absolute path
+    to somebody else's store contains no traversal.
 
     So the store is checked against what the server itself can name, not against the shape of the
     string. A CROSS-RUN store is shared by construction, so the legitimate retry — finishing a cascade
@@ -467,6 +490,36 @@ def case_keep_reason(row: dict, run: "RunIdentity") -> str:
     return "" if run.owns(row) else NOT_THIS_RUN
 
 
+def utility_keep_reason(row: dict, run: "RunIdentity") -> str:
+    """A `lesson_utility.jsonl` row is one run's own measurement — how often ITS proposals were shown
+    a lesson and how often they cited it (`events/prior_citations.py::utility_rows`). Nothing merges
+    into it: a later finalize appends a newer row and the reader keeps the latest per (run, lesson),
+    so the row is this run's alone even when the lesson it measures belongs to a run that survives.
+
+    Cascaded because it STEERS (review 2026-09-22, ENG3-07). The next run's prior folds these counts
+    onto each lesson as `utility`; `lesson_rank_key` ranks by them and `filter_useless` stops serving
+    a lesson shown `USELESS_MIN_SHOWN` times and never cited — so one deleted run's "shown 8, cited 0"
+    went on retiring a surviving run's lesson from every later prompt, on the word of a run nobody
+    could inspect any more."""
+    return "" if run.owns(row) else NOT_THIS_RUN
+
+
+def regime_keep_reason(row: dict, run: "RunIdentity") -> str:
+    """A regime-contrast row is one finished run's measurement of the implementation regimes it
+    tried (`engine/regime_contrast.py::run_contrast`) — unless it was SEEDED.
+
+    `benchmarks/regime_table.py --seed-ledger` appends rows derived from ARCHIVED probe logs, stamped
+    with the probe directory as `run_id`, no `run_uid`, and the source log as `seeded_from`. No run
+    in this store wrote one. A run whose directory name merely equals the probe's must not take it,
+    and `memory-orphans` must not sweep the seed away on first use: the archived probe is never in
+    the runs root, so to the sweep every seeded row's "run" is gone by construction."""
+    if not run.owns(row):
+        return NOT_THIS_RUN
+    if row.get("seeded_from"):
+        return "seeded from an archived run's log, not written by a run in this store"
+    return ""
+
+
 def claim_keep_reason(row: dict, run: "RunIdentity", *, curated_tasks: frozenset[str]) -> str:
     """A claim row is this run's, unless another run has already curated the shared pool it is in.
 
@@ -550,14 +603,10 @@ def _tasks_curated_by_other_runs(memory_dir: str | Path, run: "RunIdentity") -> 
 # Survey and purge
 # ---------------------------------------------------------------------------------------------
 
-# (store file, operator label). One list, so the survey and the purge cannot walk different tiers.
-CASCADED_TIERS: tuple[tuple[str, str], ...] = (
-    ("lessons.jsonl", "lessons"),
-    ("meta_notes.jsonl", "notes"),
-    ("cases.jsonl", "cases"),
-    ("research_claims.jsonl", "claims"),
-    ("concept_capsules.jsonl", "concept capsules"),
-)
+# (store file, operator label). One list, so the survey and the purge cannot walk different tiers —
+# and one REGISTRY behind it (`engine/memory_stores.py`, review 2026-09-22, ENG3-07), so the list
+# cannot silently stop short of a store every row of which names the run that wrote it.
+CASCADED_TIERS: tuple[tuple[str, str], ...] = cascaded_tiers()
 
 
 def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, str, Callable]]:
@@ -590,7 +639,12 @@ def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, s
             lambda row, ident: claim_keep_reason(row, ident, curated_tasks=curated),
         "concept_capsules.jsonl":
             lambda row, ident: capsule_keep_reason(row, ident, merged_concepts=merged),
+        "lesson_utility.jsonl": utility_keep_reason,
+        "regime_contrast.jsonl": regime_keep_reason,
     }
+    # A registry row marked CASCADED with no predicate here is a KeyError on every survey and every
+    # purge, deliberately: a store the cascade walks with no stated rule for "this run alone" must not
+    # fall back to a default one. `tests/test_memory_stores.py` drives every cascaded row through it.
     return [(filename, label, predicates[filename]) for filename, label in CASCADED_TIERS]
 
 
@@ -673,7 +727,7 @@ def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str
              "identity": _identity_label(run, 0), "available": False,
              "deletable": 0, "kept": 0, "name_matched": 0, "unmatchable": 0, "advisory": "",
              "stores": [], "unreadable": [],
-             "preserved": [{"store": s, "reason": r} for s, r in PRESERVED_TIERS]}
+             "preserved": _preserved_disclosure()}
     if not run.run_id or base is None or not base.is_dir():
         return empty
     stores, unreadable, total_deletable, total_kept, total_named = [], [], 0, 0, 0
@@ -755,6 +809,13 @@ def orphan_survey(memory_dir: str | Path, runs_root: str | Path) -> dict:
     carries one, by `run_id` only when it does not. So a uid-less row whose directory NAME is live is
     NOT an orphan, which is the safety margin — it is indistinguishable from a live run's own legacy
     row, and this survey must never propose it.
+
+    It sees EVERY tier (review 2026-09-22, ENG3-07). The cascaded stores are counted, from the same
+    registry-derived `CASCADED_TIERS` the purge walks — it used to stop at a hand-kept five, so the
+    rows `lesson_utility.jsonl` and `regime_contrast.jsonl` kept for gone runs were invisible to it
+    and to `looplab memory-orphans`. The preserved ones are not counted, because no sweep may remove
+    their rows, but they are LISTED with their reason under `preserved`, exactly as the deletion
+    preview lists them: a store a survey is silent about reads as a store it forgot.
     """
     base = Path(memory_dir)
     live = surviving_run_identities(runs_root)
@@ -762,7 +823,8 @@ def orphan_survey(memory_dir: str | Path, runs_root: str | Path) -> dict:
     result = {"schema": MEMORY_CASCADE_SCHEMA, "memory_dir": str(base),
               "runs_root": str(Path(runs_root)), "available": base.is_dir(),
               "blind": blind, "unreadable_runs": sorted(live["unreadable"]),
-              "identities": [], "orphan_rows": 0, "live_rows": 0, "stores": []}
+              "identities": [], "orphan_rows": 0, "live_rows": 0, "stores": [],
+              "preserved": _preserved_disclosure()}
     if not base.is_dir():
         return result
     groups: dict[tuple[str, str], int] = {}
@@ -1008,6 +1070,11 @@ def render_orphan_survey(survey: dict, *, limit: int = 25) -> list[str]:
         else:
             out.append(f"  {store['store']:<18} orphan {store['orphan_rows']:>4}   "
                        f"live {store['live_rows']:>4}")
+    # The tiers no sweep may touch, named with their reason (review 2026-09-22, ENG3-07): printing
+    # only the counted stores read as though those were all the stores there are.
+    for tier in survey["preserved"]:
+        out.append(f"  {tier['store']:<18} preserved: {tier['reason']} "
+                   f"({', '.join(tier['files'])})")
     out.append(f"\n  {len(survey['identities'])} contributing run(s) no longer on disk:")
     for identity in survey["identities"][:limit]:
         uid = identity["run_uid"] or "(no uid — pre-2026-08-11 run)"
@@ -1024,5 +1091,5 @@ __all__ = [
     "orphan_survey", "render_orphan_survey", "purge_orphan_identities", "surviving_run_identities",
     "known_memory_dirs", "memory_dir_is_known",
     "lesson_keep_reason", "note_keep_reason", "case_keep_reason",
-    "claim_keep_reason", "capsule_keep_reason",
+    "claim_keep_reason", "capsule_keep_reason", "utility_keep_reason", "regime_keep_reason",
 ]
