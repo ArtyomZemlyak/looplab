@@ -341,6 +341,13 @@
           "help": "Ask the crash diagnostician for the OTHER explanations that fit what it read — each with its own confidence and with what would tell it apart from the primary answer. Recorded on the failure row; the repair still follows the one failure_kind. No extra provider call."
         },
         {
+          "key": "triage_kinds_from_registry",
+          "label": "Diagnosis: kind lists from the registries",
+          "type": "bool",
+          "default": true,
+          "help": "The crash-triage prompt names exactly the failure kinds the engine’s own registries admit — the tags it hands on for a diagnosis and the answers it reads back (the emit schema’s own enum) — with no count, and asks for a diagnosis on exactly those tags. The hand-written lists had drifted: “one of four” naming an oom the engine never tags, “from these five” over six bullets, and a “Choose from those only.” that forbade an answer the schema accepts. Every kind both versions name keeps its words. It changes a prompt and buys no call: turn it OFF to reproduce the historical prompt byte for byte; a run launched before the field resumes with it OFF."
+        },
+        {
           "key": "novelty_literature",
           "label": "Novelty gates read the literature",
           "type": "bool",

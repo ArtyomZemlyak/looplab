@@ -38,8 +38,10 @@ docstring, which is the one place they are written down; what belongs HERE is on
     out-of-band signals, its cross-reader, the return code of the setup command it ran, the
     filesystem contracts its stage runner checked, and the process exit code. None parses a message.
   * `crash` and `no_metric` survive as honest STRUCTURAL residuals and say nothing about the cause.
-    They, plus `oom` and `check_failed`, are `DIAGNOSABLE_ENGINE_REASONS` — handed to the
-    diagnostician as evidence rather than kept as answers.
+    They, plus `check_failed`, are `DIAGNOSABLE_ENGINE_REASONS` — handed to the diagnostician as
+    evidence rather than kept as answers. (`oom` is not one: both of its producers were text
+    rules and are among the deleted below, so the engine has no way left to say it — see
+    `failure_diagnosis.py`.)
   * the deleted rules are named with their obituaries in place, so that nobody reinstates one from
     the corpus win it really did produce: the `setup failed:` stderr prefix (replaced by
     `RunResult.setup_failed`, an out-of-band flag on the branch that already knew), the `-9/137 +

@@ -209,8 +209,10 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   `DIAGNOSABLE_ENGINE_REASONS` / `DIAGNOSED_FAILURE_REASONS` (the registered overlap is EXACTLY
   `not_learning` + `diverged`, the latter admissible only where the engine said `check_failed` —
   `DIAGNOSED_CONTEXT_BOUND` — with `OVERRIDE_EVIDENCE_REQUIRED` refusing an override that cites no
-  log); `engine/repair_verify.py::REPAIR_VERDICTS` (disjoint from `TRIAGE_ACTIONS`
-  by a guard: a byte comparison is not a judgement a model may emit);
+  log; the triage prompt's two kind lists are RENDERED from the latter two with no count —
+  `agents/unified_agent.py::UnifiedAgent._triage_kind_lists`, `Settings.triage_kinds_from_registry`
+  — so a kind list is never re-spelled in a prompt); `engine/repair_verify.py::REPAIR_VERDICTS`
+  (disjoint from `TRIAGE_ACTIONS` by a guard: a byte comparison is not a judgement a model may emit);
   `engine/speculation.py::CARD_BUILD_SKIP_REASONS`; `core/tracing.py::TRACE_WORKER_STOP_REASONS`;
   `runtime/command_eval.py::READER_PATH_KEYS` + `READER_KEYS`; `core/config.py::DEVELOPER_BACKENDS` +
   `DEVELOPER_BACKEND_ALIASES`; `events/types.py::BACKGROUND_APPENDABLE` /
