@@ -704,7 +704,6 @@ def test_boss_endpoints_reject_a_malformed_body_instead_of_500ing(tmp_path, monk
     for path, body in (
         ("/api/runs/demo/suggest", {"instruction": 1}),
         ("/api/runs/demo/chat", {"instruction": ["not", "a", "string"]}),
-        ("/api/runs/demo/chat-compact", {"messages": ["scalar entry"]}),
         ("/api/runs/demo/chat", {"messages": {"role": "user"}}),
         ("/api/runs/demo/suggest", {"node_id": "3"}),
     ):
@@ -712,7 +711,8 @@ def test_boss_endpoints_reject_a_malformed_body_instead_of_500ing(tmp_path, monk
         assert r.status_code == 400, f"{path} {body} returned {r.status_code}, not a clean 400"
 
     # a well-formed body still gets past the parser (whatever the endpoint then decides)
-    ok = client.post("/api/runs/demo/chat-compact", headers=OWNER, json={"messages": []})
+    ok = client.post("/api/runs/demo/chat", headers=OWNER,
+                     json={"messages": [{"role": "user", "content": "status"}]})
     assert ok.status_code != 400
 
 

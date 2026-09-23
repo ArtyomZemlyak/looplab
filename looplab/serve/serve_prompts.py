@@ -198,16 +198,6 @@ CHAT_SYSTEM = (
     "Here is the run you're discussing:\n")
 
 
-# Chat compaction (`POST /api/runs/{id}/chat-compact`).
-COMPACT_SYSTEM = (
-    "You are compacting a conversation between a human and the BOSS of an autonomous ML "
-    "experiment run. Rewrite it as a TIGHT recap that becomes the boss's memory of these "
-    "turns, so they can be dropped from the live context. PRESERVE, in order of priority: "
-    "decisions made, actions already applied (and their outcome), open questions, and any "
-    "agreed next steps or constraints the human set. Drop pleasantries and resolved "
-    "tangents. One compact paragraph, no preamble, written as notes-to-self.")
-
-
 # Research brief (`POST /api/research`): the paired user turn interpolates the topic in the route.
 RESEARCH_BRIEF_SYSTEM = (
     "You are a senior ML research advisor. Given a problem "

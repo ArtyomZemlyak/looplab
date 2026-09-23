@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-134 routes on 120 paths; 11 deprecated; 25 with a declared response model.
+133 routes on 119 paths; 10 deprecated; 25 with a declared response model.
 
 ### `/api`
 
@@ -159,7 +159,6 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/artifacts` | List files currently visible to the run, grouped by root. | — |  |
 | `GET` | `/api/runs/{run_id}/cards/{card_id}/trace` | One CARD's whole story: the research that proposed it, then every node it produced. | — |  |
 | `POST` | `/api/runs/{run_id}/chat` | Advisory chat grounded on a run (and optionally one experiment node). Read-only — it | — | yes |
-| `POST` | `/api/runs/{run_id}/chat-compact` | Summarize a stretch of older chat turns into ONE tight recap, so the boss's working memory | — | yes |
 | `GET` | `/api/runs/{run_id}/chat-log` | The saved chat turns for this run, in order ({role:'user'\|'assistant'\|'action', …}). | — |  |
 | `POST` | `/api/runs/{run_id}/chat-log` | Append ONE chat turn (the verbatim feed entry: role/content/trace or role/action/status) | — |  |
 | `POST` | `/api/runs/{run_id}/command` | Action-router (Workstream C): turn a free-text instruction into EITHER a concrete control | — |  |

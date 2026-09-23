@@ -198,7 +198,7 @@ PROMPT_FAMILIES: tuple[str, ...] = tuple(sorted({d.family for d in PROMPT_REGIST
 # discovered later is a row to add, not a reason to distrust these five.
 UNGOVERNED_PROMPT_FAMILIES: tuple[tuple[str, str], ...] = (
     ("genesis", "serve/serve_prompts.py::genesis_system + RESEARCH_BRIEF_SYSTEM"),
-    ("assistant", "serve/serve_prompts.py::COMMAND_SYSTEM / CHAT_SYSTEM / COMPACT_SYSTEM"),
+    ("assistant", "serve/serve_prompts.py::COMMAND_SYSTEM / CHAT_SYSTEM"),
     ("report", "serve/report.py::_SYSTEM"),
     ("monitor", "engine/train_monitor.py::_MONITOR_SYSTEM, "
                 "engine/asha_monitor.py::_ASHA_JUDGE_SYSTEM"),

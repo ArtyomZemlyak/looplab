@@ -1,6 +1,6 @@
 """One failure epilogue for the request-path Boss LLM endpoints (doc 25 SR-15).
 
-`chat_compact`, `chat` and `suggest` each closed with the same ten lines. Both halves of that block
+`chat_compact` (retired 2026-09-23), `chat` and `suggest` each closed with the same ten lines. Both halves of that block
 are load-bearing and neither is visible from the call site, which is why one copy drifting would be
 hard to notice: a run-generation conflict must REACH the client as a conflict, and everything else
 must soft-fail as a 200 with the provider's raw text stripped out.
@@ -70,7 +70,7 @@ def test_the_accounting_failure_keeps_its_own_kind():
     assert b"accounting_pending" in response.body
 
 
-@pytest.mark.parametrize("endpoint", ["chat_compact", "chat", "suggest"])
+@pytest.mark.parametrize("endpoint", ["chat", "suggest"])
 def test_each_request_path_endpoint_uses_the_shared_epilogue(endpoint):
     source = inspect.getsource(boss)
     body = source[source.index(f"async def {endpoint}("):]

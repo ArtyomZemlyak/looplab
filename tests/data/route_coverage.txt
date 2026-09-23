@@ -67,7 +67,6 @@ GET /api/runs/{run_id}/artifact	tests/test_server.py
 GET /api/runs/{run_id}/artifacts	tests/test_refusal_vocabulary.py tests/test_server.py
 GET /api/runs/{run_id}/cards/{card_id}/trace	tests/test_card_trace_projection.py
 POST /api/runs/{run_id}/chat	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py
-POST /api/runs/{run_id}/chat-compact	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py
 GET /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_server.py
 POST /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/command	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py

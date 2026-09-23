@@ -218,7 +218,6 @@ def _boss_post(tmp_path, monkeypatch, path, body):
 
 
 @pytest.mark.parametrize(("path", "body"), [
-    ("/api/runs/demo/chat-compact", {"messages": [{"role": "user", "content": "recap"}]}),
     ("/api/runs/demo/chat", {"messages": [{"role": "user", "content": "status"}]}),
     ("/api/runs/demo/suggest", {"instruction": "try another feature"}),
     ("/api/runs/demo/command", {"instruction": "what next?"}),

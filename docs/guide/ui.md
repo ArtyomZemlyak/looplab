@@ -180,15 +180,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   action narrated in a durable feed (`chat.jsonl`). That feed is capped at **32 MiB** per run; past the
   cap further turns are refused with HTTP 413 so one long-lived conversation cannot fill the disk or
   make every `GET /chat-log` re-read a huge file. The transcript stays fully readable — only appends
-  stop. **The documented recovery is `chat-compact`, not a reset:** the 413 body says so, and a **1 MiB
-  grace** above the cap is reserved specifically for `summary` turns so the compaction recap can still be
-  appended once the cap is reached (`serve/routers/boss.py`: `_CHAT_LOG_MAX_BYTES` :72,
-  `_CHAT_SUMMARY_GRACE_BYTES` :76, and the 413 branch at :560-570). Compact, append the returned
-  recap as a `summary` turn, and carry on. Resetting the run also archives the transcript and starts a
-  fresh one, but it is the destructive option, not the first one. (No first-party client calls
-  `chat-compact` itself — the TUI writes `chat-log` but never compacts — so the route is marked
-  deprecated in the [API reference](api-reference.md); it is still served, unchanged, for a caller
-  that does.)
+  stop — and resetting the run archives it and starts a fresh one (`serve/routers/boss.py`,
+  `_CHAT_LOG_MAX_BYTES`). Until 2026-09-23 the 413 also named a `chat-compact` recap with a 1 MiB grace
+  for `summary` turns; no first-party client ever called it, and it was retired with the grace.
 - **Deep Research** — every run surface uses the same conclusion-first memo card. The newest memo is
   open and older memos are collapsed; the takeaway, provenance, evidence/claim counts and trust state
   remain visible in the header. Findings and next actions stay primary, while verified evidence,

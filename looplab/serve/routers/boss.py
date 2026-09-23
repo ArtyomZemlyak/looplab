@@ -46,7 +46,7 @@ from looplab.serve.paid_work import (
     run_directory_identity as _report_run_identity,
 )
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
-from looplab.serve.serve_prompts import CHAT_SYSTEM, COMMAND_SYSTEM, COMPACT_SYSTEM
+from looplab.serve.serve_prompts import CHAT_SYSTEM, COMMAND_SYSTEM
 
 
 def _safe_boss_failure(exc: Exception) -> dict:
@@ -72,12 +72,11 @@ from pydantic import BaseModel  # noqa: E402
 # deployment, any same-origin page) POSTing turns unbounded grows it without limit — disk exhaustion,
 # and every GET /chat-log re-reads the whole file. Generous so a real conversation never hits it (the
 # event-sourced comment path is bounded the same way); an over-cap append is refused with 413 and the
-# operator compacts (chat-compact) or resets (which archives chat.jsonl independently).
+# operator resets the run (which archives chat.jsonl independently). Until 2026-09-23 the 413 also
+# named `chat-compact`, with a 1 MiB grace so its recap could still be appended; no first-party client
+# ever called that route, it was retired (owner decision), and the grace — a 1 MiB exemption for any
+# turn a client LABELLED `summary` — went with it.
 _CHAT_LOG_MAX_BYTES = 32 * 1024 * 1024   # 32 MiB
-# Extra headroom reserved for compaction `summary` turns ONLY, so the documented recovery path
-# (chat-compact -> append the recap) still works once the cap is reached. Bounded, so the escape
-# hatch cannot become the unbounded growth it guards against.
-_CHAT_SUMMARY_GRACE_BYTES = 1024 * 1024   # 1 MiB
 
 
 _DOMAIN_HTTP_FAILURES = {
@@ -532,20 +531,12 @@ def build_router(srv) -> APIRouter:
         def _append() -> dict:
             generation = srv.commands.run_generation(rd)
             # Bound the durable sidecar so unbounded turn appends can't exhaust disk / slow every
-            # re-read. The COMPACTION SUMMARY is exempt (within a small overshoot): `chat-compact` is
-            # read-only — it returns a recap the client appends as a `summary` turn — so refusing that
-            # one append made the 413's own advertised remedy impossible and left the transcript
-            # permanently wedged, with only a destructive run reset as an escape. The exemption is
-            # bounded by a fixed grace so it cannot itself become the unbounded-growth path it exists
-            # to stop.
-            _is_summary = str(turn.get("role") or turn.get("kind") or "").lower() == "summary"
-            _ceiling = _CHAT_LOG_MAX_BYTES + (_CHAT_SUMMARY_GRACE_BYTES if _is_summary else 0)
+            # re-read.
             try:
-                if path.stat().st_size >= _ceiling:
+                if path.stat().st_size >= _CHAT_LOG_MAX_BYTES:
                     raise HTTPException(
-                        413, "chat log is full for this run — compact it (chat-compact, "
-                             "then append the returned recap as a `summary` turn) or reset "
-                             "the run to start a fresh transcript")
+                        413, "chat log is full for this run — reset the run to start a fresh "
+                             "transcript (the full transcript stays readable)")
             except OSError:
                 pass                               # no file yet (or unstat-able) -> nothing to bound
             with srv.commands.run_activity(rd, "chat_append", generation=generation):
@@ -556,38 +547,6 @@ def build_router(srv) -> APIRouter:
             return {"ok": True}
 
         return await anyio.to_thread.run_sync(_append)
-
-    # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party
-    # caller; absent from ui/src, the TUI and the CLI (grep-verified). Kept, not deleted: it is a
-    # PUBLIC route, and the flag is the notice a caller this repository cannot see receives. NOTE:
-    # the `chat-log` 413 above still names it as the remedy, and the TUI — `chat-log`'s one
-    # first-party writer — never calls it; which of the two moves is an open product decision.
-    @router.post("/api/runs/{run_id}/chat-compact", deprecated=True)
-    async def chat_compact(run_id: str, request: Request):
-        """Summarize a stretch of older chat turns into ONE tight recap, so the boss's working memory
-        stops growing turn-over-turn (the human↔boss history is re-sent in full each message). The UI
-        sends the turns to fold; we return a recap string (+ its token cost) which the UI appends as a
-        durable `summary` turn and then sends to the boss IN PLACE OF those turns. Read-only + soft-fail
-        offline — compaction is opt-in, so a missing model just leaves the chat uncompacted."""
-        rd = await anyio.to_thread.run_sync(_run_dir, run_id)
-        body = await _json_object(request)
-        msgs = body.get("messages") or []
-        convo = "\n".join(f"{m.get('role')}: {m.get('content', '')}"
-                          for m in msgs if str(m.get("content", "")).strip())
-        if not convo.strip():
-            return {"ok": True, "summary": "", "tokens": None}
-        # `run_generation` scans the whole event log — off the loop, like the fold in the routes below.
-        generation = await anyio.to_thread.run_sync(lambda: srv.commands.run_generation(rd))
-        try:
-            async with _metered_client(rd, _llm_settings(rd), generation) as client:
-                sys_prompt = COMPACT_SYSTEM
-                summary = await anyio.to_thread.run_sync(lambda: client.complete_text(
-                    [{"role": "system", "content": sys_prompt},
-                     {"role": "user", "content": convo}]))
-                tokens = _client_tokens(client)
-        except Exception as exc:  # noqa: BLE001 - offline / no model -> soft fail (chat stays uncompacted)
-            return _boss_failure_response(exc)
-        return {"ok": True, "summary": (summary or "").strip(), "tokens": tokens}
 
     @asynccontextmanager
     async def _metered_client(rd, settings, generation):

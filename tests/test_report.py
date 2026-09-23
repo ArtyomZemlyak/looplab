@@ -1241,8 +1241,8 @@ def test_boss_endpoints_reject_non_object_body(tmp_path):
     (a bare `[]`) must return a clean 400 — not an AttributeError surfacing as a 500."""
     _seed_finished_run(tmp_path)
     client = TestClient(make_app(tmp_path))
-    for path in ("/api/runs/demo/chat", "/api/runs/demo/chat-compact",
-                 "/api/runs/demo/suggest", "/api/runs/demo/command", "/api/runs/demo/chat-log"):
+    for path in ("/api/runs/demo/chat", "/api/runs/demo/suggest", "/api/runs/demo/command",
+                 "/api/runs/demo/chat-log"):
         # A non-object JSON body (bare list) and a syntactically invalid body must both be 400, never 500.
         assert client.post(path, json=[]).status_code == 400, path
         assert client.post(path, content=b"{not json",
@@ -1956,45 +1956,6 @@ def test_boss_context_includes_the_run_report(tmp_path, monkeypatch):
     # role that can raise budgets and route commands, so it travels as a labelled user message.
     assert "Quadratic solved near-optimally" not in captured["sys"]
     assert "UNTRUSTED_RUN_EVIDENCE" in captured["all"]
-
-
-def test_chat_compact_summarizes_and_reports_tokens(tmp_path, monkeypatch):
-    """Compaction folds a stretch of older turns into ONE recap and reports the token cost — so the UI
-    can append a durable `summary` turn and the header running-total stays honest."""
-    _build_run(tmp_path, "demo", writer=None)
-    client = TestClient(make_app(tmp_path))
-    captured = {}
-
-    class _Cap:
-        def __init__(self, s):
-            self.model = s.llm_model
-            self.accountant = type("A", (), {"prompt_tokens": 120, "completion_tokens": 30,
-                                             "total_tokens": 150, "calls": 1})()
-
-        def complete_text(self, msgs):
-            captured["user"] = msgs[-1]["content"]
-            return "recap: agreed to try MLPs; budget raised by 10."
-
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _Cap(s))
-    r = client.post("/api/runs/demo/chat-compact", json={"messages": [
-        {"role": "user", "content": "try some neural nets"},
-        {"role": "assistant", "content": "added two MLP baselines"}]}).json()
-    assert r["ok"] and r["summary"].startswith("recap:")
-    assert r["tokens"]["total"] == 150                     # token cost surfaced for the header total
-    assert "try some neural nets" in captured["user"]      # the folded turns were actually summarized
-
-
-def test_chat_compact_empty_is_noop(tmp_path, monkeypatch):
-    """No turns to fold -> empty recap, no model call (and no crash)."""
-    _build_run(tmp_path, "demo", writer=None)
-    client = TestClient(make_app(tmp_path))
-
-    def _boom(_s, **_kw):
-        raise AssertionError("must not call the model when there's nothing to compact")
-
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
-    r = client.post("/api/runs/demo/chat-compact", json={"messages": []}).json()
-    assert r["ok"] and r["summary"] == ""
 
 
 def test_command_reply_carries_token_usage(tmp_path, monkeypatch):

@@ -3833,9 +3833,15 @@ def test_chat_log_append_is_size_bounded(tmp_path, monkeypatch):
                        json={"role": "user", "content": "hi", "ts": 1.0, "seq": 1}).json()["ok"] is True
     # shrink the cap so the (now non-empty) file is already over it: the next append is refused
     monkeypatch.setattr(boss_router, "_CHAT_LOG_MAX_BYTES", 5)
-    assert client.post("/api/runs/demo/chat-log",
-                       json={"role": "user", "content": "more", "ts": 2.0, "seq": 2}).status_code == 413
-    assert [m["content"] for m in client.get("/api/runs/demo/chat-log").json()] == ["hi"]  # refused turn not written
+    refused = client.post("/api/runs/demo/chat-log",
+                          json={"role": "user", "content": "more", "ts": 2.0, "seq": 2})
+    assert refused.status_code == 413
+    # The remedy it names is one that exists: `chat-compact` was retired (2026-09-23), and with it the
+    # 1 MiB grace a turn LABELLED `summary` bought — a label any client could claim.
+    assert "reset" in refused.json()["detail"] and "chat-compact" not in refused.json()["detail"]
+    assert client.post("/api/runs/demo/chat-log", json={
+        "role": "summary", "content": "recap", "ts": 3.0, "seq": 3}).status_code == 413
+    assert [m["content"] for m in client.get("/api/runs/demo/chat-log").json()] == ["hi"]  # refused turns not written
 
 
 def test_start_seeds_genesis_chat(tmp_path, monkeypatch):
