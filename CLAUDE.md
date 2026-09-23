@@ -246,7 +246,8 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   redirected to a per-test file. Engine tests construct `Engine(...)` directly (~246 call sites) —
   keep its keyword API stable; new tests use `tests/factories.py::make_engine`. Use pytest's
   `monkeypatch` fixture (a bare `pytest.MonkeyPatch()` leaks across the session). The full suite
-  runs in four background shards (`--splits 4 --group N`, `tests/test_open_item_index.py` run
+  runs in four background shards (`--splits 4 --group N --splitting-algorithm least_duration`,
+  balanced by name as CI runs it; `tests/test_open_item_index.py` run
   separately); never edit a module while a shard is running — `inspect.getsource` reads the file
   from disk and a source pin then sees the wrong function.
 - **A guard test must not be satisfiable by a COMMENT.** Roughly 200 assertions read production
