@@ -406,6 +406,29 @@ def _under_scratch(path, dir_fd=None):
     return full == _SCRATCH or full.startswith(_SCRATCH + os.sep)
 
 
+def _is_ldconfig_query(args):
+    argv = args[1] if len(args) > 1 else None
+    if isinstance(argv, (str, bytes)) or not argv:
+        return False
+    argv = [os.fsdecode(a) if isinstance(a, bytes) else str(a) for a in argv]
+    return (len(argv) == 2 and argv[1] == "-p"
+            and argv[0] in ("ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"))
+
+
+def _names_something_existing(args):
+    path = args[0] if args else None
+    dir_fd = args[2] if len(args) > 2 else None
+    if path is None or isinstance(path, int):
+        return False
+    try:
+        path = os.fsdecode(os.fspath(path))
+        if isinstance(dir_fd, int) and dir_fd >= 0 and not os.path.isabs(path):
+            path = os.path.join(os.readlink("/proc/self/fd/%%d" %% dir_fd), path)
+        return os.path.lexists(path)
+    except Exception:      # noqa: BLE001 -- unresolvable is not provably existing
+        return False
+
+
 def _all_under_scratch(event, args):
     shapes = _PATH_ARGS.get(event)
     if not shapes:
@@ -430,18 +453,37 @@ def _hook(event, args):
         mode = args[1] if len(args) > 1 else None
         if mode is None:
             flags = args[2] if len(args) > 2 else 0
-            if isinstance(flags, int) and (flags & _WRITE_FLAGS) and not _under_scratch(args[0]):
+            if (isinstance(flags, int) and (flags & _WRITE_FLAGS) and not _under_scratch(args[0])
+                    and args[0] != os.devnull):
                 _refuse("write files")
             return
+        # `os.devnull` too: writing into it changes nothing, and `subprocess` opens it read-write
+        # for every child's unused stream.
         if (isinstance(mode, str) and ("w" in mode or "a" in mode or "x" in mode or "+" in mode)
-                and not _under_scratch(args[0])):
+                and not _under_scratch(args[0]) and args[0] != os.devnull):
             _refuse("write files")
         return
     if event in _MUTATE:
         if _all_under_scratch(event, args):
             return
+        # `os.makedirs(cache_dir, exist_ok=True)` at IMPORT, for a directory that is already there,
+        # is how most libraries start (`flashinfer` measured 2026-09-23, on the task's own
+        # interpreter): the kernel answers EEXIST, `exist_ok` swallows it, and nothing changes. Refused
+        # here it was an ImportError the Developer could not explain. An EXISTING name only -- a
+        # mkdir that would create something still reaches the refusal, and the Landlock rung would
+        # refuse it even if this line were wrong.
+        if event == "os.mkdir" and _names_something_existing(args):
+            return
         _refuse("create, move or delete files")
     if event in _EXEC:
+        # ONE program, with ONE argument list: the stdlib's own `ctypes.util.find_library` runs
+        # `ldconfig -p` on Linux, and ML libraries call it at IMPORT (measured 2026-09-23 importing
+        # `flashinfer` on a task interpreter). It prints the dynamic linker's cache and nothing else,
+        # and the child inherits every kernel rung this process holds -- the no-mutation ruleset, the
+        # read allow-list when confined, RLIMIT_FSIZE -- so it can neither write nor read beyond the
+        # probe. Any other program, or `ldconfig` with any other argument, is still refused.
+        if event == "subprocess.Popen" and _is_ldconfig_query(args):
+            return
         _refuse("start another program")
     # Forward compatibility, not a second list: a spelling CPython adds later for the same act
     # ("os.execve2", some future "os.posix_spawnp") must inherit the rule rather than escape it.
@@ -530,6 +572,19 @@ except Exception:      # noqa: BLE001 — no `resource` module (Windows): the au
 # No .pyc anywhere: importing a replica module would otherwise try to write __pycache__ and be
 # refused by our own hook, turning a legitimate import into a confusing refusal.
 sys.dont_write_bytecode = True
+# `ctypes.util.find_library` on Linux asks `ldconfig -p` (admitted above, read-only), and when the
+# cache does not name the library it falls back to COMPILING a throwaway binary with `gcc` and to
+# `ld -t` -- two programs, the first of which writes an output file. ML libraries call it at IMPORT
+# (measured 2026-09-23, `import flashinfer` on a task interpreter). Those two fallbacks answer None
+# here, which is exactly what they answer on any box without a compiler: every library has to cope
+# with it, and the probe's answer about whether something IMPORTS stays the same.
+try:
+    import ctypes.util as _ll_ctypes_util
+    for _ll_fn in ("_findLib_gcc", "_findLib_ld"):
+        if hasattr(_ll_ctypes_util, _ll_fn):
+            setattr(_ll_ctypes_util, _ll_fn, lambda *_a, **_k: None)
+except Exception:      # noqa: BLE001 -- no ctypes (a stripped build): nothing to route around
+    pass
 
 try:
     runpy.run_path(_PROGRAM, run_name="__main__")
@@ -1062,7 +1117,7 @@ class DevProbeTools:
             # the `finally` below removes it with everything else, and never the replica `work`.
             scratch = root / "scratch"
             scratch.mkdir()
-            replica_note = self._replicate(work)
+            replica_note = self._replicate(work) + self._link_mounts(work)
             program = root / "probe.py"
             program.write_text(code, encoding="utf-8")
             launcher = root / "probe_launcher.py"
@@ -1074,7 +1129,12 @@ class DevProbeTools:
                                 read_deny=self._read_deny(), scratch=str(scratch)),
                 encoding="utf-8")
             from looplab.runtime.sandbox import run_argv
+            # The operator's declared probe environment FIRST, so every key the probe sets for its
+            # own safety below wins over it (`EvalSpec.probe_env`; `{scratch}` = the writable TMPDIR).
+            declared_env = {str(k): str(v).replace("{scratch}", str(scratch))
+                            for k, v in ((self.repo_spec or {}).get("probe_env") or {}).items()}
             env = {
+                **declared_env,
                 # Belt to the launcher's braces: no bytecode written anywhere, so an import of a
                 # replica module cannot be refused for writing a __pycache__ nobody asked for.
                 "PYTHONDONTWRITEBYTECODE": "1",
@@ -1457,6 +1517,32 @@ class DevProbeTools:
             note += (f"; {skipped + gskipped} omitted to stay under the replica cap — "
                      "read them with read_file")
         return note + ")"
+
+    def _link_mounts(self, work: Path) -> str:
+        """The task's `data:` mounts, linked into the probe's cwd under the names the eval uses.
+
+        The eval workdir has them (`./assets` -> the checkpoint, the catalog); the probe's did not,
+        so a Developer told "read ./assets" got FileNotFoundError and no hint of the absolute path --
+        measured 2026-09-23, the first probe of a MiniOneRec plan. Reads through the link are what
+        the kernel rung already grants (the mount SOURCE is in `_confined_allow`); the link itself is
+        made here, by the engine, in the disposable replica. A name the node staged a file under
+        keeps the node's file."""
+        linked = []
+        root = work.resolve()
+        for name, ds in sorted(((self.repo_spec or {}).get("data") or {}).items()):
+            src = ds.get("path") if isinstance(ds, dict) else ds
+            if not src or not str(name).strip():
+                continue
+            dest = (work / str(name).strip().strip("/")).resolve()
+            if not str(dest).startswith(str(root) + os.sep) or os.path.lexists(dest):
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(str(src), str(dest))
+                linked.append(str(name).strip().strip("/"))
+            except OSError:
+                continue
+        return (f"\n(data mounts linked here, read-only: {', '.join(linked)})" if linked else "")
 
     def _replicate_given(self, work: Path, staged_names: set, used: int, written: int):
         """Also replicate what the task GAVE the model, not only what the model wrote.

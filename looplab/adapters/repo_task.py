@@ -1108,6 +1108,16 @@ class EvalSpec(BaseModel):
     # hours later, behind a fallback that printed one line. Operator-authored like the rest of this
     # model. Existence is NOT checked here: a task may build its env in `setup`, after admission.
     python: str = ""
+    # ENVIRONMENT FOR THE DEVELOPER'S PROBE ONLY, where `{scratch}` expands to that probe's own
+    # disposable, writable TMPDIR -- the one place a probe may write. For a library that WRITES at
+    # import into a directory of its own choosing: measured 2026-09-23, `import flashinfer` opens a
+    # JIT log for writing under `FLASHINFER_WORKSPACE_BASE` (default `~`), so on the task's own
+    # interpreter the probe refused it and the Developer could not import the attention library its
+    # whole task is about. `{"FLASHINFER_WORKSPACE_BASE": "{scratch}"}` points it at the scratch.
+    # DECLARED and never derived, like `protect_packages`: only the operator knows which of a task's
+    # libraries does this. Validated by the same rule as `env`; the probe's own safety variables
+    # (`CUDA_VISIBLE_DEVICES`, the fence, bytecode) are applied after it and cannot be overridden.
+    probe_env: dict[str, str] = Field(default_factory=dict)
     # INSTALLED packages the Developer's environment inspector may not read -- the GRADER FENCE.
     # `tools/env_inspect.py` answers "what does this installed library look like", and an eval
     # harness pip-installed into the same venv is, to it, just another library: `read_installed` /
@@ -1587,6 +1597,17 @@ class EvalSpec(BaseModel):
             return {}
         from looplab.core.envsafe import validate_env_map
         clean, err = validate_env_map("cmd/eval `env`", v)
+        if err:
+            raise ValueError(err)
+        return clean
+
+    @field_validator("probe_env")
+    @classmethod
+    def _probe_env_valid(cls, v):
+        if not v:
+            return {}
+        from looplab.core.envsafe import validate_env_map
+        clean, err = validate_env_map("cmd/eval `probe_env`", v)
         if err:
             raise ValueError(err)
         return clean
@@ -2207,6 +2228,7 @@ class RepoTask(BaseModel):
             "eval_env": dict(self.eval.env) if self.eval is not None else {},
             # The interpreter the probe answers in -- "" keeps it on the engine's own.
             "task_python": self.task_python(),
+            "probe_env": dict(self.eval.probe_env) if self.eval is not None else {},
             # Back-compat single-seed hint (first editable): consumers that still seed one dir.
             "editable_path": mounts[0]["path"] if mounts else "",
         }

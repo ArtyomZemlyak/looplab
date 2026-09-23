@@ -256,3 +256,96 @@ def test_source_reading_tools_say_which_interpreter_they_read(tmp_path):
     # And not a word of it when the task runs on the engine's own interpreter.
     same = EnvInspectTools(task_python=sys.executable).execute("py_api", {"target": "json.dumps"})
     assert "NOTE" not in same
+
+
+# ------------------------------------------------------------ what `import flashinfer` needed
+#
+# Measured 2026-09-23, the first plan of the first node built with the fixes above: the probe ran on
+# the task's interpreter and read transformers' source, but `./assets` did not exist in its cwd and
+# `import flashinfer` -- the attention library the whole task is about -- died four ways in a row: a
+# `makedirs(exist_ok=True)` of a directory already there, a JIT log opened for writing under `~`,
+# `/dev/null` opened read-write by `subprocess`, and `ctypes.util.find_library` running `ldconfig -p`
+# and then `gcc`. Each is answered narrowly below; the rule "a probe changes nothing" is unchanged.
+
+@needs_landlock
+def test_a_data_mount_is_linked_into_the_cwd_under_the_name_the_eval_uses(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    assets = tmp_path / "assets_store"
+    assets.mkdir()
+    (assets / "catalog.txt").write_text("item-1\n")
+    spec = {"editables": [{"name": ".", "path": str(src), "surface": ["**"]}],
+            "data": {"assets": {"path": str(assets), "mount": True}}}
+    out = DevProbeTools(spec, timeout_s=60).execute(
+        "run_probe", {"code": "print(open('assets/catalog.txt').read())"})
+    assert "exit=0" in out and "item-1" in out, out
+    assert "data mounts linked here" in out
+    denied = DevProbeTools(spec, timeout_s=60).execute(
+        "run_probe", {"code": "open('assets/new.txt', 'w')"})
+    assert "exit=0" not in denied and not (assets / "new.txt").exists()
+
+
+@needs_landlock
+def test_making_a_directory_that_already_exists_is_not_a_change(tmp_path):
+    there = tmp_path / "cache"
+    there.mkdir()
+    out = DevProbeTools({}, timeout_s=60).execute("run_probe", {"code": (
+        "import os\n"
+        f"os.makedirs({str(there)!r}, exist_ok=True)\n"
+        "print('existing: ok')\n"
+        "try:\n"
+        f"    os.makedirs({str(tmp_path / 'fresh')!r}, exist_ok=True)\n"
+        "    print('CREATED')\n"
+        "except BaseException as e:\n"
+        "    print('fresh:', type(e).__name__)\n")})
+    assert "existing: ok" in out and "CREATED" not in out, out
+    assert not (tmp_path / "fresh").exists()
+
+
+@needs_landlock
+def test_dev_null_may_be_opened_for_writing_and_nothing_else_may():
+    out = DevProbeTools({}, timeout_s=60).execute("run_probe", {"code": (
+        "import os\n"
+        "open(os.devnull, 'w').write('x'); os.close(os.open(os.devnull, os.O_RDWR)); print('null ok')\n")})
+    assert "null ok" in out, out
+
+
+@needs_landlock
+def test_only_the_ldconfig_cache_query_may_run_and_ctypes_compiles_nothing():
+    out = DevProbeTools({}, timeout_s=60).execute("run_probe", {"code": (
+        "import ctypes.util, shutil, subprocess\n"
+        "print('gcc fallback:', ctypes.util._findLib_gcc('m'))\n"
+        "print('find_library ran:', True if ctypes.util.find_library('c') or True else False)\n"
+        "for cmd in (['/bin/cat', '/etc/hostname'], ['ldconfig', '-v']):\n"
+        "    try:\n"
+        "        subprocess.run(cmd, capture_output=True); print('RAN', cmd[0])\n"
+        "    except BaseException as e:\n"
+        "        print('refused', cmd[0], type(e).__name__)\n")})
+    assert "gcc fallback: None" in out and "find_library ran: True" in out, out
+    assert "RAN" not in out and out.count("refused") == 2
+
+
+def test_the_ldconfig_exception_is_exactly_one_argument_list():
+    src = render_launcher("/p.py")
+    assert 'argv[1] == "-p"' in src and "len(argv) == 2" in src
+
+
+@needs_landlock
+def test_the_declared_probe_env_expands_scratch_and_cannot_override_safety():
+    spec = {"probe_env": {"MY_CACHE": "{scratch}/lib", "CUDA_VISIBLE_DEVICES": "0"}}
+    out = DevProbeTools(spec, timeout_s=60).execute("run_probe", {"code": (
+        "import os, tempfile\n"
+        "print('cache under scratch:', os.environ['MY_CACHE'].startswith(tempfile.gettempdir()))\n"
+        "print('gpus:', repr(os.environ.get('CUDA_VISIBLE_DEVICES')))\n")})
+    assert "cache under scratch: True" in out, out
+    assert "gpus: ''" in out
+
+
+def test_probe_env_is_task_authored_validated_and_carried(tmp_path):
+    run = ["/opt/envs/reco/bin/python", "run.py"]
+    task = RepoTask(goal="g", editable_path=str(tmp_path),
+                    eval={"command": run, "probe_env": {"FLASHINFER_WORKSPACE_BASE": "{scratch}"}})
+    assert task.repo_spec()["probe_env"] == {"FLASHINFER_WORKSPACE_BASE": "{scratch}"}
+    with pytest.raises(ValueError):
+        RepoTask(goal="g", editable_path=str(tmp_path),
+                 eval={"command": run, "probe_env": {"OPENAI_API_KEY": "sk-x"}})
