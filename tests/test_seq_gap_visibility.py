@@ -30,7 +30,7 @@ from typer.testing import CliRunner
 
 from looplab.cli import app
 from looplab.events.eventstore import (
-    EventStore, integrity_sentence, log_divergence, log_integrity)
+    EventStore, integrity_sentence, log_divergence, log_integrity, repair_log)
 
 REPO_RUNS = Path(__file__).resolve().parents[1] / "runs"
 
@@ -100,6 +100,39 @@ def test_the_sentence_states_the_denominator_and_refuses_an_absence_claim(tmp_pa
     assert "6 of 46 records" in note        # good + the boundary row + dropped == the file
     assert "39 durable record(s)" in note   # ...and that the rest is ON DISK
     assert "not evidence that the rest did not happen" in note
+
+
+def _batched_corrupt_log(rd: Path) -> Path:
+    """The shape a PHYSICAL count mis-states: one `append_many` transaction is ONE line carrying ten
+    events. Written by the real writer, then a complete corrupt line and a valid row behind it."""
+    rd.mkdir(parents=True, exist_ok=True)
+    log = rd / "events.jsonl"
+    store = EventStore(log)
+    store.append("run_started", {"task_id": "t", "goal": "g", "direction": "min"})
+    store.append_many([("node_building", {"node_id": i}) for i in range(1, 11)])
+    store.append("node_building", {"node_id": 11})
+    with open(log, "a", encoding="utf-8") as f:
+        f.write('{"garbage": true}\n' + _row(13, "node_building", {"node_id": 13}) + "\n")
+    return log
+
+
+def test_good_records_counts_the_events_a_reader_reads_not_the_lines_they_sit_on(tmp_path):
+    """Review 2026-09-22, EVT-07. `good_records` is documented as "how many records a reader gets"
+    and is the denominator every derived figure is over — and it counted non-blank PHYSICAL lines,
+    so a readable prefix holding one ten-event transaction reported 3 records while every reader
+    served 12. Lines stay lines where a line is meant: `corrupt_line` is the boundary `repair-log`
+    truncates at, and `dropped_lines` counts undecoded lines behind it."""
+    log = _batched_corrupt_log(tmp_path / "run")
+    served = len(EventStore(log).read_all())
+    assert served == 12                                    # 1 + the ten-event transaction + 1
+    receipt = log_integrity(log)
+    assert receipt["good_records"] == served               # was 3: the three physical lines
+    assert (receipt["corrupt_line"], receipt["dropped_lines"]) == (4, 1)
+    assert EventStore(log).divergence["good_records"] == served   # the writer's copy agrees
+    assert "only 12 of 14 records are visible to replay" in integrity_sentence(receipt)
+    # The repair receipt's "kept N record(s)" is what the repaired log folds to (plus its own row).
+    record = repair_log(log)
+    assert record["good_records"] == served == len(EventStore(log).read_all()) - 1
 
 
 def test_one_wire_shape_serves_every_http_surface():
@@ -188,6 +221,15 @@ def test_run_state_carries_the_receipt_beside_the_count_it_qualifies(client):
         "unreadable": None}
     # Mirrored into the projection too, because that is the object the browser actually receives.
     assert body["state"]["source_integrity"]["complete"] is False
+
+
+def test_the_receipt_counts_in_the_unit_of_the_count_it_qualifies(client):
+    """EVT-07 on the wire: `source_integrity` qualifies `event_count`, so the two must be the same
+    unit. On a log carrying an `append_many` transaction they were 3 and 12."""
+    api, root = client
+    _batched_corrupt_log(root / "demo")
+    body = api.get("/api/runs/demo/state").json()
+    assert body["event_count"] == body["source_integrity"]["good_records"] == 12
 
 
 def test_run_state_of_an_intact_log_says_complete(client):

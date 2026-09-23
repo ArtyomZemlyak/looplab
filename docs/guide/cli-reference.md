@@ -516,6 +516,10 @@ Over HTTP the same receipt rides on the run-state envelope, the `/lifecycle` pro
 run-list row as `source_integrity` (`{"complete": true}`, or `complete: false` with `good_records`,
 `corrupt_line` and `dropped_lines`); the UI renders it as an **Incomplete record** banner on the run
 and a pill on the list row. Mutating commands are unchanged and still refuse outright.
+`good_records` counts **events** — what the fold reads, so it equals the envelope's `event_count`
+even where one `append_many` transaction packs several events onto one line — while `corrupt_line`
+and `dropped_lines` count physical **lines** of the file (the boundary `repair-log` truncates at, and
+the undecoded lines behind it).
 
 The numbers are the honest denominator, not a warning to dismiss: everything else the surface prints
 is derived from the readable prefix, and a prefix is **not** evidence that the rest did not happen.

@@ -373,7 +373,15 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
     dropping a valid tail with no signal. Returns `{good_records, corrupt_line, dropped_lines}` for
     any invalid COMPLETE (newline-terminated) line, even when it is currently last. Only a final line
     WITHOUT a newline is a normal torn write: append can safely heal it before writing. Treating an
-    invalid complete last line as harmless lets the next append create an invisible tail behind it."""
+    invalid complete last line as harmless lets the next append create an invisible tail behind it.
+
+    TWO UNITS, each chosen for its reader (review 2026-09-22, EVT-07). `good_records` counts LOGICAL
+    events — exactly `len(read_all())` for this prefix — because it is the denominator of every
+    figure derived from the fold, and an `append_many` transaction is ONE line carrying `count`
+    events: counting lines reported 3 records for a prefix every reader served as 12. `corrupt_line`
+    (1-based, blank lines included) and `dropped_lines` (non-blank lines behind the boundary) stay
+    PHYSICAL: the first is where `repair_log` truncates, and nothing behind the boundary is decoded,
+    so a line is the only unit it has."""
     p = Path(path)
     if not p.exists():
         return None
@@ -383,6 +391,7 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
     # newline-terminated ("complete") records that iter_jsonl would consume.
     complete = lines[:-1]
     expected_seq = 0
+    good_events = 0      # LOGICAL events accepted so far — what `read_all` serves for this prefix
     for i, line in enumerate(complete):
         s = line.strip()
         if not s:
@@ -408,8 +417,8 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
                 ok = event_sequence_continues(events, expected_seq)
         if not ok:
             dropped = sum(1 for later in complete[i + 1:] if later.strip())
-            return {"good_records": sum(1 for e in complete[:i] if e.strip()),
-                    "corrupt_line": i + 1, "dropped_lines": dropped}
+            return {"good_records": good_events, "corrupt_line": i + 1, "dropped_lines": dropped}
+        good_events += len(events)
         expected_seq = events[-1].seq + 1
     return None
 
@@ -448,8 +457,9 @@ def log_integrity(path: str | os.PathLike) -> dict:
     """Whether the recoverable prefix of an event log is the WHOLE log, for a display surface.
 
     Returns `{"complete": True}`, or `{"complete": False, ...}` carrying `good_records` (how many
-    records a reader gets), `corrupt_line` (where it stops) and `dropped_lines` (how many complete
-    records are on disk BEHIND that boundary and invisible to every fold). `unreadable: True` marks
+    records a reader gets — EVENTS, `len(read_all())`, see `log_divergence`), `corrupt_line` (the
+    physical line where it stops) and `dropped_lines` (how many complete lines are on disk BEHIND that
+    boundary and invisible to every fold). `unreadable: True` marks
     the file we could not scan at all — the conservative direction, never `complete`.
 
     Callers must treat an incomplete receipt as "we cannot show you this run", not as a footnote on
@@ -487,9 +497,14 @@ def integrity_sentence(receipt: Optional[dict], *, run_label: str = "this run") 
     dropped = receipt.get("dropped_lines")
     line = receipt.get("corrupt_line")
     # good + the BOUNDARY row + dropped. The boundary line is itself a complete record on disk, so
-    # leaving it out would state a denominator one short of the file — and the timeline pager, which
-    # counts physical rows, would print a different total for the same bytes. Two surfaces disagreeing
-    # about the size of the log is the original defect in miniature.
+    # leaving it out would state a denominator one short of the file. Two surfaces disagreeing about
+    # the size of the log is the original defect in miniature. `good` counts EVENTS — the unit the
+    # fold and the timeline pager both count, since the pager expands an `append_many` line into one
+    # row per member (`serve/log_pages.py::_row_from`) — while the part behind the boundary is
+    # undecoded and so counted in LINES (review 2026-09-22, EVT-07). The sum is the file's event
+    # count whenever the lines behind the boundary are ordinary one-event rows, which is every shape
+    # measured so far; a batch envelope behind it would make the total an UNDER-count of what is
+    # hidden, never of what is shown.
     total = (good + dropped + 1) if isinstance(good, int) and isinstance(dropped, int) else None
     scope = f"{good} of {total} records" if total else f"{good} record(s)"
     return (f"[INCOMPLETE RECORD] {run_label}'s event log stops being readable at line {line}: only "
