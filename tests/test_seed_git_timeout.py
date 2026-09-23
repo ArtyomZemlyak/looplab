@@ -50,6 +50,14 @@ def _repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _tracked_bytes(repo: Path) -> int:
+    """The bytes the two TRACKED files hold ON DISK — what a walk that copies them copies. Read
+    back rather than computed from the strings the fixture was handed: `_git_repo` writes with
+    `write_text`, which on Windows turns each `\\n` into `\\r\\n`, so the LF length of the
+    literals undercounts there by one byte a line (Windows run 51: 58 == 55, 4154 == 4151)."""
+    return (repo / "train.py").stat().st_size + (repo / "cfg" / "params.yaml").stat().st_size
+
+
 def _wedge_ls_files(monkeypatch) -> list:
     """Make `git ls-files` hang past its deadline; every other subprocess runs for real."""
     real_run = subprocess.run
@@ -174,7 +182,7 @@ def test_the_row_records_the_bytes_the_tracked_walk_copied(tmp_path):
 
     row = _rows(tmp_path / "run", "workspace_seeded")[-1]
     assert ".[auto]:2 tracked" in row["materialized"], row
-    expected = len(_TRAIN.encode()) + len(b"lr: 0.1\n")
+    expected = _tracked_bytes(repo)
     assert row["workspace_bytes"] == expected, (
         "the total must be the bytes of the two TRACKED files — the checkpoint was never copied")
 
@@ -186,7 +194,7 @@ def test_the_row_records_the_bytes_a_full_copy_wrote(tmp_path):
 
     row = _rows(tmp_path / "run", "workspace_seeded")[-1]
     assert ".[all]:copytree" in row["materialized"], row
-    expected = len(_TRAIN.encode()) + len(b"lr: 0.1\n") + len(_CHECKPOINT)
+    expected = _tracked_bytes(repo) + len(_CHECKPOINT)
     assert row["workspace_bytes"] == expected, (
         "a full copy's total must count the untracked checkpoint it copied, and nothing `.git` holds")
 

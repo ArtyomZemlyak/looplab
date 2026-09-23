@@ -243,8 +243,16 @@ def test_roles_is_no_longer_a_god_module():
     unreachable endpoint cost 36 provider attempts for one fallback). That is the LLM role's own
     retry decision — the half of this module the docstring says it IS — so it stays, and the cap
     moves to measured + 1.
+
+    `roles.py` 813 -> 828 on 2026-09-23 (review 2026-09-22, the W5-5 follow-up):
+    `WRAPPED_ROLE_ATTRS`, the handle a role WRAPPER keeps its wrapped role under, which the AUTO-width
+    probe now descends. It is the third registry of one family — `LLM_PRESENCE_ATTRS` and
+    `FACADE_STAGE_ATTRS` sit directly above it, and `tests/test_build_llm_probe_contract.py` holds
+    all three to the shipped roles in both directions — so it is a role CONTRACT, and fourteen of
+    its fifteen lines are the why-comment that says what hiding a client behind a wrapper costs.
+    It stays; the cap moves to measured + 1.
     """
-    caps = {"agents/roles.py": 814, "agents/role_prompts.py": 302, "agents/state_brief.py": 463,
+    caps = {"agents/roles.py": 829, "agents/role_prompts.py": 302, "agents/state_brief.py": 463,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

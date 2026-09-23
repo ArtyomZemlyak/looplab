@@ -202,13 +202,19 @@ def test_the_durable_row_describes_what_actually_happened_to_a_silent_stage(tmp_
     from looplab.runtime.command_eval import run_command_eval
     (tmp_path / "quiet.py").write_text(_SILENT_AFTER_ONE_BAR, encoding="utf-8")
     stages = [{"name": "train", "command": [sys.executable, "quiet.py"]}]
-    res = run_command_eval([sys.executable, "quiet.py"], str(tmp_path), 1.0,
+    # A 3 s budget, not 1 s: `_stall_window` clamps the silence window to the budget, and the stall
+    # branch is checked BEFORE the deadline one — so an interpreter that has not printed its bar by
+    # the budget is killed as STALLED before the grace is ever asked for, and the row carries no
+    # `deadline_grace_s` at all. A loaded Windows runner took over a second to start the child
+    # (run 51: `KeyError: 'deadline_grace_s'`); the property under test starts after the bar.
+    budget = 3.0
+    res = run_command_eval([sys.executable, "quiet.py"], str(tmp_path), budget,
                            {"kind": "stdout_json", "key": "metric"}, stages=stages,
                            stall_cap=1800.0,
                            on_deadline=lambda tail: 600.0, deadline_grace_max_s=2.0)
     row = res.stages[0]
     assert row["deadline_grace_s"] == pytest.approx(2.0)
-    assert row["seconds"] >= 1.0 + row["deadline_grace_s"] * 0.75, (
+    assert row["seconds"] >= budget + row["deadline_grace_s"] * 0.75, (
         f"the row claims {row['deadline_grace_s']}s of grace but only ran {row['seconds']}s: {row}")
     assert res.stalled is True and res.timed_out is False
 
