@@ -48,10 +48,28 @@ export const STORED_ERROR_CODES = new Set([
   'spawn_failed', 'command_worker_failed', 'approval_not_requested',
   'ratification_not_requested', 'invalid_transition',
   'invalid_run_generation', 'run_generation_changed', 'run_generation_unavailable',
+  'config_snapshot_incompatible', 'config_snapshot_invalid',
 ])
+// The two refusals the server answers at admission, nothing appended, when the driver it would start
+// could not read the run's config.snapshot.json (`serve/engine_proc.py::spawn_snapshot_refusal`,
+// review 2026-09-22). The generated remediation below ("Refresh state…") is the one that cannot work
+// for them — the file, or the build, has to change first — so they carry the server's remedy, in
+// client-owned words, as every restored record's copy is.
+const CONFIG_SNAPSHOT_REFUSAL_COPY = Object.freeze({
+  config_snapshot_incompatible: Object.freeze([
+    "This LoopLab build cannot read the run's config snapshot",
+    'Upgrade LoopLab, or correct a hand-edited config.snapshot.json, then submit a new command.',
+  ]),
+  config_snapshot_invalid: Object.freeze([
+    "The run's config snapshot cannot be loaded",
+    'Restore config.snapshot.json from a backup or another run of the same task '
+      + '(`looplab resume <run dir>` prints the exact error), then submit a new command.',
+  ]),
+})
 // Restored command records intentionally contain only a stable code, never server-authored text.
 // Generate their copy from that code instead of eagerly shipping a large near-duplicate dictionary.
 const storedErrorCopy = code => {
+  if (Object.hasOwn(CONFIG_SNAPSHOT_REFUSAL_COPY, code)) return CONFIG_SNAPSHOT_REFUSAL_COPY[code]
   const title = code === 'engine_failed' ? 'The run engine reported a failure'
     : code.replaceAll('_', ' ')
   let remediation = 'Refresh state before acting again.'

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   COMMAND_ENVELOPE_VERSION,
   CONTROL, clearAssistantRunTransport, clearRunCommandLock, clearRunTransport, commandCanRetry, commandFailureRecord, commandFeedback,
+  commandErrorMessage,
   commandEventForAction, commandRecordMatchesAction, createIdempotencyKey, isTransientCommandReadError,
   getRunCommand, loadAssistantRunTransport, observeRunGeneration,
   loadRunCommandLock, loadRunTransport, retryRunCommand, runCommand,
@@ -828,6 +829,53 @@ test('strict storage persists no server free text, raw lastError, payload, or JS
   assert.equal(commandCanRetry(loadAssistantRunTransport('demo', storage).record), true)
   assert.match(commandFeedback(loadAssistantRunTransport('demo', storage).record).message,
     /The run engine reported a failure/)
+})
+
+// The server REJECTS at admission a command whose driver would refuse the run's config snapshot, with
+// one of two codes (`serve/engine_proc.py::spawn_snapshot_refusal`, retryable: false, nothing
+// appended). Storage keeps only a KNOWN code, so a code missing from `STORED_ERROR_CODES` was stored
+// as `command_failed` and read back after a reload as "command failed — Refresh state before acting
+// again": the one remedy that cannot work, because the file (or the build) has to change first.
+test('a config-snapshot refusal survives a reload as its own code, with its own remedy', () => {
+  const refusals = [
+    ['config_snapshot_incompatible',
+      'config snapshot names settings this build does not know: warp_drive',
+      'Upgrade LoopLab to continue it — or correct the file — then submit a new command.',
+      "Command failed: This LoopLab build cannot read the run's config snapshot — "
+        + 'Upgrade LoopLab, or correct a hand-edited config.snapshot.json, then submit a new command.'],
+    ['config_snapshot_invalid',
+      "the run's config.snapshot.json cannot be loaded as this build's settings",
+      'Inspect config.snapshot.json in the run directory, restore it, then submit a new command.',
+      "Command failed: The run's config snapshot cannot be loaded — Restore config.snapshot.json "
+        + 'from a backup or another run of the same task (`looplab resume <run dir>` prints the '
+        + 'exact error), then submit a new command.'],
+  ]
+  for (const [code, serverMessage, serverRemediation, restoredCopy] of refusals) {
+    const values = new Map()
+    const storage = {
+      getItem: key => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value),
+      removeItem: key => values.delete(key),
+    }
+    const live = {
+      id: CMD_A, status: 'rejected', event_type: 'resume',
+      error: { code, message: serverMessage, remediation: serverRemediation, retryable: false },
+    }
+    // Live, the server's own words are shown, as for every other code.
+    assert.equal(commandErrorMessage(live), `${serverMessage} — ${serverRemediation}`)
+    for (const [save, load] of [[saveRunTransport, loadRunTransport],
+      [saveAssistantRunTransport, loadAssistantRunTransport]]) {
+      values.clear()
+      assert.equal(save('demo', {
+        action: 'resume', idempotencyKey: `${code}-key`, commandId: CMD_A, record: live,
+      }, storage), true)
+      const restored = load('demo', storage).record
+      assert.deepEqual(restored.error, { code, retryable: false },
+        'the code survives the reload; none of the server text does')
+      assert.equal(commandCanRetry(restored), false, 'a refusal offers no same-command retry')
+      assert.equal(commandFeedback(restored).message, restoredCopy, code)
+    }
+  }
 })
 
 test('malformed, unknown, extra-field, cross-wired, and mismatched stored envelopes fail closed', () => {
