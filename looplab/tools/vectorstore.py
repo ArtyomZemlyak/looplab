@@ -161,31 +161,51 @@ class LLMEmbedder:
 
         Both imports are function-local for the reason `_bill` gives: this module has no import-time
         edge into `core`.
+
+        A GENERATION SPAN, like every other provider call (review 2026-09-22, doc 66 §6 item 6 —
+        the W2-2 tail). The POST and its `_bill` run inside `tracing.generation(op="embed")`, so
+        `CostAccountant.add` -> `tracing.record_paid_call` stamps the call's usage and cost on a
+        span of its own, under whatever phase opened it. Before, `record_paid_call` found no
+        generation on the stack — the chat turn's span has closed by the time a tool embeds — so
+        the money reached the durable `llm_usage` ledger and no span: `looplab tokens` could
+        only show it as the unattributed residual. No `messages`: the embedded texts are not a
+        conversation, are re-sent whole on every re-embed, and must not enter the chat delta
+        chain `generation` keeps for message inputs.
         """
+        from looplab.core import tracing
         from looplab.core.llm_broker import llm_request_permit
         from looplab.core.llm_transient import raise_if_cancelled
 
         raise_if_cancelled(f"{self.base_url}/embeddings")
-        try:
-            req = urllib.request.Request(
-                f"{self.base_url}/embeddings",
-                data=json.dumps({"model": self.model, "input": texts}).encode("utf-8"),
-                method="POST",
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {self.api_key}"},
-            )
-            with llm_request_permit():
-                with self._opener.open(req, timeout=self.timeout) as resp:
-                    body = json.loads(resp.read().decode("utf-8", "replace"))
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError,
-                json.JSONDecodeError, http.client.HTTPException):
-            # HTTPException covers IncompleteRead/BadStatusLine — a server dying mid-response
-            # must degrade to the hash fallback, not crash role construction.
-            return None
-        # BILLED BEFORE THE BODY IS VALIDATED. Every `return None` below discards an answer the
-        # provider already produced and charged for; billing at the bottom would make a malformed
-        # batch read as a call that never happened. Same rule `CostAccountant.add` states for chat.
-        self._bill(body)
+        with tracing.generation(op="embed", model=self.model) as gen:
+            try:
+                req = urllib.request.Request(
+                    f"{self.base_url}/embeddings",
+                    data=json.dumps({"model": self.model, "input": texts}).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json",
+                             "Authorization": f"Bearer {self.api_key}"},
+                )
+                with llm_request_permit():
+                    with self._opener.open(req, timeout=self.timeout) as resp:
+                        body = json.loads(resp.read().decode("utf-8", "replace"))
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+                    json.JSONDecodeError, http.client.HTTPException):
+                # HTTPException covers IncompleteRead/BadStatusLine — a server dying mid-response
+                # must degrade to the hash fallback, not crash role construction.
+                gen.set("embed_failed", True)
+                return None
+            # BILLED BEFORE THE BODY IS VALIDATED. Every `return None` below discards an answer the
+            # provider already produced and charged for; billing at the bottom would make a
+            # malformed batch read as a call that never happened. Same rule `CostAccountant.add`
+            # states for chat.
+            self._bill(body)
+            # The caller-side stamp, as the chat client makes one: it DEFERS to the commit-side
+            # stamp `record_paid_call` already wrote (`ObservationHandle.usage`), so it only fills
+            # the span of an embedder with no accountant (a bare construction), which bills nothing.
+            usage = body.get("usage") if isinstance(body, dict) else None
+            if isinstance(usage, dict):
+                gen.usage(usage).cost(usage.get("cost"))
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, list) or len(data) != len(texts):
             return None

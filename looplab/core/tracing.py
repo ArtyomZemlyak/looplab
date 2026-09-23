@@ -885,10 +885,11 @@ _untraced_seen: set = set()
 _tracer_ever_constructed: bool = False
 
 # Infrastructure frames: the tracer's own plumbing plus the SHARED LLM funnels. `generation(...)` is
-# entered from six places and every one is inside `core/llm.py`, so a walk that stops at the first
-# non-tracing frame reports the client every time — which is exactly the uselessness the comment
-# above describes ("grepping for `complete_text` finds the funnel, not the producer"). Skipping the
-# client and the two structured-call funnels lets the walk reach the ROLE that made the call.
+# entered from six places inside `core/llm.py` and one more, the embedder's `_call` in
+# `tools/vectorstore.py` (review 2026-09-22), so a walk that stops at the first non-tracing frame
+# reports the client every time — which is exactly the uselessness the comment above describes
+# ("grepping for `complete_text` finds the funnel, not the producer"). Skipping the clients and
+# the two structured-call funnels lets the walk reach the ROLE that made the call.
 _UNTRACED_SKIP_SUFFIXES = (
     "core/tracing.py", "core\\tracing.py",
     "core/llm.py", "core\\llm.py",
@@ -897,6 +898,7 @@ _UNTRACED_SKIP_SUFFIXES = (
     "core/llm_transient.py", "core\\llm_transient.py",
     "core/parse.py", "core\\parse.py",
     "trust/judge.py", "trust\\judge.py",
+    "tools/vectorstore.py", "tools\\vectorstore.py",
 )
 
 

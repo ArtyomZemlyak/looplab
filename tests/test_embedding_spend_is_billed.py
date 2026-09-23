@@ -375,3 +375,54 @@ def test_the_ENGINE_level_embedder_is_reconciled_even_when_no_role_holds_a_clien
     engine = _Engine()
     engine._embedder = embedder
     assert find_cost_accountants(engine) == [embedder.accountant]
+
+
+# ---- the embed is a generation span (review 2026-09-22, doc 66 §6 item 6 — the W2-2 tail) ----
+#
+# Billed and admitted, an embed still opened no `generation` span: `record_paid_call` found none on
+# the stack (the chat turn's span has closed by the time a tool embeds), so its tokens reached the
+# durable `llm_usage` ledger and no span, and `looplab tokens` could only show them as residual.
+
+def _spans_of(path):
+    import orjson
+    return [orjson.loads(line) for line in path.read_bytes().splitlines()]
+
+
+def test_an_embed_is_a_generation_span_under_the_phase_that_made_it(tmp_path):
+    """MUTATION: drop the `tracing.generation` wrapper in `_call` -> no generation span, and the
+    reconciliation below reports the 8 tokens as residual instead of the `knowledge_index` row."""
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+    from looplab.events.token_spend import token_spend_by_phase
+
+    embedder = _embedder(_ok([[1.0, 0.0, 0.0, 0.0]],
+                             usage={"prompt_tokens": 8, "total_tokens": 8, "cost": 0.001}))
+    t = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
+    with t.span("knowledge_index", new_trace=True):
+        assert embedder.embed("the embedded text") == [1.0, 0.0, 0.0, 0.0]
+
+    spans = _spans_of(tmp_path / "s.jsonl")
+    (gen,) = [s for s in spans if s.get("kind") == "generation"]
+    attrs = gen["attributes"]
+    assert attrs["op"] == "embed" and attrs["model"] == "embed-model"
+    assert attrs["phase"] == "knowledge_index"
+    assert attrs["usage"]["total"] == 8 and attrs["cost"] == pytest.approx(0.001)
+    # The texts are not a conversation and must not ride into the span.
+    assert "the embedded text" not in json.dumps(gen)
+
+    spend = token_spend_by_phase(spans, ledger_total=embedder.accountant.total_tokens)
+    assert [(r["phase"], r["tokens"]) for r in spend["rows"]] == [("knowledge_index", 8)]
+    assert spend["residual"] == 0
+
+
+def test_a_failed_embed_is_a_generation_that_says_so(tmp_path):
+    """A transport failure spent nothing, and the span says the call happened and failed rather
+    than vanishing — the fallback vector is still returned."""
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+
+    embedder = _embedder(OSError("connection refused"))
+    t = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
+    with t.span("knowledge_index", new_trace=True):
+        assert embedder.embed("x") == hash_embed("x", dim=4)
+    (gen,) = [s for s in _spans_of(tmp_path / "s.jsonl") if s.get("kind") == "generation"]
+    assert gen["attributes"]["embed_failed"] is True
+    assert "usage" not in gen["attributes"]
