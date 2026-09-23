@@ -52,7 +52,9 @@ below, and both are recorded rather than implied.
 ## Restart, and the one honest refusal
 
 `reconcile_on_start` runs when the service starts. A record left in `waking` means the process died
-mid-turn, and what happens next depends on what that turn could have done:
+mid-turn — provided its claimer's owner lease is free; a lease still held is a LIVE sibling server
+mid-turn, and its record is left alone (see `WatchStore`) — and what happens next depends on what
+that turn could have done:
 
 * a **read-only** (`plan`) watch is simply re-armed. Re-running a read costs a model call and
   nothing else, and the alternative — dropping the monitoring on every server restart — is the bug.
@@ -126,10 +128,15 @@ import re
 import secrets
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core.atomicio import atomic_write_text, file_identity
+# The OS-lock spellings, and deliberately NOT through `looplab.events.eventstore`, where the lock
+# primitive lives beside `EventStore.append` — this module must have no edge into the event log at
+# all (`tests/test_assistant_watch.py::test_this_module_appends_no_events_and_names_no_control_intent`).
+from looplab.serve.capability_store import hold_lease, lease_is_held, polled_store_lock
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING,
     PHASE_PAUSED, PHASE_SEARCH, PHASE_SPEC_APPROVAL)
@@ -197,6 +204,12 @@ WATCH_MAX_ACTIVE_PER_SESSION = 8
 
 WATCH_ID_RE = re.compile(r"[0-9a-f]{16}")
 _WATCH_DIR = ".watches"
+# The cross-process fence and the owner leases live INSIDE `.watches`, under names no watch file can
+# have (`_entries` readers only ever look at `<16 hex>.json`), so the scheduler's scan never reads
+# one and a record id can never collide with one. Review 2026-09-22, SRV1-03 — see `WatchStore`.
+_WATCH_STORE_LOCK = ".store.lock"
+_OWNER_LEASE_PREFIX = ".owner-"
+_OWNER_TOKEN_RE = re.compile(r"[0-9a-f]{32}")
 _MAX_INSTRUCTION_CHARS = 4000
 _MAX_CHECKPOINT_SUMMARY_CHARS = 4000
 _MAX_TODO_CHARS = 1000
@@ -450,11 +463,35 @@ class WatchStore:
     them: a shared file would put every wake-up behind a lock the list also wants, and a torn write
     would take out every watch instead of one. `.watches` is dot-prefixed so it can never collide
     with a session id (`SessionStore` requires 16 lowercase hex).
+
+    **TWO SERVERS MAY SHARE THIS DIRECTORY** (review 2026-09-22, SRV1-03). Every read-modify-write
+    ran under `self._lock`, a `threading.Lock`, which orders one process's threads and nothing else
+    — while a second server over the same run root is a first-class path (`looplab tui` starts one
+    through `ensure_server`; a hub restart overlaps the old process). Reproduced: two stores each
+    `claim` one due watch and BOTH win, so one wake-up costs two paid turns; and a starting
+    server's `reconcile_on_start` re-armed (or marked `interrupted`) a watch the OTHER, live server
+    was mid-wake on. Two mechanisms close it, and they answer different questions:
+
+    * `_mutation` — every read-modify-write also holds a `flock` on `.watches/.store.lock`
+      (`capability_store.py::polled_store_lock`), so exactly one `armed -> waking` write wins
+      across processes, not only across threads;
+    * the OWNER LEASE — a claim names the store that made it (`claimed_by`), and that store holds a
+      `flock` on its own `.owner-<token>.lock` for as long as it lives. The kernel drops a lock when
+      its process dies, so "is the claimer gone?" is a lock probe, not a guess about PIDs, and
+      `reconcile_on_start` settles only a claim whose lease it can take. A claim that names no lease
+      (written before this, or on a mount without advisory locks) settles exactly as it always did.
     """
 
     def __init__(self, run_root):
         self.dir = Path(run_root) / "assistant" / _WATCH_DIR
         self._lock = threading.Lock()
+        self._lock_path = self.dir / _WATCH_STORE_LOCK
+        # This store's owner lease: a random token and the open `flock` that proves it is alive.
+        # Minted lazily at the FIRST claim, so a store that never claims (every read-only surface,
+        # every test that only arms) holds no descriptor. Single-use: `close` retires the token and
+        # a later claim mints a new one, which is what makes a dead token's file safe to unlink.
+        self._owner: Optional[str] = None
+        self._lease: Optional[ExitStack] = None
         # Ids this process has PROVEN terminal. The scheduler ticks every 2 s and `due()` used to
         # re-read, re-parse and re-validate every file in the directory each time — including every
         # terminal record, which nothing but `delete_for_session` ever unlinks, so the cost of one
@@ -502,6 +539,73 @@ class WatchStore:
         record = {**record, "updated": time.time()}
         atomic_write_text(self._path(record["id"]), json.dumps(record))
         return self._note_settled(record)
+
+    # ---- cross-process ownership (review 2026-09-22, SRV1-03; see the class docstring) -------
+    def _mutation(self):
+        """The ONE read-modify-write fence: this store's thread lock, then the directory's `flock`.
+
+        Every transition that reads a record and writes it back goes through here, so the decision
+        ("is it still armed?", "is the chat under its cap?") and the write it licenses happen with
+        no other server's transition in between."""
+        return polled_store_lock(self._lock, self._lock_path,
+                                 prepare=lambda: self.dir.mkdir(parents=True, exist_ok=True))
+
+    def _lease_path(self, token: str) -> Path:
+        return self.dir / f"{_OWNER_LEASE_PREFIX}{token}.lock"
+
+    def _owner_lease(self) -> Optional[str]:
+        """This store's owner token, its `flock` taken and held — or None when none can be held.
+
+        Called under `_mutation`, so two threads of one store cannot mint two tokens. None (a mount
+        that cannot hold an advisory lock) is not an error: the claim then names no owner, and a
+        reconcile treats it exactly as every claim was treated before this existed."""
+        if self._owner is not None:
+            return self._owner
+        token = secrets.token_hex(16)
+        lease = hold_lease(self._lease_path(token))
+        if lease is None:
+            return None
+        self._owner, self._lease = token, lease
+        return token
+
+    def _claim_owner_alive(self, record: dict) -> bool:
+        """Is the store that claimed this `waking` record PROVABLY still alive?
+
+        True only on proof — this store's own live lease, or another process holding the claimer's
+        lease right now. Everything else answers False and the record settles the way a restart
+        always settled it: a claim naming no lease (legacy, or lease-less on this mount), a lease
+        file that is gone, or one this probe could take (its holder died, and with it the lock). A
+        lease this probe took belongs to a dead, single-use token, so its file is retired here."""
+        token = record.get("claimed_by")
+        if not isinstance(token, str) or _OWNER_TOKEN_RE.fullmatch(token) is None:
+            return False
+        if token == self._owner and self._lease is not None:
+            return True
+        lease = self._lease_path(token)
+        # An unopenable lease proves nothing about its holder either — and a claim that can never be
+        # proved alive must still settle, or it is stranded for as long as the file is broken.
+        if lease_is_held(lease):
+            return True
+        try:
+            lease.unlink()
+        except OSError:
+            pass
+        return False
+
+    def close(self) -> None:
+        """Release this store's owner lease — what the process's exit does anyway.
+
+        For a caller that retires a store and lives on (a test standing in for a restarted server):
+        until the lease is released, every claim this store made reads as a LIVE server's."""
+        lease, token = self._lease, self._owner
+        self._lease = self._owner = None
+        if lease is None:
+            return
+        try:
+            self._lease_path(token).unlink()
+        except OSError:
+            pass
+        lease.close()
 
     @staticmethod
     def _valid(record) -> bool:
@@ -599,13 +703,14 @@ class WatchStore:
                 "status": "continue", "summary": "No work cycle has run yet.",
                 "todos": initial_todos,
             }
-        with self._lock:
+        with self._mutation():
             # COUNT AND WRITE UNDER ONE LOCK. This was a check-then-act with the count outside the
             # lock and the write inside it, so two arms racing (two tabs, or the agent tool and the
             # HTTP route) both read `n` and both wrote, leaving the session above its cap. The cap is
             # this module's stated bound on UNATTENDED SPEND — every active watch is up to
             # `max_wakeups` paid model calls nobody is watching — and nothing downstream re-checks
-            # it, so the arm is the only place it can hold.
+            # it, so the arm is the only place it can hold. ACROSS PROCESSES too (`_mutation`): two
+            # servers arming for one chat raced exactly the way two tabs of one server used to.
             active = [w for w in self.list(session=session)
                       if w["status"] not in WATCH_TERMINAL_STATUSES]
             if len(active) >= WATCH_MAX_ACTIVE_PER_SESSION:
@@ -737,7 +842,13 @@ class WatchStore:
         """Read-modify-write one record. Refuses to move a TERMINAL watch: a wake-up that finishes
         after the operator stopped its watch must not re-arm it, and that race is ordinary (a stop
         arrives while the turn it stops is mid-flight)."""
-        with self._lock:
+        try:
+            self._path(watch_id)
+        except WatchRefusal:
+            # A malformed id names no record — answered before the fence, so a probe with a bad id
+            # takes no lock and creates nothing on disk (it read as None before the fence existed).
+            return None
+        with self._mutation():
             record = self._read(watch_id)
             if record is None:
                 return None
@@ -746,13 +857,26 @@ class WatchStore:
             return self._write({**record, **fields})
 
     def claim(self, watch_id: str, *, now: Optional[float] = None) -> Optional[dict]:
-        """Move `armed` -> `waking` under the store lock, or return None if someone else has it."""
+        """Move `armed` -> `waking` under the store fence, or return None if someone else has it.
+
+        "Someone else" includes ANOTHER SERVER over the same run root: the read and the write sit
+        inside `_mutation`'s cross-process lock, so of two schedulers reaching one due watch
+        exactly one claims it. The claim names this store's owner lease (`claimed_by`), which is
+        what lets a restarting sibling tell this live claim from a dead one."""
         ts = time.time() if now is None else float(now)
-        with self._lock:
+        with self._mutation():
             record = self._read(watch_id)
             if record is None or record["status"] != "armed":
                 return None
-            return self._write({**record, "status": "waking", "claimed_at": ts})
+            claimed = {**record, "status": "waking", "claimed_at": ts}
+            owner = self._owner_lease()
+            if owner is not None:
+                claimed["claimed_by"] = owner
+            else:
+                # Never inherit an earlier claimer's token: it could name a LIVE store that is not
+                # the one holding this claim, and would keep a dead claim looking owned.
+                claimed.pop("claimed_by", None)
+            return self._write(claimed)
 
     def cancel(self, watch_id: str, *, reason: str = "stopped by the operator") -> Optional[dict]:
         """The operator's stop, which is `update` with a status — deliberately not a second copy of
@@ -783,7 +907,7 @@ class WatchStore:
         session = str(session)
         receipt = []
         for known in self.list(session=session):
-            with self._lock:
+            with self._mutation():
                 record = self._read(known["id"])
                 if record is None:
                     continue
@@ -807,14 +931,22 @@ class WatchStore:
 
         Returns the records it changed, so the caller can log what a restart cost — a silent
         `interrupted` is exactly as invisible as the dropped monitoring this feature exists to fix.
+
+        "A dead process" is a PROOF, not an assumption (review 2026-09-22, SRV1-03): a `waking`
+        record whose claimer still holds its owner lease belongs to a LIVE server — the other half
+        of a shared run root — and is left alone. Re-arming it handed the same wake-up to this
+        server's scheduler while the owner's turn was still running (two paid turns); marking it
+        `interrupted` made the owner's own settle a no-op on a terminal and lost its result.
         """
         changed = []
         for record in self.list():
             if record.get("status") != "waking":
                 continue
-            with self._lock:
+            with self._mutation():
                 current = self._read(record["id"])
                 if current is None or current.get("status") != "waking":
+                    continue
+                if self._claim_owner_alive(current):
                     continue
                 if current["mode"] == "plan":
                     changed.append(self._write({
@@ -826,7 +958,36 @@ class WatchStore:
                         "last_error": ("a server restart interrupted this wake-up in a mutating "
                                        "mode; it may have applied part of its change, so it will "
                                        "not be re-entered automatically — check and re-arm it")}))
+        self._retire_dead_leases()
         return changed
+
+    def _retire_dead_leases(self) -> None:
+        """Unlink every owner-lease file whose holder is gone, once, at startup.
+
+        A server that claimed even once leaves its lease file behind when it exits, and only a probe
+        of a `waking` record it owned would otherwise retire it — so without this the directory
+        gains one empty file per server lifetime. Under ONE `_mutation` on purpose: a live store
+        mints its lease inside its own `_mutation`, and a sweep outside it could take and unlink a
+        lease file in the instant between that store's `open` and its `flock`, leaving it holding a
+        lock on a name no probe can find — a live claimer that reads as dead."""
+        try:
+            names = [path.name for path in self.dir.iterdir()]
+        except OSError:
+            return
+        tokens = [name[len(_OWNER_LEASE_PREFIX):-len(".lock")] for name in names
+                  if name.startswith(_OWNER_LEASE_PREFIX) and name.endswith(".lock")]
+        tokens = [token for token in tokens
+                  if _OWNER_TOKEN_RE.fullmatch(token) is not None and token != self._owner]
+        if not tokens:
+            return
+        try:
+            with self._mutation():
+                for token in tokens:
+                    self._claim_owner_alive({"claimed_by": token})
+        except OSError:
+            # Housekeeping only: a sibling holding the fence past the bound, or an unwritable
+            # directory, leaves the empty files for the next start rather than failing this one.
+            pass
 
 
 def describe_trigger(trigger: dict) -> str:

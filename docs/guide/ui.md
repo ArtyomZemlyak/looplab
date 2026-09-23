@@ -230,7 +230,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   `stop_watch`. After a server restart a
   read-only watch is re-armed automatically; one that could have MUTATED is left `interrupted` with
   the reason, because its turn may have applied half a change and re-entering it would apply the
-  other half twice. **Deleting a chat deletes its standing watches**, and the DELETE answers with a
+  other half twice. Two servers over one runs root (a `looplab tui` next to `looplab ui`, or a
+  restart overlapping the old process) share the watches safely: a due watch is claimed by exactly
+  one of them, and a starting server leaves alone a wake-up the other, still-running server is in the
+  middle of — it settles only a claim whose server has exited. **Deleting a chat deletes its standing watches**, and the DELETE answers with a
   receipt naming them (`watches_removed`, and each watch's id, status and condition — never its
   instruction): a watch is owned by the chat that armed it, and a chat you deleted must not go on
   holding your own sentence, nor go on polling for a conversation that is not there.

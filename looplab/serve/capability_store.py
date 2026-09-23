@@ -20,6 +20,14 @@ whose copies could only ever agree by hand:
   thread-only fallback: a filesystem that cannot provide the ordering must refuse, because what the
   ordering protects is a read-modify-write over live capabilities (two workers interleaving a
   revocation leaves alive a link whose owner was told it was dead).
+* `polled_store_lock` — the same "process lock THEN OS lock" order for the two assistant stores
+  that are NOT capability stores (`WatchStore`, `SessionStore`). It waits a sibling out instead of
+  refusing, and degrades on a locking CAPABILITY gap instead of failing closed; its docstring says
+  why each difference is the right one for those stores and the wrong one for this module's.
+  `hold_lease` / `lease_is_held` are the pair `WatchStore`'s owner lease is built from: a lock a
+  live process keeps for its lifetime, and the probe that asks whether anyone still keeps it. They
+  live here, beside the other OS-lock spellings, so `assistant_watch.py` reaches the lock without
+  an import edge into the event store it must never append to.
 * `reserve_unique_id` / `reserve_exact_id` — `O_EXCL` reservation. Randomness makes a collision
   extraordinarily unlikely, but relying on probability alone would let a collision REPLACE an
   existing token digest, and `O_EXCL` is also what makes the reservation safe against a writer that
@@ -60,7 +68,7 @@ whose copies could only ever agree by hand:
 from __future__ import annotations
 
 import base64
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import hmac
 import json
@@ -204,6 +212,125 @@ def capability_store_lock(process_lock: threading.Lock, lock_path: Path, *,
             raise on_unavailable() from exc
     finally:
         process_lock.release()
+
+
+# How long a `polled_store_lock` caller waits for a SIBLING PROCESS inside the same store section.
+# Those sections are one small read plus one atomic write (a transcript append with its fsync at
+# worst), so anything near this bound is a wedged or stopped holder, not a slow one.
+STORE_MUTATION_TIMEOUT_SECONDS = 10.0
+_STORE_MUTATION_POLL_SECONDS = 0.005
+# Lock paths the CURRENT thread holds through `polled_store_lock`. The interprocess half is a
+# `flock` on a fresh descriptor, which conflicts with the same thread's own earlier descriptor —
+# so a nested acquisition would not re-enter, it would poll against itself until the timeout and
+# then report cross-process contention that never happened. Refused instead, exactly as
+# `run_commands.py::RunCommandService.sequence` refuses its own re-entry.
+_POLLED_HELD = threading.local()
+
+
+@contextmanager
+def polled_store_lock(process_lock, lock_path: Path, *,
+                      timeout: float = STORE_MUTATION_TIMEOUT_SECONDS,
+                      prepare: Optional[Callable[[], None]] = None):
+    """Process lock THEN a POLLED cross-process lock on `lock_path` (review 2026-09-22, SRV1-03).
+
+    `WatchStore` and `SessionStore` serialized their read-modify-writes with a `threading.Lock`
+    alone, which orders the threads of ONE server. A second server over the same run root is a
+    first-class path — `looplab tui` starts its own through `ensure_server`, and a hub restart can
+    overlap the old process — and two processes interleaving `WatchStore.claim` both moved one due
+    watch `armed -> waking`: two paid wake-up turns for one wake-up. Two `append_if_len`s could both
+    pass the same length check the same way. This is the missing cross-process half, spelled beside
+    `capability_store_lock` so the two readings of "process lock, then OS lock" sit side by side.
+    It differs from that one on purpose, three times:
+
+    * contention is WAITED OUT (a bounded poll) rather than refused at once. The sections it guards
+      are one small read and one atomic write, and a scheduler settle or a transcript append that
+      failed on a sibling's millisecond-long section would strand a claim or drop a paid reply;
+    * a locking CAPABILITY gap (a mount whose advisory locks are unsupported) degrades to the
+      process lock — the whole historical guarantee of these stores — instead of refusing. A
+      capability store guards authorization state and must fail closed; a watch or transcript store
+      that refused would take the assistant down on exactly the network mounts it runs from;
+    * an inaccessible lock PATH still raises (`interprocess_lock`'s never-degrade half), and running
+      out of `timeout` raises `TimeoutError` — an `OSError`, the class every caller of these stores
+      already treats as the store's own storage failure.
+
+    `prepare` runs after the process lock and before the OS lock (a store that must create its
+    directory first). Not re-entrant on one thread for one path — see `_POLLED_HELD`.
+    """
+    from looplab.events.eventstore import InterprocessLockContended, interprocess_lock
+
+    key = os.path.normcase(os.path.abspath(os.fspath(lock_path)))
+    held = getattr(_POLLED_HELD, "paths", None)
+    if held is None:
+        held = _POLLED_HELD.paths = set()
+    if key in held:
+        raise RuntimeError(
+            "polled_store_lock re-entered on one thread: its interprocess half is not re-entrant, "
+            "so the nested acquisition would wait on this thread's own descriptor. Hoist the inner "
+            "call out of the outer locked section.")
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    if not process_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise TimeoutError("timed out waiting for the in-process store lock")
+    try:
+        if prepare is not None:
+            prepare()
+        owner = ExitStack()
+        while True:
+            try:
+                # `required=False`: the capability gap degrades (second bullet above); an
+                # inaccessible path raises either way, and contention is the one retryable answer.
+                owner.enter_context(interprocess_lock(lock_path, blocking=False))
+                break
+            except InterprocessLockContended:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "timed out waiting for another process's store section") from None
+                time.sleep(_STORE_MUTATION_POLL_SECONDS)
+        held.add(key)
+        try:
+            with owner:
+                yield
+        finally:
+            held.discard(key)
+    finally:
+        process_lock.release()
+
+
+def hold_lease(lock_path: Path) -> Optional[ExitStack]:
+    """Take a NON-blocking, REQUIRED lock on `lock_path` and KEEP it: the returned stack holds it
+    until closed — or until the process dies, when the kernel drops it, which is the whole point of
+    a lease. None when it cannot be held: contended, a mount without advisory locks, or a path that
+    will not open. A caller must treat None as "no lease", never as an error to surface."""
+    from looplab.events.eventstore import (
+        EventStoreLockError, InterprocessLockContended, interprocess_lock)
+
+    lease = ExitStack()
+    try:
+        lease.enter_context(interprocess_lock(lock_path, required=True, blocking=False))
+    except (EventStoreLockError, InterprocessLockContended, OSError):
+        lease.close()
+        return None
+    return lease
+
+
+def lease_is_held(lock_path: Path) -> bool:
+    """Does ANOTHER holder keep `lock_path` locked right now?
+
+    A probe that takes the lock for an instant and gives it back. True ONLY on contention: an absent
+    file, an unopenable one and a mount whose advisory locks are unsupported all answer False,
+    because none of them PROVES a holder — which is exactly what a caller about to settle on "the
+    holder is gone" needs to be told. (On a lock-less mount that is the historical behaviour: no
+    lease could ever have been held there.)"""
+    from looplab.events.eventstore import InterprocessLockContended, interprocess_lock
+
+    if not lock_path.exists():
+        return False
+    try:
+        with interprocess_lock(lock_path, blocking=False):
+            return False
+    except InterprocessLockContended:
+        return True
+    except OSError:
+        return False
 
 
 def reservation_state(path: Path, *, wait: bool = True) -> tuple[str, Optional[dict]]:

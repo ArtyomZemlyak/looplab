@@ -24,7 +24,7 @@ import secrets
 import shutil
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -35,6 +35,7 @@ from looplab.serve.capability_store import (
     capability_store_lock,
     exact_request_id,
     exact_token_secret,
+    polled_store_lock,
     publish_reserved,
     recovery_bearer,
     recovery_digest,
@@ -69,6 +70,13 @@ _FORK_STAGING_MAX_AGE_SECONDS = 24 * 60 * 60
 _FORK_STAGING_SWEEP_INTERVAL_SECONDS = 5 * 60
 _FORK_ACTIONS_DIR = ".fork-actions"
 _INCOMPLETE_SESSION_TITLE = "Incomplete chat (cleanup required)"
+# The per-SESSION cross-process fences (review 2026-09-22, SRV1-03), one per in-process lock they
+# extend: appends and the fork snapshot's read share the transcript's, meta read-modify-writes share
+# the meta's. Two files rather than one because `append` updates the meta AFTER releasing the
+# transcript lock, and a single non-re-entrant OS lock would force that order to nest. They live in
+# the session's own directory, so a deletion's `rmtree` takes them with it.
+_SESSION_TRANSCRIPT_LOCK = ".transcript.lock"
+_SESSION_META_LOCK = ".meta.lock"
 
 
 class ForkActionConflictError(RuntimeError):
@@ -171,7 +179,14 @@ class SessionStore:
     `meta.json` holds {id,title,created,updated,parent,mode}; `messages.jsonl` holds one turn per line
     ({role,content,ts,...}). Append is single-writer + best-effort fsync like the run chat log. The
     `assistant` dir sits beside runs but is a RESERVED id (server refuses a run named `assistant`), so
-    it never collides with a real run."""
+    it never collides with a real run.
+
+    "Single-writer" is per SESSION and across PROCESSES (review 2026-09-22, SRV1-03): the append,
+    the length-checked append and the meta read-modify-write each hold their in-process lock AND a
+    `flock` in the session directory (`_session_fence`), because a second server over the same run
+    root is a first-class path and its turns land in the same transcript. With the thread lock alone,
+    two servers' `append_if_len` both passed one length check and both appended — the interleaved
+    transcript that check exists to prevent — and two meta updates dropped each other's field."""
 
     def __init__(self, run_root):
         self.dir = Path(run_root) / "assistant"
@@ -256,6 +271,14 @@ class SessionStore:
 
     def _meta_path(self, sid: str) -> Path:
         return self._sdir(sid) / "meta.json"
+
+    def _session_fence(self, process_lock, sid: str, name: str):
+        """`process_lock`, then this session's cross-process `flock` on `<session>/<name>`.
+
+        The lock file lives in the session's own directory, so `polled_store_lock` opening it fails
+        with `FileNotFoundError` once a deletion has removed the session — the same "no such
+        session" every caller already handles for the transcript itself."""
+        return polled_store_lock(process_lock, self._sdir(sid) / name)
 
     def _msgs_path(self, sid: str) -> Path:
         return self._sdir(sid) / "messages.jsonl"
@@ -531,8 +554,16 @@ class SessionStore:
         }
 
     def update_meta(self, sid: str, **fields) -> Optional[dict]:
-        # Read-modify-write under the meta lock so concurrent updates don't drop each other's fields.
-        with self._meta_lock:
+        # Read-modify-write under the meta lock so concurrent updates don't drop each other's fields
+        # — from THIS server's threads and from a sibling server's (`_session_fence`, SRV1-03).
+        fence = ExitStack()
+        try:
+            fence.enter_context(self._session_fence(self._meta_lock, sid, _SESSION_META_LOCK))
+        except (FileNotFoundError, NotADirectoryError, ValueError):
+            # A bad id or a session already removed has no meta to update: the `None` this always
+            # answered through `_read_meta`, now answered before a lock file could be created.
+            return None
+        with fence:
             meta = self._read_meta(sid)
             if meta is None:
                 return None
@@ -599,9 +630,10 @@ class SessionStore:
 
         messages: list[dict] = []
         try:
-            # Serialize with the in-process append writer. The router's per-source lifecycle fence
-            # prevents a new turn claim; this lock also closes a late persistence read boundary.
-            with self._append_lock:
+            # Serialize with the append writer — this server's and a sibling server's (SRV1-03). The
+            # router's per-source lifecycle fence prevents a new turn claim IN THIS PROCESS; this
+            # lock also closes a late persistence read boundary, against every process.
+            with self._session_fence(self._append_lock, sid, _SESSION_TRANSCRIPT_LOCK):
                 with open(path, "rb") as stream:
                     for raw in stream:
                         if not raw.endswith(b"\n"):
@@ -736,8 +768,9 @@ class SessionStore:
         line = {**turn, "ts": turn.get("ts", time.time())}
         # A large turn (attached-file contents) exceeds the buffer and becomes multiple write() syscalls
         # that can interleave with a concurrent append → a corrupt mid-file line, which iter_jsonl stops
-        # at, silently dropping every later turn on the next read. Serialize appends to prevent that.
-        with self._append_lock:
+        # at, silently dropping every later turn on the next read. Serialize appends to prevent that —
+        # a sibling server's appends included (`_session_fence`, review 2026-09-22, SRV1-03).
+        with self._session_fence(self._append_lock, sid, _SESSION_TRANSCRIPT_LOCK):
             with open(self._msgs_path(sid), "ab") as f:
                 f.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
                 try:
@@ -751,12 +784,19 @@ class SessionStore:
         the check and the write happen atomically under the append lock. Returns True if appended,
         False if a concurrent turn changed the length in between (so a late or cancelled reply can't
         interleave into a newer turn's transcript, e.g. u1,u2,a1,a2). Closes the TOCTOU window a
-        separate 'count then append' left open."""
+        separate 'count then append' left open. ATOMICALLY ACROSS SERVERS too: a thread lock alone let
+        two processes both pass one length check (review 2026-09-22, SRV1-03)."""
         d = self._sdir(sid)
         if not d.exists():
             return False
         line = {**turn, "ts": turn.get("ts", time.time())}
-        with self._append_lock:
+        fence = ExitStack()
+        try:
+            fence.enter_context(
+                self._session_fence(self._append_lock, sid, _SESSION_TRANSCRIPT_LOCK))
+        except (FileNotFoundError, NotADirectoryError):
+            return False        # removed between the check above and the fence: nothing to append to
+        with fence:
             try:
                 cur = sum(1 for _ in iter_jsonl(self._msgs_path(sid)))
             except OSError:
