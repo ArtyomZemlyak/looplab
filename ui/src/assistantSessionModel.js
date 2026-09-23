@@ -109,3 +109,24 @@ export function sessionDeleteFailure({ code = null, ambiguous = false, listedPre
         : 'The chat was not deleted. It is shown again; you can cancel or try again.',
   }
 }
+
+// WHETHER A FAILED DELETE SAYS ANYTHING (review 2026-09-22, UI-06; moved out of
+// `AssistantBar.jsx::confirmDeleteSession`, where it was an inline closure). Only an answer the
+// server actually gave about THIS request — a 4xx — is authoritative. A deadline, an abort, a response
+// with no status or a 5xx leaves the chat's fate unknown, and DELETE is idempotent for one session id,
+// so the caller repeats it once: a success then proves the directory is gone even if the first
+// request completed.
+export const sessionDeleteAmbiguous = error => error?.name === 'TimeoutError'
+  || error?.name === 'AbortError'
+  || error?.status == null || Number(error.status) >= 500
+
+// Put an optimistically removed chat back where it was, once the delete is known NOT to have
+// happened. Idempotent: a list that already shows it again (a fresh read landed first) is returned
+// unchanged, and an index past the end appends.
+export function restoreDeletedSession(current, deleted, index) {
+  if (!deleted || current.some(session => session.id === deleted.id)) return current
+  const restored = [...current]
+  restored.splice(Math.min(index, restored.length), 0, deleted)
+  return restored
+}
+

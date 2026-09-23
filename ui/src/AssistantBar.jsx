@@ -30,7 +30,8 @@ import {
   validateShareCreateReceipt,
 } from './assistantShareRecovery.js'
 import {
-  sessionDeleteBlock, sessionDeleteFailure, sessionReadSuperseded,
+  restoreDeletedSession, sessionDeleteAmbiguous, sessionDeleteBlock, sessionDeleteFailure,
+  sessionReadSuperseded,
 } from './assistantSessionModel.js'
 import { contextChipTitle, contextUsage, foldControl, newChatGate } from './assistantChromeModel.js'
 import {
@@ -1512,10 +1513,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       await boundedRequest(signal => assistantDelete(id, { signal }))
       acceptDeletedSession()
     } catch (error) {
-      const requestWasAmbiguous = candidate => candidate?.name === 'TimeoutError'
-        || candidate?.name === 'AbortError'
-        || candidate?.status == null || Number(candidate.status) >= 500
-      const ambiguous = requestWasAmbiguous(error)
+      const ambiguous = sessionDeleteAmbiguous(error)
       let finalError = error
       let finalAmbiguous = ambiguous
       // DELETE is idempotent for this exact session id. If the first response was lost, repeat the
@@ -1528,7 +1526,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           acceptDeletedSession()
         } catch (retryError) {
           finalError = retryError
-          finalAmbiguous = requestWasAmbiguous(retryError)
+          finalAmbiguous = sessionDeleteAmbiguous(retryError)
         }
       }
       let listedPresence = null
@@ -1542,12 +1540,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       }
       if (!deleted) {
         sessionDeleteTombstonesRef.current.delete(String(id))
-        if (deletedSession) mutateSessionsLocally(current => {
-          if (current.some(session => session.id === id)) return current
-          const restored = [...current]
-          restored.splice(Math.min(deletedIndex, restored.length), 0, deletedSession)
-          return restored
-        })
+        if (deletedSession) mutateSessionsLocally(
+          current => restoreDeletedSession(current, deletedSession, deletedIndex))
         const failure = sessionDeleteFailure({
           code: finalError?.code, ambiguous: finalAmbiguous, listedPresence,
         })

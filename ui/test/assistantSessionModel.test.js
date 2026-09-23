@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 import {
-  DELETE_FAILURE_CODES, sessionDeleteBlock, sessionDeleteFailure, sessionReadSuperseded,
+  DELETE_FAILURE_CODES, restoreDeletedSession, sessionDeleteAmbiguous, sessionDeleteBlock,
+  sessionDeleteFailure, sessionReadSuperseded,
 } from '../src/assistantSessionModel.js'
 
 const assistantSource = () => readFile(new URL('../src/AssistantBar.jsx', import.meta.url), 'utf8')
@@ -218,3 +219,29 @@ test('every session-read await in AssistantBar goes through the shared fence', a
   assert.equal((open.match(/requireVisible: true/g) || []).length, 1,
     'only the post-commit await has a visible session to compare against')
 })
+
+test('only a 4xx is an answer about a DELETE; anything else is repeated once', () => {
+  for (const [error, ambiguous] of [
+    [{ name: 'TimeoutError' }, true], [{ name: 'AbortError' }, true], [{}, true],
+    [{ status: 503 }, true], [{ status: '500' }, true], [undefined, true],
+    [{ status: 404 }, false], [{ status: 409, code: 'assistant_session_busy' }, false],
+    [{ status: 400 }, false],
+  ]) {
+    assert.equal(sessionDeleteAmbiguous(error), ambiguous, JSON.stringify(error))
+  }
+})
+
+test('a chat whose delete did not happen goes back where it was, once', () => {
+  const a = { id: 'a' }
+  const b = { id: 'b' }
+  const c = { id: 'c' }
+  assert.deepEqual(restoreDeletedSession([a, c], b, 1), [a, b, c])
+  assert.deepEqual(restoreDeletedSession([a], c, 9), [a, c], 'an index past the end appends')
+  const already = [a, b, c]
+  assert.equal(restoreDeletedSession(already, b, 1), already,
+    'a list a fresh read already restored is returned as it is')
+  const current = [a]
+  assert.equal(restoreDeletedSession(current, null, 0), current)
+  assert.deepEqual(current, [a], 'the list it was given is never mutated')
+})
+
