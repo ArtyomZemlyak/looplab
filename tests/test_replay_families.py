@@ -16,8 +16,9 @@ move itself can silently break three things, and each has a guard here:
 * **A monkeypatch must still reach the code that reads the name.** A moved function stays importable
   as `looplab.events.replay._x` so existing imports keep working — but `monkeypatch.setattr(replay,
   "_x", …)` then rebinds only that re-export, and every handler in the family keeps calling its own
-  binding: a patch that stops patching and says nothing. So every patch the suite aims at
-  `looplab.events.replay` is held to a name `replay.py` itself DEFINES, or READS in its own code.
+  binding: a patch that stops patching and says nothing. So every patch the suite aims at a fold
+  module is held to a name that module itself DEFINES, or READS in its own code — `replay` and each
+  family alike, since a later move between families narrows a family's seams the same way.
 """
 from __future__ import annotations
 
@@ -106,26 +107,31 @@ def test_the_import_scan_sees_every_spelling_of_the_edge():
 
 # ------------------------------------------------------------- a patch must reach what it patches
 
-def _fold_module_aliases(tree: ast.AST) -> set[str]:
+def _module_spellings(stem: str) -> tuple[str, str]:
+    """The two dotted names a fold module answers to: canonical, and the flat-import shim alias."""
+    return (f"looplab.events.{stem}", f"looplab.{stem}")
+
+
+def _module_aliases(tree: ast.AST, stem: str) -> set[str]:
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module in ("looplab.events", "looplab"):
-            names |= {alias.asname or alias.name for alias in node.names if alias.name == "replay"}
+            names |= {alias.asname or alias.name for alias in node.names if alias.name == stem}
         elif isinstance(node, ast.Import):
             names |= {alias.asname for alias in node.names
-                      if alias.name in FOLD_MODULE_NAMES and alias.asname}
+                      if alias.name in _module_spellings(stem) and alias.asname}
     return names
 
 
-def patched_fold_names(tree: ast.AST) -> list[tuple[str, int]]:
-    """`(attribute of the fold module, line)` for every patch in *tree* aimed at it.
+def patched_names(tree: ast.AST, stem: str = "replay") -> list[tuple[str, int]]:
+    """`(attribute of the fold module *stem*, line)` for every patch in *tree* aimed at it.
 
     The spellings the suite uses: `monkeypatch.setattr(replay, "x", …)`, the dotted-string form
     `monkeypatch.setattr("looplab.events.replay.x", …)` / `mock.patch("…")`, `patch.object(replay,
     "x")`, and `monkeypatch.setitem(replay.x, key, …)` — which patches the CONTENTS of `x`, so `x`
     is the name whose reader must see it.
     """
-    aliases = _fold_module_aliases(tree)
+    aliases = _module_aliases(tree, stem)
     found: list[tuple[str, int]] = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -133,7 +139,7 @@ def patched_fold_names(tree: ast.AST) -> list[tuple[str, int]]:
             continue
         first = node.args[0]
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            for module in FOLD_MODULE_NAMES:
+            for module in _module_spellings(stem):
                 if first.value.startswith(module + "."):
                     found.append((first.value[len(module) + 1:].split(".")[0], node.lineno))
         elif isinstance(first, ast.Name) and first.id in aliases:
@@ -160,24 +166,26 @@ def names_a_patch_reaches(tree: ast.AST) -> set[str]:
     return reached
 
 
-def test_every_patch_on_the_fold_module_reaches_the_code_that_reads_it():
-    """MUTATION: move `_on_card_enriched` into a family module and leave `tests/
-    test_card_enrichment_writers.py` patching `looplab.events.replay.CARD_ENRICHMENT_JOURNAL_MAX`
-    -> named here, instead of a lowered cap the fold never sees."""
-    owned = names_a_patch_reaches(
-        next(tree for path, tree in fold_trees() if path.name == "replay.py"))
+def test_every_patch_on_a_fold_module_reaches_the_code_that_reads_it():
+    """Held for EVERY fold module, not `replay.py` alone: a later move from one family to another
+    narrows the first family's seams exactly as the split narrowed `replay`'s. MUTATION: move
+    `_on_card_enriched` out of `replay_cards.py` and leave `tests/test_card_enrichment_writers.py`
+    patching `looplab.events.replay_cards.CARD_ENRICHMENT_JOURNAL_MAX` -> named here, instead of a
+    lowered cap the fold never sees (the same mutation on `replay.py` was this guard's first catch)."""
+    reached = {path.stem: names_a_patch_reaches(tree) for path, tree in fold_trees()}
     stray = []
     for path, text in iter_sources(TESTS):
         if "replay" not in text or not any(call in text for call in PATCH_CALLS):
-            continue            # every spelling of a patch on the fold module names the module AND
+            continue            # every spelling of a patch on a fold module names the module AND
             #                     a patch call; the rest of the suite is skipped unparsed
         tree = ast.parse(text, filename=str(path))
-        stray += [f"{path.relative_to(TESTS)}:{line} patches replay.{name}"
-                  for name, line in patched_fold_names(tree) if name not in owned]
+        for stem, names in reached.items():
+            stray += [f"{path.relative_to(TESTS)}:{line} patches {stem}.{name}"
+                      for name, line in patched_names(tree, stem) if name not in names]
     assert not stray, (
-        "these patches rebind a name `replay.py` neither defines nor reads, so the fold code that "
-        "reads it — in the family module it moved to — never sees them. Patch the module that "
-        f"reads the name:\n  " + "\n  ".join(stray))
+        "these patches rebind a name their fold module neither defines nor reads, so the fold code "
+        "that reads it — in the module it moved to — never sees them. Patch the module that reads "
+        f"the name:\n  " + "\n  ".join(stray))
 
 
 def test_the_patch_scan_sees_every_spelling_the_suite_uses():
@@ -193,8 +201,18 @@ def test_the_patch_scan_sees_every_spelling_the_suite_uses():
         "    mock.patch('looplab.replay._clear_approval')\n"
         "    mock.patch.object(R, '_select_best')\n"
         "    monkeypatch.setattr(other, 'fold', None)\n")
-    assert [name for name, _line in patched_fold_names(tree)] == [
+    assert [name for name, _line in patched_names(tree, "replay")] == [
         "fold", "CARD_ENRICHMENT_JOURNAL_MAX", "_HANDLERS", "_clear_approval", "_select_best"]
+    # …and a family module is its own target: neither spelling above is aimed at it, while its own
+    # dotted string and alias are — and `replay.` is not a prefix of `replay_cards.`.
+    family = ast.parse(
+        "from looplab.events import replay_cards as RC\n"
+        "def test_y(monkeypatch):\n"
+        "    monkeypatch.setattr('looplab.events.replay_cards.CARD_ENRICHMENT_JOURNAL_MAX', 0)\n"
+        "    monkeypatch.setattr(RC, '_on_card_enriched', None)\n")
+    assert [name for name, _line in patched_names(family, "replay_cards")] == [
+        "CARD_ENRICHMENT_JOURNAL_MAX", "_on_card_enriched"]
+    assert patched_names(family, "replay") == []
 
 
 def test_the_reach_rule_admits_what_a_module_defines_or_reads_and_nothing_it_only_imports():

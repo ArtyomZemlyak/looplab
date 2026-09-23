@@ -1327,7 +1327,7 @@ def _normalize_card_dropped(ctx: _ControlIntake) -> dict:
 def _normalize_card_reopened(ctx: _ControlIntake) -> dict:
     """The drop's counterpart, and the SAME shape on purpose.
 
-    `replay.py::_on_card_reopened` reuses `_bounded_card_drop_receipt`, so the two receipts must be
+    `replay_cards.py::_on_card_reopened` reuses `_bounded_card_drop_receipt`, so both receipts must be
     one shape — a second, subtly different bound is how two halves of one lifecycle switch come to
     disagree about which ids are admissible. `by` rather than `dropped_by` because the receipt reads
     either and "dropped_by" on a reopen row would be a lie to whoever reads the log.

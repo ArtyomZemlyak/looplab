@@ -564,7 +564,9 @@ def test_a_card_scoped_delta_the_fold_refuses_is_attempted_once_per_card_not_per
 
     engine = Engine.__new__(Engine)
     engine.store = store
-    monkeypatch.setattr("looplab.events.replay.CARD_ENRICHMENT_JOURNAL_MAX", 0)
+    # The module whose handler READS the cap: `_on_card_enriched` moved with the cards family into
+    # `events/replay_cards.py` (review 2026-09-22, EVT-12), and `replay` no longer binds the name.
+    monkeypatch.setattr("looplab.events.replay_cards.CARD_ENRICHMENT_JOURNAL_MAX", 0)
 
     def _sync():
         state = fold(store.read_all())

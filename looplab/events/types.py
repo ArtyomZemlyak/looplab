@@ -1395,7 +1395,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "A Card's novelty / cross-run / footprint delta (last write by seq wins).",
         required=(),
         # THE FOUR FENCE KEYS AND THE TEN THE FOLD ACTUALLY READS. Until 2026-09-08 this row
-        # declared the fence alone, while `replay.py::_on_card_enriched` copied a ten-name
+        # declared the fence alone, while `replay_cards.py::_on_card_enriched` copied a ten-name
         # allow-list out of the payload — so the contract, and the generated
         # `docs/guide/event-reference.md` page built from it, published a four-key event whose
         # handler reads fourteen. That is the dead-reader class this table exists to convict,
