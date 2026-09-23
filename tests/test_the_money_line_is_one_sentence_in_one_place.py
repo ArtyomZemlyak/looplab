@@ -40,8 +40,10 @@ def test_a_caller_sentence_is_appended_not_replaced():
 
 
 def test_overspend_reads_as_nothing_left_not_as_negative_money():
+    """And as 100 % gone, not 140 %: the two live prompts always clamped the share, and since
+    review 2026-09-22 (CORE-12) they ARE this function, so it says what they said."""
     got = budget_line(1.4, 1.0)
-    assert "$0.0000 left" in got and "140 % gone" in got, got
+    assert "$0.0000 left" in got and "100 % gone" in got, got
 
 
 def test_junk_is_not_a_line():
@@ -49,11 +51,41 @@ def test_junk_is_not_a_line():
     assert budget_line(0.5, "y") == ""          # type: ignore[arg-type]
 
 
-def test_the_two_existing_copies_say_the_same_head():
-    """The line already existed twice, copy-pasted with different second sentences. This pins that
-    the shared head matches what both of them emit, so the extraction is not a reword."""
-    root = Path(__file__).resolve().parents[1] / "looplab"
-    for rel in ("agents/deep_research.py", "adapters/repo_developer.py"):
-        src = (root / rel).read_text(encoding="utf-8", errors="replace")
-        assert "BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone)" \
-            in src, rel
+def _historical(spent, limit, tail):
+    """The line exactly as both prompt copies built it before CORE-12, kept here as the oracle."""
+    return ("BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone). "
+            + tail + "\n\n").format(spent=spent, limit=limit, remaining=max(0.0, limit - spent),
+                                    pct=min(100.0, 100.0 * spent / limit))
+
+
+def test_both_prompts_build_the_line_they_always_built():
+    """Review 2026-09-22, CORE-12. The line was hand-spelled twice (`deep_research.py`,
+    `repo_developer.py`) beside this helper, which nothing in production called. Both now CALL it with
+    their own second sentence; this proves the prompt bytes did not move, over a grid that includes
+    zero spend, fractional cents, the exact ceiling and overspend. MUTATION: drop the clamp in
+    `budget_line` -> the overspend points differ."""
+    from looplab.adapters.repo_developer import _REPO_DEV_BUDGET_TAIL
+    from looplab.agents.deep_research import _RESEARCH_BUDGET_TAIL
+
+    for tail in (_RESEARCH_BUDGET_TAIL, _REPO_DEV_BUDGET_TAIL):
+        for limit in (0.01, 0.5, 1.0, 2.5, 37.0):
+            for frac in (0.0, 0.00013, 0.25, 0.5, 0.999, 1.0, 1.0001, 1.4, 3.0):
+                spent = limit * frac
+                assert budget_line(spent, limit, tail) == _historical(spent, limit, tail), (
+                    spent, limit)
+
+
+def test_the_prompt_builders_call_the_one_helper():
+    """AST, not text: each `_budget_note` returns `budget_line(...)` — a comment naming it is not a
+    call (CLAUDE.md, "A guard test must not be satisfiable by a COMMENT")."""
+    import ast
+    import inspect
+
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    from looplab.agents.deep_research import DeepResearcher
+
+    for owner in (LLMRepoDeveloper, DeepResearcher):
+        tree = ast.parse(inspect.getsource(owner._budget_note).lstrip())
+        calls = {n.func.id for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "budget_line" in calls, owner.__name__

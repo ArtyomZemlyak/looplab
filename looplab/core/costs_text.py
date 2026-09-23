@@ -31,6 +31,11 @@ def budget_line(spent: float, limit: float | None, tail: str = "") -> str:
     if cap <= 0:
         return ""
     left = max(0.0, cap - used)
-    pct = 100.0 * used / cap
+    # CLAMPED at 100 %, which is what both prompt copies this replaces always said (review
+    # 2026-09-22, CORE-12). This helper read "140 % gone" on overspend while the two live prompts
+    # read "100 % gone"; it had no production caller, the prompts are the contract, so the helper
+    # took theirs and they now call it — byte-identical for every input
+    # (`tests/test_the_money_line_is_one_sentence_in_one_place.py`).
+    pct = min(100.0, 100.0 * used / cap)
     head = (f"BUDGET: ${used:.4f} of ${cap:.4f} spent, ${left:.4f} left ({pct:.0f} % gone).")
     return f"{head} {tail}".rstrip() + "\n\n" if tail else head + "\n\n"

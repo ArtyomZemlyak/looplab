@@ -27,6 +27,7 @@ import math as _math
 
 from typing import Optional
 
+from looplab.core.costs_text import budget_line
 from looplab.core.errors import BudgetExceeded, OperatorRefusal, budget_stop_leaf
 from looplab.core.evidence import fence_kwargs
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
@@ -490,11 +491,12 @@ _STEP_FEEDBACK_CAP = 6000
 # 0 of 317 `plan_step` prompts in dsFB3 carried any spend figure, and the ceiling arrives as a node
 # CRASH ("LLM spend ceiling reached: $1.0024 of the $1.0000") that throws that node's work away.
 # Overshoot measured across finished probes: $1.002 to $1.091.
-_REPO_DEV_BUDGET_LINE = (
-    "BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone). Every "
-    "message you send spends it, and NOTHING you write after it runs out is measured -- the step is "
-    "lost, not saved. Spend what is left on the edit most likely to move the number; if little "
-    "remains, make this step small and finish it.\n\n")
+# The session's own second sentence; the head is `core/costs_text.py::budget_line`, the one
+# spelling (review 2026-09-22, CORE-12).
+_REPO_DEV_BUDGET_TAIL = (
+    "Every message you send spends it, and NOTHING you write after it runs out is measured -- the "
+    "step is lost, not saved. Spend what is left on the edit most likely to move the number; if "
+    "little remains, make this step small and finish it.")
 _REPO_DEV_STEP_FEEDBACK_BLOCK = (
     "\n\n=== MEASUREMENT OF THE WORK SO FAR (run for you, automatically) ===\n"
     "The operator's `{name}` command was run on your working set as it stands after the previous "
@@ -1341,9 +1343,7 @@ class LLMRepoDeveloper:
             return ""
         if limit <= 0 or not _math.isfinite(limit) or not _math.isfinite(spent) or spent < 0:
             return ""
-        return _REPO_DEV_BUDGET_LINE.format(
-            spent=spent, limit=limit, remaining=max(0.0, limit - spent),
-            pct=min(100.0, 100.0 * spent / limit))
+        return budget_line(spent, limit, _REPO_DEV_BUDGET_TAIL)
 
     def _step_feedback_command_name(self) -> str:
         """The pinned command this developer may auto-run between steps, or "" when there is none.

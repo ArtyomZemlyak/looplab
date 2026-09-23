@@ -30,6 +30,7 @@ from looplab.agents.answered_by_context import answered_by_context
 from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.loop_options import LoopOptions
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
+from looplab.core.costs_text import budget_line
 from looplab.core.evidence import fence_kwargs
 from looplab.core.fitness import is_usable_metric
 from looplab.core.llm import BudgetExceeded
@@ -48,9 +49,10 @@ from looplab.core.source_identity import canonical_source_ref
 
 
 _LOG = logging.getLogger(__name__)
-_RESEARCH_BUDGET_LINE = (
-    "BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone). "
-    "Research that leaves no money for experiments buys nothing — size this memo to what is left.\n\n"
+# The stage's own second sentence; the head (`BUDGET: $x of $y spent, …`) is
+# `core/costs_text.py::budget_line`, the one spelling (review 2026-09-22, CORE-12).
+_RESEARCH_BUDGET_TAIL = (
+    "Research that leaves no money for experiments buys nothing — size this memo to what is left."
 )
 
 _MAX_SOURCES = MAX_RESEARCH_SOURCES
@@ -877,9 +879,7 @@ class DeepResearcher:
             return ""
         if limit <= 0 or not _math.isfinite(limit) or not _math.isfinite(spent) or spent < 0:
             return ""
-        return _RESEARCH_BUDGET_LINE.format(
-            spent=spent, limit=limit, remaining=max(0.0, limit - spent),
-            pct=min(100.0, 100.0 * spent / limit))
+        return budget_line(spent, limit, _RESEARCH_BUDGET_TAIL)
 
     def _established_block(self) -> str:
         """The A5 block for this chain root, or "" — see `agents/established.py`. Appended, never
