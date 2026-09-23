@@ -68,6 +68,7 @@ from looplab.agents.role_prompts import (  # noqa: F401
     _IDEA_SPACE_PLAIN,
     _OPERATOR_NOTE,
     _RESEARCHER_CORE,
+    _SCRIPT_CO_PARENT_MAX,
     _SWEEP_CONTRACT,
     _SWEEP_OFFER,
     _UNTRUSTED_MEMORY_RULE,
@@ -76,7 +77,9 @@ from looplab.agents.role_prompts import (  # noqa: F401
     _hypothesis_system_suffix,
     _researcher_capability_suffix,
     _researcher_system,
+    SCRIPT_PARENT_CHARS,
     footprint_guidance,
+    script_parent_block,
 )
 from looplab.agents.state_brief import (  # noqa: F401
     CONCEPT_AUTHORING_CONTEXT_LINE, CONCEPT_AUTHORING_UNSAFE_LINE, drop_concept_authoring,
@@ -756,6 +759,12 @@ class LLMResearcher:
         return _clamp_fill(bind_idea_to_board_card(idea, visible_cards), self.bounds)
 
 
+def parent_code_enabled(settings) -> bool:
+    """`Settings.developer_parent_code` — the ONE reader (review 2026-09-23, Q-2). Absent reads OFF,
+    so a duck-typed stub renders what the constructor and class defaults render."""
+    return bool(getattr(settings, "developer_parent_code", False))
+
+
 class LLMDeveloper:
     """Writes (and repairs) a complete runnable solution script. `brief` carries the
     task's I/O contract (where to read data, what metric to print). `repair` powers the
@@ -776,15 +785,36 @@ class LLMDeveloper:
     # `last_files` — which made every repo task's `best_of_n` a coin flip the operator paid N full
     # builds for. `search/best_of_n.py::refuse_unrankable_best_of_n` owns the rule and the numbers.
     answers_with_code = True
+    # `Settings.developer_parent_code` (review 2026-09-23, Q-2): whether `implement_from` shows the
+    # parent's script. A CLASS default of OFF, so an instance that never ran `__init__` renders the
+    # historical request; `agents/factory.py::make_roles` sets it from `parent_code_enabled`.
+    parent_code = False
 
     def __init__(self, client: LLMClient, brief: str = "",
-                 prompts: Optional[PromptStore] = None):
+                 prompts: Optional[PromptStore] = None, *, parent_code: bool = False):
         self.client = client
         self.brief = brief
         self.prompts = prompts
+        self.parent_code = bool(parent_code)
         self.last_footprint: dict | None = None
 
     def implement(self, idea: Idea) -> str:
+        return self._implement(idea)
+
+    def implement_from(self, idea: Idea, parent, *, co_parents=()) -> str:
+        """An improve / refine / ensemble merge, from the code it is improving on.
+
+        The engine routes every parent-based build here (`engine/node_build.py::_implement_result`);
+        before this method existed its probe fell through to `implement`, so an improve differed from
+        a draft by the rationale alone and an ensemble merge rewrote from scratch two programs the
+        model had never seen (review 2026-09-23, Q-2, metered on `examples/dataset_task.json`). With
+        `parent_code` the parent's script — and each co-parent's — follows the idea turn
+        (`role_prompts.py::script_parent_block`); OFF, or a parent with no script, this IS
+        `implement`, byte for byte."""
+        extra = script_parent_block(parent, co_parents) if self.parent_code else ""
+        return self._implement(idea, extra)
+
+    def _implement(self, idea: Idea, extra: str = "") -> str:
         system = (render(self.prompts, "developer_system", _DEVELOPER_SYSTEM) + self.brief
                   + _developer_footprint_guidance(idea) + "\n\n" + _attention_points())
         # Render whatever params the task's Researcher proposed (task-agnostic): degree/lam
@@ -803,6 +833,7 @@ class LLMDeveloper:
                     f"Parameters: {params}.\n"
                     "You own the implementation: design and write the solution code that realises "
                     "this concept.").strip()
+        user += extra
         code = extract_code(self.client.complete_text(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
         self.last_footprint = developer_artifact_footprint(idea.footprint, code)

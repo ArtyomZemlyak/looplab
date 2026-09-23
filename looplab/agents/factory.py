@@ -256,6 +256,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # isn't silently downgraded to sklearn. `task_runtime_caps` returns None for offline/synthetic
     # tasks (locked to numpy+stdlib), so only capable tasks (e.g. MLEBenchReal) get the kwarg.
     from looplab.core.hardware import detect_gpu, task_runtime_caps
+    from looplab.agents.roles import LLMDeveloper, parent_code_enabled
     # Fallbacks MATCH the Settings defaults (arch-review §5 P3): a real Settings always carries the
     # field, so these only bite an incremental/mock settings — where the conservative-but-DIFFERENT
     # value (False) silently diverged from the shipped default (auto_install_deps=True).
@@ -270,6 +271,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         if "prompt_truths" in inspect.signature(task.llm_roles).parameters:
             _kw["prompt_truths"] = developer_prompt_truths_enabled(settings)
     researcher, developer = task.llm_roles(client, **_kw)
+    if isinstance(developer, LLMDeveloper):    # Q-2: an improve/merge shows the parent's script
+        developer.parent_code = parent_code_enabled(settings)
 
     # A cli_overrides hyperparameter-search RepoTask (`params` set) is a NO-code-edit mode: the
     # experiment varies via CLI overrides, not edits, so the baseline (NoOp) developer is correct.

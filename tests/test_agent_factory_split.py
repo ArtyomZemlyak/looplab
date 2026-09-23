@@ -106,7 +106,7 @@ def test_neither_module_is_a_god_module_again():
     extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 399),
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 402),
                      ("agents/developer_backends.py", 198),
                      ("adapters/task_schema.py", 231)):
     #
@@ -206,6 +206,13 @@ def test_neither_module_is_a_god_module_again():
     # keyword on the `LLMRepoDeveloper` construction, `phase_context=phase_context_enabled(settings)`,
     # and the function-local import of that reader from `adapters/repo_developer.py`. 195 -> 197
     # measured; the raise pays for exactly those two lines and keeps one line of headroom.
+    #
+    # 399 -> 402, 2026-09-23, review 2026-09-23 Q-2 (the script Developer starts from its parent):
+    # `Settings.developer_parent_code` reaches the one LLM script Developer `make_roles` builds — the
+    # role class and its reader joining the existing function-local import block, and the
+    # isinstance guard with its assignment right after `task.llm_roles`, which the unified facade
+    # reaches too because `build_unified_agent` builds through `make_roles`. 398 -> 401 measured;
+    # the raise pays for those three lines and keeps one line of headroom.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

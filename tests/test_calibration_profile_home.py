@@ -232,7 +232,13 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `['developer_phase_context']` added and `[]` removed. `_EXPECTED_FIELD_COUNT` goes
 #               251 -> 252 and both pins are re-set. INERT for a calibration replicate (the toy
 #               backend builds no repo Developer); re-pinned on the same COMPLETE-envelope rule.
-_EXPECTED_DIGEST = "sha256:01c5bd12f705c82489f9b905086fc11513fb9c0888004767afa8316dbce4972a"
+#   2026-09-23  + developer_parent_code (review 2026-09-23, Q-2: a script task's improve or merge
+#               shows the Developer the parent's script). The 'field set changed too' branch: an
+#               AST scan of `Settings`' annotated assignments against the pre-change tree reports
+#               exactly `['developer_parent_code']` added and `[]` removed. `_EXPECTED_FIELD_COUNT`
+#               goes 252 -> 253 and both pins are re-set. INERT for a calibration replicate (the toy
+#               backend builds no script Developer); re-pinned on the COMPLETE-envelope rule.
+_EXPECTED_DIGEST = "sha256:98d7403e418db7e53ac203214dc352e0e6f1db4759c6576cf24f50825114dcd8"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -717,7 +723,8 @@ _EXPECTED_DIGEST = "sha256:01c5bd12f705c82489f9b905086fc11513fb9c0888004767afa83
 #   2026-09-23  + prompt_truths_judges (review 2026-09-22, Q-1): 249 -> 250.
 #   2026-09-23  + prompt_truths_developer (review 2026-09-22, Q-1): 250 -> 251.
 #   2026-09-23  + developer_phase_context (review 2026-09-23, Q-2): 251 -> 252.
-_EXPECTED_FIELD_COUNT = 252
+#   2026-09-23  + developer_parent_code (review 2026-09-23, Q-2): 252 -> 253.
+_EXPECTED_FIELD_COUNT = 253
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

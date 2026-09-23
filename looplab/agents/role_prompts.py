@@ -286,6 +286,48 @@ def _developer_footprint_guidance(idea: Idea) -> str:
         "never put credentials, paths, commands, or prose in it. If the proposal is already accurate, "
         "you may omit the marker."
     )
+# THE CODE A SCRIPT DEVELOPER STARTS FROM (review 2026-09-23, Q-2; `Settings.developer_parent_code`).
+# One `core/context_budget.py::bounded_page` per script, so a long parent says what it left out rather
+# than being cut silently. A chosen bound, not a measurement: large enough that an ordinary solution
+# script is shown whole, and a co-parent is shown under the same page.
+SCRIPT_PARENT_CHARS = 12_000
+_SCRIPT_CO_PARENT_MAX = 3            # co-parents rendered (an ensemble merge has one or two)
+
+
+def script_parent_block(parent, co_parents=()) -> str:
+    """The parent (and an ensemble's co-parents) a script Developer's `implement_from` shows after
+    the idea: id, metric and the whole script, bounded, then what to return. `""` when the parent
+    carries no script — a plain `implement` is then the honest request."""
+    from looplab.core.context_budget import bounded_page
+    from looplab.core.fitness import format_metric
+
+    def _page(node, what: str) -> tuple[str, str, str]:
+        code = str(getattr(node, "code", "") or "")
+        metric = format_metric(getattr(node, "metric", None), absent="unscored", precision=4,
+                               exponent=False, absent_nan=False)
+        page = bounded_page(code, SCRIPT_PARENT_CHARS, what=what) if code.strip() else ""
+        return f"#{getattr(node, 'id', '?')}", metric, page.rstrip("\n")
+
+    ident, metric, page = _page(parent, "parent script")
+    if not page:
+        return ""
+    out = [f"\n\n=== PARENT SOLUTION (your starting point; parent experiment {ident}, "
+           f"metric={metric}) ===\n```python\n{page}\n```\n"]
+    others = [_page(node, "co-parent script")
+              for node in list(co_parents or ())[:_SCRIPT_CO_PARENT_MAX]]
+    others = [row for row in others if row[2]]
+    if others:
+        out.append("\n=== CO-PARENT SOLUTIONS (the OTHER lineages this ensemble must recombine) ===\n")
+        out += [f"--- co-parent experiment {i} (metric={m}) ---\n```python\n{p}\n```\n"
+                for i, m, p in others]
+        out.append("Recombine the strongest parts of these lineages — stack or average their "
+                   "predictions, or merge their best pieces — rather than re-implementing any of them "
+                   "from its description. ")
+    out.append("Return the COMPLETE updated script: start from the parent above, change what the "
+               "experiment concept calls for, and keep what already works.")
+    return "".join(out)
+
+
 # Appended to the Developer's system prompt when the Idea carries a `space` (intra-node sweep).
 _SWEEP_CONTRACT = (
     "\nThis is an INTRA-NODE SWEEP: evaluate EVERY point of the given grid in ONE process — load "

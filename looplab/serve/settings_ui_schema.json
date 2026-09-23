@@ -1190,6 +1190,13 @@
           "help": "When the repo Developer splits a build into a plan and per-step sessions, each of them is handed what the single-session build always had: the wall-clock budget, the GPU fence and count, an ensemble's other lineages — and the plan also the pipeline the stages phase declared and the files the node starts from; each step sees the whole plan with itself marked, and the read-only stages phase is no longer told it writes files. Off = the pre-2026-09-23 prompts, byte for byte."
         },
         {
+          "key": "developer_parent_code",
+          "label": "Script Developer starts from its parent",
+          "type": "bool",
+          "default": true,
+          "help": "On script tasks (dataset, MLE-bench, code regression, time series) an improve or a merge shows the Developer the parent's script — and an ensemble merge every co-parent's — with its metric, bounded with a note naming any part left out, instead of asking for a rewrite from the idea alone. Off = the pre-2026-09-23 request, byte for byte."
+        },
+        {
           "key": "established_context",
           "label": "Carry earlier phases' reads into each new phase",
           "type": "bool",

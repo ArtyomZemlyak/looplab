@@ -2605,6 +2605,21 @@ class Settings(BaseSettings):
     # it OFF, and a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). One
     # reader: `adapters/repo_developer.py::phase_context_enabled`.
     developer_phase_context: bool = True
+    # THE SCRIPT DEVELOPER STARTS FROM ITS PARENT (review 2026-09-23, Q-2). The engine routes every
+    # parent-based build — an improve, an ensemble merge, an ablation's refine — through
+    # `implement_from(idea, parent)` so it starts from the parent's actual solution; the plain script
+    # Developer every LLM script task builds with (dataset, mlebench, code_regression, timeseries)
+    # had no such method, so the probe fell through to `implement(idea)`. Metered on
+    # `examples/dataset_task.json`: an improve's request differed from a draft's by the rationale
+    # alone, and an ensemble merge named its two parents in a sentence each and showed neither
+    # script — while `merge_mode=auto` resolves to the code-recombination ensemble for exactly this
+    # Developer. ON, `agents/roles.py::LLMDeveloper.implement_from` shows the parent's script (and
+    # each co-parent's) after the idea, bounded with a receipt (`role_prompts.py::
+    # script_parent_block`). It changes a PROMPT and buys no call, so `false` is `implement`'s
+    # request BYTE FOR BYTE, the constructor and class default are OFF, and a pre-field snapshot
+    # resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). One reader:
+    # `agents/roles.py::parent_code_enabled`, set on the role by `agents/factory.py::make_roles`.
+    developer_parent_code: bool = True
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
@@ -3561,6 +3576,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # (c) is `False`, pointable at every commit before this one; `tests/test_developer_phase_context.py`
     # pins that `false` renders every phase byte for byte.
     "developer_phase_context": False,
+    # THE SCRIPT DEVELOPER'S PARENT CODE, added 2026-09-23 defaulting ON (Q-2). (a) holds. (b) is
+    # the rows above's DIFFERENT-PROMPT ground: ON, an improve or a merge on a script task shows the
+    # parent's (and the co-parents') script, so a resumed run would change what its Developer is told
+    # mid-log. (c) is `False`, pointable at every commit before this one;
+    # `tests/test_script_developer_parent_code.py` holds that `false` is `implement`'s request byte
+    # for byte.
+    "developer_parent_code": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

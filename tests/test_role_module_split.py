@@ -267,8 +267,16 @@ def test_roles_is_no_longer_a_god_module():
     SAYS is this module's whole responsibility, so the text and its one filter stay beside the
     builder rather than being re-spelled by their consumer; `roles.py` pays for the one re-export
     line the rule above demands. Both caps move to measured + 1.
+
+    `roles.py` 837 -> 868 and `role_prompts.py` 301 -> 343 on 2026-09-23 (Q-2, the script
+    Developer starts from its parent: `Settings.developer_parent_code`). `LLMDeveloper.implement_from`
+    is the LLM role's own method — the engine's parent-aware entry point it lacked — so it stays here
+    with its `parent_code` switch, the one Settings reader beside the role it configures, the split
+    of `implement` into the shared `_implement`, and the three re-export lines the rule above
+    demands. The block's TEXT went to `role_prompts.py::script_parent_block` instead — prompt bytes
+    belong to the fragments — which is why that cap moves too. Both move to measured + 1.
     """
-    caps = {"agents/roles.py": 838, "agents/role_prompts.py": 302, "agents/state_brief.py": 553,
+    caps = {"agents/roles.py": 869, "agents/role_prompts.py": 344, "agents/state_brief.py": 553,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

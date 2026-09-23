@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 220
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 221
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -279,7 +279,11 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # `developer_stage_guidance` — whether the decomposed repo build's plan and step sessions get the
 # context the single-session implement always had. A row on the same PROMPT ground as the entries
 # above. Re-derived by INTERSECTION: the 219 previous keys plus exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "9b84aab9c85d366a86fa4b798b3a953dc31ca593bf720a7cfef4bbeaf3516848"
+# 220 -> 221 on 2026-09-23: `developer_parent_code` (review 2026-09-23, Q-2), beside
+# `developer_phase_context` — whether a script task's improve or merge shows the Developer the
+# parent's (and the co-parents') script. A row on the same PROMPT ground as the entries above.
+# Re-derived by INTERSECTION: the 220 previous keys plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "0c01e1bebf2a9de2438797c2c48406a76aeb564902f63f0292f2f1babfe99980"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
