@@ -10,11 +10,14 @@ How to add an engine knob now:
   1. add the field to `Settings` (core/config.py) — flat, `LOOPLAB_<FIELD>` env mapping;
   2. add the SAME-NAMED field here with the Engine-side default (`from_settings` picks it up
      automatically; only a Settings-vs-Engine name mismatch needs a `_RENAMES` entry);
-  3. add one `_opt("<name>")` resolution in `Engine.__init__` — the knob arrives through `**knobs`,
-     there is no keyword to add — and assign the settled `self.<attr>` there. Where it landed is
-     DERIVED by `tests/test_engine_options.py::attr_by_field`, and a reader that spells it
-     `getattr(<engine>, "<attr>", <default>)` defaults to that settled value
-     (`tests/test_engine_knob_defaults.py`; review 2026-09-22, ENG1-03).
+  3. declare where it lands, ONCE, in `engine/knobs.py::EngineKnobs` — `_<name> = Knob("<name>",
+     settle)`; the knob arrives through `**knobs` (there is no keyword to add) and `settle_knobs`
+     lands it at construction. Only a knob that reads more than its own field (the box, the task,
+     the roles, another knob) is resolved with `_opt("<name>")` and assigned in `Engine.__init__`
+     instead, and says why in `knobs.py::EXPLICIT_IN_INIT`. Where it landed is DERIVED by
+     `tests/test_engine_options.py::attr_by_field` and held to the declaration by
+     `tests/test_engine_knobs.py`; a reader that spells it `getattr(<engine>, "<attr>", <default>)`
+     defaults to the settled value (`tests/test_engine_knob_defaults.py`; review 2026-09-22, ENG1-03).
 Object seams (task, roles, sandbox, policy, strategist, scorers, embedder, …) are NOT options —
 they stay explicit `Engine.__init__` parameters wired by the caller (cli.py / tests).
 

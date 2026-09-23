@@ -51,7 +51,6 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     PROGRESS_STAGE_BUILD)
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
-from looplab.runtime.metric_subject import settle_mode as settle_metric_subject_mode
 from looplab.engine.widths import LLM_WIDTH_MAX
 # The live width settle (the proposals' re-pin, the operator's `budget_extend`, the broker ceiling
 # that follows them) is a mixin of its own since review 2026-09-22, ENG1-04 step 1.
@@ -108,7 +107,7 @@ from looplab.engine.lessons import LessonMemory
 from looplab.engine.plan import META_SWEEP
 from looplab.engine.node_build import _OMIT as _OMIT_ARM
 from looplab.engine.options import EngineOptions
-from looplab.engine.knobs import EngineKnobs
+from looplab.engine.knobs import EngineKnobs, settle_knobs
 from looplab.engine.workspace import WorkspaceSeeder
 # Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
 # their original names so `looplab.engine.orchestrator._rule_triage`, `._holdout_indices`
@@ -150,7 +149,7 @@ from looplab.search.speculation_calibration import (
 )
 from looplab.search.operators import merge_idea
 from looplab.search.policy import (DEFAULT_MODEL_ARM, KIND_EXPAND, META_MODEL, SearchPolicy,
-                                   exploit_forced_action, parse_model_arms)
+                                   exploit_forced_action)
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
 # / run_phase / operator_yields / NOVELTY_STANCES …) moved to engine/strategy.py (StrategyCadenceMixin),
 # which imports those symbols from their canonical sources — so they are no longer imported here.
@@ -951,10 +950,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # BACKLOG §4 (docs/15 F3): every PURE-CONFIG knob — one per EngineOptions field — is
         # accepted via **knobs and validated against EngineOptions. Adding one is THREE edits on
         # this side, not the two this used to claim (review 2026-09-22, ENG1-03): the Settings
-        # field, the EngineOptions field, and its `_opt` + settled `self.<attr>` below (the
-        # map of where each lands is derived, `tests/test_engine_options.py::attr_by_field`).
-        # Each knob's type/default/why lives on EngineOptions (engine/options.py), which mirrors
-        # the old signature comments.
+        # field, the EngineOptions field, and its `Knob` in `engine/knobs.py::EngineKnobs` — or,
+        # for a knob that reads more than its own field, an `_opt` + `self.<attr>` below and an
+        # `EXPLICIT_IN_INIT` reason (where each lands is derived,
+        # `tests/test_engine_options.py::attr_by_field`). Each knob's type/default/why lives on
+        # EngineOptions (engine/options.py), which mirrors the old signature comments.
         # Resolution per knob (unchanged): explicitly passed kwarg > `options` field > default.
         **knobs,
     ):
@@ -984,6 +984,15 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         def _opt(field: str):
             return getattr(self.options, field)
 
+        # EVERY PURE-CONFIG KNOB LANDS HERE, in one step (review 2026-09-22, ENG1-03 step 4c): each
+        # attribute that is a function of ONE `EngineOptions` field is declared once, with its settle
+        # rule and its why-comment, in `engine/knobs.py::EngineKnobs`, and this writes all 130 into the
+        # instance dict before anything below reads one. They were 130 `_opt` locals and 130
+        # assignments spread over this body, which a double could not see and a reader could not
+        # enumerate. What stays below is only what reads more than its own field — the box, the task,
+        # the roles, another knob — listed with its reason in `knobs.py::EXPLICIT_IN_INIT`.
+        settle_knobs(self)
+
         # Layer-2 decoupling (docs/23): the CANONICAL `eval_parallel`/`llm_parallel` win over the legacy
         # `max_parallel`/`parallel_build` when set; None => fall back to the legacy field => byte-identical.
         _eval_parallel_opt = _opt("eval_parallel")
@@ -992,123 +1001,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         _llm_parallel_opt = _opt("llm_parallel")
         _llm_parallel_value = (_llm_parallel_opt if _llm_parallel_opt is not None
                                else _opt("parallel_build"))
-        train_monitor = _opt("train_monitor")
-        train_monitor_interval_s = _opt("train_monitor_interval_s")
-        train_monitor_kill = _opt("train_monitor_kill")
-        train_monitor_kill_confidence = _opt("train_monitor_kill_confidence")
-        train_monitor_tools = _opt("train_monitor_tools")
-        train_monitor_contract = _opt("train_monitor_contract")
-        repair_log_tools = _opt("repair_log_tools")
-        stage_check_tools = _opt("stage_check_tools")
-        evidence_envelope = _opt("evidence_envelope")
-        asha_live = _opt("asha_live")
-        asha_live_kill = _opt("asha_live_kill")
-        asha_live_quantile = _opt("asha_live_quantile")
-        asha_live_min_siblings = _opt("asha_live_min_siblings")
-        asha_live_kill_confidence = _opt("asha_live_kill_confidence")
-        sweep_timeout_mult = _opt("sweep_timeout_mult")
-        eval_stall_timeout_s = _opt("eval_stall_timeout_s")
-        single_command_divergence_watch = _opt("single_command_divergence_watch")
-        eval_deadline_grace_s = _opt("eval_deadline_grace_s")
-        eval_env = _opt("eval_env")
-        confirm_seed_base = _opt("confirm_seed_base")
-        coverage_context = _opt("coverage_context")
-        cadence_while_evaluating = _opt("cadence_while_evaluating")
-        concept_pivot = _opt("concept_pivot")
-        graded_novelty = _opt("graded_novelty")
-        novelty_literature = _opt("novelty_literature")
-        steady_state_build = _opt("steady_state_build")
-        capability_expansion = _opt("capability_expansion")
-        fingerprint_universal = _opt("fingerprint_universal")
-        cross_run_concepts = _opt("cross_run_concepts")
-        concept_run_base = _opt("concept_run_base")
-        cross_run_advisory = _opt("cross_run_advisory")
-        cross_run_curation = _opt("cross_run_curation")
-        task_facets_finalize = _opt("task_facets_finalize")
-        cross_run_curation_auto = _opt("cross_run_curation_auto")
-        concept_tidy = _opt("concept_tidy")
-        proposal_width = _opt("proposal_width")
-        gpu_footprint_cue = _opt("gpu_footprint_cue")
-        cross_run_read_tools = _opt("cross_run_read_tools")
-        phase_handoff_summary = _opt("phase_handoff_summary")
-        trust_mode = _opt("trust_mode")
-        seed_mode = _opt("seed_mode")
-        read_fence = _opt("read_fence")
-        metric_subject = _opt("metric_subject")
-        auto_extra_metrics = _opt("auto_extra_metrics")
-        landlock = _opt("landlock")
-        syscall_fence = _opt("syscall_fence")
         max_nodes = _opt("max_nodes")
-        policy_name = _opt("policy_name")
-        ablate_every = _opt("ablate_every")
-        strategist_every = _opt("strategist_every")
-        concept_retag_every = _opt("concept_retag_every")
-        concurrent_research_repeat = _opt("concurrent_research_repeat")
-        concurrent_research_interval_s = _opt("concurrent_research_interval_s")
-        concurrent_research_max_calls = _opt("concurrent_research_max_calls")
-        concurrent_consolidate = _opt("concurrent_consolidate")
-        report_every = _opt("report_every")
         merge_mode = _opt("merge_mode")
-        endgame_reserve_frac = _opt("endgame_reserve_frac")
-        model_arms = _opt("model_arms")
-        complexity_cue = _opt("complexity_cue")
-        budget_aware = _opt("budget_aware")
-        failure_reflection = _opt("failure_reflection")
-        watchdog_reflection = _opt("watchdog_reflection")
-        deep_repair = _opt("deep_repair")
-        localize_faults = _opt("localize_faults")
-        feature_engineering = _opt("feature_engineering")
-        ablate_code_blocks = _opt("ablate_code_blocks")
-        trust_gate = _opt("trust_gate")
-        code_leakage_detect = _opt("code_leakage_detect")
-        critic_check = _opt("critic_check")
-        redact_output = _opt("redact_output")
         novelty_mode = _opt("novelty_mode")
         novelty_gate = _opt("novelty_gate")
-        novelty_epsilon = _opt("novelty_epsilon")
-        reflection_priors = _opt("reflection_priors")
-        comparative_lessons = _opt("comparative_lessons")
-        lessons_every = _opt("lessons_every")
-        lessons_refresh_every = _opt("lessons_refresh_every")
-        track_hypotheses = _opt("track_hypotheses")
-        surrogate_explore = _opt("surrogate_explore")
-        unified_agent = _opt("unified_agent")
         agent_drives_actions = _opt("agent_drives_actions")
-        card_driven_selection = _opt("card_driven_selection")
-        exploit_strong_node_quantile = _opt("exploit_strong_node_quantile")
-        regime_prior = _opt("regime_prior")
         speculation_depth = _opt("speculation_depth")
         speculation_gate_receipt = _opt("speculation_gate_receipt")
-        inline_repair = _opt("inline_repair")
-        inline_repair_attempts = _opt("inline_repair_attempts")
-        repair_critic_after = _opt("repair_critic_after")
-        inline_repair_reasons = _opt("inline_repair_reasons")
-        inline_repair_retrain_cap = _opt("inline_repair_retrain_cap")
         metric_salvage = _opt("metric_salvage")
         metric_salvage_repair = _opt("metric_salvage_repair")
         auto_install_deps = _opt("auto_install_deps")
-        dep_install_timeout = _opt("dep_install_timeout")
-        agent_control = _opt("agent_control")
-        holdout_fraction = _opt("holdout_fraction")
-        holdout_select = _opt("holdout_select")
-        holdout_top_k = _opt("holdout_top_k")
-        select_verifier = _opt("select_verifier")
-        verifier_ci_tie = _opt("verifier_ci_tie")
-        select_verifier_samples = _opt("select_verifier_samples")
-        debug_depth = _opt("debug_depth")
-        operator_bandit = _opt("operator_bandit")
-        asha_eta = _opt("asha_eta")
-        asha_rung_nodes = _opt("asha_rung_nodes")
-        mcts_cost_weight = _opt("mcts_cost_weight")
-        mcts_value_weight = _opt("mcts_value_weight")
-        novelty_semantic = _opt("novelty_semantic")
-        novelty_semantic_threshold = _opt("novelty_semantic_threshold")
         digest_char_cap = _opt("digest_char_cap")
-        research_verify = _opt("research_verify")
-        memo_verdict_cue = _opt("memo_verdict_cue")
-        lesson_operator_scope = _opt("lesson_operator_scope")
-        workdir_audit = _opt("workdir_audit")
-        trace_llm_io = _opt("trace_llm_io")
 
         self.run_dir = Path(run_dir)
         self.task = task
@@ -1117,7 +1020,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # UnifiedAgent forwards it to its inner researcher). Default-on already via the constructor;
         # this makes an explicit OFF reach the prompt. Best-effort (toy researchers ignore it).
         try:
-            setattr(self.researcher, "track_hypotheses", track_hypotheses)
+            setattr(self.researcher, "track_hypotheses", self._track_hypotheses)
         except Exception:  # noqa: BLE001
             pass
         self.developer = developer
@@ -1125,15 +1028,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self.policy = policy
         # A7 Strategist: the policy is now hot-swappable, so the engine keeps the knobs needed to
         # rebuild it (n_seeds/max_nodes/ablate_every) + the meta-controller + operator-mix state.
-        self.n_seeds = _opt("n_seeds")
         self.max_nodes = max_nodes
         # The policy's OWN node budget is the base a live add_nodes override extends — NOT self.max_nodes
         # (the engine default can differ from a passed-in policy's, e.g. in tests). Tracked separately so
         # the override is applied idempotently (absolute set per iteration) without compounding, and
         # re-captured on a strategy-driven policy swap below.
         self._base_max_nodes = getattr(policy, "max_nodes", max_nodes)
-        self._policy_name = policy_name
-        self._ablate_every = ablate_every
         self.strategist = strategist
         # In-process memo for `_maybe_consult_strategist`: the operator pin (plus the two live inputs
         # its whitelist consults) that last validated down to NO surviving fields. An invalid pin
@@ -1147,40 +1047,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # the whole reason that registry exists. Nothing durable keys off it: an abstention is
         # live-only and a resumed process may retry each node once, which is bounded.
         self._value_estimate_attempted: set[tuple[int, int]] = set()
-        self.strategist_every = max(1, strategist_every)
-        self.concept_retag_every = max(1, concept_retag_every)
-        # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
-        # would turn "never stop the run for me" into "stop after one failure".
-        self.systemic_failure_stop = _opt("systemic_failure_stop")
-        # STORED RAW as well; `_developer_crash_pause_due` settles a junk value to the historical 1.
-        self.developer_crash_pause_after = _opt("developer_crash_pause_after")
-        # The node-OPEN floor under the spend ceiling (`_refuse_node_open_below_floor`). Raw: 0 and
-        # junk both read as OFF there, and a positive value is only ever compared, never clamped.
-        self.node_open_budget_floor_usd = _opt("node_open_budget_floor_usd")
         self.deep_researcher = deep_researcher
-        # STORED RAW, deliberately — this was `max(0, deep_research_every)` until 2026-08-07, and
-        # under the new spelling that clamp is exactly backwards: `0` now means "start immediately"
-        # and OFF is NEGATIVE, so it would have converted every spelled-off knob into a paid think at
-        # every node. The whole settling rule is stated once, in
-        # `engine/cadence.py::deep_research_window`, and applied at the two gates that read this
-        # attribute — so `-1` (off), a junk value (off) and `0` (immediate) all mean here exactly
-        # what the operator wrote, and the diagnostics that echo the knob do not lie about it.
-        # (Hence `_opt` inline: with no transform left, the local it used to be resolved into buys
-        # nothing — `tests/test_source_scan_helper.py` is the guard that says so.)
-        self.deep_research_every = _opt("deep_research_every")
-        self.concurrent_research = _opt("concurrent_research")
-        # Repeated concurrent research (don't idle a multi-day eval): the overlapped think re-runs on
-        # an adaptive time cadence for the whole window instead of once. Off in the library default
-        # (one-shot == today); the product turns it on. Interval floors the budget-derived pace;
-        # max_calls is a per-window LLM backstop. See _spawn_research / _research_overlap_loop.
-        self._concurrent_research_repeat = bool(concurrent_research_repeat)
-        self._concurrent_research_interval_s = max(1.0, float(concurrent_research_interval_s or 1800.0))
-        self._concurrent_research_max_calls = max(0, int(concurrent_research_max_calls or 0))
-        # Overlap the hypothesis-board consolidation with the eval too (dedup the board the repeated
-        # research keeps filling). Off in the library default (== today); product turns it on.
-        self._concurrent_consolidate = bool(concurrent_consolidate)
         self.report_writer = report_writer
-        self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
         self._developer_name = str(developer_name or "default")
         # Variant-1 parallel BUILD: a pool of fresh (researcher, developer) pairs so N drafts research +
@@ -1210,27 +1078,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._merge_mode = merge_mode
         # doc 52 row 18: the plan's endgame reserve and whether its reserve sweeps the champion (a
         # Strategist may switch the sweep off through `operators.endgame_sweep`).
-        self._endgame_reserve_frac = float(endgame_reserve_frac or 0.0)
         self._endgame_sweep = True
         self._endgame_surrogate = None
-        # doc 52 row 19: the model ARMS the bandit may route a build to — `{arm: (model, cost)}`;
-        # the configured Developer model is the implicit `default` arm. Inert without
-        # `operator_bandit`, which is the policy's knob, and without a declared arm.
-        self._model_arms = parse_model_arms(model_arms)
-        self._complexity_cue = complexity_cue
         self._prefer_sweep = False   # A7: Strategist-set bias toward intra-node sweeps (audit-driven)
-        self._budget_aware = budget_aware
-        self._failure_reflection = failure_reflection
-        self._watchdog_reflection = watchdog_reflection
-        self._deep_repair = deep_repair
-        # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
-        self._inline_repair = inline_repair
-        self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = no operator cap
-        # F8: how many durable repairs before the CRITIC is asked whether the chain is
-        # circling. It is a cadence, not a bound — the critic can only stop, never extend.
-        self._repair_critic_after = max(0, int(repair_critic_after))
-        self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
-        self._inline_repair_retrain_cap = max(0, int(inline_repair_retrain_cap))
         # METRIC SALVAGE — settled through the same `_opt` ladder as every other policy, so a
         # snapshot/resume carries the operator's choice (invariant 6) instead of the class default.
         self.metric_salvage = settle_metric_salvage_mode(metric_salvage)
@@ -1241,8 +1091,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # module we've already run pip for THIS run (one attempt per module: success => now present
         # forever; failure => won't change on retry), so an offline/misnamed package can't loop.
         # `_dep_lock` serializes pip + that set across parallel evals (pip is not concurrency-safe).
-        self._auto_install_deps = bool(auto_install_deps) and trust_mode == "trusted_local"
-        self._dep_install_timeout = float(dep_install_timeout)
+        self._auto_install_deps = bool(auto_install_deps) and self.trust_mode == "trusted_local"
         self._dep_installer = dep_installer        # None => deps.install (real pip)
         self._dep_attempted: set[str] = set()
         # Per-package install RECEIPTS ({pip name -> {requirement, declared, before, after}}), filled
@@ -1264,111 +1113,41 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._deps_synced_digests: set[str] = set()
         import threading as _threading
         self._dep_lock = _threading.Lock()
-        # Agent governance (Settings.agent_control): per-setting allow-list of which roles may change it
-        # at runtime. A setting absent from the map is LOCKED (no agent). Enforced at the strategist /
-        # boss / researcher seams via `_agent_may`. `None` (a bare Engine(...) with no options) resolves
-        # to the SHIPPED default matrix — so a directly-constructed engine behaves like a real CLI run
-        # (the EngineOptions "Engine() == shipped defaults" invariant); pass an explicit `{}` to lock
-        # every knob against the agents.
-        from looplab.core.config import default_agent_control
-        self._agent_control: dict = (dict(agent_control) if agent_control is not None
-                                     else default_agent_control())
-        self._localize_faults = localize_faults
-        self._feature_engineering = feature_engineering
-        self._ablate_code_blocks = ablate_code_blocks
         self.proxy_scorer = proxy_scorer
-        self.proxy_kill_fraction = _opt("proxy_kill_fraction")
-        self.reward_hack_detect = _opt("reward_hack_detect")
-        if trust_gate not in ("audit", "gate", "block"):
+        if self.trust_gate not in ("audit", "gate", "block"):
             # A security control must fail LOUDLY: silently coercing a typo ("Gate") to "audit"
             # would run with no enforcement while the caller believes the gate is on.
             raise ConfigRefusal(
-                f"trust_gate must be 'audit', 'gate' or 'block', got {trust_gate!r}")
-        self.trust_gate = trust_gate
-        self._code_leakage_detect = code_leakage_detect
-        self._critic_check = critic_check
-        self._redact_output = redact_output
+                f"trust_gate must be 'audit', 'gate' or 'block', got {self.trust_gate!r}")
         # novelty_mode is the primary selector; a legacy novelty_gate=True forces the "algo" path.
         # Read ONCE, here: it used to be relayed to `self._novelty_gate` as well, which nothing read
         # (review 2026-09-22, CORE-08).
         self._novelty_mode = str(novelty_mode or "llm") if not novelty_gate else "algo"
-        self._novelty_epsilon = novelty_epsilon
         # T5 semantic novelty (Phase 2): reject a proposal whose idea TEXT is a near-duplicate of
         # an existing node's — with one informed re-propose when the duplicate FAILED (the
         # ShinkaEvolve lever: novelty rejection before evaluation, ablation-ranked above model
         # routing). hash_embed is the zero-dep default; T4 wires a real embedder from config.
-        self._novelty_semantic = bool(novelty_semantic)
-        self._novelty_semantic_threshold = float(novelty_semantic_threshold)
         if embedder is None:
             from looplab.tools.vectorstore import hash_embed as _he
             embedder = _he
         self._embedder = embedder
         self._idea_vecs: dict[tuple, list] = {}  # (len, prefix) of idea text -> embedding (in-memory)
-        self._debug_depth = max(1, int(debug_depth))
-        self._operator_bandit = bool(operator_bandit)
-        # The other run-level POLICY knobs, held here so a Strategist rebuild hands the new policy
-        # the values the launch did (`search/policy.py::policy_knobs`, review 2026-09-22 SCJ-01).
-        # Raw on purpose: the policy factories coerce and clamp, as they do for the launch's kwargs.
-        self._asha_eta = asha_eta
-        self._asha_rung_nodes = asha_rung_nodes
-        self._mcts_cost_weight = mcts_cost_weight
-        self._mcts_value_weight = mcts_value_weight
         # M5: the Researcher's always-on digest budget (0 = auto-scale with run size).
         try:
             setattr(researcher, "_digest_cap", int(digest_char_cap))
         except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
             pass
-        self._research_verify = bool(research_verify)
-        # D8 PUSH half: `roles._state_brief` renders the latest memo's SUMMARY into every Researcher,
-        # crash-triage and repair-critic prompt, and the verifier never checks a summary — so the cue
-        # carries the memo's own CLAIM tally beside it. Threaded exactly like `_digest_cap` above:
-        # setattr on the researcher (registry `roles.RESEARCHER_HINT_ATTRS`, so every wrapper mirrors
-        # it) for the two propose paths, and an engine attribute for the three call sites that are
-        # engine methods (`crash_repair._ask_triage`/`_ask_repair_critic`, `node_build._choose_action`).
-        self._memo_verdict_cue = bool(memo_verdict_cue)
-        # Read at ONE place, `lessons_priors.py::operator_scoped_prior` — the engine attribute exists
-        # so a build worker can ask without reaching for Settings (doc 52 §4.3). Off = the Developer
-        # prior is the run-wide text, byte for byte.
-        self._lesson_operator_scope = bool(lesson_operator_scope)
+        # The researcher's copies of two prompt cues, threaded exactly like `_digest_cap` above (why
+        # each has TWO deliveries — this one and the engine attribute — is beside its Knob in
+        # `engine/knobs.py`; registry `roles.RESEARCHER_HINT_ATTRS`, so every wrapper mirrors them).
         try:
-            setattr(researcher, "_memo_verdict_cue", bool(memo_verdict_cue))
+            setattr(researcher, "_memo_verdict_cue", self._memo_verdict_cue)
         except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
             pass
-        self._workdir_audit = bool(workdir_audit)
-        # ADR-17 capture policy for THIS run's tracer (below). None = declare nothing and let the
-        # process-wide `set_llm_capture` default decide, exactly as before this knob existed.
-        self._trace_llm_io = None if trace_llm_io is None else bool(trace_llm_io)
-        self._coverage_context = bool(coverage_context)
-        self._cadence_while_evaluating = bool(cadence_while_evaluating)
-        self._concept_pivot = bool(concept_pivot)
-        self._graded_novelty = bool(graded_novelty)
-        self._novelty_literature = bool(novelty_literature)
-        self._steady_state_build = bool(steady_state_build)
-        self._capability_expansion = bool(capability_expansion)
-        self._fingerprint_universal = bool(fingerprint_universal)
-        self._cross_run_concepts = bool(cross_run_concepts)
-        self._concept_run_base = bool(concept_run_base)
-        self._cross_run_advisory = bool(cross_run_advisory)
-        self._cross_run_curation = bool(cross_run_curation)
-        self._task_facets_finalize = bool(task_facets_finalize)
-        self._cross_run_curation_auto = bool(cross_run_curation_auto)
-        self._concept_tidy = bool(concept_tidy)
-        # docs/29 F1: whether the PROPOSALS may re-pin this run's width (`_settle_proposal_width`).
-        self._proposal_width = bool(proposal_width)
-        # …and whether the cue that ASKS for those footprints states what a larger one really does.
-        # TWO deliveries, because the same false claim was in two prompts: the engine's own GPU BUDGET
-        # cue (`proposal_cues._gpu_budget_hint_text`, an engine attribute) AND the code-owned
-        # `roles._FOOTPRINT_GUIDANCE` suffix both said a larger count buys nothing. Threaded onto the
-        # researcher exactly like `_memo_verdict_cue` (registry `roles.RESEARCHER_HINT_ATTRS`, so every
-        # wrapper mirrors it) — the two propose paths read it there, and an UNSTAMPED role keeps the
-        # historical clause, which is what makes `false` and "no engine at all" the same prompt.
-        self._gpu_footprint_cue = bool(gpu_footprint_cue)
         try:
-            setattr(researcher, "_gpu_footprint_cue", bool(gpu_footprint_cue))
+            setattr(researcher, "_gpu_footprint_cue", self._gpu_footprint_cue)
         except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
             pass
-        self._cross_run_read_tools = bool(cross_run_read_tools)
-        self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
         # gate push for NEW directions. "balanced" == today's behavior; the Strategist raises it to
         # "explore" when coverage shows narrowing, or "exploit" to converge. Set by _apply_strategy.
@@ -1385,35 +1164,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # an attribute no real Engine has, so no operator's options ever reached them.
         self._loop_opts = loop_opts
         self._exploit_suite = None   # 4.3 hardened ruleset; loaded once memory_dir is set (below)
-        self._reflection_priors = reflection_priors
-        # M6 comparative lessons: credit-assigned pair distillation (run-end and, when the
-        # cadences are set, mid-run into/from the SHARED cross-run store — the live-share seam).
-        self._comparative_lessons_on = comparative_lessons
-        self.lessons_every = max(0, lessons_every)
-        self.lessons_refresh_every = max(0, lessons_refresh_every)
         # Cross-run memory / lessons / reflection cluster (looplab/engine/lessons.py). The Engine
         # keeps thin delegators under the original `_`-names below (tests call/monkeypatch them);
         # the lessons-owned mutable state (seen stamp, prior note) lives on LessonMemory.
         self.lessons = LessonMemory(self)
-        self._track_hypotheses = track_hypotheses
-        self._surrogate_explore = surrogate_explore
         # Unified self-driving agent: in unified mode `researcher is developer` (one object plays
         # both roles); `agent_drives_actions` additionally lets it pick the next macro action.
-        self.unified_agent = unified_agent
-        self.agent_drives_actions = unified_agent and agent_drives_actions
-        # The Card authority wins when both opt-in selectors are enabled. Letting the
-        # free-form agent arm pre-empt it would silently bypass the atomic existing-work claim below.
-        self.card_driven_selection = bool(card_driven_selection)
-        # B1's forced exploitation sits ABOVE the authority order rather than inside one selector:
-        # it is the same rule whichever picker is enabled, and an arm that measured it only on the
-        # Card path would be measuring the Card path. Clamped to [0, 1) -- a quantile of 1.0 would
-        # name an empty top slice and read as "off" while looking like the strongest setting there
-        # is, which is the shape of defect this file keeps finding in its own knobs.
-        self.exploit_strong_node_quantile = min(0.999, max(0.0, float(
-            exploit_strong_node_quantile or 0.0)))
-        # B2's read side: the propose prior gains the measured regime block. The ledger is written
-        # either way; this decides only whether a model is shown it.
-        self.regime_prior = bool(regime_prior)
+        self.agent_drives_actions = self.unified_agent and agent_drives_actions
         # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
         # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
         # parallelize, each concurrent eval is pinned to a DISTINCT GPU via CUDA_VISIBLE_DEVICES (see
@@ -1499,7 +1256,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         _calibration_runtime = CalibrationRuntime(
             option_fields=frozenset(_fields), read_option=_opt,
             recorded_runtime_scope=_speculation_runtime_scope_sha256,
-            card_driven_selection=card_driven_selection,
+            card_driven_selection=self.options.card_driven_selection,
             max_nodes=max_nodes,
             speculation_depth=speculation_depth,
             task=task,
@@ -1540,8 +1297,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # broker's permit (`core/llm_budget.py`, doc 52 row 15). Built before the broker so the
         # broker can carry it; fed by the durable ledger's sink (`engine/costs.py`) and seeded from
         # the `llm_usage` rows on a resume, so the cap holds across restarts.
-        self._llm_cost_limit = _opt("llm_cost_limit")
-        self._llm_token_limit = _opt("llm_token_limit")
         self._llm_budget = RunBudget(cost_limit=self._llm_cost_limit,
                                      token_limit=self._llm_token_limit)
         self._llm_broker = LLMConcurrencyBroker(
@@ -1567,67 +1322,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # instead of comparing only completed charges (`resources.py::eval_time_admission_blocked`).
         self._eval_time_reservations: dict[tuple[int, object], float] = {}
         self.timeout = _opt("timeout")
-        self.max_eval_timeout = _opt("max_eval_timeout")
-        # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
-        # Developer so its code can emit periodic progress to avoid a false silence-kill.
-        self.eval_stall_timeout_s = float(eval_stall_timeout_s)
-        # The single-command path's deterministic divergence stop, DECLARED here because
-        # `eval_dispatch._run_eval` used to read it through a `getattr(..., False)` on a name nothing
-        # ever assigned — the exact silent-typo shape `tests/test_engine_attribute_sites.py` refuses.
-        self._single_command_divergence_watch = bool(single_command_divergence_watch)
-        # Most extra wall clock a live-log judge may buy for a stage at its deadline, ONCE per
-        # command. 0 (default) = the historical unconditional tree-kill. See
-        # `Settings.eval_deadline_grace_s` for the 22.0 discarded GPU-hours and for why it is opt-in.
-        self.eval_deadline_grace_s = float(eval_deadline_grace_s)
-        # F1d RUN-LEVEL DECLARED ENVIRONMENT. Copied, never aliased: `EngineOptions` is frozen but
-        # its dict is not, and `_repin_declared_env` REPLACES this on a resume with what
-        # `run_started` recorded (invariant #6) — mutating the caller's Settings dict from here
-        # would rewrite the launch config object a UI process may still be serving.
-        self._eval_env: dict = dict(eval_env or {})
-        self._train_monitor = bool(train_monitor)
-        self._train_monitor_interval_s = train_monitor_interval_s
-        self._train_monitor_kill = bool(train_monitor_kill)
-        self._train_monitor_kill_confidence = train_monitor_kill_confidence
-        # Whether the monitor/ASHA judges may LOOK (tools/log_tools.py) instead of only being handed
-        # a slice. Read by `train_monitor.monitor_log_tools`, the ONE place the two watchdogs build
-        # their provider, so both honour one switch.
-        self._train_monitor_tools = bool(train_monitor_tools)
-        # Whether the monitor is shown the watched stage's own declared contract and the engine's
-        # live schedule reading. Read by `_monitor_training`, the ONE place that builds the tick's
-        # user message. Its own switch and not `train_monitor_tools`': that one buys paid round
-        # trips, this one buys nothing but two sentences on a call already being made.
-        self._train_monitor_contract = bool(train_monitor_contract)
-        # Whether the CRASH/TIMEOUT TRIAGE judge may LOOK at the dead eval's stage logs instead of
-        # diagnosing from `_eval_failure_text`'s 500-char stderr tail. Read by
-        # `train_monitor.repair_log_tools`, the ONE place the repair path builds its provider — the
-        # same shape as the line above, and deliberately its own switch: the watchdog's tools are paid
-        # on a TIMER up to ~200 times per node, this one is paid once per failed attempt.
-        self._repair_log_tools = bool(repair_log_tools)
-        # Whether the INTER-STAGE CHECKER may LOOK at the checked stage's own log instead of judging
-        # from `run.out[-4000:]`. Read by `train_monitor.stage_check_tools`, the ONE place
-        # `eval_stages._stage_check_fn` builds its provider — the fourth gate over the one
-        # `_log_query_tools` derivation, and its own switch: this judge is paid once per checked
-        # stage on the eval-blocking path, and it is the one that can end a node (doc 52 row 9).
-        self._stage_check_tools = bool(stage_check_tools)
-        # The untrusted-evidence FENCE on those judges' tool results — the checker above, both
-        # watchdog judges and the LLM novelty adjudicator (review 2026-09-22, TAT-02). Read by
-        # `shared.py::judge_evidence_kwargs`, the one place a judge learns its fence.
-        self._evidence_envelope = bool(evidence_envelope)
-        # ASHA live-curve rank watchdog (advisory in the product surface; opt-in kill). off == today.
-        self._asha_live = bool(asha_live)
-        self._asha_live_kill = bool(asha_live_kill)
-        self._asha_live_quantile = float(asha_live_quantile)
-        self._asha_live_min_siblings = max(1, int(asha_live_min_siblings))
-        # Minimum confidence the LLM stop-verdict needs before the rank flag may actually kill. The judge
-        # is consulted only INSIDE the rank gate, so this can only ever narrow the stop set.
-        self._asha_live_kill_confidence = asha_live_kill_confidence
-        self.sweep_timeout_mult = max(1.0, sweep_timeout_mult)
         self.crash_after = crash_after
-        self.confirm_top_k = _opt("confirm_top_k")
-        self.confirm_seeds = _opt("confirm_seeds")
-        self.max_seconds = _opt("max_seconds")
-        self.max_eval_seconds = _opt("max_eval_seconds")
-        self.memory_dir = _opt("memory_dir")
         # 4.3: load the hardened exploit ruleset grown by `looplab harden` (hacker-fixer-solver)
         # from <memory_dir>/exploits.jsonl — merged into the reward-hack scan so every
         # previously-discovered exploit stays guarded on later runs. None => built-in detector only.
@@ -1639,49 +1334,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     self._exploit_suite = ExploitSuite.load(_ep)
                 except Exception:  # noqa: BLE001
                     self._exploit_suite = None
-        self.require_approval = _opt("require_approval")
-        self.archive_resolution = _opt("archive_resolution")
         # RepoTask onboarding (Phase 3): `onboarder()` -> a proposed {eval_spec,
         # adapter_files, goal}; ratified per `eval_trust_mode` then frozen+trusted.
         self.onboarder = onboarder
-        self.eval_trust_mode = _opt("eval_trust_mode")
-        # Sandbox tier for the command-eval path (ADR-13, Phase 4): "untrusted" wraps each
-        # eval in `docker run --network none` (real isolation for an arbitrary framework);
-        # "trusted_local" runs it directly. The solution.py path uses self.sandbox instead.
-        self.trust_mode = trust_mode
-        self.docker_image = _opt("docker_image")
-        # Resource caps for the untrusted/hostile command-eval Docker tier (make_docker_wrap).
-        # Mirror the solution.py DockerSandbox tier so both untrusted tiers bound memory/cpu.
-        self.sandbox_memory = _opt("sandbox_memory")
-        self.sandbox_cpus = _opt("sandbox_cpus")
-        # Container root-filesystem hardening for that same tier ("" = off; see
-        # `Settings.sandbox_readonly_rootfs`). Threaded into `make_docker_wrap` beside mem/cpus.
-        self.sandbox_readonly_rootfs = _opt("sandbox_readonly_rootfs")
-        self._seed_mode = seed_mode or "auto"   # run-wide fallback for per-editable seeding
-        # Source-tree READ FENCE policy (off|warn|deny) — read by `engine/resources.py`, which
-        # materializes the fence lazily on the first eval and stamps its marker into the child env.
-        # It is the counterpart to `_seed_mode`: seeding decides what a node's copy CONTAINS, this
-        # decides that the copy is the only place the node may read from.
-        self._read_fence = read_fence or "deny"
-        # METRIC SUBJECT rung (off|audit|require) — read by `engine/eval_dispatch.py` (which hands
-        # `run_command_eval` the declared subject), by `engine/eval_stages.py` (which derives the
-        # protected score stage's `needs` from it) and by `engine/evaluate.py` (which folds the
-        # record onto the terminal and, under `require`, mints the violation). Settled through the
-        # module's own vocabulary so an unknown rung from another binary's snapshot degrades to the
-        # conservative one rather than silently to the strictest.
-        self.metric_subject = settle_metric_subject_mode(metric_subject)
-        # AUTO-CAPTURED EXTRA METRICS (see `Settings.auto_extra_metrics`). Read by
-        # `engine/evaluate.py` at the ONE place the `node_evaluated` payload is built, which is the
-        # only place an undeclared number can enter the record. A WRITE-side rung only: the fold
-        # never consults it, so it can never change how an already-recorded run replays.
-        self.auto_extra_metrics = bool(auto_extra_metrics)
-        # Kernel read ALLOW-LIST (off|enforce). Read by `engine/resources.py`, which derives the
-        # allow-list from the operator's declared mounts and stamps it into the child env; the
-        # boundary itself is applied in the child, between fork and exec.
-        self._landlock = str(landlock or "off")
-        # The syscall policy (`runtime/seccomp.py`), stamped beside the allow-list by
-        # `engine/resources.py::_fenced_env`; applied in the child by an exec'd launcher.
-        self._syscall_fence = str(syscall_fence or "off")
         self._run_setup_done = False             # run-level (once) dependency setup guard
         self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
         #   check-then-set on _run_setup_done races without this, launching run_setup (pip) N times
@@ -1694,12 +1349,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._card_claim_refusal_turns = 0
         # Fail loud at START, not mid-sweep: the untrusted tier needs docker, so verify it once
         # here instead of re-discovering (and re-scanning PATH) on every eval's make_docker_wrap.
-        if trust_mode in ("untrusted", "hostile"):
+        if self.trust_mode in ("untrusted", "hostile"):
             import shutil as _sh
             if not _sh.which("docker"):
                 raise EnvironmentRefusal(
-                    f"trust_mode={trust_mode!r} needs the docker CLI to sandbox evals, but it was "
-                    "not found on PATH. Install Docker or use trust_mode='trusted_local'.")
+                    f"trust_mode={self.trust_mode!r} needs the docker CLI to sandbox evals, but it "
+                    "was not found on PATH. Install Docker or use trust_mode='trusted_local'.")
             # Same rule, same place, for the OTHER value that can silently un-harden this tier: a
             # `sandbox_readonly_rootfs` docker cannot mount refuses HERE rather than in the first
             # node's first stage (`readonly_rootfs_argv` raises ConfigRefusal; "" is a no-op).
@@ -1772,22 +1427,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # partition is a pure function of (n_labels, fraction) — identical across resume/replay,
         # no state to persist. Real MLE-bench (kind="mlebench") is graded by the official
         # out-of-process grader, which the engine cannot partition — skipped.
-        self.confirm_seed_base = max(0, int(confirm_seed_base))
-        # THE EVAL NOISE FLOOR (doc 52 row 11). Coerced the way `confirm_seed_base` above is, and
-        # the `< 2` clamp is the SETTING's stated rule rather than a silent one: a single repeat has
-        # no spread, so 1 is off exactly as 0 is, and `_noise_floor_due` never has to re-decide it.
-        _noise_seeds = max(0, int(_opt("eval_noise_seeds")))
-        self.eval_noise_seeds = _noise_seeds if _noise_seeds >= 2 else 0
-        self._holdout_select = bool(holdout_select)
-        self._holdout_top_k = max(1, int(holdout_top_k))
-        self._select_verifier = bool(select_verifier)
-        self._verifier_ci_tie = bool(verifier_ci_tie)
-        self._select_verifier_samples = max(1, int(select_verifier_samples))
-        # The FRACTION defines the split every search metric is scored against, so it must be pinned
-        # in the event log (like trust_gate / holdout_select) — on resume the recorded value is
-        # re-used (see run()), so a changed live setting can't silently make pre/post-resume metrics
-        # incomparable. `_build_holdout_idx` rebuilds the partition from a fraction.
-        self._holdout_fraction = float(holdout_fraction)
         # THE MLE-BENCH SEARCH SPLIT (doc 52 §5.1 row 3, `engine/holdout.py::apply_search_split`):
         # the original assets are kept aside so every (re)build of the partition carves from them.
         self._assets_public: Optional[dict] = None

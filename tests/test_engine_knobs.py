@@ -6,8 +6,10 @@ settle rule, as a non-data descriptor: an instance value always wins, and an obj
 never ran `Engine.__init__` reads the value a real bare Engine settles to. What this file proves:
 
   1. the declaration IS what `__init__` lands — driven over the bare and product option sets, every
-     field moved alone and every falsy spelling the constructor accepts, so a transcription error in a
-     settle rule (a clamp, an `or` fallback, a copy) is red;
+     field moved alone and every falsy spelling the constructor accepts. While `__init__` still
+     spelled each assignment itself (step 4b) this proved the table's transcription; since step 4c
+     lands them through `settle_knobs`, it proves that nothing later in `__init__` re-lands a
+     declared knob with a different rule — the second copy this module exists to prevent;
   2. the declared set and `EXPLICIT_IN_INIT` together are EXACTLY the attributes the fields land on,
      as `tests/test_engine_options.py::attr_by_field` derives them by driving — so a new knob is a
      `Knob` or an explicit attribute with its reason, and the two maps cannot disagree on a name;
@@ -113,6 +115,20 @@ def test_a_knob_is_still_a_plain_attribute_to_everything_that_writes_it(tmp_path
     assert stub._eval_env == {"X": "1"} and LIBRARY_DEFAULTS.eval_env == {}
     assert isinstance(EngineKnobs.__dict__["_train_monitor"], Knob)
     assert Engine._train_monitor is EngineKnobs.__dict__["_train_monitor"], "class access: the Knob"
+
+
+def test_the_researcher_is_stamped_from_the_landed_knobs(tmp_path):
+    """Four knobs are threaded onto the RESEARCHER by `Engine.__init__`, each inside a blind `try`
+    (a toy role may refuse an attribute) — so a stamp that raised, say on a knob local that step 4c
+    removed, would fail silently and the prompt would keep its default. Measured on a throwaway copy:
+    exactly that mutation left the knob tests green. Driven here, both ways."""
+    off = _mk_engine(tmp_path / "off", track_hypotheses=False, memo_verdict_cue=False,
+                     gpu_footprint_cue=False, digest_char_cap=7).researcher
+    assert (off.track_hypotheses, off._memo_verdict_cue, off._gpu_footprint_cue, off._digest_cap) \
+        == (False, False, False, 7)
+    on = _mk_engine(tmp_path / "on").researcher
+    assert (on.track_hypotheses, on._memo_verdict_cue, on._gpu_footprint_cue, on._digest_cap) \
+        == (True, True, True, 0)
 
 
 def test_no_knob_hides_a_reader_registered_as_not_knowable():
