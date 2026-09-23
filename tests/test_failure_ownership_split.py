@@ -1291,12 +1291,14 @@ def test_a_commented_out_stamp_is_seen_by_the_ast_check_and_missed_by_a_substrin
     # BOTH rows that carry it — `node_repaired` and the `node_failed` terminal — because a stamp is
     # only gone when every writer of it is, and a half-mutation would leave this driver proving
     # nothing while looking like it passed.
-    # ALL THREE WRITERS — `node_repaired`, the repair-log row the F8 critic reads, and the
-    # `node_failed` terminal — because a stamp is only gone when every writer of it is, and a
-    # partial mutation would leave this driver looking like it passed while proving nothing. The
-    # count is pinned for exactly that reason: the first draft of this test used a needle with a
-    # trailing comma, silently hit two of the three, and the check stayed correctly green.
-    mutated = _drop_stamp(src, "engine_reason", "a._engine_reason", expect=3)
+    # BOTH WRITERS — `node_repaired` and the `node_failed` terminal — because a stamp is only gone
+    # when every writer of it is, and a partial mutation would leave this driver looking like it
+    # passed while proving nothing. The count is pinned for exactly that reason: the first draft of
+    # this test used a needle with a trailing comma, silently hit two of the three writers there
+    # were then, and the check stayed correctly green. (The third was the live repair-log row the
+    # F8 critic reads; since ENG2-06 it is `repair_ledger_row` of the `node_repaired` payload, so it
+    # has no spelling of its own to drop.)
+    mutated = _drop_stamp(src, "engine_reason", "a._engine_reason", expect=2)
     # the AST check REDDENS: the mapping is gone because a comment is not a node…
     assert "a._engine_reason" not in _payload_stamps(mutated).get("engine_reason", set()), (
         "the AST check cannot see a stamp that stopped being built — it is vacuous")

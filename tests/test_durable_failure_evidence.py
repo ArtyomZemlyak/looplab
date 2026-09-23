@@ -136,8 +136,9 @@ def test_nothing_on_the_prompt_path_reads_the_wide_column():
 
 def test_the_judge_history_still_reads_the_narrow_one():
     """The other half of the same property, stated positively so "nobody reads either" cannot pass
-    it. `_durable_repair_ledger` is what builds the repair history the judge is shown."""
-    src = inspect.getsource(ev._durable_repair_ledger)
+    it. `repair_ledger_row` is what builds each row of the repair history the judge is shown — for
+    the resumed process and, since ENG2-06, for the live one too."""
+    src = inspect.getsource(ev.repair_ledger_row)
     assert 'd.get("error_in"' in src and "error_evidence" not in src
 
 

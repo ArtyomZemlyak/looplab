@@ -169,20 +169,57 @@ def test_the_snapshot_and_the_rollback_ask_come_off_the_same_envelope():
     assert 'getattr(self.developer, "last_rollback_stage"' not in inspect.getsource(evaluate)
 
 
-def test_both_durable_appends_carry_the_key():
-    """One append is the live row and one is the rebuilt-after-resume row.
-
-    `_format_repair_log` renders them identically, so a key on only one shows a single node two
-    different histories depending on whether the process had resumed — the divergence the neighbour
-    key `param_overrides` already carries a comment about.
-    """
+def test_the_live_row_is_the_durable_payload_read_back():
+    """There used to be two appends, a live row and the durable payload, and this test counted the
+    key in both: `_format_repair_log` renders them identically, so a key on only one showed a single
+    node two different histories depending on whether the process had resumed. They DID drift — the
+    live `fix` was the raw triage rationale, the durable one the `_redact`ed copy (review 2026-09-22,
+    ENG2-06). So the live row is now `repair_ledger_row` of the very payload `_eval_apply_repair`
+    appends, and the key has ONE writer: pinned by AST, because the property is which name flows
+    into which call, not what the text says."""
+    import ast
     import inspect
+    import textwrap
+
     from looplab.engine import evaluate
 
-    src = inspect.getsource(evaluate)
-    assert src.count('"budget_exhausted": _budget_exhausted') == 2, (
-        "MUTATION: drop either append's key and a resumed run's repair history stops matching the "
-        "live one")
+    tree = ast.parse(textwrap.dedent(inspect.getsource(evaluate.EvaluateMixin._eval_apply_repair)))
+    appended, derived = set(), set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if (node.func.attr == "append" and len(node.args) == 2
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "EV_NODE_REPAIRED"
+                and isinstance(node.args[1], ast.Name)):
+            appended.add(node.args[1].id)
+        if (node.func.attr == "append" and ast.unparse(node.func.value) == "a.repair_log"
+                and node.args and isinstance(node.args[0], ast.Call)
+                and ast.unparse(node.args[0].func) == "repair_ledger_row"
+                and isinstance(node.args[0].args[0], ast.Name)):
+            derived.add(node.args[0].args[0].id)
+    assert appended and appended == derived, (
+        f"the live row must be read back from the payload the log receives: appended {appended}, "
+        f"live row built from {derived}")
+    assert inspect.getsource(evaluate).count('"budget_exhausted": _budget_exhausted') == 1
+
+
+def test_a_redacted_rationale_reads_the_same_live_and_resumed():
+    """The drift itself, driven: the durable payload carries the `_redact`ed rationale, and both the
+    live row and the resumed ledger now read THAT, so the judge's history is one text."""
+    from looplab.engine.evaluate import _durable_repair_ledger, repair_ledger_row
+    from looplab.engine.crash_repair import _format_repair_log
+
+    payload = dict(node_id=7, generation=0, attempt=1, error_in="Traceback: boom",
+                   rationale="set OPENAI_API_KEY=[REDACTED] and retry", changed=["train.py"],
+                   stages_passed=1, verified="verified", unmet=[], reason="crash",
+                   engine_reason="crash", budget_exhausted="time", edit_calls=3)
+    live = repair_ledger_row(payload, attempts=1)
+    _, resumed, _ = _durable_repair_ledger([_repaired(**{k: v for k, v in payload.items()
+                                                         if k not in ("node_id", "generation")})],
+                                           7, 0)
+    assert resumed == [live]
+    assert _format_repair_log([live]) == _format_repair_log(resumed)
+    assert "[REDACTED]" in live["fix"]
 
 
 # --------------------------------------------------------------------------------------------

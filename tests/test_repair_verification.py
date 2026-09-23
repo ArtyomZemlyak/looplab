@@ -1269,7 +1269,8 @@ def test_repair_verdicts_is_the_single_spelling_across_its_three_sites():
     # Deliberately not a `"inert" not in source` scan — the durable column is spelled `unmet` too,
     # and a negative pin that cannot tell a field name from a verdict value is a pin that will be
     # deleted by whoever it next annoys.
-    assert "REPAIR_VERDICTS" in names_read(ev_mod._durable_repair_ledger)
+    # (`repair_ledger_row` since ENG2-06: the ONE row builder, for the live process and the resumed.)
+    assert "REPAIR_VERDICTS" in names_read(ev_mod.repair_ledger_row)
     fmt = names_read(crash_repair._format_repair_log)
     assert {"REPAIR_INERT", "REPAIR_UNMET"} <= fmt, fmt
     # The one place a verdict may be MINTED is `repair_verify` itself.

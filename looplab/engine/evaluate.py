@@ -608,6 +608,71 @@ def unsettled_eval_invocations(events, node_id: int, generation: int) -> frozens
                      if kind == EV_EVAL_INVOCATION_CLAIMED)
 
 
+def repair_ledger_row(d: dict, *, attempts: int) -> dict:
+    """ONE `node_repaired` payload as the row the repair judge and the F8 critic read.
+
+    THE ONE SPELLING (review 2026-09-22, ENG2-06). The row used to be built twice: here, from the
+    event log, for a resumed process — and by hand in `_eval_apply_repair` for the process that had
+    just written the event, "kept because every field is already in hand". The two drifted exactly
+    where the judge reads: the in-process `fix` was the RAW triage rationale and the durable one the
+    `_redact`ed copy, so a rationale that echoed a secret-shaped token put different bytes in front of
+    the judge before and after a resume — the one property both sites' comments promised. The
+    in-process row is now this function applied to the payload just appended, so the two cannot
+    differ. `attempts` is the running count the ledger falls back to for a row with no ordinal.
+    """
+    n = _durable_int(d.get("attempt"), default=None)
+    row = {"attempt": n if n is not None else attempts,
+           "error": str(d.get("error_in", ""))[-_JUDGE_ERROR_CHARS:],
+           "fix": str(d.get("rationale", ""))[:200],
+           "stages_passed": d.get("stages_passed")}
+    # THE AUTHENTICATED CAUSE, and it is `in`-guarded for the same reason `changed` below is: a
+    # row written before this column existed does not know what its cause was, and telling F8's
+    # critic "(not recorded)" versus silently defaulting it to `crash` is the difference between
+    # the two answers it is being asked to tell apart. `reason` is `_failure_reason`'s
+    # classification, which reads the sandbox's out-of-band watchdog flags and never the stderr
+    # sentinel (`c862045c`) — so it is the one column here the candidate cannot write.
+    # `engine_reason` rides beside it on the same `in`-guard, so a resumed critic reads the
+    # ENGINE's column exactly as an in-process one does. Absent on a pre-2026-08-20 row, where
+    # `reason` was the engine's own answer anyway — `repair_judgment.authenticated_cause` is the
+    # one place that fallback is spelled.
+    if "engine_reason" in d:
+        row["engine_reason"] = str(d.get("engine_reason") or "")
+    if "reason" in d:
+        row["reason"] = str(d.get("reason") or "")
+    if "changed" in d:
+        row["changed"] = list(d.get("changed") or [])
+    # The verification columns are read back the same way and for the same reason, with one
+    # extra rule: an ABSENT `verified` key must stay absent. `repair_verify.inert_streak` reads
+    # "no key" as "not inert" and breaks the streak on it, so a row from before this column
+    # existed — or a `salvage_cause_fix` marker row, which never writes one — can never
+    # terminalize a node on evidence nobody recorded. Coercing it to a default here would put
+    # that decision back in the one place that cannot tell the two apart.
+    if d.get("verified") in REPAIR_VERDICTS:
+        row["verified"] = str(d.get("verified"))
+        row["unmet"] = [str(u) for u in (d.get("unmet") or [])][:12]
+    # WHICH BOUND ENDED THE SESSION, read back under the same absent-means-absent rule as the two
+    # columns above. It was written to the durable row and to the in-process one and read back by
+    # NEITHER — `_format_repair_log` had no branch for it either — so the fact the whole
+    # `last_budget_exhausted` rung exists to deliver (12 of 12 `inert` repairs in the corpus ran
+    # past their wall clock; 0 of the 65 that finished inside it are inert) reached no reader at
+    # all, and a resumed row lost the key outright while both write sites' comments asserted the
+    # two render identically.
+    if d.get("budget_exhausted"):
+        row["budget_exhausted"] = str(d.get("budget_exhausted"))[:32]
+    # The declared-coordinate column, read back under the SAME absent-means-absent rule: this
+    # column is written only when non-empty, so a missing key is either an old row or a repair
+    # that moved nothing, and `_format_repair_log` renders neither. Rows are re-shaped rather
+    # than passed through — an event payload is JSON the engine wrote, but a resumed reader
+    # should not inherit whatever shape a future writer put there.
+    _overrides = [o for o in (d.get("param_overrides") or []) if isinstance(o, dict)]
+    if _overrides:
+        row["param_overrides"] = [
+            {"param": str(o.get("param") or ""), "declared": o.get("declared"),
+             "code": o.get("code"), "file": str(o.get("file") or ""),
+             "line": o.get("line")} for o in _overrides[:PARAM_OVERRIDE_CAP]]
+    return row
+
+
 def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, list[dict], int]:
     """This node's repair ledger as the EVENT LOG records it: (attempts, judge rows, unparseables).
 
@@ -665,55 +730,7 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         if str(d.get("triage_action") or "") != SALVAGE_CAUSE_TRIAGE_ACTION:
             attempts = max(attempts, n) if n is not None else attempts + 1
         unparseable = max(unparseable, _durable_int(d.get("unparseable_repairs")))
-        row = {"attempt": n if n is not None else attempts,
-               "error": str(d.get("error_in", ""))[-_JUDGE_ERROR_CHARS:],
-               "fix": str(d.get("rationale", ""))[:200],
-               "stages_passed": d.get("stages_passed")}
-        # THE AUTHENTICATED CAUSE, and it is `in`-guarded for the same reason `changed` below is: a
-        # row written before this column existed does not know what its cause was, and telling F8's
-        # critic "(not recorded)" versus silently defaulting it to `crash` is the difference between
-        # the two answers it is being asked to tell apart. `reason` is `_failure_reason`'s
-        # classification, which reads the sandbox's out-of-band watchdog flags and never the stderr
-        # sentinel (`c862045c`) — so it is the one column here the candidate cannot write.
-        # `engine_reason` rides beside it on the same `in`-guard, so a resumed critic reads the
-        # ENGINE's column exactly as an in-process one does. Absent on a pre-2026-08-20 row, where
-        # `reason` was the engine's own answer anyway — `repair_judgment.authenticated_cause` is the
-        # one place that fallback is spelled.
-        if "engine_reason" in d:
-            row["engine_reason"] = str(d.get("engine_reason") or "")
-        if "reason" in d:
-            row["reason"] = str(d.get("reason") or "")
-        if "changed" in d:
-            row["changed"] = list(d.get("changed") or [])
-        # The verification columns are read back the same way and for the same reason, with one
-        # extra rule: an ABSENT `verified` key must stay absent. `repair_verify.inert_streak` reads
-        # "no key" as "not inert" and breaks the streak on it, so a row from before this column
-        # existed — or a `salvage_cause_fix` marker row, which never writes one — can never
-        # terminalize a node on evidence nobody recorded. Coercing it to a default here would put
-        # that decision back in the one place that cannot tell the two apart.
-        if d.get("verified") in REPAIR_VERDICTS:
-            row["verified"] = str(d.get("verified"))
-            row["unmet"] = [str(u) for u in (d.get("unmet") or [])][:12]
-        # WHICH BOUND ENDED THE SESSION, read back under the same absent-means-absent rule as the two
-        # columns above. It was written to the durable row and to the in-process one and read back by
-        # NEITHER — `_format_repair_log` had no branch for it either — so the fact the whole
-        # `last_budget_exhausted` rung exists to deliver (12 of 12 `inert` repairs in the corpus ran
-        # past their wall clock; 0 of the 65 that finished inside it are inert) reached no reader at
-        # all, and a resumed row lost the key outright while both write sites' comments asserted the
-        # two render identically.
-        if d.get("budget_exhausted"):
-            row["budget_exhausted"] = str(d.get("budget_exhausted"))[:32]
-        # The declared-coordinate column, read back under the SAME absent-means-absent rule: this
-        # column is written only when non-empty, so a missing key is either an old row or a repair
-        # that moved nothing, and `_format_repair_log` renders neither. Rows are re-shaped rather
-        # than passed through — an event payload is JSON the engine wrote, but a resumed reader
-        # should not inherit whatever shape a future writer put there.
-        _overrides = [o for o in (d.get("param_overrides") or []) if isinstance(o, dict)]
-        if _overrides:
-            row["param_overrides"] = [
-                {"param": str(o.get("param") or ""), "declared": o.get("declared"),
-                 "code": o.get("code"), "file": str(o.get("file") or ""),
-                 "line": o.get("line")} for o in _overrides[:PARAM_OVERRIDE_CAP]]
+        row = repair_ledger_row(d, attempts=attempts)
         rows.append(row)
     return attempts, rows, unparseable
 
@@ -4269,39 +4286,15 @@ class EvaluateMixin:
         # training code can't burn many full trains (the attempt budget bounds the COUNT of
         # repairs, not their cost). The workdir persists across attempts, so a reused
         # checkpoint is valid. (`changed`/`new_deleted` were computed above the append.)
-        # THE ROW THE JUDGE WILL READ on the next attempt — the in-process twin of what
-        # `_durable_repair_ledger` rebuilds from the event just written, kept because every
-        # field is already in hand and re-reading the log per attempt would be a full scan for
-        # nothing. "Which files this fix actually touched" is the column that separates a
-        # repair chain that is working from one that is rewriting the same lines: the
-        # developer's own rationale says what it INTENDED to change, this says what it did.
-        a.repair_log.append({
-            "attempt": a.attempt,
-            "error": a.err[-_JUDGE_ERROR_CHARS:],
-            "fix": str(a.triage.get("rationale", ""))[:200],
-            "changed": _changed_col,
-            "verified": _verification.verdict,
-            "unmet": list(_verification.unmet[:12]),
-            # Same fact, same omit-when-empty rule, same reason as the durable row above:
-            # `_format_repair_log` renders this row and the rebuilt one identically, so a
-            # divergence here would show one node two different histories depending on
-            # whether the process had resumed.
-            **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
-            "edit_calls": _edit_calls,
-            # Same omit-when-empty rule as the durable row above, and for the same reason:
-            # `_format_repair_log` renders this row and the rebuilt one identically, so a
-            # `[]` here and an absent key there would render two different histories for
-            # one node depending on whether the process had resumed.
-            **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
-               if _param_overrides else {}),
-            "reason": a.reason,
-            # THE ENGINE'S OWN COLUMN, beside the one a diagnostician may have chosen, so the
-            # F8 critic's `cause` is a fact and not a verdict — see
-            # `repair_judgment.authenticated_cause` for why `c862045c` makes this mandatory
-            # rather than tidy. The in-process row and the durable one must carry the same
-            # pair, or a chain judged before a resume and after it compares different columns.
-            "engine_reason": a._engine_reason,
-            "stages_passed": a._depth})
+        # THE ROW THE JUDGE WILL READ on the next attempt — `repair_ledger_row` of the payload just
+        # appended, the SAME function `_durable_repair_ledger` applies to it after a resume, so the
+        # judge reads one history for this node whether or not the process restarted (review
+        # 2026-09-22, ENG2-06). It was a hand-built twin "kept because every field is already in
+        # hand", and it drifted: its `fix` was the raw triage rationale where the durable row's is
+        # the `_redact`ed one. "Which files this fix actually touched" is the column that separates
+        # a repair chain that is working from one that is rewriting the same lines: the developer's
+        # own rationale says what it INTENDED to change, `changed` says what it did.
+        a.repair_log.append(repair_ledger_row(repair_payload, attempts=a.attempt))
         # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
         # means the engine compared the bytes and nothing moved: the files this loop is about
         # to re-materialize are the ones already on disk, `_safe_reuse_start` will reuse
