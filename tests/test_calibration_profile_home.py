@@ -207,7 +207,15 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `_EXPECTED_FIELD_COUNT` goes 248 -> 249 and both pins are re-set. INERT for a
 #               calibration replicate on `node_budget_cue`'s ground: `ToyResearcher` renders no
 #               brief. Re-pinned on the same complete-envelope rule.
-_EXPECTED_DIGEST = "sha256:0484650dd0426a4716c91f044ab353c574e3216f00b76c18b1498c9f73405ba8"
+#   2026-09-23  + prompt_truths_judges (review 2026-09-22, Q-1: the facade's pilot, triage judge and
+#               repair critic told only what their call offers and what can arrive). The 'field set
+#               changed too' branch, verified the prescribed way: an AST scan of `Settings`'
+#               annotated assignments against the pre-change tree reports exactly
+#               `['prompt_truths_judges']` added and `[]` removed. `_EXPECTED_FIELD_COUNT` goes
+#               249 -> 250 and both pins are re-set. INERT for a calibration replicate on
+#               `triage_kinds_from_registry`'s ground one entry up (the toy backend builds no judge),
+#               re-pinned anyway because the digest binds the COMPLETE non-variant envelope.
+_EXPECTED_DIGEST = "sha256:9b5dd6a6940082906beb4c1fb0c2265c15ae922221e5f9f83a48aa2d47059263"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -689,7 +697,8 @@ _EXPECTED_DIGEST = "sha256:0484650dd0426a4716c91f044ab353c574e3216f00b76c18b1498
 #   2026-09-23  + repair_context_record: 246 -> 247 — see the digest history above.
 #   2026-09-23  + node_budget_cue (Q-3): 247 -> 248; see the digest history above.
 #   2026-09-23  + propose_brief_fit (Q-3): 248 -> 249; see the digest history above.
-_EXPECTED_FIELD_COUNT = 249
+#   2026-09-23  + prompt_truths_judges (review 2026-09-22, Q-1): 249 -> 250.
+_EXPECTED_FIELD_COUNT = 250
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

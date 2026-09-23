@@ -201,7 +201,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   216 -> 217 (2026-09-23): `propose_brief_fit` (Q-3) — the proposal's working set fitted to its
   //   budget in whole rows with a receipt, each fact once. A row because it changes a prompt and
   //   OFF is the historical bytes; the Python half moved in the same change.
-  assert.equal(Object.keys(schema.fieldByKey).length, 217)
+  //   217 -> 218 (2026-09-23): `prompt_truths_judges` (review 2026-09-22, Q-1) — the facade's three
+  //   judges told only what their call offers and what can arrive. A row on the same ground; the
+  //   Python half moved in the same change.
+  assert.equal(Object.keys(schema.fieldByKey).length, 218)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

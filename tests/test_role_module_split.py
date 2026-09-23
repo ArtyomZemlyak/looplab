@@ -259,8 +259,16 @@ def test_roles_is_no_longer_a_god_module():
     re-export lines the rule above demands for the new `state_brief` helpers. In `state_brief.py`,
     which IS the brief's builder: the fitted header and the belief-grouped board rows. Each is the
     module's own job, so nothing moves out; both caps move to measured + 1.
+
+    `state_brief.py` 523 -> 552 and `roles.py` 836 -> 837 on 2026-09-23 (review 2026-09-22, Q-1):
+    `_state_brief`'s two concept-AUTHORING lines hoisted VERBATIM into named constants beside it,
+    and `drop_concept_authoring`, the one reader that removes them for a caller whose schema has no
+    concept field (the facade's judges, under `Settings.prompt_truths_judges`). What the brief
+    SAYS is this module's whole responsibility, so the text and its one filter stay beside the
+    builder rather than being re-spelled by their consumer; `roles.py` pays for the one re-export
+    line the rule above demands. Both caps move to measured + 1.
     """
-    caps = {"agents/roles.py": 837, "agents/role_prompts.py": 302, "agents/state_brief.py": 524,
+    caps = {"agents/roles.py": 838, "agents/role_prompts.py": 302, "agents/state_brief.py": 553,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

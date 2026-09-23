@@ -362,6 +362,13 @@
           "help": "The crash-triage prompt names exactly the failure kinds the engine’s own registries admit — the tags it hands on for a diagnosis and the answers it reads back (the emit schema’s own enum) — with no count, and asks for a diagnosis on exactly those tags. The hand-written lists had drifted: “one of four” naming an oom the engine never tags, “from these five” over six bullets, and a “Choose from those only.” that forbade an answer the schema accepts. Every kind both versions name keeps its words. It changes a prompt and buys no call: turn it OFF to reproduce the historical prompt byte for byte; a run launched before the field resumes with it OFF."
         },
         {
+          "key": "prompt_truths_judges",
+          "label": "Judges' prompts: only what can arrive and what is offered",
+          "type": "bool",
+          "default": true,
+          "help": "The pilot, the crash-triage judge and the repair critic are told only what their own call offers and what can actually arrive: the triage opening names the kinds the engine tags through this run's repair gate (not an `oom` nothing tags), the watchdog sentence names every watchdog kind with no count, the four workdir scouts are named only when the call holds them, and no judge's brief carries the concept-authoring instruction its answer has no field for. It changes prompts and buys no call: turn it OFF to reproduce the historical prompts byte for byte; a run launched before the field resumes with it OFF."
+        },
+        {
           "key": "novelty_literature",
           "label": "Novelty gates read the literature",
           "type": "bool",

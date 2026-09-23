@@ -20,12 +20,14 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.agents.roles import WrapsDeveloper, bind_state_on, forward_hints
+from looplab.agents.state_brief import drop_concept_authoring
 # `BudgetExceeded` is no longer named here — the propagate-vs-degrade rule moved into
 # `tool_loop.resilient`, which owns it (doc 25 AG-06). Re-exported for any importer that
 # reached it through this module.
 from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted, untrusted_evidence_guard
 from looplab.core.llm import BudgetExceeded  # noqa: F401
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import (FAILURE_REASONS, NON_REPAIRABLE_REASONS, REPAIRABLE_REASONS, Idea,
+                                 Node, RunState)
 from looplab.core.prompts import render
 
 
@@ -67,7 +69,9 @@ class UnifiedAgent(WrapsDeveloper):
                  loop_opts: Optional[dict] = None, repair_developer=None,
                  evidence_envelope: bool = False,
                  diagnosis_hypotheses: bool = False,
-                 triage_kinds_from_registry: bool = False):
+                 triage_kinds_from_registry: bool = False,
+                 prompt_truths_judges: bool = False,
+                 triage_repair_reasons=None):
         # Internal per-stage backends. Named `researcher`/`developer`/`strategist` (not _-prefixed)
         # so the engine's cost roll-up walk (_emit_llm_cost) descends into them and finds every
         # per-stage CostAccountant.
@@ -83,6 +87,16 @@ class UnifiedAgent(WrapsDeveloper):
         # "if the kind tagged above is …") rendered FROM the registries — see `_triage_kind_lists`.
         # Off = the historical prompt, byte for byte; `agents/factory.py` threads the Settings flag.
         self._triage_kinds_from_registry = bool(triage_kinds_from_registry)
+        # Review 2026-09-22, Q-1 (the prompt contract census): the three judges this facade hosts
+        # are told only what their own call offers and what can actually arrive — the triage
+        # opening's tag list, its watchdog sentence and its workdir-scout clause, and the brief's
+        # concept-AUTHORING line none of their schemas can honour. See `_triage_system_default` and
+        # `_judge_brief`. Off = the historical requests, byte for byte; `agents/factory.py` threads
+        # the Settings flag AND the run's own `inline_repair_reasons`, which is the gate a tag passes
+        # before this judge ever sees it (None: the Settings default, `REPAIRABLE_REASONS`).
+        self._prompt_truths_judges = bool(prompt_truths_judges)
+        if triage_repair_reasons is not None:
+            self._triage_repair_reasons = tuple(str(r) for r in triage_repair_reasons)
         self._active_developer = developer
         # THE PROPOSE RECEIPT'S OWN SLOT, initialized so its ABSENCE means something.
         # `roles.researcher_budget_exhausted` falls back to the plain `last_budget_exhausted` for a
@@ -437,8 +451,9 @@ class UnifiedAgent(WrapsDeveloper):
                f"{default_idx}: {legal[default_idx].get('kind')}.") if recommended is not None else ""
         messages = [
             {"role": "system", "content": render(self.prompts, "pilot_system", self._PILOT_SYSTEM)},
-            {"role": "user", "content": (brief + "\nLegal actions:\n" + menu + rec +
-                                         "\nChoose the next action.").strip()},
+            # The brief as a judge reads it (`_judge_brief`; the caller's bytes while off).
+            {"role": "user", "content": (self._judge_brief(brief) + "\nLegal actions:\n" + menu
+                                         + rec + "\nChoose the next action.").strip()},
         ]
         emit_spec = {"type": "function", "function": {
             "name": "choose_action",
@@ -509,6 +524,17 @@ class UnifiedAgent(WrapsDeveloper):
     # `object.__new__` renders the historical triage prompt, not the registry one.
     _triage_kinds_from_registry = False
 
+    # And for the judges' truths (review 2026-09-22, Q-1): OFF, and the repair gate a run gets
+    # when nobody passed one — the Settings default the factory would have handed in.
+    _prompt_truths_judges = False
+    _triage_repair_reasons = REPAIRABLE_REASONS
+
+    def _judge_brief(self, brief: str) -> str:
+        """The state brief as a JUDGE reads it: without the concept-AUTHORING line when
+        `prompt_truths_judges` is on (`state_brief.drop_concept_authoring` — none of the three
+        judges' emit schemas has a concept field), the caller's bytes when it is off."""
+        return drop_concept_authoring(brief) if self._prompt_truths_judges else brief
+
     def _evidence(self, text: str) -> str:
         """The candidate's text as it rides in a judge's user turn: fenced when the envelope is on,
         the historical bytes when it is off."""
@@ -523,10 +549,22 @@ class UnifiedAgent(WrapsDeveloper):
     # TAT-07). `_TRIAGE_SYSTEM` below is still the whole historical prompt, byte for byte —
     # `tests/test_triage_kind_vocabulary.py` pins its digest as measured before the split — and the
     # middle piece is the one `Settings.triage_kinds_from_registry` replaces (`_triage_kind_lists`).
-    _TRIAGE_SYSTEM_HEAD = (
+    #
+    # AND THE HEAD AND TAIL IN PIECES OF THEIR OWN (review 2026-09-22, Q-1), for the same reason one
+    # level down: three more spans have a second alternative spliced at the SAME position under
+    # `Settings.prompt_truths_judges` — the opening's tag list, the watchdog sentence, and the
+    # workdir-scout clause. `_TRIAGE_SYSTEM_HEAD` / `_TRIAGE_SYSTEM_TAIL` are still the historical
+    # pieces byte for byte (`tests/test_judge_prompt_truths.py` pins both digests as measured before
+    # this split); `_triage_system_default` assembles the other alternative.
+    _TRIAGE_HEAD_OPEN = (
         "You are debugging an autonomous ML research loop. One experiment node just FAILED at "
-        "runtime (the error is tagged with its kind: crash, timeout, oom, diverged, stalled, or "
-        "needs_failed). "
+        "runtime (the error is tagged with its kind")
+    # The tag list as it has always read: `oom` — which no producer can tag since 2026-08-20 — and
+    # none of setup/no_metric/drift/expect_failed/check_failed/not_learning, which the default
+    # `inline_repair_reasons` hands this judge. OFF only; ON is `_triage_arriving_kinds`.
+    _TRIAGE_TAGS_HISTORICAL = ": crash, timeout, oom, diverged, stalled, or needs_failed"
+    _TRIAGE_HEAD_ACTIONS = (
+        "). "
         "Decide what to do BEFORE "
         "spending another eval:\n"
         "  - 'repair': the SAME idea is sound — fix the code and re-run in place. Choose this for a "
@@ -534,7 +572,11 @@ class UnifiedAgent(WrapsDeveloper):
         "code was just too slow — reduce compute: fewer estimators/epochs/folds/seeds, early stopping, "
         "a lighter model), AND for an 'oom' (the code was killed for using too much memory — reduce "
         "memory: smaller batch, lighter/smaller model, fewer features or a subsample, lower precision). "
-        "A timeout or oom is NOT evidence the idea is wrong (and an oom usually has no traceback).\n"
+        "A timeout or oom is NOT evidence the idea is wrong (and an oom usually has no traceback).\n")
+    # "Two kinds are the ENGINE's own watchdogs" as it has always read. The engine's watchdog kills
+    # are three (docs/guide/concepts.md: `diverged`/`stalled`/`not_learning`), and a training-monitor
+    # `not_learning` stop reaches this very call. OFF only; ON is `_triage_watchdog_sentence`.
+    _TRIAGE_WATCHDOGS_HISTORICAL = (
         "    Two kinds are the ENGINE's own watchdogs stopping the stage, and both look like an oom "
         "(SIGKILL, no traceback) while needing the OPPOSITE fix — say so explicitly in your "
         "rationale so the repair does not reach for the memory playbook: 'diverged' means the live "
@@ -542,7 +584,8 @@ class UnifiedAgent(WrapsDeveloper):
         "gradient clipping, epsilons in log/sqrt/division, float32 loss, the weight of a new "
         "auxiliary term), and 'stalled' means the stage stayed alive and produced no output at all "
         "(remove the hang, or emit a heartbeat so the next run shows where it stopped). Neither is "
-        "evidence the idea is wrong, and neither is fixed by a smaller batch.\n"
+        "evidence the idea is wrong, and neither is fixed by a smaller batch.\n")
+    _TRIAGE_HEAD_REST = (
         "    'needs_failed' is a DECLARATION mismatch, not a runtime error: the stage said it "
         "reads a path (`needs`) that was not there when it was about to start, so nothing ran and "
         "there is no traceback. Either an earlier stage wrote the artifact somewhere else or this "
@@ -576,6 +619,8 @@ class UnifiedAgent(WrapsDeveloper):
         "fix by editing code.\n"
         "YOU ARE ALSO THE DIAGNOSTICIAN: you say WHAT THE FAILURE WAS (`failure_kind`), and the "
         "tagged kind above is NOT an answer — it is what the engine could see from the outside. ")
+    _TRIAGE_SYSTEM_HEAD = (_TRIAGE_HEAD_OPEN + _TRIAGE_TAGS_HISTORICAL + _TRIAGE_HEAD_ACTIONS
+                           + _TRIAGE_WATCHDOGS_HISTORICAL + _TRIAGE_HEAD_REST)
     # THE TWO KIND LISTS AS SHIPPED ON 2026-08-20 and grown by hand since, kept FROZEN because a run
     # launched on them resumes on them (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`) and a prompt is a
     # contract. Measured against the registries they describe (review 2026-09-22, TAT-07; doc 50
@@ -616,7 +661,7 @@ class UnifiedAgent(WrapsDeveloper):
         "a NON-FINITE or exploded loss (inf, nan, |loss| in the 1e+8 range) — the objective blew "
         "up numerically, which is neither 'not learning' nor a bug. On any other tagged kind the "
         "divergence watchdog was watching and did not fire, and 'diverged' is refused.\n")
-    _TRIAGE_SYSTEM_TAIL = (
+    _TRIAGE_TAIL_BODY = (
         "Choose from those only. When the tagged kind is 'check_failed' and you answer "
         "'not_learning', cite a 'log' source — the loss series is what that claim is ABOUT, and "
         "the check's refusal is the sentence you are contradicting, not evidence for it; an "
@@ -636,11 +681,21 @@ class UnifiedAgent(WrapsDeveloper):
         "log name, or 'error' for the tail spliced below. Quote the one line that settles it. An "
         "answer with no citation is still recorded — this is not a hoop — but a diagnosis nobody "
         "can re-derive is worth much less than one they can.\n"
-        "Consult the run if useful (read the code, find analogous experiments, read the stage logs, "
+        "Consult the run if useful (read the code, find analogous experiments, read the stage logs")
+    # The workdir scouts, named unconditionally as they always were. They reach the loop only when
+    # `failure_diagnosis.diagnosis_tools` built them — `repair_log_tools` on (its LEGACY row is off)
+    # AND a workdir that exists — so OFF, a call without them still names four tools it cannot call.
+    # ON, `_triage_system_default` splices this clause only when the call offers all four.
+    _TRIAGE_SCOUTS_HISTORICAL = (
+        ", "
         "and READ THE PROGRAM THIS EVAL ACTUALLY RAN — `list_dir`/`find_files`/`grep`/`read_file` "
-        "are rooted at the node's own workdir), then call `triage_crash` exactly once with your "
+        "are rooted at the node's own workdir")
+    _TRIAGE_SCOUT_TOOLS = ("list_dir", "find_files", "grep", "read_file")
+    _TRIAGE_TAIL_EMIT = (
+        "), then call `triage_crash` exactly once with your "
         "`action`, your `failure_kind`, your evidence and a one-sentence `rationale`."
     )
+    _TRIAGE_SYSTEM_TAIL = _TRIAGE_TAIL_BODY + _TRIAGE_SCOUTS_HISTORICAL + _TRIAGE_TAIL_EMIT
     _TRIAGE_SYSTEM = _TRIAGE_SYSTEM_HEAD + _TRIAGE_KINDS_HISTORICAL + _TRIAGE_SYSTEM_TAIL
 
     # THE SAME TWO LISTS, RENDERED FROM THE REGISTRIES (`Settings.triage_kinds_from_registry`, ON
@@ -722,14 +777,82 @@ class UnifiedAgent(WrapsDeveloper):
                 + cls._TRIAGE_ANSWER_INTRO
                 + cls._kind_bullets(answerable, cls._TRIAGE_ANSWER_MEANS))
 
-    def _triage_system_default(self, tagged, answerable) -> str:
+    # THE WATCHDOG KINDS AND THEIR WORDS (`Settings.prompt_truths_judges`). The keys are the kinds
+    # the engine's OWN watchdogs stop a stage with — every one an `ENGINE_FINAL_REASONS` member, which
+    # `tests/test_judge_prompt_truths.py` holds, because a diagnosed-only kind here would re-create
+    # the `oom` defect one sentence down — and the order is the order they are named in. The first
+    # two keep their historical words byte for byte. `not_learning`'s are the training monitor's own
+    # account of when it stops a stage FOR REPAIR (`train_monitor.should_monitor_repair`: a `broken`
+    # verdict whose `fault` is the implementation, confidence-gated and trajectory-vetoed), worded
+    # from `TrainingVerdict.fault`'s shipped description.
+    _TRIAGE_WATCHDOG_MEANS = {
+        "diverged": (
+            "the live log reported a non-finite loss/grad_norm repeatedly (stabilise the objective "
+            "— LR, warmup, gradient clipping, epsilons in log/sqrt/division, float32 loss, the "
+            "weight of a new auxiliary term)"),
+        "stalled": (
+            "the stage stayed alive and produced no output at all (remove the hang, or emit a "
+            "heartbeat so the next run shows where it stopped)"),
+        "not_learning": (
+            "the live training judge stopped the stage FOR REPAIR because it read the log as "
+            "wasted and named the IMPLEMENTATION as the fault — a loss that cannot descend as "
+            "written, a normalization or reduction on the wrong axis, a data loader feeding the "
+            "same batch (fix the thing the log shows is wrong)"),
+    }
+
+    def _triage_arriving_kinds(self, engine_kinds) -> list:
+        """The tags that can reach THIS call: every kind the engine itself tags (`engine_kinds` —
+        `ENGINE_FINAL_REASONS` + `DIAGNOSABLE_ENGINE_REASONS`, handed in by `triage_crash` because
+        `agents` reaches `engine` only inside a call), through the run's own repair gate
+        (`inline_repair_reasons`, minus `NON_REPAIRABLE_REASONS`, which is settled before any judge
+        is asked), in the closed vocabulary's order (`FAILURE_REASONS`). A kind the engine cannot
+        tag, or the run does not repair, is never shown to this judge — so it is not named."""
+        engine = set(engine_kinds)
+        gate = set(self._triage_repair_reasons) - set(NON_REPAIRABLE_REASONS)
+        return [r for r in FAILURE_REASONS if r in engine and r in gate]
+
+    @staticmethod
+    def _spoken_list(items, *, conj: str = "or") -> str:
+        """`a, b, or c` — the shape both historical lists in this prompt are written in."""
+        items = list(items)
+        if len(items) <= 1:
+            return "".join(items)
+        return ", ".join(items[:-1]) + f", {conj} " + items[-1]
+
+    def _triage_watchdog_sentence(self, arriving) -> str:
+        """The watchdog sentence naming every watchdog kind that can arrive, each with its words and
+        with no count ("Two kinds are…" was true of an older engine); "" when none can."""
+        kinds = [k for k in self._TRIAGE_WATCHDOG_MEANS if k in arriving]
+        if not kinds:
+            return ""
+        means = self._spoken_list([f"'{k}' means {self._TRIAGE_WATCHDOG_MEANS[k]}" for k in kinds],
+                                  conj="and")
+        return ("    The ENGINE's own watchdogs stop a stage too, and each kind they tag looks like "
+                "an oom (SIGKILL, no traceback) while needing the OPPOSITE fix — say so explicitly "
+                "in your rationale so the repair does not reach for the memory playbook: " + means
+                + ". None of them is evidence the idea is wrong, and none is fixed by a smaller "
+                  "batch.\n")
+
+    def _triage_system_default(self, tagged, answerable, *, engine_kinds=(), offered=()) -> str:
         """The `triage_system` DEFAULT `render()` is handed: the historical prompt, or the same
-        prompt with its two kind lists rendered from the registries. Only the default — an
-        operator's `triage_system.md` override still replaces it whole, in either mode."""
-        if not self._triage_kinds_from_registry:
+        prompt with its two kind lists rendered from the registries (TAT-07), and/or with its
+        opening tag list, watchdog sentence and workdir-scout clause saying what can arrive and what
+        this call offers (`prompt_truths_judges`; `offered` is every tool name the loop will hold).
+        Only the default — an operator's `triage_system.md` override still replaces it whole, in
+        every mode."""
+        if not self._triage_kinds_from_registry and not self._prompt_truths_judges:
             return self._TRIAGE_SYSTEM
-        return (self._TRIAGE_SYSTEM_HEAD + self._triage_kind_lists(tagged, answerable)
-                + self._TRIAGE_SYSTEM_TAIL)
+        kinds = (self._triage_kind_lists(tagged, answerable) if self._triage_kinds_from_registry
+                 else self._TRIAGE_KINDS_HISTORICAL)
+        if not self._prompt_truths_judges:
+            return self._TRIAGE_SYSTEM_HEAD + kinds + self._TRIAGE_SYSTEM_TAIL
+        arriving = self._triage_arriving_kinds(engine_kinds)
+        head = (self._TRIAGE_HEAD_OPEN + (": " + self._spoken_list(arriving) if arriving else "")
+                + self._TRIAGE_HEAD_ACTIONS + self._triage_watchdog_sentence(arriving)
+                + self._TRIAGE_HEAD_REST)
+        scouts = (self._TRIAGE_SCOUTS_HISTORICAL
+                  if set(self._TRIAGE_SCOUT_TOOLS) <= set(offered) else "")
+        return head + kinds + self._TRIAGE_TAIL_BODY + scouts + self._TRIAGE_TAIL_EMIT
 
     def _triage_asked_kinds(self, tagged) -> str:
         """The user turn's "if the kind tagged above is …": the tags the engine hands on for a
@@ -932,7 +1055,7 @@ class UnifiedAgent(WrapsDeveloper):
         from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
                                            DIAGNOSABLE_ENGINE_REASONS,
                                            DIAGNOSED_FAILURE_REASONS, DIAGNOSIS_SUMMARY_CAP,
-                                           EVIDENCE_LOCATOR_CAP,
+                                           ENGINE_FINAL_REASONS, EVIDENCE_LOCATOR_CAP,
                                            EVIDENCE_QUOTE_CAP, EVIDENCE_SOURCES,
                                            FINDINGS_CAP, FINDING_MEANS_CAP,
                                            HYPOTHESES_CAP, HYPOTHESIS_CAUSE_CAP,
@@ -963,14 +1086,27 @@ class UnifiedAgent(WrapsDeveloper):
         # THE KIND LISTS — the historical ones, or both rendered from the two registries imported
         # above (review 2026-09-22, TAT-07; `_triage_kind_lists`). It decides the DEFAULT only, so a
         # `triage_system.md` override still replaces the whole system prompt in either mode.
-        system_default = self._triage_system_default(DIAGNOSABLE_ENGINE_REASONS,
-                                                     DIAGNOSED_FAILURE_REASONS)
+        # …and, under `prompt_truths_judges` (review 2026-09-22, Q-1), the opening's tag list from
+        # every kind the engine tags through the run's repair gate, and the workdir-scout clause only
+        # when this call's loop will actually hold all four scouts. They arrive in the per-call
+        # `tools` and nowhere else (`failure_diagnosis.diagnosis_tools` roots them at the node
+        # workdir; the standing pilot toolset is `core_only` providers), so that is the one toolset
+        # read — and only while the flag is on, so the OFF path does not so much as list a spec.
+        offered: set = set()
+        if self._prompt_truths_judges and tools is not None:
+            offered = {(s.get("function") or {}).get("name") for s in (tools.specs() or [])}
+        system_default = self._triage_system_default(
+            DIAGNOSABLE_ENGINE_REASONS, DIAGNOSED_FAILURE_REASONS,
+            engine_kinds=tuple(ENGINE_FINAL_REASONS) + tuple(DIAGNOSABLE_ENGINE_REASONS),
+            offered=offered)
         messages = [
             {"role": "system", "content": render(self.prompts, "triage_system", system_default)
                                # The evidence guard LAST, or "" — see `_TRIAGE_EVIDENCE_GUARD`.
                                + (self._TRIAGE_EVIDENCE_GUARD if self._evidence_envelope else "")},
             {"role": "user", "content": (
-                (brief + "\n" if brief else "") +
+                # The brief as a judge reads it (`_judge_brief`): the caller's bytes while
+                # `prompt_truths_judges` is off.
+                (self._judge_brief(brief) + "\n" if brief else "") +
                 f"Crashed node {getattr(node, 'id', '?')} (repair attempt {attempt}).\n"
                 + budget + depth + look + facts +
                 # The three candidate-controlled blocks ride inside the fence when the envelope is
@@ -1358,7 +1494,8 @@ class UnifiedAgent(WrapsDeveloper):
                                + (self._REPAIR_CRITIC_EVIDENCE_GUARD
                                   if self._evidence_envelope else "")},
             {"role": "user", "content": (
-                (brief + "\n" if brief else "") +
+                # The brief as a judge reads it (`_judge_brief`; the caller's bytes while off).
+                (self._judge_brief(brief) + "\n" if brief else "") +
                 f"Node {getattr(node, 'id', '?')}"
                 + ("" if attempt is None else f", about to spend repair attempt {attempt}") + ".\n"
                 + self._evidence(trajectory) + "\n"

@@ -106,7 +106,7 @@ def test_neither_module_is_a_god_module_again():
     extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 390),
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 394),
                      ("agents/developer_backends.py", 188),
                      ("adapters/task_schema.py", 231)):
     #
@@ -183,6 +183,13 @@ def test_neither_module_is_a_god_module_again():
     # function-local import of that reader (`agents` reaches `engine` only inside a call). A
     # Settings field threaded into the role it configures, not a second domain: 386 -> 389
     # measured, and the raise pays for exactly those three lines and keeps one line of headroom.
+    #
+    # 390 -> 394, 2026-09-23, review 2026-09-22 Q-1 (the facade's judges told only what their call
+    # offers and what can arrive): the same shape again — TWO keywords at the composition site
+    # (`prompt_truths_judges=judge_prompt_truths_enabled(settings)` and the run's own repair gate,
+    # `triage_repair_reasons=tuple(settings.inline_repair_reasons)`, which is the Settings value the
+    # judge's tag list is rendered through), their one-line why, and the reader joining the existing
+    # function-local import. 389 -> 393 measured; the raise pays for those four lines and keeps one.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

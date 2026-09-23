@@ -271,8 +271,11 @@ def test_the_run_settings_reach_the_prompt_through_the_factory(monkeypatch, case
         snapshot.pop("config_snapshot_schema", None)
         settings = settings_from_snapshot(snapshot)
     else:
+        # `prompt_truths_judges` pinned OFF: it moves the SAME prompt's head and tail (review
+        # 2026-09-22, Q-1), and this test is about the kind lists alone. The two compose — driven in
+        # `tests/test_judge_prompt_truths.py::test_it_composes_with_the_registry_kind_lists`.
         settings = Settings(backend="llm", unified_agent=True,
-                            triage_kinds_from_registry=(case == "on"))
+                            triage_kinds_from_registry=(case == "on"), prompt_truths_judges=False)
     task = load_task(ROOT / "examples" / "code_regression_task.json")
     agent = build_unified_agent(task, settings)
     system, user, _ = _drive(monkeypatch, agent=agent)

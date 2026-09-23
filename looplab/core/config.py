@@ -1769,6 +1769,24 @@ class Settings(BaseSettings):
     # metric, champion, selectability decision or violation: the answer is still read against the
     # same enum by the same `diagnosed_failure_reason` (docs/36).
     triage_kinds_from_registry: bool = True
+    # THE LOOP'S JUDGES ARE TOLD ONLY WHAT THEIR CALL OFFERS AND WHAT CAN ARRIVE (review 2026-09-22,
+    # Q-1, the prompt contract census). Rendered through the shipped methods, the facade's three
+    # judges (`agents/unified_agent.py`: pilot, crash triage, repair critic) disagreed with the code
+    # four ways: the triage opening said the error "is tagged with its kind: crash, timeout, oom,
+    # diverged, stalled, or needs_failed" — `oom` no producer can tag, and six kinds the default
+    # `inline_repair_reasons` hands this judge missing; "Two kinds are the ENGINE's own watchdogs"
+    # while the watchdog kills are three (`not_learning` arrives too); the four workdir scouts were
+    # named on a call that does not hold them (they exist only when `diagnosis_tools` built them);
+    # and all three judges' briefs carried the concept-AUTHORING line (`concept_mode`…) their emit
+    # schemas cannot honour. ON renders each truthfully — the tag list from the engine's own kinds
+    # through the run's repair gate, the watchdog kinds with their words and no count, the scouts
+    # only when offered, the brief without that line (`UnifiedAgent._triage_system_default`,
+    # `_judge_brief`). It changes prompts and buys no call, so `false` is every historical request
+    # byte for byte, every constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). ONE reader:
+    # `engine/failure_diagnosis.py::judge_prompt_truths_enabled`. A `triage_system.md` override still
+    # replaces the system prompt whole. It moves no verdict vocabulary, metric or champion.
+    prompt_truths_judges: bool = True
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint
@@ -3484,6 +3502,14 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # one; the field's comment and `tests/test_propose_brief_fit.py` hold that `false` is the
     # historical prompt, byte for byte.
     "propose_brief_fit": False,
+    # THE JUDGES' PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a) holds.
+    # (b) is the two rows above's DIFFERENT-PROMPT ground: ON, the pilot, the triage judge and the
+    # repair critic are handed different bytes (the triage opening, its watchdog sentence and scout
+    # clause, the judges' briefs), so a resumed run would change what its judges are told mid-log.
+    # (c) is `False`, pointable at every commit before this one;
+    # `tests/test_judge_prompt_truths.py` holds that `false` is every historical request byte for
+    # byte.
+    "prompt_truths_judges": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

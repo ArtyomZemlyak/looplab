@@ -977,6 +977,17 @@ def kinds_from_registry_enabled(settings) -> bool:
     return bool(getattr(settings, "triage_kinds_from_registry", False))
 
 
+def judge_prompt_truths_enabled(settings) -> bool:
+    """`Settings.prompt_truths_judges` as the constructor argument the facade's judges take.
+
+    ONE reader, beside `kinds_from_registry_enabled` because the triage half of what it renders
+    comes from this module's registries (`ENGINE_FINAL_REASONS` + `DIAGNOSABLE_ENGINE_REASONS`,
+    through the run's repair gate). Absent means OFF — the historical requests byte for byte — so a
+    duck-typed stub reads what every constructor default and a pre-field snapshot read.
+    """
+    return bool(getattr(settings, "prompt_truths_judges", False))
+
+
 def evidence_citation_resolves(evidence, workdir) -> bool | None:
     """Does the cited file actually exist inside the node's workdir? `None` when there is nothing
     checkable to resolve (no citation, or a citation into the error text it was handed anyway).

@@ -79,6 +79,7 @@ from looplab.agents.role_prompts import (  # noqa: F401
     footprint_guidance,
 )
 from looplab.agents.state_brief import (  # noqa: F401
+    CONCEPT_AUTHORING_CONTEXT_LINE, CONCEPT_AUTHORING_UNSAFE_LINE, drop_concept_authoring,
     BOARD_PROMPT_CARDS,
     BOARD_PROMPT_SEED_BUDGET_CHARS,
     BOARD_SEED_CHARS_MAX,

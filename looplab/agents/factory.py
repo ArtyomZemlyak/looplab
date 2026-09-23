@@ -117,7 +117,8 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     stage gets its own client + read-only run tools for self-driving action choice."""
     from looplab.agents.strategist import make_strategist
     from looplab.agents.unified_agent import UnifiedAgent
-    from looplab.engine.failure_diagnosis import kinds_from_registry_enabled   # engine: deferred
+    from looplab.engine.failure_diagnosis import (judge_prompt_truths_enabled,   # engine: deferred
+                                                  kinds_from_registry_enabled)
     # The run's ONE accountant is attached to the parent BEFORE this fork, so the split roles and
     # the clients built from the parent afterwards (deep researcher, report writer) meter on one
     # ceiling; the `wrap_up_only` path used to copy first and run two (`run_cost_accountant`).
@@ -213,6 +214,9 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
                         diagnosis_hypotheses=_hypotheses_enabled(settings),
                         # TAT-07 (review 2026-09-22): its prompt's kind lists from the registries.
                         triage_kinds_from_registry=kinds_from_registry_enabled(settings),
+                        # Q-1 (review 2026-09-22): the judges' truths, and the run's repair gate.
+                        prompt_truths_judges=judge_prompt_truths_enabled(settings),
+                        triage_repair_reasons=tuple(settings.inline_repair_reasons),
                         loop_opts=loop_opts_from_settings(settings))   # B1 stuck + C1 plan + C2 summary
 
 
