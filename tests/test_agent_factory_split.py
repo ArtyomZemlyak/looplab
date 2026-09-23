@@ -106,8 +106,8 @@ def test_neither_module_is_a_god_module_again():
     extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 394),
-                     ("agents/developer_backends.py", 188),
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 399),
+                     ("agents/developer_backends.py", 196),
                      ("adapters/task_schema.py", 231)):
     #
     # 2026-08-29, MERGE with master: master's 530 is KEPT and not raised. The merged file is 529
@@ -190,6 +190,16 @@ def test_neither_module_is_a_god_module_again():
     # `triage_repair_reasons=tuple(settings.inline_repair_reasons)`, which is the Settings value the
     # judge's tag list is rendered through), their one-line why, and the reader joining the existing
     # function-local import. 389 -> 393 measured; the raise pays for those four lines and keeps one.
+    #
+    # 394 -> 399 and 188 -> 196, 2026-09-23, review 2026-09-22 Q-1 (the Developer's prompts say only
+    # what holds): `Settings.prompt_truths_developer` reaches the two Developers it configures. In
+    # `developer_backends` that is its ONE reader, `developer_prompt_truths_enabled` (seven lines with
+    # its docstring), and one keyword on the `LLMRepoDeveloper` built there — 187 -> 195 measured. In
+    # this module it is the dataset brief's opt-in, spelled the `runtime_caps` way beside it (a
+    # signature probe nested under the caps it must not contradict, with its one-line why), the
+    # `inspect` import it needs, and the reader joining the module-level import, which wraps —
+    # 393 -> 398 measured. Composition again, not a second domain; both raises pay for exactly the
+    # lines spent and keep one line of headroom.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

@@ -1787,6 +1787,26 @@ class Settings(BaseSettings):
     # `engine/failure_diagnosis.py::judge_prompt_truths_enabled`. A `triage_system.md` override still
     # replaces the system prompt whole. It moves no verdict vocabulary, metric or champion.
     prompt_truths_judges: bool = True
+    # THE DEVELOPER IS TOLD ONLY WHAT HOLDS (review 2026-09-22, Q-1, the same census). Rendered
+    # through the shipped code, the Developer's prompts disagreed with it four ways: the repo STAGES
+    # phase said "`expect` has two parts" and offered `files`/`assert` in prose and schema while
+    # `runtime/command_eval.py::STAGE_EXPECT_KEYS` is the closed triple with the engine-evaluated
+    # `numeric` (doc 52 row 24), which `validate_stages` accepts from that very manifest — and the
+    # write tools' own `declare_stages` described `expect` without it, so a repair re-declaring
+    # the list from that description could drop it; the build/repair system prompt rendered an
+    # EMPTY "CANONICAL COMMANDS" section whenever the README yields no recipe; a refused
+    # `declare_stages`/`done` was bounced as an "idea" with a doubled stop (`drive_tool_loop`'s
+    # Researcher wording); and the dataset brief, right after "any package you import that isn't
+    # installed is auto-installed … rather than downgrading it to sklearn", said "If a library is
+    # missing, fall back to one that is available rather than crashing" — the one instruction
+    # that defeats the install, which fires only on a crash (`engine/evaluate.py`). ON renders
+    # each truthfully (`LLMRepoDeveloper(prompt_truths=)`, `RepoWriteTools(prompt_truths=)`,
+    # `drive_tool_loop(reject_prompt=)`, `DatasetTask.llm_roles(prompt_truths=)`). It changes
+    # prompts and buys no call, so `false` is every historical request byte for byte, every
+    # constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). ONE reader:
+    # `agents/developer_backends.py::developer_prompt_truths_enabled`.
+    prompt_truths_developer: bool = True
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint
@@ -3510,6 +3530,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `tests/test_judge_prompt_truths.py` holds that `false` is every historical request byte for
     # byte.
     "prompt_truths_judges": False,
+    # THE DEVELOPER'S PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a)
+    # holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, the stages phase offers the
+    # `numeric` contract, the build prompts drop an empty section, a refused emit is bounced in other
+    # words and the dataset brief loses a sentence, so a resumed run would change what its Developer
+    # is told mid-log. (c) is `False`, pointable at every commit before this one;
+    # `tests/test_developer_prompt_truths.py` holds that `false` is the historical bytes.
+    "prompt_truths_developer": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

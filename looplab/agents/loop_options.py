@@ -28,11 +28,12 @@ What makes the shape impossible here is a two-part rule, and both halves are enf
      `nudge_prompt` is refused by `coerce` at the boundary instead of colliding at the call.
 
 The split is not arbitrary. `EXPLICIT_ONLY_LOOP_ARGS` are the per-call CALLBACKS (`finalize`,
-`fallback`, `validate`, the three observers, the provenance hook) and the two PROMPT CONTRACTS
-(`nudge_prompt` / `stuck_prompt`) — prompt strings are contracts (CLAUDE.md), so their wording
-belongs at the site that owns it, verbatim, never in a config bundle that a settings file could
-reword. `emit_retries` is there for the same reason as the callbacks: nothing derives it from
-`Settings`, so keeping it out means a caller can always pass it safely beside a spread.
+`fallback`, `validate`, the three observers, the provenance hook) and the PROMPT CONTRACTS
+(`nudge_prompt` / `stuck_prompt` / `reject_prompt`) — prompt strings are contracts (CLAUDE.md),
+so their wording belongs at the site that owns it, verbatim, never in a config bundle that a
+settings file could reword. `emit_retries` is there for the same reason as the callbacks: nothing
+derives it from `Settings`, so keeping it out means a caller can always pass it safely beside a
+spread.
 
 An unknown key is LOUD (`TypeError` naming the key and the valid set) rather than silently carried:
 the bundle used to be a plain dict, so `{"stuck_retries": 3}` — a typo of `stuck_repeat` — travelled
@@ -174,6 +175,10 @@ EXPLICIT_ONLY_LOOP_ARGS: tuple[str, ...] = (
                                                 # bundle-carried value frozen at session start — that
                                                 # freezing is exactly the defect 453c83d9 repaired
     "nudge_prompt", "stuck_prompt",             # prompt CONTRACTS — kept verbatim at the owning site
+    # …and the third, for the same reason: what a refused emit is told names what the CALLER
+    # validated (a stage manifest, a repair's `done`), so its wording lives beside that validator
+    # (review 2026-09-22, Q-1; `adapters/repo_developer.py::LLMRepoDeveloper._reject_kwargs`).
+    "reject_prompt",
     "emit_retries",                             # per-call; nothing derives it from Settings
     # Whether a forced emit on an exit with NO retry turn may skip `validate`. A per-call
     # POLICY that belongs beside the callback it modifies: only the repair session wants it,

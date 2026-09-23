@@ -709,6 +709,48 @@ def empty_build_refusal(*, error, base, base_deleted, files, deleted) -> str:
     return ""
 
 
+def _stages_numeric_bullet() -> str:
+    """The STAGES phase's bullet for `expect.numeric` (review 2026-09-22, Q-1).
+
+    `runtime/command_eval.py::STAGE_EXPECT_KEYS` has carried `numeric` since 2026-09-06 (doc 52 row
+    24) and `validate_stages` accepts it from exactly the manifest that phase writes, yet the phase
+    said "`expect` has two parts" and never named it: the one contract the engine checks WITHOUT a
+    model was never offered to the role that declares the stages. The operators and the cap are read
+    from `runtime/numeric_contract.py`, which enforces them, and the example is a declaration that
+    module's own validator ACCEPTS (`tests/test_developer_prompt_truths.py`) — an example that did
+    not validate would teach a refusal. Its number is tied to the stage's own configuration on
+    purpose: the comment on the `assert` example records what a copied bar cost.
+    """
+    from looplab.runtime.numeric_contract import MAX_STAGE_NUMERIC_RELATIONS, NUMERIC_OPS
+    return ("  • `numeric`: relations the ENGINE checks with no judge, against the LAST value the "
+            "stage prints under each key (as `key: value`, `key=value` or a JSON line) — e.g. a "
+            "stage configured for 30 epochs that prints `epochs_completed: 30` at its end can "
+            "declare [{\"key\": \"epochs_completed\", \"op\": \">=\", \"value\": 30}]. `op` is one "
+            f"of {', '.join(NUMERIC_OPS)}; at most {MAX_STAGE_NUMERIC_RELATIONS} relations are "
+            "checked. A relation that does not hold FAILS the stage, and so does a key the stage "
+            "never prints — so bound only a number THIS stage prints and CONTROLS, never the result "
+            "quality.\n")
+
+
+def _stages_numeric_schema() -> dict:
+    """`expect.numeric` in the `declare_stages` schema: the operator enum IS `NUMERIC_OPS` and the
+    three fields are the ones `validate_numeric` requires, so the schema cannot offer a relation the
+    validator refuses (review 2026-09-22, Q-1)."""
+    from looplab.runtime.numeric_contract import MAX_STAGE_NUMERIC_RELATIONS, NUMERIC_OPS
+    return {"type": "array", "description":
+            "Relations the ENGINE checks against the LAST value this stage prints under each key "
+            f"(`key: value`, `key=value` or a JSON line), at most {MAX_STAGE_NUMERIC_RELATIONS}. "
+            "One that does not hold FAILS the stage, and so does a key the stage never prints — "
+            "bound only a number the stage CONTROLS (e.g. epochs_completed >= the epochs it is "
+            "configured for), never the result quality.",
+            "items": {"type": "object", "properties": {
+                "key": {"type": "string",
+                        "description": "the name the stage prints the value under"},
+                "op": {"type": "string", "enum": list(NUMERIC_OPS)},
+                "value": {"type": "number"}},
+                "required": ["key", "op", "value"]}}
+
+
 class LLMRepoDeveloper:
     """In-house LLM developer for repo tasks — no external coding agent (opencode/aider/…) required.
     It reads the repo with the read-only scout tools and AUTHORS the file(s) the eval needs with
@@ -731,6 +773,9 @@ class LLMRepoDeveloper:
     # The untrusted-evidence fence on every phase's tool results (review 2026-09-22, TAT-02). A CLASS
     # default for the same `__new__` reason: an instance that never ran `__init__` reads OFF.
     _evidence_envelope = False
+    # `Settings.prompt_truths_developer` (review 2026-09-22, Q-1), a CLASS default for the same
+    # reason: OFF renders every phase's historical bytes.
+    _prompt_truths = False
 
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
@@ -741,11 +786,18 @@ class LLMRepoDeveloper:
                  probe: bool = False, probe_timeout_s: float = 60.0,
                  probe_confine: bool = True, probe_max_calls: int = 0, command_runtime=None,
                  step_feedback_command: str = "", established=None,
-                 evidence_envelope: bool = False):
+                 evidence_envelope: bool = False, prompt_truths: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
         self.prompts = prompts
+        # WHAT THE PHASES SAY HOLDS (review 2026-09-22, Q-1, the prompt contract census): the STAGES
+        # phase offers every `expect` part `validate_stages` accepts (`_stages_user`,
+        # `_stages_emit_spec`, and the write tools' own `declare_stages`), the build prompt drops an
+        # EMPTY canonical-commands section, and a refused emit is bounced as what it is
+        # (`_reject_kwargs`). OFF at the constructor because it changes prompts (CLAUDE.md);
+        # `agents/developer_backends.py` passes `Settings.prompt_truths_developer`.
+        self._prompt_truths = bool(prompt_truths)
         # THE FENCE ON WHAT EVERY PHASE'S TOOLS RETURN (`core/evidence.py`; review 2026-09-22,
         # TAT-02): the task repository and this node's staged files through the scouts, the
         # environment, the operator's dev commands run over candidate code, the probe — text the
@@ -984,6 +1036,18 @@ class LLMRepoDeveloper:
                     out.append(f"--- {fp.name} ---\n{snip}")
                     used += len(snip)
         return "\n\n".join(out)
+
+    # WHAT A REFUSED EMIT IS TOLD in every validated phase (review 2026-09-22, Q-1). The loop's own
+    # bounce — "Fix it and call it again with a valid, COMPLETE idea — never an empty one." after
+    # `{err}.` — is the Researcher's, whose emit IS an idea; here it bounced a stage manifest or a
+    # build's `done` as an "idea", and doubled the stop every validator sentence below ends in. The
+    # same words minus that clause; `drive_tool_loop` gives `{err}` its one stop.
+    _REJECT_PROMPT = "Your `{emit}` was NOT accepted: {err} Fix it and call it again."
+
+    def _reject_kwargs(self) -> dict:
+        """`{"reject_prompt": …}` while `prompt_truths` is on; `{}` — no keyword at all, so the loop
+        keeps its historical bounce — while it is off."""
+        return {"reject_prompt": self._REJECT_PROMPT} if self._prompt_truths else {}
 
     def _emit_spec(self) -> dict:
         from looplab.tools._base import fn_spec
@@ -1401,6 +1465,7 @@ class LLMRepoDeveloper:
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
                       validate=validate,
+                      **(self._reject_kwargs() if validate is not None else {}),   # Q-1
                       fallback=lambda m: "", on_budget=self._note_session_budget,
                       on_tool_result=self._established_hook("plan_step"),
                       **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
@@ -1612,7 +1677,11 @@ class LLMRepoDeveloper:
                                                       "this does not). Assert what the stage "
                                                       "CONTROLS; a numeric bar you have not measured "
                                                       "on this data is a guess that fails correct "
-                                                      "artifacts — print such a quantity instead."}}}},
+                                                      "artifacts — print such a quantity instead."},
+                                           # The third part `validate_stages` accepts, offered
+                                           # with `prompt_truths` (review 2026-09-22, Q-1).
+                                           **({"numeric": _stages_numeric_schema()}
+                                              if self._prompt_truths else {})}}},
                             "required": ["name", "command"]}}},
                         ["stages"])
 
@@ -2053,8 +2122,13 @@ class LLMRepoDeveloper:
             "GIVE EVERY STAGE AN `expect` — this is what makes a stage's success mean something. A stage "
             "that exits 0 has proved nothing: a mining stage that covered 1.2% of the queries exits 0 "
             "exactly like one that covered 100%, and the next stage consumed the 1.2% as if it were "
-            "whole (this happened, and the node's whole result was meaningless). `expect` has two parts "
-            "and you should usually give both:\n"
+            "whole (this happened, and the node's whole result was meaningless). "
+            # "TWO PARTS" STOPPED BEING TRUE on 2026-09-06, when `numeric` joined
+            # `STAGE_EXPECT_KEYS` (review 2026-09-22, Q-1): with `prompt_truths` the sentence states
+            # no count and the third part gets its bullet below; OFF keeps the historical bytes.
+            + ("`expect` has the parts below; you should usually give `files` and `assert`:\n"
+               if self._prompt_truths else
+               "`expect` has two parts and you should usually give both:\n") +
             "  • `files`: the workdir-relative paths this stage WRITES. The engine checks after the "
             "stage that each exists, is non-empty, and was written by THIS run of the stage.\n"
             "  • `assert`: ONE line stating what this stage's success MEANS, phrased so it can be "
@@ -2081,6 +2155,10 @@ class LLMRepoDeveloper:
             # stage that mines 1 % still fails this loudly, which is the whole point of `expect` two
             # paragraphs up. The sentence below says the rule outright, because an example alone is
             # what got copied last time.
+            #
+            # The THIRD part's bullet splices in here, after the assert example this comment is
+            # about and before the rule it states (review 2026-09-22, Q-1; `_stages_numeric_bullet`).
+            + (_stages_numeric_bullet() if self._prompt_truths else "") +
             "A numeric bar you have NOT measured on THIS data is a guess, and a guess in an `assert` "
             "fails stages whose artifact is correct. Assert the property the stage CONTROLS (every "
             "row has its negatives; the checkpoint exists; the file covers the ids it claims) and "
@@ -2185,6 +2263,7 @@ class LLMRepoDeveloper:
                 self.client, read_only, messages, self._stages_emit_spec(),
                 label="Developer·stages", next_label="the plan & implement phases",
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
+                **self._reject_kwargs(),                 # Q-1: a manifest is not an "idea"
                 on_budget=self._note_session_budget,
                 on_tool_result=self._established_hook("stages"),
                 **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
@@ -2251,7 +2330,8 @@ class LLMRepoDeveloper:
         write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables,
                                operator_stages=bool(op_stages),
                                data_mounts=getattr(self, "_data_mounts", None),
-                               time_budget=self._eval_time_budget())
+                               time_budget=self._eval_time_budget(),
+                               prompt_truths=self._prompt_truths)   # Q-1: its `declare_stages` text
         if base is not None or base_deleted is not None:
             # An EXPLICIT base is the node's OWN solution — the parent's (improve/refine via
             # implement_from) or the failing node's (repair via repair_from). Pre-load it so untouched
@@ -2273,7 +2353,11 @@ class LLMRepoDeveloper:
             + self.brief + "\n\n"
             + self._system_body(render)
             + operational_attention_points() + "\n\n"
-            + _REPO_DEV_COMMANDS_HEADER + self._recipes() + "\n\n"
+            # CONDITIONAL LIKE THE RESULTS HEADER BELOW once `prompt_truths` is on (review
+            # 2026-09-22, Q-1): unconditionally, a README with no recipe rendered a header over
+            # nothing. OFF keeps that empty section byte for byte.
+            + ((_REPO_DEV_COMMANDS_HEADER + _recipes + "\n\n")
+               if (_recipes := self._recipes()) or not self._prompt_truths else "")
             + ((_REPO_DEV_RESULTS_HEADER + _results + "\n\n")
                if (_results := self._results_context()) else "")
             + _REPO_DEV_SOURCE_HEADER + self._repo_context())
@@ -2455,6 +2539,7 @@ class LLMRepoDeveloper:
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
                           finalize=_finish, validate=_validate_repair,
+                          **self._reject_kwargs(),       # Q-1: a repair's `done` is not an "idea"
                           on_tool_result=self._established_hook("repair" if error else "implement"),
                           # THE ONE CALLER THAT OPTS IN. On an exit with no turn left, bouncing this
                           # summary only drops it and falls to the `lambda m: ""` below — which
@@ -2698,6 +2783,7 @@ class LLMRepoDeveloper:
                       label="Developer·implement", handoff=False,
                       finalize=lambda a: (a or {}).get("summary", ""),
                       validate=validate_build,
+                      **self._reject_kwargs(),                 # Q-1: a build's `done` is not an "idea"
                       fallback=lambda m: "", on_budget=self._note_session_budget,
                       on_tool_result=self._established_hook("implement"),
                       **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off

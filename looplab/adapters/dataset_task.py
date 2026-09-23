@@ -244,7 +244,7 @@ class DatasetTask(BaseModel):
         return (DatasetResearcher(seed=self.seed),
                 DatasetBaselineDeveloper(self._primary_path()))
 
-    def _brief(self, runtime_caps: Optional[str] = None) -> str:
+    def _brief(self, runtime_caps: Optional[str] = None, prompt_truths: bool = False) -> str:
         higher = self.direction == "max"
         sense = "HIGHER is better" if higher else "LOWER is better"
         objective = ("maximize" if higher else "minimize")
@@ -275,6 +275,17 @@ class DatasetTask(BaseModel):
                            f"that {sense} ({orient_hint}).")
         caps = runtime_caps or ("You may use numpy, pandas and scikit-learn plus the Python standard "
                                 "library; CPU only, no network.")
+        # THE LAST SENTENCE CONTRADICTED THE CAPS whenever they promise the auto-install (review
+        # 2026-09-22, Q-1): "rather than downgrading it to sklearn just to avoid an import", then
+        # "fall back to one that is available rather than crashing". The install fires only on a
+        # CRASH (`engine/evaluate.py`), so a script that obeys the second catches the ImportError,
+        # never crashes, and silently runs the downgrade the first forbids. With `prompt_truths`
+        # the line goes exactly when the caps hold that promise; without it, and on the offline
+        # stack where a missing package really cannot arrive, it stays byte for byte.
+        from looplab.core.hardware import AUTO_INSTALL_PROMISE
+        fallback = ("" if prompt_truths and AUTO_INSTALL_PROMISE in caps else
+                    " If a library is missing, fall back to one that is available rather than "
+                    "crashing.")
         return (
             f"You are an ML/DS agent. Goal: {goal}\n"
             f"The dataset is on local disk (read it directly by its absolute path; do NOT assume it is "
@@ -286,16 +297,17 @@ class DatasetTask(BaseModel):
             f"{caps}\n"
             'Print EXACTLY one final line of JSON: {"metric": <float>'
             + (', "metric_name": "<name>"' if not self.metric else "")
-            + "}. Print nothing after that line. If a library is missing, fall back to one that is "
-            "available rather than crashing.")
+            + "}. Print nothing after that line." + fallback)
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call",
-                  runtime_caps: Optional[str] = None):
+                  runtime_caps: Optional[str] = None, prompt_truths: bool = False):
+        """`prompt_truths` is `Settings.prompt_truths_developer`, which `make_roles` passes because
+        this signature accepts it (the `runtime_caps` opt-in's shape); OFF is the historical brief."""
         hint = ("Propose the next concrete modeling approach to try on this dataset (as a short "
                 "rationale) — e.g. a model family, feature engineering, or a regularization change. "
                 "Leave params empty; the Developer writes the code from your rationale.")
         return (LLMResearcher(client, space_hint=hint, bounds=None, parser=parser),
-                LLMDeveloper(client, brief=self._brief(runtime_caps)))
+                LLMDeveloper(client, brief=self._brief(runtime_caps, prompt_truths=prompt_truths)))
 
     def external_fallback_uses_llm(self) -> bool:
         return True  # output validation retains the script-writing LLMDeveloper

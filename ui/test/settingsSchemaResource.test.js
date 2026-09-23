@@ -204,7 +204,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   217 -> 218 (2026-09-23): `prompt_truths_judges` (review 2026-09-22, Q-1) — the facade's three
   //   judges told only what their call offers and what can arrive. A row on the same ground; the
   //   Python half moved in the same change.
-  assert.equal(Object.keys(schema.fieldByKey).length, 218)
+  //   218 -> 219 (2026-09-23): `prompt_truths_developer` (review 2026-09-22, Q-1) — the
+  //   Developer's prompts say only what holds. A row on the same ground; the Python half moved in
+  //   the same change.
+  assert.equal(Object.keys(schema.fieldByKey).length, 219)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

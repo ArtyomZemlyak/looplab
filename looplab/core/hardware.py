@@ -416,6 +416,14 @@ def detect_gpu() -> str | None:
     return name
 
 
+#: The promise `runtime_capabilities_brief(auto_install=True)` makes, named ONCE so a brief that must
+#: not contradict it asks for it here rather than re-spelling it (review 2026-09-22, Q-1:
+#: `adapters/dataset_task.py::DatasetTask._brief` drops its fall-back-on-a-missing-library line
+#: exactly when the caps it carries hold this sentence).
+AUTO_INSTALL_PROMISE = ("any package you import that isn't installed is auto-installed and the run "
+                        "retried")
+
+
 def runtime_capabilities_brief(*, auto_install: bool, gpu: str | None = None) -> str:
     """The 'what you may use' sentence for a task brief, honest about libraries + hardware.
 
@@ -429,8 +437,8 @@ def runtime_capabilities_brief(*, auto_install: bool, gpu: str | None = None) ->
     hw = (f"a GPU is available ({gpu}); use it when your framework supports it (e.g. torch.cuda)"
           if gpu else "no GPU detected, so assume CPU")
     return ("You may use numpy, pandas and scikit-learn AND deep-learning / gradient-boosting "
-            "frameworks (torch, xgboost, lightgbm, catboost): any package you import that isn't "
-            "installed is auto-installed and the run retried, so build the model the idea actually "
+            "frameworks (torch, xgboost, lightgbm, catboost): " + AUTO_INSTALL_PROMISE + ", so "
+            "build the model the idea actually "
             "calls for (e.g. a real neural network with the proposed architecture) rather than "
             f"downgrading it to sklearn just to avoid an import. Hardware: {hw}. No internet for "
             "downloading data, but missing Python packages are installed for you.")

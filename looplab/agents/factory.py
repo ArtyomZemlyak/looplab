@@ -18,6 +18,7 @@ import here would close the cycle into an ImportError at startup — guarded by
 """
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 
 from looplab.core.evidence import envelope_enabled
@@ -38,7 +39,8 @@ from looplab.agents.providers import _make_abstractor, _memora_cache_path, _shar
 # `agents/providers.py`'s is, and on the same condition: it keeps every `search`/`tools`/`agents`
 # import function-local, so the cycle stays exactly as open as before.
 from looplab.agents.developer_backends import (  # noqa: F401
-    _agent_model, best_of_n_developer, external_cli_developer, in_house_repo_developer)
+    _agent_model, best_of_n_developer, developer_prompt_truths_enabled, external_cli_developer,
+    in_house_repo_developer)
 from looplab.core.prompts import PromptStore
 
 if TYPE_CHECKING:                      # `adapters.tasks` re-exports from HERE, so a runtime import
@@ -264,6 +266,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     _kw = {"parser": settings.llm_parser}
     if _caps is not None:
         _kw["runtime_caps"] = _caps
+        # Q-1: a brief that must not contradict those caps opts in the same way (`DatasetTask`).
+        if "prompt_truths" in inspect.signature(task.llm_roles).parameters:
+            _kw["prompt_truths"] = developer_prompt_truths_enabled(settings)
     researcher, developer = task.llm_roles(client, **_kw)
 
     # A cli_overrides hyperparameter-search RepoTask (`params` set) is a NO-code-edit mode: the

@@ -921,6 +921,21 @@ def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> N
         pass
 
 
+def _reject_text(template: str, emit_name: str, err) -> str:
+    """A caller's `reject_prompt` with `{emit}` and `{err}` filled — `str.replace`, never
+    `str.format`, because a validator's sentence carries JSON braces (`validate_numeric`'s own
+    example does) — and `{err}` ending in exactly ONE stop.
+
+    `{err}` is filled LAST so nothing inside the refusal is ever read as a placeholder. The stop is
+    the whole reason this is a function: the default bounce appended `.` to a validator sentence,
+    and every repo-Developer validator already ends in one, so each bounce read "…itself.. Fix it"
+    (review 2026-09-22, Q-1)."""
+    sentence = str(err).rstrip()
+    if not sentence.endswith((".", "!", "?")):
+        sentence += "."
+    return template.replace("{emit}", emit_name).replace("{err}", sentence)
+
+
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int | None = None,
                     time_budget_s: float = 0.0, cost_budget_usd: float = 0.0,
@@ -934,7 +949,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     nudge_prompt: str = "", stuck_prompt: str = "", budget_note=None,
                     validate=None, emit_retries: int = 2, emit_after: int = 0, emit_force: int = 0,
                     terminal_salvage: bool = False, tool_result_label: str = "",
-                    read_loop_nudge_after: int = 25):
+                    read_loop_nudge_after: int = 25, reject_prompt: str = ""):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -997,6 +1012,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         via these instead of inheriting the generic default. `stuck_prompt` may contain a literal
         `{reason}` placeholder (substituted via `str.replace`, NOT `str.format`, so prompt wording
         with other literal braces — JSON examples etc. — is safe); empty ("") = the default wording.
+      - `reject_prompt` (optional): the caller's wording for bouncing an emit its `validate`
+        refused, with `{emit}` and `{err}` substituted the same `str.replace` way. The default was
+        written for the Researcher — "a valid, COMPLETE idea — never an empty one", after
+        `{err}.` — so a caller validating anything else (a stage manifest, a repair's `done`) says
+        what it refused here instead (review 2026-09-22, Q-1). `{err}` is given exactly ONE final
+        stop: the default's `{err}.` doubled every validator sentence that already ended in one.
 
     Termination under "unlimited": when the model answers WITHOUT calling a tool (it considers
     itself done), we FORCE the structured emit immediately (`_force_emit`) and finish — so a prose
@@ -1317,9 +1338,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                         # get their tool results (no dangling tool_call_id) and the NEXT turn re-prompts.
                         emit_rejects += 1
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                         "content": f"Your `{emit_name}` was NOT accepted: {err}. Fix it "
-                                                    "and call it again with a valid, COMPLETE idea — "
-                                                    "never an empty one."})
+                                         "content": (_reject_text(reject_prompt, emit_name, err)
+                                                     if reject_prompt else
+                                                     f"Your `{emit_name}` was NOT accepted: {err}. Fix it "
+                                                     "and call it again with a valid, COMPLETE idea — "
+                                                     "never an empty one.")})
                         continue
                 # `messages` IS LEFT INCONSISTENT HERE, deliberately: an accepted emit returns at
                 # once, so the emit's own tool_call_id — and any sibling tool_calls listed AFTER it in

@@ -39,6 +39,13 @@ if TYPE_CHECKING:                      # `adapters.tasks` re-exports through the
     from looplab.adapters.tasks import TaskAdapter   # runtime import here would be a cycle.
 
 
+def developer_prompt_truths_enabled(settings) -> bool:
+    """`Settings.prompt_truths_developer` (review 2026-09-22, Q-1), the ONE reader for both Developers
+    it reaches — the repo Developer built below and the dataset brief `make_roles` asks the task for.
+    An object without the field (a pre-field snapshot's restore fills it OFF) reads OFF."""
+    return bool(getattr(settings, "prompt_truths_developer", False))
+
+
 def _agent_model(backend: str, model: str) -> str:
     """Map our model id to the agent's provider/model string for a local Ollama model."""
     if backend == "aider":
@@ -93,7 +100,8 @@ def in_house_repo_developer(task: TaskAdapter, settings, client, *, param_search
         probe_confine=getattr(settings, "developer_probe_confine", True), probe_max_calls=getattr(settings, "developer_probe_max_calls", 0),  # noqa: E501
         # Snapshot the eval trust tier here; the role/tool never reads live Settings.
         command_runtime=DeveloperCommandRuntime.from_settings(settings),
-        evidence_envelope=envelope_enabled(settings))   # TAT-02: every phase's tool results fenced
+        evidence_envelope=envelope_enabled(settings),   # TAT-02: every phase's tool results fenced
+        prompt_truths=developer_prompt_truths_enabled(settings))   # Q-1: its prompts say what holds
 
 
 def external_cli_developer(task: TaskAdapter, settings, developer, *, param_search: bool,

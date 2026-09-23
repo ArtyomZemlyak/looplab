@@ -369,6 +369,13 @@
           "help": "The pilot, the crash-triage judge and the repair critic are told only what their own call offers and what can actually arrive: the triage opening names the kinds the engine tags through this run's repair gate (not an `oom` nothing tags), the watchdog sentence names every watchdog kind with no count, the four workdir scouts are named only when the call holds them, and no judge's brief carries the concept-authoring instruction its answer has no field for. It changes prompts and buys no call: turn it OFF to reproduce the historical prompts byte for byte; a run launched before the field resumes with it OFF."
         },
         {
+          "key": "prompt_truths_developer",
+          "label": "Developer's prompts: true to the manifest, the tools and the install",
+          "type": "bool",
+          "default": true,
+          "help": "The Developer's prompts say only what holds: the repo stages phase offers every stage `expect` part the engine checks (files, assert AND the numeric relations it evaluates with no judge — not \"two parts\"), in prose, in its schema and in the write tools' `declare_stages`; an empty canonical-commands section is not rendered; a refused `declare_stages`/`done` is not bounced as an \"idea\"; and the dataset brief no longer tells a script to fall back on a missing library right after promising it is auto-installed. It changes prompts and buys no call: turn it OFF to reproduce the historical prompts byte for byte; a run launched before the field resumes with it OFF."
+        },
+        {
           "key": "novelty_literature",
           "label": "Novelty gates read the literature",
           "type": "bool",

@@ -315,9 +315,18 @@ class RepoWriteTools:
     just like an external coding agent's diff. The SAME gates are enforced here so the model gets
     immediate feedback (a refused write) instead of having the edit silently dropped downstream."""
 
+    # A CLASS default for the `__new__` reason the repo Developer's flags carry one: an instance that
+    # never ran `__init__` renders the historical `declare_stages` text (review 2026-09-22, Q-1).
+    _prompt_truths = False
+
     def __init__(self, surface, protected, prefixes=None, editables=None,
-                 operator_stages: bool = False, data_mounts=None, time_budget=None):
+                 operator_stages: bool = False, data_mounts=None, time_budget=None,
+                 prompt_truths: bool = False):
         self.files: dict[str, str] = {}
+        # `Settings.prompt_truths_developer`, handed down by the repo Developer that builds this
+        # (review 2026-09-22, Q-1): ON, `declare_stages`' description names every `expect` part
+        # `validate_stages` accepts. OFF — this default, and a pre-field run — is the historical text.
+        self._prompt_truths = bool(prompt_truths)
         # HOW MANY TIMES THE MODEL REACHED FOR THE WRITE SURFACE, refusals and no-op edits INCLUDED.
         # `self.files` above is the RESULT; this is the ATTEMPT, and the two answer different
         # questions. Measured across every inert repair with spans (v11 x2, v13 x2): ZERO edit-like
@@ -460,7 +469,13 @@ class RepoWriteTools:
                      {"stages": {"type": "array", "items": {"type": "object"}, "description":
                                  "ordered preceding stages, each {name, command:[argv...], timeout?, "
                                  "check?, needs?:[input paths this stage READS], "
-                                 "expect?:{files:[output paths this stage WRITES], assert?}, "
+                                 "expect?:{files:[output paths this stage WRITES], assert?"
+                                 # The third `expect` part (review 2026-09-22, Q-1): a repair that
+                                 # re-declares the FULL list from this shape would otherwise drop
+                                 # a `numeric` contract the stages phase declared.
+                                 + (", numeric?:[{key, op, value} relations on a value the stage "
+                                    "PRINTS]" if self._prompt_truths else "")
+                                 + "}, "
                                  "role?:'training' on the ONE stage that runs the training loop, "
                                  "which lets the watchdog stop it early when it is provably broken}"}},
                      ["stages"]),

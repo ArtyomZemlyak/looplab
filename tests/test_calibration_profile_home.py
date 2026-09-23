@@ -215,7 +215,17 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               249 -> 250 and both pins are re-set. INERT for a calibration replicate on
 #               `triage_kinds_from_registry`'s ground one entry up (the toy backend builds no judge),
 #               re-pinned anyway because the digest binds the COMPLETE non-variant envelope.
-_EXPECTED_DIGEST = "sha256:9b5dd6a6940082906beb4c1fb0c2265c15ae922221e5f9f83a48aa2d47059263"
+#   2026-09-23  + prompt_truths_developer (review 2026-09-22, Q-1: the repo Developer's stage
+#               `expect` contract rendered from `STAGE_EXPECT_KEYS`, no empty commands section, a
+#               refused emit not called an "idea", the dataset brief without the line that defeats
+#               the auto-install). The 'field set changed too' branch, verified the prescribed way:
+#               an AST scan of `Settings`' annotated assignments against the pre-change tree reports
+#               exactly `['prompt_truths_developer']` added and `[]` removed.
+#               `_EXPECTED_FIELD_COUNT` goes 250 -> 251 and both pins are re-set. INERT for a
+#               calibration replicate: the profile's toy backend builds the task's own roles (no
+#               repo Developer, no dataset brief), re-pinned anyway because the digest binds the
+#               COMPLETE non-variant envelope.
+_EXPECTED_DIGEST = "sha256:0762650041cd609a637597feb5eada5d8878386380f020c220b417efc2c9501f"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -698,7 +708,8 @@ _EXPECTED_DIGEST = "sha256:9b5dd6a6940082906beb4c1fb0c2265c15ae922221e5f9f83a48a
 #   2026-09-23  + node_budget_cue (Q-3): 247 -> 248; see the digest history above.
 #   2026-09-23  + propose_brief_fit (Q-3): 248 -> 249; see the digest history above.
 #   2026-09-23  + prompt_truths_judges (review 2026-09-22, Q-1): 249 -> 250.
-_EXPECTED_FIELD_COUNT = 250
+#   2026-09-23  + prompt_truths_developer (review 2026-09-22, Q-1): 250 -> 251.
+_EXPECTED_FIELD_COUNT = 251
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
