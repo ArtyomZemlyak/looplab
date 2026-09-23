@@ -37,6 +37,21 @@ _MAX_VERIFICATION_TEXT = 24_000
 _MAX_VERIFICATION_VERDICTS = 64
 _MAX_ADVISORY_COUNT = (1 << 63) - 1
 _VERDICTS = frozenset({"supported", "unsupported", "unclear", "cited"})
+# WHICH QUESTION a verdict answered — `trust/memo_verify.py::VERDICT_KINDS` imports this (a PUBLIC
+# name, so the cross-package import needs no private-seam declaration) rather than
+# spelling it again, because the WRITER and the sanitizer that persists it must agree and they sit in
+# different packages (`trust` may import `core`; `core` may not import `trust`).
+#
+# It lives here at all because of a defect this file caused: the row projection below rebuilds every
+# verdict as EXACTLY `{statement, verdict, note, evidence}`, so a field added at the writer is
+# dropped at the persist boundary with nothing going red. `kind` shipped that way on 2026-09-18 and
+# the live `e5small-dr-unified-v14` showed it: 8 verdicts on disk, all `(unstamped)`.
+#
+# DEFAULTED, NOT DROPPED, when absent: an old log's row reads `citation`, the conservative direction
+# — claiming a verdict judged SUPPORT when the field saying so is missing would promote every
+# historical footnote defect into the most decisive gap for `trust/verifier_routing.py`.
+VERDICT_KINDS = frozenset({"citation", "support"})
+DEFAULT_VERDICT_KIND = "citation"
 _ADVISORY_REF_NAMESPACES = frozenset({"memo", "lesson", "claim"})
 _ADVISORY_REF_PREFIXES = {
     namespace: f"{namespace}:sha256:" for namespace in _ADVISORY_REF_NAMESPACES
@@ -548,8 +563,10 @@ def _verification(value, budget: list[int], items: list[int], *, env):
                     and len(evidence["node_refs"]) == len(raw_nodes)
                     and len(evidence["url_identities"]) == len(raw_urls)
                 )
+        raw_kind = str(row.get("kind") or "").strip().lower()
+        kind = raw_kind if raw_kind in VERDICT_KINDS else DEFAULT_VERDICT_KIND
         verdicts.append({"statement": statement, "verdict": verdict, "note": note,
-                         "evidence": evidence})
+                         "kind": kind, "evidence": evidence})
 
     return {
         "verdicts": verdicts,

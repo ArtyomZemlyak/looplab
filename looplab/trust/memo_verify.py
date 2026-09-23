@@ -28,6 +28,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.advisory_payloads import VERDICT_KINDS as _VERDICT_KINDS_CORE
 from looplab.core.advisory_payloads import (
     MAX_RESEARCH_CLAIMS,
     PROVENANCE_COVERAGE_MAX_STATEMENTS,
@@ -420,6 +421,34 @@ def _cited_nodes_note(nids, state) -> str:
     return " and ".join(parts) or f"cited experiments do not exist: {list(nids)}"
 
 
+# WHAT A VERDICT IS ABOUT, and it is a FIELD because no out-of-band channel existed.
+#
+# `verify_memo` merges two passes into one `verdicts` list: the deterministic layer answers about the
+# CITATION (did anything resolve at all?) and the LLM layer answers about the SUPPORT (does the
+# evidence carry the claim?). Both write the word `unsupported`, and until 2026-09-18 nothing on the
+# row said which question it answered — so a reader had to guess from `note` text this package
+# writes itself, which is the channel `engine/failure_diagnosis.py` forbids reading a held fact
+# through.
+#
+# MEASURED, which is why the field exists rather than a heuristic. Over the 244 memos on this box:
+# 1421 `unsupported` verdicts, whose notes are dominated by citation defects (`no evidence cited`
+# 340, `cited source URL was not consulted` 116, `cited experiments do not exist: …` ~90). The
+# obvious structural proxy — "does the row carry an `evidence` receipt?" — DOES NOT SEPARATE them:
+# 659 of the 1421 have a non-empty receipt AND a citation-shaped note, and the proxy agrees with the
+# note on only 686 of 1421 (48.3%), i.e. no better than chance. And the cost of having no field is
+# concrete: replaying `trust/verifier_routing.py`'s router over those same memos routes **233 of 237
+# to `retrieve`** (98.3%), because a citation defect is indistinguishable from missing coverage —
+# a directed revision loop would have spent every round re-citing.
+#
+# Stamped at the site that DECIDES it: the deterministic branches know exactly which check failed,
+# and the LLM upgrade knows it is answering the other question. `tests/test_verdict_kind.py`
+# re-derives this set from both writers.
+# IMPORTED, not re-spelled: the sanitizer in `core/advisory_payloads.py` validates the field against
+# this same set before persisting it, and two copies of a vocabulary that must agree across a package
+# boundary is how the two come to disagree. `core` may not import `trust`, so the set lives there.
+VERDICT_KINDS: tuple[str, ...] = tuple(sorted(_VERDICT_KINDS_CORE))
+
+
 def _check_claims(claims: list[dict], state: RunState,
                   consulted: dict[str, dict[str, str]]) -> list[dict]:
     """Implementation shared by the public raw-source path and ``verify_memo``'s frozen map."""
@@ -437,7 +466,7 @@ def _check_claims(claims: list[dict], state: RunState,
         known = identity_receipt["node_refs"]
         matched = identity_receipt["url_identities"]
         if not nids and not urls:
-            out.append({"statement": stmt, "verdict": "unsupported",
+            out.append({"statement": stmt, "verdict": "unsupported", "kind": "citation",
                         "note": "no evidence cited", "evidence": identity_receipt})
             continue
         if not known and not matched:
@@ -447,10 +476,10 @@ def _check_claims(claims: list[dict], state: RunState,
                 note = "cited source URL was not consulted"
             else:
                 note = _cited_nodes_note(nids, state) + " and source URLs were not consulted"
-            out.append({"statement": stmt, "verdict": "unsupported",
+            out.append({"statement": stmt, "verdict": "unsupported", "kind": "citation",
                         "note": note, "evidence": identity_receipt})
             continue
-        out.append({"statement": stmt, "verdict": "cited", "note": "",
+        out.append({"statement": stmt, "verdict": "cited", "kind": "citation", "note": "",
                     "evidence": identity_receipt})
     return out
 
@@ -504,7 +533,7 @@ def verify_memo(memo: dict, state: RunState, client=None,
                 parser: str = "tool_call", tool_result_label: str = "") -> Optional[dict]:
     """Verify a memo's claims. Deterministic layer always runs; the LLM rubric pass upgrades
     `cited` claims to supported/unsupported/unclear when a client is wired. Returns
-    {"verdicts": [{statement, verdict, note, evidence}], "method": "deterministic"|"llm",
+    {"verdicts": [{statement, verdict, kind, note, evidence}], "method": "deterministic"|"llm",
      "unsupported": n, "total_verdicts": n, "omitted_verdicts": n} — ALL FIVE keys, always — or
     None when the memo has no claims (nothing to verify).
 
@@ -564,6 +593,12 @@ def verify_memo(memo: dict, state: RunState, client=None,
                     if proposed == "supported" and verdicts[i]["evidence"]["complete"] is not True:
                         proposed = "unclear"
                     verdicts[i]["verdict"] = proposed
+                    # THE ROW CHANGES QUESTION HERE, so it changes `kind` here. The deterministic
+                    # pass left it `citation`; this pass has read the evidence and is answering
+                    # whether it CARRIES the claim. Stamped beside the verdict it belongs to rather
+                    # than after the loop: a `kind` set anywhere else could describe a verdict this
+                    # branch declined to change.
+                    verdicts[i]["kind"] = "support"
                     if k < len(out.notes):
                         verdicts[i]["note"] = _clean(out.notes[k], 200, single_line=True)
                     if (out.verdicts[k] == "supported"

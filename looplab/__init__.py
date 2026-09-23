@@ -465,6 +465,7 @@ _LAYOUT = {
     "uibuild": "serve",
     "validate": "core",
     "vectorstore": "tools",
+    "verifier_routing": "trust",  # DR-04: the next step a memo's verification asks for
     "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
     "verifier_tiebreak": "engine",  # R1-c calibrated-verifier metric tie-break mixin (doc 25 EC-09)
     "value_estimate": "engine",  # the LLM value estimate cadence (docs/BACKLOG.md §0.1 row 17)
