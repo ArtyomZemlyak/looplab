@@ -99,6 +99,15 @@ class EngineOptions:
     # `EngineOptions` caller gains no new call — only a better-informed one, and only when the stage
     # wrote a nameable log at all.
     stage_check_tools: bool = True
+    # THE UNTRUSTED-EVIDENCE FENCE on the engine's own judges' tool results (`core/evidence.py`,
+    # `Settings.evidence_envelope`; review 2026-09-22, TAT-02): the inter-stage checker, the two
+    # live-log watchdog judges and the LLM novelty adjudicator read the candidate's own logs and
+    # code through their tools, and with this on each result arrives between `UNTRUSTED_RUN_EVIDENCE`
+    # and its closing fence (`shared.py::judge_evidence_kwargs`). OFF here and ON in the product
+    # surface — a divergence-table row (`tests/test_options_divergence.py`) — because it changes a
+    # PROMPT, and a prompt flag defaults off at every constructor (CLAUDE.md): a bare `Engine(...)`
+    # keeps every judge's historical request byte for byte.
+    evidence_envelope: bool = False
     asha_live: bool = False              # ASHA live-curve rank watchdog (advisory); off = today
     asha_live_kill: bool = False         # opt-in: tree-kill a persistently-underperforming node early
     asha_live_quantile: float = 0.5      # rank bar = this quantile of finished siblings' finals (median)

@@ -74,6 +74,12 @@ EXPECTED = {
     # than the setting because the field was MISSING from EngineOptions until 2026-09-06, which is
     # how the product default was decorative for a week (doc 52 row 21's attribute guard).
     "single_command_divergence_watch": (True, False),
+    # The untrusted-evidence FENCE on the engine's own judges' tool results (review 2026-09-22,
+    # TAT-02): the stage checker, both watchdog judges and the LLM novelty adjudicator. ON in the
+    # product surface (the same `Settings.evidence_envelope` the triage judge and the Strategist
+    # read), OFF in the bare library because it changes a PROMPT, and a prompt flag defaults off at
+    # every constructor (CLAUDE.md) — a direct `Engine(...)` keeps each judge's historical request.
+    "evidence_envelope": (True, False),
     "unified_agent": (True, False),
     # Layer 3 Card queue owns macro-action selection in the product surface (2026-08-04): the Card lane
     # is the intended selector, and it wins over `agent_drives_actions` when both are on. The bare

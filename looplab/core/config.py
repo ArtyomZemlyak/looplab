@@ -1375,6 +1375,18 @@ class Settings(BaseSettings):
     # ground — a DIFFERENT PROMPT — because a resumed pre-field run must keep the prompts it was
     # launched with. It ANNOTATES and withholds nothing: no metric, champion, selectability
     # decision or violation can move on it (docs/36).
+    #
+    # THE FENCE REACHES THE JUDGES TOO since review 2026-09-22 (TAT-02). The four wrappers the
+    # engine's own judges call the model through (`agentic_text`, `agentic_struct`, `emit_loop`,
+    # `structured_judge`) could not carry the label, so with this ON the judges that read the
+    # CANDIDATE'S own text with their tools still read it bare: the inter-stage checker (whose FAIL
+    # ends a node), the training monitor's and the ASHA watchdog's judges, and the LLM novelty
+    # adjudicator — reached through `EngineOptions.evidence_envelope`, which `from_settings` fills from
+    # this field, and `engine/shared.py::judge_evidence_kwargs`; and the unified pilot, whose
+    # `choose_action` fences the same toolset its triage and critic siblings already fenced. The FENCE
+    # only — no guard sentence is added to those judges' system prompts. A run launched with this ON
+    # before that change resumes with those tool results fenced; a pre-field run stays OFF (the
+    # legacy row below), so its judges keep their historical bytes.
     evidence_envelope: bool = True
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
@@ -3319,8 +3331,10 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # (b) is `developer_probe`'s DIFFERENT-PROMPT ground exactly: the Strategist, triage and critic
     # system prompts gain a guard sentence and their user turns gain a fence around the candidate's
     # own text, and the Strategist's tool results arrive fenced — so the two values produce two
-    # different prompts for three roles. (c) is `False`, pointable at every commit before this one,
-    # and the field's own comment states that `false` restores every prompt byte for byte.
+    # different prompts for three roles (and, since review 2026-09-22 TAT-02, different tool-result
+    # bytes for the stage checker, both watchdog judges, the novelty adjudicator and the pilot).
+    # (c) is `False`, pointable at every commit before this one, and the field's own comment states
+    # that `false` restores every prompt byte for byte.
     "evidence_envelope": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest

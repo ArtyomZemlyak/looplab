@@ -1499,11 +1499,15 @@ class EvalStagesMixin:
                     # off path and the exhausted path are the same call. The verdict LINE is read
                     # out of the answer (`stage_check_verdict_line`) because a checker that has just
                     # read a log says what it found before it says the verdict.
+                    # The log it reads is the CANDIDATE's own output, so every result is fenced
+                    # when the run's evidence envelope is on (review 2026-09-22, TAT-02).
                     from looplab.agents.tool_loop import agentic_text
+                    from looplab.engine.shared import judge_evidence_kwargs
                     out = stage_check_verdict_line(agentic_text(
                         client, tools, msgs, loop_opts={"max_turns": STAGE_CHECK_LOOK_TURNS},
                         answer_desc=("your ONE-LINE verdict: `OK`, `FAIL <kind>: <evidence>`, or "
-                                     "`INCONCLUSIVE: <what you would need to see>`")))
+                                     "`INCONCLUSIVE: <what you would need to see>`"),
+                        **judge_evidence_kwargs(self)))
             except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
                 raise
             except Exception:  # noqa: BLE001 — a checker failure must never fail the eval

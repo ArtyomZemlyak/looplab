@@ -23,7 +23,8 @@ JUDGE_MAX_TURNS = 15
 
 
 def structured_judge(client, msgs: list, model: type, *, parser: str,
-                     tools: Any = None, max_turns: int = JUDGE_MAX_TURNS) -> Optional[Any]:
+                     tools: Any = None, max_turns: int = JUDGE_MAX_TURNS,
+                     tool_result_label: str = "") -> Optional[Any]:
     """Ask the model for `model`-shaped output, agentically when `tools` are available.
 
     With `tools`, the judge reads the run through them first and the plain structured parse becomes
@@ -33,6 +34,12 @@ def structured_judge(client, msgs: list, model: type, *, parser: str,
     Raises whatever the model layer raises; each caller already owns its own failure policy
     (`verify_memo` keeps its deterministic verdicts, `verify` drops the sample), and moving that
     decision in here would flatten two deliberately different contracts into one.
+
+    `tool_result_label` is the untrusted-evidence FENCE on every tool result (`core/evidence.py`),
+    carried to the loop (review 2026-09-22, TAT-02): the two live-log watchdog judges read the
+    candidate's own training log through their tools, and without this parameter no caller could
+    ask for it. Forwarded only when non-empty — the historical call byte for byte otherwise, and
+    moot without `tools` (there is no tool result to fence).
     """
     from looplab.core.parse import parse_structured
 
@@ -44,4 +51,5 @@ def structured_judge(client, msgs: list, model: type, *, parser: str,
 
     return agentic_struct(
         client, tools, msgs, model, parser=parser, loop_opts={"max_turns": max_turns},
-        fallback=lambda m: parse_structured(client, m, model, parser))
+        fallback=lambda m: parse_structured(client, m, model, parser),
+        **({"tool_result_label": tool_result_label} if tool_result_label else {}))

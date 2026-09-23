@@ -21,6 +21,7 @@ import time
 from typing import Optional
 
 from looplab.core.config import governed_eval_timeout
+from looplab.core.evidence import EVIDENCE_LABEL
 from looplab.engine.cadence import cadence_due
 from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PHASE_PROGRESS, assert_progress_phase
 
@@ -123,6 +124,44 @@ def effective_eval_time_budget(engine) -> Optional[float]:
     if isinstance(cand, bool) or not isinstance(cand, (int, float)):
         return None
     return float(cand) if math.isfinite(cand) and cand > 0 else None
+
+
+def judge_evidence_kwargs(engine) -> dict:
+    """The fence keyword an ENGINE-side judge spreads into its wrapper call:
+    `{"tool_result_label": EVIDENCE_LABEL}` while the run's untrusted-evidence envelope is on, and
+    `{}` while it is off — ABSENT, not an empty label, so the judge's call through its seam is the
+    historical one byte for byte (the rule `unified_agent._pilot_emit` states for the loop call; a
+    test double written against a wrapper's old signature is a caller too).
+
+    Review 2026-09-22, TAT-02. `Settings.evidence_envelope` fenced the Strategist's, the triage
+    judge's and the repair critic's tool results and stopped there, because the four wrappers the
+    engine's OWN judges reach the model through (`agentic_text`, `agentic_struct`, `emit_loop`,
+    `structured_judge`) had no way to carry a label. So on a run with the envelope ON, the four
+    judges that read the candidate's own text with their tools read it bare: the inter-stage checker
+    (`eval_stages._stage_check_fn`, whose FAIL ends the node), the training monitor's judge (kill
+    authority under `train_monitor_kill`), the ASHA watchdog's judge and the LLM novelty adjudicator
+    (whose verdict sends the Researcher back for another paid proposal). The wrappers now forward the
+    label, and each of those four asks HERE — four clusters, one reading of one flag, so no site can
+    come to read it with a different default.
+
+    A module function over `engine` rather than a mixin method, and a `getattr` with the flag's own
+    constructor default: the watchdog judges are driven in the suite through stubs that inherit
+    their own mixin and never run `Engine.__init__` (`tests/test_asha_monitor.py::_AshaStub`), and a
+    missing attribute read inside a judge's containment `except` would turn every such judge into a
+    silent "no verdict". Absent therefore means OFF — the historical bytes, like
+    `core/evidence.py::envelope_enabled` for a settings stub. `Engine.__init__` declares the
+    attribute from `EngineOptions.evidence_envelope`, which `from_settings` fills from the Settings
+    field by name.
+
+    The FENCE only, and deliberately: the guard sentence stays with the three roles whose system
+    prompts already carry one. The label names itself (`UNTRUSTED_RUN_EVIDENCE` … `END …`), the
+    fence neutralizes a forged marker inside the text so a log line cannot close its block early and
+    speak as the loop, and a new system-prompt clause for four more judges is a larger contract
+    change than the missing parameter was. It reaches no metric, champion, selectability decision or
+    violation (docs/36) — what a judge is TOLD about its evidence moves, not what the evidence is.
+    """
+    return ({"tool_result_label": EVIDENCE_LABEL}
+            if getattr(engine, "_evidence_envelope", False) else {})
 
 
 class SharedEngineMixin:

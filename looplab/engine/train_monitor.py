@@ -2671,12 +2671,16 @@ class TrainingMonitorMixin:
              + "\n\nClassify this run's health from the log evidence above."},
         ]
         try:
+            from looplab.engine.shared import judge_evidence_kwargs
             from looplab.trust.judge import structured_judge
             # `parser="tool_call"` is what the two other judges in this repo use, and `structured_judge`
             # falls back to the plain `parse_structured` whenever the tool loop yields nothing valid —
             # so an agentic hiccup degrades to the historical verdict rather than to no verdict.
+            # What its tools return is the candidate's own log and code, fenced when the run's
+            # evidence envelope is on (review 2026-09-22, TAT-02).
             return structured_judge(client, messages, TrainingVerdict, parser="tool_call",
-                                    tools=tools, max_turns=_MONITOR_LOOK_TURNS)
+                                    tools=tools, max_turns=_MONITOR_LOOK_TURNS,
+                                    **judge_evidence_kwargs(self))
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
         except Exception:  # noqa: BLE001 — a parser/endpoint failure means "no verdict this tick", not a crash

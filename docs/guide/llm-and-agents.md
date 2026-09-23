@@ -974,6 +974,15 @@ inside a loop that stamps everything is not double-marked). `false` reproduces e
 prompts byte for byte — a prompt is a contract — and nothing here reaches a metric, a champion,
 selectability or a violation. `tests/test_evidence_envelope.py` drives each surface both ways.
 
+Since 2026-09-22 the same switch also **fences the tool results of the judges that read the
+candidate's own text**: the inter-stage checker (whose `FAIL` ends a node), the training monitor's
+and the ASHA watchdog's judges, the LLM novelty adjudicator and the unified pilot. Until then the
+four wrappers those judges call the model through (`agentic_text`, `agentic_struct`, `emit_loop`,
+`structured_judge`) had no way to carry the label, so with the envelope on their `read_log` /
+`read_code` results still arrived bare. It is the fence only — those judges' system prompts gain no
+guard sentence — and `false` (or a pre-field snapshot) keeps their historical bytes.
+`tests/test_judge_evidence_fence.py` drives each judge both ways.
+
 ## Knowledge, skills & prompts
 
 Give the agentic Researcher extra context and tools:

@@ -49,6 +49,9 @@ ATTR_BY_FIELD = {
     "train_monitor_contract": "_train_monitor_contract",
     "repair_log_tools": "_repair_log_tools",
     "stage_check_tools": "_stage_check_tools",
+    # The untrusted-evidence fence on the engine's own judges' tool results (review 2026-09-22,
+    # TAT-02), read by `engine/shared.py::judge_evidence_kwargs`.
+    "evidence_envelope": "_evidence_envelope",
     "asha_live": "_asha_live",
     "asha_live_kill": "_asha_live_kill",
     "asha_live_quantile": "_asha_live_quantile",
@@ -429,6 +432,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the plan's endgame reserve (doc 52 row 18), ON in Settings (0.2) and 0 in the bare
         # library for the reason frozen in tests/test_options_divergence.py.
         endgame_reserve_frac=settings.endgame_reserve_frac,
+        # …and the judges' evidence fence (review 2026-09-22, TAT-02), ON in Settings and OFF in
+        # the bare library for the reason frozen in tests/test_options_divergence.py (a prompt flag).
+        evidence_envelope=settings.evidence_envelope,
         # …and the seven above, so the differential compares a NON-DEFAULT value on both sides.
         stage_check_tools=settings.stage_check_tools,
         llm_cost_limit=settings.llm_cost_limit,

@@ -700,9 +700,13 @@ class AshaMonitorMixin:
              + "\n\nShould this still-running experiment continue, be watched, or be stopped?"},
         ]
         try:
+            from looplab.engine.shared import judge_evidence_kwargs
             from looplab.trust.judge import structured_judge
+            # Fenced tool results when the run's evidence envelope is on: the log it queries is the
+            # candidate's own (review 2026-09-22, TAT-02).
             return structured_judge(client, messages, AshaVerdict, parser="tool_call",
-                                    tools=tools, max_turns=_MONITOR_LOOK_TURNS)
+                                    tools=tools, max_turns=_MONITOR_LOOK_TURNS,
+                                    **judge_evidence_kwargs(self))
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
         except Exception:  # noqa: BLE001 — a parser/endpoint failure means "no verdict", not a crash

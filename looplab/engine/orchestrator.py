@@ -1022,6 +1022,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         train_monitor_contract = _opt("train_monitor_contract")
         repair_log_tools = _opt("repair_log_tools")
         stage_check_tools = _opt("stage_check_tools")
+        evidence_envelope = _opt("evidence_envelope")
         asha_live = _opt("asha_live")
         asha_live_kill = _opt("asha_live_kill")
         asha_live_quantile = _opt("asha_live_quantile")
@@ -1623,6 +1624,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # `_log_query_tools` derivation, and its own switch: this judge is paid once per checked
         # stage on the eval-blocking path, and it is the one that can end a node (doc 52 row 9).
         self._stage_check_tools = bool(stage_check_tools)
+        # The untrusted-evidence FENCE on those judges' tool results — the checker above, both
+        # watchdog judges and the LLM novelty adjudicator (review 2026-09-22, TAT-02). Read by
+        # `shared.py::judge_evidence_kwargs`, the one place a judge learns its fence.
+        self._evidence_envelope = bool(evidence_envelope)
         # ASHA live-curve rank watchdog (advisory in the product surface; opt-in kill). off == today.
         self._asha_live = bool(asha_live)
         self._asha_live_kill = bool(asha_live_kill)

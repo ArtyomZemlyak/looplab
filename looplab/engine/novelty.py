@@ -673,7 +673,11 @@ class NoveltyGateMixin:
         if tools is None:
             return idea
         try:
-            v = agentic_struct(client, tools, msgs, _NoveltyVerdict, loop_opts={"max_turns": 12})
+            # `read_experiment` / `read_code` return the candidates' own code and output, fenced when
+            # the run's evidence envelope is on (review 2026-09-22, TAT-02).
+            from looplab.engine.shared import judge_evidence_kwargs
+            v = agentic_struct(client, tools, msgs, _NoveltyVerdict, loop_opts={"max_turns": 12},
+                               **judge_evidence_kwargs(self))
         except BudgetExceeded:
             # Admitting the idea on the ceiling handed it straight to a paid build (review
             # 2026-09-22, TAT-01 / SCJ-03 / ENG1-09).

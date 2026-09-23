@@ -455,7 +455,11 @@ class UnifiedAgent(WrapsDeveloper):
 
         # On any transport failure the pilot degrades to the policy recommendation, still within
         # `legal` — see `_pilot_emit` for the budget-vs-transport rule it applies.
-        return self._pilot_emit(messages, emit_spec, _finalize, _fallback, state=state)
+        # The fence rides the SAME toolset the triage judge and the repair critic already fence:
+        # `_pilot_tools` reads candidate code and output, and the pilot was the one caller of it
+        # that never asked (review 2026-09-22, TAT-02). "" (no fence) while the envelope is off.
+        return self._pilot_emit(messages, emit_spec, _finalize, _fallback, state=state,
+                                tool_result_label=self._evidence_label())
 
     # --------------------------------------------------- Crash triage (in-node repair)
     # THE TWO GUARDS, built by `core/evidence.py`'s ONE builder with each judge's own `powers`

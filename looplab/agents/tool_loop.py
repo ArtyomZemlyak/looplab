@@ -1470,12 +1470,20 @@ def answered_transcript(messages: list) -> list:
 # existing test patches seams that still resolve (run_phase stayed in agent.py for exactly this
 # reason — see its why-comment).
 def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
-                 answer_desc="your final answer") -> str:
+                 answer_desc="your final answer", tool_result_label: str = "") -> str:
     """`client.complete_text(messages)` upgraded to AGENTIC: the model MAY first call the provided
     read-only tools (run introspection, repo scouts, …) to GROUND its answer in the real experiments/
     code, then emits the text. Any single-shot text call becomes tool-using just by passing `tools`.
     Degrades to a plain completion when `tools` is falsy or the loop yields nothing — so callers keep
-    their exact old behavior with no client/tools. Returns the emitted text (str)."""
+    their exact old behavior with no client/tools. Returns the emitted text (str).
+
+    `tool_result_label` is `drive_tool_loop`'s evidence FENCE (`core/evidence.py`), carried through
+    (review 2026-09-22, TAT-02). The judges that reach the model through this wrapper read the
+    candidate's own logs and code with their tools, and until this parameter existed a caller could
+    not ask for the fence at all — the envelope was ON for the run and those results still arrived
+    bare. EXPLICIT, like the loop's own (`loop_options.EXPLICIT_ONLY_LOOP_ARGS`: never a bundle
+    field), and forwarded only when non-empty, so a caller without the envelope makes the historical
+    call byte for byte."""
     fb = fallback or (lambda m: str(client.complete_text(m) or ""))
     if not tools:
         return fb(messages)
@@ -1491,7 +1499,10 @@ def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
     try:
         return drive_tool_loop(client, tools, messages, emit_spec,
                                finalize=lambda a: str((a or {}).get("text", "") or ""),
-                               fallback=fb, **options)
+                               fallback=fb,
+                               **({"tool_result_label": tool_result_label}
+                                  if tool_result_label else {}),
+                               **options)
     except BudgetExceeded:  # a HARD budget stop must propagate — degrading to fb() runs ANOTHER LLM
         raise                # call after the budget tripped (every sibling loop caller re-raises first)
     except Exception:  # noqa: BLE001 — an agentic-path failure must never break a best-effort step
@@ -1501,11 +1512,14 @@ def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
 
 
 def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
-                   loop_opts=None, fallback=None):
+                   loop_opts=None, fallback=None, tool_result_label: str = ""):
     """`parse_structured(client, messages, model_cls, parser)` upgraded to AGENTIC: the model MAY first
     call the provided read-only tools to GROUND its structured emit in the real experiments/code, then
     emits the object. Returns a validated `model_cls` instance. Degrades to plain `parse_structured` when
-    `tools` are absent or the loop yields nothing invalid — so callers keep their exact old behavior."""
+    `tools` are absent or the loop yields nothing invalid — so callers keep their exact old behavior.
+
+    `tool_result_label`: the evidence fence on every tool result, carried through exactly as
+    `agentic_text` carries it (review 2026-09-22, TAT-02) — absent when empty."""
     from looplab.core.parse import parse_structured
     fb = fallback or (lambda m: parse_structured(client, m, model_cls, parser))
     if not tools:
@@ -1525,6 +1539,8 @@ def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
             return fb(answered_transcript(messages))
     try:
         return drive_tool_loop(client, tools, messages, emit_spec, finalize=_final, fallback=fb,
+                               **({"tool_result_label": tool_result_label}
+                                  if tool_result_label else {}),
                                **options)
     except BudgetExceeded:  # a HARD budget stop must propagate, not degrade to another LLM call
         raise
@@ -1723,7 +1739,7 @@ def resilient(attempt, fallback, *, on_error=None, reason: str = "resilient"):
 
 
 def emit_loop(client, tools, messages: list, model_cls, settings, *, description: str,
-              fallback=None, on_step=None):
+              fallback=None, on_step=None, tool_result_label: str = ""):
     """Drive a tool loop whose only terminal is one `emit` call, and return the emitted model.
 
     Two HTTP surfaces — the genesis planner and the boss command router — each hand-built the same
@@ -1741,6 +1757,10 @@ def emit_loop(client, tools, messages: list, model_cls, settings, *, description
     `fallback(messages, emitted)` runs when the loop ends without an emit — the model drove tools
     and stopped, or ignored them entirely. Its answer becomes the result, so a caller that forces a
     final structured call there does not have to write into a cell of its own.
+
+    `tool_result_label`: the evidence fence on every tool result, carried through exactly as
+    `agentic_text` carries it (review 2026-09-22, TAT-02) — absent when empty, so neither HTTP
+    surface's historical request moves unless it asks.
     """
     emitted: dict = {}
 
@@ -1781,5 +1801,6 @@ def emit_loop(client, tools, messages: list, model_cls, settings, *, description
             "name": "emit", "description": description,
             "parameters": model_cls.model_json_schema()}},
         finalize=_finalize, fallback=_fallback, on_step=on_step,
+        **({"tool_result_label": tool_result_label} if tool_result_label else {}),
         **options)
     return emitted.get("value")

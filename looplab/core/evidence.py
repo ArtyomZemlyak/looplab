@@ -35,10 +35,14 @@ by re-typing, and so the words cannot drift between roles:
 WHERE THE FLAG IS. Prompt strings are contracts (CLAUDE.md), so every consumer takes the envelope
 as a constructor argument that defaults OFF and reproduces the historical bytes; `agents/factory.py`
 threads `Settings.evidence_envelope` (ON for new runs, `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` OFF so a
-resumed pre-field run keeps the prompts it was launched with). The Boss and the assistant predate
-the flag and are unconditional; nothing about them moved — `serve/llm_context.py` re-exports the
-builder and the label under the names its tests import, and `agents/tool_loop.py` re-exports the
-fence, so both spellings name the SAME objects.
+resumed pre-field run keeps the prompts it was launched with). The engine's own judges take it as
+`engine/options.py::EngineOptions.evidence_envelope` (off in the bare library, filled from the same
+field by `from_settings`) and ask `engine/shared.py::judge_evidence_kwargs` for their fence — the four
+judge wrappers (`agentic_text`, `agentic_struct`, `emit_loop`, `trust/judge.py::structured_judge`)
+carry a `tool_result_label` since review 2026-09-22 (TAT-02), which until then no caller could pass.
+The Boss and the assistant predate the flag and are unconditional; nothing about them moved —
+`serve/llm_context.py` re-exports the builder and the label under the names its tests import, and
+`agents/tool_loop.py` re-exports the fence, so both spellings name the SAME objects.
 
 It reaches no metric, champion, selectability decision or violation (docs/36): a guard sentence
 and a fence widen what a role is TOLD about its evidence and change nothing about what the
