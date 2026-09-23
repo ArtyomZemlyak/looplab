@@ -17,7 +17,10 @@ dir. The file carries its own format version in `config_snapshot_schema` (now `3
 stated at `core/config.py::CONFIG_SNAPSHOT_SCHEMA`, governs a snapshot this build does not fully
 understand. A **newer format** is refused on every path. A **key** this build does not know — neither
 a current `Settings` field nor one it retired (`RETIRED_SETTINGS`) — is refused, with one line at exit
-2, on the paths that spend the run's money: `resume`, `finalize` and the server's Replay. `Settings`
+2, on the paths that spend the run's money: `resume`, `finalize` and the server's Replay. The server
+also refuses to START such a `resume`/`finalize`: a command whose admission would spawn one is a
+`rejected` record (`config_snapshot_incompatible` / `config_snapshot_invalid`, or a `409` on the
+legacy `POST /resume`) with nothing appended. `Settings`
 ignores fields it does not recognize, so continuing would silently run under different paid,
 concurrency or selection semantics, a spend cap among them. Read-only paths still load such a
 snapshot. Upgrade LoopLab to resume such a run. A
