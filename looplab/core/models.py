@@ -2149,7 +2149,7 @@ class RunState(BaseModel):
     llm_parallel: int = Field(default=0, ge=0, le=64, exclude=True)
     # docs/29 F1 — the widths this run RE-PINNED mid-run from what the research proposed
     # (`events/replay.py::_on_run_width_settled`, written by
-    # `engine/orchestrator.py::_settle_proposal_width`). SEPARATE fields from the two pins above, for
+    # `engine/width_settling.py::_settle_proposal_width`). SEPARATE fields from the two pins above, for
     # exactly the reason `speculation_depth_settled` is separate from `speculation_depth_pinned`: each
     # fact has ONE writer, neither handler reads the other's field before writing its own, so the two
     # rows may be spliced in either order and land on the same treatment (invariant #5). Folding a

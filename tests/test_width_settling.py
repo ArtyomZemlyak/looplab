@@ -70,7 +70,8 @@ def test_the_two_axes_keep_their_own_ceilings():
 # ------------------------------------------------------------------ all four call sites use it
 
 @pytest.mark.parametrize("module,holder,function", [
-    ("looplab.engine.orchestrator", "Engine", "_apply_control_overrides"),
+    # `WidthSettlingMixin` since review 2026-09-22, ENG1-04 step 1 (it was `orchestrator.Engine`).
+    ("looplab.engine.width_settling", "WidthSettlingMixin", "_apply_control_overrides"),
     ("looplab.engine.strategy", "StrategyCadenceMixin", "_apply_strategy"),
 ])
 def test_no_control_path_re_derives_the_rule(module, holder, function):
