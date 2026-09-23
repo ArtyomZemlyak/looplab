@@ -14,6 +14,7 @@ from looplab.events.replay import fold  # noqa: E402
 from looplab.serve.assistant import safe_provider_failure  # noqa: E402
 from looplab.serve.report import generate_report  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
+from tests.test_report import _settled  # noqa: E402
 
 
 _LEAK = (
@@ -204,6 +205,18 @@ def test_genesis_planning_failure_is_redacted(tmp_path, monkeypatch):
     _assert_safe(body)
 
 
+def _boss_post(tmp_path, monkeypatch, path, body):
+    """POST one boss route over a run whose provider cannot even be constructed."""
+    _minimal_run(tmp_path)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _provider_boom)
+    client = TestClient(make_app(tmp_path))
+    headers = {}
+    if path.endswith("/report_refresh"):
+        body = {"expected_generation": client.get("/api/runs/demo/state").json()["generation"]}
+        headers["Idempotency-Key"] = "provider-redaction-report"
+    return client, client.post(path, json=body, headers=headers)
+
+
 @pytest.mark.parametrize(("path", "body"), [
     ("/api/runs/demo/chat-compact", {"messages": [{"role": "user", "content": "recap"}]}),
     ("/api/runs/demo/chat", {"messages": [{"role": "user", "content": "status"}]}),
@@ -212,17 +225,43 @@ def test_genesis_planning_failure_is_redacted(tmp_path, monkeypatch):
     ("/api/runs/demo/report_refresh", {}),
 ])
 def test_boss_provider_failures_are_redacted(tmp_path, monkeypatch, path, body):
-    _minimal_run(tmp_path)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", _provider_boom)
-    client = TestClient(make_app(tmp_path))
-    headers = {}
-    if path.endswith("/report_refresh"):
-        body = {"expected_generation": client.get("/api/runs/demo/state").json()["generation"]}
-        headers["Idempotency-Key"] = "provider-redaction-report"
-    response = client.post(path, json=body, headers=headers)
-    result = response.json()
+    """The answer is read where every client reads it: SETTLED (review 2026-09-22, WIN-4).
+    `report_refresh` waits at most 0.5 s inline and otherwise hands back `{status: running,
+    job_id}` — its documented contract, which the UI's `jobAwait` and the TUI's `_await_job` both
+    follow. On a loaded Windows runner (CI run 36, 35823390348) the worker missed that wait, the
+    test indexed the RECEIPT for `ok` and died with KeyError before judging any redaction. The
+    receipt is judged as it arrives, and the result where the job leaves it
+    (`tests/test_report.py::_settled`, a no-op for an inline answer)."""
+    client, response = _boss_post(tmp_path, monkeypatch, path, body)
+    assert response.status_code == 200
+    receipt = response.json()
+    _assert_safe(receipt)
+    result = _settled(client, receipt)
 
-    assert response.status_code == 200 and result["ok"] is False
+    assert result.get("ok") is False, result
+    assert result["error_kind"] == "credentials"
+    _assert_safe(result)
+
+
+@pytest.mark.parametrize(("path", "body"), [
+    ("/api/runs/demo/command", {"instruction": "what next?"}),
+    ("/api/runs/demo/report_refresh", {}),
+])
+def test_a_provider_failure_answered_through_the_job_is_redacted_too(
+        tmp_path, monkeypatch, path, body):
+    """The timing the Windows runner produced by chance, produced on purpose: no inline wait at all
+    (`LOOPLAB_JOB_INLINE_WAIT=0`), so each job-backed route answers with its receipt and the failure
+    is only ever seen through the job's poll — the path a slow provider takes in production."""
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    client, response = _boss_post(tmp_path, monkeypatch, path, body)
+    assert response.status_code == 200
+    receipt = response.json()
+    assert receipt.get("status") == "running" and receipt.get("job_id"), (
+        f"the premise: the route answered with its job receipt, got {receipt}")
+    _assert_safe(receipt)
+    result = _settled(client, receipt)
+
+    assert result.get("ok") is False, result
     assert result["error_kind"] == "credentials"
     _assert_safe(result)
 
