@@ -164,9 +164,14 @@ def test_summary_capability_is_one_run_read_only_and_revocable(tmp_path, monkeyp
     assert client.get("/api/runs/demo/state", headers=review).status_code == 403
     assert client.get("/api/runs/other/state", headers=review).status_code == 403
     before = list(iter_jsonl(tmp_path / "demo" / "events.jsonl"))
+    # The command row is a COMPLETE durable command (a `hint` appends on any run; the generation is
+    # the one the owner saw above; each request carries an `Idempotency-Key`), so what refuses it is
+    # the review capability and nothing else. It was the legacy `/control` route, slated for
+    # retirement (review 2026-09-22, SRV1-07).
     mutation_cases = [
         ("post", "/api/review/state", {}),
-        ("post", "/api/runs/demo/control", {"type": "pause", "data": {}}),
+        ("post", "/api/runs/demo/commands",
+         {"type": "hint", "data": {"text": "review"}, "expected_generation": generation}),
         ("put", "/api/runs/demo/config", {"settings": {"timeout": 1}}),
         ("post", "/api/runs/demo/resume", {}),
         ("post", "/api/runs/demo/reset", {}),
@@ -174,8 +179,9 @@ def test_summary_capability_is_one_run_read_only_and_revocable(tmp_path, monkeyp
         ("post", "/api/start", {"run_id": "pwned", "task": {"kind": "quadratic"}}),
         ("post", "/api/assistant/sessions", {"title": "nope"}),
     ]
-    for method, path, body in mutation_cases:
-        response = client.request(method.upper(), path, headers=review, json=body)
+    for index, (method, path, body) in enumerate(mutation_cases):
+        response = client.request(method.upper(), path, json=body,
+                                  headers={**review, "Idempotency-Key": f"review-{index}"})
         assert response.status_code == 403, (method, path, response.text)
     assert list(iter_jsonl(tmp_path / "demo" / "events.jsonl")) == before
     assert not (tmp_path / "pwned").exists()

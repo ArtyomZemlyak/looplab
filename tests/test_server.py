@@ -25,6 +25,7 @@ from looplab.events.eventstore import EventStore, iter_event_jsonl, iter_jsonl  
 from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 from _posix_gates import RENAMEAT2
+from tests.factories import log_run_generation, post_command  # noqa: E402
 
 
 def _sse_payloads(text: str) -> list:
@@ -3218,6 +3219,14 @@ def test_cors_is_allowlisted_not_wildcard(tmp_path):
     assert ok.headers.get("access-control-allow-origin") == "http://localhost:5173"
 
 
+# THE MUTATION GUARDS ARE PROVED ON `POST /commands` (review 2026-09-22, SRV1-07). The six tests
+# below (Origin, DNS-rebinding Host, the configured-host allow-list twice, the owner token twice)
+# each used the legacy `/control` route as their sample mutation — the route slated for retirement,
+# which would have taken these proofs with it and left the guards unproved on the one mutation route
+# both first-party clients use. The sample is a `hint`: it APPENDS on any run (a `pause` on these
+# finished runs is a `noop` record, so a request the guard failed to stop could pass for one it
+# stopped), it settles synchronously, and it spawns nothing. The generation is read off the log,
+# because each guard answers `GET /state` exactly as it answers the POST.
 def test_cross_origin_simple_post_is_rejected_before_mutation(tmp_path, monkeypatch):
     """CORS only hides a response; a simple cross-site POST still executes unless the server checks
     Origin. This matters in the default tokenless local mode, where a web page could otherwise append
@@ -3227,21 +3236,22 @@ def test_cross_origin_simple_post_is_rejected_before_mutation(tmp_path, monkeypa
     rd = tmp_path / "demo"
     before = list(iter_jsonl(rd / "events.jsonl"))
     client = TestClient(make_app(tmp_path))
+    generation = log_run_generation(rd)
 
     blocked = client.post(
-        "/api/runs/demo/control",
-        content='{"type":"run_abort","data":{"reason":"cross-site"}}',
-        headers={"Origin": "https://evil.example", "Content-Type": "text/plain"},
+        "/api/runs/demo/commands",
+        content=json.dumps({"type": "hint", "data": {"text": "cross-site"},
+                            "expected_generation": generation}),
+        headers={"Origin": "https://evil.example", "Content-Type": "text/plain",
+                 "Idempotency-Key": "cross-site"},
     )
 
     assert blocked.status_code == 403
     assert list(iter_jsonl(rd / "events.jsonl")) == before
-    allowed = client.post(
-        "/api/runs/demo/control",
-        json={"type": "pause", "data": {}},
-        headers={"Origin": "http://localhost:5173"},
-    )
-    assert allowed.status_code == 200
+    assert not (rd / ".commands").exists(), "not even a durable command record was minted"
+    allowed = post_command(client, "hint", {"text": "same-origin dev server"}, "dev-origin",
+                           generation=generation, headers={"Origin": "http://localhost:5173"})
+    assert allowed.status_code == 200 and allowed.json()["status"] == "succeeded", allowed.text
 
 
 def test_dns_rebinding_host_cannot_self_authorize_origin(tmp_path, monkeypatch):
@@ -3252,33 +3262,29 @@ def test_dns_rebinding_host_cannot_self_authorize_origin(tmp_path, monkeypatch):
     rd = tmp_path / "demo"
     before = list(iter_jsonl(rd / "events.jsonl"))
     client = TestClient(make_app(tmp_path))
+    generation = log_run_generation(rd)
 
-    rebound = client.post(
-        "/api/runs/demo/control",
-        json={"type": "pause", "data": {}},
-        headers={"Host": "evil.example:8765", "Origin": "http://evil.example:8765"},
-    )
+    rebound = post_command(
+        client, "hint", {"text": "rebound"}, "rebound", generation=generation,
+        headers={"Host": "evil.example:8765", "Origin": "http://evil.example:8765"})
     assert rebound.status_code == 421
     assert list(iter_jsonl(rd / "events.jsonl")) == before
 
-    local = client.post(
-        "/api/runs/demo/control",
-        json={"type": "pause", "data": {}},
-        headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"},
-    )
-    assert local.status_code == 200
+    local = post_command(
+        client, "hint", {"text": "local"}, "local", generation=generation,
+        headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"})
+    assert local.status_code == 200 and local.json()["status"] == "succeeded", local.text
 
 
 def test_explicit_remote_host_allowlist(tmp_path, monkeypatch):
     _build_run(tmp_path)
     monkeypatch.setenv("LOOPLAB_UI_HOSTS", "research.example:9443")
     client = TestClient(make_app(tmp_path))
-    response = client.post(
-        "/api/runs/demo/control",
-        json={"type": "pause", "data": {}},
-        headers={"Host": "research.example:9443", "Origin": "http://research.example:9443"},
-    )
-    assert response.status_code == 200
+    response = post_command(
+        client, "hint", {"text": "remote"}, "remote",
+        generation=log_run_generation(tmp_path / "demo"),
+        headers={"Host": "research.example:9443", "Origin": "http://research.example:9443"})
+    assert response.status_code == 200 and response.json()["status"] == "succeeded", response.text
 
 
 def test_configured_host_is_trusted_as_mutation_origin_behind_a_proxy(tmp_path, monkeypatch):
@@ -3290,12 +3296,16 @@ def test_configured_host_is_trusted_as_mutation_origin_behind_a_proxy(tmp_path, 
     _build_run(tmp_path)
     monkeypatch.setenv("LOOPLAB_UI_HOSTS", "research.example")
     client = TestClient(make_app(tmp_path))
-    ok = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
-                     headers={"Origin": "https://research.example"})
-    assert ok.status_code == 200
-    evil = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
-                       headers={"Origin": "https://evil.example"})
+    rd = tmp_path / "demo"
+    generation = log_run_generation(rd)
+    ok = post_command(client, "hint", {"text": "proxied"}, "proxied", generation=generation,
+                      headers={"Origin": "https://research.example"})
+    assert ok.status_code == 200 and ok.json()["status"] == "succeeded", ok.text
+    before = list(iter_jsonl(rd / "events.jsonl"))
+    evil = post_command(client, "hint", {"text": "evil"}, "evil", generation=generation,
+                        headers={"Origin": "https://evil.example"})
     assert evil.status_code == 403          # a non-configured origin is still rejected
+    assert list(iter_jsonl(rd / "events.jsonl")) == before
 
 
 def test_sse_emits_state_snapshot(tmp_path):
@@ -3495,9 +3505,14 @@ def test_g1_auth_token_required_on_mutating(tmp_path, monkeypatch):
     assert client.get("/api/runs", headers=h).status_code == 200
     assert client.get("/api/health").status_code == 200          # sole untokened-OK /api/ route
     # mutating without the token -> 401; with it -> allowed
-    assert client.post("/api/runs/demo/control", json={"type": "pause", "data": {}}).status_code == 401
-    assert client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
-                       headers=h).status_code == 200
+    rd = tmp_path / "demo"
+    before = list(iter_jsonl(rd / "events.jsonl"))
+    untokened = post_command(client, "hint", {"text": "no token"}, "untokened",
+                             generation=log_run_generation(rd))
+    assert untokened.status_code == 401
+    assert list(iter_jsonl(rd / "events.jsonl")) == before
+    tokened = post_command(client, "hint", {"text": "owner"}, "tokened", headers=h)
+    assert tokened.status_code == 200 and tokened.json()["status"] == "succeeded", tokened.text
 
 
 def test_g1_no_token_means_open(tmp_path, monkeypatch):
@@ -3505,8 +3520,8 @@ def test_g1_no_token_means_open(tmp_path, monkeypatch):
     _build_run(tmp_path)
     monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
     client = TestClient(make_app(tmp_path))
-    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}})
-    assert r.status_code == 200
+    r = post_command(client, "hint", {"text": "open plane"}, "open")
+    assert r.status_code == 200 and r.json()["status"] == "succeeded", r.text
 
 
 def _fake_dist(tmp_path, monkeypatch):

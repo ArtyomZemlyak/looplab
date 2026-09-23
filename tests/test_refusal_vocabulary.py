@@ -31,6 +31,7 @@ from looplab.events.eventstore import EventStore
 from looplab.serve.http import REFUSALS
 from looplab.serve.run_commands import run_generation_token
 from looplab.serve.server import make_app
+from tests.factories import post_command
 
 SERVE = Path(__file__).resolve().parents[1] / "looplab" / "serve"
 RUN = "demo"
@@ -176,12 +177,14 @@ def test_a_bad_command_lock_path_answers_a_code_and_no_host_path(tmp_path):
     — the absolute host path of the operator's run directory, in a body that is also written into
     every export of it. MUTATION: restore the f-string -> the run directory's path is in `detail`.
     """
-    _run(tmp_path)
+    rd = _run(tmp_path)
     # UNDER THE SERVER ROOT, which is where `_lock_directory` puts it — not under the run dir.
     (tmp_path / ".command-locks").write_text("not a directory\n", encoding="utf-8")
     client = TestClient(make_app(tmp_path))
-    response = client.post(f"/api/runs/{RUN}/control",
-                           json={"type": "run_abort", "data": {}})
+    # Through `POST /commands`, the route both first-party clients use; it was the legacy `/control`
+    # route, slated for retirement (review 2026-09-22, SRV1-07). Both take the same sequencer.
+    response = post_command(client, "run_abort", {}, "bad-lock-path", run_id=RUN,
+                            generation=_generation(rd))
 
     assert response.status_code in (409, 503), response.text
     body = response.json()["detail"]

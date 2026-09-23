@@ -90,13 +90,19 @@ def test_options_preflight_not_gated_by_ui_token(monkeypatch):
     from fastapi.testclient import TestClient
     from looplab.serve.server import make_app
     client = TestClient(make_app(tempfile.mkdtemp()))
-    r = client.options("/api/runs/demo/control",
+    # On `/commands`, the mutation route both first-party clients use, and with the headers a browser
+    # actually preflights for it — it was proved on the legacy `/control` route, slated for
+    # retirement (review 2026-09-22, SRV1-07).
+    r = client.options("/api/runs/demo/commands",
                        headers={"Origin": "http://localhost:5173",
-                                "Access-Control-Request-Method": "POST"})
+                                "Access-Control-Request-Method": "POST",
+                                "Access-Control-Request-Headers": "idempotency-key, x-looplab-token"})
     assert r.status_code != 401
     assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
     # a real mutating request without the token is still gated
-    assert client.post("/api/runs/demo/control", json={"etype": "pause", "data": {}}).status_code == 401
+    assert client.post("/api/runs/demo/commands", headers={"Idempotency-Key": "untokened"},
+                       json={"type": "pause", "data": {},
+                             "expected_generation": "0" * 64}).status_code == 401
 
 
 # ---------------------------------------------------------- authenticated SSE + public share boundary
@@ -107,7 +113,7 @@ def test_unauth_api_ok_allows_share_but_not_sse_or_state():
     assert _unauth_api_ok("/api/assistant/shared/abc123")
     assert not _unauth_api_ok("/api/runs/demo/events")
     assert not _unauth_api_ok("/api/runs/demo/state")
-    assert not _unauth_api_ok("/api/runs/demo/control")
+    assert not _unauth_api_ok("/api/runs/demo/commands")
     assert not _unauth_api_ok("/api/runs/demo/nodes/0")
 
 
