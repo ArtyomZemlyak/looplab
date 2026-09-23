@@ -192,7 +192,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   213 -> 214 (2026-09-23): `triage_kinds_from_registry` (review 2026-09-22, TAT-07) — the
   //   crash-triage prompt's kind lists from the registries. A row because it changes a prompt and
   //   OFF is the historical bytes; the Python half moved in the same change.
-  assert.equal(Object.keys(schema.fieldByKey).length, 214)
+  //   214 -> 215 (2026-09-23): `repair_context_record` (review 2026-09-22, ENG2-14 / doc 50
+  //   ES2-05) — the repair Developer's context as the engine's own record. A row because it changes
+  //   a prompt and OFF is the historical bytes; the Python half moved in the same change.
+  assert.equal(Object.keys(schema.fieldByKey).length, 215)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

@@ -81,7 +81,9 @@ from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's r
     _REPAIR_ANSWER_EDIT, _REPAIR_ANSWER_PROVIDER_FAILURE, _REPAIR_ANSWER_STUCK,
     RepairGateContext, _classify_repair_answer, _repair_change_set, _repair_provider_failure,
     evaluated_terminal, repair_gate, triage_verdict_outcome)
+from looplab.engine.crash_repair import developer_repair_history
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
+from looplab.engine.shared import repair_context_record
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
                                            cause_repair_context, salvage_gates,
                                            declaration_actually_corrected,
@@ -133,7 +135,7 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
                                               engine_observed_facts, fence_refusal_note,
                                               evidence_citation_resolves,
                                               reason_source_for,
-                                              resolve_findings)
+                                              resolve_findings, silent_exit_account)
 # NOTE what is deliberately NOT imported here: `UNCLASSIFIED_REASON` and `REASON_SOURCE_UNDIAGNOSED`.
 # This file never spells either — `diagnosed_failure_reason` returns them as a PAIR, which is the
 # whole point of the rule living in one pure function. A site here that set one of them by hand
@@ -1785,6 +1787,28 @@ class EvaluateMixin:
             f"metric drift: {res.drift}" if res.drift is not None else
             f"exit={res.exit_code} timed_out={res.timed_out} no_metric{_no_metric_hint}"
         )
+        # THE ACCOUNT THE ENGINE ACTUALLY HOLDS, under `Settings.repair_context_record` (review
+        # 2026-09-22, the repair-context audit beside ENG2-14). Two sentences above say something
+        # the engine's own record contradicts or leave out what it holds, both measured by driving
+        # the real loop and reading what `Developer.repair` received:
+        #   * the fallback said "the command ran cleanly (exit 0)" whatever the exit was — a process
+        #     SIGKILLed with nothing on stderr read `exit=-9 … ran cleanly (exit 0)`, and a deadline
+        #     read the same sentence one line above the timeout directive that contradicts it;
+        #   * a clean exit with no metric that wrote ANYTHING to stderr — a warning, a progress bar,
+        #     the ordinary case for a training script — lost the one sentence naming the key the
+        #     eval reads, so the Developer was handed a warning and asked to fix it.
+        # `failure_diagnosis.silent_exit_account` states the first rule; the second prepends the
+        # SAME no-metric sentence, in front so the 500-character tail keeps its whole window and
+        # the judge history's last-300 view of the row still shows what the process wrote.
+        if repair_context_record(self):
+            _clean = res.exit_code == 0 and not res.timed_out
+            if not _stderr_tail.strip() and res.drift is None and not _clean:
+                _text = (f"exit={res.exit_code} timed_out={res.timed_out} "
+                         + silent_exit_account(res.exit_code, res.timed_out))
+            elif (_stderr_tail.strip() and _clean and res.drift is None
+                  and getattr(res, "metric", None) is None
+                  and not getattr(res, "failed_stage", None)):
+                _text = f"[no_metric{_no_metric_hint}]\n{_text}"
         # WHICH STAGE BROKE, KEPT WHERE THE READER WILL SEE IT. `command_eval._run_stages` writes its
         # `stage '<name>' failed:` marker at the FRONT of `res.stderr`, and the 500-char TAIL above
         # cuts it off for every failure whose stderr is longer than that — i.e. for every real
@@ -3771,6 +3795,16 @@ class EvaluateMixin:
                 # THE ENVELOPE, off the loop (doc 52 row 12): the whole `DeveloperResult`
                 # comes back from the worker, captured under the instance's lock in the
                 # same breath as the call, so nothing below reads the shared instance.
+                # THE NODE'S OWN REPAIR HISTORY, after the stuck contract, under
+                # `Settings.repair_context_record` (review 2026-09-22, the repair-context audit):
+                # the rows the triage judge and the critic read (`a.repair_log`, durable and
+                # redacted), in the judge's own rendering and window, so the Developer asked for
+                # attempt N+1 can see what attempts 1..N changed and failed with. Driven before
+                # this, a three-repair chain handed the Developer the same text three times while
+                # the stuck contract asked whether "every fix … has already been tried". LAST on
+                # purpose: every byte the context carried before keeps its place, and the repo
+                # Developer's head-kept `error[:4000]` drops this block before anything older.
+                # `reason_source` is WHO named `a.reason`: the watchdog-kill sentence is keyed on it.
                 repaired = await self._offload_under_proposal_sink(functools.partial(
                     self._repair_result,
                     a.node, self._repair_error_context(
@@ -3778,8 +3812,11 @@ class EvaluateMixin:
                         headline=failure_headline(
                             getattr(a.res, "stderr", "") or "", self._redact),
                         fence_note=fence_refusal_note(
-                            a.res, landlock=self._landlock, syscall_fence=self._syscall_fence))
-                    + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
+                            a.res, landlock=self._landlock, syscall_fence=self._syscall_fence),
+                        reason_source=a._reason_source)
+                    + developer_stuck_contract(DEVELOPER_STUCK_PREFIX)
+                    + (developer_repair_history(a.repair_log[-_JUDGE_HISTORY_ROWS:])
+                       if repair_context_record(self) else ""),
                     a.state))
             except BudgetExceeded:
                 raise      # the hard budget stop propagates, exactly as in `_triage_crash`

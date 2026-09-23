@@ -173,6 +173,26 @@ def judge_evidence_kwargs(engine) -> dict:
             if getattr(engine, "_evidence_envelope", False) else {})
 
 
+def repair_context_record(engine) -> bool:
+    """`Settings.repair_context_record` as the repair path reads it — the ONE reading.
+
+    Review 2026-09-22, ENG2-14 / doc 50 ES2-05, and the repair-context audit beside it. Three sites
+    ask: `crash_repair._repair_error_context` (who stopped the stage — a watchdog's kill and a
+    diagnostician's reading get different sentences), `evaluate._eval_failure_text` (how a silent
+    process really ended, and the no-metric sentence beside a non-empty stderr) and
+    `evaluate._eval_apply_repair` (the node's own repair history after the stuck contract). One
+    function so no site can come to read it with a different default.
+
+    A module function with a `getattr` default of OFF, on `judge_evidence_kwargs`' ground one
+    function up: both rules are driven in the suite through stubs that inherit only their own mixin
+    and never run `Engine.__init__` (`tests/test_watchdog_kill_is_not_an_oom.py::_Repairer`,
+    `tests/test_evaluate_named_rules.py::_TextHost`), and absent must mean the historical bytes.
+    `Engine.__init__` lands the attribute from `EngineOptions.repair_context_record`
+    (`engine/knobs.py`), which `from_settings` fills from the Settings field by name.
+    """
+    return bool(getattr(engine, "_repair_context_record", False))
+
+
 class SharedEngineMixin:
     """Cross-cluster members, mixed into `Engine` like every other mixin. In here `self` IS the
     Engine, exactly as in the concern mixins."""

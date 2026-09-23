@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 214
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 215
+    # 214 -> 215 on 2026-09-23: `repair_context_record` (review 2026-09-22, ENG2-14 / doc 50
+    # ES2-05) -- the repair Developer's context as the engine's own record. A ROW because it
+    # changes a PROMPT and OFF is the historical bytes an operator must be able to get back.
+    # Verified by INTERSECTION: 214 keys common to the previous keyset plus exactly that one.
     # 213 -> 214 on 2026-09-23: `triage_kinds_from_registry` (review 2026-09-22, TAT-07) -- the
     # crash-triage prompt's kind lists rendered from the registries. A ROW because it changes a
     # PROMPT and OFF is the historical bytes an operator must be able to get back. Verified by
@@ -381,7 +385,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 248 -> 249 on 2026-09-23: `triage_kinds_from_registry` (review 2026-09-22, TAT-07; a curated
     # row, so BOTH counts move together). An AST scan of `Settings`' annotated assignments against
     # the pre-change tree reports exactly `['triage_kinds_from_registry']` added and `[]` removed.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 249
+    # 249 -> 250 on 2026-09-23: `repair_context_record` (review 2026-09-22, ENG2-14; a curated row,
+    # so BOTH counts move together). The same AST scan reports exactly `['repair_context_record']`
+    # added and `[]` removed against the tree before it.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 250
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

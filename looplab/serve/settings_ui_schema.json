@@ -419,6 +419,13 @@
           "help": "C3: give the Developer the failure taxonomy + a “reproduce then fix” directive on debug/inline repair. On by default."
         },
         {
+          "key": "repair_context_record",
+          "label": "Repair context from the run's record",
+          "type": "bool",
+          "default": true,
+          "help": "The repair Developer is told what the engine recorded: whether a watchdog really stopped the stage or the diagnostician named the failure afterwards, how a silent process ended (a signal, a deadline), the metric key a run that printed none must print, and this node's earlier repairs. Off = the pre-2026-09-23 repair text, byte for byte."
+        },
+        {
           "key": "inline_repair",
           "label": "Inline crash repair",
           "type": "bool",

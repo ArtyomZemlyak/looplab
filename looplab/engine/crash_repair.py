@@ -22,6 +22,8 @@ from typing import Optional
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, normalize_researcher_footprint
+from looplab.engine.failure_diagnosis import REASON_SOURCE_TRIAGE
+from looplab.engine.shared import repair_context_record
 from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
                                    DIAGNOSIS_SUMMARY_CAP, FINDINGS_CAP,
                                    TRIAGE_RATIONALE_CAP, UNANSWERABLE_TRIAGE_ACTION, _rule_triage,
@@ -146,7 +148,11 @@ def _format_repair_log(repair_log) -> str:
     Rendered here rather than in `agents/unified_agent.py` because the rows are the ENGINE's
     record of what it did, and because the deterministic rule path must be able to ignore them
     without the agent module having an opinion. Empty history renders empty, so the first attempt's
-    prompt is byte-identical to what it was before the history existed."""
+    prompt is byte-identical to what it was before the history existed.
+
+    A SECOND READER since review 2026-09-22: the repair Developer, through
+    `developer_repair_history`, under `Settings.repair_context_record` — one rendering, so the judge
+    and the Developer are shown the same record of what was tried."""
     rows = [r for r in (repair_log or []) if isinstance(r, dict)]
     if not rows:
         return ""
@@ -227,6 +233,24 @@ def _format_repair_log(repair_log) -> str:
     return "\n".join(out)
 
 
+def developer_repair_history(repair_log) -> str:
+    """This node's earlier in-node repairs, for the DEVELOPER about to make the next one — `""` when
+    there are none, so a first repair's text is unchanged.
+
+    Review 2026-09-22, the repair-context audit beside ENG2-14. Since F5 moved repair IN PLACE the
+    earlier attempts are `node_repaired` rows on the node itself, not ancestor nodes, so
+    `events/digest.py::ancestral_repair_chain` — the "do NOT undo these fixes" memory
+    `_repair_error_context` prepends — finds none of them, and nothing else carried them: driven, a
+    three-repair chain handed the Developer byte-identical text three times while the stuck contract
+    asked it whether "every fix you can think of has already been tried and failed". The triage judge
+    and the critic already read these rows every attempt; this is `_format_repair_log` — the SAME
+    rendering, header and notes (the byte-verified `inert`, `unmet`, the moved declared coordinate,
+    the session cut off by its budget) — so the two roles cannot come to disagree about what was
+    tried. Appended by `evaluate._eval_apply_repair` under `Settings.repair_context_record` only."""
+    text = _format_repair_log(repair_log)
+    return "\n\n" + text if text else ""
+
+
 def _coerced_critic_verdict(out) -> dict:
     """One WIRED critic answer, normalized to `{action, rationale, source}` — the two branches that
     used to be a bare `coerce_critic_action` plus a `not isinstance(out, dict)` early return.
@@ -257,6 +281,63 @@ def _coerced_critic_verdict(out) -> dict:
     return {"action": action,
             "rationale": str(out.get("rationale", ""))[:300],
             "source": CRITIC_SOURCE_MODEL if readable else CRITIC_SOURCE_OUT_OF_ENUM}
+
+
+# THE TWO WATCHDOG DIRECTIVES, cut at the one sentence that says WHO stopped the stage (review
+# 2026-09-22, ENG2-14 / doc 50 ES2-05). `_repair_error_context` opens each with the watchdog's
+# account or, under `Settings.repair_context_record` when the diagnostician named the kind, the
+# diagnostician's; the FIX half is shared, so the two cases ask for the same change in the same
+# words. The historical directive is `_WATCHDOG_* + _*_FIX`, byte for byte — a prompt is a contract,
+# and `tests/test_repair_context_record.py` pins it by digest.
+_WATCHDOG_DIVERGED_LEAD = (
+    "LoopLab's own training health-check KILLED this stage: the live log reported a "
+    "non-finite loss or grad_norm (NaN/inf) repeatedly, so the model could no longer "
+    "learn and the rest of the budget would have been wasted. This is NOT an "
+    "out-of-memory kill and NOT a timeout — ")
+_DIAGNOSED_DIVERGED_LEAD = (
+    "No LoopLab watchdog stopped this stage — it ended on its own (the error above), and the "
+    "failure diagnostician, reading its logs afterwards, found the loss or grad_norm non-finite "
+    "(NaN/inf), so the model could no longer learn. This is NOT an out-of-memory failure and NOT "
+    "a timeout — ")
+_DIVERGED_FIX = (
+    "do not reduce batch size, model size or "
+    "sequence length to fix it; that changes nothing about the instability and costs "
+    "another full run to find out. Return a corrected, complete change that makes the "
+    "OBJECTIVE numerically stable: lower the learning rate or lengthen the warmup, "
+    "clip gradients, add an epsilon inside every log/sqrt/division, compute the loss "
+    "in float32 even under mixed precision, guard a masked softmax against an "
+    "all-masked row and a 0*log(0), and reduce or ramp the weight of any newly-added "
+    "auxiliary/regularisation term. Keep the idea; make its arithmetic survivable.")
+_WATCHDOG_NOT_LEARNING_LEAD = (
+    "LoopLab's live training watchdog KILLED this stage: the loss stopped moving "
+    "(frozen or flat well above where it should be) while the run reported itself "
+    "healthy, so the remaining budget would have trained a model that never "
+    "learned the task. This is NOT an out-of-memory kill, NOT a timeout and NOT a "
+    "numeric divergence — nothing was non-finite, and reducing batch or model size "
+    "does not make a frozen objective move. Treat it as a BUG until you have "
+    "checked otherwise, and check the specific thing the watchdog named above "
+    "first. ")
+_DIAGNOSED_NOT_LEARNING_LEAD = (
+    "No LoopLab watchdog stopped this stage — it ended on its own (the error above), and the "
+    "failure diagnostician, reading its logs afterwards, concluded the loss had stopped moving "
+    "(frozen or flat well above where it should be), so the run was training a model that never "
+    "learned the task. This is NOT an out-of-memory failure, NOT a timeout and NOT a numeric "
+    "divergence — nothing was non-finite, and reducing batch or model size does not make a "
+    "frozen objective move. Treat it as a BUG until you have checked otherwise, and check first "
+    "whatever the diagnostician named above, if it named anything. ")
+_NOT_LEARNING_FIX = (
+    "The usual causes are mechanical: the loss reduced over the wrong axis "
+    "or with the wrong sign, embeddings normalized (or not) inconsistently between "
+    "the two towers, a temperature or margin that makes every pair identical, "
+    "labels or positives misaligned with their inputs, a dataloader yielding the "
+    "same batch every step, a scheduler that drove the learning rate to ~0, a "
+    "frozen/detached parameter set that leaves nothing to update, or a "
+    "regularisation term whose minimum is a constant embedding. Return a corrected, "
+    "complete change that makes the objective ABLE to descend, and print enough per "
+    "step (loss AND grad_norm AND lr) that the next run shows whether it did. If "
+    "after looking you conclude the code is right and the IDEA is simply wrong for "
+    "this setup, say so plainly instead of changing something at random — a real "
+    "negative result is worth more than a repair that hides it.")
 
 
 class CrashRepairMixin:
@@ -653,7 +734,8 @@ class CrashRepairMixin:
 
     def _repair_error_context(self, reason: str, error: str,
                               state: Optional[RunState] = None, node=None,
-                              *, headline: str = "", fence_note: str = "") -> str:
+                              *, headline: str = "", fence_note: str = "",
+                              reason_source: Optional[str] = None) -> str:
         """Error context handed to Developer.repair(). A timeout gets an explicit cost-reduction
         directive (the code was too slow, not wrong — shrink it to fit the budget). With deep_repair
         (C3) a crash is enriched with the failure taxonomy + a 'reproduce then fix' directive; else
@@ -661,7 +743,14 @@ class CrashRepairMixin:
 
         M1/A0c: when `state`+`node` are given, the ANCESTRAL REPAIR CHAIN of the lineage is
         prepended (aira-dojo MEM_OPS `ancestral`) — prior fixes and what they hit — so a repair
-        doesn't oscillate undo↔redo with an earlier one."""
+        doesn't oscillate undo↔redo with an earlier one.
+
+        `reason_source` is WHO named `reason` (`failure_diagnosis.REASON_SOURCES`), and under
+        `Settings.repair_context_record` it decides which account opens the `diverged` and
+        `not_learning` directives: those are the two kinds a LoopLab WATCHDOG kills a stage for and
+        the DIAGNOSTICIAN may also name afterwards (`DIAGNOSED_ENGINE_FINAL_OVERLAP`), and only the
+        first is a kill (review 2026-09-22, ENG2-14 / doc 50 ES2-05). `None` — a caller that does
+        not know, like the Card debug build — keeps the historical sentence."""
         chain = ""
         if state is not None and node is not None:
             from looplab.events.digest import ancestral_repair_chain
@@ -761,23 +850,26 @@ class CrashRepairMixin:
                     "batch — it does not divide the per-device one — so raising it frees NOTHING; to "
                     "keep an effective batch while cutting memory you must divide the per-device "
                     "batch and raise accumulation by the same factor.")
+        # WHO STOPPED THE STAGE, for the two kinds a watchdog and the diagnostician can both name
+        # (review 2026-09-22, ENG2-14 / doc 50 ES2-05). Both directives open by telling the Developer
+        # a LoopLab watchdog KILLED the stage — true when the engine's own kill named the reason, and
+        # false on both counts when the diagnostician named it over a `check_failed` stage: nothing
+        # was killed, and the account at the head of `error` is the diagnostician's
+        # (`failure_diagnosis.diagnosis_repair_lead`), not a watchdog's. Measured on the triage
+        # corpus (`bench-out/cand.durable.jsonl`): 14 of 122 rows are that case, every one a
+        # `repair`. A new opening sentence for the diagnosed case, keyed on the SOURCE the durable
+        # row carries; the fix each directive asks for is the same words either way, and `false`
+        # — or a caller that does not know the source — is the historical text byte for byte.
+        _diagnosed = (repair_context_record(self)
+                      and reason_source == REASON_SOURCE_TRIAGE)
         if reason == "diverged":
             # The directive that must be said FIRST is the negative one. This kill and an OOM kill are
             # the same SIGKILL with the same absent traceback, so a model reading only the exit code
             # reaches for the memory playbook — which is what happened for three rounds on v6 node 5,
             # each one halving a batch size that was never the problem.
             return ("[failure kind: diverged]\n" + error + "\n"
-                    "LoopLab's own training health-check KILLED this stage: the live log reported a "
-                    "non-finite loss or grad_norm (NaN/inf) repeatedly, so the model could no longer "
-                    "learn and the rest of the budget would have been wasted. This is NOT an "
-                    "out-of-memory kill and NOT a timeout — do not reduce batch size, model size or "
-                    "sequence length to fix it; that changes nothing about the instability and costs "
-                    "another full run to find out. Return a corrected, complete change that makes the "
-                    "OBJECTIVE numerically stable: lower the learning rate or lengthen the warmup, "
-                    "clip gradients, add an epsilon inside every log/sqrt/division, compute the loss "
-                    "in float32 even under mixed precision, guard a masked softmax against an "
-                    "all-masked row and a 0*log(0), and reduce or ramp the weight of any newly-added "
-                    "auxiliary/regularisation term. Keep the idea; make its arithmetic survivable.")
+                    + (_DIAGNOSED_DIVERGED_LEAD if _diagnosed else _WATCHDOG_DIVERGED_LEAD)
+                    + _DIVERGED_FIX)
         if reason == "check_false_positive":
             # The directive that must be said FIRST is, again, the negative one — and here the
             # negative is the whole point. Every other kind in this ladder tells the Developer what
@@ -844,25 +936,8 @@ class CrashRepairMixin:
             # memory changes nothing, and lowering the learning rate — `diverged`'s first move — is
             # if anything the wrong direction for a model that is not learning at all.
             return ("[failure kind: not_learning]\n" + error + "\n"
-                    "LoopLab's live training watchdog KILLED this stage: the loss stopped moving "
-                    "(frozen or flat well above where it should be) while the run reported itself "
-                    "healthy, so the remaining budget would have trained a model that never "
-                    "learned the task. This is NOT an out-of-memory kill, NOT a timeout and NOT a "
-                    "numeric divergence — nothing was non-finite, and reducing batch or model size "
-                    "does not make a frozen objective move. Treat it as a BUG until you have "
-                    "checked otherwise, and check the specific thing the watchdog named above "
-                    "first. The usual causes are mechanical: the loss reduced over the wrong axis "
-                    "or with the wrong sign, embeddings normalized (or not) inconsistently between "
-                    "the two towers, a temperature or margin that makes every pair identical, "
-                    "labels or positives misaligned with their inputs, a dataloader yielding the "
-                    "same batch every step, a scheduler that drove the learning rate to ~0, a "
-                    "frozen/detached parameter set that leaves nothing to update, or a "
-                    "regularisation term whose minimum is a constant embedding. Return a corrected, "
-                    "complete change that makes the objective ABLE to descend, and print enough per "
-                    "step (loss AND grad_norm AND lr) that the next run shows whether it did. If "
-                    "after looking you conclude the code is right and the IDEA is simply wrong for "
-                    "this setup, say so plainly instead of changing something at random — a real "
-                    "negative result is worth more than a repair that hides it.")
+                    + (_DIAGNOSED_NOT_LEARNING_LEAD if _diagnosed else _WATCHDOG_NOT_LEARNING_LEAD)
+                    + _NOT_LEARNING_FIX)
         if reason == "needs_failed":
             # The one directive that must NOT say "diagnose the crash": there was no crash. The stage
             # was refused before it started, so its code is not evidence of anything yet, and the two

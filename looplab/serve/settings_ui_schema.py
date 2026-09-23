@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 214
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 215
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -250,7 +250,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # registries or read as they did. A row on `evidence_envelope`'s ground: it changes a PROMPT, so the
 # switch that restores the historical bytes must be where an operator can see it. Re-derived by
 # INTERSECTION: the 213 previous keys plus exactly that one, no duplicate and none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "988675c83fa4bc41880df29887ad2bf8a6f02a9f0f7cce3cb0f1287f7538abcb"
+# 214 -> 215 on 2026-09-23: `repair_context_record` (review 2026-09-22, ENG2-14 / doc 50 ES2-05),
+# beside `deep_repair` — whether the repair Developer's context states who stopped the stage, how a
+# silent process ended, the key a metric-less run should have printed, and the node's repair
+# history. A row on the same ground as the one above: it changes a PROMPT. Re-derived by
+# INTERSECTION: the 214 previous keys plus exactly that one, no duplicate and none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5959521f3ebb24e89c27841ebe97ff1a2aae6e1eeb7898fb56631fc40740a8eb"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

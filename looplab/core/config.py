@@ -917,6 +917,31 @@ class Settings(BaseSettings):
     # then fix" directive on debug, not just the raw stderr tail. ON by default (product surface); the
     # conservative library default in EngineOptions stays off, per that module's contract.
     deep_repair: bool = True
+    # THE REPAIR CONTEXT IS THE ENGINE'S OWN RECORD OF THE NODE (review 2026-09-22, ENG2-14 / doc 50
+    # ES2-05, and the repair-context audit beside it). Measured by driving scripted failures through
+    # the real `_evaluate` and capturing what `Developer.repair` receives, four places where the text
+    # contradicted the engine's record or left out what it holds:
+    #   * a `not_learning` / `diverged` the DIAGNOSTICIAN named on a `check_failed` stage was handed
+    #     "LoopLab's live training watchdog KILLED this stage" — nothing was killed, and the account
+    #     at the head of the text is the diagnostician's (14 of the 122 rows of the triage corpus,
+    #     `bench-out/cand.durable.jsonl`, are exactly this: triage-sourced `not_learning` over
+    #     `check_failed`, every one a `repair`);
+    #   * a process that exited non-zero (a SIGKILL, -9) or hit its deadline with nothing on stderr was
+    #     described as "the command ran cleanly (exit 0) but printed NO parseable metric";
+    #   * a run that exited 0 with no metric but wrote ANYTHING to stderr (a warning, a progress bar)
+    #     lost the one sentence naming the key the eval reads;
+    #   * the node's own earlier repairs — the rows the triage judge and the critic read — never
+    #     reached the Developer, whose stuck contract asks whether "every fix … has already been tried".
+    # ON: the kill sentence is keyed on WHO named the reason (`reason_source`), the silent-exit text
+    # states the exit code or the deadline, the no-metric sentence rides beside a non-empty stderr,
+    # and the node's repair history (`crash_repair._format_repair_log`, the judge's own rendering,
+    # same window) follows the stuck contract. `false` is every one of those texts BYTE FOR BYTE —
+    # the Developer's prompt, the triage judge's `err`, and the `error` / `error_in` the durable rows
+    # carry — so it takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row on `evidence_envelope`'s
+    # different-prompt ground; OFF at every constructor (`EngineOptions`). Read through ONE reader,
+    # `engine/shared.py::repair_context_record`. No extra call, and no metric, champion,
+    # selectability decision or violation moves on it (docs/36): only what the repair is TOLD.
+    repair_context_record: bool = True
     # === Inline crash repair ==============================================================
     # Hybrid in-node crash repair: when an LLM-generated node CRASHES at runtime (mechanical errors
     # — bad import, removed kwarg, typo), the agent triages it and may repair the code IN PLACE within
@@ -3395,6 +3420,15 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `tests/test_triage_kind_vocabulary.py` hold that `false` is the historical prompt, byte for
     # byte.
     "triage_kinds_from_registry": False,
+    # THE REPAIR CONTEXT AS THE ENGINE'S RECORD, added 2026-09-23 defaulting ON (review 2026-09-22,
+    # ENG2-14 / doc 50 ES2-05). (a) holds. (b) is the rows above' DIFFERENT-PROMPT ground: ON, the
+    # Developer's repair text keys the watchdog sentence on who named the reason, states a silent
+    # exit's code or deadline, keeps the no-metric sentence beside a non-empty stderr and carries the
+    # node's repair history — and the failure text is also the triage judge's input and the durable
+    # rows' `error`, so a resumed run would change what both roles are told mid-log. (c) is `False`,
+    # pointable at every commit before this one; `tests/test_repair_context_record.py` holds that
+    # `false` is the historical text byte for byte.
+    "repair_context_record": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

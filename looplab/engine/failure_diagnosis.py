@@ -1138,6 +1138,48 @@ def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
     return kind, REASON_SOURCE_TRIAGE
 
 
+# The signals an exit code can name, and what they are called. NEGATIVE exit codes are POSIX signals
+# as Python reports them, and 128+N is the shell's spelling of the same thing. Named rather than left
+# as a number, because "-9" means nothing to a reader that has not memorised the table and "SIGKILL"
+# is the whole content. ONE table for the two readers of an exit code below (`engine_observed_facts`
+# for the diagnostician, `silent_exit_account` for the failure text), so they cannot name one exit
+# two ways.
+_SIGNAL_NAMES = {9: "SIGKILL", 15: "SIGTERM", 6: "SIGABRT", 11: "SIGSEGV", 7: "SIGBUS"}
+
+
+def exit_signal_name(code) -> str | None:
+    """The signal an integer exit code names (`SIGKILL` for -9 and for 137), or None."""
+    if not isinstance(code, int):
+        return None
+    sig = -code if code < 0 else (code - 128 if 128 < code < 160 else None)
+    return _SIGNAL_NAMES.get(sig)
+
+
+def silent_exit_account(exit_code, timed_out: bool) -> str:
+    """What the failure text says about a process that wrote NOTHING to stderr and did not exit
+    cleanly: the words after `exit=<code> timed_out=<bool> ` (review 2026-09-22, the repair-context
+    audit beside ENG2-14; read only under `Settings.repair_context_record`, by
+    `evaluate._eval_failure_text`).
+
+    The historical fallback said "the command ran cleanly (exit 0) but printed NO parseable metric"
+    about EVERY silent failure, so a process killed by SIGKILL and one stopped at its deadline were
+    both described as a clean exit — to the repair Developer, to the triage judge and on the durable
+    `error`. Driven: `exit=-9 timed_out=True no_metric — the command ran cleanly (exit 0)…` one line
+    above the timeout directive that contradicts it. This says only what the engine holds: that the
+    deadline fired, or that the process exited non-zero — naming the signal when the code names one,
+    exactly as `engine_observed_facts` names it to the diagnostician. It classifies nothing (the
+    reason is still `triage._failure_reason`'s) and, like that function, does not say "this looks
+    like an OOM": the kill's cause is the judgement being delegated.
+    """
+    if timed_out:
+        return ("— the evaluation was stopped at its time budget before it printed a metric, and "
+                "it wrote nothing to stderr.")
+    named = exit_signal_name(exit_code)
+    ended = f"was killed by {named}" if named else "ended with a non-zero exit"
+    return (f"— the process {ended} and wrote nothing to stderr, so there is no traceback to "
+            "read.")
+
+
 def engine_observed_facts(res) -> str:
     """The engine's OWN record of how the process ended, rendered for the diagnostician — or `""`
     when there is no `res` to read.
@@ -1168,11 +1210,7 @@ def engine_observed_facts(res) -> str:
     bits = []
     code = getattr(res, "exit_code", None)
     if isinstance(code, int):
-        # NEGATIVE exit codes are POSIX signals as Python reports them, and 128+N is the shell's
-        # spelling of the same thing. Named rather than left as a number, because "-9" means nothing
-        # to a reader that has not memorised the table and "SIGKILL" is the whole content.
-        sig = -code if code < 0 else (code - 128 if 128 < code < 160 else None)
-        named = {9: "SIGKILL", 15: "SIGTERM", 6: "SIGABRT", 11: "SIGSEGV", 7: "SIGBUS"}.get(sig)
+        named = exit_signal_name(code)
         bits.append(f"exit code {code}" + (f" (killed by {named})" if named else ""))
     err = getattr(res, "stderr", None)
     if isinstance(err, str):

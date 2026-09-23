@@ -157,6 +157,9 @@ class EngineKnobs:
     _failure_reflection = Knob("failure_reflection")
     _watchdog_reflection = Knob("watchdog_reflection")
     _deep_repair = Knob("deep_repair")
+    # The repair context as the engine's own record (review 2026-09-22, ENG2-14 / ES2-05). Read by
+    # `shared.py::repair_context_record`, the one place the repair path learns it.
+    _repair_context_record = Knob("repair_context_record", bool)
     # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
     _inline_repair = Knob("inline_repair")
     _inline_repair_attempts = Knob("inline_repair_attempts",

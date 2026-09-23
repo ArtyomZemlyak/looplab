@@ -182,7 +182,15 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               replicate renders either prompt. Re-pinned anyway on the rule every inert knob above
 #               was re-pinned under — the digest binds the COMPLETE non-variant envelope — and a
 #               PROMPT knob earns it, since a prompt is a contract.
-_EXPECTED_DIGEST = "sha256:76656ad61abbaa0ac2dbab20158765fe2db77709832490756f91f9b6ea2a617c"
+#   2026-09-23  + repair_context_record (review 2026-09-22, ENG2-14 / doc 50 ES2-05: the repair
+#               Developer's context as the engine's own record). The 'field set changed too'
+#               branch, verified the prescribed way: an AST scan of `Settings`' annotated
+#               assignments against the pre-change tree reports exactly `['repair_context_record']`
+#               added and `[]` removed. `_EXPECTED_FIELD_COUNT` goes 246 -> 247 and both pins are
+#               re-set. INERT for a calibration replicate: the toy workload never fails an eval, so
+#               no repair context is ever built. Re-pinned anyway — the digest binds the COMPLETE
+#               non-variant envelope, and a PROMPT knob earns it.
+_EXPECTED_DIGEST = "sha256:f526dc14975d326d5fc4f267552588fc57b9ab220e559a6956dbae156c272945"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -661,7 +669,8 @@ _EXPECTED_DIGEST = "sha256:76656ad61abbaa0ac2dbab20158765fe2db77709832490756f91f
 #               decides whether a run's params, metrics and champion CODE leave the box for an
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
-_EXPECTED_FIELD_COUNT = 246
+#   2026-09-23  + repair_context_record: 246 -> 247 — see the digest history above.
+_EXPECTED_FIELD_COUNT = 247
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

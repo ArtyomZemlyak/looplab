@@ -1008,6 +1008,13 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   broken registry, and v6 node 5 halved a batch size three times against an OOM that never happened.
   None of the three may decide *what the result was* — no model's word moves a metric, a champion,
   selectability or a violation.
+  **Since 2026-09-23 the Developer is shown the same record** (`repair_context_record`, ON for new
+  runs): the node's earlier repairs follow the stuck contract in the judge's own rendering, so the
+  question "has every fix already been tried?" is one it can answer; a `not_learning` / `diverged`
+  the diagnostician named is no longer described as a watchdog kill; a process that ended silently
+  (a SIGKILL, a deadline) is no longer described as a clean exit; and a metric-less clean exit keeps
+  the sentence naming the key the eval reads even when it wrote to stderr. Driven before the change,
+  a three-repair chain handed the Developer the same text three times.
   **Since 2026-08-20 the same judge also says WHAT FAILED, over half of the vocabulary.** The
   classification splits in two. Eight reasons are **authenticated facts** the engine recorded out of
   band about what *it* did — `diverged` and `stalled` (the watchdogs' `signals`), `timeout` (its own

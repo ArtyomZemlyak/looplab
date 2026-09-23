@@ -230,6 +230,14 @@ class EngineOptions:
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt
     watchdog_reflection: bool = False    # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
     deep_repair: bool = False            # C3: structured failure-taxonomy repair context
+    # THE REPAIR CONTEXT AS THE ENGINE'S RECORD (`Settings.repair_context_record`; review
+    # 2026-09-22, ENG2-14 / doc 50 ES2-05): who stopped the stage, how a silent process ended, the
+    # no-metric sentence beside a non-empty stderr, and the node's repair history in front of the
+    # Developer. OFF here and ON in the product surface — a divergence-table row
+    # (`tests/test_options_divergence.py`) — because it changes a PROMPT (and the failure text the
+    # triage judge and the durable rows carry), and a prompt flag defaults off at every constructor
+    # (CLAUDE.md): a bare `Engine(...)` keeps every one of those texts byte for byte.
+    repair_context_record: bool = False
     localize_faults: bool = False        # C1: surface fault-localized files for repo tasks
     feature_engineering: bool = False    # I1: CV-gated feature-engineering directive
     ablate_code_blocks: bool = False     # A0a: ablate pipeline code blocks, not just params

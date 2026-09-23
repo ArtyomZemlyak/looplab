@@ -80,6 +80,12 @@ EXPECTED = {
     # read), OFF in the bare library because it changes a PROMPT, and a prompt flag defaults off at
     # every constructor (CLAUDE.md) — a direct `Engine(...)` keeps each judge's historical request.
     "evidence_envelope": (True, False),
+    # The repair context as the engine's own record (review 2026-09-22, ENG2-14 / doc 50 ES2-05):
+    # who stopped the stage, how a silent process ended, the key a metric-less run should have
+    # printed, the node's repair history. ON in the product surface, OFF in the bare library on the
+    # row above's ground — it changes a PROMPT (and the failure text the triage judge and the
+    # durable rows carry), so a direct `Engine(...)` keeps every one of those texts byte for byte.
+    "repair_context_record": (True, False),
     "unified_agent": (True, False),
     # Layer 3 Card queue owns macro-action selection in the product surface (2026-08-04): the Card lane
     # is the intended selector, and it wins over `agent_drives_actions` when both are on. The bare
