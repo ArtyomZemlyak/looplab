@@ -122,6 +122,9 @@ def _srv(rd: Path, generation: str, *, jobs: _Jobs | None = None):
         commands=_Commands(generation),
         jobs=jobs or _Jobs(),
         llm_settings=lambda _rd=None: SimpleNamespace(),
+        # `AppState.event_store(rd)` — the recovery projection reads through the server's reused
+        # store since review 2026-09-22 (SRV2-11); a fresh one per call is this double's version.
+        event_store=lambda run_dir: EventStore(run_dir / "events.jsonl"),
     )
 
 

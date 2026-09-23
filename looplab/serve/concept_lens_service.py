@@ -750,7 +750,12 @@ def durable_recover_concept_lens_receipt(srv, run_id: str, response: Response,
         stale_remediation="Reload Concepts and inspect only the current generation.",
         prepared_message="The run changed while its recovery projection was prepared.")
 
-    store = EventStore(rd / "events.jsonl")
+    # The server's REUSED store (`serve/appstate.py::AppState.event_store`), not a fresh one: the
+    # Concepts panel polls this every second while a paid lens is unresolved, and a fresh
+    # `EventStore` re-scans the whole log for its tail seq on construction — the per-poll
+    # O(log) the shared store's append-only read cache exists to remove (review 2026-09-22,
+    # SRV2-11).
+    store = srv.event_store(rd)
     claims, terminals, unresolved, conflict = lens_recovery_ledger(
         store.read_all(), current_generation)
     _rd_after, generation_after = srv.commands.generation_fence(rd)

@@ -989,3 +989,31 @@ def test_recovery_is_owner_only_and_review_capability_cannot_translate(
     assert review_write.json()["kind"] == "review_read_only"
     assert not any(event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}
                    for event in EventStore(run_dir / "events.jsonl").read_all())
+
+
+def test_the_recovery_poll_reads_through_the_servers_store_not_a_fresh_one(tmp_path, monkeypatch):
+    """Review 2026-09-22, SRV2-11. The Concepts panel polls `GET …/concepts/lens/recovery` every
+    second while a paid lens is unresolved, and the projection built a NEW `EventStore` per poll —
+    whose constructor walks the whole log for its tail seq. It reads through
+    `srv.event_store(rd)` now, the store reused across requests. MUTATION: restore
+    `EventStore(rd / "events.jsonl")` in `durable_recover_concept_lens_receipt` -> one construction
+    per poll."""
+    import looplab.serve.concept_lens_service as service
+
+    _seed_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/concepts").json()["generation"]
+    assert _recover(client, generation).status_code == 200      # warms the server's store
+
+    built = []
+    real = service.EventStore
+
+    class _Counting(real):
+        def __init__(self, *args, **kwargs):
+            built.append(args)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(service, "EventStore", _Counting)
+    for _ in range(5):
+        assert _recover(client, generation).status_code == 200
+    assert built == [], f"the recovery poll built {len(built)} fresh EventStore(s) in 5 polls"
