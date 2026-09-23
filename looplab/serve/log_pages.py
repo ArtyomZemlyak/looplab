@@ -29,7 +29,7 @@ from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, decode_event_record, is_event_batch_record,
     prefix_anchor_from_handle)
 from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
-from looplab.serve.http import generation_conflict
+from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.run_commands import run_generation_token
 
 
@@ -505,8 +505,13 @@ class EventLogPager:
         path = Path(path)
         try:
             handle = open(path, "rb")
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise HTTPException(404, "no such run") from exc
+        except OSError as exc:
+            # A log that EXISTS and will not open (EACCES, EIO on a flaky mount) is not a missing
+            # run: it is the coded 503 every other per-run read answers (review 2026-09-22,
+            # SRV2-04). This answered 404, telling the timeline the run was gone.
+            raise refusal("event_log_unreadable") from exc
         with handle, self._paths.hold(str(path)):
             stat = os.fstat(handle.fileno())
             snapshot_size = stat.st_size

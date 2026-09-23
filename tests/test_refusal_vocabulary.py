@@ -277,15 +277,34 @@ def _event_log_raises_eio(monkeypatch, rd) -> None:
     # The legacy raw-envelope route reads `iter_event_jsonl` itself (its rows are the RAW envelopes,
     # which `AppState.events` re-validates into `Event`s), so it names the same refusal on its own.
     f"/api/runs/{RUN}/log",
+    # THE REMAINDER (review 2026-09-22, SRV2-04), four routes that answered something MISLEADING
+    # rather than a 500, each through a read that is not `AppState.events`:
+    #   * the timeline pager opens the log itself, and every open failure was `404 no such run`;
+    f"/api/runs/{RUN}/log-page",
+    #   * the concept frame reads through `EventStore.read_all`, which answers EIO with an empty
+    #     prefix — `409 run_generation_unavailable` ("no durable generation yet");
+    f"/api/runs/{RUN}/concepts",
+    #   * every read FENCE compared the generation `run_generation` answers — "" for an unreadable
+    #     log — with the client's, and answered `409 run_generation_changed` ("the run was reset").
+    #     `{gen}` is the run's real generation, read before the fault.
+    f"/api/runs/{RUN}/artifacts?expected_generation={{gen}}",
+    f"/api/runs/{RUN}/trace/tail?expected_generation={{gen}}",
+    #   * ...and without one, the tail fence passed "" and served an EMPTY tail as a success.
+    f"/api/runs/{RUN}/trace/tail",
 ])
 def test_an_unreadable_event_log_is_a_coded_503_on_every_per_run_read(tmp_path, monkeypatch, path):
     """Review 2026-09-22, SRV2-04: an `events.jsonl` that exists but cannot be read answered a bare
     500 on every per-run GET — the framework's word for a crash in the server's own code, which a
     client reports and never retries. `AppState.events` is the read every fold on the HTTP path goes
     through, so it answers `event_log_unreadable` from the table. MUTATION: drop the `except OSError`
-    in `AppState.events` -> 500."""
+    in `AppState.events` -> 500. The remainder rows are held by `run_commands.py::
+    readable_event_records` (the read fences' generation, and the concept frame's empty-prefix
+    branch) and the pager's own open: MUTATION: `readable_run_generation` back to `run_generation`
+    -> the fenced rows answer 409 `run_generation_changed` again, and the pager's `except OSError`
+    back to 404 -> `/log-page` answers `no such run`."""
     rd = _run(tmp_path)
     client = TestClient(make_app(tmp_path), raise_server_exceptions=False)
+    path = path.format(gen=_generation(rd))
     _event_log_raises_eio(monkeypatch, rd)
     response = client.get(path)
     assert response.status_code == 503, response.text

@@ -31,7 +31,7 @@ import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 from fastapi import HTTPException
 import orjson
@@ -110,6 +110,27 @@ def run_generation_token(events) -> str:
         "run_id": data.get("run_id"),
     }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def readable_event_records(path) -> Iterator[dict]:
+    """`iter_event_jsonl`, for a READ that must tell an unreadable log from an empty one.
+
+    `run_generation_token` answers a failed read with "" — the right fail-closed answer for a WRITER
+    (no durable generation, so no mutation), and a misleading one for a GET: every read fence
+    compared that "" with the client's generation and answered `409 run_generation_changed` ("the
+    run was reset — reload"), and the reload then met `event_log_unreadable`, the coded 503 every
+    other per-run read gives for the same file (review 2026-09-22, SRV2-04). Here an EXISTING log
+    whose open or read raises is that refusal. A log that vanished between the existence check and
+    the open is still no events (a reset's replace, or a deletion), exactly as before; the refusal
+    is an `HTTPException`, not an `OSError`, so it passes through `run_generation_token`'s guard.
+    """
+    try:
+        yield from iter_event_jsonl(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    except OSError as exc:
+        # `refusal` carries the slug and never the `OSError` text (the host path).
+        raise refusal("event_log_unreadable") from exc
 
 
 def _normalize_expected_generation(value: object) -> str:
@@ -660,8 +681,26 @@ class RunCommandService:
         O(events) critical section. ``iter_event_jsonl`` preserves the event store's torn/corrupt-first-line
         semantics; ``run_generation_token`` also validates that dictionary through ``Event`` so a
         complete JSON object with an invalid event schema remains generation-less, as in ``read_all``.
+
+        An unreadable log is "" here, which is the WRITERS' fail-closed answer. A GET's read fence
+        asks `readable_run_generation` instead (review 2026-09-22, SRV2-04).
         """
         return run_generation_token(iter_event_jsonl(self._events_path(rd)))
+
+    def readable_run_generation(self, rd: Path) -> str:
+        """`run_generation` for a READ fence: an existing log that cannot be read is the coded
+        `event_log_unreadable` 503 every per-run read answers, never "" (see
+        `readable_event_records`). Every GET that CASes on the generation reads it through here —
+        `generation_fence` and the trace family's `_begin_trace_read`/`_finish_trace_read`.
+
+        `run_generation` first, and the strict re-read ONLY when it answers "": a generation IS
+        proof the log was read, while "" is the answer for an empty log and for an unreadable one
+        alike, and only a read that can tell those apart may decide which. Going through
+        `run_generation` also keeps it the one generation seam the read fences' tests drive."""
+        generation = self.run_generation(rd)
+        if generation:
+            return generation
+        return run_generation_token(readable_event_records(self._events_path(rd)))
 
     def generation_fence(self, rd: Path) -> tuple[Path, str]:
         """The READ side of a generation CAS: `(validated run dir, current generation)`, NO lock.
@@ -685,9 +724,13 @@ class RunCommandService:
         `validate_paths` is included because a fence over a path the caller has not validated is a
         fence over the wrong file; it is returned rather than discarded so the caller reads the same
         canonical directory this generation was taken from.
+
+        THE READ SPELLING of the generation (`readable_run_generation`): an unreadable log answered
+        "" here, which every caller turned into `409 run_generation_changed` — telling the client
+        the run was replaced when it could not be read at all (review 2026-09-22, SRV2-04).
         """
         rd = self.validate_paths(rd)
-        return rd, self.run_generation(rd)
+        return rd, self.readable_run_generation(rd)
 
     def run_generation_if_present(self, rd: Path) -> str:
         """Observe a generation while a fenced reset may temporarily have no event log.

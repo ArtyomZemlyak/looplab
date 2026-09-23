@@ -666,7 +666,9 @@ def build_router(srv) -> APIRouter:
                 "message": "expected_generation must be the exact generation from run state.",
                 "remediation": f"Reload the run before reading {reading}.",
             })
-        generation = srv.commands.run_generation(rd)
+        # The READ spelling: an unreadable log is the coded 503, never a "" that reads as a reset
+        # (review 2026-09-22, SRV2-04) — see `run_commands.py::readable_event_records`.
+        generation = srv.commands.readable_run_generation(rd)
         if expected_generation is not None and generation != expected_generation:
             raise generation_conflict(
                 f"The run was reset or replaced before {subject} was read.",
@@ -678,7 +680,7 @@ def build_router(srv) -> APIRouter:
                            expected_generation: Optional[str]) -> str:
         """Complete the trace-sidecar lifecycle CAS after the potentially slow projection."""
         _assert_trace_reset_clear(rd)
-        generation = srv.commands.run_generation(rd)
+        generation = srv.commands.readable_run_generation(rd)
         if (generation != before_generation
                 or (expected_generation is not None
                     and generation != expected_generation)):
@@ -729,6 +731,11 @@ def build_router(srv) -> APIRouter:
 
         def _from_snapshot(events, current_state, source_divergence):
             if not events:
+                # No events is TWO facts (review 2026-09-22, SRV2-04): an empty log, or one that
+                # exists and cannot be read — `EventStore.read_all` answers both with an empty
+                # prefix. The second is the coded 503 every other per-run read gives; only the
+                # first is "no durable generation yet". The strict read decides, and raises.
+                srv.commands.readable_run_generation(rd)
                 raise HTTPException(409, {
                     "code": "run_generation_unavailable",
                     "message": "The run has no durable generation identity.",
@@ -1355,7 +1362,7 @@ def build_router(srv) -> APIRouter:
         payload = {"eval": _tail("eval.log"), "stages": stages, "setup": _tail("setup.log"),
                    "run_setup": _tail("run_setup.log", rd)}
         _assert_trace_reset_clear(rd)
-        after_generation = srv.commands.run_generation(rd)
+        after_generation = srv.commands.readable_run_generation(rd)
         after_attempt = _cached_node_attempt(rd, nid)
         if legacy_node_identity is not None:
             after_legacy_identity = _legacy_node_log_dir_identity(rd, nid)
@@ -1511,7 +1518,7 @@ def build_router(srv) -> APIRouter:
         # (`useTraceRetry`), and this fence is what the reset-safety tests drive.
         _assert_attempt_unchanged(rd, nid, current_attempt,
                                   message="The node was reset while its trace was being read.")
-        after_generation = srv.commands.run_generation(rd)
+        after_generation = srv.commands.readable_run_generation(rd)
         if (after_generation != before_generation
                 or (expected_generation is not None
                     and after_generation != expected_generation)):
@@ -1699,7 +1706,7 @@ def build_router(srv) -> APIRouter:
         def _generation_bound(payload: dict) -> dict:
             """Publish only a snapshot whose run identity stayed stable for the whole read."""
             _assert_trace_reset_clear(rd)
-            after_generation = srv.commands.run_generation(rd)
+            after_generation = srv.commands.readable_run_generation(rd)
             if (after_generation != before_generation
                     or (expected_generation is not None
                         and after_generation != expected_generation)):
@@ -1969,7 +1976,7 @@ def build_router(srv) -> APIRouter:
             after_attempt = _cached_node_attempt(rd, nid)
             after_attempt = after_attempt if after_attempt is not None else 0
             _assert_trace_reset_clear(rd)
-            after_generation = srv.commands.run_generation(rd)
+            after_generation = srv.commands.readable_run_generation(rd)
             if (after_generation != before_generation
                     or (expected_generation is not None
                         and after_generation != expected_generation)):
