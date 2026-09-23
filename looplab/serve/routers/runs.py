@@ -41,7 +41,7 @@ from looplab.serve.http import (
 from looplab.events.eventstore import (
     EventStore, EventStoreLockError, JsonlRecordInvalid,
     interprocess_lock, decode_jsonl_line, iter_event_jsonl)
-from looplab.events.replay import FoldCursor, fold
+from looplab.events.replay import FoldCursor, fold, fold_run_start
 from looplab.events.trust_gate import (
     GATE_WRITE_APPENDED, GATE_WRITE_CONTENDED, apply_trust_gate,
 )
@@ -2807,7 +2807,12 @@ def build_router(srv) -> APIRouter:
         launch-time request the pin is the resolution OF, so overwriting it here would show — and then
         let the form save back — one run's resolved integer in place of the operator's own spelling.
         """
-        pinned = run_start_pinned_settings(srv.state(rd))
+        # The run-start ROW's fields, not the whole fold (review 2026-09-22, SRV2-11): every value this
+        # overlay reads — the pins and the declared environment — is written by `run_started` alone,
+        # which `events/replay.py::fold_run_start` replays through the fold's own handler. A full
+        # fold here cost the card ledger's finalize on every GET (28 of 43 ms on a 1,141-event log).
+        run_start = fold_run_start(srv.events(rd))
+        pinned = run_start_pinned_settings(run_start)
         # Keep revision bound to the exact on-disk object, but expose the complete effective Settings
         # projection that resume consumes. Preserve unknown snapshot keys; GET stays read-only and
         # never backfills legacy bytes.
@@ -2823,7 +2828,7 @@ def build_router(srv) -> APIRouter:
         # environment from `run_started` — so a re-entry spelling a different value leaves the
         # snapshot holding one the engine does not use, and this panel is where an operator would
         # read it and believe it.
-        _recorded_env = getattr(srv.state(rd), "eval_env", None)
+        _recorded_env = getattr(run_start, "eval_env", None)
         if isinstance(_recorded_env, dict) and _recorded_env:
             if effective.get("eval_env") != _recorded_env:
                 mismatches = sorted([*mismatches, "eval_env"])

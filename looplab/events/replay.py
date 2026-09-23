@@ -2389,6 +2389,32 @@ def fold(events: Iterable[Event]) -> RunState:
     return _finalize_fold(st, ctx)
 
 
+def fold_run_start(events: Iterable[Event]) -> RunState:
+    """The run-start record's fields WITHOUT the fold: every `run_started` row, in log order, through
+    the fold's own `_on_run_started`, on a fresh `RunState` (review 2026-09-22, SRV2-11).
+
+    EQUAL TO `fold(events)` ON EVERY FIELD THAT HANDLER ALONE WRITES — by construction, not by a second
+    spelling of the rule. The handler reads nothing of the fold context and nothing of the state but
+    `run_id`, which only it writes (FIRST START WINS: a row that established no identity is folded
+    over by the next, here exactly as there), and no other handler or post-pass writes those fields.
+    `tests/test_run_start_fold.py` re-derives both halves by AST and drives the equality over real
+    logs. ONE field it writes is not the run-start's alone: `trust_gate_changed` moves `trust_gate`
+    afterwards, so a reader of this state must never take `trust_gate` from it. Every field no
+    `run_started` row writes is the `RunState` default here, not the run's value.
+
+    For readers that want only the run-start record: `GET /api/runs/{id}/config`'s pin overlay paid a
+    whole fold — O(log), the card ledger's finalize on top — on every request for thirty-odd fields
+    of one row.
+    """
+    st = RunState()
+    ctx = _FoldCtx()
+    for index, e in enumerate(events):
+        if e.type == EV_RUN_STARTED:
+            ctx.event_index = index
+            _on_run_started(st, e, e.data, ctx)
+    return st
+
+
 def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
     """Apply the order-independent read-model tail to one isolated raw fold state."""
     # PART V (B): materialize delta-authored node concepts topologically once the whole DAG is folded
