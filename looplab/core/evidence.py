@@ -157,10 +157,12 @@ def fence_untrusted(text: str, label: str) -> str:
     `fence_untrusted` for this reason and says so; it is the site that measured this.
 
     OPT-IN, and the empty default is what keeps it so: `drive_tool_loop` drives every persona in the
-    product, and a prompt is a contract (CLAUDE.md), so the Developer's and Researcher's tool results
-    stay byte-identical until someone decides that role wants this too. It is an EXPLICIT-only loop
-    argument for the same reason `nudge_prompt` is — the wording is the contract, and it belongs at
-    the site that owns it rather than in a bundle a settings file could reword.
+    product, and a prompt is a contract (CLAUDE.md), so a loop's tool results stay byte-identical
+    until someone decides that role wants this too. Since review 2026-09-22 (TAT-02) the Researcher,
+    Deep Research and the repo Developer have decided so — under `Settings.evidence_envelope`, each
+    OFF at its constructor. It is an EXPLICIT-only loop argument for the same reason `nudge_prompt`
+    is — the wording is the contract, and it belongs at the site that owns it rather than in a
+    bundle a settings file could reword.
     """
     if not label:
         return text

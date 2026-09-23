@@ -30,6 +30,7 @@ from looplab.agents.answered_by_context import answered_by_context
 from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.loop_options import LoopOptions
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
+from looplab.core.evidence import fence_kwargs
 from looplab.core.fitness import is_usable_metric
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import (
@@ -817,10 +818,20 @@ class DeepResearcher:
     # "think hard" loop can't spin forever on repeated searches.
     _DEFAULT_LOOP_OPTS = LoopOptions(self_plan=True, auto_summary=True,
                                      emit_after=300, emit_force=500)
+    # The untrusted-evidence fence on this stage's tool results (review 2026-09-22, TAT-02); a
+    # CLASS default too, so an instance built without `__init__` reads OFF.
+    evidence_envelope = False
 
     def __init__(self, client, tools=None, parser: str = "tool_call", loop_opts=None, prompts=None,
-                 established=None):
+                 established=None, evidence_envelope: bool = False):
         self.client = client
+        # THE FENCE ON WHAT ITS TOOLS RETURN (`core/evidence.py`; review 2026-09-22, TAT-02). The
+        # arXiv and web tools already stamp their own results under the same switch, and the loop's
+        # fence is idempotent over those; this reaches everything else the stage reads — the run's
+        # experiments, the repo reader, memory, knowledge. The fence only: the system prompt's
+        # research-data rule is unchanged. OFF at the constructor (a prompt flag, CLAUDE.md);
+        # `make_deep_researcher` passes `envelope_enabled(settings)`.
+        self.evidence_envelope = bool(evidence_envelope)
         self.tools = tools
         self.parser = parser
         self.prompts = prompts              # hot-reloadable PromptStore (I18, ADR-8); None = inline default
@@ -986,6 +997,8 @@ class DeepResearcher:
                 budget_note=self._budget_note,
                 nudge_prompt="Now call `emit` with your memo.",
                 stuck_prompt="Stop: you appear to be stuck ({reason}). Call `emit` with your memo now.",
+                # The evidence fence, per call like the two wordings above; absent when it is off.
+                **fence_kwargs(self.evidence_envelope),
                 **self.loop_opts)
         except BudgetExceeded:      # a hard budget stop must end the run, not be swallowed as a memo
             raise
@@ -1181,4 +1194,7 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     from looplab.agents.established import established_context_from_settings
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
                           prompts=prompts, loop_opts=loop_opts,
-                          established=established_context_from_settings(settings))
+                          established=established_context_from_settings(settings),
+                          # The loop's fence on every tool result, from the same one reader the
+                          # web tools above take theirs from (review 2026-09-22, TAT-02).
+                          evidence_envelope=envelope_enabled(settings))

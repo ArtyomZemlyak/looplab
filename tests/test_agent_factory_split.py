@@ -106,8 +106,8 @@ def test_neither_module_is_a_god_module_again():
     extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 385),
-                     ("agents/developer_backends.py", 186),
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 386),
+                     ("agents/developer_backends.py", 188),
                      ("adapters/task_schema.py", 231)):
     #
     # 2026-08-29, MERGE with master: master's 530 is KEPT and not raised. The merged file is 529
@@ -161,6 +161,14 @@ def test_neither_module_is_a_god_module_again():
     # measured, so the cap follows the file DOWN to measured + 1 rather than banking 167 lines of
     # slack nobody decided on — the same rule the entry above applies upward. The new module gets it
     # too: 230 measured, cap 231.
+    #
+    # 385 -> 386 and 186 -> 188, 2026-09-23, review 2026-09-22 TAT-02 (the untrusted-evidence fence
+    # reaches the Researcher's and the repo Developer's tool results): ONE keyword at each
+    # composition site — `evidence_envelope=envelope_enabled(settings)` on the `ToolUsingResearcher`
+    # built here and on the `LLMRepoDeveloper` built in `developer_backends` — plus that module's
+    # `core.evidence` import. A Settings field threaded into the role it configures is the
+    # composition root doing its job, not a second domain; the raises pay for exactly the lines spent
+    # (384 -> 385 and 185 -> 187 measured) and keep the same one line of headroom.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

@@ -357,6 +357,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             loop_opts=loop_opts_from_settings(settings),     # B1 stuck + C1 self-plan + C2 summary
             offer_sweep=_offer_sweep,      # P6/P21: sweep offer only where idea.space is honored
             handoff=_handoff_dev,          # P25: summary call only for the run_phase repo Developer
+            evidence_envelope=envelope_enabled(settings),   # TAT-02: its tool results fenced
         )
     # The third gate, applied last because it RANKS whatever the two above settled on.
     _ranked_developer = best_of_n_developer(task, settings, developer, param_search=_param_search)

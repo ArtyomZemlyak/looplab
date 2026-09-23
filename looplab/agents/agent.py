@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.core import tracing
+from looplab.core.evidence import fence_kwargs
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
@@ -177,13 +178,25 @@ class ToolUsingResearcher:
                + _OPERATOR_NOTE + "\n"
                + _IDEA_SPACE_TOOL)
 
+    # The untrusted-evidence fence on this role's tool results (review 2026-09-22, TAT-02). A CLASS
+    # default too, so an instance built without `__init__` reads OFF — the historical request.
+    evidence_envelope = False
+
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
                  max_turns: int = 0, prompts: Optional[PromptStore] = None,
                  context_budget_chars: int | None = None, time_budget_s: float = 0.0,
                  loop_opts: Optional[dict] = None, offer_sweep: bool = True,
-                 handoff: bool = True, established=None):
+                 handoff: bool = True, established=None, evidence_envelope: bool = False):
         self.client = client
+        # THE FENCE ON WHAT ITS TOOLS RETURN (`core/evidence.py`; review 2026-09-22, TAT-02). The
+        # Researcher proposes from the run's own experiments, the repository, knowledge, memory and
+        # the literature — every one of them text the model did not write — and with this on each
+        # result arrives between `UNTRUSTED_RUN_EVIDENCE` and its closing marker. The fence only:
+        # the system prompt keeps its `_UNTRUSTED_MEMORY_RULE` and gains nothing. OFF at the
+        # constructor, because it changes a prompt (CLAUDE.md); `make_roles` passes
+        # `envelope_enabled(settings)`, so a pre-field run keeps its historical request.
+        self.evidence_envelope = bool(evidence_envelope)
         # A5 (docs/60): the run's shared `agents/established.py::EstablishedContext`, or None —
         # None and an empty store both leave the propose prompt byte-identical.
         self._established = established
@@ -384,6 +397,9 @@ class ToolUsingResearcher:
                 finalize=self._finalize, fallback=self._fallback,
                 validate=self._validate_emit, on_budget=_note_cutoff,
                 on_tool_result=_established_hook(getattr(self, "_established", None), "propose"),
+                # The evidence fence: EXPLICIT (`tool_result_label` is never a bundle field, so it
+                # cannot collide with the spread below) and ABSENT when the envelope is off.
+                **fence_kwargs(self.evidence_envelope),
                 **self.loop_opts)
             return bind_idea_to_board_card(result, self._visible_board_cards)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run

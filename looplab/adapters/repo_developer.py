@@ -28,6 +28,7 @@ import math as _math
 from typing import Optional
 
 from looplab.core.errors import BudgetExceeded, OperatorRefusal, budget_stop_leaf
+from looplab.core.evidence import fence_kwargs
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -725,6 +726,9 @@ class LLMRepoDeveloper:
     # methods on bare `__new__` instances, and the attr also opts into make_roles' existing
     # post-construction hook (`if hasattr(developer, "prompts"): developer.prompts = prompts`).
     prompts = None
+    # The untrusted-evidence fence on every phase's tool results (review 2026-09-22, TAT-02). A CLASS
+    # default for the same `__new__` reason: an instance that never ran `__init__` reads OFF.
+    _evidence_envelope = False
 
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
@@ -734,11 +738,21 @@ class LLMRepoDeveloper:
                  prompts=None, cross_run_read_tools: bool = False, memory_dir=None,
                  probe: bool = False, probe_timeout_s: float = 60.0,
                  probe_confine: bool = True, probe_max_calls: int = 0, command_runtime=None,
-                 step_feedback_command: str = "", established=None):
+                 step_feedback_command: str = "", established=None,
+                 evidence_envelope: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
         self.prompts = prompts
+        # THE FENCE ON WHAT EVERY PHASE'S TOOLS RETURN (`core/evidence.py`; review 2026-09-22,
+        # TAT-02): the task repository and this node's staged files through the scouts, the
+        # environment, the operator's dev commands run over candidate code, the probe — text the
+        # model did not write, read by the one role that WRITES the code the next eval runs. With
+        # this on, each result arrives between `UNTRUSTED_RUN_EVIDENCE` and its closing marker; the
+        # fence only, no system-prompt sentence. OFF at the constructor, because it changes a prompt
+        # (CLAUDE.md) and the ~170 direct constructions in the suite are not asking for it;
+        # `agents/developer_backends.py` passes `envelope_enabled(settings)`.
+        self._evidence_envelope = bool(evidence_envelope)
         # PART V §22: read-only cross-run knowledge, ROLE-SCOPED to the developer (repair/impl lessons).
         self._cross_run_read_tools = bool(cross_run_read_tools)
         self._cross_run_memory_dir = memory_dir
@@ -1261,6 +1275,7 @@ class LLMRepoDeveloper:
                 label="Developer·plan", next_label="the implement phase",
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
                 on_tool_result=self._established_hook("plan"),
+                **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
                 **self._session_opts())
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
@@ -1388,6 +1403,7 @@ class LLMRepoDeveloper:
                       validate=validate,
                       fallback=lambda m: "", on_budget=self._note_session_budget,
                       on_tool_result=self._established_hook("plan_step"),
+                      **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
                       **self._session_opts(cost_budget=self._step_cost_ceiling()))
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
@@ -2171,6 +2187,7 @@ class LLMRepoDeveloper:
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
                 on_budget=self._note_session_budget,
                 on_tool_result=self._established_hook("stages"),
+                **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
                 **self._session_opts()) or []
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
@@ -2448,6 +2465,7 @@ class LLMRepoDeveloper:
                           # `validate` is the operator's wall budget and manifest-collision fence.
                           terminal_salvage=True,
                           fallback=lambda m: "", on_budget=self._note_session_budget,
+                          **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
                       **self._session_opts())
         # EXPLICIT, BEFORE THE PARENT, because master's containment census reads the handlers
         # rather than their reasoning: `test_containment_census` flags a blind `except` around a
@@ -2682,6 +2700,7 @@ class LLMRepoDeveloper:
                       validate=validate_build,
                       fallback=lambda m: "", on_budget=self._note_session_budget,
                       on_tool_result=self._established_hook("implement"),
+                      **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
               **self._session_opts())
 
     def _record_result(self, write, idea: Idea) -> None:

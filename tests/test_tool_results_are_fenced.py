@@ -8,8 +8,9 @@ an enforced rule, and the text it covers is candidate-authored stdout, agent tra
 the cheapest injection surface in the product.
 
 OPT-IN at the shared loop, because `drive_tool_loop` drives every persona and a prompt is a contract:
-the Developer's and Researcher's results stay byte-identical until someone decides those roles want
-this too.
+a role's results stay byte-identical until someone decides that role wants this too. Since review
+2026-09-22 (TAT-02) the Researcher, Deep Research and the repo Developer do, under
+`Settings.evidence_envelope` (`tests/test_evidence_consumer_fences.py` drives them).
 """
 from __future__ import annotations
 

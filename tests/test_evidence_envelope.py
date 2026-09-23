@@ -350,8 +350,13 @@ def test_every_construction_site_threads_the_one_settings_reader():
     """By AST over the modules that build the consumers (`agents/providers.py` holds the shared
     providers since 2026-09-06): each `LiteratureTools(` / `WebTools(` call passes
     `envelope=envelope_enabled(...)`, `UnifiedAgent(` passes `evidence_envelope=envelope_enabled(...)`,
-    and `make_strategist` reads the same function."""
-    from looplab.agents import deep_research, factory, providers, strategist
+    and `make_strategist` reads the same function. Since review 2026-09-22 (TAT-02) the three roles
+    that make most of a run's tool calls are construction sites too — `ToolUsingResearcher`,
+    `DeepResearcher` and the repo Developer, each OFF at its constructor — and so are the report
+    writer and the foresight panel (driven in `tests/test_evidence_consumer_fences.py`)."""
+    from looplab import cli
+    from looplab.agents import deep_research, developer_backends, factory, providers, strategist
+    from looplab.serve import report
 
     def calls_named(module, name):
         tree = ast.parse(inspect.getsource(module))
@@ -370,7 +375,12 @@ def test_every_construction_site_threads_the_one_settings_reader():
                                 # constructor, so the task's `web_deny` reaches both sites.
                                 (factory, "build_web_tools", "envelope"),
                                 (deep_research, "build_web_tools", "envelope"),
-                                (factory, "UnifiedAgent", "evidence_envelope")):
+                                (factory, "UnifiedAgent", "evidence_envelope"),
+                                (factory, "ToolUsingResearcher", "evidence_envelope"),
+                                (developer_backends, "LLMRepoDeveloper", "evidence_envelope"),
+                                (deep_research, "DeepResearcher", "evidence_envelope"),
+                                (report, "ReportWriter", "evidence_envelope"),
+                                (cli, "ForesightPanelResearcher", "evidence_envelope")):
         calls = calls_named(module, name)
         assert calls, f"{module.__name__} no longer constructs {name}"
         assert all(passes_reader(c, kwarg) for c in calls), (module.__name__, name)

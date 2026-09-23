@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from looplab.core.evidence import envelope_enabled
 from looplab.core.llm import resolve_llm_target, run_cost_accountant
 
 if TYPE_CHECKING:                      # `adapters.tasks` re-exports through the factory, so a
@@ -91,7 +92,8 @@ def in_house_repo_developer(task: TaskAdapter, settings, client, *, param_search
         probe_timeout_s=getattr(settings, "developer_probe_timeout_s", 60.0),
         probe_confine=getattr(settings, "developer_probe_confine", True), probe_max_calls=getattr(settings, "developer_probe_max_calls", 0),  # noqa: E501
         # Snapshot the eval trust tier here; the role/tool never reads live Settings.
-        command_runtime=DeveloperCommandRuntime.from_settings(settings))
+        command_runtime=DeveloperCommandRuntime.from_settings(settings),
+        evidence_envelope=envelope_enabled(settings))   # TAT-02: every phase's tool results fenced
 
 
 def external_cli_developer(task: TaskAdapter, settings, developer, *, param_search: bool,
