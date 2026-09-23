@@ -87,10 +87,10 @@ from looplab.engine.loss_trajectory import (  # noqa: F401 — re-exported
     _TRAJECTORY_EXPLOSION_RATIO, _TRAJECTORY_MIN_ABSOLUTE_DROP, _TRAJECTORY_MIN_RELATIVE_DROP,
 )
 from looplab.engine.monitor_gates import (  # noqa: F401 — re-exported
-    citation_authenticates, claim_watchdog_kill, last_lifecycle_row, MONITOR_REPAIR_REASON,
-    next_monitor_sleep, should_monitor_kill, should_monitor_repair, _confirmation_would_act,
-    _HEALTHY_BACKOFF_K, _KILL_ELIGIBLE_ROLES, _MAX_MONITOR_LLM_CALLS, _MONITOR_ARM_MAX_LOOKS,
-    _MONITOR_ARM_TTL_S, _MONITOR_CADENCE_CAP_S, _MONITOR_CONFIRM_DELAY_S,
+    citation_authenticates, claim_watchdog_kill, kill_superseded_by, last_lifecycle_row,
+    MONITOR_REPAIR_REASON, next_monitor_sleep, should_monitor_kill, should_monitor_repair,
+    _confirmation_would_act, _HEALTHY_BACKOFF_K, _KILL_ELIGIBLE_ROLES, _MAX_MONITOR_LLM_CALLS,
+    _MONITOR_ARM_MAX_LOOKS, _MONITOR_ARM_TTL_S, _MONITOR_CADENCE_CAP_S, _MONITOR_CONFIRM_DELAY_S,
     _MONITOR_KILL_CONFIRM_TICKS, _MONITOR_SAME_DIGEST_RETRIES, _NON_TRAINING_ROLES,
     _normalize_monitor_confidence,
 )
@@ -496,6 +496,160 @@ def stage_check_tools(engine, workdir, log_plan=None, log_snapshot=None):
     return _log_query_tools(workdir, log_plan, log_snapshot)
 
 
+# ---------------------------------------------------------------- THE WATCHDOG TICK, WRITTEN ONCE
+# Both live-log watchdogs — `_monitor_training` below and `asha_monitor.py::_monitor_asha` — wrap
+# their own judgement in the same scaffold: recover the last durable row on re-entry, spend at most
+# one bounded paid look per tick in a worker, redact what the model wrote, and append one
+# diagnostic row that a decided stop must not lose. Each loop carried its own copy, so every fix to
+# the scaffold had to land twice, and did — the in-worker tool build with a 14-line docstring stated
+# once per loop, the pre-call cancel check, the `finally` bounds (review 2026-09-22, ENG3-13 / doc 50
+# EM-05). These are that scaffold ONCE, as free functions for the reason `monitor_log_tools` is one:
+# no MRO can hide one from a stub (`tests/test_asha_monitor.py::_AshaStub` runs the ASHA loop with no
+# `TrainingMonitorMixin`), and each takes exactly what it touches. Both loops resolve them through
+# THIS module — the ASHA loop by a call-time import — so one patch here reaches both.
+
+
+async def recover_last_row(engine, event_type: str, node_id: int,
+                           generation: int) -> Optional[dict]:
+    """The newest durable `event_type` row of exactly this `(node_id, generation)`, or None.
+
+    `resume` can restart a watchdog inside the same node generation, and without its last durable
+    row the first healthy observation looks like a first observation, so a pre-crash warning is lost
+    instead of being closed (doc 25 EC-04). The READ is shared — the whole log fetched on a worker
+    thread, never on the event loop, and scanned by `last_lifecycle_row`'s bool-guarded lifecycle
+    match; what the row MEANS stays with each watchdog.
+
+    Advisory: a read that fails answers None — "no history" — and the live watch still starts.
+    """
+    # Local: `evaluate` imports this module, so a module-level import would be a cycle.
+    from looplab.engine.evaluate import _watch_limiter
+    import anyio
+
+    try:
+        rows = await anyio.to_thread.run_sync(engine.store.read_all, limiter=_watch_limiter())
+        return last_lifecycle_row(rows, event_type, node_id, generation)
+    except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
+        return None
+
+
+class JudgeCalls:
+    """How many paid looks ONE watchdog has STARTED on one node lifecycle — answered, raised and
+    budget-stopped alike: counting only the looks that RETURNED is what let a judge that raised be
+    re-asked every tick, past any cap (review 2026-09-22, ENG3-02). The loop owns it; the cap it is
+    held to is read by the loop, per tick, from the loop's own module, so a test that lowers the cap
+    patches the module whose code reads it."""
+
+    __slots__ = ("started",)
+
+    def __init__(self) -> None:
+        self.started = 0
+
+
+async def watchdog_judge_tick(sp, cancel, judge, calls: JudgeCalls, *, cap: int,
+                              on_raised=None) -> tuple:
+    """Spend at most ONE paid look by a live-log watchdog's judge. Returns `(answer, stop)`.
+
+    `stop` True means the watch must END, and the span says why: `cancelled_before_call` (the eval
+    ended while this tick was reading) or `budget_stop` (the run's spend ceiling). Otherwise
+    `answer` is whatever `judge` returned — None when it parsed nothing, and None WITHOUT a call
+    when the per-node backstop is spent (`llm_capped` on the span: a silent cap would read as "all
+    healthy" to one watchdog and as "the judge keeps sparing this node" to the other, when in fact
+    nobody is asking any more). A judge that RAISES propagates, so the tick's own handler skips the
+    tick as it always did — after the look is counted and `on_raised` has run.
+
+    `judge` RUNS IN A WORKER, AND SO DOES EVERYTHING IT DERIVES. The paid call is synchronous and so
+    is its tool derivation: `monitor_log_tools` GLOBS the workdir for `*.log`, opens + fstats every
+    stage log the plan names, and `attempt_byte_floor` probe-READS each one. As an ARGUMENT to
+    `run_sync` it was evaluated on the EVENT-LOOP thread, the one place in a tick that pays for a
+    slow mount: on the geesefs/S3 mounts `runs/` lives on, an `lstat` of a file that is NOT there
+    costs 105-950 ms (`core/fence.py::_warm_directory_lookup` measured it), so one blocking
+    derivation per tick per running eval stalled the whole engine loop. So each caller's `judge`
+    builds its tools — and its prompt evidence, and whatever it re-reads after the answer — INSIDE
+    itself, PER TICK, because the log the judge reads is being written while it thinks. (This was
+    stated twice, once per loop, because each built its tools at its own call site.)
+
+    THE CALL IS JOINED, NEVER ABANDONED (`abandon_on_cancel=False`). The verdict may be advisory, but
+    its client usage is billable and recorded on shared run state, so an in-flight call is joined on
+    eval cancellation and no detached worker can emit cost after the node or run has finalized.
+    Endpoint timeouts remain the upper bound for that ownership hand-off — which is why the `cancel`
+    check sits immediately before the spend: the eval can end (it finished, an operator aborted, or
+    the SIBLING watchdog claimed the kill) while this tick was reading, and starting the call then
+    would buy a verdict about a node that no longer exists AND hold node teardown open for a whole
+    endpoint timeout to pay for it — once per watchdog.
+
+    BOTH BOUNDS ARE COMMITTED IN `finally` (review 2026-09-22, ENG3-02). They were committed only
+    after the await RETURNED, and each tick's blind handler swallowed whatever did not: a judge that
+    raised counted toward neither the per-node cap nor the training monitor's same-digest retry, and
+    was asked again next tick — 300 times in 5 s on a frozen log in the reproduction
+    (`review/ENG3/budget_swallow.py`), each one a provider call. `on_raised` is where a caller's own
+    bound on an unanswered look is committed.
+
+    THE SPEND CEILING ENDS THE WATCH. `BudgetExceeded` is the operator's ceiling, not a tick hiccup:
+    it is said on the tick's span and the watch stops. RETURN, not re-raise — a watcher shares the
+    eval's task group, and tearing down the stage whose training the run is already paying for is
+    not a watchdog's decision to make. The accountant is sticky, so the run's next paid call raises
+    the same stop on the main path, which is where it ends the run.
+    """
+    if calls.started >= cap:
+        sp.set("llm_capped", True)
+        return None, False
+    if cancel.is_set():
+        sp.set("cancelled_before_call", True)
+        return None, True
+    import anyio
+
+    attempt = "raised"
+    try:
+        answer = await anyio.to_thread.run_sync(judge, abandon_on_cancel=False)
+        attempt = "answered"
+        return answer, False
+    except BudgetExceeded:
+        attempt = "budget_stop"
+        sp.set("budget_stop", True)
+        return None, True
+    finally:
+        calls.started += 1
+        if attempt == "raised" and on_raised is not None:
+            on_raised()
+
+
+def watchdog_redact(engine, text: str, limit: int = 300) -> str:
+    """What a watchdog's judge wrote, redacted and bounded before it lands in the trace, the event
+    log or the attention feed. It is model text derived from the candidate's own log, so it takes
+    the funnel `_evaluate` stores stderr tails through (`engine/audit.py::Engine._redact`);
+    `getattr` because a watchdog runs on hosts that never ran `Engine.__init__`."""
+    redact = getattr(engine, "_redact", None)
+    return (redact(text) if callable(redact) else text)[:limit]
+
+
+async def append_watchdog_row(event_type: str, row: dict, engine, *, shield: bool) -> None:
+    """Append ONE watchdog row under the engine's write lock — SHIELDED when the row records a
+    decided stop.
+
+    A decided stop means cancellation is already in flight (this watchdog's own claim or its
+    sibling's): `_evaluate` cancels the eval's task group, and the write lock is the row's next
+    cancellation checkpoint, so an unshielded append would be preempted and the ONLY durable record
+    of the decision lost — the kill would leave no diagnostic behind. Bounded (one append), and the
+    same shielding `_evaluate` uses for its own promised terminal. A row that decided nothing keeps
+    the plain best-effort append.
+
+    DIAGNOSTIC rows only, asserted here for every caller: both watchdogs append from a task beside
+    the main one, and only a fold-ignored row's thread-dependent position cannot move folded state
+    (invariant #1). `event_type` comes FIRST on purpose: the payload contract's writer scan
+    (`tests/_source_scan.py::event_payload_writers`) knows a writer by a call whose first argument
+    is the event type and whose second is the payload, and a helper that took the engine first
+    would hide every watchdog row from it.
+    """
+    import anyio
+
+    from looplab.events.types import DIAGNOSTIC_EVENTS
+
+    assert event_type in DIAGNOSTIC_EVENTS, event_type
+    with anyio.CancelScope(shield=shield):
+        async with engine._write_lock:
+            engine.store.append(event_type, row)
+
+
 class TrainingMonitorMixin:
     """The engine's training-log monitor cluster. `self` IS the Engine (mixin convention — see
     orchestrator.py). Gated on `self._train_monitor`; started as a sibling task in `_evaluate`'s task
@@ -641,7 +795,7 @@ class TrainingMonitorMixin:
         from looplab.engine.evaluate import _watch_limiter
         import anyio
 
-        from looplab.events.types import DIAGNOSTIC_EVENTS, EV_TRAIN_MONITOR_ALERT
+        from looplab.events.types import EV_TRAIN_MONITOR_ALERT
         # Base cadence derived from the per-experiment time budget (Phase 2): a short training is watched
         # often, a multi-hour one sparsely. The next delay adapts per verdict — the observer self-paces
         # (LLM `recheck_after_s`) and a steadily-healthy run backs off — via `next_monitor_sleep`.
@@ -652,17 +806,11 @@ class TrainingMonitorMixin:
         last_event_status: Optional[str] = None
         # resume may restart the observer inside the same node generation. Recover its last
         # durable state so the first healthy verdict can close a pre-crash warning instead of losing it.
-        try:
-            prior_rows = await anyio.to_thread.run_sync(
-                self.store.read_all, limiter=_watch_limiter())
-            prior = last_lifecycle_row(
-                prior_rows, EV_TRAIN_MONITOR_ALERT, node_id, generation)
-            if prior is not None:
-                status = str(prior.get("status") or "").strip().lower()
-                last_event_status = status if status in ("healthy", "watch", "broken") else None
-        except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
-            pass
-        llm_calls = 0
+        prior = await recover_last_row(self, EV_TRAIN_MONITOR_ALERT, node_id, generation)
+        if prior is not None:
+            status = str(prior.get("status") or "").strip().lower()
+            last_event_status = status if status in ("healthy", "watch", "broken") else None
+        llm_calls = JudgeCalls()
         # Phase 3 arming state. `broken_streak` counts CONSECUTIVE `broken` verdicts about the
         # same stage log — ANY of them, at ANY confidence: the increment below is
         # `if verdict.status == "broken"` and never reads the number. This comment said
@@ -697,11 +845,12 @@ class TrainingMonitorMixin:
             nonlocal broken_streak, armed_at, arm_looks
             broken_streak, armed_at, arm_looks = 0, None, 0
 
-        def unjudged(digest: str) -> bool:
-            """Count one UNANSWERED look at `digest` toward `_MONITOR_SAME_DIGEST_RETRIES`; True when
-            that retires it (quiet until the log actually changes). One spelling for the two ways a
-            look goes unanswered — a verdict that did not parse, and a judge that RAISED — because
-            the second used to commit nothing at all (review 2026-09-22, ENG3-02)."""
+        def unjudged(digest: str, sp) -> None:
+            """Count one UNANSWERED look at `digest` toward `_MONITOR_SAME_DIGEST_RETRIES`, and retire
+            it once that bound is spent (quiet until the log actually changes), saying so on the
+            tick's span. One spelling for the two ways a look goes unanswered — a verdict that did not
+            parse, and a judge that RAISED (`watchdog_judge_tick`'s `on_raised`) — because the second
+            used to commit nothing at all (review 2026-09-22, ENG3-02)."""
             nonlocal failed_digest, failed_digest_tries, last_digest
             if digest == failed_digest:
                 failed_digest_tries += 1
@@ -709,8 +858,7 @@ class TrainingMonitorMixin:
                 failed_digest, failed_digest_tries = digest, 1
             if failed_digest_tries >= _MONITOR_SAME_DIGEST_RETRIES:
                 last_digest = digest     # retire it: quiet until the log actually changes
-                return True
-            return False
+                sp.set("digest_retired", True)
 
         while True:
             await anyio.sleep(next_sleep)    # only cancellation (eval finished) unwinds the task, from here
@@ -808,26 +956,10 @@ class TrainingMonitorMixin:
                         # defends against sampling noise, never against a systematic misread — say so
                         # on the span rather than letting "two verdicts" imply two observations.
                         sp.set("confirm_digest_unchanged", True)
-                    # Per-node backstop on LLM cost (the adaptive cadence + healthy-backoff are the primary
-                    # budget control; this only bounds a pathological run whose digest keeps changing while
-                    # staying non-healthy). Past the cap we keep OBSERVING (trace-only) but stop calling the
-                    # LLM. Surfaced on the span — a silent cap would read as "all healthy" when it isn't.
-                    verdict = None
-                    if llm_calls >= _MAX_MONITOR_LLM_CALLS:
-                        sp.set("llm_capped", True)
-                    elif cancel.is_set():
-                        # The eval ended (finished, operator abort, or the SIBLING ASHA watchdog already
-                        # claimed the kill) while this tick was reading the log. Starting the call now
-                        # would buy a verdict about a node that no longer exists AND — because the call
-                        # is deliberately un-abandonable below — hold node teardown open for a whole
-                        # endpoint timeout to pay for it. Checked here, immediately before the spend.
-                        sp.set("cancelled_before_call", True)
-                        return
-                    else:
-                        # the verdict is advisory, but its client usage is billable and is
-                        # recorded on shared run state. Join an in-flight call on eval cancellation so
-                        # no detached worker can emit cost after the node/run has finalized. Endpoint
-                        # timeouts remain the upper bound for this ownership hand-off.
+                    def _judge():
+                        # The paid call AND everything it needs, derived in the worker with it — the
+                        # prompt's evidence and the tools; `watchdog_judge_tick` says why none of it
+                        # may run on the event loop, and why it is built PER TICK.
                         stage_text = monitor_stage_context(resolved, log_plan)
                         trajectory_text = trajectory_context(trajectory)
                         # The watched stage's own declared contract, and the engine's live reading of
@@ -842,54 +974,23 @@ class TrainingMonitorMixin:
                                 and resolved.stage is not None):
                             contract_text = stage_contract_context(
                                 log_plan.declarations.get(resolved.stage), tail)
+                        return self._training_verdict(
+                            tail, context, stage_text, trajectory_text,
+                            monitor_tools(self, workdir, log_plan, log_snapshot),
+                            contract_text=contract_text)
 
-                        def _judge():
-                            """The paid call AND the source derivation it needs, both in the worker.
-
-                            `monitor_log_tools` is FILESYSTEM work — it globs the workdir for
-                            `*.log` and opens + fstats every stage log the plan names, and
-                            `attempt_byte_floor` probe-READS each one. As an ARGUMENT to
-                            `run_sync` it was evaluated on the EVENT-LOOP thread, which is the one
-                            place in this tick that pays for a slow mount: on the geesefs/S3 mounts
-                            `runs/` lives on, an `lstat` of a file that is NOT there costs
-                            105-950 ms (`core/fence.py::_warm_directory_lookup` measured it), so
-                            one blocking derivation per tick per running eval stalls the whole
-                            engine loop. Every other filesystem touch in this loop is already
-                            handed to a worker (`_observe_log` above); this one just looked like a
-                            plain argument. Still built PER TICK, for the reason it always was: the
-                            tool reads the live log while the judge is thinking, so it must see the
-                            file as it is now and not as it was when the eval started.
-                            """
-                            return self._training_verdict(
-                                tail, context, stage_text, trajectory_text,
-                                monitor_tools(self, workdir, log_plan, log_snapshot),
-                                contract_text=contract_text)
-
-                        # BOTH BOUNDS ARE COMMITTED IN `finally` (review 2026-09-22, ENG3-02). They
-                        # were committed only after the await RETURNED, and the tick's blind handler
-                        # below swallowed whatever did not: a judge that raised counted toward
-                        # neither `_MAX_MONITOR_LLM_CALLS` nor the same-digest retry, and was asked
-                        # again next tick — 300 times in 5 s on a frozen log in the reproduction
-                        # (`review/ENG3/budget_swallow.py`), each one a provider call.
-                        attempt = "raised"
-                        try:
-                            verdict = await anyio.to_thread.run_sync(
-                                _judge, abandon_on_cancel=False)
-                            attempt = "answered"
-                        except BudgetExceeded:
-                            # The operator's spend ceiling, not a tick hiccup: say so on this tick's
-                            # span and stop watching. RETURN, not re-raise — this watcher shares the
-                            # eval's task group, and tearing down the stage whose training the run is
-                            # already paying for is not the watchdog's decision to make. The
-                            # accountant is sticky, so the run's next paid call raises the same stop
-                            # on the main path, which is where it ends the run.
-                            attempt = "budget_stop"
-                            sp.set("budget_stop", True)
-                            return
-                        finally:
-                            llm_calls += 1
-                            if attempt == "raised" and unjudged(tail):
-                                sp.set("digest_retired", True)
+                    # Per-node backstop on LLM cost (the adaptive cadence + healthy-backoff are the primary
+                    # budget control; this only bounds a pathological run whose digest keeps changing while
+                    # staying non-healthy). Past the cap we keep OBSERVING (trace-only) but stop calling the
+                    # LLM. The cap, the pre-call cancel check, the joined worker call, the spend ceiling
+                    # and both `finally` bounds are the protocol both watchdogs share
+                    # (`watchdog_judge_tick`); this monitor's own bound on an unanswered look is
+                    # `unjudged`, committed through `on_raised` when the judge RAISES.
+                    verdict, stop = await watchdog_judge_tick(
+                        sp, cancel, _judge, llm_calls, cap=_MAX_MONITOR_LLM_CALLS,
+                        on_raised=lambda: unjudged(tail, sp))
+                    if stop:
+                        return
                     if verdict is None:
                         # NO PARSEABLE ANSWER this tick — an endpoint failure, model output that failed
                         # schema validation (`unknown` is not a `TrainingVerdict.status`), or the
@@ -904,15 +1005,12 @@ class TrainingMonitorMixin:
                         # Bounded same-digest retry (see `_MONITOR_SAME_DIGEST_RETRIES`): `last_digest`
                         # is otherwise committed only on a usable verdict, so an endpoint that never
                         # answers re-sent a byte-identical prompt every cadence until the LLM cap.
-                        if unjudged(tail):
-                            sp.set("digest_retired", True)
+                        unjudged(tail, sp)
                     else:
                         conf, confidence_valid = _normalize_monitor_confidence(verdict.confidence)
                         # The reason is LLM text derived from the raw log; redact it before it lands in the
                         # trace / event log / attention feed, matching how `_evaluate` stores stderr tails.
-                        _redact = getattr(self, "_redact", None)
-                        reason = (verdict.reason or "")
-                        reason = (_redact(reason) if callable(_redact) else reason)[:300]
+                        reason = watchdog_redact(self, verdict.reason or "")
                         # The durable event keeps the fuller reason (300); the trace span carries a shorter
                         # preview (200) — spans are a high-volume sidecar, the event is the authoritative record.
                         sp.set_many(status=verdict.status, confidence=round(conf, 3), reason=reason[:200])
@@ -1128,7 +1226,7 @@ class TrainingMonitorMixin:
                             # healthy is normally trace-only, but the transition from an alert
                             # is a durable recovery edge. Without it, projections can only ever discover the
                             # old bad verdict and keep warning after the live curve has recovered.
-                            assert EV_TRAIN_MONITOR_ALERT in DIAGNOSTIC_EVENTS
+                            # (A DIAGNOSTIC row: `append_watchdog_row` asserts it for both watchdogs.)
                             alert = {
                                 "node_id": node_id, "generation": generation,
                                 "status": verdict.status, "reason": reason,
@@ -1193,8 +1291,7 @@ class TrainingMonitorMixin:
                                 if _loc:
                                     alert["evidence_source"] = str(
                                         getattr(verdict, "evidence_source", "none"))[:16]
-                                    alert["evidence_locator"] = (
-                                        _redact(_loc) if callable(_redact) else _loc)[:300]
+                                    alert["evidence_locator"] = watchdog_redact(self, _loc)
                                 if _citation_resolved is not None:
                                     alert["citation_resolved"] = bool(_citation_resolved)
                             if repair_decided:
@@ -1210,15 +1307,12 @@ class TrainingMonitorMixin:
                                 alert["stop_decided"] = True
                                 alert["kill"] = bool(claimed)
                                 if not claimed:
-                                    alert["kill_superseded_by"] = str(
-                                        kill_signal.get("terminal_reason") or "")[:64]
-                            # Once claimed, `_evaluate` cancels this task group; `self._write_lock` is
-                            # the next checkpoint, so an unshielded append would be preempted and the
-                            # kill would leave NO diagnostic behind. Bounded (one append), and the same
-                            # shielding `_evaluate` uses for its own promised terminal.
-                            with anyio.CancelScope(shield=stop_decided or repair_decided):
-                                async with self._write_lock:
-                                    self.store.append(EV_TRAIN_MONITOR_ALERT, alert)
+                                    alert["kill_superseded_by"] = kill_superseded_by(kill_signal)
+                            # Once claimed, `_evaluate` cancels this task group, so a row recording a
+                            # decided stop is appended SHIELDED — or the kill would leave NO
+                            # diagnostic behind (`append_watchdog_row`).
+                            await append_watchdog_row(EV_TRAIN_MONITOR_ALERT, alert, self,
+                                                      shield=stop_decided or repair_decided)
                         last_event_status = verdict.status
                         # Committed only once a USABLE verdict came back. Setting it before the call
                         # meant a transient endpoint failure (verdict None) permanently skipped

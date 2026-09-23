@@ -367,6 +367,17 @@ def claim_watchdog_kill(kill_signal: dict, cancel, *, reason: str, terminal_reas
     return True
 
 
+def kill_superseded_by(kill_signal: dict) -> str:
+    """The `terminal_reason` of the watchdog that WON the shared claim, as a LOSER records it.
+
+    Both watchdogs stamp it on their row when they decided a stop and `claim_watchdog_kill` said
+    another had already claimed the terminal, so "which watchdog stopped what" needs no guesswork.
+    One reading of the winner for both rows (review 2026-09-22, ENG3-13 / doc 50 EM-05), bounded
+    like every other attribution field.
+    """
+    return str(kill_signal.get("terminal_reason") or "")[:64]
+
+
 def last_lifecycle_row(rows, event_type: str, node_id: int, generation: int) -> Optional[dict]:
     """The NEWEST row of `event_type` belonging to exactly this `(node_id, generation)`, as its data
     dict — or None when the watchdog never spoke for this lifecycle.

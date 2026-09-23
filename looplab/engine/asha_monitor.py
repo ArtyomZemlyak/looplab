@@ -736,10 +736,14 @@ class AshaMonitorMixin:
         from looplab.engine.evaluate import _watch_limiter
         import anyio
 
+        # Resolved through `train_monitor` at CALL time, so one patch there reaches both watchdogs
+        # (the shared tick: `recover_last_row`, `watchdog_judge_tick`, `watchdog_redact`,
+        # `append_watchdog_row` — review 2026-09-22, ENG3-13 / doc 50 EM-05).
         from looplab.engine.train_monitor import (
-            claim_watchdog_kill, last_lifecycle_row, read_training_tail_raw)
+            JudgeCalls, append_watchdog_row, claim_watchdog_kill, kill_superseded_by,
+            read_training_tail_raw, recover_last_row, watchdog_judge_tick, watchdog_redact)
         from looplab.engine.shared import engine_fold as fold  # the engine's seam
-        from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK, EV_ASHA_VERDICT
+        from looplab.events.types import EV_ASHA_RANK, EV_ASHA_VERDICT
 
         base = self._asha_cadence()
         # Read the configured values WITHOUT `or`-coercion, so a legitimate quantile=0.0 (most
@@ -756,21 +760,16 @@ class AshaMonitorMixin:
         # preserve an open episode across process re-entry; otherwise an initially healthy
         # resumed curve looks like a first observation and never emits the recovery edge. Modern rows
         # retain endpoint/resource truth separately; legacy rows safely map their single bit to endpoint.
-        try:
-            prior_rows = await anyio.to_thread.run_sync(
-                self.store.read_all, limiter=_watch_limiter())
-            prior = last_lifecycle_row(prior_rows, EV_ASHA_RANK, node_id, generation)
-            if prior is not None:
-                endpoint = prior.get("endpoint_underperforming")
-                resource = prior.get("resource_underperforming")
-                if (isinstance(endpoint, bool)
-                        and (resource is None or isinstance(resource, bool))):
-                    last_flag = (endpoint, resource)
-                else:
-                    raw_flag = prior.get("underperforming", True)
-                    last_flag = (raw_flag, None) if isinstance(raw_flag, bool) else None
-        except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
-            pass
+        prior = await recover_last_row(self, EV_ASHA_RANK, node_id, generation)
+        if prior is not None:
+            endpoint = prior.get("endpoint_underperforming")
+            resource = prior.get("resource_underperforming")
+            if (isinstance(endpoint, bool)
+                    and (resource is None or isinstance(resource, bool))):
+                last_flag = (endpoint, resource)
+            else:
+                raw_flag = prior.get("underperforming", True)
+                last_flag = (raw_flag, None) if isinstance(raw_flag, bool) else None
 
         def _observe():
             """ONE read of the log per tick, in the worker thread: the folded state the rank test needs
@@ -782,7 +781,7 @@ class AshaMonitorMixin:
             return fold(rows), latest_train_verdict(rows, node_id, generation)
 
         under_streak = 0
-        judge_calls = 0
+        judge_calls = JudgeCalls()
         # WHAT THIS WATCHDOG CANNOT DO, said once per distinct reason (see `asha_inert_reason`). The
         # structural reason is known before the first read, so it is stated on the first tick rather
         # than after the hours it takes for a rank transition that will never come; the observational
@@ -857,7 +856,7 @@ class AshaMonitorMixin:
                         # same-resource advisory. Otherwise digest and Attention retain a historical flag
                         # after this exact node generation recovers.
                         if underperforming or previous_underperforming:
-                            assert EV_ASHA_RANK in DIAGNOSTIC_EVENTS
+                            # (A DIAGNOSTIC row: `append_watchdog_row` asserts it for both watchdogs.)
                             event = {
                                 "node_id": node_id, "generation": generation,
                                 "underperforming": underperforming,
@@ -871,8 +870,7 @@ class AshaMonitorMixin:
                             if sample.resource_key is not None and sample.resource is not None:
                                 event.update({"resource_key": sample.resource_key,
                                               "resource": sample.resource})
-                            async with self._write_lock:
-                                self.store.append(EV_ASHA_RANK, event)
+                            await append_watchdog_row(EV_ASHA_RANK, event, self, shield=False)
                     # Dedup state moves only AFTER the edge is durably published, like the sibling
                     # train monitor's `last_event_status`. Committing it first meant a raising append
                     # (or tracer span) — swallowed by the per-tick handler — permanently deduped the
@@ -901,23 +899,11 @@ class AshaMonitorMixin:
                                     quantile=round(quantile, 3), under_streak=under_streak,
                                     comparable_population=len(comparable_population),
                                     train_status=str((train_verdict or {}).get("status") or ""))
-                        if judge_calls >= _MAX_ASHA_JUDGE_CALLS:
-                            # Backstop only (see _MAX_ASHA_JUDGE_CALLS). Surfaced on the span because a
-                            # silent cap would read as "the judge keeps sparing this node" when in fact
-                            # nobody is asking any more.
-                            sp.set("llm_capped", True)
-                        elif cancel.is_set():
-                            # The node is already ending — the eval finished, an operator aborted, or the
-                            # SIBLING training monitor claimed the kill while this tick was reading the
-                            # log and folding. `cancel` was only re-checked at the top of the loop, so a
-                            # loser could still start a judge call here; because the call is deliberately
-                            # un-abandonable below, `_evaluate`'s task-group cancel then had to WAIT a
-                            # whole endpoint timeout for a verdict about a dead node — and pay for it.
-                            # Node teardown was bounded by the endpoint timeout twice over, once per
-                            # watchdog. Nothing is decided or recorded on this tick.
-                            sp.set("cancelled_before_call", True)
-                            return
-                        else:
+
+                        def _judge():
+                            # The paid call AND everything it needs, derived in the worker with it —
+                            # the judge's evidence and its log tools; `watchdog_judge_tick` says why
+                            # none of it may run on the event loop, and why it is built PER TICK.
                             context = asha_judge_context(
                                 node_id=node_id, generation=generation, direction=direction,
                                 metric_key=str(metric_spec.get("key", "metric")), sample=sample,
@@ -926,52 +912,24 @@ class AshaMonitorMixin:
                                 under_streak=under_streak, endpoint_population=population,
                                 extra_metrics=latest_extra_metrics(tail, metric_spec),
                                 train_verdict=train_verdict)
-                            # the verdict decides whether to spend the rest of a possibly
-                            # multi-hour budget, and its client usage is billable against shared run
-                            # state. Join an in-flight call on eval cancellation (abandon_on_cancel=False)
-                            # so no detached worker can emit cost after the node/run has finalized.
-                            def _judge():
-                                """The paid call AND the source derivation it needs, both in the worker.
+                            return self._asha_verdict(
+                                context, monitor_log_tools(self, workdir, log_plan, log_snapshot))
 
-                                `monitor_log_tools` is FILESYSTEM work — it globs the workdir for
-                                `*.log`, opens + fstats every stage log the plan names, and
-                                `attempt_byte_floor` probe-READS each one. As an ARGUMENT to
-                                `run_sync` it was evaluated on the EVENT-LOOP thread, which is the
-                                one place in this tick that pays for a slow mount: on the geesefs/S3
-                                mounts `runs/` lives on, an `lstat` of a file that is NOT there
-                                costs 105-950 ms (`core/fence.py::_warm_directory_lookup` measured
-                                it), so one blocking derivation per tick per running eval stalls the
-                                whole engine loop. The identical defect and the identical fix as
-                                `train_monitor.py`'s `_judge`, and it has to be stated twice because
-                                the two watchdogs build their tools at their own call sites. Still
-                                built PER TICK, for the reason it always was: the log the judge
-                                would read is being written while it thinks.
-                                """
-                                return self._asha_verdict(
-                                    context, monitor_log_tools(self, workdir, log_plan, log_snapshot))
-
-                            # COUNTED IN `finally`, and the spend ceiling ENDS the watch (review
-                            # 2026-09-22, ENG3-02). The count was committed only after the await
-                            # returned, and the tick's blind handler swallowed a judge that raised —
-                            # so a budget-stopped judge was re-asked every tick for as long as the
-                            # rank flag held, never reaching `_MAX_ASHA_JUDGE_CALLS`. Return rather
-                            # than re-raise, for the training monitor's reason: this task shares the
-                            # eval's group, and the next paid call on the main path raises the stop.
-                            try:
-                                verdict = await anyio.to_thread.run_sync(
-                                    _judge, abandon_on_cancel=False)
-                            except BudgetExceeded:
-                                sp.set("budget_stop", True)
-                                return
-                            finally:
-                                judge_calls += 1
+                        # The verdict decides whether to spend the rest of a possibly multi-hour
+                        # budget. Backstop only (see _MAX_ASHA_JUDGE_CALLS): past it this watchdog
+                        # keeps observing but can no longer kill, which is the safe direction. The
+                        # cap, the pre-call cancel check, the joined worker call, the spend ceiling
+                        # and the `finally` count are the protocol both watchdogs share
+                        # (`watchdog_judge_tick`); a cancelled tick decides and records nothing.
+                        verdict, stop = await watchdog_judge_tick(
+                            sp, cancel, _judge, judge_calls, cap=_MAX_ASHA_JUDGE_CALLS)
+                        if stop:
+                            return
                         conf, confidence_valid = _normalize_monitor_confidence(
                             getattr(verdict, "confidence", None))
                         # LLM text derived from the run's own log — redact it before it lands in the
                         # trace / event log, exactly as the training monitor's reason is redacted.
-                        _redact = getattr(self, "_redact", None)
-                        reason = (getattr(verdict, "reason", "") or "")
-                        reason = (_redact(reason) if callable(_redact) else reason)[:300]
+                        reason = watchdog_redact(self, getattr(verdict, "reason", "") or "")
                         # "unavailable" is NOT one of the model's three statuses: it records that nobody
                         # answered (no client / endpoint failure / cap), which is why the node lives on.
                         status = getattr(verdict, "status", None) or "unavailable"
@@ -1005,8 +963,8 @@ class AshaMonitorMixin:
                         # DURABLE record of the decision (fold-IGNORED, like EV_ASHA_RANK): the rank rows
                         # say a node was behind, this says what was decided about it and why — including
                         # the far more common "the rank test fired and the judge kept the run alive",
-                        # which otherwise leaves no trace at all.
-                        assert EV_ASHA_VERDICT in DIAGNOSTIC_EVENTS
+                        # which otherwise leaves no trace at all. (DIAGNOSTIC: `append_watchdog_row`
+                        # asserts it.)
                         # TWO separate bits, because they answer different questions and CAN differ:
                         #   `stop_decided` — what this watchdog decided (the judge's confident `stop`);
                         #   `kill`         — whether it then WON the shared per-eval claim, i.e. whether
@@ -1030,21 +988,18 @@ class AshaMonitorMixin:
                         if stop_decided and not kill:
                             # The judge said stop and the claim LOST: the sibling watchdog owns the
                             # terminal. Naming its reason means attribution needs no guesswork.
-                            decision["kill_superseded_by"] = str(
-                                kill_signal.get("terminal_reason") or "")[:64]
+                            decision["kill_superseded_by"] = kill_superseded_by(kill_signal)
                         if sample.resource_key is not None and sample.resource is not None:
                             decision.update({"resource_key": sample.resource_key,
                                              "resource": sample.resource})
                         if train_verdict:
                             decision["train_monitor_status"] = train_verdict.get("status")
                         # A decided stop means cancellation is already in flight (this claim or the
-                        # sibling's), and `self._write_lock` is the next cancellation checkpoint — an
-                        # unshielded append would be preempted and the ONLY durable record of the
-                        # decision lost. Bounded (one append); same shielding `_evaluate` uses for its
-                        # own promised terminal. A spared verdict keeps the plain best-effort append.
-                        with anyio.CancelScope(shield=stop_decided):
-                            async with self._write_lock:
-                                self.store.append(EV_ASHA_VERDICT, decision)
+                        # sibling's), so its row is appended SHIELDED or the ONLY durable record of
+                        # the decision is lost; a spared verdict keeps the plain best-effort append
+                        # (`append_watchdog_row`).
+                        await append_watchdog_row(EV_ASHA_VERDICT, decision, self,
+                                                  shield=stop_decided)
                     if stop_decided:
                         return              # won or lost, this node is ending — stop watching it
                     # SPARED: re-arm the whole grace window instead of re-judging on the very next tick.

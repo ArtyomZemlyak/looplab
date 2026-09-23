@@ -886,16 +886,23 @@ def test_the_lifecycle_scan_ignores_other_types_generations_and_empty_logs():
 
 
 def _lifecycle_scan_sites():
-    """The three sites that must not own a lifecycle scan: both resume recoveries and the judge's
-    health lookup."""
+    """The sites that must not own a lifecycle scan: both resume recoveries, the one resume READ they
+    share since review 2026-09-22 (ENG3-13 / doc 50 EM-05: `train_monitor.recover_last_row`), and the
+    judge's health lookup."""
     from looplab.engine import asha_monitor as asha
     from looplab.engine import train_monitor as train
 
     return {
         "train resume": train.TrainingMonitorMixin._monitor_training,
         "asha resume": asha.AshaMonitorMixin._monitor_asha,
+        "shared resume read": train.recover_last_row,
         "latest_train_verdict": asha.latest_train_verdict,
     }
+
+
+# The call each site must make. The loops reach the scan THROUGH the shared read, so what they must
+# call is that read; everything else calls the scan itself.
+_SCAN_CALL = {"train resume": "recover_last_row", "asha resume": "recover_last_row"}
 
 
 def test_all_three_lifecycle_scans_go_through_the_shared_helper():
@@ -912,10 +919,11 @@ def test_all_three_lifecycle_scans_go_through_the_shared_helper():
 
     for name, fn in _lifecycle_scan_sites().items():
         tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        wanted = _SCAN_CALL.get(name, "last_lifecycle_row")
         calls = [node for node in ast.walk(tree)
                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                 and node.func.id == "last_lifecycle_row"]
-        assert calls, f"{name} no longer CALLS the shared scan (a mention is not a call)"
+                 and node.func.id == wanted]
+        assert calls, f"{name} no longer CALLS `{wanted}` (a mention is not a call)"
 
         for node in ast.walk(tree):
             # `reversed(rows)` / `rows.reverse()` / `sorted(..., reverse=True)`
