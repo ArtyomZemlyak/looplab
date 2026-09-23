@@ -291,9 +291,11 @@ def test_only_a_budget_gate_drains_a_forced_node_creator():
 def test_the_reentry_prologue_still_folds_through_the_orchestrator_module_global(tmp_path,
                                                                                  monkeypatch):
     """`monkeypatch.setattr(orch, "fold", ...)` is what puts the run spine under test in four test
-    files. `_enter_run` folds twice and therefore stays in THIS module: a `from looplab.events.replay
-    import fold` in some other engine file binds a different object, so the patch would still apply
-    and simply stop reaching the prologue — a silent narrowing, not a red test."""
+    files, and `_enter_run` folds twice. What this pins is that those folds still REACH the patched
+    global: a direct `from looplab.events.replay import fold` binds a different object, so the patch
+    would still apply and simply stop reaching the prologue — a silent narrowing, not a red test.
+    (Since ENG1-04 step 0 an engine file elsewhere reaches the same seam at call time through
+    `engine/shared.py::engine_fold`, so this is no longer why `_enter_run` lives in the orchestrator.)"""
     import looplab.engine.orchestrator as orch
 
     real = orch.fold
@@ -305,9 +307,9 @@ def test_the_reentry_prologue_still_folds_through_the_orchestrator_module_global
 
     eng = _toy_engine(tmp_path)
     monkeypatch.setattr(orch, "fold", counting)
-    # `_reentry_repin` folds too and has always lived here, so leaving it in place would satisfy
-    # this assertion no matter what `_enter_run` itself binds — measured: the guard was vacuous
-    # until this stub. Only the prologue's own folds can register now.
+    # `_reentry_repin` folds too (through `engine_fold`, from `reentry.py` since ENG1-04 step 2), so
+    # leaving it in place would satisfy this assertion no matter what `_enter_run` itself binds —
+    # measured: the guard was vacuous until this stub. Only the prologue's own folds can register now.
     monkeypatch.setattr(eng, "_reentry_repin", lambda: False)
     eng._enter_run()
     assert seen, "_enter_run no longer folds through the orchestrator module global"

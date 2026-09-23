@@ -3,11 +3,13 @@ orchestrator.py as a MIXIN: `class Engine(NodeBuildMixin, …)` inherits these m
 so there is ZERO call-site churn and `self` here IS the engine. Verbatim moves; several are
 exercised on bare `Engine.__new__(Engine)` instances by tests, which a mixin preserves.
 
-DELIBERATELY NOT MOVED: `_create_node` / `_rerun_node` / `_create_injected_node` /
-`_activate_spec` stay in orchestrator.py — they call the module-global `fold`, which two tests
-monkeypatch THROUGH the orchestrator module (`monkeypatch.setattr(orch, "fold", …)`); moving
-them would silently detach that seam. This split keeps the fold-callers with the spine and
-extracts only the stateless build sub-helpers they call.
+NOT MOVED: `_create_node` / `_rerun_node` / `_create_injected_node` / `_activate_spec` stay in
+orchestrator.py. The reason recorded when this split was made — they call the module-global
+`fold`, which two tests monkeypatch THROUGH the orchestrator module
+(`monkeypatch.setattr(orch, "fold", …)`), so moving them would silently detach that seam — no
+longer binds: since ENG1-04 step 0 (review 2026-09-22) every engine file folds through
+`engine/shared.py::engine_fold`, which resolves `orchestrator.fold` at call time, and
+`_activate_spec` never folded at all. This split extracted only the stateless build sub-helpers.
 
 Agent-facing deps (`legal_actions`, `_state_brief`, `render_hint_directives`) stay lazy,
 method-local imports so monkeypatching through their source modules keeps working."""

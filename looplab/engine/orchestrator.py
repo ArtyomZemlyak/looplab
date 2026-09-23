@@ -2281,10 +2281,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         gate and `state` is re-folded at the top of every loop turn — so its entire output is the
         one `entry_finished` flag finalization needs.
 
-        It stays in THIS module because it folds twice.  `fold` here is the module-global
-        monkeypatch seam (`tests/test_creation_runaway_guard.py` and friends replace it), and a
-        method that reached it from another engine file would bind a different object; see
-        `engine/card_reservation.py::_fold` for the deferred-attribute pattern that costs.
+        It stays in THIS module because it is the run loop's own prologue — it sequences recovery,
+        command acknowledgement and setup in one order (ENG1-04 kept it with the spine, review
+        2026-09-22). It folds twice through the module-global `fold`, the monkeypatch seam
+        (`tests/test_creation_runaway_guard.py` and friends replace it). That used to be the reason
+        it could not move — a method elsewhere bound a different object — but since ENG1-04 step 0
+        every engine file reaches the same seam at call time through `engine/shared.py::engine_fold`,
+        so the fold no longer pins anything here.
         """
         # NO PROGRESS BEACON IN THIS PROLOGUE, and the reason is worth recording because it looks
         # like the obvious place for one. A resume IS one of the operator-reported blank waits: every
