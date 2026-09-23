@@ -5545,7 +5545,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             return None
         _kind, parents, parent_generations = parent_snapshot
 
-        def _link(candidate, *, proposed: bool = True) -> Optional[Idea]:
+        def _link(candidate, *, proposed: bool = True, receipt_from=None) -> Optional[Idea]:
             if candidate is None:
                 return None
             # The proposal path's provider circuit breaker, at the ONE funnel every proposal
@@ -5574,8 +5574,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # `agent_max_turns`/`agent_time_budget_s` both shipping at 0 this can only fire for an
             # operator who set a cap, and the value of saying so is telling a TRUNCATED proposal
             # from a converged one — the distinction a cap destroys if nobody records it.
+            # `receipt_from`: the handle whose propose produced THIS candidate when that is not
+            # `researcher` — the endgame sweep's own surrogate (see the improve path below).
             if proposed:
-                _bound = researcher_budget_exhausted(researcher)
+                _bound = researcher_budget_exhausted(
+                    researcher if receipt_from is None else receipt_from)
                 if _bound:
                     _LOG.warning(
                         "the proposal for node %s was cut short by its %s budget — it did not "
@@ -5724,20 +5727,32 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # Researcher below warm-up); every other improve proposes exactly as before.
         proposer = (self._sweep_researcher(researcher)
                     if action.get(META_SWEEP) and self._endgame_reserve_frac > 0.0 else researcher)
+        # WHOSE PROPOSE RECEIPT `_link` READS (review 2026-09-22, W5-5 follow-up): the handle that
+        # produced the candidate. For a sweep that is the sweep's OWN surrogate, whose per-call
+        # receipt is "" for a numeric point; reading `researcher` there reported the Researcher's
+        # LAST cut-short proposal against a point that made no call — driven: two "cut short"
+        # warnings for a sweep node whose fallback was never called. The gate's re-proposal goes
+        # through `researcher`, so it hands the read back. Every other improve: `researcher`, as
+        # before.
+        answered_by = [proposer]
+
+        def _repropose(p=parent):
+            answered_by[0] = researcher
+            return _link(self._canonicalize_idea_operator(
+                researcher.propose(state, p), authoritative_operator))
+
         with self.tracer.span("propose") as _span:
             idea = _link(self._canonicalize_idea_operator(
-                proposer.propose(state, parent), authoritative_operator))
+                proposer.propose(state, parent), authoritative_operator), receipt_from=proposer)
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None:
             return None
         with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
                                  node_id=prospective_node_id, prospective=True, operator=kind):
             final = self._apply_novelty_gate(
-                state, idea,
-                repropose=lambda p=parent: _link(self._canonicalize_idea_operator(
-                    researcher.propose(state, p), authoritative_operator)),
+                state, idea, repropose=_repropose,
                 researcher=researcher, prospective_node_id=prospective_node_id)
-        return _link(final)
+        return _link(final, receipt_from=answered_by[0])
 
     @in_llm_lane("build")
     def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,

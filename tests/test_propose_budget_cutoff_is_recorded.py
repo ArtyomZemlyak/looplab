@@ -278,3 +278,77 @@ def test_the_proposal_funnel_warns_through_the_surrogate_only_for_a_delegated_cu
     assert len(proposed) == 2 and "surrogate-guided" in proposed[1].rationale, (
         "the second proposal must be the surrogate's own numeric point, or the half above is vacuous")
     assert cut.calls == 1, "past warm-up the surrogate proposed without calling the fallback"
+
+
+def test_the_endgame_sweep_reads_its_OWN_receipt_not_the_researchers_stale_one(
+        tmp_path, monkeypatch, caplog):
+    """The champion sweep proposes through its own surrogate (`orchestrator.py::_sweep_researcher`)
+    while the funnel read the receipt off `researcher` — the handle the sweep WRAPS. Past warm-up
+    the sweep's point makes no call, so that read reported the Researcher's LAST cut-short proposal
+    against it: driven before the fix, two "cut short" warnings for a sweep node whose fallback was
+    never called. Below warm-up the sweep delegates, and a cut-short delegated proposal must still
+    be reported.
+
+    And WHICH handle is asked, spied at the funnel: the sweep's surrogate for its own point, and
+    `researcher` again once the novelty gate re-proposes through it.
+
+    MUTATIONS: drop `receipt_from=` from the sweep's `_link` reads -> the warm half warns; drop the
+    gate's hand-back -> the final read after a re-proposal still asks the sweep."""
+    import looplab.engine.orchestrator as orchestrator_module
+    from looplab.adapters.toytask import ToyTask
+    from looplab.engine.plan import META_SWEEP
+    from looplab.events.replay import fold
+    from tests.factories import TOY_TASK, make_engine
+
+    cut = _CutEveryCall()
+    engine = make_engine(tmp_path / "sweep", task=ToyTask.load(TOY_TASK), researcher=cut,
+                         endgame_reserve_frac=0.25)
+    engine.store.append("run_started", {
+        "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
+    monkeypatch.setattr(engine, "_apply_novelty_gate", lambda _state, idea, **_kw: idea)
+    asked: list = []
+    real_reader = orchestrator_module.researcher_budget_exhausted
+
+    def _asked(handle):
+        asked.append(handle)
+        return real_reader(handle)
+
+    monkeypatch.setattr(orchestrator_module, "researcher_budget_exhausted", _asked)
+
+    def _evaluated(i: int) -> None:
+        engine.store.append("node_created", {
+            "node_id": i, "parent_ids": [], "operator": "draft", "code": "print(1)",
+            "idea": {"operator": "draft", "params": {"x": float(i), "y": -float(i)}}})
+        engine.store.append("node_evaluated", {
+            "node_id": i, "generation": 0, "metric": float((i - 2) ** 2), "eval_seconds": 0.1})
+
+    def _sweep(parent_id: int, node_id: int):
+        caplog.clear()
+        asked.clear()
+        with caplog.at_level("WARNING", logger="looplab.engine.orchestrator"):
+            idea = engine._prepare_node_idea(
+                {"kind": "improve", "parent_id": parent_id, META_SWEEP: True},
+                fold(engine.store.read_all()), researcher=engine.researcher,
+                prospective_node_id=node_id, source="researcher")
+        return idea, [r.getMessage() for r in caplog.records if "cut short by its" in r.getMessage()]
+
+    for i in range(2):
+        _evaluated(i)
+    _idea, warned = _sweep(1, 2)                   # below warm-up: the sweep DELEGATES
+    assert cut.calls == 1 and warned, "a delegated cut-short sweep proposal went unreported"
+    for i in range(2, 5):
+        _evaluated(i)
+    idea, warned = _sweep(2, 5)                    # past warm-up: its own numeric point
+    assert idea is not None and "surrogate-guided" in idea.rationale and cut.calls == 1
+    assert cut.last_budget_exhausted == "turns", "precondition: the Researcher's receipt is STALE"
+    assert warned == [], "a sweep point that made no call was reported TRUNCATED"
+    sweeper = engine._sweep_researcher(cut)
+    assert asked == [sweeper, sweeper], "the funnel must ask the handle that proposed"
+
+    # The novelty gate re-proposes through `researcher` (cut short again): from then on the funnel
+    # asks `researcher`, for the re-proposal and for the final candidate it became.
+    monkeypatch.setattr(engine, "_apply_novelty_gate",
+                        lambda _state, _idea, *, repropose=None, **_kw: repropose())
+    _idea, warned = _sweep(2, 5)
+    assert cut.calls == 2 and warned, "the gate's cut-short re-proposal went unreported"
+    assert asked == [sweeper, cut, cut], asked
