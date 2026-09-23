@@ -943,9 +943,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # Private CLI→Engine provenance seam. Narrow calibration/receipt paths independently
         # reconstruct this digest from their source-owned full Settings profile before trusting it.
         # BACKLOG §4 (docs/15 F3): every PURE-CONFIG knob — one per EngineOptions field — is
-        # accepted via **knobs and validated against EngineOptions, so adding a knob is TWO edits
-        # (Settings field + EngineOptions field) instead of four. Each knob's type/default/why
-        # lives on EngineOptions (engine/options.py), which mirrors the old signature comments.
+        # accepted via **knobs and validated against EngineOptions. Adding one is THREE edits on
+        # this side, not the two this used to claim (review 2026-09-22, ENG1-03): the Settings
+        # field, the EngineOptions field, and its `_opt` + settled `self.<attr>` below (the
+        # map of where each lands is derived, `tests/test_engine_options.py::attr_by_field`).
+        # Each knob's type/default/why lives on EngineOptions (engine/options.py), which mirrors
+        # the old signature comments.
         # Resolution per knob (unchanged): explicitly passed kwarg > `options` field > default.
         **knobs,
     ):
