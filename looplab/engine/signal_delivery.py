@@ -160,9 +160,9 @@ SIGNALS: tuple[SignalRoute, ...] = (
         inject="looplab.agents.hints:render_hint_directives",
         consumer="Researcher, Strategist, pilot, crash-triage, Developer",
         call_sites=(("looplab/engine/node_build.py", "render_hint_directives(state.pending_hints)"),
-                    # _directed_idea itself lives in node_build.py (NodeBuildMixin); the orchestrator's
-                    # node-creation spine still threads every idea through it:
-                    ("looplab/engine/orchestrator.py", "self._directed_idea("),
+                    # _directed_idea lives in node_build.py (NodeBuildMixin), and since ENG1-04 step
+                    # 4c so does the node-creation spine that threads every idea through it:
+                    ("looplab/engine/node_build.py", "self._directed_idea("),
                     # the ablation-produced refine_block is a real tree-entering Developer node too, so
                     # its directive threading is enforced here (it was silently bypassed before).
                     ("looplab/engine/ablation.py", "self._directed_idea("),

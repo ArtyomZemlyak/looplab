@@ -849,11 +849,15 @@ def test_every_build_lifecycle_discard_reason_is_registered():
     """
     import ast
 
+    import looplab.engine.node_build as node_build_module
     import looplab.engine.orchestrator as orchestrator_module
     import looplab.engine.speculation as speculation_module
 
     written: set[str] = set()
-    for module in (orchestrator_module, speculation_module):
+    # `node_build.py` since ENG1-04 step 4c: the build spine — every creation path's
+    # `_fail_reserved_build` — lives there, and a scan that stayed on `orchestrator.py` would read
+    # the registry's reasons as written by nobody.
+    for module in (orchestrator_module, node_build_module, speculation_module):
         # utf-8-sig: `orchestrator.py` carries a BOM, which `ast.parse` refuses.
         tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8-sig"))
         for node in ast.walk(tree):
