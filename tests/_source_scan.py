@@ -140,6 +140,25 @@ def called_names(func) -> list[str]:
     return [_dotted(node.func) for node in calls]
 
 
+def called_or_offloaded_names(func) -> list[str]:
+    """`called_names`, with a callable handed to `anyio.to_thread.run_sync` counted as its call.
+
+    `await anyio.to_thread.run_sync(self._eval_prepare_workdir, a)` INVOKES the phase — on a worker
+    thread since review 2026-09-22 (ENG2-11) — and a pin over the driver's phase order has to read it
+    as such; `called_names` alone reports only `anyio.to_thread.run_sync`. The offloaded reference is
+    reported in the offload call's own source position, so "A runs before B" pins keep their meaning.
+    """
+    calls = [node for node in ast.walk(function_tree(func)) if isinstance(node, ast.Call)]
+    calls.sort(key=lambda node: (node.lineno, node.col_offset))
+    out = []
+    for node in calls:
+        name = _dotted(node.func)
+        if name == "anyio.to_thread.run_sync" and node.args:
+            name = _dotted(node.args[0]) or name
+        out.append(name)
+    return out
+
+
 def names_read(func) -> set[str]:
     """Every bare name LOADED in *func*. A name that survives only in a comment is not in here."""
     return {node.id for node in ast.walk(function_tree(func))

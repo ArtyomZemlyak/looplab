@@ -2509,7 +2509,14 @@ class EvaluateMixin:
                     a.sp = sp
                     if await self._eval_admit(a) is PHASE_RETURN:
                         return
-                    self._eval_prepare_workdir(a)
+                    # IN A WORKER THREAD (review 2026-09-22, ENG2-11): the workdir build is a seed
+                    # copy measured at up to 1,017 MB, and on the loop it froze every session turn,
+                    # watcher and heartbeat for its whole duration. It writes only this lifecycle's
+                    # own directory and appends only DIAGNOSTIC rows (`workspace_seeded`,
+                    # `node_build_delta` — invariant #1's thread-appendable set); a reset, abort or
+                    # pause that lands meanwhile is after `a.start_seq`, so the attempt's watcher
+                    # sees it exactly as it sees one landing during ADMIT's own awaits.
+                    await anyio.to_thread.run_sync(self._eval_prepare_workdir, a)
                     self._eval_seed_ledgers(a)
                     while True:
                         if await self._eval_run_attempt(a) is PHASE_RETURN:
@@ -4413,6 +4420,30 @@ class EvaluateMixin:
             _spec = getattr(self, "_eval_spec", None)
             _curve = extract_resource_curve(
                 a.res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)
+        # …and the SUBSTRATE this number was produced on, read LIVE rather than from the folded pin:
+        # the pin is what `run_started` recorded and is blind to a fix the operator promoted into the
+        # editable repo an hour ago, which is exactly the move that has to split two nodes.
+        # Discriminator only — see `comparability.py::comparability_record` — so a wrong or missing
+        # answer can never CERTIFY a comparison, and a task with no editable repo records none.
+        #
+        # IN A THREAD, and that is not tidiness. `_substrate_fingerprint` spawns `git rev-parse` /
+        # `git status` / `git diff` with real timeouts, or walks a tree with `rglob`+`stat` for a
+        # non-git source. Until 2026-08-25 it ran on the event loop at EVERY node terminal — where it
+        # had previously only ever run at setup and resume — and a wedged FUSE mount would have
+        # frozen eval finalisation, terminals and GPU dispatch for the whole of its timeout. This
+        # engine has already paid that bill once, for a propose phase.
+        #
+        # AND BEFORE THE LOCK, for the same reason one level up (review 2026-09-22, ENG2-11). It was
+        # awaited INSIDE `async with self._write_lock` — the only `await` under that lock in the
+        # engine — so every other writer that needs it (a sibling's terminal, a repair row, a stage
+        # row) queued behind this node's git read for up to its whole deadline. It depends on
+        # nothing the lock guards, like `_curve` above, and the terminal carries the same value.
+        _substrate = None
+        if a.ok and self._repo_spec:
+            try:
+                _substrate = await anyio.to_thread.run_sync(self._substrate_fingerprint)
+            except Exception:  # noqa: BLE001 — an unreadable tree is `unknown`, never a failure
+                _substrate = None
         async with self._write_lock:
             # (The `stage_finished` rows are NOT written here any more — they are appended inside
             # the attempt loop, once per attempt, which is the only way a repaired node's log can
@@ -4629,25 +4660,7 @@ class EvaluateMixin:
                 # "two runs that recorded nothing are the same evaluation" is the exact statement
                 # this mechanism exists to refuse.
                 _inputs_prov = getattr(a.res, "eval_inputs", None)
-                # …and the SUBSTRATE this number was produced on, read LIVE rather than from
-                # the folded pin: the pin is what `run_started` recorded and is blind to a fix
-                # the operator promoted into the editable repo an hour ago, which is exactly the
-                # move that has to split two nodes. Discriminator only — see
-                # `comparability.py::comparability_record` — so a wrong or missing answer can
-                # never CERTIFY a comparison, and a task with no editable repo records none.
-                #
-                # IN A THREAD, and that is not tidiness. `_substrate_fingerprint` spawns
-                # `git rev-parse` / `git status` / `git diff` with real timeouts, or walks a tree
-                # with `rglob`+`stat` for a non-git source. Until 2026-08-25 it ran on the event
-                # loop at EVERY node terminal — where it had previously only ever run at setup
-                # and resume — and a wedged FUSE mount would have frozen eval finalisation,
-                # terminals and GPU dispatch for the whole of its timeout. This engine has
-                # already paid that bill once, for a propose phase.
-                try:
-                    _substrate = (await anyio.to_thread.run_sync(self._substrate_fingerprint)
-                                  if self._repo_spec else None)
-                except Exception:  # noqa: BLE001 — an unreadable tree is `unknown`, never a failure
-                    _substrate = None
+                # `_substrate` was read above, BEFORE this lock was taken (ENG2-11) — see there.
                 _cmp = comparability_record(task=self._task_snapshot_for_comparability(),
                                             inputs_prov=_inputs_prov, substrate=_substrate)
                 if isinstance(_inputs_prov, dict) or _cmp is not None:
@@ -4712,6 +4725,14 @@ class EvaluateMixin:
                 # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                 # emission does not rewrite the metric, but the folded trust_gate policy
                 # can exclude high-precision signals from champion/breeding under gate/block.
+                #
+                # SYNCHRONOUS AND INSIDE THIS SECTION ON PURPOSE — checked, not overlooked (review
+                # 2026-09-22, ENG2-11, which moved the substrate read out and the workdir build off
+                # the loop). There is no `await` between the terminal above and the flag below, so
+                # no task on this loop can observe the node evaluated-but-unflagged. Offloading the
+                # scan to a thread would open exactly that window for the main task's selection and
+                # breeding under `gate`/`block`, and scanning BEFORE the terminal is the kill-window
+                # trade the receipt's own paragraph below refuses.
                 # Both the surface and the findings over it are NAMED rules (doc 25 ES-03) — the
                 # `code_digest` below must be the digest of the exact bytes that were scanned, so
                 # the surface is read once, here, and handed to the scan.

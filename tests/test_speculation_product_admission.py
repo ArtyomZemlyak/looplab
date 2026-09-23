@@ -632,7 +632,7 @@ def test_the_invariant_is_wired_at_the_single_dispatch_funnel():
     import ast
     import textwrap
 
-    from tests._source_scan import called_names, eval_attempt_tree
+    from tests._source_scan import called_or_offloaded_names, eval_attempt_tree
 
     # Since the EvalAttempt split the funnel is `_eval_admit` (the pre-start fence) and the
     # workdir is built by `_eval_prepare_workdir`; the whole loop is scanned so a second call
@@ -659,7 +659,7 @@ def test_the_invariant_is_wired_at_the_single_dispatch_funnel():
     assert not any(isinstance(n, ast.Constant) and n.value == "nodes" for n in ast.walk(admit)), (
         "the workdir is derived inside ADMIT — an unconfirmed prediction can already be on its way "
         "into a sandbox")
-    order = called_names(Engine._evaluate)
+    order = called_or_offloaded_names(Engine._evaluate)   # the workdir phase runs in a worker
     assert order.index("self._eval_admit") < order.index("self._eval_prepare_workdir"), (
         "the driver runs the workdir phase before the pre-start fence")
 

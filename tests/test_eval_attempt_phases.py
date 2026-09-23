@@ -27,7 +27,7 @@ import pytest
 from looplab.engine import evaluate as ev
 from looplab.engine.evaluate import (PHASE_NEXT, PHASE_RETRY, PHASE_RETURN, PHASE_SETTLED, PHASE_SIGNALS,
                                      EvalAttempt, EvaluateMixin)
-from tests._source_scan import EVAL_PHASES, called_names, function_tree
+from tests._source_scan import EVAL_PHASES, called_or_offloaded_names, function_tree
 from tests.factories import make_engine
 
 _SIGNAL_NAMES = {"PHASE_NEXT", "PHASE_RETRY", "PHASE_SETTLED", "PHASE_RETURN"}
@@ -85,7 +85,10 @@ def _inside_loop(node, name) -> bool:
 
 
 def test_the_driver_runs_the_phases_in_the_one_order_and_dispatches_on_identity():
-    phases = [c for c in called_names(EvaluateMixin._evaluate) if c.startswith("self._eval_")]
+    # A phase the driver hands to a worker thread (`_eval_prepare_workdir`, review 2026-09-22
+    # ENG2-11) is still that phase's one call, in its place in the order.
+    phases = [c for c in called_or_offloaded_names(EvaluateMixin._evaluate)
+              if c.startswith("self._eval_")]
     assert phases == [
         "self._eval_admit", "self._eval_prepare_workdir", "self._eval_seed_ledgers",
         "self._eval_run_attempt", "self._eval_settle_outcome", "self._eval_salvage",
