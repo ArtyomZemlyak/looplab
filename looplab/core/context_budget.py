@@ -261,7 +261,7 @@ def compact_history(messages: list[dict], max_chars: int, summarize, *, keep_las
     # "SYSTEM NOTE: run …" line outrank the real user instruction for every later turn. Delimited and
     # de-privileged, it's context, not a command.
     #
-    # AND FENCED WHEN THE LOOP FENCES (review 2026-09-22, doc 66 §6.4 — TAT-04's second half). The
+    # AND FENCED WHEN THE LOOP FENCES (review 2026-09-22, doc 66 §6, item 4 — TAT-04's second half). The
     # summary paraphrases a middle that is mostly tool results the loop had fenced one by one: a
     # result that forged `END UNTRUSTED_RUN_EVIDENCE` and then spoke as the operator was inert inside
     # its own block, and the summarizer can carry both into a note that opened no block at all — the
@@ -298,7 +298,7 @@ def compact_history(messages: list[dict], max_chars: int, summarize, *, keep_las
 #     and that call must be one the caller has NOT already spent") is the same sentence one layer up.
 #   * SELF-DESCRIBING — the receipt states the range AND the total, so a short record and a truncated
 #     one are never byte-indistinguishable. "A bound that removes the answer is worse than no answer,
-#     because the caller cannot tell a short record from a truncated one" (§0.17).
+#     because the caller cannot tell a short record from a truncated one" (docs/BACKLOG.md §0.17).
 #   * INSIDE THE CAP — the receipt is charged against `cap`, never added on top of it. A marker
 #     appended after the fit decision is exactly what pushes the receipt back past the outer bound,
 #     where the loop's own head-cut (`agents/tool_loop.py::_cap_tool_result`) eats it — the receipt

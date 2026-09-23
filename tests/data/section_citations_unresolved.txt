@@ -21,6 +21,4 @@ looplab/engine/claims_retrieval.py::§20.6
 #   context_budget.py -> `docs/BACKLOG.md §0.17` (the bounded-answer rule, as knowledge_tools names it)
 #   memory.py         -> `doc 51 §3, item (b)` ("A promoted skill is promoted forever")
 #   replay.py         -> `doc 14 §2.2` (the breedable-nodes rule every sibling site now names)
-looplab/core/context_budget.py::§0.17
-looplab/engine/memory.py::doc 51 §3b
 looplab/events/replay.py::§2.2

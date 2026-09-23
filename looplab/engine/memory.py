@@ -459,7 +459,7 @@ def _stored_skill_fingerprints(raw: str) -> list[list[str]]:
     return parse_skill_fingerprints(raw)
 
 
-# THE LIFECYCLE IS A LATTICE, NOT A RATCHET (doc 52 row 17; doc 51 §3b). Until 2026-09-06 one
+# THE LIFECYCLE IS A LATTICE, NOT A RATCHET (doc 52 row 17; doc 51 §3, item (b)). Until 2026-09-06 one
 # expression decided it — ``"promoted" if different or prior_status == "promoted" else
 # "candidate"`` — monotone upward: nothing recorded after a promotion could ever move a skill back,
 # and the word `retired` did not occur in this file. `next_auto_skill_status` is the SUPPORT edge

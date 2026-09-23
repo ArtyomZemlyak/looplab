@@ -682,7 +682,7 @@ def _compact_in_place(messages: list, context_budget_chars, auto_summary: bool, 
     default, i.e. compaction ~8× MORE aggressive than the operator asked for), >0 = the budget.
 
     `label`: the loop's own `tool_result_label`. A summary paraphrases the results that label fenced,
-    so it rides in the same fence (review 2026-09-22, doc 66 §6.4; `compact_history`); "" (every
+    so it rides in the same fence (review 2026-09-22, doc 66 §6, item 4; `compact_history`); "" (every
     loop that does not fence its results) keeps the historical note.
 
     `keep`: the request the loop was handed (`drive_tool_loop` holds it by identity), which both

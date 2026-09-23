@@ -320,7 +320,7 @@ def test_a_long_real_loop_still_hands_the_model_its_task():
         assert sum(_msg_chars(m) for m in model.last) < 13 * 900, "compaction did run"
 
 
-# --- the SUMMARY rides in the fence its loop put the results in (review 2026-09-22, doc 66 §6.4) --
+# --- the SUMMARY rides in the fence its loop put the results in (review 2026-09-22, doc 66 §6, item 4) --
 #
 # The compaction note is a model's paraphrase of the middle it replaces, and that middle is mostly
 # tool results a fencing loop had wrapped one by one — a result that forged the fence's close and

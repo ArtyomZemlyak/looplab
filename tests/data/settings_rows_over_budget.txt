@@ -18,7 +18,6 @@ developer_probe 1 3036
 eval_deadline_grace_s 1 2212
 eval_noise_seeds 1 2093
 eval_parallel 1 2384
-evidence_envelope 1 2295
 inline_repair_attempts 1 3839
 inline_repair_reasons 1 5640
 inline_repair_retrain_cap 1 4119

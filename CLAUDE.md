@@ -73,6 +73,9 @@ CORRECT default) and the relevant `docs/guide/*.md` page; (2) the **full process
 numbers/cadences/thresholds are verified against `looplab/` (embedded on `docs/guide/architecture.md`).
 Stale docs/diagram are treated as a bug. The diagram is data-driven (a `B` block map + `E` edge list
 in its inline `<script>`); edit the data, not hand-placed SVG.
+Both surfaces are on SIZE budgets (`tests/test_doc_surface_budgets.py`): a diagram `B`/`E` string <= 600
+characters and a settings row <= 1,500; the story goes in the module docstring or a numbered doc,
+and the pre-existing violators are shrink-only rows under `tests/data/`.
 
 ## Package map (what lives where)
 
@@ -336,7 +339,11 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   evaluated by `looplab/core/claimpin.py` with the same predicates as the open-item index plus
   `line:<a>&&<b>@<path>`; a red `test_claim_pins` means the SENTENCE IS FALSE. `<mod>.py::<symbol>`
   citations are re-derived by `citation_defects()`, and a bare `tests/<file>.py` must name a file
-  that exists; a `<mod>.py:NNN` citation is REFUSED. Run
+  that exists; a `<mod>.py:NNN` citation is REFUSED. A `§` citation must name a section of the doc it NAMES
+  (`doc 56 §228`, `BACKLOG §0.7`, `docs/60 §60.9`), and a BARE one a section of doc 56 or doc 17
+  (`core/claimpin.py::iter_section_citations`; the residue is the shrink-only
+  `tests/data/section_citations_unresolved.txt`). Doc 56 numbers §1..§436 densely, so a bare integer
+  resolves whatever it meant: a new citation NAMES its doc. Run
   `python -m looplab.core.claimpin <task.json>` on a task GOAL before submitting a run, and **do
   not put ANSWERS in a goal** — the objective, the constraints and the MEASURED limits with their
   source, never a configuration copied from a benchmark table.

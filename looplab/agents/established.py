@@ -28,7 +28,7 @@ threads under `llm_parallel`, hence the lock); it records through the tool loop'
 `on_tool_result` hook, keyed on `(tool, path)` the way `tool_loop._READ_TOOL_PATH_SLOTS` keys the
 read-loop nudge — the two are one reading of "which tools return a file".
 
-A CARRIED PAGE IS TEXT THE MODEL DID NOT WRITE (review 2026-09-22, doc 66 §6.4 — the remainder of
+A CARRIED PAGE IS TEXT THE MODEL DID NOT WRITE (review 2026-09-22, doc 66 §6, item 4 — the remainder of
 TAT-02 and doc 50 TO-06's boundary). The block lands in a chain root's USER turn, the message the
 phase reads as its task, and what it carries is repository text, a candidate's staged code or a
 data sample. The same bytes reached the model a phase earlier as a `read_file` result fenced under
@@ -401,7 +401,7 @@ class EstablishedContext:
             elsewhere = row.get("workspace") != here
             content = None if elsewhere else row["content"]
             if content is not None:
-                # FENCED under the envelope (review 2026-09-22, doc 66 §6.4): this page is going
+                # FENCED under the envelope (review 2026-09-22, doc 66 §6, item 4): this page is going
                 # into the phase's TASK message, and a file that forges `END UNTRUSTED_RUN_EVIDENCE`
                 # would otherwise end the evidence it never opened and speak as the loop. Only the
                 # file's bytes go inside; the sha stays theirs, and the fenced size is what the
@@ -449,7 +449,7 @@ def established_context_from_settings(settings) -> Optional[EstablishedContext]:
     Keyed on the settings object the roles were built from, so a run that deliberately builds roles
     from a DIFFERENT `Settings` (the speculation-calibration profile) still gets its own.
 
-    It is also where the store's fence is switched on (review 2026-09-22, doc 66 §6.4): the same
+    It is also where the store's fence is switched on (review 2026-09-22, doc 66 §6, item 4): the same
     `envelope_enabled(settings)` every role builder reads, so a run's carried pages are fenced
     exactly when the tool results they were read as are.
     """

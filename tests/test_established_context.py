@@ -619,7 +619,7 @@ def test_two_concurrent_builds_do_not_share_one_workspace_pointer():
     assert seen == {"a": "a", "b": "b"}, seen
 
 
-# ---- the carried page is TEXT THE MODEL DID NOT WRITE (review 2026-09-22, doc 66 §6.4) -------
+# ---- the carried page is TEXT THE MODEL DID NOT WRITE (review 2026-09-22, doc 66 §6, item 4) -------
 #
 # The block is spliced into a chain root's USER turn — the message a phase reads as its task — and
 # what it carries is the first page of a file the agent READ: repository text, a candidate's staged

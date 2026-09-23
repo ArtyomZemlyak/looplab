@@ -48,7 +48,7 @@ foresight ranker, and the Researcher, Deep Research and the repo Developer thems
 such call site, fenced or exempt with its reason, under a two-way guard
 (`tests/test_evidence_consumers.py`), so the next loop cannot arrive unfenced unnoticed.
 Text the model did not write can also reach a prompt WITHOUT being a tool result, and those sites
-take the same switch and the same `fence_untrusted` (review 2026-09-22, doc 66 §6.4): the pages the
+take the same switch and the same `fence_untrusted` (review 2026-09-22, doc 66 §6, item 4): the pages the
 ALREADY-ESTABLISHED block carries into the next phase's task message
 (`agents/established.py::EstablishedContext`, switched on by `established_context_from_settings`),
 and a remote MCP server's self-description in the tool schema the assistant is offered

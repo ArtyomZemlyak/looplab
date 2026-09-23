@@ -39,7 +39,7 @@ DIAGRAM_STRING_BUDGET = 600
 SETTINGS_ROW_BUDGET = 1_500
 # The row counts the day the budgets landed. Lower them as rows go; never raise them.
 DIAGRAM_BACKLOG_CEILING = 26
-SETTINGS_BACKLOG_CEILING = 44
+SETTINGS_BACKLOG_CEILING = 43
 
 _JS_TOKEN = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'|`(?:[^`\\]|\\.)*`'
                        r"|//[^\n]*|/\*[\s\S]*?\*/")
