@@ -1,9 +1,14 @@
 """Request-driven Card speculation (docs/23, Layers 5a/5b).
 
-The append-only log remains the queue.  Background producer work may only return an in-memory
-``SpecBuildResult``; every selection-affecting event and every speculative ``node_created`` is written
-by the main engine task.  The mixin is inert unless both Card selection and a positive, run-pinned
-``speculation_depth`` are enabled.
+The append-only log remains the queue.  Background producer work — the isolated Card build and the
+raw proposal — may only return an in-memory ``SpecBuildResult`` / ``SpecRawStageResult``; every
+selection-affecting event that work leads to, and every speculative ``node_created``, is written by
+the main engine task.  That is THIS LANE's rule, not the run's, and the sentence used to read as the
+run's (review 2026-09-22, ES1-08): an evaluation child writes its own node's terminal (an anyio task
+on the same loop, under ``_write_lock``), and the parallel build's worker threads append their OWN
+node's rows — ``card_auto_dropped`` included, through ``orchestrator.py::_fail_reserved_build`` on a
+build crash.  CLAUDE.md invariant #1 lists every typed exception.  The mixin is inert unless both
+Card selection and a positive, run-pinned ``speculation_depth`` are enabled.
 """
 from __future__ import annotations
 
@@ -606,10 +611,16 @@ class SpeculationMixin:
         re-folds before the next phase reads" mechanical here instead of a discipline each phase has
         to remember.
 
-        The memo also keys on the `fold` callable ITSELF.  `looplab.engine.speculation.fold` is a
-        documented patch seam (tests swap it for a fabricated RunState), and a memo that outlived the
-        swap would serve the previous function's answer to the new one — the "test still runs but no
-        longer measures anything" failure CLAUDE.md warns about.
+        The memo also keys on the fold callable ITSELF, and it has to key on the one that will RUN.
+        Tests steer what the Engine sees by swapping `orchestrator.fold` (the seam
+        `shared.py::engine_fold` resolves at call time, `tests/test_engine_fold_seam.py`), and a memo
+        that outlived the swap would serve the previous function's answer to the new one — the "test
+        still runs but no longer measures anything" failure CLAUDE.md warns about. This used to key
+        on this module's own `fold` and call `speculation.fold` a documented patch seam; no test
+        patches that name, and since step 0 it is `engine_fold` — one stable object — so the key
+        never moved when the real seam did (review 2026-09-22, ES1-08). The key is now the PAIR:
+        this module's name (a direct patch of it) and the target it resolves to (a patch of the
+        seam).
 
         A folded `RunState` served from this memo is treated as immutable by every consumer, and this
         session already hands ONE folded state to a background research task that outlives the turn.
@@ -624,11 +635,15 @@ class SpeculationMixin:
 
         events = self.store.read_all()
         tail = events[-1].seq if events else -1
+        # Deferred for the reason `engine_fold`'s own import is: a module-level binding would
+        # snapshot the seam's target and make a patch of it invisible again.
+        from looplab.engine import orchestrator as _seam
+        key = (fold, _seam.fold)
         memo = self._spec_fold_memo
-        if memo is not None and memo[0] is fold and memo[1] == tail and memo[2] == len(events):
+        if memo is not None and memo[0] == key and memo[1] == tail and memo[2] == len(events):
             return events, memo[3]
         state = fold(events)
-        self._spec_fold_memo = (fold, tail, len(events), state)
+        self._spec_fold_memo = (key, tail, len(events), state)
         return events, state
 
     def _session_state(self) -> RunState:
@@ -2332,11 +2347,16 @@ class SpeculationMixin:
                 self._publish_proposal_events(result.audit_events)
                 return True, False, None
             return True, False, str(getattr(self, "_card_stage_refusal", "") or "unrecorded")
-        # the Card commit above and these proposal-audit events are separate appends. A crash
-        # or append failure after EV_CARD_ADDED leaves an executable durable Card whose novelty/governance
-        # audit prefix was silently lost; `_spec_raw_stage_result` was already cleared, so resume cannot
-        # repair it. Commit the Card and its bounded audit intents in one tail-fenced append_many, or add a
-        # durable proposal receipt plus recovery gate that keeps the Card non-selectable until it is closed.
+        # OPEN[raw-stage-card-and-audit-are-separate-appends] the Card commit above
+        # (`card_reservation.py::_stage_prepared_card`: one `card_added`, alone, under its own tail
+        # CAS) and these proposal-audit events are separate appends. A crash or append failure after
+        # EV_CARD_ADDED leaves an executable durable Card whose novelty/governance audit prefix was
+        # silently lost; `_spec_raw_stage_result` was already cleared, so resume cannot repair it.
+        # Commit the Card and its bounded audit intents in one tail-fenced append_many, or add a
+        # durable proposal receipt plus recovery gate that keeps the Card non-selectable until it
+        # is closed. Indexed by review 2026-09-22 (ES1-08); it stays open while the staging commit
+        # is that lone append:
+        # proof:`present:self.store.append(EV_CARD_ADDED, plan.payload, expected_last_seq=tail)@looplab/engine/card_reservation.py`
         self._publish_proposal_events(result.audit_events)
         return True, True, None
 

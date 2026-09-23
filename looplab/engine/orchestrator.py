@@ -2343,8 +2343,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # ceiling, and it still does — after the siblings have landed, before `finalize_run`.
         await self._raise_deferred_eval_budget_stop()
         # WHY THE LOOP STOPPED, exactly once — the receipt rule, the `finished` skip and the
-        # exactly-once latch all live on `_record_run_loop_exit`. This fall-through covers the
-        # thirteen `break`s; `Engine.run`'s outer `finally` calls the same helper so the RAISING
+        # exactly-once latch all live on `_record_run_loop_exit`. This fall-through covers every
+        # `break` above; `Engine.run`'s outer `finally` calls the same helper so the RAISING
         # exits (the BudgetExceeded hard stop, a provider/store error, cancellation) get the same
         # receipt — the previous inline append sat only here and silently skipped every one of
         # them, i.e. exactly the exit classes the motivating v11 chase had to rule out by hand.
@@ -2357,8 +2357,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     def _record_run_loop_exit(self) -> None:
         """Append the run loop's exit receipt exactly once per entered loop, wherever the exit is.
 
-        WHY THE LOOP STOPPED, DERIVED FROM THE FINAL FOLD rather than from thirteen hand-set
-        locals: a derivation cannot disagree with the state a reader reconstructs from the same
+        WHY THE LOOP STOPPED, DERIVED FROM THE FINAL FOLD rather than from a hand-set local per
+        exit: a derivation cannot disagree with the state a reader reconstructs from the same
         log. `unattributed` is a legal answer and the reason this exists — measured 2026-08-31,
         three runs of eight (v6, v9, v11) ended with NO pause and NO `run_finished` row; v11's
         last event is a `trust_scan`, so anyone folding its log sees a run still in flight,
@@ -2375,7 +2375,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         the speculation gate refuse every calibration run recorded at that commit.
 
         CALLED FROM TWO PLACES because the exits are of two kinds: `_run_with_llm_broker`'s
-        fall-through covers the thirteen `break`s, and `Engine.run`'s outer `finally` covers the
+        fall-through covers every `break` of its loop (no count: the one this carried had drifted —
+        review 2026-09-22, ES1-08), and `Engine.run`'s outer `finally` covers the
         raising exits — BudgetExceeded, a provider/store error, cancellation. `_run_loop_exit_owed`
         makes the pair exactly-once: latched only after `_enter_run` returns (a refused re-entry
         must keep the log byte-identical) and cleared on the first receipt. Errors are contained
@@ -2409,13 +2410,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                               drain_forced_request: bool = False) -> str:
         """One terminal gate: settle what is in flight, then finish only if the log is quiescent.
 
-        Four gates in the run loop spelled this ladder out (leakage, aborted, time_budget,
-        eval_budget) and the ORDER is the whole rule — a Card build or a forced Node creator still
-        in flight must be settled BEFORE finalization can win, or the run finishes with its own
-        durable request head unacknowledged. Returns the outer loop's signal: "break" once the run
-        is durably finished, "continue" to re-enter every gate on a fresh fold. An in-flight head
-        also yields "continue", because the settle attempt churns the tail either way and its return
-        value means "a head existed", not "this CAS succeeded".
+        Every terminal gate of the run loop settles through here: leakage, aborted, the
+        systemic-failure stop, time_budget and eval_budget (this said "four gates" and missed the
+        fifth caller — review 2026-09-22, ES1-08). The ORDER is the whole rule — a Card build or a
+        forced Node creator still in flight must be settled BEFORE finalization can win, or the run
+        finishes with its own durable request head unacknowledged. Returns the outer loop's signal:
+        "break" once the run is durably finished, "continue" to re-enter every gate on a fresh fold.
+        An in-flight head also yields "continue", because the settle attempt churns the tail either
+        way and its return value means "a head existed", not "this CAS succeeded".
 
         `state.paused` deliberately does NOT come through here even though it settles the same
         in-flight build: it then breaks WITHOUT finishing, which is a different terminal.
@@ -3142,10 +3144,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # trace (spans.jsonl / OTel). `built` is structurally bounded by `fan` (=len of
                 # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
                 # the configured fan-out — this span makes the actual per-batch cost observable.
-                # CODEX AGENT: this join is a bulk-synchronous build barrier, not independent
-                # adaptive research threads. Fast workers cannot select/propose from completed
-                # sibling evidence until the slowest build and later eval batch finish; feed each
-                # completion back to a central scheduler and refill the freed lane immediately.
+                # THIS JOIN IS A BULK-SYNCHRONOUS BUILD BARRIER, not independent adaptive research
+                # threads: a fast worker cannot select or propose from a completed sibling's
+                # evidence until the slowest build of the chunk and the eval batch after it finish.
+                # The lane that refills a freed worker instead exists, opt-in
+                # (`_steady_state_build_lane`, `Settings.steady_state_build`); flipping the DEFAULT
+                # is the indexed open item `parallel-build-is-a-bulk-synchronous-barrier` (doc 52),
+                # which is owed a multi-GPU measurement. This was an un-indexed `CODEX AGENT` note
+                # until review 2026-09-22 (ES1-08).
                 # The spend ceiling, raised inside one build, is HELD here until the chunk joins
                 # (review 2026-09-22, ENG1-01): `_create_node_guarded` no longer turns it into a
                 # `build_crash`, and letting it cancel the group would cost the siblings their

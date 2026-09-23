@@ -86,3 +86,23 @@ def test_a_patched_seam_sees_the_folds_of_the_other_engine_modules(tmp_path, mon
     # orchestrator.py, and each used to be invisible to this exact patch.
     assert {"looplab.engine.evaluate", "looplab.engine.finalize"} <= others, (
         f"the seam saw folds only from {sorted(callers)}")
+
+
+def test_the_card_sessions_fold_memo_follows_a_patch_of_the_seam(tmp_path, monkeypatch):
+    """`_fold_current` memoizes a fold per observed tail, keyed on "the fold callable itself" so a
+    memo cannot outlive a swap of the function. Since step 0 the module's `fold` is `engine_fold` —
+    ONE stable object that resolves `orchestrator.fold` at call time — so keying on it alone missed
+    exactly the patch tests make (review 2026-09-22, ES1-08: the docstring's "documented patch seam"
+    was `speculation.fold`, which no test patches). Driven: same tail, seam swapped, next read.
+    """
+    from looplab.engine import orchestrator
+
+    engine = make_engine(tmp_path / "run")
+    engine.store.append("run_started", {"run_id": "run", "task_id": "t", "direction": "min"})
+    _events, first = engine._fold_current()
+    assert engine._fold_current()[1] is first, "an unmoved tail must be served from the memo"
+
+    swapped = object()
+    monkeypatch.setattr(orchestrator, "fold", lambda events: swapped)
+    assert engine._fold_current()[1] is swapped, (
+        "the memo served the previous fold's answer after the seam was swapped")
