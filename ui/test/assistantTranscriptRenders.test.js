@@ -210,12 +210,30 @@ async function mountRestoredChat({ transcript }) {
   return {
     backend, container, turns,
     unmount: async () => {
-      // Let the feed's autoscroll frame (a `requestAnimationFrame` the transcript effect schedules on
-      // every commit) run while the feed still exists, as it would between two real frames.
       await settle()
       await React.act(async () => { root.unmount() })
       container.remove()
     },
+  }
+}
+
+// Animation frames the drive runs BY HAND. `_mount.js` turns a frame into a zero-delay timer, which
+// runs whenever the event loop gets there; held, a frame a commit scheduled runs exactly when the
+// test says — after the DOM it was scheduled against has changed under it, which is the case a
+// frame must survive. `cancelAnimationFrame` drops a held frame the way the browser's would.
+function holdFrames() {
+  const held = new Map()
+  let lastId = 0
+  const previous = [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame]
+  globalThis.requestAnimationFrame = callback => {
+    lastId += 1
+    held.set(lastId, callback)
+    return lastId
+  }
+  globalThis.cancelAnimationFrame = id => { held.delete(id) }
+  return {
+    take() { const frames = [...held.values()]; held.clear(); return frames },
+    release() { [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame] = previous },
   }
 }
 
@@ -402,6 +420,48 @@ test('the handlers a settled Turn holds still act, through the latest render', a
     assert.equal(!!chat.container.querySelector('.asst-side-panel'), false, 'folded to the bar')
     assert.equal(location.hash, '#/settings')
   } finally {
+    await chat.unmount()
+  }
+})
+
+// The transcript's autoscroll is an animation frame the COMMIT schedules, so it runs after the commit
+// that asked for it — by then the feed may be gone: folded to the bar, or the whole bar unmounted. It
+// read `feedRef.current.scrollHeight` unguarded, and a null there is a TypeError thrown out of a bare
+// frame, where nothing catches it (review 2026-09-22 follow-up to UI-06). Held frames make "the feed
+// left before the frame ran" a deterministic step instead of a race with the event loop.
+test('an autoscroll frame that outlives its feed does nothing instead of throwing', async () => {
+  const chat = await mountRestoredChat({ transcript: settledTranscript(2) })
+  const frames = holdFrames()
+  try {
+    await sendFromComposer(chat.container, 'Keep talking')
+    await until(() => chat.backend.streams.length === 1, 'the turn to open its stream')
+    await settle()
+    for (const frame of frames.take()) frame(0)   // with the feed still there: these scroll it
+    const [stream] = chat.backend.streams
+    const chunkFrame = async () => {
+      await React.act(async () => { stream.send('token', { text: 'more ' }); await tick() })
+      const scheduled = frames.take()
+      assert.equal(scheduled.length, 1,
+        'a chunk schedules exactly one frame: the transcript autoscroll')
+      return scheduled[0]
+    }
+
+    // 1. Folded to the bar before the frame runs: the side panel, and its feed, are unmounted.
+    const beforeFold = await chunkFrame()
+    await click(chat.container.querySelector('button[title="collapse to the bar"]'))
+    assert.equal(!!chat.container.querySelector('[role="log"]'), false, 'no feed on the bar')
+    assert.doesNotThrow(() => beforeFold(0), 'a frame whose feed was folded away does nothing')
+    for (const frame of frames.take()) frame(0)   // the fold's own focus frame
+
+    // 2. Unmounted before the frame runs: the same frame, with no component left at all.
+    await click(chat.container.querySelector('button.cmdbar-drawer-btn'))
+    assert.equal(!!chat.container.querySelector('[role="log"]'), true, 'the feed is back')
+    for (const frame of frames.take()) frame(0)
+    const beforeUnmount = await chunkFrame()
+    await chat.unmount()
+    assert.doesNotThrow(() => beforeUnmount(0), 'a frame that outlived the whole bar does nothing')
+  } finally {
+    frames.release()
     await chat.unmount()
   }
 })

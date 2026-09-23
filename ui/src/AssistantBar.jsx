@@ -938,7 +938,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // Autoscroll ONLY when the user is already near the bottom — don't yank them back down while they've
   // scrolled up to read earlier turns during a streaming reply.
   const onFeedScroll = (e) => { const f = e.currentTarget; atBottomRef.current = f.scrollHeight - f.scrollTop - f.clientHeight < 80 }
-  useEffect(() => { if (feedOpen && feedRef.current && atBottomRef.current) requestAnimationFrame(() => { feedRef.current.scrollTop = feedRef.current.scrollHeight }) }, [msgs, view, busy])
+  // The frame runs AFTER the commit that scheduled it, and by then the feed may be gone — folded to
+  // the bar, or the whole bar unmounted — so it scrolls only a feed that still exists. Unguarded,
+  // that null was a TypeError thrown out of a bare frame (review 2026-09-22, UI-06 follow-up).
+  useEffect(() => { if (feedOpen && feedRef.current && atBottomRef.current) requestAnimationFrame(() => { const feed = feedRef.current; if (feed) feed.scrollTop = feed.scrollHeight }) }, [msgs, view, busy])
 
   const patchLast = (patch) => setMsgs(m => {
     const c = [...m]; const i = c.length - 1
