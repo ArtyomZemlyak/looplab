@@ -222,3 +222,63 @@ def test_the_last_plan_step_declares_it_too(monkeypatch):
 
 def test_no_declaration_writes_no_file(monkeypatch):
     assert activation.ACTIVATION_MANIFEST_NAME not in _build(monkeypatch, {"summary": "s"})
+
+
+# ------------------------------------------------------------ a marker the evaluated code never prints
+#
+# Measured 2026-09-23, MiniOneRec inf11 node 0: declared `PER_DEPTH_SCORER_TEST_OK`, which only its
+# TEST file printed; the service printed `PER_DEPTH_SCORER_ACTIVE depths=...`. The path ran, quality
+# held, and the node was withheld as `inert_path` over a string the eval could never print.
+
+from looplab.engine.repair_verify import activation_markers_not_in_code  # noqa: E402
+
+_SERVICE = {"service/engine.py": "print('PER_DEPTH_SCORER_ACTIVE depths=', depths)\n",
+            "tests/test_scorer.py": "print('PER_DEPTH_SCORER_TEST_OK depths=')\n"}
+
+
+def test_a_marker_only_a_test_prints_is_bounced_and_says_where_it_was():
+    out = activation_markers_not_in_code(["PER_DEPTH_SCORER_TEST_OK"], _SERVICE)
+    assert "'PER_DEPTH_SCORER_TEST_OK'" in out and "tests/test_scorer.py" in out
+
+
+def test_a_marker_the_service_prints_passes_and_a_fragment_is_enough():
+    assert activation_markers_not_in_code(["PER_DEPTH_SCORER_ACTIVE"], _SERVICE) == ""
+    assert activation_markers_not_in_code(["SCORER_ACTIVE depths"], _SERVICE) == ""
+
+
+def test_a_marker_nowhere_at_all_is_bounced_and_none_declared_is_fine():
+    assert "appears in no file" in activation_markers_not_in_code(["NEVER"], _SERVICE)
+    assert activation_markers_not_in_code([], _SERVICE) == ""
+    assert activation_markers_not_in_code(None, _SERVICE) == ""
+
+
+def test_the_real_build_bounces_a_marker_only_its_test_prints(monkeypatch):
+    import sys
+    import looplab.agents.agent as agent_mod
+    from looplab.adapters.repo_task import EvalSpec, LLMRepoDeveloper, RepoTask
+
+    refusals: list = []
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": []})
+        if name == "propose_plan":
+            return finalize({"steps": []})
+        tools.execute("write_file", {"path": "solution.py",
+                                     "content": "print('PER_DEPTH_SCORER_ACTIVE')\n"})
+        args = {"summary": "s", "activation_markers": ["PER_DEPTH_SCORER_TEST_OK"]}
+        validate = opts.get("validate")
+        if validate is not None and (refusal := validate(args)):
+            refusals.append(refusal)
+        return finalize(args)
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    fixture = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
+    task = RepoTask(id="r", goal="g", direction="max", editable_path=str(fixture),
+                    edit_surface=["*.py"], protect=[],
+                    eval=EvalSpec(command=[sys.executable, "ttrain.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}))
+    LLMRepoDeveloper(object(), task, plan_decompose=False).implement(
+        Idea(operator="draft", params={}, rationale="x"))
+    assert refusals and "'PER_DEPTH_SCORER_TEST_OK'" in refusals[0]

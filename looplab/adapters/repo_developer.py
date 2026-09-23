@@ -2608,6 +2608,14 @@ class LLMRepoDeveloper:
                 from looplab.engine.repair_verify import silent_broad_fallbacks
                 return silent_broad_fallbacks(write.files, before=_started_from)
 
+            def _marker_refusal(args) -> str:
+                # Checked against THIS emit's declaration, not the file it will become: the
+                # bounce is the one chance to correct a marker before an eval is spent on it.
+                if not isinstance(args, dict) or "activation_markers" not in args:
+                    return ""
+                from looplab.engine.repair_verify import activation_markers_not_in_code
+                return activation_markers_not_in_code(args.get("activation_markers"), write.files)
+
             def _validate_build(_args):
                 """A manifest declaring a stage whose SCRIPT this session never wrote.
 
@@ -2633,7 +2641,7 @@ class LLMRepoDeveloper:
                     exists=write.exists)
                 # Second rule, same single bounce: a catch-everything handler this session added
                 # that keeps no record of what it caught (`repair_verify.silent_broad_fallbacks`).
-                refusal = refusal or _silent_fallback_refusal()
+                refusal = refusal or _silent_fallback_refusal() or _marker_refusal(_args)
                 if not refusal:
                     return None
                 _bounced.append(True)
@@ -2698,7 +2706,7 @@ class LLMRepoDeveloper:
                     # A repair is where a silent fallback does most damage: the node is failing,
                     # and wrapping the failing call in `except Exception: pass` makes the failure
                     # vanish from the next attempt's evidence as well as from this one's.
-                    refusal = refusal or _silent_fallback_refusal()
+                    refusal = refusal or _silent_fallback_refusal() or _marker_refusal(args)
                     if not refusal:
                         return None                     # claimed nothing concrete — a legitimate
                     _bounced.append(True)               # "no change needed" answer is left alone

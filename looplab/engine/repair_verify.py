@@ -1598,3 +1598,45 @@ def silent_broad_fallbacks(written: dict, *, before=None) -> str:
             "an `activation_markers` line that path prints when it runs, so an evaluation where it "
             "fell back is caught instead of scored. Fix it and call done again. If a handler is "
             "deliberately silent, call done again unchanged; you will not be asked twice.")
+
+
+# ---------------------------------------------------------------------- a marker the code never prints
+#
+# Measured 2026-09-23, the first node built with activation markers (MiniOneRec inf11 node 0). It
+# declared `PER_DEPTH_SCORER_TEST_OK`; its service printed `PER_DEPTH_SCORER_ACTIVE depths=...` and
+# only its own TEST file printed the declared text. The new path RAN, quality held (9 lost, 7 gained,
+# p 0.40), and the node was withheld as `inert_path` over a string the evaluation could never print.
+# A marker is a claim about what the EVALUATED code prints, so it must at least be text that code
+# contains: this asks that of the node's staged files, tests excluded -- the eval does not run them.
+
+def _is_test_file(path: str) -> bool:
+    parts = str(path).replace("\\", "/").split("/")
+    name = parts[-1]
+    return (any(p in ("tests", "test") for p in parts[:-1])
+            or name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py")
+
+
+def activation_markers_not_in_code(markers, written: dict) -> str:
+    """The bounce text when a declared activation marker appears in no NON-TEST staged file, else "".
+    Total, like the rules above."""
+    from looplab.engine.activation import normalize_markers   # total: never raises
+    markers = normalize_markers(markers)
+    if not markers:
+        return ""
+    code = {p: b for p, b in (written or {}).items()
+            if isinstance(b, str) and not str(p).endswith(".json") and not _is_test_file(p)}
+    tests = {p: b for p, b in (written or {}).items() if isinstance(b, str) and _is_test_file(p)}
+    missing = [m for m in markers if not any(m in body for body in code.values())]
+    if not missing:
+        return ""
+    lines = []
+    for m in missing:
+        only_in = sorted(p for p, b in tests.items() if m in b)
+        where = (f" -- it appears only in {', '.join(only_in)}, which the evaluation does not run"
+                 if only_in else " -- it appears in no file this node wrote")
+        lines.append(f"  {m!r}{where}")
+    return ("Your `done` declares activation marker(s) that the code the evaluation runs does not "
+            "contain:\n" + "\n".join(lines) + "\n\nA marker is checked against what the evaluation "
+            "PRINTS; text your service never prints makes the node `inert_path` and withholds its "
+            "metric even when the new path ran. Declare the exact text your NEW path prints on the "
+            "evaluated code path (a fragment of that print is enough), then call done again.")
