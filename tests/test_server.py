@@ -25,7 +25,7 @@ from looplab.events.eventstore import EventStore, iter_event_jsonl, iter_jsonl  
 from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 from _posix_gates import RENAMEAT2
-from tests.factories import log_run_generation, post_command  # noqa: E402
+from tests.factories import command_terminal, log_run_generation, post_command  # noqa: E402
 
 
 def _sse_payloads(text: str) -> list:
@@ -66,6 +66,21 @@ def _make_resumable(rd: Path) -> Path:
     snap = rd / "task.snapshot.json"
     snap.write_text(TASK.read_text(encoding="utf-8"), encoding="utf-8")
     return snap
+
+
+def _settled_command(client, event_type: str, data: dict, *, key: str,
+                     run_id: str = "demo") -> dict:
+    """One intent through `POST /commands`, returned SETTLED (review 2026-09-22, SRV1-07).
+
+    The sites that call this used to speak the legacy `/control` route, whose coverage would have
+    died with it. An ENSURE_RUNNING intent is appended by the command worker, and `_build_run`'s
+    runs carry no `task.snapshot.json`, so the driver it asks for cannot start: its record settles
+    `failed: spawn_failed` AFTER the intent is durable (`event_seq`). A refusal is a REJECTED record
+    carrying the coded error, never an HTTP status.
+    """
+    response = post_command(client, event_type, data, key, run_id=run_id)
+    assert response.status_code == 200, response.text
+    return command_terminal(client, response.json(), run_id=run_id)
 
 
 def test_state_exposes_deprecated_hypotheses_compat_projection(tmp_path):
@@ -813,22 +828,25 @@ def test_public_node_activity_is_generation_scoped_and_evidence_backed(tmp_path)
 
 
 def test_add_and_abandon_hypothesis_via_control(tmp_path):
-    """P1 (1 card = 1 hypothesis): a human posts a hypothesis to the board through /control (it's in
-    CONTROL_EVENTS); it folds into the single Card board as a card with verdict `open`, and an abandon
-    control event flips that verdict to `abandoned`. The separate `state.hypotheses` view is gone."""
+    """P1 (1 card = 1 hypothesis): a human posts a hypothesis to the board as a control intent (it's
+    in CONTROL_EVENTS); it folds into the single Card board as a card with verdict `open`, and an
+    abandon control event flips that verdict to `abandoned`. The separate `state.hypotheses` view is
+    gone. Driven through `POST /commands` (SRV1-07); both are NO_SPAWN, so each settles on its own
+    append."""
     from looplab.core.models import hypothesis_id
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
     stmt = "a log transform of the target helps"
-    r = client.post("/api/runs/demo/control",
-                    json={"type": "hypothesis_added", "data": {"statement": stmt, "source": "human"}})
-    assert r.status_code == 200
+    added = _settled_command(client, "hypothesis_added",
+                             {"statement": stmt, "source": "human"}, key="hypothesis-added")
+    assert added["status"] == "succeeded", added
     cards = client.get("/api/runs/demo/state").json()["state"]["cards"]
     hid = hypothesis_id(stmt)
     assert hid in cards and cards[hid]["verdict"] == "open" and cards[hid]["source"] == "human"
 
-    client.post("/api/runs/demo/control",
-                json={"type": "hypothesis_updated", "data": {"id": hid, "status": "abandoned"}})
+    abandoned = _settled_command(client, "hypothesis_updated",
+                                 {"id": hid, "status": "abandoned"}, key="hypothesis-abandoned")
+    assert abandoned["status"] == "succeeded", abandoned
     cards = client.get("/api/runs/demo/state").json()["state"]["cards"]
     assert cards[hid]["verdict"] == "abandoned"
 
@@ -1555,11 +1573,13 @@ def test_resume_during_post_finish_tail_spawns_once_after_engine_exit(
         assert ok
         # This is the exact SSE-visible window: state is already finished, but finalize_run still
         # owns engine.lock. The control intent is durable; two resume calls must install one waiter.
+        # The intent is SETUP, appended as the durable row a client left in that window: what is
+        # under test is the `/resume` route's single waiter, not the route the intent came by (it
+        # used to be the legacy `/control`, SRV1-07; `/commands` would add its own driver monitor,
+        # whose hand-off with this waiter `tests/test_launch_inflight_handshake.py` drives).
         data = ({"idea": {"operator": "manual", "params": {"x": 0.5}}}
                 if intent == "inject_node" else {})
-        action = client.post(
-            f"/api/runs/{run_id}/control", json={"type": intent, "data": data})
-        assert action.status_code == 200
+        EventStore(rd / "events.jsonl").append(intent, data)
         first = client.post(f"/api/runs/{run_id}/resume").json()
         second = client.post(f"/api/runs/{run_id}/resume").json()
         assert first["resume_after_exit"] is True and second["resume_after_exit"] is True
@@ -1861,12 +1881,17 @@ def test_control_append_and_validation(tmp_path):
 
 
 def test_node_controls_compare_and_set_lifecycle_generation(tmp_path):
+    """Driven through `POST /commands` (review 2026-09-22, SRV1-07), where a refusal is a REJECTED
+    record that appended nothing rather than an HTTP 409, and an admitted intent is one whose
+    `event_seq` is durable."""
     _build_run(tmp_path)
     rd = tmp_path / "demo"
     store = EventStore(rd / "events.jsonl")
     store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
     client = TestClient(make_app(tmp_path))
-    endpoint = "/api/runs/demo/control"
+
+    def refused(record: dict) -> None:
+        assert record["status"] == "rejected" and record.get("event_seq") is None, record
 
     # A delayed generation-0 card/click must not mutate the generation-1 node.
     for etype, data in (
@@ -1878,29 +1903,40 @@ def test_node_controls_compare_and_set_lifecycle_generation(tmp_path):
         ("fork", {"from_node_id": 0, "generation": 0}),
         ("promote", {"node_id": 0, "generation": 0}),
     ):
-        assert client.post(endpoint, json={"type": etype, "data": data}).status_code == 409
-    assert client.post(endpoint, json={"type": "node_reset",
-                                      "data": {"node_id": 0, "from_stage": "eval"}}).status_code == 409
+        refused(_settled_command(client, etype, data, key=f"stale-{etype}"))
+    # ...and so must one that names NO generation at all, with the refusal saying which: the
+    # message is what separates "you must say" from the generation-mismatch refusal above.
+    unnamed = _settled_command(client, "node_reset", {"node_id": 0, "from_stage": "eval"},
+                               key="reset-without-generation")
+    refused(unnamed)
+    assert "generation is required" in unnamed["error"]["message"], unnamed["error"]
 
     # The exact current generation succeeds and is persisted unchanged (not synthesized on receipt).
-    ok = client.post(endpoint, json={"type": "node_reset",
-                                    "data": {"node_id": 0, "generation": 1,
-                                             "from_stage": "eval"}})
-    assert ok.status_code == 200
+    ok = _settled_command(client, "node_reset",
+                          {"node_id": 0, "generation": 1, "from_stage": "eval"}, key="reset-current")
+    assert ok.get("event_seq") is not None, ok
     resets = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "node_reset"]
     assert [e.data["generation"] for e in resets[-2:]] == [0, 1]
 
     # Parent-derived inject/merge actions use the same CAS contract after reset.
     idea = {"operator": "improve", "params": {}, "rationale": ""}
-    missing = client.post(endpoint, json={"type": "inject_node",
-                                          "data": {"idea": idea, "parent_id": 0}})
-    assert missing.status_code == 409
-    current = client.post(endpoint, json={"type": "inject_node", "data": {
-        "idea": idea, "parent_id": 0, "parent_generations": {"0": 2}}})
-    assert current.status_code == 200
+    refused(_settled_command(client, "inject_node", {"idea": idea, "parent_id": 0},
+                             key="inject-without-generations"))
+    stale_parent = _settled_command(client, "inject_node", {
+        "idea": idea, "parent_id": 0, "parent_generations": {"0": 1}}, key="inject-stale-parent")
+    refused(stale_parent)
+    assert stale_parent["error"]["message"] == "stale parent #0: current generation is 2"
+    current = _settled_command(client, "inject_node", {
+        "idea": idea, "parent_id": 0, "parent_generations": {"0": 2}}, key="inject-current")
+    assert current.get("event_seq") is not None, current
 
-    assert client.post(endpoint, json=[]).status_code == 400
-    assert client.post(endpoint, json={"type": "pause", "data": []}).status_code == 400
+    # The body itself is refused at the door, before any record exists.
+    headers = {"Idempotency-Key": "not-an-object"}
+    assert client.post("/api/runs/demo/commands", headers=headers, json=[]).status_code == 400
+    generation = log_run_generation(rd)
+    malformed = client.post("/api/runs/demo/commands", headers={"Idempotency-Key": "list-data"},
+                            json={"type": "pause", "data": [], "expected_generation": generation})
+    assert malformed.status_code == 400, malformed.text
 
 
 def test_config_masked_and_gpu_softfail(tmp_path):
@@ -3104,9 +3140,10 @@ def test_concurrent_start_reserves_run_before_popen(tmp_path, monkeypatch):
 def test_inject_node_control_append(tmp_path):
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
-    r = client.post("/api/runs/demo/control", json={"type": "inject_node", "data": {
-        "idea": {"operator": "manual", "params": {"x": 0.5}, "rationale": "hand"}, "parent_id": None}})
-    assert r.status_code == 200 and r.json()["type"] == "inject_node"
+    record = _settled_command(client, "inject_node", {
+        "idea": {"operator": "manual", "params": {"x": 0.5}, "rationale": "hand"},
+        "parent_id": None}, key="inject")
+    assert record["event_type"] == "inject_node" and record.get("event_seq") is not None, record
     st = fold(EventStore(tmp_path / "demo" / "events.jsonl").read_all())
     assert st.inject_requests and st.inject_requests[0]["idea"]["operator"] == "manual"
 
@@ -3123,14 +3160,14 @@ def test_inject_rejects_unavailable_parent(tmp_path, unavailable):
     before = sum(event.type == "inject_node" for event in store.read_all())
 
     client = TestClient(make_app(tmp_path))
-    response = client.post("/api/runs/demo/control", json={"type": "inject_node", "data": {
+    record = _settled_command(client, "inject_node", {
         "idea": {"operator": "manual", "params": {}, "rationale": ""},
         "parent_id": 0,
         "parent_generations": {"0": 0},
-    }})
+    }, key="inject-unavailable-parent")
 
-    assert response.status_code == 409
-    assert unavailable in response.json()["detail"]
+    assert record["status"] == "rejected", record
+    assert unavailable in record["error"]["message"]
     assert sum(event.type == "inject_node" for event in store.read_all()) == before
 
 
@@ -3147,13 +3184,11 @@ def test_cross_run_inject_rejects_unavailable_source(tmp_path, unavailable):
     before = sum(event.type == "inject_node" for event in destination_store.read_all())
 
     client = TestClient(make_app(tmp_path))
-    response = client.post("/api/runs/destination/control", json={
-        "type": "inject_node",
-        "data": {"source_run": "source", "source_node": 0},
-    })
+    record = _settled_command(client, "inject_node", {"source_run": "source", "source_node": 0},
+                              key="import-unavailable-source", run_id="destination")
 
-    assert response.status_code == 409
-    assert unavailable in response.json()["detail"]
+    assert record["status"] == "rejected", record
+    assert unavailable in record["error"]["message"]
     assert sum(event.type == "inject_node" for event in destination_store.read_all()) == before
 
 
@@ -4294,11 +4329,9 @@ def test_cross_run_import_origin_names_the_source_attempt(tmp_path):
     _build_run(tmp_path, "source")
     _build_run(tmp_path, "destination")
     client = TestClient(make_app(tmp_path))
-    response = client.post("/api/runs/destination/control", json={
-        "type": "inject_node",
-        "data": {"source_run": "source", "source_node": 0},
-    })
-    assert response.status_code == 200, response.text
+    record = _settled_command(client, "inject_node", {"source_run": "source", "source_node": 0},
+                              key="import", run_id="destination")
+    assert record.get("event_seq") is not None, record
 
     injected = next(event for event in EventStore(tmp_path / "destination" / "events.jsonl")
                     .read_all() if event.type == "inject_node")

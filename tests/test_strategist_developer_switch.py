@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from looplab.agents.strategist import (
     StrategyContext, _assemble_strategy, _StrategyOut, validate_strategy)
 from looplab.core.config import developer_switch_names
+from tests.factories import command_terminal, post_command
 
 
 def _ctx(**over) -> StrategyContext:
@@ -106,9 +107,13 @@ def test_the_operator_can_POST_one(tmp_path):
     client = TestClient(make_app(tmp_path))
     name = sorted(developer_switch_names())[0]
 
-    response = client.post("/api/runs/demo/control",
-                           json={"type": "set_strategy", "data": {"strategy": {"developer": name}}})
-    assert response.status_code < 400, response.text
+    # Through `POST /commands` (review 2026-09-22, SRV1-07). The intent is admitted when its
+    # `event_seq` is durable; this bare run has no task snapshot, so the driver it asks for cannot
+    # start and the record settles `spawn_failed` AFTER the append.
+    response = post_command(client, "set_strategy", {"strategy": {"developer": name}}, "switch")
+    assert response.status_code == 200, response.text
+    record = command_terminal(client, response.json())
+    assert record.get("event_seq") is not None, record
 
 
 def test_an_unknown_backend_is_REFUSED_over_the_wire_and_the_message_names_the_set(tmp_path):
@@ -121,10 +126,14 @@ def test_an_unknown_backend_is_REFUSED_over_the_wire_and_the_message_names_the_s
     (run / "events.jsonl").write_text('{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
     client = TestClient(make_app(tmp_path))
 
-    response = client.post("/api/runs/demo/control",
-                           json={"type": "set_strategy", "data": {"strategy": {"developer": "agentless"}}})
-    assert response.status_code == 400
-    body = response.text
+    # Through `POST /commands` (SRV1-07): the refusal is a REJECTED record, and its message is what
+    # the operator reads.
+    response = post_command(client, "set_strategy", {"strategy": {"developer": "agentless"}},
+                            "switch-unknown")
+    assert response.status_code == 200, response.text
+    record = command_terminal(client, response.json())
+    assert record["status"] == "rejected" and record.get("event_seq") is None, record
+    body = record["error"]["message"]
     assert "strategy.developer" in body
     for name in developer_switch_names():
         assert name in body, name

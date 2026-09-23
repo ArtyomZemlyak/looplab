@@ -234,12 +234,12 @@ def build_router(srv) -> APIRouter:
     # reverted: it is the correct end state but breaks the contract this route exists to preserve
     # (the suite's own call sites, counted below, append here unfenced), so it needs a deprecation
     # window with a warning header and a migration note — not a silent 409.
-    # OPEN[legacy-control-route-is-not-retired] the route still exists and the suite still speaks
-    # it unfenced, which is the reason a silent 409 is not the fix. It ANNOUNCES its deprecation
-    # (the headers below, and `deprecated=True` in OpenAPI), COUNTS its callers
-    # (`legacy_control_callers`) and SAYS each new (type, User-Agent) pair once at WARNING, so the
-    # port to `/commands` is schedulable and its progress readable on a real deployment; what is
-    # open is doing it and deleting the route.
+    # OPEN[legacy-control-route-is-not-retired] the route still exists; the suite now speaks it only
+    # through its OWN instruments (every intent-coverage site moved to `/commands`, below), which
+    # die with it. It ANNOUNCES its deprecation (the headers below, and `deprecated=True` in
+    # OpenAPI), COUNTS its callers (`legacy_control_callers`) and SAYS each new (type, User-Agent)
+    # pair once at WARNING, so its retirement is schedulable and readable on a real deployment;
+    # what is open is the removal date and deleting the route.
     # proof:`present:async def control(@looplab/serve/routers/control.py`
     #
     # WHAT BLOCKS IT, re-measured 2026-09-23 (review 2026-09-22, SRV1-07 found two of the four
@@ -278,17 +278,17 @@ def build_router(srv) -> APIRouter:
     # every agent that is not the suite's own client — OBSERVABLE since 2026-09-23 (the WARNING
     # line names every new pair a deployment sees) but UNMEASURED: no deployment's log has been read.
     # Counted 2026-09-23 with `git grep -c -E 'runs/[^" ]*/control' -- 'tests/*.py'` (the same
-    # count read 64 lines in 11 files at review 2026-09-22): 49 lines in 8 files, and no
-    # first-party client. The ten security tests that used this route as their sample mutation
-    # (Origin, Host, owner token, review capability, the lock-path refusal) moved to `/commands`
-    # FIRST and were re-verified there by mutation, so no guard's proof dies with the route. Of the
-    # 49, 22 are this route's OWN instruments, which die with it rather than migrate:
-    # test_legacy_control_deprecation, test_control_reads_the_log_once, the command-only refusals
-    # in test_collaboration and test_concept_tag_command, test_server's tail-CAS/validation test
-    # and its incomplete-finalize refusal (9), and test_run_command_service's nine sites asserting
-    # that this route honours the command service's normalization and guards. The other 27 are
-    # intent coverage to port and RE-VERIFY under `/commands`: test_fork_from_seq 17, test_server 8,
-    # test_strategist_developer_switch 2.
+    # count read 64 lines in 11 files at review 2026-09-22 and 49 in 8 that morning): 22 lines in
+    # 6 files, and no first-party client — every one of them this route's OWN instrument, which dies
+    # with it rather than migrates: test_legacy_control_deprecation, test_control_reads_the_log_once,
+    # the command-only refusals in test_collaboration and test_concept_tag_command, test_server's
+    # tail-CAS/validation test and its incomplete-finalize refusal (9), and test_run_command_service's
+    # nine sites asserting that this route honours the command service's normalization and guards.
+    # Nothing that proves a guard or an intent dies with the route: the ten security tests that
+    # used it as their sample mutation (Origin, Host, owner token, review capability, the lock-path
+    # refusal) moved to `/commands` first, and the 27 intent-coverage sites followed
+    # (test_fork_from_seq 17, test_server 8, test_strategist_developer_switch 2), each re-verified
+    # there by mutating the check it covers.
     # DEPRECATED in OpenAPI too — no behaviour change (review 2026-09-22, SRV2-09): the compat
     # route both first-party clients left for `POST .../commands`; nothing in ui/src, the TUI or
     # the CLI calls it. The flag joins the `Deprecation`/`Link` headers below; retiring the route

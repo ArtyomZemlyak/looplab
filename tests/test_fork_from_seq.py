@@ -26,6 +26,7 @@ from looplab.events.replay import fold  # noqa: E402
 from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
 from looplab.search.policy import GreedyTree  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
+from tests.factories import command_terminal, post_command  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -81,6 +82,33 @@ def _fork_payload(node_id: int, generation: int, observed_seq: int, idea: dict) 
     }
 
 
+def _command(client, body: dict, *, key: str) -> dict:
+    """Submit one intent through `POST /commands` — the durable path the browser takes — and return
+    its SETTLED record (review 2026-09-22, SRV1-07: these sites used to speak the legacy `/control`
+    route, whose coverage would have died with it).
+
+    Settled, not merely accepted: an `inject_node`/`budget_extend` intent is appended by the command
+    worker, so an assertion on the log right after the POST would race it. These runs are built by
+    the Engine directly and carry no `task.snapshot.json`, so the driver each command asks for cannot
+    start — the record settles `failed: spawn_failed` AFTER its intent is durable (`event_seq`), and
+    `_resume` below is the driver that serves it, exactly as it was for the legacy route. A refusal
+    is a REJECTED record carrying the coded error, never an HTTP status.
+    """
+    response = post_command(client, body["type"], body.get("data") or {}, key=key)
+    assert response.status_code == 200, response.text
+    return command_terminal(client, response.json())
+
+
+def _admitted(record: dict) -> None:
+    assert record.get("event_seq") is not None, record
+
+
+def _refused(record: dict, code: str) -> dict:
+    assert record["status"] == "rejected" and record.get("event_seq") is None, record
+    assert record["error"]["code"] == code, record["error"]
+    return record["error"]
+
+
 def _snapshot_before_the_tail(client, rd: Path):
     """Read a node from a HISTORICAL snapshot that is genuinely behind the live tail."""
     events = client.get("/api/runs/demo/log").json()
@@ -105,10 +133,9 @@ def test_fork_from_a_historical_seq_lands_with_its_lineage(tmp_path):
     edited = _fork_idea(seen["idea"],
                         rationale="operator: the parent's step is too coarse, halve it",
                         params={**(seen["idea"].get("params") or {}), "x": 0.125})
-    client.post("/api/runs/demo/control", json={"type": "budget_extend", "data": {"add_nodes": 1}})
-    posted = client.post("/api/runs/demo/control",
-                         json=_fork_payload(source_id, seen["attempt"], view_seq, edited))
-    assert posted.status_code == 200, posted.text
+    _admitted(_command(client, {"type": "budget_extend", "data": {"add_nodes": 1}}, key="budget"))
+    _admitted(_command(client, _fork_payload(source_id, seen["attempt"], view_seq, edited),
+                       key="fork"))
 
     # The durable request already carries the receipt, and its two derived fields are the SERVER's.
     queued = fold(EventStore(rd / "events.jsonl").read_all()).inject_requests[-1]
@@ -157,11 +184,11 @@ def test_fork_against_a_stale_snapshot_is_refused_not_applied_to_the_live_tail(t
     assert fold(EventStore(rd / "events.jsonl").read_all()).nodes[source_id].attempt == 1
 
     before = len(fold(EventStore(rd / "events.jsonl").read_all()).inject_requests)
-    refused = client.post("/api/runs/demo/control", json=_fork_payload(
+    refused = _refused(_command(client, _fork_payload(
         source_id, stale_generation, view_seq,
-        _fork_idea(seen["idea"], rationale="branch from what I was looking at")))
-    assert refused.status_code == 409
-    assert f"stale parent #{source_id}" in refused.text
+        _fork_idea(seen["idea"], rationale="branch from what I was looking at")), key="stale"),
+        "command_target_not_found")
+    assert f"stale parent #{source_id}" in refused["message"]
     # Nothing was folded against the live tail behind the operator's back.
     assert len(fold(EventStore(rd / "events.jsonl").read_all()).inject_requests) == before
     # ...and the engine builds no node for a request that was never queued.
@@ -182,35 +209,31 @@ def test_fork_receipt_must_name_a_parent_and_a_seq_the_run_reached(tmp_path):
     # does not have.
     body = _fork_payload(source_id, 0, 1, idea)
     body["data"]["forked_from"]["node_id"] = other_id
-    mismatch = client.post("/api/runs/demo/control", json=body)
-    assert mismatch.status_code == 400
-    assert "fork_parent_mismatch" in mismatch.text
+    _refused(_command(client, body, key="mismatch"), "fork_parent_mismatch")
 
     # A vantage point the run has never reached is not a vantage point.
-    future = client.post("/api/runs/demo/control",
-                         json=_fork_payload(source_id, 0, 10_000_000, idea))
-    assert future.status_code == 400
-    assert "fork_observed_seq_out_of_range" in future.text
+    _refused(_command(client, _fork_payload(source_id, 0, 10_000_000, idea), key="future"),
+             "fork_observed_seq_out_of_range")
 
     # The two derived fields are the server's answer, never the client's claim.
     for forged in ("changed_fields", "base_idea_digest"):
         body = _fork_payload(source_id, 0, 1, idea)
         body["data"]["forked_from"][forged] = [] if forged == "changed_fields" else "idea:v1:x"
-        response = client.post("/api/runs/demo/control", json=body)
-        assert response.status_code == 400
-        assert "fork_receipt_forged" in response.text
+        _refused(_command(client, body, key=f"forged-{forged}"), "fork_receipt_forged")
 
     # An unknown field is refused rather than written straight through into the durable event.
     body = _fork_payload(source_id, 0, 1, idea)
     body["data"]["forked_from"]["note"] = "hello"
-    assert client.post("/api/runs/demo/control", json=body).status_code == 400
+    unknown = _command(client, body, key="unknown-field")
+    assert unknown["status"] == "rejected" and unknown.get("event_seq") is None, unknown
 
     # A receipt missing one of its three authored fields is refused too — a partial receipt would
     # record a lineage claim nobody can check.
     body = _fork_payload(source_id, 0, 1, idea)
     body["data"]["forked_from"].pop("observed_seq")
-    incomplete = client.post("/api/runs/demo/control", json=body)
-    assert incomplete.status_code == 400 and "observed_seq" in incomplete.text
+    incomplete = _command(client, body, key="incomplete")
+    assert incomplete["status"] == "rejected", incomplete
+    assert "observed_seq" in incomplete["error"]["message"]
 
     # Nothing above was admitted.
     assert not fold(EventStore(rd / "events.jsonl").read_all()).inject_requests
@@ -276,9 +299,8 @@ def test_the_receipt_reports_an_envelope_the_client_manufactured(tmp_path):
     source_id, view_seq, seen = _snapshot_before_the_tail(client, rd)
     echoed = {k: v for k, v in seen["idea"].items() if v is not None}
     echoed["rationale"] = "echo the whole projection back"
-    posted = client.post("/api/runs/demo/control",
-                         json=_fork_payload(source_id, seen["attempt"], view_seq, echoed))
-    assert posted.status_code == 200, posted.text
+    _admitted(_command(client, _fork_payload(source_id, seen["attempt"], view_seq, echoed),
+                       key="echo"))
     receipt = fold(EventStore(rd / "events.jsonl").read_all()).inject_requests[-1]["forked_from"]
     assert "concept_mode" in receipt["changed_fields"]
 
@@ -289,24 +311,22 @@ def test_inject_without_a_fork_receipt_is_unchanged(tmp_path):
     client = TestClient(make_app(tmp_path))
     state = client.get("/api/runs/demo/state").json()["state"]
     parent_id = sorted(int(k) for k in state["nodes"])[0]
-    client.post("/api/runs/demo/control", json={"type": "budget_extend", "data": {"add_nodes": 2}})
-    posted = client.post("/api/runs/demo/control", json={
+    _admitted(_command(client, {"type": "budget_extend", "data": {"add_nodes": 2}}, key="budget"))
+    _admitted(_command(client, {
         "type": "inject_node",
         "data": {"idea": {"operator": "manual", "params": {"x": 0.5}},
                  "parent_id": parent_id, "parent_generations": {str(parent_id): 0}},
-    })
-    assert posted.status_code == 200, posted.text
+    }, key="inject-plain"))
     queued = fold(EventStore(rd / "events.jsonl").read_all()).inject_requests[-1]
     assert "forked_from" not in queued
 
     # An EXPLICIT null is absent, not a receipt with a null value: the durable row must not look
     # like a branch while carrying no lineage.
-    nulled = client.post("/api/runs/demo/control", json={
+    _admitted(_command(client, {
         "type": "inject_node",
         "data": {"idea": {"operator": "manual", "params": {"x": 0.75}}, "forked_from": None,
                  "parent_id": parent_id, "parent_generations": {str(parent_id): 0}},
-    })
-    assert nulled.status_code == 200, nulled.text
+    }, key="inject-null-receipt"))
     assert "forked_from" not in fold(
         EventStore(rd / "events.jsonl").read_all()).inject_requests[-1]
 
@@ -337,10 +357,9 @@ def test_the_receipt_separates_what_the_operator_wrote_from_what_it_left_behind(
     edited = _fork_idea(seen["idea"],
                         rationale="operator: halve the step",
                         params={**(seen["idea"].get("params") or {}), "x": 0.125})
-    client.post("/api/runs/demo/control", json={"type": "budget_extend", "data": {"add_nodes": 1}})
-    posted = client.post("/api/runs/demo/control",
-                         json=_fork_payload(source_id, seen["attempt"], view_seq, edited))
-    assert posted.status_code == 200, posted.text
+    _admitted(_command(client, {"type": "budget_extend", "data": {"add_nodes": 1}}, key="budget"))
+    _admitted(_command(client, _fork_payload(source_id, seen["attempt"], view_seq, edited),
+                       key="fork"))
     receipt = fold(EventStore(rd / "events.jsonl").read_all()).inject_requests[-1]["forked_from"]
 
     # The raw diff is UNCHANGED — it stays the authority for "these two ideas differ here", so every
@@ -355,9 +374,7 @@ def test_the_receipt_separates_what_the_operator_wrote_from_what_it_left_behind(
     for forged in ("authored_fields", "not_carried_fields"):
         body = _fork_payload(source_id, seen["attempt"], view_seq, edited)
         body["data"]["forked_from"][forged] = []
-        refused = client.post("/api/runs/demo/control", json=body)
-        assert refused.status_code == 400, refused.text
-        assert "fork_receipt_forged" in refused.text
+        _refused(_command(client, body, key=f"forged-{forged}"), "fork_receipt_forged")
 
     # The split survives to the durable node, which is what a later reader folds.
     state = _resume(rd)
@@ -379,10 +396,9 @@ def test_the_prov_export_does_not_credit_the_engine_with_an_operators_idea(tmp_p
     source_id, view_seq, seen = _snapshot_before_the_tail(client, rd)
     edited = _fork_idea(seen["idea"], rationale="operator: halve the step",
                         params={**(seen["idea"].get("params") or {}), "x": 0.125})
-    client.post("/api/runs/demo/control", json={"type": "budget_extend", "data": {"add_nodes": 1}})
-    assert client.post("/api/runs/demo/control",
-                       json=_fork_payload(source_id, seen["attempt"], view_seq, edited)
-                       ).status_code == 200
+    _admitted(_command(client, {"type": "budget_extend", "data": {"add_nodes": 1}}, key="budget"))
+    _admitted(_command(client, _fork_payload(source_id, seen["attempt"], view_seq, edited),
+                       key="fork"))
     state = _resume(rd)
     branch = next(n for n in state.nodes.values()
                   if isinstance(n.forked_from, dict) and n.forked_from["node_id"] == source_id)
