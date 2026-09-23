@@ -36,7 +36,7 @@ from looplab.core.models import (Idea, Node, RunState, card_drift_brief, card_is
 # are different budgets for different prompts and collapsing them would assert a sameness that is not
 # there.
 BOARD_SEED_CHARS_MAX = 4_000    # a single seed statement larger than this is skipped, not truncated
-BOARD_PROMPT_CARDS = 5          # whole rows either builder will show — the number the writer cap reads
+BOARD_PROMPT_CARDS = 20  # whole rows either builder shows; the writer cap READS this (5->20, see research_cadence)
 # The prompt budget the window spends on seed statements. Named for the same reason the row
 # count is: it bounds what the model SEES, and a bare literal here reads as incidental.
 BOARD_PROMPT_SEED_BUDGET_CHARS = 20_000

@@ -302,9 +302,12 @@ def test_the_receipt_names_a_call_only_where_the_proposer_is_offered_it(tmp_path
 
 # The HISTORICAL bytes, measured on the pre-change tree (origin/master 2026-09-23) over the
 # repo-shaped state above: OFF must reproduce them exactly, whatever this module does ON.
+# RE-BASELINED ONCE, for a change that is not this module's: the open-belief window
+# (`state_brief.BOARD_PROMPT_CARDS`) went 5 -> 20, so the board block of this state now shows the
+# two evaluated beliefs rows 6-7 it used to cut. The digest is untouched; only the board rows moved.
 _HISTORICAL_SHA256 = {
     "digest": "bc91a53873985196e36190cc7f4640241ffb803ce1208b1a43c02a12b919c120",
-    "brief": "fff336b22c01678e2b2cf6fe6c9f7cbc6af8b19e6b1b70b52d0eb844ea70fe94",
+    "brief": "8a3cb33f7394d896b7493d699d47f1806c4f8765f110220af762424225243a11",
 }
 
 

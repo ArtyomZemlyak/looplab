@@ -57,16 +57,56 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_BELIEF_ADMISSION,
 _LOG = logging.getLogger(__name__)
 
 
-# The open belief board is a QUEUE the search spends, not a scratchpad the research stage fills.
-# Sized to the window every prompt that reads the board can actually SHOW — `next_board_prompt_cards`
-# and `attempted_board_prompt_cards` both stop at `BOARD_PROMPT_CARDS` whole rows — because a belief
-# the model cannot see is a belief it re-proposes in new words, which is precisely how the measured
-# board reached eleven cards for five ideas. Untested beliefs leave this population as soon as they
-# get evidence, so the cap throttles the WRITER, it does not close the board.
+# THE OPERATOR SET THIS BOARD TO 20, 2026-09-17, having first said to remove the cap outright
+# ("капа не должно быть. пусть хоть 1000 хоть 100000000") and then settled it: "надо чтоб столько
+# сколько нужно карточек добавлялось. ну давай сделаем, что не более 20".
 #
-# DERIVED, not copied. This value's whole justification is the reader's row cap, and it used to be a
-# bare `5` beside a comment that quoted the other file's literal — so raising the prompt window left
-# this cap silently wrong, which is the exact drift the comment was written to prevent.
+# DERIVED FROM THE WINDOW AGAIN, and the direction of the derivation is the whole point. It read
+# `= BOARD_PROMPT_CARDS` originally, on the argument that "a belief the model cannot see is a belief
+# it re-proposes in new words" — RIGHT rule, wrong value: the window was 5, which is what made the
+# cap 5. A first cut of this change replaced the derivation with a sentinel (100_000_000) and then
+# with a bare `20`, i.e. it decoupled the two constants and left the window at 5 — so a memo could
+# register fifteen beliefs no prompt would ever show. That is the same defect the original comment
+# was written about, arriving from the other side. `agents/state_brief.py::BOARD_PROMPT_CARDS` is
+# now 20 and this reads it, so the board and what the model sees cannot come apart again.
+#
+# WHAT IT USED TO BE AND WHY 5 WAS WRONG FOR THIS BOARD. MEASURED on
+# `runs/e5small-dr-unified-v13`, seven memos:
+#     proposed 24   admitted 10   CAPPED 12   restated 3
+# Half of everything the run proposed was refused for board space while only three were genuine
+# restatements — so the re-proposal the cap existed to prevent was being caught by the DUPLICATE
+# rules (`restated`/`repeated`), which are separate from it and still apply. Memo 7 landed nothing.
+# On `runs/e5small-dr-unified-v12` the same bound refused 394 of 413 proposals.
+#
+# AND IT COST THE HIERARCHY. Every memo fills `question_parents` aligned with `open_questions`;
+# memo 2's THIRD question carried a real parent already on that board and was CAPPED, while its
+# first — top-level, parent "" — was admitted. Admission is by ARRIVAL ORDER inside a memo, so the
+# cap kept opening fresh top-level rows and refused the one entry that would have nested the tree.
+# Re-derived over every run on this box: 0 of 264 registered questions carry a `parent_belief_id`,
+# so corpus-wide the question tree has never once existed.
+#
+# REPLAYED AT 20 over v13's memo sizes (5, 3, 6, 2, 3, 3, 2 = 24 questions): 20 admitted against 10,
+# the first FIVE memos land whole, and the bound bites once, at the end.
+#
+# WHY A REAL BOUND AND NOT UNBOUNDED. A sentinel is a bound abandoned rather than chosen, and it is
+# also a LANDMINE: three test files size a board as `range(DEEP_RESEARCH_OPEN_BELIEF_CAP)`, which was
+# honest at 5 and, at 100_000_000, allocated a hundred million Cards — measured twice before it was
+# caught, 224 GB and 256 GB of RSS on a box with 724 GB free.
+# `test_the_cap_stays_small_enough_to_size_a_board_by` guards that.
+#
+# THE TRADE, STATED HONESTLY BECAUSE IT IS REAL: 20 whole rows cost 5,780 chars at the corpus median
+# and 17,260 all-max, against the window's 20k budget — so nothing is truncated and nothing is
+# skipped for space in the ordinary case. What is NOT claimed is that proposals get better; see
+# the measurement below on why that is unmeasurable with what exists.
+#
+# THE WINDOW'S SIDE, MEASURED before raising it, because the obvious objection is prompt size and
+# the obvious fix (a compact, truncated row) is worse. Over the 498 seed statements in `runs/`:
+# median 289 chars, p90 539, max 863 — the row COUNT was the binding constraint and the character
+# budget was never scarce (5 rows spent 7% of it). A row truncated to 200 chars would have cut 79%
+# of the corpus's statements and broken `state_brief.py`'s rule that a seed too long is SKIPPED,
+# never truncated. Proposal QUALITY is not claimed: a proposal the model did not make is never run,
+# so it is `judgebench`'s permanently-unlabelled class (docs/BACKLOG.md §0.19); measuring it needs
+# the research-lifecycle benchmark docs/52 lists as `no-research-lifecycle-benchmark-number`.
 DEEP_RESEARCH_OPEN_BELIEF_CAP = BOARD_PROMPT_CARDS
 
 
@@ -1462,7 +1502,18 @@ class ResearchCadenceMixin:
         except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
             board_read = False
             open_statements = unanswered = []
-        verdict = classify_research_beliefs(open_statements, directions, counted=unanswered)
+        # THE CAP IS READ HERE, AT CALL TIME, and that is not a style choice. Both public entry
+        # points bind it as a DEF-TIME default (`cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP`), which
+        # is right for them — a caller passing no cap wants the shipped one — but it means the
+        # module global is resolved once, at import, so nothing can drive this live caller at a
+        # bound a test can afford. A 2026-09-04 cut set the shipped value to a 100_000_000 sentinel
+        # and `tests/test_direction_board_cap.py`, which sizes its board as
+        # `range(DEEP_RESEARCH_OPEN_BELIEF_CAP)`, built a hundred million Cards (224 GB RSS) before
+        # it was killed. Passing the global explicitly makes `rc.DEEP_RESEARCH_OPEN_BELIEF_CAP` a
+        # patch seam exactly like `rc.fold` beside it, which that file already monkeypatches.
+        verdict = classify_research_beliefs(open_statements, directions,
+                                            cap=DEEP_RESEARCH_OPEN_BELIEF_CAP,
+                                            counted=unanswered)
         self._record_belief_admission(verdict, len(directions), board_read)
         if verdict.dropped:
             # Not silent: the operator reading the log sees a memo whose directions did not all

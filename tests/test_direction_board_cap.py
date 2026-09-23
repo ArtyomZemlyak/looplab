@@ -6,7 +6,7 @@ seqs 35-39. Memos 2, 3 and 4 produced concrete directions (a `dcl_threshold ∈ 
 sweep among them, visible in their own `hint` rows) and contributed ZERO to the board. The run paid
 for three think-hard reviews and could not act on any of them.
 
-THE MECHANISM, and my own change made it permanent. `DEEP_RESEARCH_OPEN_BELIEF_CAP` is 5 and
+THE MECHANISM, and my own change made it permanent. The cap was 5 then and
 `_admissible_beliefs` counts `open_research_beliefs()` — open cards carrying no EVIDENCE. A
 direction never carries any: since the `parent_card_id` edge shipped, the experiments answering a
 direction are CHILD cards with evidence of their own, so the direction stays evidence-free for the
@@ -25,6 +25,14 @@ from looplab.engine.research_cadence import (classify_research_beliefs,
                                              admit_research_beliefs, is_pure_belief)
 from looplab.engine import research_cadence as rc
 from looplab.core.models import Card, CardSelectionProvenance, RunState
+
+
+# THE SHIPPED CAP IS WHAT SIZES THESE BOARDS, and it may only stay that way while it is a number
+# a test can allocate. It was 5 when this file was written; a 2026-09-04 change set it to the
+# sentinel 100_000_000 and the first test below then built a hundred million Cards — 224 GB RSS,
+# 95 minutes, killed rather than finished. The operator settled it at 20 on 2026-09-17, and
+# `test_the_cap_stays_small_enough_to_size_a_board_by` at the bottom is what keeps that safe:
+# re-bound the board to a sentinel and this file goes red instead of eating the box.
 
 
 def _direction(cid: str, statement: str, **kw) -> Card:
@@ -149,7 +157,7 @@ def test_the_room_a_taken_up_question_frees_goes_to_a_NEW_question():
     register nothing from any of them, because five childless beliefs met a cap of five."""
     full = [f"question {i}" for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
     assert admit_research_beliefs(full, ["a genuinely new question"], counted=full) == [], (
-        "five UNANSWERED questions still fill the board")
+        "a full board of UNANSWERED questions still fills it")
     assert admit_research_beliefs(full, ["a genuinely new question"], counted=[]) == [
         "a genuinely new question"], "…and questions somebody is working on free their room"
 
@@ -351,3 +359,17 @@ def test_the_merge_cadence_consolidates_exactly_the_per_card_view(monkeypatch):
     rc.ResearchCadenceMixin._maybe_merge_hypotheses(engine, st)
     assert seen == [["Raise the LR", "raise   the lr", "add dropout", "use label smoothing"]]
     assert engine._last_hyp_merge_n == 4
+
+
+def test_the_cap_stays_small_enough_to_size_a_board_by():
+    """Every board above is `range(DEEP_RESEARCH_OPEN_BELIEF_CAP)`, so the cap is an ALLOCATION here.
+
+    That is only safe while the cap is a chosen bound rather than a sentinel meaning "unbounded".
+    It is the guard for a measured accident: on 2026-09-04 the cap was set to 100_000_000 and this
+    file built a hundred million Cards — 224 GB RSS after 95 minutes, and a second run of a sibling
+    file reached 256 GB before either was killed. A future contributor who re-bounds the board that
+    way gets a red test naming the number instead of discovering it on a loaded box.
+    """
+    assert 1 <= DEEP_RESEARCH_OPEN_BELIEF_CAP <= 1_000, (
+        f"the cap is {DEEP_RESEARCH_OPEN_BELIEF_CAP}; this file ALLOCATES that many Cards. If the "
+        "board is meant to be effectively unbounded, these tests must inject their own cap instead")

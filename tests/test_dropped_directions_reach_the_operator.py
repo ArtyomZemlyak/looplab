@@ -405,3 +405,14 @@ def test_an_unusable_LEVEL_degrades_and_says_so_rather_than_killing_the_CLI():
     assert "LOOPLAB_LOG_LEVEL" in out and "not a logging level" in out, out
     assert "a real degradation" in out, "the degradation dropped the records it fell back to keeping"
     assert "routine chatter" not in out
+
+
+def test_the_cap_stays_small_enough_to_size_a_board_by():
+    """The twin of `tests/test_direction_board_cap.py`'s guard, for the same measured accident.
+
+    Every board here is `range(DEEP_RESEARCH_OPEN_BELIEF_CAP)`, so the cap is an ALLOCATION. At the
+    sentinel 100_000_000 this file reached 256 GB RSS before it was killed.
+    """
+    assert 1 <= DEEP_RESEARCH_OPEN_BELIEF_CAP <= 1_000, (
+        f"the cap is {DEEP_RESEARCH_OPEN_BELIEF_CAP}; this file ALLOCATES that many Cards. If the "
+        "board is meant to be effectively unbounded, these tests must inject their own cap instead")

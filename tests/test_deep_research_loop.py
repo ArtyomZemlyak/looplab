@@ -896,7 +896,10 @@ def test_the_memo_prompt_promises_only_what_the_append_site_enforces():
     assert "past its cap" in brief
     # Driven, not read: both promises hold at the append site.
     assert admit_research_beliefs(["an open belief"], ["an open belief"]) == []
-    assert admit_research_beliefs([f"b{i}" for i in range(5)], ["genuinely new"]) == []
+    # `cap=5` NAMED, because the brief promises the RULE and the shipped default no longer binds
+    # (the operator removed the cap on 2026-09-04). What the prompt says must be true of a board
+    # that HAS a cap; whether this deployment sets one is a product decision, not this test's.
+    assert admit_research_beliefs([f"b{i}" for i in range(5)], ["genuinely new"], cap=5) == []
     # And the thing it does NOT promise: nothing retires a belief for the memo.
     assert "retiring a belief is the operator's call" in brief
 
@@ -907,19 +910,36 @@ def test_admit_research_beliefs_truth_table():
     from looplab.engine.research_cadence import (DEEP_RESEARCH_OPEN_BELIEF_CAP,
                                                  admit_research_beliefs)
 
-    assert DEEP_RESEARCH_OPEN_BELIEF_CAP == 5
+    # THE TABLE NAMES ITS OWN CAP, and this line used to assert the shipped one WAS 5. The
+    # operator raised it (5 -> 20, settled 2026-09-17), so pinning the value here made a PRODUCT
+    # decision cost a truth-table edit. The rule below is a property of `cap=N`; which N a
+    # deployment chooses is not, and what is pinned instead is the relation that was wrong — a cap
+    # derived from the five-row prompt window.
+    assert DEEP_RESEARCH_OPEN_BELIEF_CAP > 5, (
+        "the rows below name their own cap; what must hold is that the shipped one is not the "
+        "prompt window")
     # empty board: the memo's historical five all land, in order
-    assert admit_research_beliefs([], ["a", "b", "c", "d", "e"]) == ["a", "b", "c", "d", "e"]
+    assert admit_research_beliefs([], ["a", "b", "c", "d", "e"], cap=5) == ["a", "b", "c", "d", "e"]
     # a sixth does not, and the drop is a TRUNCATION at the cap, not a filter that reorders
-    assert admit_research_beliefs([], ["a", "b", "c", "d", "e", "f"]) == ["a", "b", "c", "d", "e"]
+    assert admit_research_beliefs([], ["a", "b", "c", "d", "e", "f"], cap=5) == [
+        "a", "b", "c", "d", "e"]
     # case and whitespace are not semantics
-    assert admit_research_beliefs(["Raise The LR"], ["  raise the   lr  "]) == []
+    assert admit_research_beliefs(["Raise The LR"], ["  raise the   lr  "], cap=5) == []
     # the memo's own repeats collapse against each other, so re-running one memo is idempotent
-    assert admit_research_beliefs([], ["x", "X", " x "]) == ["x"]
+    assert admit_research_beliefs([], ["x", "X", " x "], cap=5) == ["x"]
     # blank/None directions are not beliefs and do not spend room
-    assert admit_research_beliefs(["p", "q", "r", "s"], ["", None, "  ", "new"]) == ["new"]
+    assert admit_research_beliefs(["p", "q", "r", "s"], ["", None, "  ", "new"], cap=5) == ["new"]
     # a full board admits nothing at all
-    assert admit_research_beliefs(["p", "q", "r", "s", "t"], ["new"]) == []
+    assert admit_research_beliefs(["p", "q", "r", "s", "t"], ["new"], cap=5) == []
+    # AND AT THE SHIPPED CAP the same two rows go the other way, which is the operator's decision
+    # driven rather than described: a sixth direction is no longer truncated, and five open
+    # questions no longer fill the board.
+    assert admit_research_beliefs([], ["a", "b", "c", "d", "e", "f"]) == [
+        "a", "b", "c", "d", "e", "f"]
+    assert admit_research_beliefs(["p", "q", "r", "s", "t"], ["new"]) == ["new"]
+    # …and it still BINDS, one question past it. Driven, so "20" is never typed here.
+    full = [f"open {i}" for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
+    assert admit_research_beliefs(full, ["one too many"]) == []
 
 
 def test_the_exact_key_does_not_catch_the_live_rewordings_and_the_cap_does():
@@ -934,16 +954,24 @@ def test_the_exact_key_does_not_catch_the_live_rewordings_and_the_cap_does():
     assert len(keys) == len(_LIVE_REWORDINGS)          # four distinct keys: the guard cannot see it
     board: list[str] = []
     for reworded in _LIVE_REWORDINGS:                  # the live run's four memos, ONE idea between them
-        board.extend(admit_research_beliefs(board, [reworded]))
+        board.extend(admit_research_beliefs(board, [reworded], cap=5))
     assert len(board) == 4                             # four rows for one idea — the guard is blind
-    # What stops it is the cap, and it stops it whatever the fifth wording is.
-    assert admit_research_beliefs(board, ["a fifth wording of the same baseline idea"]) == [
+    # What stops it is the cap, and it stops it whatever the fifth wording is — AT A BOARD THAT HAS
+    # ONE. Named here for the reason the truth table above names it: the shipped default no longer
+    # binds, and the docstring's last clause ("what actually holds the board is the cap") is now a
+    # statement about a bounded board rather than about this deployment.
+    assert admit_research_beliefs(board, ["a fifth wording of the same baseline idea"], cap=5) == [
         "a fifth wording of the same baseline idea"]
     board.append("a fifth wording of the same baseline idea")
-    assert admit_research_beliefs(board, ["a sixth wording", "and a seventh"]) == []
+    assert admit_research_beliefs(board, ["a sixth wording", "and a seventh"], cap=5) == []
+    # THE OTHER HALF OF THE OPERATOR'S TRADE, driven: at the shipped cap those two land, and the
+    # only thing still refusing a re-wording is the duplicate rule — which is exactly what the
+    # cap's own comment says, and exactly the residue it accepts.
+    assert admit_research_beliefs(board, ["a sixth wording", "and a seventh"]) == [
+        "a sixth wording", "and a seventh"]
 
 
-def test_four_memos_of_rewordings_no_longer_fill_the_board():
+def test_four_memos_of_rewordings_are_bounded_by_the_CAP_and_not_by_five():
     """End to end through the durable writer: four memos, five directions each, against a live board.
 
     The shape of `runs/rubertlite-dr-unified-v6` — including the memo that re-words the question
@@ -951,6 +979,7 @@ def test_four_memos_of_rewordings_no_longer_fill_the_board():
     ends with a card per distinct wording; the operator's complaint was eleven cards for five ideas."""
     from looplab.core.models import ResearchMemo
     from looplab.engine.orchestrator import Engine
+    from looplab.engine.research_cadence import DEEP_RESEARCH_OPEN_BELIEF_CAP
     from looplab.events.eventstore import Event
     from looplab.events.replay import fold
 
@@ -987,7 +1016,12 @@ def test_four_memos_of_rewordings_no_longer_fill_the_board():
     board = fold(store.read_all())
     beliefs = [card for card in board.open_research_beliefs()
                if card.selection_provenance.action_source == "none"]
-    assert len(beliefs) <= 5
+    # BOUNDED BY THE CAP, NOT BY FIVE. This asserted `<= 5` while the cap was the prompt window;
+    # four memos of five directions is 20 distinct statements, and at the shipped cap they land
+    # (19 open here — the twentieth is the `running` question, filtered out above by its own
+    # action_source). That is the point of the raise: a memo is no longer halved for space.
+    assert 5 < len(beliefs) <= DEEP_RESEARCH_OPEN_BELIEF_CAP, (
+        "the board is bounded by the cap and the old five-row bound no longer holds it")
     # the question with a node in flight keeps its own card and gains no twin
     running_cards = [c for c in board.research_cards() if c.seed_statement == running]
     assert len(running_cards) == 1 and running_cards[0].evidence == [0]

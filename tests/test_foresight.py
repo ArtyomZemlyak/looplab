@@ -364,11 +364,14 @@ def test_board_prompt_preserves_and_binds_full_four_thousand_character_seed():
 
 
 def test_board_prompt_window_rotates_without_new_nodes():
-    st = _state_with_open_hyps([f"belief-{index}" for index in range(7)])
+    # Sized off the window rather than a literal: the window went 5 -> 20 and a board of 7 then
+    # fit whole, so nothing rotated and the `== 5` below measured the old constant, not the rule.
+    from looplab.agents.state_brief import BOARD_PROMPT_CARDS
+    st = _state_with_open_hyps([f"belief-{index}" for index in range(BOARD_PROMPT_CARDS + 2)])
     first = next_board_prompt_cards(st, attempt=0)
     second = next_board_prompt_cards(st, attempt=1)
     third = next_board_prompt_cards(st, attempt=2)
-    assert len(first) == len(second) == 5
+    assert len(first) == len(second) == BOARD_PROMPT_CARDS
     assert first[0].id != second[0].id
     assert {card.id for card in first + second + third} == set(st.cards)
 
