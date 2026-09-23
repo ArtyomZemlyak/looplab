@@ -4,13 +4,15 @@
 // every settled turn re-ran, rebuilding its Markdown's inline pass and element tree, once per token
 // of someone else's reply.
 //
-// This is the first Assistant test that MOUNTS the bar with its effects running (the `_mount.js`
-// harness is static-render only, on purpose): a real `createRoot` under jsdom restores a saved
-// session through the same `assistant_get` a reload performs, opens the side view, sends a message
-// through the composer, and then streams a reply chunk by chunk through a real SSE body. Renders are
-// COUNTED, not inferred: React's DevTools hook is installed before `react-dom` loads (it is the
-// surface the React DevTools Profiler itself reads) and each commit's fiber tree is walked for
-// `Turn` fibers that did work. What is asserted is the property, stated as a number:
+// This is the first Assistant test that MOUNTS the bar with its effects running (the harness it
+// was built on is now `_mount.js::mountLive`, hoisted from here — review 2026-09-22, UI-05; the
+// static `mountHarness` still runs no effects, on purpose): a real `createRoot` under jsdom
+// restores a saved session through the same `assistant_get` a reload performs, opens the side
+// view, sends a message through the composer, and then streams a reply chunk by chunk through a
+// real SSE body. Renders are COUNTED, not inferred: React's DevTools hook is installed before
+// `react-dom` loads (it is the surface the React DevTools Profiler itself reads) and each commit's
+// fiber tree is walked for `Turn` fibers that did work. What is asserted is the property, stated
+// as a number:
 //
 //   one chunk re-renders exactly one Turn — the streaming one — however long the transcript is.
 //
@@ -20,14 +22,17 @@ import assert from 'node:assert/strict'
 
 import React from 'react'
 
-import { mountHarness } from './_mount.js'
+import {
+  click, fetchStub, holdFrames, jsonResponse, mountLive, settle, sseStream, tick, unanswered, until,
+} from './_mount.js'
 
 // ── the render counter ──────────────────────────────────────────────────────────────────────────
-// Installed BEFORE `react-dom` is first evaluated (it is imported dynamically below): the renderer
-// looks for the hook once, at module load. The walk is the one React DevTools performs: descend only
-// where this commit replaced a fiber's children (a bailed-out subtree keeps the previous commit's
-// child pointer and did no work), count a mount, and otherwise count a fiber only when React's
-// `PerformedWork` flag says its render function actually ran — a `React.memo` bailout does not set it.
+// Installed BEFORE `react-dom` is first evaluated (`_mount.js::mountLive` imports it lazily): the
+// renderer looks for the hook once, at module load. The walk is the one React DevTools performs:
+// descend only where this commit replaced a fiber's children (a bailed-out subtree keeps the
+// previous commit's child pointer and did no work), count a mount, and otherwise count a fiber only
+// when React's `PerformedWork` flag says its render function actually ran — a `React.memo` bailout
+// does not set it.
 const PERFORMED_WORK = 0b1
 const commitListeners = new Set()
 globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
@@ -97,88 +102,39 @@ function settledTranscript(exchanges) {
   return messages
 }
 
-const json = (body, status = 200) => new Response(JSON.stringify(body), {
-  status, headers: { 'content-type': 'application/json' },
-})
-// A request the drive deliberately leaves unanswered (the permission and progress fallback polls):
-// it settles only when its own signal aborts, so it can never publish a state change mid-count.
-const unanswered = init => new Promise((_resolve, reject) => {
-  init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
-})
-
-function sseStream() {
-  const encoder = new TextEncoder()
-  let controller
-  const body = new ReadableStream({ start(c) { controller = c } })
-  return {
-    body,
-    send: (event, data) => controller.enqueue(
-      encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)),
-    close: () => controller.close(),
-  }
-}
-
+// The drive's server, on the shared path-keyed stub (`_mount.js::fetchStub`): the saved chat is
+// read back, the permission and progress fallback polls are left unanswered (they settle only when
+// their own signal aborts, so they can never publish a state change mid-count), every turn opens a
+// live SSE body the test writes chunk by chunk, and a revert is held until the test releases it.
 function server({ transcript, meta = META }) {
-  const calls = []
   const streams = []
   const revert = { pending: [] }
-  const fetch = async (input, init = {}) => {
-    const url = new URL(typeof input === 'string' ? input : input.url, 'http://localhost/')
-    const method = String(init.method || 'GET').toUpperCase()
-    calls.push({ method, path: url.pathname, body: init.body ?? null })
-    const path = url.pathname
-    if (method === 'GET' && path === '/api/assistant/commands') return json({ commands: [] })
-    if (method === 'GET' && path === '/api/assistant/sessions') return json({ sessions: [meta] })
-    if (method === 'GET' && path === `/api/assistant/sessions/${SID}`) {
-      return json({ messages: transcript, meta })
-    }
-    if (method === 'GET' && path === '/api/assistant/watches') return json({ watches: [] })
-    if (method === 'GET' && path === '/api/runs') {
-      return json([{ run_id: 'r0', phase: 'running', engine_running: true, best_metric: 0.5 }])
-    }
-    if (method === 'GET' && (path === '/api/assistant/permissions'
-        || path === '/api/assistant/progress')) return unanswered(init)
-    if (method === 'POST' && path === `/api/assistant/sessions/${SID}/message_stream`) {
+  const fetch = fetchStub({
+    'GET /api/assistant/commands': { commands: [] },
+    'GET /api/assistant/sessions': { sessions: [meta] },
+    [`GET /api/assistant/sessions/${SID}`]: { messages: transcript, meta },
+    'GET /api/assistant/watches': { watches: [] },
+    'GET /api/runs': [{ run_id: 'r0', phase: 'running', engine_running: true, best_metric: 0.5 }],
+    'GET /api/assistant/permissions': ({ init }) => unanswered(init),
+    'GET /api/assistant/progress': ({ init }) => unanswered(init),
+    [`POST /api/assistant/sessions/${SID}/message_stream`]: () => {
       const stream = sseStream()
       streams.push(stream)
-      return new Response(stream.body,
-        { status: 200, headers: { 'content-type': 'text/event-stream' } })
-    }
-    if (method === 'POST' && path === '/api/assistant/revert') {
-      return new Promise(resolve => revert.pending.push(() => resolve(json({ ok: true }))))
-    }
-    return json({ error: 'unstubbed route' }, 404)
-  }
-  return { fetch, calls, streams, revert }
+      return stream.response()
+    },
+    'POST /api/assistant/revert': () => new Promise(resolve => revert.pending.push(
+      () => resolve(jsonResponse({ ok: true })))),
+  })
+  return { fetch, calls: fetch.calls, streams, revert }
 }
 
-const tick = () => new Promise(resolve => setTimeout(resolve, 0))
-async function settle(rounds = 3) {
-  for (let round = 0; round < rounds; round += 1) {
-    await React.act(async () => { await tick(); await tick() })
-  }
-}
-async function until(predicate, what) {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (predicate()) return
-    await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 5)) })
-  }
-  assert.fail(`timed out waiting for ${what}`)
-}
-
+// The live harness (`_mount.js::mountLive`) imports `react-dom/client` itself, lazily — after the
+// DevTools hook above is in place, which is what the render counter needs.
 let harness
 let AssistantBar
-let createRoot
 
 test.before(async () => {
-  harness = await mountHarness({ routes: {} })
-  const dom = globalThis.__looplabMountDom
-  for (const key of ['Element', 'HTMLTextAreaElement', 'HTMLInputElement', 'MouseEvent',
-    'KeyboardEvent', 'getComputedStyle', 'DocumentFragment']) {
-    globalThis[key] = dom.window[key]
-  }
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true
-  ;({ createRoot } = await import('react-dom/client'))
+  harness = await mountLive()
   ;({ default: AssistantBar } = await harness.load('/src/AssistantBar.jsx'))
 })
 
@@ -192,13 +148,8 @@ async function mountRestoredChat({ transcript, meta }) {
   localStorage.clear()
   sessionStorage.clear()
   localStorage.setItem('ll.asstSid', SID)
-  const container = document.createElement('div')
-  document.body.appendChild(container)
-  const root = createRoot(container)
-  const render = props => React.act(async () => {
-    root.render(React.createElement(AssistantBar, { runId: null, ...props }))
-  })
-  await render({})
+  const mounted = await harness.mount(AssistantBar, { runId: null })
+  const { container } = mounted
   await until(() => backend.calls.some(call => call.path === `/api/assistant/sessions/${SID}`),
     'the saved chat to be read back')
   await settle()
@@ -214,39 +165,9 @@ async function mountRestoredChat({ transcript, meta }) {
     backend, container, turns,
     // The SAME root re-rendered with new props — an update, never a remount, so React compares
     // this render's hooks with the previous one's.
-    rerender: props => render(props),
-    unmount: async () => {
-      await settle()
-      await React.act(async () => { root.unmount() })
-      container.remove()
-    },
+    rerender: props => mounted.rerender({ runId: null, ...props }),
+    unmount: () => mounted.unmount(),
   }
-}
-
-// Animation frames the drive runs BY HAND. `_mount.js` turns a frame into a zero-delay timer, which
-// runs whenever the event loop gets there; held, a frame a commit scheduled runs exactly when the
-// test says — after the DOM it was scheduled against has changed under it, which is the case a
-// frame must survive. `cancelAnimationFrame` drops a held frame the way the browser's would.
-function holdFrames() {
-  const held = new Map()
-  let lastId = 0
-  const previous = [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame]
-  globalThis.requestAnimationFrame = callback => {
-    lastId += 1
-    held.set(lastId, callback)
-    return lastId
-  }
-  globalThis.cancelAnimationFrame = id => { held.delete(id) }
-  return {
-    take() { const frames = [...held.values()]; held.clear(); return frames },
-    release() { [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame] = previous },
-  }
-}
-
-const click = async (element, init = {}) => {
-  const event = new window.MouseEvent('click', { bubbles: true, cancelable: true, ...init })
-  await React.act(async () => { element.dispatchEvent(event) })
-  return event
 }
 
 async function sendFromComposer(container, text) {
