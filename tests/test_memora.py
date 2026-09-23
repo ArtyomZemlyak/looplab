@@ -1,5 +1,5 @@
 """Memora harmonic memory (idea import): abstraction+anchor indexing, consolidation on write, and
-anchor-expansion on retrieval — layered over CaseLibrary/KnowledgeTools as an OPT-IN mode that degrades
+anchor-expansion on retrieval — layered over KnowledgeTools as an OPT-IN mode that degrades
 to the exact pre-Memora behavior with no abstractor and to a deterministic lexical abstractor with no
 LLM. All offline (no real network/model)."""
 from __future__ import annotations
@@ -7,7 +7,6 @@ from __future__ import annotations
 from looplab.core.config import Settings
 from looplab.tools.memora import (Abstraction, CachedAbstractor, LLMAbstractor, chat_completer,
                             expand_by_anchors, lexical_abstraction, make_abstractor)
-from looplab.engine.memory import CaseLibrary
 from looplab.tools.knowledge_tools import KnowledgeTools
 from looplab.tools.vectorstore import InMemoryVectorStore, hash_embed
 
@@ -195,46 +194,6 @@ def test_kb_search_anchor_expansion_surfaces_related_note(tmp_path):
     legacy = KnowledgeTools(str(tmp_path), k=1).execute(
         "kb_search", {"query": "ridge penalty shrink coefficients"})
     assert "lasso.md" not in legacy                      # legacy: no anchor-expansion
-
-
-# --------------------------- CaseLibrary (harmonic) ------------------------ #
-def test_case_library_legacy_unchanged():
-    lib = CaseLibrary(InMemoryVectorStore())             # no abstractor
-    lib.add("c1", "tabular classification gradient boosting", {"sol": "xgb"})
-    hit = lib.retrieve("tabular gradient boosting", k=1)[0]
-    assert hit.id == "c1" and "anchors" not in hit.payload
-
-
-def test_case_library_consolidates_near_duplicate_cases():
-    lib = CaseLibrary(InMemoryVectorStore(), abstract=_lex, consolidate_threshold=0.85)
-    lib.add("c1", "gradient boosting tabular classification", {"metric": 0.9, "direction": "max"})
-    lib.add("c2", "gradient boosting tabular classification", {"metric": 0.95, "direction": "max"})
-    cases = lib.store._idx["cases"]
-    assert len(cases) == 1                               # merged, not duplicated
-    only = next(iter(cases.values()))
-    assert only.payload["merged"] == 2
-    assert only.payload["metric"] == 0.95                # kept the better metric (direction=max)
-
-
-def test_case_library_retrieve_expands_through_anchors():
-    lib = CaseLibrary(InMemoryVectorStore(), abstract=_lex)
-    lib.add("a", "ridge penalty shrink regularization regularization overfitting overfitting", {})
-    lib.add("b", "lasso sparsity regularization regularization overfitting overfitting", {})
-    lib.add("c", "convolutional image segmentation unet pixels", {})
-    hits = lib.retrieve("ridge penalty shrink", k=1)
-    ids = [h.id for h in hits]
-    assert ids[0] == "a"                                 # direct hit
-    assert "b" in ids                                    # anchor-linked, pulled in by expansion
-    assert "c" not in ids                                # unrelated, not surfaced
-
-
-def test_case_library_retain_if_improved_still_works_harmonic():
-    lib = CaseLibrary(InMemoryVectorStore(), abstract=_lex)
-    assert lib.retain_if_improved("c1", "time series forecast arima", {}, 0.5, "min")
-    assert not lib.retain_if_improved("c1", "time series forecast arima", {}, 0.9, "min")
-    assert lib.retain_if_improved("c1", "time series forecast arima", {}, 0.2, "min")
-    hit = lib.store.get("cases", "c1")
-    assert hit.payload["metric"] == 0.2 and hit.payload["anchors"]  # harmonic keys present
 
 
 def test_abstraction_cache_is_bounded(tmp_path, monkeypatch):

@@ -12,7 +12,7 @@ on and a client is wired — both default on — else the lexical fallback); set
 the pre-Memora raw-text index.
 
 Nothing here is a source of truth: abstractions/anchors live only in *derived, rebuildable* indexes
-(the in-memory `VectorStore` behind `KnowledgeTools`/`CaseLibrary`), never in the append-only event log
+(the in-memory `VectorStore` behind `KnowledgeTools`), never in the append-only event log
 or the canonical `cases.jsonl`. Consolidation only ever collapses duplicates *inside* such an index.
 """
 from __future__ import annotations

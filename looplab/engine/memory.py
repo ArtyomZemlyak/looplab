@@ -1,7 +1,12 @@
-"""Cross-run memory (I19, ADR-10): an episodic case library over a VectorStore.
-Cases are keyed by a task description embedding; `retain_if_improved` keeps a case
-only when its metric beats the stored one (retain-on-improvement). This is the
-top-system differentiator — solved tasks make later similar tasks easier.
+"""Cross-run memory (I19, ADR-10): the task fingerprint, comparative-lesson credit assignment,
+the auto-skill lifecycle, the CASE store and the portfolio concept digest — plus re-exports of the
+lesson-hygiene and concept-capsule names that moved out (doc 25 EM-10).
+
+The case store is `JsonlCaseLibrary`: cases on disk as JSONL, one elected `active` row per
+`(task_id, direction, comparability)` with retain-on-improvement, written by
+`lessons.py::LessonMemory.store_case`. This docstring used to describe a vector-backed episodic case
+library keyed by a task-description embedding (`CaseLibrary`), which no code under `looplab/` ever
+constructed; it was deleted rather than kept as an unwired twin (review 2026-09-22, ENG3-14).
 """
 from __future__ import annotations
 
@@ -11,7 +16,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,7 +27,6 @@ from looplab.core.text import normalize_text, tokenize
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.events.eventstore import (read_jsonl_lenient, read_jsonl_lenient_with_health,
                                        replace_jsonl_rows_atomic_preserving_quarantine)
-from looplab.tools.vectorstore import Hit, Item, VectorStore, hash_embed
 
 # Lesson HYGIENE moved to its own module (doc 25 EM-10); re-exported so both spellings name
 # the SAME objects and every existing import / monkeypatch seam keeps working.
@@ -1193,18 +1197,18 @@ def _case_scale(case) -> str:
 
 
 class JsonlCaseLibrary:
-    """THE case store the engine actually uses (I19, ADR-10) — `lessons.py::store_case` builds it.
+    """THE case store (I19, ADR-10) — `lessons.py::store_case` builds it.
 
-    Cases on disk as JSONL, keyed by (task_id, direction) with retain-on-improvement. Loads existing cases on init
-    so it accumulates across runs. `search` does a keyword/recency lookup (no embedding dependency).
+    Cases on disk as JSONL, elected per (task_id, direction, comparability) with retain-on-improvement.
+    Loads existing cases on init so it accumulates across runs. `search` does a keyword/recency lookup
+    (no embedding dependency).
 
-    The vector-backed `CaseLibrary` above claims the same I19/ADR-10 role in its own docstring but is
-    unwired; that ambiguity used to be resolvable only by grepping for constructors (doc 25 EM-11).
-
-    One lesson worth carrying if the harmonic path is ever wired in: `CaseLibrary._consolidate` had to
-    learn that two cases are only comparable when their objective DIRECTION matches, or merging picks
-    the wrong winner across a min/max boundary. This store sidesteps it by keying on task_id, which
-    carries the direction with it."""
+    It is the ONLY one. A vector-backed `CaseLibrary` claimed the same I19/ADR-10 role in its own
+    docstring for months while nothing constructed it (doc 25 EM-11 marked it unwired; review
+    2026-09-22, ENG3-14 deleted it). One lesson it learned is worth carrying if a harmonic case path
+    is ever built: two cases are only comparable when their objective DIRECTION matches, or a merge
+    picks the wrong winner across a min/max boundary. This store sidesteps it by electing within
+    (task_id, direction), which is why the direction is part of every group key below."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -1456,122 +1460,3 @@ def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
         "concepts_omitted": n_concepts - retained_concepts,
         **capsule_source_summary(valid_capsules),
     }
-
-
-class CaseLibrary:
-    """UNWIRED (doc 25 EM-11): the vector-backed episodic case store, kept for the Memora path.
-
-    Nothing under `looplab/` constructs this — the engine's real case store is `JsonlCaseLibrary`
-    below, reached through `lessons.py::store_case`. Only tests exercise this class today, so read it
-    as a prototype of the harmonic path rather than as live behaviour; a reader tracing "where do
-    cases come from" wants `JsonlCaseLibrary`.
-
-    It is retained rather than deleted because its tests are the only coverage of Memora
-    consolidation/expansion, which is still the intended direction for the case path. Wiring it in
-    means giving it `JsonlCaseLibrary`'s durability contract (whole-file reload, quarantine-preserving
-    rewrite, retain-on-improvement across runs) — it has none of those today.
-
-    Episodic case store over a `VectorStore`. Optionally *harmonic* (Memora): pass an `abstract`
-    callable (see `tools.memora.make_abstractor`) to index each case by a short abstraction + cue
-    anchors instead of its raw task text, CONSOLIDATE a near-duplicate case into the existing entry on
-    `add`, and EXPAND `retrieve` through the top hits' anchors. With `abstract=None` (the default) every
-    method is byte-identical to the pre-Memora behavior."""
-
-    def __init__(self, store: VectorStore, embed: Callable[[str], list[float]] = hash_embed,
-                 index: str = "cases", abstract: Optional[Callable[[str], object]] = None,
-                 consolidate_threshold: float = 0.86, expand: bool = True):
-        self.store = store
-        self.embed = embed
-        self.index = index
-        self.abstract = abstract
-        self.consolidate_threshold = consolidate_threshold
-        self.expand = expand
-
-    @staticmethod
-    def _content(task_desc: str, payload: dict) -> str:
-        """The rich memory VALUE the abstraction summarizes: the task plus the case's own words."""
-        extra = " ".join(str(payload.get(k, "")) for k in ("rationale", "params", "operator"))
-        return f"{task_desc} {extra}".strip()
-
-    def _harmonic_item(self, case_id: str, task_desc: str, payload: dict):
-        """Build the `(vector, payload, abstraction)` for a harmonic case: embed the abstraction+anchors
-        (not the raw text) and carry the anchors in the payload so retrieval can expand through them."""
-        ab = self.abstract(self._content(task_desc, payload))  # type: ignore[misc]
-        vec = self.embed(ab.index_text())
-        p = {**payload, "abstraction": ab.primary, "anchors": list(ab.anchors)}
-        return Item(case_id, vec, p), ab
-
-    def add(self, case_id: str, task_desc: str, payload: dict) -> None:
-        if self.abstract is None:                       # legacy path — byte-identical to before
-            self.store.upsert(self.index, [Item(case_id, self.embed(task_desc), payload)])
-            return
-        item, ab = self._harmonic_item(case_id, task_desc, payload)
-        # Consolidation: if a stored case sits at/above the threshold under the SAME abstraction, merge
-        # into it rather than growing a chain of near-duplicates (Memora: ~half the entries of a flat
-        # store). Never merge onto self (a re-add of the same id is a plain upsert).
-        near = self.store.search(self.index, item.vector, 1)
-        if near and near[0].id != case_id and near[0].score >= self.consolidate_threshold:
-            self._consolidate(near[0], ab, payload)
-            return
-        self.store.upsert(self.index, [item])
-
-    def _consolidate(self, target: Hit, ab, payload: dict) -> None:
-        """Fold a new case into `target`: union the anchors, keep the richer abstraction, keep the
-        better metric, and re-embed the merged abstraction under the target's id."""
-        from looplab.tools.memora import Abstraction
-        prev = Abstraction(str(target.payload.get("abstraction", "")),
-                           list(target.payload.get("anchors", [])))
-        merged_ab = prev.merge(ab)
-        # Consolidation fires on embedding similarity alone, which says nothing about the two
-        # cases' OBJECTIVES. Folding a min-task metric and a max-task metric under one direction
-        # keeps the WORSE number for whichever case disagrees — silently, and the merged case then
-        # advises future runs with it. When the directions differ (or one is unknown) keep the
-        # TARGET's own metric instead of picking a winner across incomparable scales.
-        old_dir, new_dir = target.payload.get("direction"), payload.get("direction")
-        direction = new_dir or old_dir or "min"
-        comparable = (old_dir or direction) == (new_dir or direction)
-        p = {**target.payload, **payload}               # newer content wins for scalar fields
-        om, nm = target.payload.get("metric"), payload.get("metric")
-        if om is not None and nm is not None and not comparable:
-            p["metric"] = om                            # incomparable objectives -> keep the target's
-        elif om is not None and nm is not None:
-            p["metric"] = min(om, nm) if direction == "min" else max(om, nm)
-        elif om is not None:
-            p["metric"] = om
-        p["abstraction"] = merged_ab.primary
-        p["anchors"] = list(merged_ab.anchors)
-        p["merged"] = int(target.payload.get("merged", 1)) + 1
-        self.store.upsert(self.index, [Item(target.id, self.embed(merged_ab.index_text()), p)])
-
-    def retrieve(self, task_desc: str, k: int = 3) -> list[Hit]:
-        hits = self.store.search(self.index, self.embed(task_desc), k)
-        if self.abstract is None or not self.expand:    # legacy: exactly k, no expansion
-            return hits
-        from looplab.tools.memora import expand_by_anchors
-        extra = expand_by_anchors(self.store, self.index, hits, self.embed, k=k)
-        seen = {h.id for h in hits}
-        return hits + [h for h in extra if h.id not in seen]
-
-    def retain_if_improved(self, case_id: str, task_desc: str, payload: dict,
-                           metric: float, direction: str = "min") -> bool:
-        """Store/replace only if better than the existing case. Returns True if stored. Keyed by
-        `case_id` (no consolidation here — that would break the id-based lookup); when harmonic, the
-        stored entry still carries abstraction+anchors so retrieval can expand through them."""
-        existing: Optional[Hit] = None
-        getter = getattr(self.store, "get", None)
-        if callable(getter):
-            existing = getter(self.index, case_id)
-        if existing is not None:
-            prev = existing.payload.get("metric")
-            if prev is not None:
-                better = metric < prev if direction == "min" else metric > prev
-                if not better:
-                    return False
-        if self.abstract is None:                       # legacy: unchanged payload shape
-            self.store.upsert(self.index, [Item(case_id, self.embed(task_desc),
-                                                {**payload, "metric": metric})])
-        else:
-            item, _ = self._harmonic_item(case_id, task_desc,
-                                          {**payload, "metric": metric, "direction": direction})
-            self.store.upsert(self.index, [item])
-        return True

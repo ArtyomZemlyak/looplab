@@ -1,9 +1,11 @@
 """Which case store the engine actually uses (doc 25 EM-11), and what reads a case back.
 
 Two classes claimed the same I19/ADR-10 role in their docstrings — `CaseLibrary` (vector-backed,
-Memora-capable) and `JsonlCaseLibrary` (on-disk JSONL) — and only one of them is reachable from a
-run. Resolving that used to require grepping for constructors. The docstrings say it now; this keeps
-them honest, in both directions.
+Memora-capable) and `JsonlCaseLibrary` (on-disk JSONL) — and only one of them was reachable from a
+run. Resolving that used to require grepping for constructors; doc 25 EM-11 made the docstrings say
+it and this file kept them honest. Review 2026-09-22 (ENG3-14) went the rest of the way: nothing
+had constructed `CaseLibrary` in all that time, so it is deleted, and the first half of this file
+now pins that there is ONE case store and that a run reaches it.
 
 The second half of the file pins the READ side, which is what the operator-facing labels claim.
 
@@ -60,31 +62,17 @@ def test_the_jsonl_store_is_the_one_a_run_reaches():
         "nothing constructs JsonlCaseLibrary — the engine's case path is disconnected")
 
 
-def test_the_vector_store_is_still_unwired_or_its_docstring_is_now_wrong():
-    """`CaseLibrary` is documented as UNWIRED and kept for the Memora path.
+def test_there_is_one_case_store_and_no_unwired_twin():
+    """The vector-backed `CaseLibrary` was deleted (review 2026-09-22, ENG3-14): it claimed the
+    I19/ADR-10 role beside `JsonlCaseLibrary` while no code under `looplab/` ever constructed it, and
+    a second case class nothing builds is exactly how the "which store is live?" ambiguity started.
+    A harmonic case path is still a fine thing to build — as a store the engine CONSTRUCTS, with
+    `JsonlCaseLibrary`'s durability contract (whole-file reload, quarantine-preserving rewrite,
+    retain-on-improvement across runs) — and then this test changes with it."""
+    from looplab.engine import memory
 
-    Wiring it in is a fine thing to do — but it needs `JsonlCaseLibrary`'s durability contract
-    (whole-file reload, quarantine-preserving rewrite, retain-on-improvement across runs), and the
-    two docstrings have to stop pointing at each other. Failing here is the reminder.
-    """
-    sites = _constructor_sites("CaseLibrary")
-    assert not sites, (
-        "CaseLibrary is now constructed under looplab/ at "
-        + ", ".join(sites)
-        + " — update both class docstrings (memory.py) and give it the durability contract "
-          "JsonlCaseLibrary has, or this is a case store that loses cases across runs")
-
-
-def test_both_docstrings_name_the_other_so_neither_reads_as_the_live_one_alone():
-    """The subject is the two class DOCSTRINGS, so they are what is read — `__doc__`, not the 900
-    characters of file text after each `class` line, which any comment in that window satisfied
-    (review 2026-09-22, TST-05)."""
-    from looplab.engine.memory import CaseLibrary, JsonlCaseLibrary
-
-    unwired, live = CaseLibrary.__doc__ or "", JsonlCaseLibrary.__doc__ or ""
-    assert "UNWIRED" in unwired
-    assert "JsonlCaseLibrary" in unwired
-    assert "CaseLibrary` above" in live
+    assert not hasattr(memory, "CaseLibrary"), "an unwired second case store is back"
+    assert _constructor_sites("CaseLibrary") == []
 
 
 def _memory_dir_with_one_of_each(tmp_path, task_id: str, fingerprint: list[str]):

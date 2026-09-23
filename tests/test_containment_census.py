@@ -241,11 +241,11 @@ NOT_PROPAGATED: dict[str, tuple[str, frozenset[str]]] = {
                    "looplab/tools/memora.py::LLMAbstractor.__call__",
                    "looplab/tools/vectorstore.py::LLMEmbedder.__call__"})),
     "add": (
-        "`set.add` is everywhere; the paid `CaseLibrary.add` embeds its case, and nothing under "
-        "`looplab/` constructs a `CaseLibrary` (the engine's case store is `JsonlCaseLibrary`, "
-        "which embeds nothing). Embeddings ARE inside the spend ceiling since review 2026-09-22 "
-        "CORE-01 part 2, so wiring it in means reviewing its callers' handlers",
-        frozenset({"looplab/engine/memory.py::CaseLibrary.add"})),
+        "`set.add` is everywhere, and no `add` under `looplab/` reaches a provider: the one that "
+        "did, the vector `CaseLibrary.add` (it embedded its case), went with its class in review "
+        "2026-09-22, ENG3-14 — nothing had ever constructed it. The engine's case store is "
+        "`JsonlCaseLibrary`, whose `add` embeds nothing",
+        frozenset()),
     "bind_state": (
         "the optional ToolProvider hook every provider may implement; only the knowledge "
         "index's builds (and embeds) anything",

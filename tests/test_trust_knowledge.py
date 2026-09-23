@@ -1,11 +1,11 @@
-"""I9 leakage, I16 profiler, I17 vector store + retrieval, I19 cross-run memory."""
+"""I9 leakage, I16 profiler, I17 vector store + retrieval. (I19 cross-run memory is the case
+store's: `tests/test_case_store_wiring.py`.)"""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
-from looplab.engine.memory import CaseLibrary
 from looplab.core.profile import profile_column, profile_dataset
 from looplab.tools.retrieval import grep, glob_files
 from looplab.tools.vectorstore import InMemoryVectorStore, hash_embed
@@ -151,20 +151,6 @@ def test_grep_and_glob_prune_the_noise_dirs_instead_of_walking_them(tmp_path, mo
     assert globbed == {tmp_path.name, "pkg"}, globbed
     assert not [d for d in visited if Path(d).name in
                 {".git", "node_modules", ".venv", "__pycache__", "checkpoints"}], visited
-
-
-# --------------------------- I19 cross-run memory -------------------------- #
-def test_case_library_retrieve_and_retain():
-    lib = CaseLibrary(InMemoryVectorStore())
-    lib.add("c1", "tabular classification with gradient boosting", {"sol": "xgb"})
-    lib.add("c2", "image segmentation with unet", {"sol": "unet"})
-    hits = lib.retrieve("tabular gradient boosting model", k=1)
-    assert hits[0].id == "c1"
-
-    # retain-on-improvement: better metric replaces, worse is rejected.
-    assert lib.retain_if_improved("c3", "time series forecast", {"sol": "arima"}, 0.5, "min")
-    assert not lib.retain_if_improved("c3", "time series forecast", {"sol": "arima2"}, 0.9, "min")
-    assert lib.retain_if_improved("c3", "time series forecast", {"sol": "arima3"}, 0.2, "min")
 
 
 def test_profile_nan_is_missing_and_unhashable_ok():
