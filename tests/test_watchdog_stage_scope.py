@@ -177,7 +177,12 @@ class _Host(TrainingMonitorMixin, AshaMonitorMixin):
                 if line.strip() and json.loads(line).get("name") == name]
 
 
-def _drive_train(host, workdir, *, plan=None, context="", until=None, window=0.3):
+def _drive_train(host, workdir, *, plan=None, context="", until=None, window=0.3, linger=0.0):
+    """`window` for a claim that NOTHING happens; `until` for one that something does. A positive
+    count inside a fixed window is a race with the runner's speed: tests-windows run 63 saw ONE
+    judge call in 0.5 s where the retry bound under test needs two. `linger` keeps the monitor
+    ticking after `until` holds, for the "…and then quiet" half of a claim — a slow runner fits
+    fewer ticks into it, which can only weaken that half, never turn it red."""
     async def _run():
         async with anyio.create_task_group() as tg:
             tg.start_soon(host._monitor_training, 0, 0, str(workdir), host.cancel,
@@ -188,9 +193,18 @@ def _drive_train(host, workdir, *, plan=None, context="", until=None, window=0.3
                 deadline = time.monotonic() + _SETTLE_TIMEOUT_S
                 while not until(host) and time.monotonic() < deadline:
                     await anyio.sleep(0.005)
+                await anyio.sleep(linger)
             tg.cancel_scope.cancel()
 
     anyio.run(_run)
+
+
+def _settled_spans(host, name: str = "train_monitor") -> list:
+    """`host.spans` for a POLL: a span line caught mid-write means "not yet", not an error."""
+    try:
+        return host.spans(name)
+    except ValueError:
+        return []
 
 
 # =========================================================== H-1: which log the judge is shown
@@ -1014,7 +1028,9 @@ def test_h4b_the_armed_re_look_is_bounded_to_one_identical_prompt(tmp_path):
     client = _FailingClient(before=[{"status": "broken", "reason": "diverged then silent",
                                      "confidence": 0.95}], raises=True)
     host = _Host(tmp_path, client=client)
-    _drive_train(host, wd, plan=eval_log_plan(_TRAINING_STAGES), window=0.5)   # ~25 ticks at 0.02s
+    # Until the confirming look's span is written, then ~10 more ticks at 0.02s for it to stay quiet.
+    _drive_train(host, wd, plan=eval_log_plan(_TRAINING_STAGES),
+                 until=lambda h: len(_settled_spans(h)) >= 2, linger=0.2)
 
     assert (wd / "train.log").read_text() == frozen                  # the log never changed
     assert client.calls == 2, "arming tick + exactly one confirming look, then quiet"
@@ -1034,7 +1050,9 @@ def test_h4b_a_frozen_log_with_a_dead_endpoint_stops_re_asking(tmp_path):
     wd = _one_log_workdir(tmp_path, "train.log", _TRAIN_TAIL)
     client = _FailingClient(raises=True)
     host = _Host(tmp_path, client=client)
-    _drive_train(host, wd, plan=eval_log_plan(_TRAINING_STAGES), window=0.5)
+    _drive_train(host, wd, plan=eval_log_plan(_TRAINING_STAGES),
+                 until=lambda h: any(s["attributes"].get("digest_retired")
+                                     for s in _settled_spans(h)), linger=0.2)
 
     assert client.calls == tm._MONITOR_SAME_DIGEST_RETRIES, "the same question, asked twice, then dropped"
     assert any(s["attributes"].get("digest_retired") for s in host.spans("train_monitor"))
@@ -1044,7 +1062,8 @@ def test_h4b_a_frozen_log_with_a_dead_endpoint_stops_re_asking(tmp_path):
     # ... and a log that DOES change is judged again, so the retirement is not a permanent mute.
     (wd / "train.log").write_text(_TRAIN_TAIL + '{"recall": 0.51, "step": 3, "loss": 1.4}\n',
                                   encoding="utf-8")
-    _drive_train(host, wd, plan=eval_log_plan(_TRAINING_STAGES), window=0.2)
+    _drive_train(host, wd, plan=eval_log_plan(_TRAINING_STAGES),
+                 until=lambda _h: client.calls > tm._MONITOR_SAME_DIGEST_RETRIES)
     assert client.calls > tm._MONITOR_SAME_DIGEST_RETRIES
 
 
