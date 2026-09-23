@@ -75,7 +75,15 @@ def throwaway_tree(tmp_path_factory):
 
 
 def _pytest_in(tree: Path, tests: list, basetemp: Path):
-    env = {**os.environ, "PYTHONPATH": str(tree) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    # NO BYTECODE IN THE THROWAWAY TREE (CI run 1989, 2026-09-23). Every forced variant of the tool
+    # is the SAME size — one `return True, 'forced'` line inserted after a different `def` — and a
+    # `.pyc` is trusted on (source mtime in whole SECONDS, size). Two parametrized checks forced
+    # inside one second therefore let the nested interpreter load the PREVIOUS check's compiled
+    # module: the check under test was never forced, every test naming it stayed green, and this
+    # audit reported a real alarm as wired to nothing. Reproduced deterministically by pinning two
+    # variants' mtimes to the same second; with bytecode off, the forced source is what runs.
+    env = {**os.environ, "PYTHONPATH": str(tree) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+           "PYTHONDONTWRITEBYTECODE": "1"}
     return subprocess.run([sys.executable, "-m", "pytest", *tests, "-q", "--no-header",
                            "-p", "no:warnings", "-p", "no:cacheprovider", "-x",
                            f"--basetemp={basetemp}"],
@@ -112,3 +120,29 @@ def test_forcing_a_check_to_pass_reddens_the_test_that_names_it(check, throwaway
             f"{[Path(p).name for p in named]}")
     finally:
         tool.write_text(src, encoding="utf-8")
+
+
+def test_the_nested_run_imports_the_variant_on_disk_not_a_stale_compile(tmp_path):
+    """The harness's own control (CI run 1989): two same-size variants written inside one second
+    must each be what the nested run imports. Pinned mtimes make "inside one second" deterministic.
+    MUTATION: drop `PYTHONDONTWRITEBYTECODE` from `_pytest_in` -> the second run imports the first
+    variant's `.pyc` and this goes red."""
+    tree = tmp_path / "tree"
+    (tree / "tests").mkdir(parents=True)
+    tool = tree / "tool.py"
+    variant = "def a():\n    return {a}\ndef b():\n    return {b}\n"
+    (tree / "tests" / "test_probe.py").write_text(
+        "import sys, pathlib\n"
+        "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))\n"
+        "import tool\n"
+        "def test_b_is_forced():\n"
+        "    assert tool.b() == 1\n", encoding="utf-8")
+    pinned = 1_700_000_000
+    tool.write_text(variant.format(a=1, b=0), encoding="utf-8")
+    os.utime(tool, (pinned, pinned))
+    first = _pytest_in(tree, [str(tree / "tests" / "test_probe.py")], tmp_path / "bt1")
+    assert first.returncode != 0, "control: with b unforced the probe must fail"
+    tool.write_text(variant.format(a=0, b=1), encoding="utf-8")     # same size, same second
+    os.utime(tool, (pinned, pinned))
+    second = _pytest_in(tree, [str(tree / "tests" / "test_probe.py")], tmp_path / "bt2")
+    assert second.returncode == 0, second.stdout[-2000:]
