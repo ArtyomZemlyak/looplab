@@ -271,20 +271,93 @@ def test_a_run_a_live_engine_holds_is_refused(tmp_path):
     failed on every run, and (failing closed) reported all eight runs as live, including seven
     finished for days.
 
-    Held here through `interprocess_lock`, the primitive that takes the same byte the engine takes
-    on THIS platform (flock on POSIX, msvcrt on Windows) — a raw `fcntl.flock` holder made the test
-    itself a POSIX-only test of a rule that must hold on both."""
+    The verdict is the ENGINE's own rule since review 2026-09-22 (EVT-14), not this module's copy,
+    so the probe below is `engine_liveness` itself; both a dry run and `--apply` refuse. Held through
+    `interprocess_lock`, the primitive that takes the same byte the engine takes on THIS platform
+    (flock on POSIX, msvcrt on Windows) — a raw `fcntl.flock` holder made the test itself POSIX-only."""
+    from looplab.engine.run_lifecycle import engine_liveness
+
     run = tmp_path / "r"
     run.mkdir()
     (run / "events.jsonl").write_text("", encoding="utf-8")
     lock = run / "engine.lock"
     lock.touch()
-    assert bf._lock_is_live(run) is False           # exists, unheld
+    assert engine_liveness(run) is False            # exists, unheld
     with interprocess_lock(lock, required=True):
-        assert bf._lock_is_live(run) is True
-        out = bf.backfill(tmp_path, dry_run=True)
-        assert "SKIPPED" in out and "live engine" in out
-    assert bf._lock_is_live(run) is False           # released again
+        assert engine_liveness(run) is True
+        for dry_run in (True, False):
+            out = bf.backfill(tmp_path, dry_run=dry_run)
+            assert "SKIPPED" in out and "live engine" in out
+    assert engine_liveness(run) is False            # released again
+
+
+def _backfillable_run(root: Path) -> Path:
+    """One evaluated node whose carrier says 512 where the proposal said 8192 — one row to write."""
+    run = root / "r"
+    (run / "nodes" / "node_0").mkdir(parents=True)
+    (run / "nodes" / "node_0" / "cfg.yaml").write_text("train:\n  batch_size: 512\n",
+                                                       encoding="utf-8")
+    store = EventStore(str(run / "events.jsonl"))
+    store.append("run_started", {"goal": "g"})
+    store.append("node_created", {"node_id": 0, "operator": "improve", "code": "",
+                                  "files": {"cfg.yaml": "train:\n  batch_size: 512\n"},
+                                  "idea": {"operator": "improve",
+                                           "params": {"train.batch_size": 8192.0},
+                                           "rationale": "r"}})
+    store.append(EV_NODE_EVALUATED, {"node_id": 0, "generation": 0, "metric": 0.5,
+                                     "metric_provenance": {"subject_bound": False}})
+    return run
+
+
+def _an_engine_tries_to_start(seen: list):
+    """Wrap a pass step so that, while it runs, an engine contends for `engine.lock` — exactly the
+    non-blocking take `cli/__init__.py::_engine_singleton` makes before an engine appends anything.
+    Records whether that engine would have got the run."""
+    from looplab.events.eventstore import InterprocessLockContended, interprocess_lock
+
+    def wrap(step):
+        def during(run_dir, *args):
+            try:
+                with interprocess_lock(run_dir / "engine.lock", required=True, blocking=False):
+                    seen.append(f"{step.__name__}: an engine STARTED")
+            except InterprocessLockContended:
+                seen.append(f"{step.__name__}: fenced")
+            return step(run_dir, *args)
+        return during
+    return wrap
+
+
+def test_no_engine_can_start_between_the_liveness_verdict_and_the_write(tmp_path, monkeypatch):
+    """Review 2026-09-22, EVT-14. The pass asked "is an engine live?" ONCE, released its probe, and
+    only then planned and appended — so an engine that started in the gap (a `resume`, the UI's
+    auto-reopen of a finished run) became a second writer of FOLDED events into the log it owns
+    (invariant #1). `engine.lock` is now held from the verdict through the last append, the way
+    `repair-log` holds it for its rewrite."""
+    _backfillable_run(tmp_path)
+    seen: list = []
+    wrap = _an_engine_tries_to_start(seen)
+    monkeypatch.setattr(bf, "plan_run", wrap(bf.plan_run))
+    monkeypatch.setattr(bf, "apply_run", wrap(bf.apply_run))
+    out = bf.backfill(tmp_path, dry_run=False)
+    assert seen == ["plan_run: fenced", "apply_run: fenced"], seen
+    assert "WROTE 1 backfill event(s)." in out
+
+
+def test_liveness_is_the_engines_own_rule_not_a_copy(tmp_path):
+    """`_lock_is_live` re-derived `engine/run_lifecycle.py::engine_liveness` and drifted from it
+    (EVT-14): `Path.exists` follows links, so a DANGLING `engine.lock` symlink read as "no engine"
+    and the pass wrote. The shared rule treats any link/special inode as untrusted ownership
+    evidence — inconclusive — and an append-only writer must refuse on inconclusive."""
+    run = _backfillable_run(tmp_path)
+    try:
+        (run / "engine.lock").symlink_to(tmp_path / "elsewhere.lock")
+    except (OSError, NotImplementedError):
+        pytest.skip("this filesystem cannot hold a symlink")
+    before = (run / "events.jsonl").read_bytes()
+    out = bf.backfill(tmp_path, dry_run=False)
+    assert "SKIPPED" in out, out
+    assert (run / "events.jsonl").read_bytes() == before
+    assert not (tmp_path / "elsewhere.lock").exists(), "nothing may be created through the link"
 
 
 def test_the_liveness_probe_contends_the_way_the_engine_locks_on_windows(tmp_path, monkeypatch):
@@ -292,7 +365,13 @@ def test_the_liveness_probe_contends_the_way_the_engine_locks_on_windows(tmp_pat
     Driven on this box with exactly that platform — `fcntl` unimportable, a byte-lock `msvcrt`,
     `os.name == "nt"` for the probe's calls only: an unheld lock must read IDLE and a held one LIVE.
     The probe that asked `fcntl` alone answered "live" for both, i.e. every run was skipped
-    (review 2026-09-22, WIN-BACKFILL; measured on the Windows CI leg as a ModuleNotFoundError)."""
+    (review 2026-09-22, WIN-BACKFILL; measured on the Windows CI leg as a ModuleNotFoundError).
+    Since EVT-14 the backfill's verdict is the engine's own `engine_liveness`, asked through
+    `offline_run`, so this holds THAT rule to the Windows primitive."""
+    def skipped() -> bool:
+        with bf.offline_run(run, hold=False) as refusal:
+            return refusal is not None
+
     run = tmp_path / "r"
     run.mkdir()
     lock = run / "engine.lock"
@@ -302,13 +381,13 @@ def test_the_liveness_probe_contends_the_way_the_engine_locks_on_windows(tmp_pat
         m.setitem(sys.modules, "fcntl", None)
         m.setitem(sys.modules, "msvcrt", msvcrt)
         m.setattr(os, "name", "nt")
-        idle = bf._lock_is_live(run)
+        idle = skipped()
         with open(lock, "a+") as engine:             # the engine's own hold: byte 0, one byte
             engine.seek(0)
             msvcrt.locking(engine.fileno(), msvcrt.LK_NBLCK, 1)
-            live = bf._lock_is_live(run)
+            live = skipped()
             msvcrt.locking(engine.fileno(), msvcrt.LK_UNLCK, 1)
-        released = bf._lock_is_live(run)
+        released = skipped()
     assert (idle, live, released) == (False, True, False)
     assert msvcrt.held == {}, "the probe must release the byte it took"
 

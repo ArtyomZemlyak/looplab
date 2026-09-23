@@ -1791,8 +1791,10 @@ looplab backfill-score-metrics runs/ --apply             # actually append
   `rubertlite-dense-retrieval` that fence bites at event 20 of 1,624 lines, so a run with 81
   `node_created` rows folds to two nodes. The report says so rather than quietly reporting "1
   scored node".
-* **It refuses a live run**, by contending for `engine.lock`: a `score.log` still being written
-  describes nothing yet.
+* **It refuses a live run**, by the engine's own liveness rule on `engine.lock`: a `score.log`
+  still being written describes nothing yet. With `--apply` it then HOLDS `engine.lock` until its
+  last append, so no engine can start mid-pass and share the log with it; a lock it cannot verify
+  (a link, a special file) or cannot hold counts as live.
 
 ## `repair-candidates`
 
@@ -1872,8 +1874,10 @@ looplab backfill-applied-params runs/ --apply             # actually append
 * **It never guesses.** Two carriers that disagree are recorded as a CONFLICT carrying both readings
   with their file and line — on one champion the config document says 8192 while the training
   script's own assignment says 4096, and picking either would be an invention.
-* **It refuses a live run**, asked by contending for `engine.lock` (the file is empty and holds an
-  flock, not a pid).
+* **It refuses a live run**, asked by the engine's own liveness rule, which contends for
+  `engine.lock` (the file is empty and holds an flock, not a pid). With `--apply` it then HOLDS the
+  lock until its last append, so no engine can start mid-pass and share the log with it; a lock it
+  cannot verify (a link, a special file) or cannot hold counts as live.
 
 ## `concept-merge`
 

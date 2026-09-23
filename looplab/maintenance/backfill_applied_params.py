@@ -35,16 +35,21 @@ WHAT IT WILL AND WILL NOT DO
   where the config document says 8192 and the training script's own assignment says 4096 — and this
   module passes that through untouched, each reading with the file and line it was read at.
 * REFUSES A LIVE RUN. The workdir of a node that is training right now is being written to, and a
-  reading taken mid-write describes nothing.
+  reading taken mid-write describes nothing. Asked by the engine's own liveness rule, and `--apply`
+  HOLDS `engine.lock` from that verdict through its last append (`offline_run`), so no engine can
+  start mid-pass and share the log with it.
 """
 from __future__ import annotations
 
 import json
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
-from looplab.events.eventstore import EventStore, InterprocessLockContended, interprocess_lock
+from looplab.engine.run_lifecycle import engine_liveness
+from looplab.events.eventstore import (EventStore, EventStoreLockError, InterprocessLockContended,
+                                       interprocess_lock)
 from looplab.events.replay import fold
 from looplab.events.types import EV_APPLIED_PARAMS_BACKFILLED
 from looplab.runtime.applied_params import bind_applied_params
@@ -179,42 +184,46 @@ def backfill(root: Path, *, dry_run: bool = True, only: Optional[str] = None,
     for run_dir in run_dirs(root):
         if only and run_dir.name != only:
             continue
-        if skip_live and (run_dir / "engine.lock").exists() and _lock_is_live(run_dir):
-            out.append(f"{run_dir.name}: SKIPPED — a live engine holds this run. A workdir being "
-                       "written to cannot be read as what ran.")
-            totals["skipped_live"] += 1
-            continue
-        # NAMED BEFORE THE EARLY RETURN, not after it. A run whose rows are all already
-        # backfilled produces NO rows and `continue`s below — so the one combination a reader most
-        # needs ("nothing to do here" AND "only 20 of 1,624 lines are readable") printed nothing at
-        # all. Found by running it, not by reading it.
-        #
-        # WHAT THIS PASS COULD NOT SEE. `EventStore.read_all` serves the log's dense prefix and stops
-        # at the first logical-sequence gap — correct for a fold, invisible to a coverage claim. This
-        # command shipped without saying so, and on `rubertlite-dense-retrieval` the fence bites at
-        # event 20 of 1,624 lines, so a run with 81 `node_created` rows folded to two nodes and the
-        # report read as if that were the run. Named rather than fixed: repairing a gapped log is a
-        # different question from backfilling, and smuggling it in here would answer neither well.
-        served, lines = run_store(run_dir).readable_horizon()
-        if lines and served < lines:
-            out.append(f"{run_dir.name}: ** BOUNDED — the event store serves {served} of {lines} "
-                       "lines; it stops at the first logical-sequence gap. Nodes recorded past that "
-                       "point were NOT considered, and any count below is the prefix's, not the "
-                       "run's. **")
-            totals["bounded"] += 1
-        rows = plan_run(run_dir)
-        if not rows:
-            continue
-        summary = summarize(rows)
-        out.append(render(run_dir.name, rows, summary))
+        # The whole pass over this run happens inside ONE fence: the liveness verdict, the horizon,
+        # the plan and — under `--apply` — every append (review 2026-09-22, EVT-14; `offline_run`).
+        with offline_run(run_dir, hold=not dry_run) as refusal:
+            if skip_live and refusal:
+                out.append(f"{run_dir.name}: SKIPPED — {refusal}. A workdir being written to "
+                           "cannot be read as what ran.")
+                totals["skipped_live"] += 1
+                continue
+            # NAMED BEFORE THE EARLY RETURN, not after it. A run whose rows are all already
+            # backfilled produces NO rows and `continue`s below — so the one combination a reader
+            # most needs ("nothing to do here" AND "only 20 of 1,624 lines are readable") printed
+            # nothing at all. Found by running it, not by reading it.
+            #
+            # WHAT THIS PASS COULD NOT SEE. `EventStore.read_all` serves the log's dense prefix and
+            # stops at the first logical-sequence gap — correct for a fold, invisible to a coverage
+            # claim. This command shipped without saying so, and on `rubertlite-dense-retrieval` the
+            # fence bites at event 20 of 1,624 lines, so a run with 81 `node_created` rows folded to
+            # two nodes and the report read as if that were the run. Named rather than fixed:
+            # repairing a gapped log is a different question from backfilling, and smuggling it in
+            # here would answer neither well.
+            served, lines = run_store(run_dir).readable_horizon()
+            if lines and served < lines:
+                out.append(f"{run_dir.name}: ** BOUNDED — the event store serves {served} of {lines} "
+                           "lines; it stops at the first logical-sequence gap. Nodes recorded past that "
+                           "point were NOT considered, and any count below is the prefix's, not the "
+                           "run's. **")
+                totals["bounded"] += 1
+            rows = plan_run(run_dir)
+            if not rows:
+                continue
+            summary = summarize(rows)
+            out.append(render(run_dir.name, rows, summary))
 
-        totals["considered"] += summary["considered"]
-        totals["recovered"] += summary["recovered"]
-        totals["unrecoverable"] += summary["unrecoverable"]
-        totals["diverged"] += len(summary["diverged_nodes"])
-        totals["conflicted"] += len(summary["conflicted_nodes"])
-        if not dry_run:
-            totals["written"] += apply_run(run_dir, rows)
+            totals["considered"] += summary["considered"]
+            totals["recovered"] += summary["recovered"]
+            totals["unrecoverable"] += summary["unrecoverable"]
+            totals["diverged"] += len(summary["diverged_nodes"])
+            totals["conflicted"] += len(summary["conflicted_nodes"])
+            if not dry_run:
+                totals["written"] += apply_run(run_dir, rows)
     out.append("")
     out.append(f"TOTAL: {totals['considered']} considered, {totals['recovered']} recovered, "
                f"{totals['unrecoverable']} unrecoverable, {totals['diverged']} with a coordinate "
@@ -232,39 +241,57 @@ def run_store(run_dir: Path) -> EventStore:
     return EventStore(str(run_dir / "events.jsonl"))
 
 
-def _lock_is_live(run_dir: Path) -> bool:
-    """Is a live engine holding this run?
+@contextmanager
+def offline_run(run_dir: Path, *, hold: bool) -> Iterator[Optional[str]]:
+    """Fence one run for a backfill pass: yield None to proceed, or the reason to skip it.
 
-    ASKED THE WAY THE ENGINE ASKS IT — by trying to take the lock. `engine.lock` is an EMPTY file
-    holding an **flock**, not a pid file (`cli/__init__.py`: "The OS frees the lock when the process
-    exits (even on crash), so there's no stale-lock problem"), so reading it tells you nothing at
-    all. A first version of this function parsed it as JSON for a pid, failed on every run because
-    the file is zero bytes, and — failing closed — reported all EIGHT runs as live, including seven
-    that had been finished for days. It looked like a careful safety check and was a total refusal.
-    Contending for the lock is the only question with an answer.
+    With ``hold`` (an ``--apply`` pass) the run's `engine.lock` is HELD while the block runs, so no
+    engine can start until the last append is on disk — an engine starts by taking that lock without
+    waiting (`cli/__init__.py::_engine_singleton`), and `repair-log` holds it the same way for its
+    rewrite. A dry run writes nothing, so it only asks.
 
-    Non-blocking, and the lock is released immediately: this asks whether someone else holds it, and
-    must never itself become the thing that blocks an engine from starting. Fails CLOSED — an
-    unopenable or unlockable path reads as LIVE, because the cost of a false "live" is that the
-    operator runs the command again, and the cost of a false "idle" is a reading taken from a
-    directory being written to.
+    THE VERDICT IS THE ENGINE'S OWN RULE, `engine/run_lifecycle.py::engine_liveness`, not a copy
+    (review 2026-09-22, EVT-14). This module used to carry one, `_lock_is_live`, and it had drifted:
+    it asked `Path.exists`, which follows links, so a dangling `engine.lock` symlink read as "no
+    engine here" and the pass wrote. The shared rule answers a link or special inode as
+    INCONCLUSIVE, and an append-only writer refuses on inconclusive: the cost of a false "live" is
+    that the operator runs the command again, the cost of a false "idle" is a second writer of
+    FOLDED events into a log the engine owns (invariant #1). The copy's one hard-won lesson is kept
+    because the shared rule already embodies it: `engine.lock` is an EMPTY file holding an flock,
+    not a pid file, so only contending for the lock answers the question — a first version parsed
+    it for a pid, failed on every zero-byte file and, failing closed, reported all eight runs as
+    live. And the shared rule contends with the ENGINE's primitive on each platform — `msvcrt` on
+    Windows, where the copy's `import fcntl` had refused every run (WIN-BACKFILL, the Windows CI leg).
 
-    CONTENDED WITH THE ENGINE'S OWN PRIMITIVE ON EACH PLATFORM (review 2026-09-22, WIN-BACKFILL).
-    This asked through `fcntl` alone, and on Windows — where the engine takes the same byte with
-    `msvcrt.locking` (`cli/__init__.py`) — `import fcntl` raised, the fail-closed handler answered
-    "live", and every run with an `engine.lock` was SKIPPED: the total refusal the paragraph above
-    records, reached by a different road (measured on the Windows CI leg, GitHub Actions run
-    35785582444: `ModuleNotFoundError: No module named 'fcntl'`). `events/eventstore.py::
-    interprocess_lock` is the shared contender — `msvcrt` there, `flock` here, contention typed as
-    `InterprocessLockContended` and a capability gap as `EventStoreLockError` under `required=True`.
+    AND THE VERDICT IS HELD, NOT JUST TAKEN. The copy contended for the lock and released it at
+    once — right for a probe, which "must never itself become the thing that blocks an engine from
+    starting", and wrong for a WRITER: the pass then planned and appended with nothing held, so an
+    engine that started in that window (a `resume`, the UI's auto-reopen of a finished run) shared
+    the log with it. The lock is now taken non-blocking right after the verdict — a contended take
+    is an engine that started in between — and released only when the block exits.
     """
-    lock = run_dir / "engine.lock"
-    if not lock.exists():
-        return False
-    try:
-        with interprocess_lock(lock, required=True, blocking=False):
-            return False
-    except InterprocessLockContended:
-        return True                              # someone holds it — a live engine
-    except Exception:  # noqa: BLE001 — no lock backend on this mount, or no permission: fail closed
-        return True
+    liveness = engine_liveness(run_dir)
+    if liveness is True:
+        yield "a live engine holds this run"
+        return
+    if liveness is None:
+        yield ("its engine.lock could not be verified (a link, a special file, or a probe that "
+               "failed), which is treated as a live engine")
+        return
+    if not hold:
+        yield None
+        return
+    with ExitStack() as fence:
+        # Only the TAKE is guarded here. The block's own exceptions must propagate through the
+        # `yield` untouched — catching them would make this generator yield twice.
+        try:
+            fence.enter_context(
+                interprocess_lock(run_dir / "engine.lock", required=True, blocking=False))
+        except InterprocessLockContended:
+            refusal: Optional[str] = "a live engine holds this run (it started after the check)"
+        except EventStoreLockError as exc:
+            refusal = (f"engine.lock cannot be held here ({exc}), so an engine starting mid-pass "
+                       "could not be fenced")
+        else:
+            refusal = None
+        yield refusal

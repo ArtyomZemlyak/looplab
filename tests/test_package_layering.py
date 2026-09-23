@@ -60,7 +60,9 @@ MODULE_LEVEL: dict[str, frozenset[str]] = {
     "adapters": frozenset({"core", "tools", "agents"}),
     "engine": frozenset({"core", "events", "runtime", "tools", "trust", "search", "agents"}),
     "judgebench": frozenset({"core"}),
-    "maintenance": frozenset({"events", "runtime"}),
+    # `engine`: the backfills ask the engine's OWN liveness rule (`engine/run_lifecycle.py`, which
+    # imports only `core` and `events`) instead of a drifting copy — review 2026-09-22, EVT-14.
+    "maintenance": frozenset({"events", "runtime", "engine"}),
     "serve": frozenset({"core", "events", "tools", "trust", "engine", "adapters", "looplab"}),
     "cli": frozenset({"core", "events", "runtime", "tools", "trust", "search", "engine",
                       "adapters", "serve", "looplab"}),

@@ -59,8 +59,9 @@ def backfill_applied_params(
     "the workdir is gone" and "the proposal is what ran" are opposite statements and the second is
     the one every reader currently makes by default.
 
-    Refuses any run a live engine holds — asked by contending for `engine.lock`, which is how the
-    engine itself asks, since the file is empty and holds an flock rather than a pid.
+    Refuses any run a live engine holds — asked by the engine's own liveness rule, which contends
+    for `engine.lock` (the file is empty and holds an flock rather than a pid) — and with `--apply`
+    HOLDS that lock until its last append, so no engine can start mid-pass.
     """
     from looplab.maintenance.backfill_applied_params import backfill
     typer.echo(backfill(Path(run_root), dry_run=not apply, only=only))

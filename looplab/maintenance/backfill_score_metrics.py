@@ -51,7 +51,8 @@ WHAT IT WILL AND WILL NOT DO
   are equal on nDCG" and "the print statement cannot tell them apart" are different claims and a
   reader must not have to guess which one they are reading.
 * REFUSES A LIVE RUN, for the same reason its sibling does: a `score.log` still being written
-  describes nothing yet.
+  describes nothing yet. Through the sibling's `offline_run`: the engine's own liveness rule, and
+  `--apply` holds `engine.lock` from that verdict through its last append.
 """
 from __future__ import annotations
 
@@ -306,39 +307,42 @@ def run_dirs(root: Path) -> list[Path]:
 def backfill(root: Path, *, dry_run: bool = True, only: Optional[str] = None,
              skip_live: bool = True) -> str:
     """Walk every run under `root`. Returns the report."""
-    from looplab.maintenance.backfill_applied_params import _lock_is_live
+    from looplab.maintenance.backfill_applied_params import offline_run
     out: list[str] = []
     totals = {"considered": 0, "recovered": 0, "values": 0, "written": 0,
               "skipped_live": 0, "bounded": 0}
     for run_dir in run_dirs(root):
         if only and run_dir.name != only:
             continue
-        if skip_live and (run_dir / "engine.lock").exists() and _lock_is_live(run_dir):
-            out.append(f"{run_dir.name}: SKIPPED — a live engine holds this run. A score log still "
-                       "being written describes nothing yet.")
-            totals["skipped_live"] += 1
-            continue
-        # NAMED BEFORE THE EARLY RETURN, not after it. A run whose rows are all already
-        # backfilled produces NO rows and would `continue` below — so the one combination a reader
-        # most needs ("nothing to do here" AND "only 20 of 1,624 lines are readable") was exactly
-        # the one that printed nothing at all. Found by running it, not by reading it.
-        served, lines = readable_horizon(run_dir)
-        bounded = bool(lines and served < lines)
-        if bounded:
-            out.append(f"{run_dir.name}: ** BOUNDED — the event store serves {served} of {lines} "
-                       "lines; it stops at the first logical-sequence gap. Nodes recorded past that "
-                       "point were NOT considered, and any count below is the prefix's, not the "
-                       "run's. **")
-            totals["bounded"] += 1
-        rows = plan_run(run_dir)
-        if not rows:
-            continue
-        summary = summarize(rows)
-        out.append(render(run_dir.name, rows, summary))
-        for k in ("considered", "recovered", "values"):
-            totals[k] += summary[k]
-        if not dry_run:
-            totals["written"] += apply_run(run_dir, rows)
+        # One fence over the verdict, the horizon, the plan and every `--apply` append — the
+        # sibling's `offline_run` (review 2026-09-22, EVT-14).
+        with offline_run(run_dir, hold=not dry_run) as refusal:
+            if skip_live and refusal:
+                out.append(f"{run_dir.name}: SKIPPED — {refusal}. A score log still being written "
+                           "describes nothing yet.")
+                totals["skipped_live"] += 1
+                continue
+            # NAMED BEFORE THE EARLY RETURN, not after it. A run whose rows are all already
+            # backfilled produces NO rows and would `continue` below — so the one combination a
+            # reader most needs ("nothing to do here" AND "only 20 of 1,624 lines are readable") was
+            # exactly the one that printed nothing at all. Found by running it, not by reading it.
+            served, lines = readable_horizon(run_dir)
+            bounded = bool(lines and served < lines)
+            if bounded:
+                out.append(f"{run_dir.name}: ** BOUNDED — the event store serves {served} of {lines} "
+                           "lines; it stops at the first logical-sequence gap. Nodes recorded past that "
+                           "point were NOT considered, and any count below is the prefix's, not the "
+                           "run's. **")
+                totals["bounded"] += 1
+            rows = plan_run(run_dir)
+            if not rows:
+                continue
+            summary = summarize(rows)
+            out.append(render(run_dir.name, rows, summary))
+            for k in ("considered", "recovered", "values"):
+                totals[k] += summary[k]
+            if not dry_run:
+                totals["written"] += apply_run(run_dir, rows)
     out.append("")
     out.append(f"TOTAL: {totals['considered']} scored node(s), {totals['recovered']} recovered, "
                f"{totals['values']} value(s) the record had computed and thrown away"

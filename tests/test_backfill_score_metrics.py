@@ -238,3 +238,21 @@ def test_the_readable_horizon_is_named_rather_than_silently_applied(tmp_path):
             fh.write(json.dumps(r) + "\n")
     served2, lines2 = readable_horizon(d)
     assert served2 < lines2, "the store stops at the gap and the tool can see that it did"
+
+
+def test_no_engine_can_start_between_the_liveness_verdict_and_the_write(tmp_path, monkeypatch):
+    """Review 2026-09-22, EVT-14, for this pass: `engine.lock` is held from the liveness verdict
+    through the last append, so an engine starting mid-pass cannot share the log with it. Driven the
+    same way as the sibling's test — an engine contends for the lock while each step runs."""
+    from test_backfill_applied_params import _an_engine_tries_to_start
+
+    import looplab.maintenance.backfill_score_metrics as sm
+
+    _run(tmp_path)
+    seen: list = []
+    wrap = _an_engine_tries_to_start(seen)
+    monkeypatch.setattr(sm, "plan_run", wrap(sm.plan_run))
+    monkeypatch.setattr(sm, "apply_run", wrap(sm.apply_run))
+    out = sm.backfill(tmp_path, dry_run=False)
+    assert seen == ["plan_run: fenced", "apply_run: fenced"], seen
+    assert "WROTE 1 backfill event(s)." in out
