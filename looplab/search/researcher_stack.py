@@ -14,7 +14,7 @@ that stack was derived THREE times, by three different rules, and driven through
   with two separate role objects, so it is not unified at all. Measured: on a dataset task (no
   declared bounds) and on every `--backend toy` run the launch rule wrapped and the switch did not,
   so a Strategist's `bohb` there was bare ASHA;
-* the POOLED pairs (`orchestrator.py::_build_role_pairs`, the Layer-5 producer's lease) were the bare
+* the POOLED pairs (`node_build.py::_build_role_pairs`, the Layer-5 producer's lease) were the bare
   `make_roles` pair, so the speculative producer — AUTO-on for a greedy LLM run — proposed on an
   unwrapped role: under `surrogate_proposer` the primary proposed through the surrogate and the
   producer, one lane over, ignored it.

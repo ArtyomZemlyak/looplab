@@ -21,6 +21,7 @@ import pytest
 from looplab.engine.orchestrator import Engine
 from looplab.engine.eval_dispatch import EvalDispatchMixin
 from looplab.engine.forced_requests import ForcedRequestsMixin
+from looplab.engine.node_build import NodeBuildMixin
 from looplab.engine.reentry import ReentryMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
 from looplab.engine.setup_phase import SetupPhaseMixin
@@ -63,6 +64,18 @@ EVAL_DISPATCH_MEMBERS = ("_dispatch_evals", "_fold_if_tail_moved", "_skip_if_abo
 EVAL_DISPATCH_MODULE_NAMES = ("_HEAD_BYPASS_LIMIT", "budget_stop_recheck", "_run_terminal_gate",
                               "_eval_admission_current", "_eval_time_admission_refused",
                               "_reserve_eval_time", "_release_eval_time")
+
+# The node-creation spine — ENG1-04 step 4c — beside the build sub-helpers `node_build.py` already
+# held, with the module-level names only it reads.
+BUILD_SPINE_MEMBERS = (
+    "_create_node", "_model_for_arm", "_create_node_scoped", "_consume_node_build_telemetry",
+    "_commit_built_node", "_create_node_guarded", "_fail_reserved_build", "_prepare_node_idea",
+    "_build_role_pairs", "_offload_build", "_reserve_on_main_task", "_offload_node_build",
+    "_commit_rerun_card_on_main_task", "_commit_rerun_card", "_rerun_node",
+    "_prepare_injected_node", "_reserve_injected_node", "_create_injected_node",
+    "_consume_batch_proposal", "_await_batch_proposal")
+BUILD_SPINE_MODULE_NAMES = ("parent_generations_current", "stamp_proposal_span", "_OFFLOADED_BUILD",
+                            "_RerunCardCommit", "_InjectedNodePlan")
 
 
 def _homes(cls) -> dict[str, list[str]]:
@@ -206,6 +219,25 @@ def test_the_deferred_stop_is_one_class_under_both_spellings():
     from looplab.engine import eval_dispatch, orchestrator
 
     assert orchestrator._DeferredBudgetStop is eval_dispatch._DeferredBudgetStop
+
+
+@pytest.mark.parametrize("name", BUILD_SPINE_MEMBERS)
+def test_the_build_spine_resolves_to_its_mixin(name):
+    assert NodeBuildMixin in Engine.__mro__
+    assert name not in vars(Engine), f"a copy of {name} in the Engine body shadows the mixin's"
+    assert inspect.getattr_static(Engine, name) is vars(NodeBuildMixin)[name]
+
+
+@pytest.mark.parametrize("name", BUILD_SPINE_MODULE_NAMES)
+def test_a_name_the_build_spine_reads_has_no_second_spelling_on_the_orchestrator(name):
+    """`tests/test_the_reservation_stays_on_the_main_task.py` flips `_OFFLOADED_BUILD` on the module
+    `_reserve_on_main_task` reads it from; a copy left on `orchestrator` would take that flip and
+    reach nothing, and the test would pass over the branch it exists to drive."""
+    from looplab.engine import node_build, orchestrator
+
+    assert hasattr(node_build, name), f"{name} left `node_build.py` — re-point this guard"
+    assert not hasattr(orchestrator, name), f"orchestrator.{name} exists again and would reach nothing"
+    assert vars(NodeBuildMixin)["_reserve_on_main_task"].__globals__ is vars(node_build)
 
 
 def test_the_census_sees_a_copy_left_behind():

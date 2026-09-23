@@ -3088,7 +3088,7 @@ def test_a_pair_that_could_not_be_BUILT_is_retried_and_its_card_is_never_barred(
 
     MUTATIONS, each red here: restore the `producer_failed` close (a skipped done, the Card barred),
     close the head at once instead of retrying (a skipped done, no node), or drop the `_LOG.warning`
-    in `orchestrator.py::_build_role_pairs` (no record names the exception)."""
+    in `node_build.py::_build_role_pairs` (no record names the exception)."""
     factory_calls: list[int] = []
 
     def _factory_for(producer):

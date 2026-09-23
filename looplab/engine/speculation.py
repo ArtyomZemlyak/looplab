@@ -6,7 +6,7 @@ selection-affecting event that work leads to, and every speculative ``node_creat
 the main engine task.  That is THIS LANE's rule, not the run's, and the sentence used to read as the
 run's (review 2026-09-22, ES1-08): an evaluation child writes its own node's terminal (an anyio task
 on the same loop, under ``_write_lock``), and the parallel build's worker threads append their OWN
-node's rows — ``card_auto_dropped`` included, through ``orchestrator.py::_fail_reserved_build`` on a
+node's rows — ``card_auto_dropped`` included, through ``node_build.py::_fail_reserved_build`` on a
 build crash.  CLAUDE.md invariant #1 lists every typed exception.  The mixin is inert unless both
 Card selection and a positive, run-pinned ``speculation_depth`` are enabled.
 """
@@ -1163,7 +1163,7 @@ class SpeculationMixin:
         # real runs: the entire Card build vanished from `spans.jsonl` (238 s of one 28-minute run,
         # 21 min of one 37-minute run) while the cost ledger billed every call it made, which is what
         # made `looplab timings` account for ~13% of the wall clock. The serial path has had this
-        # since the beginning (`orchestrator.py::_create_node` opens `create_node`); speculation is
+        # since the beginning (`node_build.py::_create_node` opens `create_node`); speculation is
         # the path that never got it, and speculation now ships on.
         # `_op_span` (new_trace=True), not a child span, exactly like `propose` in the sibling
         # producer `_prepare_raw_card_stage`: an `anyio.to_thread` worker inherits a COPY of the
@@ -1369,10 +1369,10 @@ class SpeculationMixin:
                 # add_nodes extension rebuilds it — so a mid-build pause/budget crossing must NOT reach
                 # _fail_reserved_build's drop_card=True default and permanently card_auto_drop the Card
                 # (losing its hypothesis). Only real supersession drops the Card.
-                # The parent half is `orchestrator.py::parent_generations_current` — the one
+                # The parent half is `node_build.py::parent_generations_current` — the one
                 # spelling every creation site shares (review 2026-09-22, ENG1-11: this was its last
                 # inline copy, a negated `any` over the same four clauses).
-                from looplab.engine.orchestrator import parent_generations_current
+                from looplab.engine.node_build import parent_generations_current
                 superseded = (
                     latest.search_epoch != result.generation
                     or node_id in latest.aborted_nodes

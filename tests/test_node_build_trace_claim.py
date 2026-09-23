@@ -10,7 +10,7 @@ The measurement, 2026-08-14, over the whole `runs/` corpus:
   are the three `card_build` traces: the Developer's entire construction, `plan` and `stages`
   included, with `attributes={}` on every root. Node 2's trace was TWO spans.
 * the serial-path run `rubert-dr-0804` — 14,846 spans, NINE unattributed (0.1 %). Nothing is broken
-  there, because `orchestrator._create_node` opens `create_node` with the node id and the build runs
+  there, because `node_build._create_node` opens `create_node` with the node id and the build runs
   INSIDE it. This is a Card-lane defect, not a tracing one.
 
 WHY THE BUILD CANNOT SIMPLY CARRY `node_id`. `_build_requested_card` runs on a speculative producer
@@ -18,7 +18,7 @@ worker BEFORE any node id is reserved. The id it could compute is `_node_id_ceil
 that `_claim_requested_card_build` re-derives after that span has already closed — and the build may
 be refused (stale / budget / superseded) and mint no node at all. Stamping it would file a
 1,300-span build under a node that need not exist, which is the one thing a trace must never do
-(`orchestrator.stamp_proposal_span` states the same rule for `proposed_for_node`).
+(`node_build.stamp_proposal_span` states the same rule for `proposed_for_node`).
 
 SO THE POINTER RUNS THE OTHER WAY: the node NAMES its build, on the one span where both facts exist
 at once (`materialize_node`, which already carries `node_id` and `generation`). These tests drive

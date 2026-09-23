@@ -860,7 +860,7 @@ def test_novelty_sidecar_uses_the_final_reused_card_identity(tmp_path, monkeypat
 # The mint's round-trip proof.
 #
 # `Idea.model_config` is empty — no `validate_assignment` — and both proposal funnels admit an
-# existing instance without re-validating it (`orchestrator.py::_prepare_node_idea._link` and
+# existing instance without re-validating it (`node_build.py::_prepare_node_idea._link` and
 # `novelty.py::_propose_batch._link_card` share the `candidate if isinstance(candidate, Idea) else
 # Idea.model_validate(candidate)` shape). So ANY producer that assigns onto an Idea can reach the
 # writer with values the Idea's own validators would have changed, and because the Card's ownership

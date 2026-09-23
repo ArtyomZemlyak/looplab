@@ -114,9 +114,12 @@ def test_every_reservation_that_NAMES_an_anchor_names_its_attempt():
     about `_reserve_node_build`, which re-folds internally.
     """
     offenders = []
-    for rel in ("looplab/engine/orchestrator.py", "looplab/engine/ablation.py",
-                "looplab/engine/card_reservation.py", "looplab/engine/novelty.py",
-                "looplab/engine/speculation.py"):
+    # `node_build.py` since ENG1-04 step 4c: the build spine's `_create_node_scoped`, `_rerun_node`
+    # and `_create_injected_node` reserve there, and a file list that forgot the new home would
+    # scan less while staying green.
+    for rel in ("looplab/engine/orchestrator.py", "looplab/engine/node_build.py",
+                "looplab/engine/ablation.py", "looplab/engine/card_reservation.py",
+                "looplab/engine/novelty.py", "looplab/engine/speculation.py"):
         path = ROOT / rel
         if not path.is_file():
             continue

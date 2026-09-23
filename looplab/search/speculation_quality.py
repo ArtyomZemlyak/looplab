@@ -2231,7 +2231,7 @@ def _total_predicate(predicate, state, node, *, on_error: bool) -> bool:
 
 # The `node_failed.reason` values that mean "the BUILD LIFECYCLE threw this node away", as opposed to
 # "the experiment ran and produced a failure". Every one is written by
-# `engine/orchestrator.py::_fail_reserved_build` or by the speculation commit terminal beside it; none
+# `engine/node_build.py::_fail_reserved_build` or by the speculation commit terminal beside it; none
 # of them is ever the outcome of an evaluation.
 #
 # A REGISTRY, guarded two-way by `tests/test_speculation_product_admission.py`, for the reason every

@@ -2,7 +2,7 @@
 
 THE DEFECT, live in `runs/rubertlite-dr-unified-v5` and — identically — in `runs/rubert-dr-0807`
 one run earlier: node 0 was built for card-0 and failed (`no_metric`), the policy answered with
-`{"kind": "debug", "parent_id": 0}`, `orchestrator.py::_prepare_node_idea` filled that in with the
+`{"kind": "debug", "parent_id": 0}`, `node_build.py::_prepare_node_idea` filled that in with the
 PARENT'S OWN IDEA verbatim (only `operator` flipped — the run has three `propose` spans, one per
 draft, and none for this), and the mint saw a different action digest and wrote card-3 with a
 statement BYTE-IDENTICAL to card-0's. Two rows, one research question, and the operator reading the

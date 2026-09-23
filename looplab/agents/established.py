@@ -225,7 +225,7 @@ class EstablishedContext:
         #
         # PER THREAD, because the pointer it replaces was a per-STORE scalar and the store is
         # shared across CONCURRENT builds. Every build now runs in a worker
-        # (`orchestrator.py::_offload_build`), and `enter_workspace` is called on that worker at
+        # (`node_build.py::_offload_build`), and `enter_workspace` is called on that worker at
         # the node's own build boundary — so with one scalar, node 7 entering its workspace moved
         # node 3's pointer too: node 3's `record` stamped node 7's token onto its pages and node
         # 3's `render` read `here = <node 7's token>` and carried node 7's bytes into node 3's

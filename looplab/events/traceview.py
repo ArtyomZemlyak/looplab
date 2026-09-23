@@ -324,7 +324,7 @@ _SPAN_FIELDS = {
 _ATTRIBUTE_FIELDS = {
     # topology / conversation reconstruction
     "node_id", "generation", "phase", "phase_span", "input_from", "input_carry", "input_partial",
-    # The Researcher's CARD binding (orchestrator.stamp_proposal_span). `card_id` is the join that
+    # The Researcher's CARD binding (node_build.stamp_proposal_span). `card_id` is the join that
     # makes a card's own research reachable; `proposed_for_node` is the node the proposal was
     # prepared for and is deliberately NOT `node_id`, which would re-attribute the whole trace to
     # one node. Both must be on this allowlist or the projection silently drops them — which is
@@ -1070,7 +1070,7 @@ def claimed_build_traces(spans, *, _normalized: bool = False) -> dict:
     a producer could compute (`_node_id_ceiling`) is a PREDICTION that `_claim_requested_card_build`
     re-derives after the span has already closed, and the build may be refused as stale/budget/
     superseded and produce no node at all. A run-scoped span must not be made to lie about a node —
-    `orchestrator.stamp_proposal_span` states the same rule for `proposed_for_node`.
+    `node_build.stamp_proposal_span` states the same rule for `proposed_for_node`.
 
     SO THE POINTER RUNS THE OTHER WAY. The node knows its build the moment it commits, so the node
     names the trace (`speculation.py::_create_precoded_node` stamps `build_trace` on
@@ -2016,7 +2016,7 @@ def card_research_root_card(span) -> Optional[str]:
 
 
 # THE CARD IS THE UNIT OF RESEARCH. A Card is one hypothesis; the Researcher proposes it and the
-# Developer builds one or more NODES under it. Before `orchestrator.stamp_proposal_span` there was no
+# Developer builds one or more NODES under it. Before `node_build.stamp_proposal_span` there was no
 # join between the two halves at all (no span carried a card id, no card event carried a trace id),
 # so the two were only ever reachable from different screens — which is what made an operator hunt
 # around the UI for work that belongs to one story.

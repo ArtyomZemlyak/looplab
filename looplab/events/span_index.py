@@ -758,7 +758,7 @@ class SpanIndex:
                 self.node_tids[str(nid)].add(tid)
                 self._claim_build_trace(light, attributes, nid, tid)
             # A research root carries NO node_id (the proposal precedes the node, and
-            # `orchestrator.stamp_proposal_span` refuses to make a run-scoped span name one), so this
+            # `node_build.stamp_proposal_span` refuses to make a run-scoped span name one), so this
             # sits OUTSIDE the branch above rather than beside the claim.
             stamped = card_research_root_card(light)
             if stamped:

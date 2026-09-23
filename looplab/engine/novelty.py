@@ -52,7 +52,7 @@ _IDEA_VEC_KEY_CHARS = 4_096
 # happens before the offloaded call begins.
 #
 # THE SIZE IS DERIVED, NOT PICKED. Three lanes install the proposal sink and each is bounded to one
-# in flight: `orchestrator.py::_await_batch_proposal` and the per-action offload in
+# in flight: `node_build.py::_await_batch_proposal` and the per-action offload in
 # `card_reservation.py` are the two arms of ONE `if` on the loop task (serial, and the per-action
 # arm is a plain `for` with an `await` in the body), and `speculation.py::_produce_raw_card_stage`
 # is gated by the `_spec_raw_stage_inflight` boolean. Two can be in flight at once; four is that
@@ -330,7 +330,7 @@ class BatchProposal(NamedTuple):
 
     It used to hand three of these back through ENGINE ATTRIBUTES — `_pending_batch_telemetry`,
     `_pending_batch_dropped`, `_pending_batch_novelty_gated` — written from the worker thread the
-    batch runs on, read by `orchestrator.py::_consume_batch_proposal`, and reset by seventeen
+    batch runs on, read by `node_build.py::_consume_batch_proposal`, and reset by seventeen
     statements at eight sites in three files, in three different orders (doc 25 ES-08 is the
     ordering those resets protected: a later batch must never read an earlier batch's telemetry,
     drops or gate capability). A value has no reset to get wrong and no reader to reach it in the
@@ -378,7 +378,7 @@ class NoveltyGateMixin:
         the set from the tree — a count typed here rotted twice in two days, reading FOUR and
         THREE at once while the true set was neither). `_offload_under_proposal_sink` below installs it around
         BOTH offloaded proposal lanes — `card_reservation.py::_stage_card_creates` (per-action) and
-        `orchestrator.py::_await_batch_proposal` (batch) reach the sink only through that helper,
+        `node_build.py::_await_batch_proposal` (batch) reach the sink only through that helper,
         never by opening this context themselves — and `speculation.py::_prepare_raw_card_stage`
         installs it in Layer 5's isolated Researcher worker. All three lanes moved their paid
         provider wait onto a worker thread, where `_append_proposal_event` would otherwise fall
@@ -931,7 +931,7 @@ class NoveltyGateMixin:
         WHERE THIS RUNS, corrected 2026-08-31 — the sentence here said "in the MAIN task before the
         build fan-out, so it uses `self.researcher` (no pool race)", and the first half went false
         on 2026-08-30. Both call sites now execute this ON AN ANYIO WORKER THREAD, through
-        `orchestrator.py::_await_batch_proposal`, because it is a minutes-long paid provider wait
+        `node_build.py::_await_batch_proposal`, because it is a minutes-long paid provider wait
         with no `await` in it and as one event-loop callback it stopped everything.
 
         THE NO-RACE PROPERTY SURVIVES, but for a different reason than the old sentence gave, and

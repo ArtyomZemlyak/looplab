@@ -277,7 +277,7 @@ class _CardReservationPlan(NamedTuple):
 
     That "nothing is minted" is exactly why the claim it commits carries
     ``CLAIM_ATTACHED_FIELD``: every bare-reservation close path drops the card its marker names
-    (``orchestrator.py::_fail_reserved_build``), and for an attach that card belongs to the PARENT.
+    (``node_build.py::_fail_reserved_build``), and for an attach that card belongs to the PARENT.
     See ``_reservation_minted_card``.
     """
 
@@ -466,7 +466,7 @@ class CardReservationMixin:
 
         `Idea.model_config` is empty (`core/models.py`) — there is no `validate_assignment` — and the
         two proposal funnels admit an existing instance WITHOUT re-validating it
-        (`orchestrator.py::_prepare_node_idea._link` and `novelty.py::_propose_batch._link_card` both
+        (`node_build.py::_prepare_node_idea._link` and `novelty.py::_propose_batch._link_card` both
         spell `candidate if isinstance(candidate, Idea) else Idea.model_validate(candidate)`). So any
         producer that ASSIGNS onto an Idea escapes every validator on the way to the mint. Two live
         instances so far — `agents/roles.py::_clamp_fill`'s bounds clamp on a swept key, and
@@ -914,7 +914,7 @@ class CardReservationMixin:
 
         THE DEFECT THIS CLOSES, measured in `runs/rubertlite-dr-unified-v5`: node 0 was built for
         card-0 and failed (`no_metric`); the policy then planned `{"kind": "debug", "parent_id": 0}`;
-        `orchestrator.py::_prepare_node_idea` answered it with the PARENT'S OWN IDEA, verbatim, with
+        `node_build.py::_prepare_node_idea` answered it with the PARENT'S OWN IDEA, verbatim, with
         only `operator` flipped to "debug" — no Researcher call at all (the run's `spans.jsonl` has
         three `propose` spans, one per draft, and none for this) — and `_plan_native_card` saw a
         different action digest and minted card-3 with a statement BYTE-IDENTICAL to card-0's. Two
@@ -1009,7 +1009,7 @@ class CardReservationMixin:
 
         THE DEFECT THIS CLOSES, and it is strictly worse than the twin it replaced. A bare
         `node_building` reservation records the card it claimed, and every close path hands that
-        recorded id to `orchestrator.py::_fail_reserved_build` with `drop_card=True` — because until
+        recorded id to `node_build.py::_fail_reserved_build` with `drop_card=True` — because until
         the `attach` disposition existed, a claim's card was ALWAYS one the same reservation had just
         minted. An attach breaks that assumption at the one site that commits it: its marker names
         the PARENT's card. So a single SIGKILL between `node_building` and `node_created` made
@@ -1067,16 +1067,16 @@ class CardReservationMixin:
         it has five callers, three of which must never attach, and hardcoding it there made the
         opt-in claim in this docstring false the day it was written. Who opts in, and why:
 
-          * `orchestrator.py::_create_node_scoped` -> `_reserve_node_build(retry_attach=True)` —
+          * `node_build.py::_create_node_scoped` -> `_reserve_node_build(retry_attach=True)` —
             the ordinary build spine, and the one site that COMMITS an attach.
-          * `orchestrator.py::_prepare_node_idea._link` — the proposal half of that same spine; it
+          * `node_build.py::_prepare_node_idea._link` — the proposal half of that same spine; it
             must agree with the commit or the `idea.card_id != plan.card_id` fence refuses the
             build (see there for the one disagreement that is a RACE rather than a bug).
           * `_stage_prepared_card` — asks, then REFUSES, and names the refusal (see there).
 
         …and who deliberately does not:
 
-          * `orchestrator.py::_create_injected_node` — an operator-authored experiment. It carries
+          * `node_build.py::_create_injected_node` — an operator-authored experiment. It carries
             `source="operator"` and an `implementation_ref` binding ready-made code, and an attach
             discards BOTH (the durable receipt already exists and is immutable). Folding an
             operator's injected `debug` into the Researcher's card would file human work under an
@@ -1325,7 +1325,7 @@ class CardReservationMixin:
                     # would count a phantom loss on every exact twin.
                     #
                     # The loss that IS real — a fully paid propose refused because the board is busy
-                    # — lands in `orchestrator._prepare_node_idea._link`, which runs immediately
+                    # — lands in `node_build._prepare_node_idea._link`, which runs immediately
                     # after the proposal call and nowhere else. That is where the receipt is
                     # written; see it for the measurement.
                     _refused("card_duplicate")
@@ -1674,7 +1674,7 @@ class CardReservationMixin:
         try:
             if len(raw) > 1 and all(action.get("kind") == "draft" for action in raw):
                 # OFF THE EVENT-LOOP THREAD, through the SAME helper the other batch call site
-                # uses — see `orchestrator.py::_await_batch_proposal` for why the sink is not
+                # uses — see `node_build.py::_await_batch_proposal` for why the sink is not
                 # optional and why the beacon travels with it. This branch is reachable whenever a
                 # card run stages a multi-draft lane, e.g. an occupancy-paced create fired precisely
                 # BECAUSE an eval is in flight, and while it ran no eval terminal, watchdog tick or
@@ -2203,7 +2203,7 @@ class CardReservationMixin:
         """The `card_auto_dropped` row that retires ``card_id`` over ``events``, or None when a drop
         already stands (or there is no card). ONE spelling of the payload and of the idempotence
         rule for the two writers that need it: `_drop_card_once`'s own CAS, and the node-reset
-        re-proposal's single CAS'd batch (`orchestrator.py::_commit_rerun_card`, review 2026-09-22,
+        re-proposal's single CAS'd batch (`node_build.py::_commit_rerun_card`, review 2026-09-22,
         ENG1-05), which must fold the drop INTO its claim and so cannot call a helper that appends.
         """
         if not card_id:

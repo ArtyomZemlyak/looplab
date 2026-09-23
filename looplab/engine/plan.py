@@ -19,7 +19,7 @@ The plan is a FOLDED event (`EV_PLAN`, `RunState.plan`) written by the main task
   `search/policy.py::pareto_front`, the run's non-dominated set over the primary metric plus every
   authenticated, orientable extra metric — the metric leaders alone when no such axis exists, so
   the pick is the historical top-2 on every run that records one objective), else an `improve` of
-  the champion stamped `_sweep`, whose idea `engine/orchestrator.py::_prepare_node_idea` asks the
+  the champion stamped `_sweep`, whose idea `engine/node_build.py::_prepare_node_idea` asks the
   k-NN surrogate for (`search/surrogate.py`, bounds inferred from the run's own evaluated
   params; the LLM Researcher is its fallback below warm-up). A selected Card that already IS an
   endgame action (a merge of two evaluated nodes, an improve of the champion) keeps its slot.

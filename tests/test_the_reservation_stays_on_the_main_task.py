@@ -1,6 +1,6 @@
 """The serial build lane may run its PAID work in a worker; it may not mint a Card there.
 
-`orchestrator.py::_offload_build` (2026-09-06) moved the whole of `_create_node` off the loop,
+`node_build.py::_offload_build` (2026-09-06) moved the whole of `_create_node` off the loop,
 reservation included, and that took two FOLDED appends — `card_added` and `node_building` — off the
 main task, against `events/types.py`'s own statement about the Card ledger ("Main-task-written; NONE
 are BACKGROUND_APPENDABLE — a monotonic card_id cannot be background-minted") and against
@@ -84,7 +84,7 @@ def test_the_helper_marshals_only_when_it_is_actually_in_a_worker():
     Always-direct is exactly the pre-fix behaviour and would leave the test above the only guard;
     always-marshal would deadlock on the main task, where there is no loop to hand work to.
     """
-    from looplab.engine import orchestrator
+    from looplab.engine import node_build
 
     engine = make_engine(pathlib.Path(tempfile.mkdtemp()))
     calls: list[str] = []
@@ -100,11 +100,11 @@ def test_the_helper_marshals_only_when_it_is_actually_in_a_worker():
     loop_thread = threading.current_thread().name
 
     def worker():
-        orchestrator._OFFLOADED_BUILD.value = True
+        node_build._OFFLOADED_BUILD.value = True
         try:
             return engine._reserve_on_main_task({"kind": "draft"})
         finally:
-            orchestrator._OFFLOADED_BUILD.value = False
+            node_build._OFFLOADED_BUILD.value = False
 
     async def drive():
         return await anyio.to_thread.run_sync(worker)

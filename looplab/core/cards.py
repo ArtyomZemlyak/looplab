@@ -1375,7 +1375,7 @@ class Card(BaseModel):
     # `id` is the WORK-ITEM identity and `identity.action_digest` binds the executable action; neither
     # can say "these two work items ask the same question". Until these two fields existed the work-item
     # identity was doing double duty, so a debug RETRY of a failed card — which reuses the parent's Idea
-    # verbatim and only flips `operator` (`engine/orchestrator.py::_prepare_node_idea`) — minted a second
+    # verbatim and only flips `operator` (`engine/node_build.py::_prepare_node_idea`) — minted a second
     # card with a different action digest and the board rendered ONE hypothesis TWICE. Measured live in
     # `runs/rubert-dr-0807`: card-0 (draft) and card-1 (debug) byte-identical in statement, rationale, all
     # six params and footprint, differing only in `idea.operator`.

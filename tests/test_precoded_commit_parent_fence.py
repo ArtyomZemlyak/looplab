@@ -2,7 +2,7 @@
 
 `speculation.py::_create_precoded_node` revalidates a reserved Card build on the commit fold and
 separates a GENUINE supersession (the Card is dropped) from a TRANSIENT freeze (the Card is kept for a
-later rebuild). Its parent half was the last inline copy of `orchestrator.py::parent_generations_current`
+later rebuild). Its parent half was the last inline copy of `node_build.py::parent_generations_current`
 — a negated `any` over the four clauses every other creation path already shares — and it reads the
 helper now. The helper's own truth table is `tests/test_node_commit_epilogue.py`'s; what this file
 pins is that the commit ASKS it, which no existing test did: dropping the parent clause from the

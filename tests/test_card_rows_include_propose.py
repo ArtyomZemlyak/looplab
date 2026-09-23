@@ -3,7 +3,7 @@
 `CARD_UNATTRIBUTED`'s comment said "Every `propose` generation lands here by construction on a
 card-driven run, because a proposal is made BEFORE the card it may become exists", and
 `token_spend_by_card`'s docstring said the table was "what each experiment's BUILD cost". Both were
-backwards: `orchestrator.py::stamp_proposal_span` stamps the card id INSIDE the open `propose` span
+backwards: `node_build.py::stamp_proposal_span` stamps the card id INSIDE the open `propose` span
 the moment `_link` mints the card, and spans are written on CLOSE, so the id is on the row
 `_owning_card` walks to.
 

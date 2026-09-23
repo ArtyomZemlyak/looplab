@@ -29,21 +29,23 @@ import pathlib
 
 import pytest
 
-from looplab.engine import card_reservation, novelty, orchestrator
+from looplab.engine import card_reservation, node_build, novelty
 from looplab.events import types as event_types
 
 # BOTH OFFLOAD LANES, since 2026-08-31. Every guard below parsed `card_reservation.py` ONLY, so none
-# covered the BATCH wrapper `orchestrator.py::_await_batch_proposal` — the lane a run on the shipped
+# covered the BATCH wrapper `node_build.py::_await_batch_proposal` — the lane a run on the shipped
 # default width actually takes. Same rule, same shape, two homes; a guard that names a file rather
 # than a property is one refactor from covering nothing, which is this module's own subject.
 #
 # SCOPED TO THE OWNING FUNCTION, not to the module, and that is load-bearing rather than tidy:
-# `orchestrator.py` holds FOUR `to_thread.run_sync(partial(...))` calls (`_await_batch_proposal`,
+# `orchestrator.py` held FOUR `to_thread.run_sync(partial(...))` calls (`_await_batch_proposal`,
 # `_bg`, `_research_overlap_loop`, `_spawn_research`), so a module-wide search for "the offload"
 # would have locked onto the research lane and reported green about a region nobody asked it to
-# check.
+# check. The lanes' home moved (ENG1-04 step 4c: the batch wrapper and `_offload_build` live in
+# `node_build.py` with the rest of the build spine, beside its two `from_thread` main-task hops),
+# and the rule did not: a module is never the unit.
 _LANES = (("per-action", card_reservation, "_stage_card_creates"),
-          ("batch", orchestrator, "_await_batch_proposal"),
+          ("batch", node_build, "_await_batch_proposal"),
           # THE THIRD LANE, added 2026-09-07 after it breached the invariant the other two were
           # fixed for. `_offload_build` carries the SERIAL build, the fork's build and the
           # node-reset rebuild onto a worker, and it used a bare `to_thread` on the reasoning that
@@ -52,7 +54,7 @@ _LANES = (("per-action", card_reservation, "_stage_card_creates"),
           # `novelty_rejected` / `novelty_graded` / `cross_run_prior` landed from the thread —
           # FOLDED and authority-bearing. This list is why it went unseen: two lanes were
           # enumerated and the third simply was not in it.
-          ("serial build", orchestrator, "_offload_build"))
+          ("serial build", node_build, "_offload_build"))
 
 # CLOSED 2026-09-08: `test_the_real_batch_closure_writes_no_folded_row_off_the_loop_thread`
 # (bottom of this file) drives the REAL `_propose_batch` through the REAL wrapper with only

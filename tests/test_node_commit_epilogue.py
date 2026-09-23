@@ -19,7 +19,8 @@ import pytest
 
 from looplab.core.models import Idea, durable_idea_payload
 from looplab.engine import orchestrator as orch
-from looplab.engine.orchestrator import Engine, parent_generations_current
+from looplab.engine.node_build import parent_generations_current
+from looplab.engine.orchestrator import Engine
 from looplab.events.replay import fold
 from looplab.events.types import EV_NODE_CREATED, EV_NODE_FAILED
 

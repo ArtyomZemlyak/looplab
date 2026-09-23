@@ -965,7 +965,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # shared when the settled build width is >1 (canonical llm_parallel; legacy parallel_build).
         # This is LLM/build isolation, not proof of the later evaluation's CPU/GPU allocation.
         # BARE on purpose: the engine gives each pair it mints the primary's FREE wrapper layers
-        # (`orchestrator.py::_build_role_pairs` -> `researcher_stack.py::pooled_researcher`), which
+        # (`node_build.py::_build_role_pairs` -> `researcher_stack.py::pooled_researcher`), which
         # a closure over the LAUNCH settings could not keep in step through a mid-run BOHB switch.
         role_factory=(lambda: role_builder(task, settings, run_dir)),
         proxy_scorer=proxy_scorer,

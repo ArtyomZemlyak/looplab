@@ -50,8 +50,9 @@ def test_no_module_respells_the_sentinel_literally():
         "is_developer_error, never a re-spelled literal:\n" + "\n".join(offenders))
 
 
+# `orchestrator.py`'s row left with the build spine (ENG1-04 step 4c): every consumer it had now
+# lives in `node_build.py`, whose row was already here.
 @pytest.mark.parametrize("relative,symbol", [
-    ("engine/orchestrator.py", "is_developer_error"),
     ("engine/node_build.py", "is_developer_error"),
     ("engine/speculation.py", "is_developer_error"),
     ("adapters/repo_developer.py", "DEVELOPER_ERROR_PREFIX"),

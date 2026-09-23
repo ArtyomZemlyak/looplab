@@ -198,7 +198,7 @@ def echo_reconciliation(*, wall, intervals: list, attributed: float, durable_eve
 # `events/eval_occupancy.py` records: a span sidecar can be cleared, torn or switched off, and a
 # question about the RUN must still have an answer. Only the propose itself has no durable boundary
 # pair of its own (a node id is reserved AFTER the proposal is final — see
-# `orchestrator.py::_prepare_node_idea` — so `node_building` bounds it from above but does not say
+# `node_build.py::_prepare_node_idea` — so `node_building` bounds it from above but does not say
 # when the model finished), and that one row is read from the `propose` span: the same population the
 # 2026-08-25 table was built from.
 

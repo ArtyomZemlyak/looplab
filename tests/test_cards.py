@@ -1404,7 +1404,7 @@ def _retry_run(second_operator="debug"):
         _node_for_card(0, "card-0", _RETRY_STATEMENT, operator="draft"),
         ("node_failed", {"node_id": 0, "reason": "lightning_ddp", "eval_seconds": 1}),
         # The repair path copies the PARENT's Idea verbatim and flips only `operator`
-        # (`engine/orchestrator.py::_prepare_node_idea`), so the statement is byte-identical.
+        # (`engine/node_build.py::_prepare_node_idea`), so the statement is byte-identical.
         _receipted_card_added("card-1", _RETRY_STATEMENT, operator=second_operator,
                               parents=(0,), at_node=1),
         _node_for_card(1, "card-1", _RETRY_STATEMENT, operator=second_operator, parents=(0,)),

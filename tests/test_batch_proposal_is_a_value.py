@@ -3,7 +3,7 @@
 `novelty.py::_propose_batch` used to return only its ideas and hand everything else back through
 three engine attributes — `_pending_batch_telemetry`, `_pending_batch_dropped`,
 `_pending_batch_novelty_gated` — written from the worker thread the batch runs on, read by
-`orchestrator.py::_consume_batch_proposal`, and reset by seventeen statements at eight sites in
+`node_build.py::_consume_batch_proposal`, and reset by seventeen statements at eight sites in
 three files, in three different orders. The gate capability was also consumed BY IDENTITY in
 `_prepare_node_idea` (`preproposed is batch_idea` -> `already_gated=True`), so a batch whose caller
 forgot the reset — or raised before reaching it — left a live novelty-gate bypass on the engine for

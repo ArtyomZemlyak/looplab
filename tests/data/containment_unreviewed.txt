@@ -33,7 +33,7 @@ looplab/engine/novelty.py::NoveltyGateMixin._llm_novelty_gate#0
 looplab/engine/novelty.py::NoveltyGateMixin._propose_batch#1
 looplab/engine/orchestrator.py::Engine.__init__#0
 looplab/engine/orchestrator.py::Engine.__init__#4
-looplab/engine/orchestrator.py::Engine._create_node_scoped#0
+looplab/engine/node_build.py::NodeBuildMixin._create_node_scoped#0
 looplab/engine/proposal_cues.py::ProposalCuesMixin._cue_cross_run_advisory#0
 looplab/engine/proposal_cues.py::ProposalCuesMixin._set_complexity_hint#0
 looplab/engine/proposal_cues.py::ProposalCuesMixin._set_complexity_hint#1

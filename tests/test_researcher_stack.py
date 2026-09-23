@@ -126,7 +126,7 @@ def test_the_pooled_pair_is_the_primary_stack_minus_its_paid_layers(
     exclusion in `speculation.py::_producer_role_pair` — and is still its own objects.
 
     MUTATIONS, each red here: drop the `pooled_researcher(...)` call in
-    `orchestrator.py::_build_role_pairs` (the surrogate configs: the pooled chain is bare again), or
+    `node_build.py::_build_role_pairs` (the surrogate configs: the pooled chain is bare again), or
     hand pooled pairs the whole launch stack (every paid config: a panel appears on the pool)."""
     _offline_llm(monkeypatch)
     engine = _build(tmp_path, f"{config}-{kind}", _task(kind, tmp_path), **_CONFIGS[config])

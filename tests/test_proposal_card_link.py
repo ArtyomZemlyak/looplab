@@ -11,7 +11,7 @@ it went unnoticed is that no surface had ever asked.
 from __future__ import annotations
 
 from looplab.core.models import Idea
-from looplab.engine.orchestrator import stamp_proposal_span
+from looplab.engine.node_build import stamp_proposal_span
 
 
 class _Span:
@@ -77,9 +77,10 @@ def test_no_idea_still_records_the_node_and_never_invents_a_card():
 def test_the_re_proposal_site_passes_no_idea():
     import inspect
 
-    from looplab.engine import orchestrator
+    # The three sites live with the build spine in `node_build.py` since ENG1-04 step 4c.
+    from looplab.engine import node_build
 
-    source = inspect.getsource(orchestrator)
+    source = inspect.getsource(node_build)
     assert "stamp_proposal_span(_span, None, node_id=node.id)" in source
     assert "stamp_proposal_span(_span, node.idea" not in source, (
         "stamping the node's CURRENT idea there files a re-proposal under the card it replaced")
@@ -93,9 +94,10 @@ def test_every_propose_span_site_stamps():
     paths."""
     import inspect
 
-    from looplab.engine import orchestrator
+    # The three sites live with the build spine in `node_build.py` since ENG1-04 step 4c.
+    from looplab.engine import node_build
 
-    source = inspect.getsource(orchestrator)
+    source = inspect.getsource(node_build)
     opened = source.count('self.tracer.span("propose") as _span')
     unbound = source.count('self.tracer.span("propose"):')
     assert unbound == 0, "a `propose` span opened without binding its handle cannot be stamped"

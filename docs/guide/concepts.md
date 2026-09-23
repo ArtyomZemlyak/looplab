@@ -2189,6 +2189,7 @@ Where each concept lives in the code:
 | Durable per-run observed-usage ledger | `engine/costs.py` |
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
 | Control loop + crash-resume (run-start pins + re-entry checks; the setup phase; the launch record and its knobs) | `engine/orchestrator.py`, `engine/reentry.py`, `engine/setup_phase.py`, `engine/knobs.py` |
+| Node creation · the non-Card eval dispatch · forced steering (fork/inject/ablation/confirm) | `engine/node_build.py`, `engine/eval_dispatch.py`, `engine/forced_requests.py` |
 | The two pacing rules (node-count `cadence_due`, occupancy `occupancy_due`) | `engine/cadence.py` |
 | Live-log watchdogs: the training-health judge and its loop; what the engine measures from the log; the kill / repair / arming gates; which log is whose + the attempt-bounded readers; the ASHA rank watchdog | `engine/train_monitor.py`, `engine/loss_trajectory.py`, `engine/monitor_gates.py`, `engine/eval_log_plan.py`, `engine/asha_monitor.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |

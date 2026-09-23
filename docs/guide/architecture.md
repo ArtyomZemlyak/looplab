@@ -128,9 +128,9 @@ Two kinds of work are therefore given their own pool rather than the default:
 | Pool | Size | Who rides it | Why it must not queue behind an eval |
 |---|---|---|---|
 | `evaluate.py::_watch_limiter` | 8 | watchdog / ASHA / train-monitor ticks | a liveness poll that queues goes blind exactly when a kill matters |
-| `novelty.py::proposal_limiter` | 4 | the three proposal lanes; since 2026-09-06 also every BUILD (`orchestrator.py::_offload_build` — the serial lane, the fork, the node-reset rebuild) and the repair path's three paid calls (`evaluate.py`, through the proposal sink) | a paid proposal that queues starves the board while the GPUs idle; a build or a repair that ran ON the loop held it for a 116–276 s median (doc 52 row 12) |
+| `novelty.py::proposal_limiter` | 4 | the three proposal lanes; since 2026-09-06 also every BUILD (`node_build.py::_offload_build` — the serial lane, the fork, the node-reset rebuild) and the repair path's three paid calls (`evaluate.py`, through the proposal sink) | a paid proposal that queues starves the board while the GPUs idle; a build or a repair that ran ON the loop held it for a 116–276 s median (doc 52 row 12) |
 
-The proposal size is **derived**: the batch lane (`orchestrator.py::_await_batch_proposal`) and the
+The proposal size is **derived**: the batch lane (`node_build.py::_await_batch_proposal`) and the
 per-action lane (`card_reservation.py`) are the two arms of one `if` on the loop task, and
 `speculation.py::_produce_raw_card_stage` is gated by the `_spec_raw_stage_inflight` boolean — at
 most two coexist, doubled for headroom.
@@ -169,7 +169,7 @@ deliberate:
 
 | Lane | Publishes | Why |
 |---|---|---|
-| batch (`orchestrator`) | always | a refused proposal is when the receipt matters most (`bd182357`) |
+| batch (`node_build`) | always | a refused proposal is when the receipt matters most (`bd182357`) |
 | per-action (`card_reservation`) | always | same rule; this lane never abandons and re-makes |
 | speculative raw stage | on the branch that hands the work on | an attach refusal COMMITS the prefix (the paid call happened); a stale-fence refusal DROPS it (the proposal is being remade) |
 
@@ -358,6 +358,7 @@ flowchart LR
 | Concept | Module |
 |---|---|
 | Control loop + crash-resume (the `run_started` pins and the re-entry checks that adopt or refuse them; the one-time setup phase that appends `run_started`; the launch record `self.options` and the knobs declared once over it) | `engine/orchestrator.py`, `engine/reentry.py`, `engine/setup_phase.py`, `engine/knobs.py` |
+| Node creation (propose → reserve → build → commit, the rerun and inject builds, the worker offload) · the non-Card evaluation dispatch · the operator's forced steering (fork, inject, forced ablation, confirm) | `engine/node_build.py`, `engine/eval_dispatch.py`, `engine/forced_requests.py` |
 | The two pacing clocks: the node-count window (`cadence_due`, behind lessons/deep-research/report/Strategist/concept cadences) and the occupancy pace (`occupancy_due` — produce while an eval is running and the board behind it does not cover the width; records no `at_node`, has no setting of its own) | `engine/cadence.py`, `engine/orchestrator.py::_occupancy_paced_creates` |
 | Standing watches + continuous work: one durable assistant record (`<runs>/assistant/.watches/`) and lazy scheduler for typed run/experiment/stage waits, every-N monitoring, and bounded resumable goal/TODO/checkpoint cycles — server-evaluated conditions, pinned target identity and permission mode | `serve/assistant_watch.py`, `serve/routers/assistant.py`, `ui/src/assistantWatchModel.js` |
 | Append-only log · pure fold · SQLite read-model — the fold's handler families (concepts, journals, cards, selection, operator requests) in their own modules over a shared context, `replay.py` keeping `fold`, the merged `_HANDLERS`, the node lifecycle and the run-state transitions | `events/eventstore.py`, `events/replay.py`, `events/replay_ctx.py`, `events/replay_concepts.py`, `events/replay_journals.py`, `events/replay_cards.py`, `events/replay_selection.py`, `events/replay_requests.py`, `events/readmodel.py` |

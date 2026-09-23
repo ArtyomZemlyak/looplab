@@ -69,7 +69,15 @@ def test_the_reason_is_the_callers_but_the_rest_is_not():
     assert first[1][1]["node_id"] == second[1][1]["node_id"]
 
 
-ENGINE_SITES = ["engine/orchestrator.py", "engine/speculation.py"]
+# The build spine left `orchestrator.py` for `node_build.py` (ENG1-04 step 4c), the builder's own
+# home — so that module is scanned with the builder's definition cut out (`_scanned_source`).
+ENGINE_SITES = ["engine/node_build.py", "engine/speculation.py"]
+
+
+def _scanned_source(relative: str) -> str:
+    source = (_PKG / relative).read_text(encoding="utf-8")
+    definition = inspect.getsource(developer_crash_records)
+    return source.replace(definition, "") if definition in source else source
 
 
 @pytest.mark.parametrize("relative", ENGINE_SITES)
@@ -79,7 +87,7 @@ def test_no_engine_module_respells_the_pair(relative):
     `"reason": "developer_crash"` is the signature of a hand-built terminal. It may appear only in
     the builder; a READ of `error_reason == "developer_crash"` is a different thing and is not
     matched by this pattern."""
-    source = (_PKG / relative).read_text(encoding="utf-8")
+    source = _scanned_source(relative)
     offenders = [
         f"{relative}:{number}" for number, line in enumerate(source.splitlines(), 1)
         if '"reason": "developer_crash"' in line.split("#", 1)[0]
@@ -106,8 +114,9 @@ def test_the_fanout_site_still_queues_its_pause_instead_of_appending_it():
     FOLDED, run-GLOBAL event outside the worker seam (which allows only a worker's OWN node's
     node_created / node_failed / per-node audit). It is splice-neutral for `paused` alone but NOT
     against a concurrent EV_RESUME, so the MAIN task appends it after the join."""
-    # utf-8-sig: orchestrator.py carries a BOM, which `ast.parse` rejects as a non-printable char.
-    source = (_PKG / "engine/orchestrator.py").read_text(encoding="utf-8-sig")
+    # utf-8-sig: orchestrator.py carried a BOM, which `ast.parse` rejects as a non-printable char;
+    # the build spine lives in `node_build.py` since ENG1-04 step 4c.
+    source = (_PKG / "engine/node_build.py").read_text(encoding="utf-8-sig")
     tree = ast.parse(source)
     create_node = next(node for node in ast.walk(tree)
                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -133,7 +142,7 @@ def test_every_creation_path_consumes_its_build_telemetry_through_one_helper():
     a different experiment. `_emit_role_telemetry` exists to prevent exactly that, and it cannot if
     the consuming half is spelled three times.
     """
-    source = (_PKG / "engine/orchestrator.py").read_text(encoding="utf-8-sig")
+    source = (_PKG / "engine/node_build.py").read_text(encoding="utf-8-sig")
     tree = ast.parse(source)
     bodies = {node.name: ast.unparse(node) for node in ast.walk(tree)
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -148,7 +157,7 @@ def test_every_creation_path_consumes_its_build_telemetry_through_one_helper():
 
 def test_the_consume_helper_pairs_with_the_discard_used_on_failure_paths():
     """Consume and discard are the two halves of one rule: telemetry never outlives its build."""
-    source = (_PKG / "engine/orchestrator.py").read_text(encoding="utf-8-sig")
+    source = (_PKG / "engine/node_build.py").read_text(encoding="utf-8-sig")
     helper = ast.unparse(next(
         node for node in ast.walk(ast.parse(source))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))

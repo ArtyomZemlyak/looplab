@@ -104,7 +104,7 @@ def _tokens_of(usage) -> tuple[int, int, int]:
 # record.
 #
 # A `propose` GENERATION DOES NOT LAND HERE, and this comment claimed the opposite until 2026-08-30.
-# `orchestrator.py::stamp_proposal_span` stamps the card id INSIDE the open `propose` span the moment
+# `node_build.py::stamp_proposal_span` stamps the card id INSIDE the open `propose` span the moment
 # `_link` mints the card, and spans are written on CLOSE, so the id is on the row `_owning_card`
 # walks to. MEASURED on `runs/rubertlite-dr-unified-v9` by folding its real spans twice, with and
 # without the propose phase: ALL 27,436,262 propose tokens resolve to a real card and `(no card)`

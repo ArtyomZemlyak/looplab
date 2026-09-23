@@ -87,7 +87,8 @@ def test_the_engine_READS_it_at_the_one_proposal_funnel():
 
     Mutation: delete the getattr and this names the funnel that stopped looking.
     """
-    src = (ROOT / "looplab/engine/orchestrator.py").read_text()
+    # The one funnel lives with the build spine in `node_build.py` since ENG1-04 step 4c.
+    src = (ROOT / "looplab/engine/node_build.py").read_text()
     fn = next(n for n in ast.walk(ast.parse(src))
               if isinstance(n, ast.FunctionDef) and n.name == "_prepare_node_idea")
     reads = [call for call in ast.walk(fn)
@@ -294,7 +295,8 @@ def test_the_endgame_sweep_reads_its_OWN_receipt_not_the_researchers_stale_one(
 
     MUTATIONS: drop `receipt_from=` from the sweep's `_link` reads -> the warm half warns; drop the
     gate's hand-back -> the final read after a re-proposal still asks the sweep."""
-    import looplab.engine.orchestrator as orchestrator_module
+    # Patched where `_prepare_node_idea` READS it — its module since ENG1-04 step 4c.
+    import looplab.engine.node_build as build_module
     from looplab.adapters.toytask import ToyTask
     from looplab.engine.plan import META_SWEEP
     from looplab.events.replay import fold
@@ -307,13 +309,13 @@ def test_the_endgame_sweep_reads_its_OWN_receipt_not_the_researchers_stale_one(
         "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
     monkeypatch.setattr(engine, "_apply_novelty_gate", lambda _state, idea, **_kw: idea)
     asked: list = []
-    real_reader = orchestrator_module.researcher_budget_exhausted
+    real_reader = build_module.researcher_budget_exhausted
 
     def _asked(handle):
         asked.append(handle)
         return real_reader(handle)
 
-    monkeypatch.setattr(orchestrator_module, "researcher_budget_exhausted", _asked)
+    monkeypatch.setattr(build_module, "researcher_budget_exhausted", _asked)
 
     def _evaluated(i: int) -> None:
         engine.store.append("node_created", {

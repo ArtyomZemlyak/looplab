@@ -2376,7 +2376,7 @@ def build_router(srv) -> APIRouter:
 
         A Card is one hypothesis; the Researcher proposes it and the Developer builds one or more
         nodes under it. Those two halves lived on different screens because no join existed between
-        them — see `orchestrator.stamp_proposal_span`. This is the surface that join was for.
+        them — see `node_build.stamp_proposal_span`. This is the surface that join was for.
 
         Sections are LIGHT rows naming their traces, not trees: the reader opens the one they want
         through `/trace/by_trace/{trace_id}` for a proposal and `/nodes/{n}/trace` for a node, both of

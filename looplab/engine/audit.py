@@ -44,7 +44,7 @@ class AuditMixin:
 
         `report=` IS THE ENVELOPE'S COPY, and it is what a caller that made the call should pass.
         Pooling the developer per build was only half the fix: every build now runs in a worker
-        (`orchestrator.py::_offload_build`), and `last_report` is read HERE, after
+        (`node_build.py::_offload_build`), and `last_report` is read HERE, after
         `developer_call_lock` has been released. Between a worker returning from `_run_developer`
         and reaching this line, a sibling's `_discard_node_build_telemetry` can `setattr(current,
         'last_report', None)` — also unlocked — so this node emits no `agent_validated` row at all;

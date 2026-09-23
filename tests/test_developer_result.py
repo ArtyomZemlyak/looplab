@@ -562,7 +562,7 @@ def test_the_clear_is_inside_the_locked_window_and_not_at_the_call_site():
     `_reset_developer_footprint` used to be called by the five build sites themselves, before the
     Developer call — an UNLOCKED write to a possibly-shared instance. That was safe only while every
     such site ran on the loop thread; once the serial build, the fork's build and the node-reset
-    rebuild moved off it (`orchestrator.py::_offload_build`, 2026-09-06), the write could land inside
+    rebuild moved off it (`node_build.py::_offload_build`, 2026-09-06), the write could land inside
     another caller's locked window. Driven here rather than pinned, because the defect is a
     schedule: the call site is one `with` away from looking correct in either arrangement.
     """

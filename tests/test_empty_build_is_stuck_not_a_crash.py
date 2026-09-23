@@ -25,7 +25,8 @@ from _source_scan import iter_sources
 from looplab.adapters.repo_developer import empty_build_refusal
 from looplab.core.models import is_developer_error, is_developer_stuck
 
-_ORCH = Path(__file__).resolve().parents[1] / "looplab" / "engine" / "orchestrator.py"
+# The fresh-build path's home: it left `orchestrator.py` with the build spine (ENG1-04 step 4c).
+_BUILD_SPINE = Path(__file__).resolve().parents[1] / "looplab" / "engine" / "node_build.py"
 
 
 def _refusal(files=None, deleted=None):
@@ -57,7 +58,7 @@ def test_a_build_that_wrote_something_is_not_refused_at_all():
 def test_the_fresh_build_path_handles_stuck_before_it_handles_a_crash():
     """Order matters: `is_developer_error` does not match the stuck spelling, so without this
     branch -- or with it placed after -- the sentinel reaches the code path and is evaluated."""
-    body = _ORCH.read_text(encoding="utf-8")
+    body = _BUILD_SPINE.read_text(encoding="utf-8")
     stuck = body.find("elif is_developer_stuck(code):")
     crash = body.find("elif is_developer_error(code):")
     assert stuck != -1, "the fresh-build path lost its stuck branch"
@@ -66,7 +67,7 @@ def test_the_fresh_build_path_handles_stuck_before_it_handles_a_crash():
 
 
 def test_the_stuck_branch_fails_the_node_without_asking_for_a_pause():
-    body = _ORCH.read_text(encoding="utf-8")
+    body = _BUILD_SPINE.read_text(encoding="utf-8")
     start = body.find("elif is_developer_stuck(code):")
     block = body[start:body.find("elif is_developer_error(code):", start)]
     # CODE ONLY. The block's own comment explains what a pause would do and why this branch does

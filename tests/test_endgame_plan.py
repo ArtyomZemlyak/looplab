@@ -115,10 +115,11 @@ def test_the_validating_wrapper_and_the_facade_forward_the_keyword():
 def test_both_engine_merge_sites_pass_the_co_parents():
     from tests._source_scan import function_tree
     import inspect
-    from looplab.engine import speculation, orchestrator
+    from looplab.engine import node_build, speculation
     src = inspect.getsource(speculation)
     assert 'co_parents=parents[1:] if self._merge_mode == "ensemble" else ()' in src
-    src2 = inspect.getsource(orchestrator)
+    # The serial/pooled build's merge site lives with the build spine since ENG1-04 step 4c.
+    src2 = inspect.getsource(node_build)
     assert 'co_parents=pnodes[1:] if self._merge_mode == "ensemble" else ()' in src2
     assert function_tree  # the scanner is importable (tier-3 pins above are the residue)
 

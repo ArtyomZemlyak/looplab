@@ -2,7 +2,7 @@
 
 A Card is one hypothesis; the Researcher proposes it and the Developer builds one or more NODES under
 it. Those two halves lived on different screens because no join existed between them at all — see
-`orchestrator.stamp_proposal_span` for the measurement. This projection is what that join was for.
+`node_build.stamp_proposal_span` for the measurement. This projection is what that join was for.
 
 The rule that matters most here is the one about NOT matching: a card whose research cannot be
 identified returns an empty list rather than a guessed one. Attributing another hypothesis's
