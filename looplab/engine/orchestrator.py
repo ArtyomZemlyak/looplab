@@ -77,7 +77,7 @@ from looplab.engine.costs import bind_cost_accountants, find_cost_accountants, s
 from looplab.engine.crash_repair import CrashRepairMixin
 from looplab.engine.eval_dispatch import EvalDispatchMixin
 from looplab.engine.eval_stages import EvalStagesMixin
-from looplab.engine.evaluate import EvaluateMixin
+from looplab.engine.evaluate import EvaluateMixin, handed_admission_fold
 from looplab.engine.node_build import NodeBuildMixin, developer_crash_records
 from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
 from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
@@ -4489,6 +4489,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             break        # the ceiling fired: finish what is running, start nothing
                         cur_events = self.store.read_all()
                         cur = fold(cur_events)
+                        # This lane's `(tail_seq, state)`: moved by the resource wait's tail gate
+                        # below, and HANDED to the evaluation's ADMIT when it starts (EVT-04).
+                        waited_fold = (cur_events[-1].seq if cur_events else -1, cur)
                         if self._skip_if_aborted(a, cur):
                             continue
                         # Re-check the eval-compute budget BEFORE each eval (not just per loop
@@ -4518,7 +4521,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             # since (review 2026-09-22, EVT-04): `None` here re-folded that identical
                             # prefix on EVERY eval's first tick, 60 times in a 60-node toy run. The
                             # gate still re-folds the moment anything appends.
-                            waited_fold = (cur_events[-1].seq if cur_events else -1, cur)
                             while True:
                                 if budget_stop_recheck(budget_stop):
                                     skip_eval = True
@@ -4600,7 +4602,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                         # spending (`resources.py::eval_time_admission_blocked`).
                         _reserve_eval_time(self, a["node_id"], generation, node)
                         try:
-                            await self._evaluate(a["node_id"], limiter, max_es)
+                            # ADMIT's fold IS this one while the tail stays put (review 2026-09-22,
+                            # EVT-04): it re-folded the identical prefix for every evaluation, 60 of
+                            # 60 in a 60-node toy run. The state is given up here — nothing below
+                            # reads it, and the next iteration folds afresh — see
+                            # `evaluate.py::handed_admission_fold` for why that is not a shared memo.
+                            with handed_admission_fold(a["node_id"], *waited_fold):
+                                await self._evaluate(a["node_id"], limiter, max_es)
                         finally:
                             _release_eval_time(self, a["node_id"], generation)
                             if reservation is not None and generation is not None:

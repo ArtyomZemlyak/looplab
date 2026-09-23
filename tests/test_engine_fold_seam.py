@@ -79,7 +79,10 @@ def test_a_patched_seam_sees_the_folds_of_the_other_engine_modules(tmp_path, mon
         return real(events)
 
     monkeypatch.setattr(orchestrator, "fold", counting_fold)
-    state = anyio.run(make_engine(tmp_path / "run", n_seeds=2, max_nodes=3).run)
+    # TWO evaluation slots: the SERIAL dispatcher hands an evaluation's ADMIT its own fold (review
+    # 2026-09-22, EVT-04, `evaluate.py::handed_admission_fold`), so on a serial toy run nothing in
+    # evaluate.py folds at all; a parallel slot hands nothing, and its ADMIT folds for itself.
+    state = anyio.run(make_engine(tmp_path / "run", n_seeds=2, max_nodes=3, eval_parallel=2).run)
     assert state.finished
     others = {name for name in callers if name != "looplab.engine.orchestrator"}
     # The toy run evaluates, finalizes and writes its lessons: each of those folds lives outside

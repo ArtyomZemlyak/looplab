@@ -46,6 +46,8 @@ Invariant #2 lives in this file: exactly ONE terminal event per node, emitted at
 attempt loop. Trust scans (reward-hack / code-leakage / critic) stay lazy, method-local imports."""
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import logging
 import threading
@@ -935,6 +937,63 @@ PHASE_RETRY = "retry"        # start the next attempt (`continue`)
 PHASE_SETTLED = "settled"    # leave the attempt loop and write the terminal (`break`)
 PHASE_RETURN = "return"      # the node is closed — a terminal was written, or a reset owns it
 PHASE_SIGNALS = frozenset({PHASE_NEXT, PHASE_RETRY, PHASE_SETTLED, PHASE_RETURN})
+
+
+# THE SERIAL DISPATCHER'S ADMISSION FOLD, HANDED TO ADMIT (review 2026-09-22, EVT-04). The serial
+# branch of `orchestrator.py::_dispatch_evals` folds the log to admit an evaluation — at the loop
+# top, then through its tail gate `_fold_if_tail_moved` across the resource wait — and ADMIT, the
+# first thing `_evaluate` does, folded the same log again a few statements later. Measured on the
+# reviewer's run (the documented offline smoke, `-s max_nodes=60`): all 60 of ADMIT's folds were an
+# identical prefix of the dispatcher's, one whole fold per evaluated node spent for nothing.
+#
+# WHY IT MAY BE HANDED, and why that is not the declined shared memo
+# (`shared-fold-memo-races-the-build-worker`, doc 25 ES-12). That item refuses ONE `RunState` held
+# by two owners at once — a build worker thread and `_evaluate`'s `node.rerun_stage = None`. Here
+# ownership MOVES: the dispatcher's fold is its own loop-local value (the research task it spawns is
+# handed the TURN's state, a different object), nothing between the fold and this hand-off writes
+# it (every admission helper only reads), the dispatcher is suspended in the `await` for the whole
+# evaluation and folds afresh on its next iteration, and ADMIT takes the value exactly once. Sound
+# for the same reason the dispatcher's own gate is: everything that could change what ADMIT decides
+# lands by APPEND and seqs are strictly monotonic, so an unmoved tail IS the fold ADMIT would take;
+# a moved one re-folds, exactly as before.
+#
+# WHY A TASK-LOCAL VARIABLE rather than a parameter of `_evaluate`: that method is a seam the suite
+# stubs heavily — 31 doubles on 2026-09-23 (23 patched in with `monkeypatch.setattr`, 8 stub-class
+# methods), written against its three positional parameters — and a keyword the dispatcher passed
+# would be a `TypeError` in each one it reaches. And rather than an
+# engine attribute: an attribute is visible to every concurrent lane (the Card lanes, the parallel
+# slots, confirm), which is the shared memo again. A `ContextVar` set around the one `await` is seen
+# only by that call, whose first phase consumes it before it spawns anything; every other caller of
+# `_evaluate` (the parallel slots, the Card lanes, recovery, the tests) hands nothing and folds as
+# before.
+_HANDED_ADMISSION_FOLD: contextvars.ContextVar = contextvars.ContextVar(
+    "looplab_handed_admission_fold", default=None)
+
+
+@contextlib.contextmanager
+def handed_admission_fold(node_id, tail_seq: int, state):
+    """Hand `_evaluate`'s ADMIT the caller's own fold of the log as it stood at `tail_seq`.
+
+    The caller gives up the state: it must neither read nor write it once the `await` inside this
+    block starts (ADMIT may keep it as `EvalAttempt.state` for the whole evaluation)."""
+    token = _HANDED_ADMISSION_FOLD.set((int(node_id), int(tail_seq), state))
+    try:
+        yield
+    finally:
+        _HANDED_ADMISSION_FOLD.reset(token)
+
+
+def _take_handed_admission_fold(node_id, tail_seq: int):
+    """The handed fold when it is this node's and the log has not moved since; else None.
+
+    Consumed whether or not it matches, so a nested `_evaluate` in the same task (a stub that calls
+    the real method twice, say) can never receive a state an earlier ADMIT already owns."""
+    handed = _HANDED_ADMISSION_FOLD.get()
+    if handed is None:
+        return None
+    _HANDED_ADMISSION_FOLD.set(None)
+    handed_node, handed_tail, state = handed
+    return state if handed_node == int(node_id) and handed_tail == tail_seq else None
 
 
 @dataclass(slots=True)
@@ -2547,7 +2606,12 @@ class EvaluateMixin:
         (each has already written its own terminal, or owes none); `PHASE_NEXT` once the sandbox may
         be entered."""
         a.events_at_start = self.store.read_all()
-        a.state = fold(a.events_at_start)
+        # The serial dispatcher's own admission fold when the log has not moved since it took it
+        # (EVT-04) — see `handed_admission_fold`; every other caller hands nothing and folds here.
+        a.state = _take_handed_admission_fold(
+            a.node_id, a.events_at_start[-1].seq if a.events_at_start else -1)
+        if a.state is None:
+            a.state = fold(a.events_at_start)
         a.node = a.state.nodes.get(a.node_id)
         # The dispatcher checks this before and after resource admission, but _evaluate is also a
         # defensive public seam used by recovery/tests. An operator Card drop that predates this
