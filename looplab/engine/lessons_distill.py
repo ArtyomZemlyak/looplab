@@ -622,14 +622,17 @@ class LessonDistillMixin:
         emit, they don't investigate for 300 turns).
 
         `.replace()`, not `.with_defaults()`: the tight cap must WIN over the configured
-        `agent_max_turns`, which is what the old `opts["max_turns"] = 15` assignment did."""
+        `agent_max_turns`, which is what the old `opts["max_turns"] = 15` assignment did.
+
+        The configured options are `Engine._loop_opts`, which the CLI builds from the run's Settings.
+        This read `loop_opts_from_settings(getattr(engine, "settings", None))` until review
+        2026-09-22, and no real Engine has a `settings` attribute, so every run-end reflection ran on
+        the DEFAULT options: an operator's `context_budget_chars` (1,000,000 shipped; lowered for a
+        small-context model) never reached it, and the loop compacted at its built-in fallback. The
+        blind handler that guarded that read went with it — `coerce` of None or of the bundle the
+        CLI built has nothing left to contain."""
         from looplab.agents.loop_options import LoopOptions
-        try:
-            from looplab.agents.agent import loop_opts_from_settings
-            opts = LoopOptions.coerce(loop_opts_from_settings(getattr(self._e, "settings", None)))
-        except Exception:  # noqa: BLE001
-            opts = LoopOptions()
-        return opts.replace(max_turns=15)
+        return LoopOptions.coerce(getattr(self._e, "_loop_opts", None)).replace(max_turns=15)
 
     def reflect_lessons(self, final: RunState, best, fp: list) -> list:
         """LLM reflection over the whole run → 1-3 GENERALIZABLE lessons (transferable good/bad

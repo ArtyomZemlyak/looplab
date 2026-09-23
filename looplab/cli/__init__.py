@@ -985,6 +985,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # Every pure-config Settings→Engine knob travels as ONE bundle (BACKLOG §4); only the built
     # OBJECTS (roles, sandbox, policy, strategist, scorers, …) and genuinely CLI-specific values
     # (crash_after comes from a CLI flag, not Settings) remain explicit kwargs.
+    from looplab.agents.tool_loop import loop_opts_from_settings
+
     engine = Engine(
         run_dir,
         task=task,
@@ -1036,6 +1038,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # uses for the case/KB index; shares its content-hash cache). None when memora is off; a
         # dead LLM endpoint degrades to the deterministic lexical abstractor inside make_abstractor.
         lesson_abstractor=_make_lesson_abstractor(settings),
+        # The operator's tool-loop options for the engine's OWN agent loops (run-end reflection):
+        # the engine holds no Settings, so the one place that does builds them here.
+        loop_opts=loop_opts_from_settings(settings),
     )
     # CLI-owned annotations, never read by the engine. `wrap_up_degradation_warning` is what the
     # wrap-up commands close with, so their last line says whether the artifacts they just wrote

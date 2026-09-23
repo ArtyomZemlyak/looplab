@@ -172,9 +172,11 @@ class CurationProtocolMixin:
                              client) -> dict:
         from looplab.core.redact import redact_persisted_text
 
+        # The steward client's own model, else "unknown". It used to fall back to
+        # `engine.settings.llm_model`, which no real Engine has (review 2026-09-22, found by ENG1-03's
+        # knob census): the fallback only ever answered for a test double, and "unknown" is what
+        # every real run with no client model already recorded.
         model = getattr(client, "model", None) if client is not None else None
-        if not model:
-            model = getattr(getattr(self._e, "settings", None), "llm_model", None)
         model = redact_persisted_text(
             model or "unknown", max_chars=200, entropy=True, single_line=True)
         return {

@@ -938,6 +938,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # rebuild policies with the same run-wide settings.
         embedder=None,                       # text→vector callable (default: zero-dep hash_embed)
         lesson_abstractor=None,              # Memora synergy: harmonic recall over cross-run lessons
+        loop_opts=None,                      # the operator's tool-loop options, for the engine's OWN
+        #                                      agent loops (run-end reflection); None => the defaults
         _speculation_gate_calibration: bool = False,  # private mechanics-test/bootstrap seam
         _speculation_runtime_scope_sha256: Optional[str] = None,
         # Private CLI→Engine provenance seam. Narrow calibration/receipt paths independently
@@ -1361,6 +1363,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # cross-run LESSONS tier so lesson retrieval gains anchor-expansion (harmonic recall)
         # instead of fingerprint-Jaccard alone. None (memora off) => the legacy Jaccard-only path.
         self._lesson_abstractor = lesson_abstractor
+        # The operator's configured tool-loop options (`agents/tool_loop.py::loop_opts_from_settings`)
+        # for the agent loops the ENGINE runs itself rather than a role — the run-end reflection and
+        # skill distillation (`lessons_distill.py::_reflect_loop_opts`). The CLI holds the Settings
+        # and hands them in; None (a bare Engine) keeps the defaults those loops always got. Review
+        # 2026-09-22 (found by ENG1-03's knob census): they read `getattr(engine, "settings", None)`,
+        # an attribute no real Engine has, so no operator's options ever reached them.
+        self._loop_opts = loop_opts
         self._exploit_suite = None   # 4.3 hardened ruleset; loaded once memory_dir is set (below)
         self._reflection_priors = reflection_priors
         # M6 comparative lessons: credit-assigned pair distillation (run-end and, when the
