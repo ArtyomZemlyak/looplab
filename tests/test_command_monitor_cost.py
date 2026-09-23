@@ -53,8 +53,40 @@ class _FinalizingEngine:
         return 4242
 
 
-def _finalize_under_a_live_engine(tmp_path, monkeypatch, *, observation: float):
-    """A durable Finalize command, admitted but not yet executed, over an engine that is alive."""
+class _MonitorClock:
+    """`run_commands`' clock, DRIVEN by the monitor's own sleeps (review 2026-09-22, WIN-4).
+
+    The two window tests below measure what the monitor pays over an OBSERVATION WINDOW, and that
+    window was wall-clock: how many ticks fit in it was a function of what one tick costs on the
+    host (a record save, a log append, an index read), so a slower host fit fewer — Windows CI run
+    36 (35823390348) counted 19 against the premise's 20. Here `time()`/`monotonic()` move only
+    when the monitor sleeps its `poll_interval`, so a window is exactly `observation /
+    poll_interval` ticks on any host, and the rate limit is measured on the same clock the gate
+    reads. Everything else the module reads off `time` is the real module."""
+
+    def __init__(self):
+        self.now = time.time()          # epoch-based, so the record's wall-clock fields stay sane
+
+    def time(self) -> float:
+        return self.now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(0.0, float(seconds))
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _finalize_under_a_live_engine(tmp_path, monkeypatch, *, observation: float,
+                                  clock: "_MonitorClock | None" = None):
+    """A durable Finalize command, admitted but not yet executed, over an engine that is alive.
+    With `clock`, the command service runs on it from admission on — the deadlines it stamps
+    included."""
+    if clock is not None:
+        monkeypatch.setattr(rc, "time", clock)
     rd = tmp_path / "demo"
     rd.mkdir()
     store = EventStore(rd / "events.jsonl")
@@ -82,9 +114,10 @@ def _finalize_under_a_live_engine(tmp_path, monkeypatch, *, observation: float):
 class _Meter:
     """Counts log folds and `RunState` deep copies, and brackets the monitor LOOP with snapshots:
     the first tick's heartbeat opens the window, the deadline exit (`_terminalize_expired`, which
-    takes its own fresh look on purpose) closes it."""
+    takes its own fresh look on purpose) closes it. `clock` stamps the window: the monitor's own, so
+    elapsed time is read where the gate reads it."""
 
-    def __init__(self, monkeypatch, commands, *, on_tick=None):
+    def __init__(self, monkeypatch, commands, *, on_tick=None, clock=time.monotonic):
         self.folds = self.copies = self.ticks = 0
         self.opened = self.closed = None
         real_fold = command_observation.fold
@@ -103,7 +136,7 @@ class _Meter:
 
         def heartbeat(rd, command_id):
             if self.opened is None:
-                self.opened = (self.folds, self.copies, time.monotonic())
+                self.opened = (self.folds, self.copies, clock())
             self.ticks += 1
             if on_tick is not None:
                 on_tick(self.ticks)
@@ -112,7 +145,7 @@ class _Meter:
         real_expire = commands._terminalize_expired
 
         def expire(*args, **kwargs):
-            self.closed = (self.folds, self.copies, time.monotonic())
+            self.closed = (self.folds, self.copies, clock())
             return real_expire(*args, **kwargs)
 
         monkeypatch.setattr(command_observation, "fold", counting_fold)
@@ -127,9 +160,10 @@ class _Meter:
 
 def test_an_unchanged_log_costs_the_finalize_monitor_no_fold_and_at_most_one_copy(
         tmp_path, monkeypatch):
+    clock = _MonitorClock()
     commands, rd, engine, (run_dir, path, record) = _finalize_under_a_live_engine(
-        tmp_path, monkeypatch, observation=0.8)
-    meter = _Meter(monkeypatch, commands)
+        tmp_path, monkeypatch, observation=0.8, clock=clock)
+    meter = _Meter(monkeypatch, commands, clock=clock.monotonic)
 
     commands._execute(run_dir, path, record, claimed=False)
 
@@ -146,11 +180,16 @@ def test_an_unchanged_log_costs_the_finalize_monitor_no_fold_and_at_most_one_cop
 def test_a_growing_log_is_re_read_at_most_once_per_recheck_interval(tmp_path, monkeypatch):
     """The finalization TAIL: the engine keeps appending, so the revision moves on every tick. The
     state-reading ask is rate-limited to the tail waiter's own interval instead of refolding the
-    whole log at the poll rate."""
+    whole log at the poll rate.
+
+    On the monitor's own clock (`_MonitorClock`): the window holds 120 ticks on every host, each one
+    growing the log, and "at most once per recheck interval" is judged on the interval the gate
+    measures. On the wall clock this premise was a count of how many ticks a host fits in 1.2 s."""
+    clock = _MonitorClock()
     commands, rd, _engine, (run_dir, path, record) = _finalize_under_a_live_engine(
-        tmp_path, monkeypatch, observation=1.2)
+        tmp_path, monkeypatch, observation=1.2, clock=clock)
     store = EventStore(rd / "events.jsonl")
-    meter = _Meter(monkeypatch, commands, on_tick=lambda n: store.append(
+    meter = _Meter(monkeypatch, commands, clock=clock.monotonic, on_tick=lambda n: store.append(
         "setup_step", {"step": f"wrap-up {n}"}))
 
     commands._execute(run_dir, path, record, claimed=False)
