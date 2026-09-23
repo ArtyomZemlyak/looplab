@@ -1237,6 +1237,20 @@ def finalize(
     roll-up, tree.html). Works whether the run is live or already `stop`ped. Idempotent."""
     # `healthy=True`: fail closed on a mid-file corruption before appending (P0-4).
     store = _require_run_dir(run_dir, healthy=True)
+    # Command functions are also part of the Python compatibility surface (`looplab.cli.finalize(rd)`
+    # in integrations/tests). In a direct call Typer leaves its OptionInfo default object in place;
+    # only an actual Path is an explicit override.
+    snap = task_file if isinstance(task_file, Path) else (run_dir / "task.snapshot.json")
+    # READ WHAT THE WRAP-UP SPENDS UNDER BEFORE WRITING ANYTHING (review 2026-09-22, the W2-2 tail).
+    # The strict read — which REFUSES a snapshot this build cannot read, an unknown key included
+    # (`core/config.py::CONFIG_SNAPSHOT_SCHEMA`) — ran AFTER the stop intent below was durably
+    # appended, so a refused `finalize` had still stopped the run: a live engine honours `run_abort`
+    # at its next boundary, and the operator was told, at exit 2, that nothing had happened. It is
+    # read once, lazily, after the already-finalized check (a pure read that needs no settings) and
+    # before either exit of the loop; with no task snapshot there is no wrap-up here to spend, so
+    # the intent is still recorded for a running engine that reads its own settings. To stop a run
+    # whose snapshot this build refuses, `looplab stop` reads no settings at all.
+    settings = None
     # Record exactly one stop intent. The server may already have appended it before spawning this
     # command; two direct CLIs can also race. A tail CAS makes both cases idempotent. A terminal run
     # whose current finish is only partially finalized repairs that finish first instead of creating
@@ -1262,6 +1276,9 @@ def finalize(
             typer.echo(f"already finalized {run_dir} — nothing to do "
                        f"(finished, wrap-up complete, no pending finalize, no pending resume)")
             return
+        if settings is None and snap.exists():
+            settings = load_run_settings(run_dir, strict=True)
+            task = _load_task(snap, existing_run=True)
         if wrap_up_incomplete or _pending_finalize(before):
             break
         tail = events[-1].seq if events else -1
@@ -1271,23 +1288,17 @@ def finalize(
             break
         except EventStoreConcurrencyError:
             continue
-    # Command functions are also part of the Python compatibility surface (`looplab.cli.finalize(rd)`
-    # in integrations/tests). In a direct call Typer leaves its OptionInfo default object in place;
-    # only an actual Path is an explicit override.
-    snap = task_file if isinstance(task_file, Path) else (run_dir / "task.snapshot.json")
-    if not snap.exists():
+    if settings is None:
         typer.echo(f"marked {run_dir} for finalize; a running engine will wrap it up "
                    f"(task file not found: {snap})")
         return
-    settings = load_run_settings(run_dir, strict=True)
     # `wrap_up_only` unconditionally: this command's whole contract is "stop it AND wrap it up". It
     # has already appended the stop intent above, so the only move the loop below has left is to
     # emit the final report and finish — it cannot propose, so an unreachable endpoint is a warning
     # about which artifacts the wrap-up loses, not a reason to refuse the wrap-up. Before this, a run
     # whose endpoint had since died could not be finalized AT ALL, and the refusal blamed "empty
     # fallback proposals" on a run that will never propose again.
-    eng = _engine(run_dir, _load_task(snap, existing_run=True), settings, crash_after=None,
-                  wrap_up_only=True)
+    eng = _engine(run_dir, task, settings, crash_after=None, wrap_up_only=True)
     _preflight_speculation_authority(eng)
     with _engine_singleton(run_dir) as ok:
         if not ok:

@@ -636,20 +636,45 @@ def test_resume_refuses_a_snapshot_key_this_build_does_not_know_before_it_writes
 
 
 def test_finalize_refuses_the_same_unknown_key_instead_of_wrapping_up_without_it(tmp_path):
-    """Finalize runs PAID stewards under these settings, so it is a spending path too. (It records
-    its stop intent before it reads the snapshot, as it always has; what it must not do is the
-    wrap-up.)"""
-    from looplab.events.eventstore import EventStore
-
+    """Finalize runs PAID stewards under these settings, so it is a spending path too — and, like
+    resume, it refuses BEFORE it writes. It used to record its stop intent first and read the
+    snapshot second, so a refused finalize had still stopped the run (a live engine honours
+    `run_abort` at its next boundary) while the operator was told, at exit 2, that nothing happened
+    (review 2026-09-22, the W2-2 tail). MUTATION: read the settings after the append -> a
+    `run_abort` lands in the log."""
     run_dir = tmp_path / "newer-snapshot-finalize"
-    _snapshot_run(run_dir, llm_spend_cap_from_a_newer_build=0.25)
+    before = _snapshot_run(run_dir, llm_spend_cap_from_a_newer_build=0.25)
 
     result = runner.invoke(app, ["finalize", str(run_dir)])
 
     assert result.exit_code == REFUSAL_EXIT_CODE, result.output
     assert "llm_spend_cap_from_a_newer_build" in result.output
-    types = [event.type for event in EventStore(run_dir / "events.jsonl").read_all()]
-    assert "run_finished" not in types, "the wrap-up ran on settings that dropped a key"
+    assert {name: (run_dir / name).read_bytes() for name in before} == before, (
+        "a refused finalize wrote to the run")
+
+
+def test_finalize_refuses_an_unreadable_snapshot_before_writing_and_its_no_op_still_reads_none(
+        tmp_path):
+    """The other refusal the strict read makes (a snapshot that is not JSON) is refused before the
+    write too, and a run with no task snapshot — no wrap-up here to spend — still has its intent
+    recorded for a running engine to wrap up under its own settings. (The already-finalized exit
+    is pinned in `tests/test_finalization_recovery.py`.)"""
+    from looplab.events.eventstore import EventStore
+
+    run_dir = tmp_path / "corrupt-snapshot-finalize"
+    before = _snapshot_run(run_dir)
+    (run_dir / "config.snapshot.json").write_text("{not json", encoding="utf-8")
+    before["config.snapshot.json"] = (run_dir / "config.snapshot.json").read_bytes()
+
+    result = runner.invoke(app, ["finalize", str(run_dir)])
+
+    assert result.exit_code == REFUSAL_EXIT_CODE, result.output
+    assert {name: (run_dir / name).read_bytes() for name in before} == before
+
+    (run_dir / "task.snapshot.json").unlink()
+    marked = runner.invoke(app, ["finalize", str(run_dir)])
+    assert marked.exit_code == 0 and "marked" in marked.output, marked.output
+    assert [e.type for e in EventStore(run_dir / "events.jsonl").read_all()][-1] == "run_abort"
 
 
 def test_a_read_only_loader_keeps_the_recorded_snapshot_and_a_retired_key_resumes(tmp_path):

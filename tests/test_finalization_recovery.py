@@ -540,6 +540,22 @@ def test_cli_finalize_fully_complete_is_a_pure_noop(tmp_path):
     assert not state.finalization_pending()
 
 
+def test_cli_finalize_no_op_reads_no_settings_so_an_unreadable_snapshot_cannot_refuse_it(tmp_path):
+    """The already-finalized exit is a pure read. Since the strict settings read moved BEFORE the stop
+    intent (so a refused finalize writes nothing), it must still come AFTER this exit: a complete
+    run answers "nothing to do" whatever its snapshot holds."""
+    import looplab.cli.run_cmds as cmds
+
+    run_dir = tmp_path / "run"
+    store, _ = _terminal_store(run_dir, marked=True)
+    (run_dir / "config.snapshot.json").write_text("{not json", encoding="utf-8")
+    before = [(e.type, e.data) for e in store.read_all()]
+
+    cmds.finalize(run_dir)
+
+    assert [(e.type, e.data) for e in store.read_all()] == before
+
+
 def test_cli_finalize_serves_preexisting_request_on_finished_without_search(tmp_path, monkeypatch):
     import looplab.cli.run_cmds as cmds
 
