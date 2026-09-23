@@ -165,7 +165,11 @@ def node_attempt(state, nid: int) -> Optional[int]:
 def node_attempt_from_payload(payload_state: dict, nid: int) -> Optional[int]:
     """The SAME rule, over the SERIALIZED `/state` payload instead of a folded `RunState`.
 
-    `serve/routers/runs.py` needs the attempt from its metadata-keyed payload cache — four fresh
+    (Since review 2026-09-22, SRV2-05, the trace family reads `serve/appstate.py::TraceFacts`, which
+    applies the typed `node_attempt` above; this spelling stays the rule for any reader holding only
+    a payload, and `tests/test_trace_facts_and_sse_offload.py` holds the two to one answer.)
+
+    `serve/routers/runs.py` needed the attempt from its metadata-keyed payload cache — four fresh
     folds every four seconds would defeat the indexed trace path — and had a second, untyped
     derivation for it: dict spelunking that re-guessed key types (`nodes.get(str(nid), nodes.get(nid))`),
     re-guessed the `buildings`/`building` marker shape, and depended on `_public_state_value` not

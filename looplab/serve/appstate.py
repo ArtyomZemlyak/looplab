@@ -22,12 +22,14 @@ import threading
 from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, NamedTuple, Optional
+from types import MappingProxyType
+from typing import Callable, Mapping, NamedTuple, Optional
 
 from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
+from looplab.core.node_evidence import node_attempt
 from looplab.core.pathsafe import is_reparse, run_child_name_defect, validate_run_child
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
@@ -164,6 +166,61 @@ class _StateSlot(NamedTuple):
     entry: tuple
 
 
+#: How many runs' `TraceFacts` one server keeps: one slot per run dir, REPLACED when the log's
+#: identity moves (exactly like the live payload slot), LRU across runs. A slot is a few strings and
+#: one int per node — the bound is on the runs, not on the bytes.
+_TRACE_FACTS_MAX = 64
+
+
+class TraceFacts(NamedTuple):
+    """What the trace family reads off a run's fold, and nothing else (review 2026-09-22, SRV2-05).
+
+    Every trace-family poll (`/nodes/{nid}/trace|logs|conversation|episodes`, `/trace`,
+    `/trace/tail`) needs the three identity scalars the projection it renders reads, and ONE node's
+    current attempt for the lifecycle CAS taken before and after its read. It got both by building
+    the WHOLE public state — fold, public projection, dump: 650-760 ms per poll measured on a live
+    11 MB run, whose every provider call appends and so misses the payload cache — to read four
+    numbers. These are those numbers as VALUES: strings, a float and a read-only map of ints,
+    extracted from one fold nobody else ever sees. That is the line the permanently declined
+    `shared-fold-memo-races-the-build-worker` item (docs/25) draws — an independent snapshot, never
+    a shared mutable `RunState`.
+
+    `run_id` / `task_id` / `total_eval_seconds` are the only fields `events/traceview.py` reads off
+    the "state" it is handed, so this tuple IS that argument (`AppState.trace_scalars`).
+    """
+
+    run_id: str
+    task_id: str
+    total_eval_seconds: float
+    attempts: Mapping
+
+    def attempt(self, nid) -> Optional[int]:
+        """`core/node_evidence.py::node_attempt` of the fold, for `nid`. Precomputed for every id the
+        rule can answer for — a folded node or a pre-create building marker — so a miss IS the
+        rule's own `None` ("neither folded nor building")."""
+        return self.attempts.get(nid)
+
+
+def trace_facts_of(state) -> TraceFacts:
+    """The `TraceFacts` of one folded `RunState` — the ONE extraction, through the ONE attempt rule.
+
+    The candidates are exactly the ids `node_attempt` can answer for (`_node_attempt` consults the
+    folded nodes, then `buildings`, then the singular `building` marker), so a lookup of any other
+    id answering None is the rule's answer, not a gap in the table."""
+    candidates = set(state.nodes) | set(state.buildings)
+    building = state.building
+    if isinstance(building, dict) and building.get("node_id") is not None:
+        candidates.add(building.get("node_id"))
+    attempts = {}
+    for nid in candidates:
+        value = node_attempt(state, nid)
+        if value is not None:
+            attempts[nid] = value
+    return TraceFacts(run_id=state.run_id or "", task_id=state.task_id or "",
+                      total_eval_seconds=float(state.total_eval_seconds or 0.0),
+                      attempts=MappingProxyType(attempts))
+
+
 @contextmanager
 def request_fold_scope():
     """Memoize `AppState.state` for the duration of one request. Nesting is safe (inner wins).
@@ -225,11 +282,16 @@ class AppState:
         # rather than one lock per run (a lock table would itself need bounding) or one global lock
         # (a slow build of one run would stall every other run's first read).
         self._state_build_locks = tuple(threading.RLock() for _ in range(_STATE_BUILD_STRIPES))
-        # Guards the state-cache insert+evict for the same reason as the trace-view lock below: /state,
-        # the SSE stream, and the /trace + /nodes routes (via trace_scalars -> state_payload) all reach
-        # state_payload concurrently on the threadpool, and `pop(next(iter(dict)))` on a dict another
-        # thread is inserting into raises "dictionary changed size during iteration" (a 500).
+        # Guards the state-cache insert+evict for the same reason as the trace-view lock below: /state
+        # and the SSE stream reach state_payload concurrently on the threadpool (and the /trace +
+        # /nodes routes reach the trace facts below the same way), and `pop(next(iter(dict)))` on a
+        # dict another thread is inserting into raises "dictionary changed size during iteration".
         self._state_cache_lock = threading.Lock()
+        # The trace family's NARROW read (review 2026-09-22, SRV2-05; see `TraceFacts`): per run dir,
+        # `(events identity, TraceFacts)` — immutable values extracted from a fold that is never kept.
+        # Its own single-flight stripes: a facts fold must not queue behind a whole payload build.
+        self._trace_facts: "OrderedDict[str, tuple]" = OrderedDict()
+        self._trace_fact_locks = tuple(threading.Lock() for _ in range(_STATE_BUILD_STRIPES))
         # Per-run event-log INTEGRITY receipt, keyed by the same `file_identity` (see `log_integrity`).
         # Deliberately a separate map from the state payload cache: that one holds a slot per
         # (run, audience) plus historical prefixes, while this answers ONE question about the file and
@@ -778,22 +840,71 @@ class AppState:
             "engine_running": state.get("engine_running"),
         }
 
-    def trace_scalars(self, rd: Path):
-        """A lightweight state carrying ONLY the three fields the trace projections read
-        (`build_trace_view` → run_id/task_id/total_eval_seconds; `build_conversation` → run_id/task_id).
-        Pulled from the CACHED `state_payload` so the trace hot path never triggers a SECOND full fold
-        of events.jsonl just to read three scalars (the old `/trace` folded the whole 1 GB log for them).
-        Falls back to empty scalars if the log can't be folded — the trace view (spans) still renders."""
-        from types import SimpleNamespace
+    def trace_facts(self, rd: Path) -> TraceFacts:
+        """The run's `TraceFacts`, cached as VALUES by the log's file identity (SRV2-05).
+
+        An unchanged log is a stat and a lookup. A new identity — every append of a live run — is ONE
+        fresh fold (`self.state`, so a request that already folded this identity reuses it) from
+        which the facts are extracted; the `RunState` itself is never retained, and never built into
+        a public payload. Keyed by the identity stat'ed BEFORE the fold and stored only when a stat
+        after it agrees, so bytes appended during the fold are never filed under the older identity.
+        Raises whatever the fold's read raises (the coded `event_log_unreadable` 503 included) — the
+        same failures the payload it replaces raised.
+        """
+        key = str(rd)
+        identity = self._trace_fact_identity(rd)
+        hit = self._cached_trace_facts(key, identity)
+        if hit is not None:
+            return hit
+        with self._trace_fact_locks[hash(key) % len(self._trace_fact_locks)]:
+            # SINGLE FLIGHT against a FRESH stat: a poll that waited behind another's fold serves
+            # that fold's facts, or folds the identity that is on disk now.
+            identity = self._trace_fact_identity(rd)
+            hit = self._cached_trace_facts(key, identity)
+            if hit is not None:
+                return hit
+            facts = trace_facts_of(self.state(rd))
+            if identity is not None and self._trace_fact_identity(rd) == identity:
+                with self._state_cache_lock:
+                    self._trace_facts[key] = (identity, facts)
+                    self._trace_facts.move_to_end(key)
+                    while len(self._trace_facts) > _TRACE_FACTS_MAX:
+                        self._trace_facts.popitem(last=False)
+            return facts
+
+    @staticmethod
+    def _trace_fact_identity(rd: Path):
         try:
-            s = self.state_payload(rd)["state"]
+            return file_identity((Path(rd) / "events.jsonl").stat())
+        except OSError:
+            return None
+
+    def _cached_trace_facts(self, key: str, identity) -> Optional[TraceFacts]:
+        if identity is None:
+            return None
+        with self._state_cache_lock:
+            hit = self._trace_facts.get(key)
+            if hit is None or hit[0] != identity:
+                return None
+            self._trace_facts.move_to_end(key)
+            return hit[1]
+
+    def trace_scalars(self, rd: Path) -> TraceFacts:
+        """A lightweight state carrying ONLY the fields the trace projections read
+        (`build_trace_view` → run_id/task_id/total_eval_seconds; `build_conversation` → run_id/task_id).
+        Read from `trace_facts` (review 2026-09-22, SRV2-05) — it was the CACHED `state_payload`,
+        which on a live run missed on every append and rebuilt the whole public state for these three
+        fields. Falls back to empty scalars if the log can't be folded — the trace view (spans) still
+        renders."""
+        try:
+            facts = self.trace_facts(rd)
         except Exception:  # noqa: BLE001 — a malformed log must not 500 the trace; degrade to spans-only
-            s = {}
+            facts = TraceFacts(run_id="", task_id="", total_eval_seconds=0.0,
+                               attempts=MappingProxyType({}))
         # Fall back to the run dir name for run_id (rd == root/run_id, so rd.name IS the run id) when the
         # log can't be folded — so a corrupt-log `/trace` still carries the correct run_id, matching the
         # pre-index endpoint's degraded response (which returned the URL's run_id) rather than an empty one.
-        return SimpleNamespace(run_id=s.get("run_id") or rd.name, task_id=s.get("task_id") or "",
-                               total_eval_seconds=float(s.get("total_eval_seconds") or 0.0))
+        return facts if facts.run_id else facts._replace(run_id=rd.name)
 
     def trace_view(self, rd: Path) -> dict:
         """The run-level LIGHT trace view (`build_trace_view(light=True)`), read via the incremental
@@ -883,6 +994,7 @@ class AppState:
             for slots in (self._state_live, self._state_history):
                 for slot_key in [slot_key for slot_key in slots if slot_key[0] == key]:
                     slots.pop(slot_key, None)
+            self._trace_facts.pop(key, None)
         self.invalidate_trace_view(rd)
         from looplab.events.span_index import invalidate
         invalidate(rd / "spans.jsonl")

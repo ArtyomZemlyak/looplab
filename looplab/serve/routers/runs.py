@@ -28,7 +28,7 @@ from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_disagreement, run_start_pinned_settings,
     settings_from_snapshot)
 from looplab.core.node_evidence import (
-    node_attempt, node_attempt_from_payload, node_workdir, read_bounded_regular_file)
+    node_attempt, node_workdir, read_bounded_regular_file)
 from looplab.core.models import Idea, idea_field_carried
 from looplab.core.trace_files import (
     TraceFileIdentity, iter_bounded_trace_jsonl_lines, open_private_trace_file)
@@ -611,6 +611,36 @@ def _operator_stage_names(rd: Path) -> tuple:
     return names
 
 
+def _encode_state_frame(payload: dict, last_payload: Optional[dict], same_generation: bool,
+                        generation, event_count) -> tuple[str, str, dict]:
+    """ONE SSE state frame: `(event kind, data body, the connection's own copy of the payload)`.
+
+    Pure CPU over the whole payload — `json.dumps` of it, the delta against the connection's
+    previous frame (`events/state_delta.py::diff`), and the `json.loads` that gives the connection
+    its private copy — so the stream runs it on a WORKER thread (review 2026-09-22, SRV2-06). Inline
+    in the async generator it ran ON the event loop: 199 ms per tick per connection at a 3.1 MB
+    payload, during which every other request and every other stream in the process waited.
+
+    THE DELTA FRAME (doc 52 row 29). Until 2026-09-06 every tick re-sent the whole folded state, so
+    one long-lived tab received O(events × state) bytes and the server repeated whole-state encoding
+    per tick. A frame after the first on a connection is a delta against the payload that connection
+    last sent, keyed on that payload's seq, and only when it is smaller than the snapshot; a
+    generation change sends the full frame. The client applies it to the exact snapshot it holds and
+    reconnects for a full frame on any mismatch (`ui/src/stateDelta.js`).
+    """
+    full = json.dumps(payload)
+    kind, body = SSE_STATE, full
+    if last_payload is not None and same_generation:
+        delta = {"version": DELTA_VERSION, "base_seq": last_payload["seq"],
+                 "seq": payload["seq"], RUN_GENERATION_FIELD: generation,
+                 "event_count": event_count,
+                 "ops": state_diff(last_payload, payload)}
+        encoded = json.dumps(delta)
+        if len(encoded) < len(full):
+            kind, body = SSE_STATE_DELTA, encoded
+    return kind, body, json.loads(full)
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     log_pages = EventLogPager()
@@ -706,14 +736,16 @@ def build_router(srv) -> APIRouter:
             try:
                 # Reconcile before folding so a request that waited behind Replay cannot publish a
                 # generation-A payload after generation B has already committed.
-                # ONE NON-BLOCKING TRY, never a wait (review 2026-09-22, SRV2-08). Six GETs reach
+                # ONE NON-BLOCKING TRY, never a wait (review 2026-09-22, SRV2-08). Six GETs reached
                 # this helper (`/state`, the SSE stream, and every node-evidence poll through
-                # `_cached_node_attempt`), and the default acquire budget is 60 s: with a marker on
-                # disk and a writer holding the run, `/state` blocked for the whole budget. The lock
-                # only ever guarded THIS cleanup — the fold below runs outside it either way — and
-                # the writer that holds it is the owner that completes the observation (or the next
-                # uncontended read does), so a contended read skips it: `sequence` fails closed
-                # with a 503 at once, which the handler below already treats as "not now".
+                # `_cached_node_attempt` — which reads `srv.trace_facts` since SRV2-05, after
+                # `_begin_trace_read` has refused a marked run), and the default acquire budget is
+                # 60 s: with a marker on disk and a writer holding the run, `/state` blocked for the
+                # whole budget. The lock only ever guarded THIS cleanup — the fold below runs
+                # outside it either way — and the writer that holds it is the owner that completes
+                # the observation (or the next uncontended read does), so a contended read skips
+                # it: `sequence` fails closed with a 503 at once, which the handler below already
+                # treats as "not now".
                 with srv.commands.sequence(rd, timeout=0):
                     reconcile_run_reset_observation(srv, rd)
             except (HTTPException, OSError, ResetReceiptError, RunResetStorageError):
@@ -953,12 +985,17 @@ def build_router(srv) -> APIRouter:
         """Stream canonical public state frames — a full `state` frame first, then `state_delta`
         frames against the frame this connection last sent — including the Cards completeness
         receipt."""
-        rd = _run_dir(run_id)
-        try:
-            initial_entry = rd.lstat()
-            initial_identity = same_file_kind(initial_entry)
-        except OSError as exc:
-            raise HTTPException(404, "no such run") from exc
+        def _open_stream_run():
+            rd = _run_dir(run_id)
+            try:
+                return rd, same_file_kind(rd.lstat())
+            except OSError as exc:
+                raise HTTPException(404, "no such run") from exc
+
+        # OFF the loop, like every later step of this stream (review 2026-09-22, SRV2-06): resolving
+        # the run reads the deletion fence and lstats the log, and an `async def` handler that does
+        # filesystem work inline stalls every other request in the process for its duration.
+        rd, initial_identity = await anyio.to_thread.run_sync(_open_stream_run)
 
         def _same_stream_run() -> bool:
             """Revalidate the exact directory captured before this streaming response started."""
@@ -1014,26 +1051,12 @@ def build_router(srv) -> APIRouter:
                     last_generation = generation
                     last_event_count = event_count
                     last_beat = time.monotonic()
-                    full = json.dumps(payload)
-                    # THE DELTA FRAME (doc 52 row 29). Until 2026-09-06 every tick re-sent the whole
-                    # folded state, so one long-lived tab received O(events × state) bytes and the
-                    # server repeated whole-state encoding per tick. A frame after the first on THIS
-                    # connection is a delta against the payload this connection last sent
-                    # (`events/state_delta.py::diff`), keyed on that payload's seq, and only when it
-                    # is smaller than the snapshot; a generation change sends the full frame. The
-                    # client applies it to the exact snapshot it holds and reconnects for a full frame
-                    # on any mismatch (`ui/src/stateDelta.js`). A fresh connection — one presenting
-                    # `Last-Event-ID` included — always starts with a full frame.
-                    kind, body = SSE_STATE, full
-                    if last_payload is not None and same_generation:
-                        delta = {"version": DELTA_VERSION, "base_seq": last_payload["seq"],
-                                 "seq": payload["seq"], RUN_GENERATION_FIELD: generation,
-                                 "event_count": event_count,
-                                 "ops": state_diff(last_payload, payload)}
-                        encoded = json.dumps(delta)
-                        if len(encoded) < len(full):
-                            kind, body = SSE_STATE_DELTA, encoded
-                    last_payload = json.loads(full)
+                    # THE DELTA FRAME (doc 52 row 29) — see `_encode_state_frame`, which builds it
+                    # OFF the event loop (review 2026-09-22, SRV2-06). A fresh connection — one
+                    # presenting `Last-Event-ID` included — always starts with a full frame.
+                    kind, body, last_payload = await anyio.to_thread.run_sync(
+                        _encode_state_frame, payload, last_payload, same_generation, generation,
+                        event_count)
                     yield (f"id: {payload['seq']}\n"
                            f"event: {kind}\n"
                            f"data: {body}\n\n")
@@ -1067,29 +1090,26 @@ def build_router(srv) -> APIRouter:
         return node_attempt(st, nid)
 
     def _cached_node_attempt(rd: Path, nid: int) -> Optional[int]:
-        """Current attempt from the metadata-keyed live-state projection cache.
+        """Current attempt, from the run's `AppState.trace_facts` (review 2026-09-22, SRV2-05).
 
         Trace/log polls need a before+after lifecycle CAS, but four fresh full event folds every four
-        seconds defeats the point of the indexed trace path. ``_state_payload`` keys its fold by the
-        exact events-file identity and returns a copy, so an unchanged log is a stat+lookup while an
-        append/reset still changes the observation used by the second check.
+        seconds defeats the point of the indexed trace path. The facts are keyed by the exact
+        events-file identity, so an unchanged log is a stat+lookup while an append/reset still changes
+        the observation used by the second check.
 
         THROUGH `core.node_evidence`, not a second derivation. Five routes fence a reset on this
         answer; when it was spelled twice — once typed over `RunState`, once by dict spelunking here —
         a renamed field or a changed marker shape moved only one of them, and two routes would then
-        disagree about the same reset.
+        disagree about the same reset. `TraceFacts` precomputes the typed `node_attempt` for every id
+        it can answer for.
 
-        KNOWN COST, not a claim this docstring makes lightly: "an unchanged log is a stat+lookup" is the FINISHED-run
-        case. On a LIVE run every append changes the events-file identity, so the cache misses on
-        essentially every poll, and each node_logs/node_trace/conversation request pays up to two
-        full fold + model_dump + public-card-projection rebuilds (before/after CAS) just to read
-        one node's attempt integer — on the 14k-event runs this file elsewhere measures, that is a
-        materially heavier poll than the pre-CAS route. Worth a narrow attempt-only projection (a
-        tail scan for the node's lifecycle rows) instead of the full state payload.
+        THE COST THIS USED TO NAME IS GONE: it read the attempt off `_state_payload`, and on a LIVE
+        run every append changes the events-file identity, so each node_logs/node_trace/conversation
+        request paid up to two full fold + model_dump + public-card-projection rebuilds (before/after
+        CAS) to read one integer — 650-760 ms per poll measured on an 11 MB run. A facts miss is now
+        one fold and an extraction, with no public projection and no `RunState` kept.
         """
-        frame = _state_payload(rd)
-        state = frame.get("state") if isinstance(frame, dict) else None
-        return node_attempt_from_payload(state if isinstance(state, dict) else {}, nid)
+        return srv.trace_facts(rd).attempt(nid)
 
     # The node-lifecycle compare-and-swap every per-node evidence route runs, spelled ONCE.
     #
@@ -1139,9 +1159,9 @@ def build_router(srv) -> APIRouter:
         if type(nid) is not int or nid < 0:
             return None
         try:
-            frame = _state_payload(rd)
-            state = frame.get("state") if isinstance(frame, dict) else None
-            if not isinstance(state, dict) or state.get("run_id") != rd.name:
+            # The folded run identity, from the trace family's narrow read (review 2026-09-22,
+            # SRV2-05) rather than a whole public-state build for one string.
+            if srv.trace_facts(rd).run_id != rd.name:
                 return None
 
             run = rd.resolve(strict=True)
