@@ -476,7 +476,9 @@ def citation_defects(root: Path, subtrees: tuple[str, ...] = ("looplab",)) -> li
             if any(part in _SKIP_DIRS for part in f.relative_to(root).parts):
                 continue
             text = read_text(f)
-            where = f.relative_to(root)
+            # POSIX on every OS: this is a repo path in a message people grep and tests compare,
+            # and a Windows `Path` printed `looplab\dead.py` (CI tests-windows run 29).
+            where = f.relative_to(root).as_posix()
             # A citation split across two comment lines is not a defect, it is a line WRAP at this
             # repo's ~100 columns — `…repair_verify(dot)py::declared_param_` / `overrides` is one
             # citation, and reporting it would be the guard crying wolf about its own house style.
