@@ -507,6 +507,32 @@ def _note_path_read(read_state: dict, name: str, args: dict, result: str,
     return entry["reads"], template.format(path=path, n=entry["reads"], tool=name, slot=slot,
                                            fit=_read_loop_fit(entry), page=_READ_PAGE_CHARS)
 
+# THE NUDGE'S ESCALATION (2026-09-23). `minionerec-backbones-v3` spent 20 min of `Researcher·propose`
+# (~390 turns, GPUs idle) on 218 reads of ONE file, `data.py`, with `{"start_line": 2112, "end_line":
+# 280}`, `2110`, `2108`… — every read after the 25th carried `_READ_LOOP_NOTE` and the model
+# (deepseek-v4-flash) ignored it 190 times. Nothing else fired: the arguments moved by two lines, so
+# neither the identical-call note nor the StuckDetector's 1-/2-cycle window saw a repeat, and the only
+# remaining exit was `agent_emit_force` at 500 turns. So past `_READ_LOOP_FORCE_FACTOR` × the nudge
+# threshold the SAME path counts as "stuck" and the loop takes the StuckDetector's exit (nudge once,
+# then force the emit from what was gathered). Still no read is refused or rewritten — P3 stands;
+# this ends the loop, it does not edit what a read returns. Derived from the nudge threshold rather
+# than a new setting, so `agent_read_loop_nudge_after: 0` keeps both off.
+_READ_LOOP_FORCE_FACTOR = 4
+
+
+def _read_loop_stuck(read_state: dict | None, name: str, args: dict, nudge_after: int) -> str | None:
+    """The stuck reason for a read that pushed one path past `_READ_LOOP_FORCE_FACTOR` × the nudge
+    threshold, else None. Reads the ledger `_note_path_read` already charged; never mutates it."""
+    if read_state is None or nudge_after <= 0:
+        return None
+    path = _canonical_read_path(name, args)
+    entry = read_state.get(path) if path is not None else None
+    if not entry or entry.get("reads", 0) < _READ_LOOP_FORCE_FACTOR * nudge_after:
+        return None
+    return (f"`{path}` read {entry['reads']}× this phase, still piecemeal after the re-read note — "
+            "work from the copies already in this conversation")
+
+
 def _deadline_note(clock: "LoopClock", emit_name: str) -> str:
     """The note, or "" while the wall is comfortably far (or there is none)."""
     remaining = clock.remaining()
@@ -1411,6 +1437,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # Push the UN-noted result: the note's incrementing count would otherwise make every
                 # repeat look like a NEW observation and blind the identical-pair check.
                 stuck_reason = stuck.push(name, args, result) or stuck_reason
+                # The read-loop nudge's ESCALATION (see `_READ_LOOP_FORCE_FACTOR`): a model that
+                # keeps walking one file long after the note told it how to stop is stuck too.
+                stuck_reason = (_read_loop_stuck(read_state, name, args, read_loop_nudge_after)
+                                or stuck_reason)
         # G: soft convergence. A model that keeps issuing DIFFERENT tool calls never trips the
         # StuckDetector (it keys on repeats) and, with max_turns unlimited, investigates until the budget
         # runs out (live GLM node 63: one idea's worth of intent, then ~200 more reads). Nudge it to

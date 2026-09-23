@@ -323,3 +323,56 @@ def test_the_benchmarks_read_tools_are_all_registered_here():
 ])
 def test_the_ledger_key_is_the_normalized_path_of_a_registered_reader_only(name, args, key):
     assert tool_loop._canonical_read_path(name, args) == key
+
+
+# ------------------------------------------------------------------------ the escalation
+
+class _ForcingClient(_Client):
+    """`_Client` plus the forced-emit call every salvage exit makes (`tool_loop._force_emit`)."""
+
+    def __init__(self, scripted):
+        super().__init__(scripted)
+        self.forced = 0
+
+    def complete_tool(self, messages, schema):
+        self.forced += 1
+        return {"ok": True}
+
+
+def _drive_raw(scripted, tools, **kw):
+    """Like `_drive`, but returns the loop's result, EVERY message and the client, so the exit is
+    visible: a salvage answers through `complete_tool`, a model's own emit through `chat`."""
+    messages = [{"role": "user", "content": "go"}]
+    client = _ForcingClient(scripted)
+    out = drive_tool_loop(client, tools, messages, _EMIT,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None),
+                          **kw)
+    return out, messages, client
+
+
+def test_a_walk_that_ignores_the_note_is_stuck_at_four_times_the_threshold():
+    """minionerec-backbones-v3 (2026-09-23): 218 reads of one file, each carrying the note, ~390
+    turns of `propose` with idle GPUs. Past `_READ_LOOP_FORCE_FACTOR` × the threshold the loop takes
+    the StuckDetector's exit. Mutation: drop the `_read_loop_stuck` call (the 100th read is followed
+    by 50 more and the loop ends on the model's own emit, with no stop message), or compare with `>`
+    (one read later)."""
+    limit = tool_loop._READ_LOOP_FORCE_FACTOR * 25
+    tools = _Tools()
+    out, messages, client = _drive_raw(_walk(_REF, limit + 50), tools)
+    assert out == ("emit", {"ok": True})
+    assert client.forced == 1, "the exit is the StuckDetector's salvage, not the model's own emit"
+    assert len(tools.calls) == limit, "the walk must end AT the escalation, not run on"
+    stops = [m["content"] for m in messages
+             if m.get("role") == "user" and "stuck" in str(m.get("content"))]
+    assert stops and f"read {limit}×" in stops[0], stops
+
+
+def test_the_escalation_is_off_with_the_nudge_and_below_its_ceiling():
+    """`agent_read_loop_nudge_after: 0` keeps BOTH nets off; below 4× the threshold nothing ends."""
+    assert tool_loop._read_loop_stuck({}, "repo_read", {"path": _REF}, 0) is None
+    state = {_REF: {"reads": 99}}
+    assert tool_loop._read_loop_stuck(state, "repo_read", {"path": _REF}, 25) is None
+    state[_REF]["reads"] = 100
+    assert tool_loop._read_loop_stuck(state, "repo_read", {"path": _REF}, 25)
+    assert tool_loop._read_loop_stuck(state, "repo_grep", {"path": _REF}, 25) is None, (
+        "a grep is not a read; only a registered reader can end the loop")
