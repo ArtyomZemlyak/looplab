@@ -879,7 +879,7 @@ def budget_facts(owner) -> "dict | None":
 
     ONE derivation for what is rendered in two sentences. `repo_developer.py::_budget_note` and
     `deep_research.py::_budget_note` carried byte-identical 14-line bodies differing only in the
-    template constant, which is the shape §0.8 records: two copies of one money reading, and the
+    template constant, which is the shape BACKLOG §0.7 records: two copies of one money reading, and the
     one that drifts is the one nobody re-reads. The SENTENCES stay at their call sites, because
     they are contracts of the prompt that speaks them (`serve/durable_op.py`'s rule).
 

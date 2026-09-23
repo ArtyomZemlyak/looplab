@@ -370,7 +370,7 @@ def test_the_critic_never_gets_a_verdict_that_extends_the_loop():
         "indistinguishable from a critic that is not wired")
 
 
-# ------------------------------------------------- the verdict RECORD (2026-08-15, backlog §0.2)
+# ------------------------------------------------- the verdict RECORD (2026-08-15, BACKLOG §0.2)
 # THE GAP THIS CLOSES. The critic was consulted and left no trace of what it ANSWERED: its
 # `repair_critic` span carried `{attempt, node_id, generation}` and nothing else, a `continue`
 # appended nothing at all, and a STOP was visible only indirectly as the `abandon` triage_action it

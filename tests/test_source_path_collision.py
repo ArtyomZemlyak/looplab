@@ -193,7 +193,7 @@ def test_declare_stages_accepts_the_same_manifest_when_nothing_collides():
 
 
 def test_with_no_manifest_the_write_side_degrades_to_the_advisory_note():
-    """§F1c asked that the check "degrade gracefully exactly where it matters most". With no
+    """docs/29 §F1c asked that the check "degrade gracefully exactly where it matters most". With no
     declaration there is nothing to contradict, so it says nothing — and the note still fires."""
     w = _tools()
     out = w.execute("write_file", {"path": "vectorsearch/configs/config.yaml",

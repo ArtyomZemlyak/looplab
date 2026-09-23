@@ -272,7 +272,7 @@ def test_the_account_leaves_the_pending_finalize_question_to_its_owner(tmp_path)
 
     "Is a finalize still outstanding on a FINISHED run?" is `classify_prior_run`'s question — a stop
     request newer than the accepted finish, or a finish whose reason is `error` — and this module
-    deliberately does not answer it a second time (doc 25 §0.8: four implementations of one join, and
+    deliberately does not answer it a second time (BACKLOG §0.7: four implementations of one join, and
     every drift was between the copies). The guard is that the clause is scoped to the branches where
     no finish exists, so there is no second spelling to drift.
     """

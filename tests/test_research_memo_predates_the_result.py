@@ -19,7 +19,7 @@ MEASURED over the thirty run dirs (`runs-B` + `model-probes` + `fullctx-probe`):
 completed memos (65.5 %) were appended after at least one `node_evaluated` their snapshot could not
 contain — 78 results in all, on 28 of the 30 runs.
 
-WHAT DOES NOT WORK, measured rather than assumed. §4a proposed "build the memo from state at
+WHAT DOES NOT WORK, measured rather than assumed. Doc 53 §4a proposed "build the memo from state at
 generation time". Over 131 `research_attempted` receipts the snapshot's own node count disagrees
 with the log **0 times** — the snapshot is already fresh when the provider call STARTS, and goes
 stale while it runs. Re-folding one line earlier recovers nothing. A memo cannot see the future;

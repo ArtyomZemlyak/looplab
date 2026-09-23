@@ -121,7 +121,7 @@ def test_audit_lets_flagged_node_win():
 def test_gate_excludes_flagged_from_winning_and_breeding_but_keeps_it_feasible():
     s = fold(_mk(_base("gate") + [_HACK]))
     assert s.best_node_id == 1
-    # §2.2 "don't improve cheaters": the flagged node stays FEASIBLE (kept in the tree for
+    # doc 14 §2.2 "don't improve cheaters": the flagged node stays FEASIBLE (kept in the tree for
     # diversity/audit) but is barred from BREEDING — out of breedable_nodes(), in feasible_nodes().
     assert s.nodes[2].feasible is True
     assert 2 in s.breed_excluded

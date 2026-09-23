@@ -33,13 +33,17 @@ from looplab.core.claimpin import (
     KINDS,
     CLAIM_MARKER,
     DECIDED,
+    SECTION_BACKLOG,
     decided_predicates,
     check_text,
     check_tree,
     citation_defects,
     iter_claims,
+    iter_section_citations,
     predicate_holds,
     read_text,
+    section_backlog,
+    section_citation_defects,
     tracked_text_files,
 )
 
@@ -57,8 +61,12 @@ def test_no_source_citation_is_dead():
 
     A `<mod>.py:NNN` citation is refused outright rather than resolved. That is not "hard to check",
     it is UNCHECKABLE: an edit anywhere above the cited line silently re-points it, which is exactly
-    how §0.3's eight went dead without a single commit mentioning them. CLAUDE.md already tells you
-    to locate by SYMBOL; this is that instruction with a guard behind it.
+    how BACKLOG §0.3's eight went dead without a single commit mentioning them. CLAUDE.md already
+    tells you to locate by SYMBOL; this is that instruction with a guard behind it.
+
+    And a `§` citation must name a section of the doc it resolves against (review 2026-09-22,
+    TST-07): 71 did not when that landed, among them a section 331 that doc 56 never had. The rows
+    of `tests/data/section_citations_unresolved.txt` are the part not yet corrected.
     """
     defects = citation_defects(ROOT)
     assert not defects, (
@@ -90,6 +98,146 @@ def test_a_bare_test_file_citation_must_name_a_file_that_exists(tmp_path):
     assert len(bare) == 1 and "looplab/dead.py: `tests/test_gone.py`" in bare[0], defects
     assert len(symbol) == 1 and "tests/test_gone.py::test_it" in symbol[0], defects
     assert len(defects) == 2, "the `::` form must not be reported twice"
+
+
+# ---------------------------------------------------------------------------------------------
+# `§` section citations (review 2026-09-22, TST-07). The sign is spelled `§` in this file so
+# the tree-wide guard above never reads these fixtures as citations of the REAL docs.
+S = "§"
+
+
+def _section_tree(tmp_path: Path) -> Path:
+    """A synthetic tree with each addressable shape, and beside it one shape that is NOT a section.
+
+    doc 56 (the notebook): `## 1.`, `## S2 —`, `### 2.1`, a `**21.1 —**` sub-label, 330 and 332 with
+    no 331 between them — and a heading that OPENS WITH A CITATION (`### S114 is weaker…`) plus a
+    heading inside a code fence, neither of which is a section. doc 17 (PART IV/V) shares 12 and 21.1
+    with it; doc 35 numbers a LIST under its 7; BACKLOG numbers `15. **…**` items; doc 16 is the one
+    the `arch-review` alias names.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "56-notebook.md").write_text(
+        "# 56 — notebook\n\n"
+        f"## 1. First\n\n## {S}2 — Second\n\n### 2.1 A dotted subsection\n\n"
+        "## 3. Third\n\n## 4. Fourth\n\n## 12. Twelve\n\n"
+        "**21.1 — a bold sub-label, and `**338.26**` below is a bold NUMBER, not a label**\n\n"
+        "**338.26** seconds\n\n"
+        f"### {S}114 is weaker than four points made it look\n\n"
+        "```\n## 999. a heading inside a fence\n```\n\n"
+        "## 330 — before the gap\n\n## 332 — after the gap\n", encoding="utf-8")
+    (docs / "17-plan.md").write_text(
+        "### 12. LLM-as-a-Verifier\n\n#### 21.1 D0 — the same key as the notebook's label\n\n"
+        "##### 21.20.5 Retrieval and the context contract\n", encoding="utf-8")
+    (docs / "35-options.md").write_text(
+        "## 7. What I could not determine\n\n1. **One.**\n2. **Two.**\n", encoding="utf-8")
+    (docs / "16-review.md").write_text("## 5. P2/P3 findings\n", encoding="utf-8")
+    (docs / "BACKLOG.md").write_text(
+        f"### {S}0.8 The memo summary\n\n15. **Drift detection is absent.**\n", encoding="utf-8")
+    (tmp_path / "looplab").mkdir()
+    # One rule per line, each line opening with words, so no citation inherits its neighbour's doc
+    # through the chain rule unless the line is ABOUT the chain rule.
+    (tmp_path / "looplab" / "mod.py").write_text("\n".join([
+        f"# bare, the notebook's: {S}1, {S}2 and {S}2.1; bare, PART IV's: {S}21.20.5",
+        f"# bare keys BOTH docs carry: {S}12 (an integer) and {S}21.1 (a dotted key)",
+        f"# the gap: {S}331",
+        f"# a heading that opens with a citation is not a section: {S}114",
+        f"# a fence is not a heading: {S}999",
+        f"# a bold number is not a label: {S}338.26",
+        f"# named and resolving: docs/BACKLOG.md {S}15",
+        f"# named and resolving: BACKLOG's {S}0.8",
+        f"# named and resolving: doc 35 {S}7, and a list item: doc 35 {S}2",
+        f"# named through the alias: arch-review {S}5",
+        # Named and NOT resolving. Every key is a real section of the NOTEBOOK, so each of these
+        # would pass if it were read bare — the defect is the proof that the name was read.
+        f"# no such section: doc 35 {S}7.2",
+        f"# the chain rule: doc 35 {S}7/{S}3",
+        f"# the doc named after the key: {S}4 of docs/35",
+        f"# past an item id: doc 35 XP-01 {S}330",
+        f"# through the alias: arch-review {S}332",
+        f"# no such doc: doc 99 {S}1",
+        "# a doc named at the end of one comment line and cited on the next (docs/BACKLOG.md",
+        f"# {S}0.8) is one citation",
+        "X = 1",
+    ]) + "\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_a_section_citation_must_name_a_section_of_the_doc_it_resolves_against(tmp_path):
+    """The resolver, driven on every shape it reads, with both halves of each rule asserted.
+
+    A BARE citation resolves in doc 56 or doc 17; a NAMED one only in the doc it names — which is
+    why every named defect below uses a key the notebook DOES carry: read bare, each would pass,
+    so the defect proves the name was read (before the sign, through `of <doc>`, through a chain
+    `doc 35 S7/S3`, past an item id, through the `arch-review` alias). The notebook's own shapes are
+    held from both sides too: `S2.1` and `S21.1` resolve, while a heading that opens with a
+    citation (`S114`), a heading in a code fence (`S999`) and a bold NUMBER (`S338.26`) are not
+    sections. MUTATION: drop the chain rule, the `of` lookahead, the alias or the fence toggle and
+    this set changes.
+    """
+    root = _section_tree(tmp_path)
+    defects = {c.backlog_key for c in section_citation_defects(root)}
+    assert defects == {
+        f"looplab/mod.py::{S}331", f"looplab/mod.py::{S}114", f"looplab/mod.py::{S}999",
+        f"looplab/mod.py::{S}338.26",
+        f"looplab/mod.py::doc 35 {S}7.2", f"looplab/mod.py::doc 35 {S}3",
+        f"looplab/mod.py::doc 35 {S}4", f"looplab/mod.py::doc 35 {S}330",
+        f"looplab/mod.py::doc 16 {S}332", f"looplab/mod.py::doc 99 {S}1",
+    }, defects
+
+    messages = citation_defects(root)
+    assert any(f"`{S}331` names no section of doc 56 or doc 17, the docs a BARE" in m
+               for m in messages), messages
+    assert any(f"`doc 35 {S}7.2` — docs/35-options.md has no section 7.2" in m
+               for m in messages), messages
+    assert any(f"`doc 99 {S}1` — there is no doc 99 under docs/" in m for m in messages), messages
+
+
+def test_a_key_both_bare_docs_carry_is_attributed_by_its_shape(tmp_path):
+    """The tie-break is statable, so it is stated: when doc 56 AND doc 17 carry a bare key, an
+    INTEGER is read as the notebook's and a DOTTED key as PART IV/V's. It decides attribution only
+    (the verdict is "resolves" either way), and the corpus is why: the 182 bare dotted citations
+    whose key both docs carry all sit in the concept and trust code, none in benchmarks/."""
+    root = _section_tree(tmp_path)
+    resolved = {c.key: c.resolved for c in iter_section_citations(root) if c.doc is None}
+    assert resolved["12"] == "56" and resolved["21.1"] == "17", resolved
+    assert resolved["2.1"] == "56" and resolved["21.20.5"] == "17", resolved
+
+
+def test_the_section_backlog_is_subtracted_and_a_tree_without_docs_is_not_condemned(tmp_path):
+    """Two boundaries of `citation_defects`, driven. A backlog row silences EXACTLY its key — the
+    operator pre-flight (`python -m looplab.core.claimpin`) stays at 0 on a tree whose only defects
+    are recorded — and a tree with no `docs/` at all reports no `§` defect: with nothing to resolve
+    against every citation would read as dangling, and "cannot tell" must not condemn."""
+    root = _section_tree(tmp_path)
+    before = citation_defects(root)
+    backlog = root / SECTION_BACKLOG
+    backlog.parent.mkdir(parents=True)
+    backlog.write_text(f"# a reason line is not a row\nlooplab/mod.py::{S}331\n", encoding="utf-8")
+    assert section_backlog(root) == [f"looplab/mod.py::{S}331"]
+    after = citation_defects(root)
+    assert len(after) == len(before) - 1, (before, after)
+    assert not any(f"`{S}331`" in m for m in after), after
+
+    bare = tmp_path / "no-docs"
+    (bare / "looplab").mkdir(parents=True)
+    (bare / "looplab" / "mod.py").write_text(f"# {S}331\n", encoding="utf-8")
+    assert list(iter_section_citations(bare)) == []
+
+
+def test_the_section_backlog_only_shrinks_and_names_live_defects():
+    """`tests/data/section_citations_unresolved.txt` is the review's backlog, in the house style of
+    `containment_unreviewed.txt`: correcting a citation means deleting its row. A row whose citation
+    now resolves (or is gone) is STALE and red, so the file never lists a closed defect; and the
+    ceiling below is the size on the day the resolver landed — lower it as rows go, never raise it.
+    MUTATION: correct a listed citation without deleting its row -> red; add a row -> red."""
+    rows = section_backlog(ROOT)
+    assert len(rows) == len(set(rows)), "duplicate rows"
+    live = {c.backlog_key for c in section_citation_defects(ROOT)}
+    stale = [r for r in rows if r not in live]
+    assert not stale, (f"these {SECTION_BACKLOG} rows name no unresolved citation any more — delete "
+                       "them:\n  " + "\n  ".join(stale))
+    assert len(rows) <= 10, len(rows)
 
 
 def test_every_claim_pin_is_well_formed():

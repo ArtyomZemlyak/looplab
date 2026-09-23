@@ -168,7 +168,7 @@ def sessions(spans_path: str) -> list[dict]:
                 # B3's whole question is the SHAPE of the curve, not its ends: "three `eval_train`
                 # without improvement and the session stops" can only be judged by asking how often
                 # a session that has gone k measurements without a new best goes on to find one.
-                # The values are carried in order, unparsed ones left out (58 §58.11: a value the
+                # The values are carried in order, unparsed ones left out (docs/58 §58.11: a value the
                 # instrument could not see is not a zero), so the reading is over what was SEEN.
                 "curve": [v for _i, v in seen],
                 "best": best_v, "last": last_v,

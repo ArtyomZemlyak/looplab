@@ -623,7 +623,8 @@ def test_the_refused_wrapper_shape_never_reaches_the_digest(tmp_path, monkeypatc
 
     `sh -c "python mine.py"` yields a closure of one phantom entry, so the answer is
     `unresolved_entry` however the workdir looks — and the walk that used to run before that clause
-    is the multi-second half of the instrument (§0.12: 3.0-4.4 s per stage on a real workdir)."""
+    is the multi-second half of the instrument (BACKLOG §0.12: 3.0-4.4 s per stage on a real
+    workdir)."""
     from looplab.runtime import stage_identity
 
     walks = []

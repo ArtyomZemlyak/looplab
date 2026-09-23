@@ -291,9 +291,9 @@ class ConfirmPhaseMixin:
         Resume-safe: nodes already confirmed (from an earlier crashed attempt) are reused, and a
         completed pass emits `best_confirmed` even when every actual seed run returns an invalid
         metric. A retryable infrastructure refusal deliberately leaves the pass open."""
-        # Only confirm BREEDABLE leaders (#5, §2.2): spending the expensive full-profile seed budget on
-        # a constraint-violating OR trust-gated node is wasted — a gate-flagged cheater can never be
-        # promoted to best, so it must not take a confirm slot from an honest node either.
+        # Only confirm BREEDABLE leaders (#5, doc 14 §2.2): spending the expensive full-profile seed
+        # budget on a constraint-violating OR trust-gated node is wasted — a gate-flagged cheater can
+        # never be promoted to best, so it must not take a confirm slot from an honest node either.
         evaluated = sorted(state.breedable_nodes(), key=lambda n: (n.metric, n.id),
                            reverse=(state.direction == "max"))
         topk = evaluated[: self.confirm_top_k]

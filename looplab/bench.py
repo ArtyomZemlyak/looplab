@@ -40,7 +40,7 @@ from looplab.adapters.tasks import validate_task
 # gone — the CLI's `bench` command imports looplab.bench lazily inside its own body
 # (looplab/cli/export_cmds.py), so nothing in the looplab.cli package imports this module at import
 # time, in either direction. Importing the shared engine builder here retires that load-bearing lazy
-# import (docs/15 §P5.2b).
+# import (docs/15 §P5.2, item (b)).
 # Late-binding shim matching the cli package's own command-module shims. `looplab.core.latebind`
 # names it by STRING, so this module still does not import the Typer command surface.
 #

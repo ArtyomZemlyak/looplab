@@ -303,7 +303,7 @@ def _shared_title(messages: list[dict]) -> str:
     return "Shared chat"
 
 
-# ------------------------------------------------------------------ standing watches (§F4)
+# ----------------------------------------------------------- standing watches (doc 29 §F4)
 # Module level, not closures inside `build_router`: these three are the whole decision layer
 # of an UNATTENDED turn — what the server saw, and what it refuses to do with nobody watching —
 # and a rule nobody can call is a rule nobody can test. They take what they need as arguments
@@ -490,7 +490,7 @@ def build_router(srv) -> APIRouter:
     # ------------------------------------------------------------------ assistant (general chat agent)
     _asst = SessionStore(root)
     _shares = ShareStore(root)
-    # BACKLOG §F4 — standing watches. The STORE is durable and portfolio-wide; the SERVICE is this
+    # doc 29 §F4 — standing watches. The STORE is durable and portfolio-wide; the SERVICE is this
     # process's scheduler over it, and every one of its four collaborators is injected here rather
     # than imported there, so `assistant_watch.py` stays free of any FastAPI/AppState import and the
     # whole feature is drivable in a test with no HTTP client and no model.
@@ -1785,7 +1785,7 @@ def build_router(srv) -> APIRouter:
                 pass
         return res
 
-    # ---------------------------------------------------------------- standing watches (§F4)
+    # --------------------------------------------------------- standing watches (doc 29 §F4)
     def _watch_observe_run(run_id: str):
         return watch_observe_run(srv, run_id)
 

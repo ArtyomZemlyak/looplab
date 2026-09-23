@@ -364,9 +364,10 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     if _ranked_developer is not None:
         developer = _ranked_developer
 
-    # H3 per-role model presets + §4.1 per-role temperature: point the Researcher / Developer at their
-    # own model/endpoint AND/OR sampling temperature when configured (e.g. Developer on a strong coding
-    # model at a low temp, Researcher on a fast breadth model at a higher temp). A temperature-only
+    # H3 per-role model presets + per-role temperature (doc 14 §4, item 1): point the Researcher /
+    # Developer at their own model/endpoint AND/OR sampling temperature when configured (e.g.
+    # Developer on a strong coding model at a low temp, Researcher on a fast breadth model at a
+    # higher temp). A temperature-only
     # override still rebuilds the client (else it would silently no-op); model/base_url stay shared.
     # The test is "does this role resolve anywhere other than the client built above?" — one
     # comparison covering the per-role fields, a temperature-only override (which used to need its own

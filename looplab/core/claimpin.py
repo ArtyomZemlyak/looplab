@@ -31,7 +31,7 @@ TWO HALVES, deliberately different in what they cost the author.
 2. **`CLAIM[<slug>] … decided:<predicate>` — opt-in, for the facts a citation cannot carry**: a
    number, a behaviour, a row in a file outside the repo. The predicate vocabulary is the open-item
    index's, evaluated by the code below, which `tests/test_open_item_index.py` also imports — one
-   implementation, because `docs/BACKLOG.md` §0.8 found four implementations of one claim/verdict
+   implementation, because `docs/BACKLOG.md` §0.7 found four implementations of one claim/verdict
    join and the drift was between the copies.
 
 WHAT A RED MEANS HERE IS THE OPPOSITE OF WHAT IT MEANS IN THE INDEX, and the two tokens are
@@ -57,12 +57,14 @@ Both halves run in the suite over the repo itself (`tests/test_claim_pins.py`).
 """
 from __future__ import annotations
 
+import functools
 import io
 import json
 import tokenize
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 # ---------------------------------------------------------------------------------------------
 # The two greppable tokens.
@@ -451,7 +453,302 @@ def _identifier_present(body: str, name: str, *, prefix: bool = False) -> bool:
     return re.search(r"\b" + re.escape(name) + tail, body) is not None
 
 
-def citation_defects(root: Path, subtrees: tuple[str, ...] = ("looplab",)) -> list[str]:
+# ---------------------------------------------------------------------------------------------
+# Half 1b: `§` section citations, resolved against the doc they point into (review 2026-09-22,
+# TST-07).
+#
+# WHY, measured on 2026-09-23 over `SECTION_SURFACES`. `§` is the tree's most-cited kind of target:
+# 2,291 citations in 510 files, 1,187 of them a bare integer with no doc named — 1,181 of those name
+# a section of `docs/56-where-the-budget-goes-2026-08-28.md`, the 1.2 MB campaign notebook whose 435
+# numbered sections are that convention's namespace. Nothing resolved one, so nothing noticed a
+# citation that points nowhere: `engine/evaluate.py` cited a section 331 doc 56 never had (its 330
+# and 332 were written on 2026-09-07/08; the citation arrived with a merge on 2026-09-09), and 70
+# more citations resolved to no section of the doc they named or meant.
+#
+# WHAT IS ADDRESSABLE in a doc (`section_keys`): the number an ATX heading OPENS with (`## 117.`,
+# `## §330 — …`, `## F4 · …`, `### 3a. …`, `### 33.1 …`, `##### 21.20.13 …`, but not
+# `### §114 is weaker…`, which opens with a citation of its own), a bold sub-label at a line start
+# (`**21.1 — …**`, `**P4.2 [MED-HIGH] …**`: doc 56 §21 and doc 15 §P4 number their parts that way),
+# and a bold-led top-level list item (`15. **Drift detection…**`: `docs/BACKLOG.md` §0.1 numbers the
+# rows that 23 citations call "BACKLOG §15" that way). Fenced code is not read.
+#
+# WHICH DOC a citation means (`iter_section_citations`):
+#   * NAMED — `doc 56`, `Doc 56's`, `docs/56`, `docs/56-<slug>.md`, `(../56-<slug>.md)`,
+#     `docs/<file>.md`, an upper-case docs/ stem (`BACKLOG`, `BACKLOG.md`) immediately before the
+#     sign, with only quotes, brackets, punctuation or ONE item id between (`doc 25 XP-01/TO-09 §6.6`);
+#     `§X of <doc>` after it; or chained to a named one by a separator (`§84/§277`, `§21.7/§21.10`,
+#     `§187 and §195 of docs/56`). A named citation must resolve in THAT doc. `arch-review` is the
+#     one alias: the 2026-07-11 review (`docs/16-…`) is cited by that label 78 times and never by
+#     its number.
+#   * BARE — every other citation must name a section of one of `BARE_SECTION_DOCS`: doc 56, the
+#     notebook (1,181 of the 1,187 bare integers resolve there), or doc 17, whose PART IV/V
+#     numbering (`§21.20.13`, `§22.4`, `§6.3`) is the tree's second bare convention (445 of the 517
+#     bare DOTTED citations resolve there, 35 only in doc 56 — the notebook's own `§419.1`-style
+#     subsections). When both carry a key the integer is read as doc 56's and the dotted key as
+#     doc 17's; that decides only which doc a citation is ATTRIBUTED to, never whether it resolves.
+#
+# WHAT THIS CANNOT SEE, and it is most of what a bare citation can get wrong: doc 56 numbers §1..§436
+# densely, so ANY bare integer in that range resolves. `arch-review §3` is now read against doc 16,
+# but 70 of the 1,187 bare integers sit beside ANOTHER doc's name on their line or the one above —
+# `Signal-delivery (§1)` (doc 14's §1) 22 times, `PART V §22` 16, `PART IV … §12` (doc 17's
+# verifier) 14 — and all but one of them land on a doc-56 section and are reported as nothing.
+# This proves a citation points SOMEWHERE; naming its doc is what makes it point at the right place,
+# so a new citation should name it.
+SECTION_SURFACES: tuple[str, ...] = ("looplab", "tests", "benchmarks", "CLAUDE.md", "docs/guide")
+_SECTION_SUFFIXES = frozenset({".py", ".md", ".sh", ".txt", ".json"})
+# Data, not prose: recorded fixtures quote OTHER text's signs, and the backlog below is a list of
+# `§` keys that would otherwise be read as citations of the very sections they record as missing.
+_SECTION_DATA_DIRS = ("tests/data/", "tests/fixtures/")
+BARE_SECTION_DOCS: tuple[str, ...] = ("56", "17")
+SECTION_DOC_ALIASES: dict[str, str] = {"arch-review": "16"}
+# The shrink-only backlog of the pre-existing citations this could not correct with confidence, one
+# `SectionCitation.backlog_key` per line (`tests/test_claim_pins.py` refuses a row that names no
+# live defect). Read HERE and not only by the test because `python -m looplab.core.claimpin` is an
+# operator's pre-flight (NEXT_RUN.md: "must report 0 claim defects"), and a backlog that made it
+# red on a clean tree would teach that operator to ignore it.
+SECTION_BACKLOG = "tests/data/section_citations_unresolved.txt"
+
+_SECTION_KEY = r"\d+(?:\.\d+)*[a-z]?|[A-Z]{1,3}\d+(?:[.-]\d+)*[a-z]?"
+# `§§28` is doc 18's own spelling for "sections 28 and…"; the first key is the one that can be read.
+SECTION_CITATION = re.compile(rf"§§?\s?({_SECTION_KEY})(?!\w)")
+_SECTION_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_SECTION_HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$")
+_SECTION_KEY_AT = re.compile(rf"^(?:§\s?)?({_SECTION_KEY})(.*)$")
+_SECTION_BOLD_AT = re.compile(rf"^\*\*(?:§\s?)?({_SECTION_KEY})(.*)$")
+_SECTION_ITEM_AT = re.compile(r"^(\d+)\.\s+\*\*")
+# What may sit between a named doc and its sign, and between two chained signs.
+_SECTION_ITEM_ID = r"(?:\s+[A-Z]{1,4}-?\d+[a-z]?(?:/[A-Z]{1,4}-?\d+[a-z]?)*)?"
+_SECTION_GLUE = r"(?:(?:'s|’s)(?:\s+own)?)?[`\"'’)\]*]*[\s,:;(\[]*"
+_SECTION_CHAIN = re.compile(r"^(?:[\s/,&+–—-]|\band\b|\bor\b|#|\*)*$")
+
+
+def _heading_section_key(text: str) -> str | None:
+    """The key an ATX heading's text OPENS with, or None when it opens with anything else."""
+    m = _SECTION_KEY_AT.match(text)
+    if not m:
+        return None
+    key, rest = m.group(1), m.group(2)
+    if rest[:1] in ("", ".", ":", ")") or re.match(r"\s*[—–·-](?:\s|$)", rest):
+        return key
+    # `### 33.1 The syntax gate`, BACKLOG's `### 0.6b The metric…` (spelled there with the sign): a
+    # dotted or lettered key is a section even with no separator. A PLAIN integer followed by a word
+    # is a heading that opens with a CITATION (`### §114 is weaker than four points made it look`),
+    # which is not section 114.
+    return key if rest[:1].isspace() and not key.isdigit() else None
+
+
+def _bold_section_key(line: str) -> str | None:
+    """`**21.1 — …**` / `**P4.2 [MED-HIGH] …**` — never `**338.26**`, which is a bold NUMBER."""
+    m = _SECTION_BOLD_AT.match(line)
+    if not m or m.group(1).isdigit():
+        return None
+    return m.group(1) if re.match(r"\s+[—–-]\s|\s+\[|[.:]\s|\s+[A-Z]", m.group(2)) else None
+
+
+@functools.lru_cache(maxsize=256)
+def _section_keys_cached(path: str, mtime_ns: int, size: int) -> frozenset[str]:
+    keys: set[str] = set()
+    fence = ""
+    for line in read_text(Path(path)).splitlines():
+        f = _SECTION_FENCE.match(line)
+        if f:
+            if not fence:
+                fence = f.group(1)[0]
+            elif f.group(1)[0] == fence:
+                fence = ""
+            continue
+        if fence:
+            continue
+        h = _SECTION_HEADING.match(line)
+        if h:
+            key = _heading_section_key(h.group(1))
+        else:
+            item = _SECTION_ITEM_AT.match(line)
+            key = _bold_section_key(line) or (item.group(1) if item else None)
+        if key:
+            keys.add(key)
+    return frozenset(keys)
+
+
+def section_keys(path: Path) -> frozenset[str]:
+    """Every section key `path` makes addressable (see the block comment above for the grammar)."""
+    st = path.stat()
+    return _section_keys_cached(str(path), st.st_mtime_ns, st.st_size)
+
+
+def _section_doc_files(root: Path, doc: str) -> list[Path]:
+    """The file(s) a doc id names: `56` -> `docs/56-*.md` (doc 18 is TWO files, so their union),
+    `BACKLOG` -> `docs/BACKLOG.md`, `audit/proxy-accuracy` -> `docs/audit/proxy-accuracy.md`."""
+    docs = root / "docs"
+    if doc.isdigit():
+        return sorted(docs.glob(f"{int(doc):02d}-*.md"))
+    path = docs / f"{doc}.md"
+    return [path] if path.is_file() else []
+
+
+def _section_doc_label(doc: str) -> str:
+    return f"doc {doc}" if doc.isdigit() else (doc if doc.isupper() else f"docs/{doc}.md")
+
+
+@functools.lru_cache(maxsize=8)
+def _section_doc_name(docs_dir: str) -> str:
+    """The alternation that NAMES a doc, with this tree's own upper-case docs/ stems spelled out —
+    a generic `[A-Z]+` would read `INCREMENTAL (§21.16` as a doc called INCREMENTAL."""
+    stems = sorted((p.stem for p in Path(docs_dir).glob("*.md") if p.stem.isupper()),
+                   key=len, reverse=True)
+    upper = "|".join(re.escape(s) for s in stems) or r"(?!)"
+    aliases = "|".join(re.escape(a) for a in SECTION_DOC_ALIASES)
+    return (r"(?:(?i:\bdocs?)(?:\s|/)(?P<num>\d{1,2})(?![\d.])(?:-[\w.-]*?\.md)?"
+            r"|(?:\.\./|docs/)(?P<link>\d{2})-[\w.-]+?\.md"
+            r"|docs/(?P<path>[\w./-]+?)\.md"
+            rf"|\b(?P<stem>{upper})\b(?:\.md)?"
+            rf"|(?P<alias>{aliases}))")
+
+
+def _doc_from(m: "re.Match") -> str:
+    if m.group("num") or m.group("link"):
+        return str(int(m.group("num") or m.group("link")))
+    if m.group("path"):
+        return m.group("path")
+    if m.group("stem"):
+        return m.group("stem")
+    return SECTION_DOC_ALIASES[m.group("alias")]
+
+
+def _section_left_context(text: str, start: int) -> str:
+    """The text a sign's doc name can sit in: its own line so far, and — when the sign opens a
+    wrapped comment or docstring line — the tail of the line above."""
+    line_start = text.rfind("\n", 0, start) + 1
+    left = text[line_start:start]
+    if re.fullmatch(r"\s*(?:#|//|\*|\"\"\"|''')?\s*", left) and line_start:
+        # The continuation's own comment marker is not glue: a doc named at the END of one comment
+        # line and cited at the START of the next is one citation, wrapped at ~100 columns.
+        prev_start = text.rfind("\n", 0, line_start - 1) + 1
+        left = text[prev_start:line_start - 1] + " "
+    return left[-160:]
+
+
+class SectionCitation(NamedTuple):
+    """One `§` citation, resolved. `doc` is the doc it NAMES (None when bare); `resolved` is the doc
+    whose section it names (None when it names none — the defect)."""
+    rel: str
+    line: int
+    key: str
+    doc: str | None
+    resolved: str | None
+
+    @property
+    def backlog_key(self) -> str:
+        """Stable across edits above it: the file, the doc it names, and the key — no line number."""
+        return f"{self.rel}::{_section_doc_label(self.doc) + ' ' if self.doc else ''}§{self.key}"
+
+    def message(self, root: Path) -> str:
+        where = f"{self.rel}:{self.line}"
+        if self.doc is None:
+            bare = " or ".join(f"doc {d}" for d in BARE_SECTION_DOCS)
+            return (f"{where}: `§{self.key}` names no section of {bare}, the docs a BARE § "
+                    "resolves in — name the doc it means (`doc NN §…`) or correct the key")
+        label = _section_doc_label(self.doc)
+        files = _section_doc_files(root, self.doc)
+        if not files:
+            return f"{where}: `{label} §{self.key}` — there is no {label} under docs/"
+        return (f"{where}: `{label} §{self.key}` — {files[0].relative_to(root).as_posix()} has no "
+                f"section {self.key} (a heading, a `**N.M —` sub-label or an `N. **…**` item)")
+
+
+def _section_files(root: Path, surfaces: tuple[str, ...]) -> list[Path]:
+    out: list[Path] = []
+    for surface in surfaces:
+        base = root / surface
+        if base.is_file():
+            out.append(base)
+            continue
+        if not base.is_dir():
+            continue
+        for f in sorted(base.rglob("*")):
+            if f.suffix not in _SECTION_SUFFIXES or f.is_symlink() or not f.is_file():
+                continue
+            rel = f.relative_to(root)
+            if (any(part in _SKIP_DIRS for part in rel.parts)
+                    or rel.as_posix().startswith(_SECTION_DATA_DIRS)):
+                continue
+            out.append(f)
+    return out
+
+
+def iter_section_citations(root: Path, surfaces: tuple[str, ...] = SECTION_SURFACES):
+    """Every `§` citation in `surfaces`, with the doc it names and the doc it resolves in.
+
+    Empty when the tree has no `docs/` at all: with nothing to resolve against, every citation would
+    read as dangling, and "we cannot tell" must not condemn (the rule `prose_spans` follows too).
+    """
+    docs_dir = root / "docs"
+    if not docs_dir.is_dir():
+        return
+    name = _section_doc_name(str(docs_dir))
+    before = re.compile(rf"{name}{_SECTION_ITEM_ID}{_SECTION_GLUE}$")
+    # No `^`: `Pattern.match(text, pos)` anchors at `pos` already, and a `^` there matches only at
+    # the real start of the string, which made this lookahead silently never fire.
+    after = re.compile(rf"(?:(?:[\s/,&+–—-]|\band\b|\bor\b)*§§?\s?(?:{_SECTION_KEY}))*"
+                       rf"(?:'s|’s)?\s+(?:of|in)\s+`?{name}")
+    keys_of: dict[str, frozenset[str]] = {}
+
+    def keys(doc: str) -> frozenset[str]:
+        if doc not in keys_of:
+            keys_of[doc] = frozenset().union(*(section_keys(p)
+                                               for p in _section_doc_files(root, doc)))
+        return keys_of[doc]
+
+    for f in _section_files(root, surfaces):
+        text = read_text(f)
+        if "§" not in text:
+            continue
+        rel = f.relative_to(root).as_posix()
+        prev_end, prev_doc = -1, None
+        for m in SECTION_CITATION.finditer(text):
+            key = m.group(1)
+            named = before.search(_section_left_context(text, m.start()))
+            doc = _doc_from(named) if named else None
+            if doc is None:
+                later = after.match(text, m.end(), m.end() + 240)
+                doc = _doc_from(later) if later else None
+            if doc is None and prev_doc is not None and _SECTION_CHAIN.match(
+                    text[prev_end:m.start()]):
+                doc = prev_doc
+            if doc is not None:
+                resolved = doc if key in keys(doc) else None
+            else:
+                # Both docs are tried; the ORDER only decides the attribution when both have the
+                # key. An integer is the notebook's; a dotted key is PART IV/V's — the 182 bare
+                # dotted citations whose key both docs carry (`§21.12`, `§21.7`: doc 56 §21's
+                # `**21.N —**` sub-labels vs doc 17's `#### 21.N` headings) all sit in the concept
+                # and trust code, and none in benchmarks/, where the notebook is cited.
+                order = (BARE_SECTION_DOCS if re.fullmatch(r"\d+[a-z]?", key)
+                         else BARE_SECTION_DOCS[::-1])
+                resolved = next((d for d in order if key in keys(d)), None)
+            yield SectionCitation(rel, text.count("\n", 0, m.start()) + 1, key, doc, resolved)
+            prev_end, prev_doc = m.end(), doc
+
+
+def section_citation_defects(root: Path, surfaces: tuple[str, ...] = SECTION_SURFACES
+                             ) -> list[SectionCitation]:
+    """Every `§` citation in `surfaces` that names no section of the doc it resolves against —
+    backlog rows included; `citation_defects` is the reader that subtracts them."""
+    return [c for c in iter_section_citations(root, surfaces) if c.resolved is None]
+
+
+def section_backlog(root: Path) -> list[str]:
+    """The rows of `SECTION_BACKLOG`, in file order; empty when the tree does not carry the file.
+    A `#` line is the reason for the rows under it, never a row."""
+    path = root / SECTION_BACKLOG
+    if not path.is_file():
+        return []
+    return [ln.strip() for ln in read_text(path).splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def citation_defects(root: Path, subtrees: tuple[str, ...] = ("looplab",), *,
+                     section_surfaces: tuple[str, ...] = SECTION_SURFACES) -> list[str]:
     """Re-derive every ``<mod>(dot)py::<symbol>`` citation in `subtrees` against the real tree.
 
     Two defects, both of which this repo has live: a path that resolves to nothing, and a symbol
@@ -465,8 +762,15 @@ def citation_defects(root: Path, subtrees: tuple[str, ...] = ("looplab",)) -> li
 
     A third defect has no symbol to check: a bare `tests/<name>(dot)py` (`TEST_PATH_CITATION`) that
     names no file — the "pinned by" citation, whose whole promise is that the file exists.
+
+    A fourth reads `section_surfaces`, not `subtrees`, because a `§` citation lives in tests, bench
+    scripts and guide pages as much as in the package: a `§` citation that names no section of the
+    doc it resolves against (`iter_section_citations`), minus the rows of `SECTION_BACKLOG`.
     """
     out: list[str] = []
+    known = set(section_backlog(root))
+    out.extend(c.message(root) for c in section_citation_defects(root, section_surfaces)
+               if c.backlog_key not in known)
     cache: dict[Path, str] = {}
     for sub in subtrees:
         base = root / sub

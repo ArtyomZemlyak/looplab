@@ -506,7 +506,7 @@ def test_reserved_caveat_slot_can_be_filled_by_a_ratified_caveat():
     from looplab.engine.memory import normalize_statement
     # 3 ratified positives (more evidence -> rank first) fill max_claims; a ratified MIXED caveat has less
     # evidence so it is pushed PAST the cutoff. The reserved caveat slot must still pull it in — before the
-    # fix `caveats` looked only in the NON-ratified pool and this ratified caveat was starved (§20.5).
+    # fix `caveats` looked only in the NON-ratified pool and this ratified caveat was starved (doc 17 §21.20.5).
     lessons = [_lesson("pos0", "supported", [1, 2, 3]),
                _lesson("pos1", "supported", [1, 2, 3]),
                _lesson("pos2", "supported", [1, 2, 3]),

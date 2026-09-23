@@ -33,7 +33,7 @@ WHAT IS IN IT
 | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc` | read | the C runtime, CA certs, `nsswitch.conf` |
 | `/tmp`, `/var/tmp`, `/dev/shm` | readwrite | tempfiles, and `/dev/shm` is where torch DataLoader workers talk |
 | the model cache (`HF_HOME`, `TRANSFORMERS_CACHE`, `HF_HUB_CACHE`, `TORCH_HOME`, `XDG_CACHE_HOME`, `~/.cache`) | read | a base-model download is a read every repo task makes |
-| `/proc`, `/sys`, `/dev` | readwrite | CUDA/NCCL device nodes, `/proc/self`, `/sys/class`. Deliberately WHOLE: doc 35 §7.2 records that an allow-list omitting `/sys` and `/dev` would have failed a real GPU run, and nobody has enumerated those surfaces |
+| `/proc`, `/sys`, `/dev` | readwrite | CUDA/NCCL device nodes, `/proc/self`, `/sys/class`. Deliberately WHOLE: doc 35 §7 item 2 records that an allow-list omitting `/sys` and `/dev` would have failed a real GPU run, and nobody has enumerated those surfaces |
 | the stage's declared `needs` | (already inside the workdir) | `needs` entries are workdir-relative by `_validate_rel_paths`, so they add no rule — but they ARE the declaration channel: `engine/eval_stages.py` derives the protected `score` stage's `needs` from the declared metric SUBJECT, so "what the stage says it reads" and "what it may read" come from one place |
 
 The EDITABLE SOURCE ROOT is deliberately absent, and that is the whole point: it is the one place on
@@ -51,7 +51,7 @@ WHY THIS IS NOT IN `read_fence.py`
 -----------------------------------
 Two reasons, one of them structural. `fence_inputs` answers "what is forbidden"; a Landlock ruleset
 needs "what is permitted", and the complement of a deny-list over a live filesystem is exactly the
-construction doc 35 §7.4 measured as fragile (211 candidate rules -> 55 accepted, i.e. 156 silent
+construction doc 35 §7 item 4 measured as fragile (211 candidate rules -> 55 accepted, i.e. 156 silent
 denials). The second is that `read_fence.py` has a live owner; this is additive beside it, not a
 rewrite of it.
 
@@ -69,7 +69,7 @@ from typing import Iterable, Optional
 # about the image, not a disagreement with anything the operator said.
 #
 # `/proc`, `/sys` and `/dev` are granted WHOLE and read-write on purpose. The single largest unretired
-# unknown in this design is whether a real GPU eval survives a ruleset at all (doc 35 §7.2: CUDA,
+# unknown in this design is whether a real GPU eval survives a ruleset at all (doc 35 §7 item 2: CUDA,
 # NCCL, `/dev/nvidia*`, `/dev/shm`, `/sys/class` and geesefs were never exercised — only `open`
 # microbenchmarks), and the author of that section records that their own candidate allow-list omitted
 # `/sys` and `/dev` and "would have failed such a run". Narrowing these is a change to make AFTER one

@@ -2,7 +2,7 @@
 *suspicious* wins so an operator can see specification-gaming live — agents that import the grader
 / answer key, write to protected (frozen) files at runtime, or report a suspiciously-perfect metric.
 
-Defense-in-depth: it never changes a node's metric (that's the host-side scoring job, §B1). Under
+Defense-in-depth: it never changes a node's metric (that's the host-side scoring job, BACKLOG B1). Under
 ``trust_gate=audit`` it only surfaces a `reward_hack_suspected` event; under ``gate`` or ``block``,
 high-precision reward/leakage signals can exclude selection/breeding or mark the node infeasible.
 Pure function of the node's code + metric + the protected-name set, so it's deterministic and

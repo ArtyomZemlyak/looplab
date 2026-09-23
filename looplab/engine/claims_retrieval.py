@@ -144,11 +144,13 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     picked = ordered[:max_claims]
     # Reserved caveat slot: if nothing picked carries a caveat but caveats exist, swap the weakest NON-kept
     # picked (a governance-retained claim is never evicted to make room) for the strongest available caveat —
-    # opposition is never crowded out by a full slate of positives (§20.5). Kept caveats count as caveats too.
+    # opposition is never crowded out by a full slate of positives (doc 17 §21.20.5). Kept caveats
+    # count as caveats too.
     if picked and not any(c["epistemic"] in _CAVEAT_STATES for c in picked):
         # Include RATIFIED caveats too: a ratified mixed/refuted/inconclusive claim pushed past max_claims by
         # the ratified block must still be able to fill the reserved slot, or a slate of ratified-supported
-        # claims could crowd opposition out — the exact §20.5 rule this slot exists to protect.
+        # claims could crowd opposition out — the exact doc 17 §21.20.5 rule this slot exists to
+        # protect.
         caveats = ([c for c in pinned if c["epistemic"] in _CAVEAT_STATES]
                    + [c for c in ratified if c["epistemic"] in _CAVEAT_STATES]
                    + by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"])

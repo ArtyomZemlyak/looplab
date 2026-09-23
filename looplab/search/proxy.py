@@ -53,7 +53,7 @@ class ProxyScorer:
         neighbours, WITH the distance to the nearest of them — the uncertainty the kill must
         respect (doc 51 §5). Returns None when there's no numeric signal to predict from (proxy
         abstains). `breedable_nodes` (not feasible_nodes) drops trust-gate cheaters so their
-        inflated metric can't pull the prediction toward the cheated params (§2.2); a no-op
+        inflated metric can't pull the prediction toward the cheated params (doc 14 §2.2); a no-op
         under audit."""
         target = self._numeric(node.idea.params)
         neighbours = []
@@ -128,7 +128,8 @@ class ProxyScorer:
         if self.abstains(state, node, nearest):
             return False
         # breedable (not feasible): a trust-gate cheater's inflated metric must not raise the kill
-        # threshold and get honest candidates skipped as "doomed bottom fraction" (§2.2); no-op on audit.
+        # threshold and get honest candidates skipped as "doomed bottom fraction" (doc 14 §2.2); no-op
+        # on audit.
         metrics = sorted(
             (n.metric for n in state.breedable_nodes() if n.metric is not None),
             reverse=(state.direction == "max"))   # best-first

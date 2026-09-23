@@ -372,7 +372,7 @@ def test_operator_yields_credits_only_breedable_nodes():
 
     `operator_yields` iterated `state.nodes` RAW, so a §6.3 TOMBSTONED node, an ABORTED one, and —
     worst — a `breed_excluded` node the trust gate hard-flagged as cheating/leaking all contributed
-    credit. §2.2's whole point is that "the search never sinks budget improving a cheating lineage";
+    credit. Doc 14 §2.2's whole point is that "the search never sinks budget improving a cheating lineage";
     crediting that node's inflated Δmetric to its OPERATOR did exactly that one level up, so the
     bandit picked the operator that produced the cheat more often."""
     from looplab.search.policy import operator_yields

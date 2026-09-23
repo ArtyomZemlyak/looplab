@@ -20,7 +20,7 @@ reach the durable row until `_assemble` stopped raising on it (7d406cc2), and
 reachable, which is why it is fixed now and not when a lattice parent looks wrong.
 
 Extracted rather than corrected in place: #72 adds a SECOND caller (the Researcher's own registered
-questions), and CLAUDE.md §0.8's measured lesson is four implementations of one join with every
+questions), and BACKLOG §0.7's measured lesson is four implementations of one join with every
 drift between the copies.
 
 MUTATION for the ordering assertions: restore

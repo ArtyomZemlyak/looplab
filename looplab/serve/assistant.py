@@ -2039,7 +2039,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     providers.append(TodoTools(on_todos=on_todos))
     if work_cycle:
         providers.append(WorkCheckpointTools())
-    # Standing watches (BACKLOG §F4) — present in EVERY mode including read-only plan, because
+    # Standing watches (doc 29 §F4) — present in EVERY mode including read-only plan, because
     # arming one takes no action; it records an instruction to run LATER at this chat's already-
     # pinned mode. Deliberately NOT on the `mutation_recovery` path above: a recovered dangling turn
     # lost the model trace that would prove which watches the first attempt already armed, and a
@@ -2591,7 +2591,7 @@ class WorkCheckpointTools:
 
 
 class WatchTools:
-    """Arm a STANDING watch that outlives this turn, this request and this browser (BACKLOG §F4).
+    """Arm a STANDING watch that outlives this turn, this request and this browser (doc 29 §F4).
 
     The operator's three asks — "infinite assistant mode; waiting on statuses; monitoring every N" —
     reach the model as typed status waits, scheduled monitoring, and resumable work cycles over one

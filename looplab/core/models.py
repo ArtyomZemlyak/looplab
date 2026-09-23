@@ -2333,7 +2333,7 @@ class RunState(BaseModel):
     # reset or a subject change clears it, and a classifier/operator row cannot touch it.
     # FULL SETS ONLY. A `concept_mode: "delta"` node's authored operands are already durable in
     # `node_concept_deltas`, which no classifier writer clears, so recording them again here would be
-    # a second copy of a record that already exists — the drift shape doc 25 §0.8 measured.
+    # a second copy of a record that already exists — the drift shape BACKLOG §0.7 measured.
     # Additive/reader-defaulted: empty on every log written before today -> byte-identical fold.
     node_concepts_authored: dict[int, list[str]] = Field(default_factory=dict)
     # PART V (B): the RUN's BASE concept set — the common technologies every node uses unless a node
@@ -2879,7 +2879,8 @@ class RunState(BaseModel):
         target). Under `trust_gate=gate` a hard-flagged (cheating/leaking) node stays feasible — kept
         in the tree for diversity/audit and barred from WINNING elsewhere — but is NOT bred from, so
         the search never sinks budget improving a cheating lineage or displaces an honest node from
-        the confirm top-k (T2, §2.2). Under `block` it is already infeasible (out of feasible_nodes).
+        the confirm top-k (T2, doc 14 §2.2). Under `block` it is already infeasible (out of
+        feasible_nodes).
         `audit` / no flags -> identical to feasible_nodes(); the fast path keeps it a no-op there."""
         if not self.breed_excluded:
             return self.feasible_nodes()

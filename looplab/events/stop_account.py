@@ -203,7 +203,7 @@ def _unserved_finalize(state) -> str:
     this needs no predicate of its own. On a run that HAS finished, "is a finalize still outstanding?"
     is a genuinely subtle question — `cli/run_cmds.py::classify_prior_run` answers it with a stop
     request NEWER than the accepted finish, or a finish whose own reason is `error` — and this module
-    deliberately does not answer it a second time. Doc 25 §0.8 measured four implementations of one
+    deliberately does not answer it a second time. BACKLOG §0.7 measured four implementations of one
     claim/verdict join and every drift was between the copies; a fifth spelling of the pending-finalize
     rung, living in a RECORD where nothing would exercise it, is that finding volunteering to recur.
     Here `paused`/`no_boundary` have already established that no finish exists, so a truthy

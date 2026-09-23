@@ -3990,7 +3990,11 @@ class EvaluateMixin:
                 # second, differently-behaved one. `except Exception` deliberately does not
                 # catch `BaseException`, so cancellation and KeyboardInterrupt still travel.
                 if budget_stop_leaf(_repair_exc) is not None:
-                    # RE-APPLIED ONTO MASTER'S REFACTOR of this block (§331). The same rule as
+                    # RE-APPLIED ONTO MASTER'S REFACTOR of this block by the 2026-09-09 merge, which
+                    # cited it as a "section 331" that doc 56 has never had (330 and 332 exist, and
+                    # what 331 was meant to be is not recoverable from the history this clone holds
+                    # -- review 2026-09-22, TST-07). The rule is the one doc 56 §228 measured, with
+                    # exactly the numbers below. The same rule as
                     # `repo_developer`'s handler: the spend ceiling is an ENDING, not a provider
                     # failure, and routing it through the crash sentinel pauses a run that is simply
                     # finished -- 16 of the 105 runs that reached full budget in the probe corpus,

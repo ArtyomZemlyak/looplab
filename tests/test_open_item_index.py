@@ -3,7 +3,7 @@
 Why this exists, measured (CLAUDE.md, "The open-item index"): on 2026-08-14 `docs/BACKLOG.md` §0
 recorded B7 as open; the fix landed 2026-08-15 and the row stayed open until 2026-08-19 because
 nothing connected the row to the tree. Re-derived on 2026-08-19 the same shape is live in three more
-§0.1 rows (2, 4, 8 — row 8's own test, `tests/test_append_multiprocess_race.py`, landed the SAME DAY
+BACKLOG §0.1 rows (2, 4, 8 — row 8's own test, `tests/test_append_multiprocess_race.py`, landed the SAME DAY
 the row was written and the row has never been amended). In the other direction, eight `✅` rows are
 annotated "★Shipped's ✅ overstates it". A status marker nobody re-derives is wrong in BOTH
 directions, so this file re-derives every marker's own falsifier against the real tree on every run.
@@ -43,8 +43,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # The predicate evaluator, the tree walk and the marker-stripping rule MOVED to
 # `looplab/core/claimpin.py` on 2026-08-20 and are imported rather than re-implemented. The reason
-# is this repo's own most-repeated defect: §0.8 found FOUR implementations of one claim/verdict join
-# and every drift was between the copies. Its sibling guard `tests/test_claim_pins.py` re-derives a
+# is this repo's own most-repeated defect: BACKLOG §0.7 found FOUR implementations of one
+# claim/verdict join and every drift was between the copies. Its sibling guard
+# `tests/test_claim_pins.py` re-derives a
 # different family of markers (`CLAIM[…] … decided:`) with the SAME three predicates plus `line:`,
 # and two evaluators would eventually disagree about what `present:` means — including about the
 # marker-stripping rule, whose absence was a silent FALSE GREEN here until 2026-08-19.
@@ -64,7 +65,7 @@ _MARKER = re.compile(r"\b(OPEN|DECLINED)\[([a-z0-9][a-z0-9-]{2,60})\]")
 # is precisely the split `looplab/core/claimpin.py` was created to end.
 #
 # WHAT THE DRIFT COST: an item of the shape "the DEFAULT is wrong" had no expressible falsifier at
-# all. §0.1 #7's live half is `Settings.landlock` shipping `"off"`, and the only predicate that
+# all. BACKLOG §0.1 #7's live half is `Settings.landlock` shipping `"off"`, and the only predicate that
 # discriminates it is `line:landlock&&"off"@looplab/core/config.py` — True today, False the moment
 # the default flips. `line:` was exactly what this scanner did not admit, and the one whitespace-free
 # spelling in the tree sits in a COMMENT, which `satisfied_only_by_prose` exists to reject. So that
@@ -201,7 +202,7 @@ def test_each_slug_is_declared_exactly_once():
     `docs/BACKLOG.md`'s own caveat 2 records the alternative: three namespaces share one letter-digit
     space, `C2`/`C3`/`C5` each mean two different things, and the file warns you never to cite a bare
     ID from it. Re-derived 2026-08-19 there are at least seven disjoint ID namespaces across the docs
-    (§0/§1 A-C, ★Shipped/§2 A-I, §6 D1-D5, doc 25 XX-NN, doc 29 F1-F8, doc 34 D-01..D-05, and the
+    (BACKLOG §0/§1 A-C, ★Shipped/§2 A-I, §6 D1-D5, doc 25 XX-NN, doc 29 F1-F8, doc 34 D-01..D-05, and the
     `CR0/CR1a/CR2b` pointers in `looplab/engine/` into a doc section that no longer exists).
     """
     seen: dict[str, list[str]] = {}
@@ -241,7 +242,7 @@ def test_the_index_is_not_empty_and_not_a_single_file():
 
     The second half is the constraint that killed a separate `OPEN.md`: an index that lives in ONE
     file cannot hold an item whose home is a docstring paragraph, and duplicating it into a tracker
-    is how this repo got four implementations of one claim/verdict join (§0.8 finding 2).
+    is how this repo got four implementations of one claim/verdict join (BACKLOG §0.7, still-open item 2).
     """
     slugs = [(path, slug) for path, _kind, slug, _ in _iter_markers()]
     assert len(slugs) >= 10, f"the index has collapsed to {len(slugs)} entries"
@@ -336,7 +337,7 @@ def test_the_two_indexes_agree_on_which_predicates_EXIST():
     disagreeing about which predicates exist, over one shared evaluator.
 
     THE COST WAS A WHOLE SHAPE OF ITEM. "The DEFAULT is wrong" has no whitespace-free falsifier —
-    §0.1 #7's live half is `Settings.landlock` shipping `"off"`, discriminated only by
+    BACKLOG §0.1 #7's live half is `Settings.landlock` shipping `"off"`, discriminated only by
     `line:landlock&&"off"@…`, and the sole whitespace-free spelling in the tree sits in a COMMENT
     that `satisfied_only_by_prose` rejects. So that entry could not come under the guard at all.
     """

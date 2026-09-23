@@ -9,7 +9,7 @@ none of them is about. Measured 2026-09-07 on a box with no arena: 11 of 25 red,
 `INCOMPLETE SNAPSHOT`.
 
 A test whose subject is "what does this script REFUSE" must own its inputs; borrowing the box's is
-how it comes to depend on a machine. And the second copy is the defect CLAUDE.md §0.8 records four
+how it comes to depend on a machine. And the second copy is the defect BACKLOG §0.7 records four
 times over — two builders of one fixture drift, and the one that drifts is the one nobody runs.
 
 `snapshot.sh`'s own comments already treat a synthetic root as the way to drive it ("Driven on a

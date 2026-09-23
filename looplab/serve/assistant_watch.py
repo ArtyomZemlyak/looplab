@@ -1,4 +1,4 @@
-"""Always-on assistant: a turn that outlives the HTTP request that asked for it (BACKLOG §F4).
+"""Always-on assistant: a turn that outlives the HTTP request that asked for it (doc 29 §F4).
 
 The operator asked for three things — *"infinite assistant mode; waiting on statuses; monitoring
 every N"* — and all three are the same structural ask: **the work has to survive the browser.**

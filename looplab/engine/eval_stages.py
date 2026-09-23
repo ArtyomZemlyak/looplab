@@ -865,7 +865,7 @@ class EvalStagesMixin:
 
         # ONE DIGEST MEMO PER CLOSURE, i.e. per eval attempt: `_run_stages` calls `_key` once per
         # stage, unconditionally, before that stage's command runs, and each call used to sha256 the
-        # whole keyable tree again (3.0-4.4 s per stage warm on a 1 GB workdir, §0.12's own numbers)
+        # whole keyable tree again (3.0-4.4 s per stage warm on a 1 GB workdir, BACKLOG §0.12's own numbers)
         # even though a `train` stage moves a handful of files and leaves the rest of the workdir
         # exactly as `mine` left it. The memo is `{rel -> (file_identity, digest)}` and it is owned
         # HERE rather than inside `workdir_content` for two reasons: its lifetime is the attempt (a

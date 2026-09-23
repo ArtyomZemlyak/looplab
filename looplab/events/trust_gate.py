@@ -15,7 +15,7 @@ implementations of one write, and they had already drifted on every property tha
     cross-process lock cannot be taken; the tool's append was best effort, i.e. it could interleave
     with the engine's own writes on the same `events.jsonl`.
 
-That is §0.8's shape one surface over: a rule with more than one implementation drifts between the
+That is BACKLOG §0.7's shape one surface over: a rule with more than one implementation drifts between the
 copies, and here the weaker copy is the one an LLM drives.
 
 WHAT THIS FUNCTION DELIBERATELY DOES NOT DO is phrase the refusal. Contention returns

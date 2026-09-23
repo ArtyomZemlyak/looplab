@@ -404,7 +404,7 @@ def deep_research_hint_text(directions: Iterable) -> str:
 def question_concept_rows(questions: Iterable, per_question: Iterable) -> dict[str, list]:
     """Join each question to ITS OWN concept row: `question_concepts[i]` describes `questions[i]`.
 
-    PURE and shared on purpose (CLAUDE.md §0.8 measured the alternative: four implementations of one
+    PURE and shared on purpose (BACKLOG §0.7 measured the alternative: four implementations of one
     claim/verdict join, and every drift was between the copies). Two callers — the deep-research memo
     and, since #72, the Researcher's own registered questions — and a positional join that disagrees
     with itself files a question under a concept set belonging to a different question.

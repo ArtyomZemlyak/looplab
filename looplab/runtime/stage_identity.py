@@ -224,7 +224,7 @@ def workdir_content(workdir, *, exclude: set, digests: Optional[dict] = None) ->
     `digests` is an optional CALLER-OWNED memo, `{rel -> (file_identity, "<mode>:<digest>")}`, and it
     is the difference between a key that costs one walk per ATTEMPT and one that costs a full sha256
     sweep per STAGE. The N stages of one pipeline run against the same workdir minutes apart and
-    most of the tree does not move between them (§0.12 measured 3.0-4.4 s per stage on a 1 GB
+    most of the tree does not move between them (BACKLOG §0.12 measured 3.0-4.4 s per stage on a 1 GB
     workdir), so a file whose `atomicio.file_identity` is unchanged keeps the digest already taken
     for it and every other file is re-read. That is the SAME fence `reuse_refusal` decides on, used
     in the same direction, and it is why the memo is a stat-identity map rather than a path set: a

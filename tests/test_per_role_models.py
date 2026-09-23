@@ -42,7 +42,7 @@ def test_settings_accepts_per_role_base_urls():
     assert s.researcher_base_url == "http://a/v1" and s.developer_base_url == "http://b/v1"
 
 
-def test_per_role_temperature_overrides_shared(  # §4.1
+def test_per_role_temperature_overrides_shared(  # doc 14 §4, item 1
 ):
     task = load_task(ROOT / "examples" / "code_regression_task.json")
     s = Settings(backend="llm", llm_model="shared-model", llm_temperature=0.6, unified_agent=False,

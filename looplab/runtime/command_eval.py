@@ -409,7 +409,7 @@ def _file_is_fresh(p: Path, since: Optional[float]) -> bool:
     the eval start (minus _FRESH_EPS). `since=None` disables the gate (non-eval / legacy callers).
     Guards the workdir-reuse trap: a successful-looking command that produced NO new output would else
     let a STALE prior-attempt artifact (predictions/metrics file lingering in a coarsely-keyed, un-
-    cleaned workdir) be read as this eval's result and promote a false metric (arch-review §6.3)."""
+    cleaned workdir) be read as this eval's result and promote a false metric (doc 17 §6.3)."""
     if since is None:
         return True
     try:

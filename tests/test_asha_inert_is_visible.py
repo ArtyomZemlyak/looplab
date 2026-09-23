@@ -19,7 +19,7 @@ diagnostic; twelve days later it was still unwritten.
 WHAT IS AND IS NOT FIXED HERE. This makes an existing refusal legible and changes nothing about what
 may stop a node: `should_asha_kill`'s conjuncts are untouched, no model reading becomes load-bearing,
 and the statement reaches only a span and a log line — never the fold. Giving ASHA a curve to read is
-a separate question and the corpus answers it in §0.15: the only intermediate signals these logs
+a separate question and the corpus answers it in BACKLOG §0.15: the only intermediate signals these logs
 carry (`loss`, `eval_loss`) rank NEGATIVELY against the final objective, so no engine-side proxy is
 admissible.
 """

@@ -298,9 +298,9 @@ def _breeding_credits(state: RunState):
     # CREDIT ONLY BREEDABLE NODES — the same pool `breedable_nodes()` defines, not `state.nodes` raw.
     # A tombstoned node is §6.3 logically deleted and `evaluated_nodes()` gates it out of every other
     # selection path; an aborted one never finished on its own terms; and a `breed_excluded` node is
-    # one the trust gate hard-flagged as cheating/leaking, whose whole point (§2.2) is that "the
-    # search never sinks budget improving a cheating lineage". Crediting its inflated Δmetric to its
-    # OPERATOR did exactly that one level up: the P4 bandit then picked that operator more often.
+    # one the trust gate hard-flagged as cheating/leaking, whose whole point (doc 14 §2.2) is that
+    # "the search never sinks budget improving a cheating lineage". Crediting its inflated Δmetric to
+    # its OPERATOR did exactly that one level up: the P4 bandit then picked that operator more often.
     # (NaN metrics are NOT a concern here: replay's `_finite_metric` nulls non-finite values at fold
     # time, so folded state never carries a NaN metric.)
     for n in state.nodes.values():
@@ -735,7 +735,8 @@ class MCTSPolicy:
             tree = subtree(node.id)
             # Value the subtree by its feasible descendants' metrics, EXCLUDING gate-flagged (cheating)
             # nodes: their inflated metric must not make an ancestor's subtree look good and pull MCTS
-            # exploration toward a cheating lineage (§2.2, matching breedable_nodes for direct targets).
+            # exploration toward a cheating lineage (doc 14 §2.2, matching breedable_nodes for direct
+            # targets).
             # Tombstoned/aborted descendants are excluded too: a §6.3 logically-deleted descendant
             # is invisible to the candidate pool, so letting its metric keep steering UCB toward its
             # ancestor's subtree meant deleting a node changed what the operator could pick but not

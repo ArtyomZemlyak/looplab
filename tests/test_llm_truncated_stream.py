@@ -461,7 +461,7 @@ def test_the_response_validation_error_kept_its_fail_fast_answer(no_sleep):
 
 
 def test_the_predicate_and_the_policy_table_name_the_SAME_family():
-    """Two readers of one rule, and §0.8's lesson about what happens when they are two rules.
+    """Two readers of one rule, and BACKLOG §0.7's lesson about what happens when they are two rules.
 
     `_accumulate_stream` decides whether to salvage with `_inband_stream_error`; `_RETRY_POLICY`
     decides whether to retry by DISPATCHING on classes. If those ever disagree, an exception is
@@ -480,7 +480,7 @@ def test_the_predicate_and_the_policy_table_name_the_SAME_family():
         # These classes take incompatible constructor arguments, so build an un-initialised instance
         # of each: `isinstance` — which is all both halves use — is a property of the type, and this
         # is what lets the REAL predicate be asked rather than a copy of it restated here. Restating
-        # it is exactly how the two implementations of one rule drift apart (CLAUDE.md §0.8).
+        # it is exactly how the two implementations of one rule drift apart (BACKLOG §0.7).
         probe = cls.__new__(cls)
         row = next(name for types, name in OpenAICompatibleClient._RETRY_POLICY
                    if types is None or isinstance(probe, types))

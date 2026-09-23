@@ -1041,7 +1041,7 @@ class Settings(BaseSettings):
     # COUNT of repairs, not what each one costs). 0 = unlimited (legacy behavior).
     #
     # IT IS SPENT TWO WAYS, and the second exists because the first structurally cannot reach the
-    # case that costs the most (2026-08-15, backlog §0.2). As a COUNT it charges only a repair that
+    # case that costs the most (2026-08-15, BACKLOG §0.2). As a COUNT it charges only a repair that
     # DISCARDS COMPLETED EARLIER-STAGE WORK (`evaluate.py::_repair_forces_full_retrain`) — a
     # FIRST-stage failure and a single-command eval discard nothing, so they were charged nothing and
     # left to "the attempt budget", which since 2026-08-13 means 50-or-a-judgement. Driven on the
@@ -2019,7 +2019,7 @@ class Settings(BaseSettings):
     # child `cat` and raw `libc.fopen` all refused; +2.1 %/open, 0.15 ms setup) — but those are
     # `open`/`read` microbenchmarks. NOBODY HAS RUN A LANDLOCK ALLOW-LIST THROUGH A REAL GPU EVAL:
     # torch, CUDA, NCCL, `/dev/nvidia*`, `/dev/shm`, `/sys/class` and the geesefs read surfaces were
-    # never exercised, and doc 35 §7.2's author records that their own candidate allow-list omitted
+    # never exercised, and doc 35 §7 item 2's author records that their own candidate allow-list omitted
     # `/sys` and `/dev` entirely and "would have failed such a run". A ruleset missing one surface
     # does not degrade, it refuses mid-training.
     #
@@ -2051,10 +2051,11 @@ class Settings(BaseSettings):
     developer_model: str | None = None
     researcher_base_url: str | None = None
     developer_base_url: str | None = None
-    # Per-role sampling temperature (§4.1): the Researcher wants breadth (higher temp = more diverse
-    # ideas), the Developer wants determinism (lower temp = fewer syntax slips), the Strategist a
-    # steady hand. Each overrides the shared `llm_temperature` for that role only; None = use the
-    # shared value (byte-identical to before). Flat + nullable, mirroring the per-role model fields.
+    # Per-role sampling temperature (doc 14 §4, item 1): the Researcher wants breadth (higher temp
+    # = more diverse ideas), the Developer wants determinism (lower temp = fewer syntax slips), the
+    # Strategist a steady hand. Each overrides the shared `llm_temperature` for that role only;
+    # None = use the shared value (byte-identical to before). Flat + nullable, mirroring the
+    # per-role model fields.
     researcher_temperature: float | None = None
     developer_temperature: float | None = None
     strategist_temperature: float | None = None

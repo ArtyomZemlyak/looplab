@@ -46,7 +46,7 @@ from looplab.events import digest
 from looplab.serve.report import _report_context
 
 # The bytes of `runs-B/spectral_clustering/run/nodes/node_0/score.log`, unedited — the same fixture
-# `tests/test_metric_account_on_the_default_read_path.py` reads, and the record §4a is about.
+# `tests/test_metric_account_on_the_default_read_path.py` reads, and the record doc 53 §4a is about.
 _SCORE_LINE = (Path(__file__).parent / "fixtures"
                / "algotune_score_line_invalid_results.txt").read_text(encoding="utf-8")
 
@@ -151,9 +151,9 @@ def test_a_hostile_eval_cannot_spend_the_headline():
     assert len(head) < 200 and "zzzz" not in head, head
 
 
-# ------------------------------------------------------------------ the champion line (§4a, half 2)
+# ----------------------------------------------------------- the champion line (doc 53 §4a, half 2)
 #
-# The headline count above was the FIRST of the three contradictions §4a measured. The SECOND is the
+# The headline count above was the FIRST of the three contradictions doc 53 §4a measured. The SECOND is the
 # line directly above it in every proposal prompt: `agents/roles.py::_state_brief` opens with
 # `Best so far: node N metric=<x>`, and `<x>` was a bare `0.0` whether the run measured a genuine
 # zero or the arena refused to time the solver at all.

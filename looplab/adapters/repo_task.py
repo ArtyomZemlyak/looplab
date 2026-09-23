@@ -749,7 +749,7 @@ def eval_source_tree_command_paths(task) -> list[str]:
     /src/repo/models/x.ckpt`. That reaches the operator's own tree rather than the node's copy, so
     every node reads the same bytes and no node's edits to it ever take effect.
 
-    A WARNING and not a refusal, for the reason §F1c itself gives for not banning absolute source
+    A WARNING and not a refusal, for the reason docs/29 §F1c itself gives for not banning absolute source
     paths on the agent side: an operator naming a large untracked in-tree INPUT is legitimate and
     measured — `runs/rubertlite-dense-retrieval` node 36's `--teacher_checkpoint` lives inside that
     run's editable root. Unlike the agent-side check there is no manifest here to collide it

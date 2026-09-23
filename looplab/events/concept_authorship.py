@@ -36,7 +36,7 @@ def _resolved(values, renames: dict) -> set:
 
     `core.concepts.resolve_concept_set` and not a local loop over a one-hop dictionary lookup: a
     rename is a bounded CHAIN, the id normalization is the same one every membership went through,
-    and a fifth spelling of that resolution is the drift shape doc 25 §0.8 measured. Its reason
+    and a fifth spelling of that resolution is the drift shape BACKLOG §0.7 measured. Its reason
     envelope is dropped on purpose — a malformed or cyclic id simply is not in either set here, and
     this instrument reports arithmetic over what resolved, never a receipt.
     """

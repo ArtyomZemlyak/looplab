@@ -1,4 +1,4 @@
-"""Standing assistant watches: monitoring that survives the browser, the tab and a restart (§F4).
+"""Standing assistant watches: monitoring that survives the browser, the tab and a restart (doc 29 §F4).
 
 The operator asked for "infinite assistant mode; waiting on statuses; monitoring every N". The whole
 reason this is a durable record plus a scheduler rather than a longer HTTP timeout is that a browser
