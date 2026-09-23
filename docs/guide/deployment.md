@@ -147,9 +147,11 @@ The allow-listed file is then read **once, through one descriptor**, and the byt
 parsed and the bytes fingerprinted into the launch token. A name that passed the check and a file
 that gets parsed are not the same thing: the file is opened `O_NOFOLLOW` on the already-resolved path
 (so a final component that became a symlink *after* the check is refused), non-regular files such as
-a FIFO are refused instead of blocking the request, and the descriptor's `fstat` is compared against
-an `lstat` across the read, so a file replaced or rewritten mid-read is refused with
-`422 task_source_changed` rather than parsed. The genesis card applies the same allow-list before it
+a FIFO are refused instead of blocking the request, two `fstat`s of the descriptor bracket the read, an
+`lstat` binds the name to that descriptor, and the descriptor is read back and must still hold exactly
+the bytes read — a timestamp cannot see a same-size rewrite that lands inside one tick of the clock
+that stamps it — so a file replaced or rewritten mid-read is refused with `422 task_source_changed`
+rather than parsed. The genesis card applies the same allow-list before it
 reads a `task_file` to decide its display-only backend hint.
 
 Note that this bounds an *authenticated* caller: it is not part of the token boundary but a limit on

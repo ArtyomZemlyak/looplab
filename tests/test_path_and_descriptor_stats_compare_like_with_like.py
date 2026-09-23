@@ -28,7 +28,7 @@ import os
 
 import pytest
 
-from _windows_emulation import windows_path_stat_ctime
+from _windows_emulation import change_time_within_one_tick, windows_path_stat_ctime
 
 fastapi = pytest.importorskip("fastapi")
 
@@ -118,6 +118,48 @@ def test_a_same_size_rewrite_during_the_read_is_still_refused(tmp_path, monkeypa
     assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
         before.st_ino, before.st_size, before.st_mtime_ns), (
         "the fixture failed to keep inode, size and mtime, so this proves nothing about ctime")
+
+
+def test_a_same_size_rewrite_no_stat_field_can_see_is_refused_by_its_bytes(tmp_path, monkeypatch):
+    """The test above, where it failed: the Windows CI leg answered "DID NOT RAISE HTTPException"
+    (run 35817293259, review 2026-09-22 wave 5, WIN-3). The descriptor pair there already carries
+    ChangeTime, not creation time -- a CPython 3.12+ `fstat` reports FILE_BASIC_INFO.ChangeTime --
+    and it did not move: a file's times move only when the clock that stamps them ticks, and the
+    whole write-rewrite-utime sequence fit inside one tick. So no stat of the file, and no
+    descriptor-bound ChangeTime query either, can witness this rewrite there; only its bytes can.
+    Driven through `change_time_within_one_tick`, and the refusal has to come from the bytes: every
+    field of the file's identity still reads as it did before the read."""
+    from fastapi import HTTPException
+
+    from looplab.core.atomicio import file_identity
+    from looplab.serve import launch
+
+    root = tmp_path / "runroot"
+    root.mkdir()
+    source = root / "task.json"
+    original = json.dumps(_toy("aaaa")).encode("utf-8")
+    source.write_bytes(original)
+    pinned = change_time_within_one_tick(monkeypatch)
+    before = os.stat(source)
+
+    real_read = launch._read_bounded
+
+    def _rewrite_in_place(fd):
+        data = real_read(fd)
+        with open(source, "r+b") as handle:          # same inode, same length, different bytes
+            handle.write(json.dumps(_toy("bbbb")).encode("utf-8"))
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return data
+
+    monkeypatch.setattr(launch, "_read_bounded", _rewrite_in_place)
+    with pytest.raises(HTTPException) as refused:
+        launch.read_confined_task_file(root, str(source))
+    assert refused.value.status_code == 422
+    assert refused.value.detail["code"] == "task_source_changed"
+    assert pinned, "the double never fired"
+    assert source.read_bytes() != original, "the fixture never rewrote the file"
+    assert file_identity(os.stat(source)) == file_identity(before), (
+        "a stat field moved, so this proves nothing about a rewrite no stat can see")
 
 
 def test_an_empty_run_log_has_a_deletion_identity_where_lstat_and_fstat_disagree(

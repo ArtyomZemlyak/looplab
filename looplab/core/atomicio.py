@@ -25,7 +25,11 @@ def file_identity(info: os.stat_result) -> tuple[int, ...]:
     On POSIX this is the project's ordinary "same file, unchanged?" fence. On Windows, Python exposes
     creation time as ``st_ctime_ns``; callers that must detect same-file content mutation after mtime
     restoration need descriptor-bound ``FILE_BASIC_INFO.ChangeTime`` (as SpanIndex does), a content
-    digest, or a fail-closed fallback. Each portable stat field still earns its place:
+    digest, or a fail-closed fallback. Only the digest survives a rewrite inside ONE tick of the clock
+    that stamps file times: two ``fstat``s of one descriptor -- which carry ChangeTime on CPython
+    3.12+ -- compared equal across such a rewrite on the Windows CI leg (review 2026-09-22 wave 5,
+    WIN-3), so `serve/launch.py::read_confined_task_file` reads its bytes back. Each portable stat
+    field still earns its place:
 
       * ``st_dev``/``st_ino`` — a REPLACEMENT: `os.replace` gives the name a different inode, so a
         same-size same-mtime swap is invisible without these.

@@ -24,6 +24,9 @@ These doubles reproduce exactly the rule each branch exists for, no more:
 * `windows_path_stat_ctime` — CPython (3.12+) fills a PATH stat's `st_ctime` with the creation
   time and an `fstat`'s with FILE_BASIC_INFO.ChangeTime, so for one unchanged file the two calls
   disagree about it (review 2026-09-22 round 2, GitHub Actions run 35804658308).
+* `change_time_within_one_tick` — a file's change time moves only when the clock that stamps it
+  ticks, so a same-size rewrite with its mtime put back, done inside one tick, leaves EVERY stat
+  field as it was (review 2026-09-22 wave 5, GitHub Actions run 35817293259).
 
 A test switches `os.name` to "nt" only around the call under test (pathlib picks its flavour from
 it at construction time) and restores it before asserting.
@@ -333,6 +336,47 @@ def windows_path_stat_ctime(monkeypatch) -> list:
     monkeypatch.setattr(os, "stat", _stat)
     monkeypatch.setattr(os, "lstat", _lstat)
     return answered
+
+
+def change_time_within_one_tick(monkeypatch) -> dict:
+    """Make every stat report the change time (`st_ctime`) a file had when this double first saw
+    it: the whole test runs inside ONE tick of the clock that stamps file times.
+
+    A timestamp is only as fine as that clock. NTFS stamps a write from the system time, which
+    advances once per timer tick (15.625 ms by default), and Linux stamps inode times from its coarse
+    clock (`tests/test_span_index.py::_await_inode_clock_past` measured 4 ms steps on an overlayfs
+    box). So a same-size rewrite whose writer puts the mtime back, done inside one tick, changes the
+    bytes and NO stat field: on the Windows CI leg two `fstat`s of one descriptor -- ChangeTime in
+    `st_ctime` on CPython 3.12+ -- compared equal across exactly that rewrite, and the confined task
+    read accepted it (run 35817293259, review 2026-09-22 wave 5, WIN-3). This box does not show it
+    without help: a kernel with multigrain timestamps hands a just-queried ctime a fine-grained
+    stamp. Every other field is the filesystem's own. Returns the pinned `{(st_dev, st_ino):
+    st_ctime_ns}` map, so a test can prove the double fired."""
+    real_stat, real_lstat, real_fstat = os.stat, os.lstat, os.fstat
+    pinned: dict = {}
+
+    def _within_one_tick(info):
+        ctime_ns = pinned.setdefault((info.st_dev, info.st_ino), info.st_ctime_ns)
+        extra = {name: getattr(info, name) for name in _STAT_EXTRA_FIELDS if hasattr(info, name)}
+        extra["st_ctime_ns"] = ctime_ns
+        extra["st_ctime"] = ctime_ns / 1e9
+        head = list(tuple(info)[:10])
+        head[9] = int(extra["st_ctime"])
+        return os.stat_result(head, extra)
+
+    def _stat(path, *args, **kwargs):
+        return _within_one_tick(real_stat(path, *args, **kwargs))
+
+    def _lstat(path, *args, **kwargs):
+        return _within_one_tick(real_lstat(path, *args, **kwargs))
+
+    def _fstat(fd):
+        return _within_one_tick(real_fstat(fd))
+
+    monkeypatch.setattr(os, "stat", _stat)
+    monkeypatch.setattr(os, "lstat", _lstat)
+    monkeypatch.setattr(os, "fstat", _fstat)
+    return pinned
 
 
 def refuse_deleting_an_open_file(monkeypatch) -> list:

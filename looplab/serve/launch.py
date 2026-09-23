@@ -339,6 +339,30 @@ def _read_bounded(fd: int) -> bytes:
     return b"".join(chunks)
 
 
+def _still_reads_back(fd: int, data: bytes) -> bool:
+    """Read the descriptor again from offset 0 and answer whether it still holds exactly `data`.
+
+    The CONTENT witness beside `read_confined_task_file`'s identity CAS, and the one that does not
+    depend on a clock. Every stat field that could see a same-size in-place rewrite whose writer put
+    the mtime back is a TIMESTAMP, and a timestamp moves only when the clock that stamps it ticks: on
+    the Windows CI leg the descriptor's two `fstat`s -- ChangeTime there -- compared equal across
+    exactly that rewrite (run 35817293259, review 2026-09-22 wave 5, WIN-3); a Linux inode clock
+    without multigrain timestamps has the same window, one jiffy wide. Bounded by what was read: it
+    stops at most one chunk past `len(data)`, so growth is a mismatch, never a second unbounded read.
+    Not `_read_bounded`, which is the read window's patch seam and must run exactly once."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    view = memoryview(data)
+    offset = 0
+    while True:
+        chunk = os.read(fd, _TASK_FILE_READ_CHUNK)
+        if not chunk:
+            return offset == len(data)
+        end = offset + len(chunk)
+        if end > len(data) or view[offset:end] != chunk:
+            return False
+        offset = end
+
+
 def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
     """Contain a requested `task_file`, then read it ONCE through a fenced descriptor.
 
@@ -352,7 +376,7 @@ def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
     The three reads could also disagree with each other: the launch token's fingerprint described a
     different set of bytes than the ones that were parsed into the run's task.
 
-    Three rungs, in this order:
+    Four rungs, in this order:
 
     * **`O_NOFOLLOW` on the RESOLVED path.** `Path.resolve()` has already canonicalized every
       symlink, so the resolved path contains none by construction and this flag can refuse no
@@ -374,6 +398,12 @@ def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
       and `fstat` the change time, so the whole tuple across the two refused every file there —
       every launch through a `task_file` answered 422 on the Windows CI leg (review 2026-09-22
       round 2, run 35804658308).
+    * **the bytes, read back.** The fields that see a same-size rewrite with its mtime put back are
+      timestamps, and a timestamp only moves when its clock ticks: inside one tick the whole CAS
+      reads "unchanged". On the Windows CI leg that is how such a rewrite was ACCEPTED (review
+      2026-09-22 wave 5, WIN-3, run 35817293259), ChangeTime and all. So the descriptor is read
+      again (`_still_reads_back`) and must hand back exactly the bytes that are parsed -- on every
+      platform, beside the timestamps rather than instead of them.
 
     What stays open, said plainly: a DIRECTORY component of the resolved path could still be swapped
     between the resolve and the open, which no `O_NOFOLLOW` can see — closing that needs an
@@ -402,6 +432,8 @@ def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
                     f"task_file exceeds the {_MAX_TASK_FILE_BYTES}-byte limit", "task_file")
         try:
             data = _read_bounded(fd)
+            # BEFORE the second fstat, so the stat window [before, after_read] covers both reads.
+            reads_back = _still_reads_back(fd, data)
             after_read = os.fstat(fd)
             after = os.lstat(path)
         except OSError as exc:
@@ -410,8 +442,10 @@ def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
             _reject(400, "task_file_too_large",
                     f"task_file exceeds the {_MAX_TASK_FILE_BYTES}-byte limit", "task_file")
         # Like with like (see the docstring): the full tuple over the descriptor's own two
-        # observations, the replacement tier across the descriptor and the name.
-        if (file_identity(after_read) != file_identity(before)
+        # observations, the replacement tier across the descriptor and the name -- and the bytes,
+        # the one witness a clock that has not ticked cannot blind.
+        if (not reads_back
+                or file_identity(after_read) != file_identity(before)
                 or same_file_entry(after) != same_file_entry(before)):
             _reject(422, "task_source_changed",
                     "task_file changed while it was being read", "task_file")
