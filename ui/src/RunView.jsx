@@ -6,7 +6,7 @@ import { serverCodeNotice } from './serverCode.js'
 import { useToast } from './useToast.js'
 import { useTimeline } from './useTimeline.js'
 import { takeRunPanelHistoryEntry, useRunRouteState } from './useRunRouteState.js'
-import { REVIEW_SAFE_VIEWS, reviewInspectorTabs, reviewPanelAllowed,
+import { REVIEW_SAFE_VIEWS, inspectorTabs, reviewPanelAllowed,
   runRouteStateHasTarget } from './runRouteState.js'
 import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
   storageGet, storageSet, runApiPath, nodeActivityView } from './util.js'
@@ -184,8 +184,6 @@ const START_OVER_SAFE_PANELS = new Set([
 // prop whose identity feeds a `useMemo` in `Dag.jsx` — rebuilt per render it would re-derive the
 // menu on every poll tick.
 const FORK_ONLY_NODE_MENU = Object.freeze([FORK_FROM_SEQ_ACTION])
-const LIVE_INSPECT_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
-const READ_ONLY_INSPECT_TABS = ['Overview', 'Code', 'Trust', 'Cost']
 
 const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
 // Expanded Timeline controls + pager + transport need enough room to leave a usable event viewport.
@@ -1365,11 +1363,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     showToast('Merge cancelled because the run or one of its experiment attempts changed.')
     closeMergeChooser(true)
   }, [mergeIntent, runId, generation, live?.nodes])
+  // Which `tab=` the URL may keep: `runRouteState.js::inspectorTabs`, the function the Inspector
+  // draws its strip with — asked for the DURABLE modes only (see its comment for why a transient
+  // read-only mode draws the read-only strip without healing a deep-linked tab).
   const allowedInspectTabs = useMemo(() => {
-    if (reviewMode) return reviewInspectorTabs(reviewEvidence)
-    if (historyActive) return READ_ONLY_INSPECT_TABS
     const node = selectedId == null ? null : live2?.nodes?.[selectedId]
-    return node && !isSweep(node) ? LIVE_INSPECT_TABS.filter(tab => tab !== 'Trials') : LIVE_INSPECT_TABS
+    return inspectorTabs({
+      access: reviewMode ? 'review' : historyActive ? 'read-only' : 'live',
+      evidence: reviewEvidence, sweep: !node || isSweep(node),
+    })
   }, [reviewMode, reviewEvidence, historyActive, live2, selectedId])
   const effectiveInspectTab = allowedInspectTabs.includes(inspectTab) ? inspectTab : 'Overview'
   useEffect(() => {

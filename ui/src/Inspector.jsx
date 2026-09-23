@@ -17,7 +17,7 @@ import { nodeFeasibilityStatus, isSalvagedMetricViolation,
 import {
   extraMetricChannel, extraMetricCaveated, extraMetricSourceHelp,
   extraMetricSourceLabel, extraMetricIsBackfilled } from './extraMetrics.js'
-import { reviewInspectorTabs } from './runRouteState.js'
+import { inspectorTabs } from './runRouteState.js'
 import { readOnlyLabel } from './runMode.js'
 import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
   appliedParamsNotice, appliedParamsConflicts,
@@ -85,7 +85,6 @@ const DETAIL_REQUEST_TIMEOUT_MS = 8000
 // chat (add the node via its ＋#id chip, or use a /command), so there's no per-node button toolbar.
 // Tab order keeps durable review context closest to the summary: Overview → Comments →
 // Trials (sweeps) → Trace → Code → Metrics → Trust → Cost.
-const TABS = ['Overview', 'Comments', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 
 // The ONE per-node write action (Workstream-C exception): re-run THIS node in place — no new node —
 // from a chosen stage. It's a recovery/fix control (natural to trigger from the failed node itself),
@@ -339,10 +338,12 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // Sweep nodes get a Trials tab (right after Overview). `activeTab` guards against a stale tab
   // (e.g. 'Trials' left selected after switching to a non-sweep node) falling through to nothing.
   const sweep = isSweep(n)
-  const liveTabs = sweep ? ['Overview', 'Comments', 'Trials', ...TABS.slice(2)] : TABS
-  const tabs = readOnly
-    ? readOnlyReason === 'review' ? reviewInspectorTabs(evidenceAvailable) : ['Overview', 'Code', 'Trust', 'Cost']
-    : liveTabs
+  // The strip is `runRouteState.js::inspectorTabs` — the same function RunView heals the URL with,
+  // asked with THIS view's current access (every read-only mode draws the read-only strip).
+  const tabs = inspectorTabs({
+    access: readOnly ? (readOnlyReason === 'review' ? 'review' : 'read-only') : 'live',
+    evidence: evidenceAvailable, sweep,
+  })
   const activeTab = tabs.includes(tab) ? tab : 'Overview'
   const tabSlug = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '-')
   const tabId = value => `inspector-${nodeId}-tab-${tabSlug(value)}`

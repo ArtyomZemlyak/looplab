@@ -32,6 +32,11 @@ export const TIMELINE_KIND_ORDER = [
 ]
 export const REVIEW_SUMMARY_TABS = ['Overview', 'Comments', 'Trust', 'Cost']
 export const REVIEW_EVIDENCE_TABS = ['Overview', 'Comments', 'Code', 'Trust', 'Cost']
+// The strip a view that may not ACT on the node still shows (a historical snapshot, a loading or
+// stale workspace, a start-over hand-off): Comments posts, Trace clears, Metrics and Trials read the
+// live node — none of them is what a frozen or not-yet-authorized view may offer.
+export const READ_ONLY_INSPECT_TABS = ['Overview', 'Code', 'Trust', 'Cost']
+const NON_SWEEP_INSPECT_TABS = RUN_ROUTE_TABS.filter(tab => tab !== 'Trials')
 export const REVIEW_SAFE_PANEL_NAMES = [
   'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data', 'compare', 'collab',
 ]
@@ -180,6 +185,25 @@ export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
 
 export function reviewInspectorTabs(evidence = false) {
   return evidence ? REVIEW_EVIDENCE_TABS : REVIEW_SUMMARY_TABS
+}
+
+// THE ONE ANSWER to "which Inspector tabs does this view offer?" (review 2026-09-22, UI-04). It was
+// four copies of the vocabulary — `RUN_ROUTE_TABS` here, `Inspector.jsx`'s own `TABS` with Trials
+// spliced in, `RunView.jsx`'s LIVE/READ_ONLY pair and the Inspector's inline read-only list — and two
+// deciders re-deriving the same sets: RunView to heal the URL, the Inspector to draw the strip. A
+// tab added to one copy and not the route's was silently dropped from every deep link.
+//
+// `access` is 'live' | 'review' | 'read-only'. The two callers still pass different access, on
+// purpose and only there: RunView heals the URL for the DURABLE modes (a review scope, a historical
+// snapshot), while the Inspector draws the read-only strip in every read-only mode — so a transient
+// one (the run still loading, a stale link, a start-over hand-off) shows the strip without
+// rewriting a deep-linked `tab=trace`, which is back the moment the mode clears. `sweep` unknown
+// (the node not loaded yet) is `true`, so a Trials deep link is not healed away before its node
+// arrives.
+export function inspectorTabs({ access = 'live', evidence = false, sweep = true } = {}) {
+  if (access === 'review') return reviewInspectorTabs(evidence)
+  if (access === 'read-only') return READ_ONLY_INSPECT_TABS
+  return sweep ? RUN_ROUTE_TABS : NON_SWEEP_INSPECT_TABS
 }
 
 export function reviewPanelAllowed(panel, evidence = false) {
