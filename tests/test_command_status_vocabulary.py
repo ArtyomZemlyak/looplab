@@ -99,3 +99,22 @@ def test_noop_is_a_success_and_rejected_is_not_a_failure_of_the_work():
     """
     assert "noop" in COMMAND_SUCCEEDED_STATUSES and "noop" not in COMMAND_FAILED_STATUSES
     assert "rejected" in COMMAND_FAILED_STATUSES and "rejected" in COMMAND_TERMINAL_STATUSES
+
+
+def test_every_admission_refusal_code_survives_a_reload_as_itself():
+    """The server's coded admission refusals for an unreadable config snapshot
+    (`serve/engine_proc.py::SPAWN_SNAPSHOT_REFUSAL_CODES`, review 2026-09-22) must each be a code the
+    browser STORES: a code outside `STORED_ERROR_CODES` is restored after a reload as the generic
+    `command_failed`, with the "refresh and retry" remedy that cannot work for a file that must be
+    fixed first. W4-3 added two such codes and the client learnt them one change later, by hand.
+
+    MUTATION: add a third refusal code on the server only -> red, naming it.
+    """
+    if not _JS.exists():
+        pytest.skip("the UI command model is not present in this checkout")
+    from looplab.serve.engine_proc import SPAWN_SNAPSHOT_REFUSAL_CODES
+
+    missing = sorted(set(SPAWN_SNAPSHOT_REFUSAL_CODES) - _js_set("STORED_ERROR_CODES"))
+    assert not missing, (
+        f"server admission refusal codes the browser does not store: {missing} — add them to "
+        "`ui/src/commandModel.js::STORED_ERROR_CODES` with client-owned copy")
