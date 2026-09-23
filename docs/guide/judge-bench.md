@@ -104,7 +104,7 @@ Two findings and one warning:
   instant and not to the end of training alone.
 - **False alarms are rare and concentrated.** 5 of 450 decisions called `broken` on a run that
   finished fine — and **4 of the 5 are the two runs where the judge had no log tools**, the
-  flat-tail misreading `train_monitor.py`'s trajectory section already documents.
+  flat-tail misreading the trajectory section of `engine/loss_trajectory.py` already documents.
 - **That last comparison was a confound, and it is now SETTLED — the tools are not what makes the
   difference.** See the next section.
 - **101 "missed stops" is not 101 mistakes.** Most are early looks at an attempt that failed later,
@@ -161,7 +161,7 @@ The residual after mix — the false-stop rate, 0.6 % of productive decisions wi
 14.8 % without — survives arm B unchanged (1 of 173 and 4 of 27 in BOTH arms), so it is not the
 tools either. It tracks the measured TRAJECTORY instead: **0 of the 107 productive decisions that
 carried a `trajectory` block were called `broken`**, and all four v6 false stops are the flat-tail
-misread the trajectory section of `engine/train_monitor.py` was written for. That is suggestive and
+misread the trajectory section of `engine/loss_trajectory.py` was written for. That is suggestive and
 it is **not** measurable here: the tracker postdates v6/v7, so there is no stored measurement to
 splice into their prompts and no arm that could add one.
 

@@ -117,7 +117,12 @@ def test_the_column_is_omitted_rather_than_written_empty():
 
 # ------------------------------------------------------------------ THE guard
 _PROMPT_PATH = ("looplab/engine/crash_repair.py", "looplab/agents/unified_agent.py",
-                "looplab/engine/failure_diagnosis.py", "looplab/engine/train_monitor.py")
+                "looplab/engine/failure_diagnosis.py", "looplab/engine/train_monitor.py",
+                # `train_monitor`'s pure halves (review 2026-09-22, ENG3-13): the trajectory and
+                # contract text and the stage line its judge is shown are built there now, and a
+                # guard that read the whole monitor must still read all of it.
+                "looplab/engine/loss_trajectory.py", "looplab/engine/monitor_gates.py",
+                "looplab/engine/eval_log_plan.py")
 
 
 def test_nothing_on_the_prompt_path_reads_the_wide_column():

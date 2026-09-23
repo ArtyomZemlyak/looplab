@@ -199,10 +199,10 @@ def test_the_median_is_one_definition_shared_with_the_trajectory_veto():
     median. A drift between them would put the number a judge reads and the number the engine acts on
     in silent contradiction."""
     from looplab.core.numeric import median as core_median
-    from looplab.engine import train_monitor as tm
+    from looplab.engine import loss_trajectory as trajectory     # the veto's home since ENG3-13
     from looplab.tools import log_tools as lt
 
-    assert lt.median is core_median and tm._median is core_median
+    assert lt.median is core_median and trajectory._median is core_median
     assert core_median([3.0, 1.0, 2.0]) == 2.0
     assert core_median([1.0, 2.0, 3.0, 4.0]) == 2.5
 

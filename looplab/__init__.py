@@ -434,6 +434,11 @@ _LAYOUT = {
     "state_delta": "events",   # the SSE stream's delta frames: diff/apply over two folded payloads
     "tracing": "core",
     "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill
+    # Its pure halves, split out and re-exported by it (review 2026-09-22, ENG3-13 / doc 50 EM-06):
+    # the log measurement, the kill/repair/arming gates, and which log is whose + its readers.
+    "loss_trajectory": "engine",
+    "monitor_gates": "engine",
+    "eval_log_plan": "engine",
     "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory + opt-in kill)
     "triage": "engine",
     "repair_judgment": "engine",

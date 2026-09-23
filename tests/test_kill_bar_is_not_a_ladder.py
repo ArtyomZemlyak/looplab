@@ -59,8 +59,12 @@ def test_repetition_is_already_required_and_is_not_what_holds_the_gun():
     verdict has repeated K times" is shipped, not missing. The streak counts ANY `broken` verdict at
     any confidence — its increment is `if verdict.status == "broken"` and never reads the number — so
     the two conjuncts are independent and the confidence bar is the one doing the holding."""
+    # The conjunct is read off the GATE itself, wherever it lives: `should_monitor_kill` moved to
+    # `engine/monitor_gates.py` with the split (review 2026-09-22, ENG3-13), and a whole-module read
+    # of `train_monitor` would have gone blind to it rather than red.
+    gate = inspect.getsource(train_monitor.should_monitor_kill)
+    assert "if broken_streak < max(1, needed):" in gate       # repetition IS a required conjunct
     src = inspect.getsource(train_monitor)
-    assert "if broken_streak < max(1, needed):" in src        # repetition IS a required conjunct
     # Located by the INCREMENT and read backwards, not by the first `status == "broken"` in the
     # file: there is more than one, and a locator that finds the wrong one passes for the wrong
     # reason. (A mutant that confidence-gated the increment exposed exactly that fragility.)
