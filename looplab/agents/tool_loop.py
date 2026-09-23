@@ -1273,7 +1273,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # branch above `continue`s precisely because it does NOT return, so it must not leave
                 # a dangling id.) The consequence is a caller obligation: anything that RE-SENDS this
                 # transcript to a provider must first strip unanswered tool_call_ids, or a strict
-                # OpenAI-compatible backend 400s on it — `serve/assistant.py` does exactly that.
+                # OpenAI-compatible backend 400s on it — `answered_transcript` below is the ONE
+                # spelling of that, used by `serve/assistant.py` and the two `agentic_*` wrappers.
                 _done("emitted")
                 return finalize(args)
             from_a_tool = False
@@ -1425,6 +1426,44 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     return fallback(messages)
 
 
+def answered_transcript(messages: list) -> list:
+    """`messages` with every tool call nobody ANSWERED removed — what a re-sent transcript must be.
+
+    `drive_tool_loop` returns AT an accepted emit, so the emit's own `tool_call_id` and any sibling
+    call listed after it in the same assistant turn never receive their `role: "tool"` answer (see
+    the comment at that return). A strict OpenAI-compatible endpoint refuses a request carrying one
+    ("an assistant message with 'tool_calls' must be followed by tool messages responding to each
+    'tool_call_id'", HTTP 400), so everything that sends such a transcript AGAIN — the assistant's
+    streamed final answer, a wrapper's fallback parse — sends this instead.
+
+    ONE spelling of that obligation (review 2026-09-22, TAT-09). `serve/assistant.py` met it inline
+    and `agentic_struct._final` did not: a malformed emit fell back to `parse_structured` over the
+    very transcript that still named the emit, so on a strict endpoint the fallback that exists to
+    rescue a bad emit was refused too — and the wrapper's outer `except` then re-sent it a second
+    time. The rule is the assistant's, moved here byte for byte:
+
+      * an answered call stays; an unanswered one is dropped from its turn's `tool_calls`;
+      * a turn left with no call keeps its prose WITHOUT the `tool_calls` key, and is dropped whole
+        when it has no prose either — an empty assistant turn is its own refusal on some servers.
+
+    Pure: a NEW list, the caller's messages untouched (the loop's own record still says what the
+    model asked for). A transcript with nothing unanswered comes back as the same message objects
+    in the same order, so a re-send of a consistent transcript is byte-identical to before.
+    """
+    answered = {m.get("tool_call_id") for m in messages if m.get("role") == "tool"}
+    base = []
+    for m in messages:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            kept = [c for c in m["tool_calls"] if c.get("id") in answered]
+            if not kept and not (m.get("content") or "").strip():
+                continue
+            if len(kept) != len(m["tool_calls"]):
+                m = {**m, "tool_calls": kept} if kept else \
+                    {k: v for k, v in m.items() if k != "tool_calls"}
+        base.append(m)
+    return base
+
+
 # SEAM NOTE: agentic_text/agentic_struct call `drive_tool_loop` through THIS module's globals.
 # Pre-split (one module) a patch on `looplab.agents.agent.drive_tool_loop` intercepted them; now
 # it does not — patch `looplab.agents.tool_loop.drive_tool_loop` to intercept these two. Every
@@ -1456,7 +1495,9 @@ def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
     except BudgetExceeded:  # a HARD budget stop must propagate — degrading to fb() runs ANOTHER LLM
         raise                # call after the budget tripped (every sibling loop caller re-raises first)
     except Exception:  # noqa: BLE001 — an agentic-path failure must never break a best-effort step
-        return fb(messages)
+        # A loop that RAISED mid-turn (a tool that threw) left that turn's calls unanswered, and
+        # this re-sends the transcript — `answered_transcript` (review 2026-09-22, TAT-09).
+        return fb(answered_transcript(messages))
 
 
 def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
@@ -1478,14 +1519,17 @@ def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
         try:
             return model_cls.model_validate(args or {})
         except Exception:  # noqa: BLE001 — a malformed emit falls back to the plain structured path
-            return fb(messages)
+            # ...over an ANSWERED transcript: the loop returned AT this emit, so its tool_call_id
+            # (and any sibling after it) is still unanswered in `messages`, and a strict endpoint
+            # refuses the fallback's request with HTTP 400 (review 2026-09-22, TAT-09).
+            return fb(answered_transcript(messages))
     try:
         return drive_tool_loop(client, tools, messages, emit_spec, finalize=_final, fallback=fb,
                                **options)
     except BudgetExceeded:  # a HARD budget stop must propagate, not degrade to another LLM call
         raise
     except Exception:  # noqa: BLE001 — the agentic path must never break a best-effort step
-        return fb(messages)
+        return fb(answered_transcript(messages))     # same obligation as `agentic_text`'s
 
 
 def _summarizer(client):

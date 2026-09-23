@@ -2434,17 +2434,10 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
             # when the model paired a retrieval call with final_answer, the loop executed the
             # retrieval but returned on final_answer, leaving its tool_call_id dangling — strict
             # OpenAI-compatible endpoints 400 on that and the turn silently loses streaming.
-            answered = {m.get("tool_call_id") for m in convo if m.get("role") == "tool"}
-            base = []
-            for m in convo:
-                if m.get("role") == "assistant" and m.get("tool_calls"):
-                    kept = [c for c in m["tool_calls"] if c.get("id") in answered]
-                    if not kept and not (m.get("content") or "").strip():
-                        continue
-                    if len(kept) != len(m["tool_calls"]):
-                        m = {**m, "tool_calls": kept} if kept else \
-                            {k: v for k, v in m.items() if k != "tool_calls"}
-                base.append(m)
+            # The rule was spelled out HERE until review 2026-09-22 (TAT-09) moved it, byte for
+            # byte, to `answered_transcript`, which the `agentic_*` wrappers' fallbacks now share.
+            from looplab.agents.tool_loop import answered_transcript
+            base = answered_transcript(convo)
             # SCOPED to this turn, and the scope is this function's OWN `turn_request` — not a
             # message the summariser goes looking for. The old directive pointed the model at the
             # entire trace, and the scan that replaced it marked whichever `user` message came last,
