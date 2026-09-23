@@ -831,7 +831,9 @@ def check_money_cue_reaches_the_choosers(bench: str):
     # the check announced the line crossed. Pooled over all 142 trees that have the span the figure
     # is 2.06 % (per probe: median 2.01, p75 2.63, max 5.56 -- 21 of 142 at or above 3 %). The
     # decision stands; the alarm was the sample. Pooling all of them costs 13 s.
-    roots = [str(Path(r).parent) for r in roots if "/_ruler/" not in r]
+    # POSIX form before the containment test (WIN-SEPS): a Windows glob answer spells the matched
+    # `_ruler` component between "\\"s, so the ruler's tree was pooled in there.
+    roots = [str(Path(r).parent) for r in roots if "/_ruler/" not in r.replace(os.sep, "/")]
     if not tool.is_file() or not roots:
         return False, "cue_reach.py or a probe tree is missing, so the claim cannot be driven"
     # `--json`, not the columns: §289 measured what parsing this kind of table by eye costs.

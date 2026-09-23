@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import posixpath
 import re
 import json
 import random
@@ -131,12 +132,18 @@ def champions(root: str, task: str = "edge_expansion", min_spend: float = 0.9,
     live = {p.get("probe") for p in (lanes.probes() if live is None else live) if p.get("probe")}
     out = []
     for path in sorted(glob.glob(f"{root}/*/runs/*/run/events.jsonl")):
-        if f"/runs/{task}/" not in path:
+        # POSIX FORM FIRST (WIN-SEPS). A Windows glob answer joins every matched component with
+        # "\\", so this containment test found no "/runs/<task>/" in any of them and every champion
+        # list came back EMPTY on the Windows CI leg (review 2026-09-22 round 2, run 35804658308:
+        # 8 rows here and in test_the_null_is_the_control_population). The round-1 guard covered
+        # `split`s only; this is the same defect spelled as `in`.
+        posix = path.replace(os.sep, "/")
+        if f"/runs/{task}/" not in posix:
             continue
         # THE NAME RELATIVE TO `root`, not a split on a magic path segment. Splitting on
         # "/model-probes/" silently matched nothing for any root not called that -- including every
         # test fixture, which is how the mutation that removes this filter first came back green.
-        probe = os.path.relpath(path, root).split(os.sep)[0]
+        probe = posixpath.relpath(posix, Path(root).as_posix()).split("/")[0]
         if probe in live:
             continue
         # THE CONTROL POPULATION, NOT EVERY RUN (§374). A probe with no instrument predates the

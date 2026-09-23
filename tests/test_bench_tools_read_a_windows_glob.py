@@ -94,6 +94,31 @@ def test_probe_summary_names_the_probe_and_not_its_run_dir(tmp_path, monkeypatch
     assert got is not None and got["probe"] == "p9", got
 
 
+def test_arm_power_finds_the_champion_of_a_windows_glob_answer(tmp_path, monkeypatch):
+    """The same defect spelled as a CONTAINMENT test rather than a split: `champions()` kept a run
+    only when `f"/runs/{task}/" in path`, which no Windows answer contains, so every champion list
+    was empty on the second Windows CI leg (run 35804658308, review 2026-09-22 round 2: 9 rows in
+    test_the_power_table_uses_finished_runs_only and test_the_null_is_the_control_population)."""
+    import arm_power
+
+    root = tmp_path / "probes"
+    for probe, metrics in (("done", [50.0, 55.0, 12.0]), ("other", [70.0])):
+        run = root / probe / "runs" / "pagerank" / "run"
+        run.mkdir(parents=True)
+        (root / probe / "INSTRUMENT.txt").write_text(
+            f"task:           pagerank\ncard_args:      {arm_power.SHIPPED_CARD}\n",
+            encoding="utf-8")
+        rows = [{"v": 1, "seq": 0, "ts": 0.0, "type": "llm_usage", "data": {"cost": 1.0}}]
+        rows += [{"v": 1, "seq": i + 1, "ts": float(i + 1), "type": "node_evaluated",
+                  "data": {"node_id": i, "metric": m}} for i, m in enumerate(metrics)]
+        (run / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows),
+                                          encoding="utf-8")
+    handed = windows_glob(monkeypatch)
+    got = arm_power.champions(str(root), "pagerank", live=[{"probe": "other"}])
+    _spelled_by_windows(handed)
+    assert got == [55.0], got
+
+
 # The only split of this shape that does NOT parse a filesystem answer: `lanes.probes` reads the
 # argv of a live process out of `/proc`, which exists on Linux alone and is never a glob result.
 _NOT_A_GLOB_ANSWER = {"benchmarks/lanes.py"}
@@ -150,4 +175,43 @@ def test_every_directory_split_in_the_bench_tools_is_made_on_the_posix_form():
     assert not offenders, (
         "a bench tool splits a path on a directory marker without putting it in POSIX form first; "
         "a Windows glob answers with '\\\\' and the split finds nothing (WIN-SEPS):\n"
+        + "\n".join(sorted(offenders)))
+
+
+def _marker_text(node: ast.AST) -> str | None:
+    """A string literal or f-string's text, with each placeholder spelled `{}`."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value if isinstance(v, ast.Constant) else "{}" for v in node.values)
+    return None
+
+
+def test_every_directory_containment_test_in_the_bench_tools_is_made_on_the_posix_form():
+    """The split guard's sibling, for the spelling round 1 missed: `f"/runs/{task}/" in path` is a
+    split in all but name, and `arm_power.champions` went empty on the second Windows leg (run
+    35804658308) through exactly that. Same rule, same tier-3 caveat: the drive above proves it."""
+    offenders, sites = set(), set()
+    for path, tree in iter_trees(BENCH):
+        rel = path.relative_to(REPO).as_posix()
+        if rel in _NOT_A_GLOB_ANSWER:
+            continue
+        for scope in [n for n in ast.walk(tree)
+                      if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))]:
+            bound = {t.id for n in ast.walk(scope) if isinstance(n, ast.Assign)
+                     and _posix_form(n.value, {}) for t in n.targets if isinstance(t, ast.Name)}
+            for n in ast.walk(scope):
+                if not (isinstance(n, ast.Compare) and len(n.ops) == 1
+                        and isinstance(n.ops[0], (ast.In, ast.NotIn))):
+                    continue
+                text = _marker_text(n.left)
+                if not (text and len(text) > 2 and text.startswith("/") and text.endswith("/")):
+                    continue
+                sites.add((rel, n.lineno, n.col_offset))
+                if not _posix_form(n.comparators[0], bound):
+                    offenders.add(f"{rel}:{n.lineno} {ast.unparse(n)[:80]}")
+    assert len(sites) >= 5, f"the scan found only {len(sites)} containment tests -- still looking?"
+    assert not offenders, (
+        "a bench tool tests a path for a directory marker without putting it in POSIX form first; "
+        "a Windows glob answers with '\\\\' and the test never matches (WIN-SEPS):\n"
         + "\n".join(sorted(offenders)))
