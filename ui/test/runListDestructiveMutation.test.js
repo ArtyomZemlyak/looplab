@@ -87,8 +87,17 @@ test('destructive and drag/drop writes stay authoritative, bounded, and recovera
 // every other Vite worker in the full suite before the guard's own 25ms deadlines even start. Keep
 // those behavioural deadlines deliberately tight, but give the integration harness enough wall
 // clock budget on loaded CI hosts (and when the Python suite is running alongside it).
+//
+// DETERMINISTIC TIME (review 2026-09-22, UI-05). The two 25ms deadlines used to be REAL timers the
+// test waited out with 70ms sleeps, so they also raced the test's own progress: on a loaded box a
+// deadline fired before the test had resolved the write it bounds, and the drive failed at
+// whichever step the scheduler lost ("not confirmed" over a newer success; no "Checking the
+// current list"). On 2026-09-23 it failed 3 of 4 full-suite runs at load 12-19 (both runs on
+// master) and, alone beside 12 busy processes, 8 of 15 runs. node:test's `mock.timers` now owns
+// `setTimeout` once the module is loaded: a deadline fires only when the test ticks the clock to
+// it, so each one is observed 1ms before it and at it (15 of 15 beside the same 12 processes).
 test('the list mutation guard bounds hung writes and reconciliation without late overwrite',
-  { timeout: 90_000 }, async () => {
+  { timeout: 90_000 }, async t => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url: 'https://looplab.test/', pretendToBeVisual: true,
   })
@@ -115,6 +124,15 @@ test('the list mutation guard bounds hung writes and reconciliation without late
     const [{ createRoot }, { useListMutation }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/RunList.jsx'),
     ])
+    // The module is loaded (Vite's own timers are done with); every timer from here on is the
+    // test's to fire. `elapse` moves the clock inside `act` and lets what the fired timers started
+    // land through real event-loop turns (`setImmediate` is not mocked).
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const elapse = ms => act(async () => {
+      t.mock.timers.tick(ms)
+      for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve))
+    })
+    const DEADLINE_MS = 25
     root = createRoot(document.getElementById('root'))
 
     const write = () => new Promise((resolve, reject) => writes.push({ resolve, reject }))
@@ -135,10 +153,13 @@ test('the list mutation guard bounds hung writes and reconciliation without late
     // and `[role="status"]` was empty. Observed once at 694 tests, passing 3/3 in isolation and in
     // three earlier full runs — a wall-clock race, not a behaviour change. The recorded sequence
     // answers the same question ("did the mutation go busy with its label") without depending on how
-    // much of the 25ms budget the scheduler ate.
+    // much of the 25ms budget the scheduler ate. (On the mocked clock that race cannot happen; the
+    // log stays because it asserts the busy row was RENDERED, not merely present at the end.)
     const renders = []
     function Harness() {
-      const [state, mutate, clear] = useListMutation({ actionTimeout: 25, reconcileTimeout: 25 })
+      const [state, mutate, clear] = useListMutation({
+        actionTimeout: DEADLINE_MS, reconcileTimeout: DEADLINE_MS,
+      })
       renders.push(state)
       return React.createElement(React.Fragment, null,
         React.createElement('button', { onClick: () => mutate('delete-run', 'Deleting run…', write, reconcile) }, 'Delete'),
@@ -158,7 +179,10 @@ test('the list mutation guard bounds hung writes and reconciliation without late
     assert.ok(renders.some(state => state?.busy && /Deleting run/.test(state.label || '')),
       'the mutation renders a busy row carrying its own label')
 
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 70)) })
+    await elapse(DEADLINE_MS - 1)
+    assert.equal(reads.length, 0, '1ms before its deadline the hung write is still pending')
+    assert.equal(document.querySelector('[role="alert"]')?.textContent ?? null, null)
+    await elapse(1)
     assert.equal(reads.length, 1)
     let alert = document.querySelector('[role="alert"]')?.textContent || ''
     assert.match(alert, /not confirmed/i, 'a hung write becomes an explicit unknown outcome')
@@ -169,7 +193,9 @@ test('the list mutation guard bounds hung writes and reconciliation without late
     assert.equal(writes.length, 2, 'the lock re-arms only after the bounded list check')
     await act(async () => { writes[1].resolve(); await Promise.resolve() })
     await act(async () => { writes[0].resolve(); await Promise.resolve() })
-    assert.equal(document.querySelector('[role="alert"]'), null,
+    // Text, never a DOM node, in an assertion that may fail: the reporter serializes an element's
+    // whole jsdom window into the message (`inspectorTracePager.test.js`'s header).
+    assert.equal(document.querySelector('[role="alert"]')?.textContent ?? null, null,
       'the old write settling late cannot overwrite a newer success')
 
     await act(async () => {
@@ -188,7 +214,10 @@ test('the list mutation guard bounds hung writes and reconciliation without late
     })
     assert.equal(writes.length, 3, 'the lock stays armed while reconciliation is still pending')
 
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 70)) })
+    await elapse(DEADLINE_MS - 1)
+    assert.match(document.querySelector('[role="status"]')?.textContent || '',
+      /Checking the current list/, '1ms before its deadline the hung check still holds the lock')
+    await elapse(1)
     alert = document.querySelector('[role="alert"]')?.textContent || ''
     assert.match(alert, /follow-up list check timed out/i)
     assert.doesNotMatch(alert, /private provider detail/)
@@ -201,9 +230,11 @@ test('the list mutation guard bounds hung writes and reconciliation without late
     // Settle the refresh the last write is still waiting on. Indexed from the end because the count
     // of reads depends on how many writes settled, not on which one is being bounded.
     await act(async () => { reads[reads.length - 1](); await Promise.resolve() })
-    assert.equal(document.querySelector('[role="status"]'), null)
-    assert.equal(document.querySelector('[role="alert"]'), null)
+    assert.equal(document.querySelector('[role="status"]')?.textContent ?? null, null)
+    assert.equal(document.querySelector('[role="alert"]')?.textContent ?? null, null)
   } finally {
+    // Real timers back before the teardown: closing the Vite server is not the test's to clock.
+    t.mock.timers.reset()
     if (root) await act(async () => root.unmount())
     if (vite) await vite.close()
     dom.window.close()
