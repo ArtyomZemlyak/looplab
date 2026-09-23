@@ -432,6 +432,8 @@ _LAYOUT = {
     "reentry": "engine",
     # The run's one-time setup phase: `run_started`, provenance, the leakage stop (ENG1-04 step 3).
     "setup_phase": "engine",
+    # The Engine's pure-config knobs, declared once as descriptors over EngineOptions (ENG1-03 step 4).
+    "knobs": "engine",
     "tui": "serve",
     "tui_api": "serve",
     "tui_format": "serve",

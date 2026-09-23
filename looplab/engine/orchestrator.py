@@ -108,6 +108,7 @@ from looplab.engine.lessons import LessonMemory
 from looplab.engine.plan import META_SWEEP
 from looplab.engine.node_build import _OMIT as _OMIT_ARM
 from looplab.engine.options import EngineOptions
+from looplab.engine.knobs import EngineKnobs
 from looplab.engine.workspace import WorkspaceSeeder
 # Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
 # their original names so `looplab.engine.orchestrator._rule_triage`, `._holdout_indices`
@@ -880,6 +881,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
              ProposalCuesMixin,
              TrainingMonitorMixin, AshaMonitorMixin,
              WidthSettlingMixin, ReentryMixin, SetupPhaseMixin,
+             # The pure-config knobs as non-data descriptors: an instance value always wins, and an
+             # object that never ran `__init__` reads the library default (ENG1-03 step 4b).
+             EngineKnobs,
              # Last: the cross-cluster members every other mixin may call (doc 25 ES-14). Kept at the
              # END of the MRO so a concern mixin that ever needs to specialize one can, exactly as it
              # could when they lived on the Engine body.
