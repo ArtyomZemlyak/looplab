@@ -171,16 +171,24 @@ def _run(tmp_path):
     return store
 
 
-def test_the_stream_sends_a_full_frame_then_a_delta_that_reproduces_the_next_full_state(tmp_path):
+# The gap between the evaluation and the finish. 0.0: both usually land inside one poll, so ONE delta
+# carries both. 1.0 (> `POLL_SECONDS`, 0.4): they land in two polls, so TWO deltas chain. CI run 1970
+# (2026-09-22) caught the second shape by accident — the appends are not atomic against the poll, and
+# the test then compared the FIRST delta against the FINAL state. Both shapes are driven now, and the
+# property held to is the one a client relies on: the delta CHAIN, applied in order from the full
+# frame, reproduces the full state.
+@pytest.mark.parametrize("gap", [0.0, 1.0])
+def test_the_stream_sends_a_full_frame_then_a_delta_that_reproduces_the_next_full_state(tmp_path, gap):
     store = _run(tmp_path)
     client = TestClient(make_app(tmp_path))
 
     def append_later():
-        # After the first tick has emitted its full frame: one evaluation and the finish, so the
-        # next tick emits ONE delta carrying both and then the stream's `done` ends the response.
+        # After the first tick has emitted its full frame: one evaluation and the finish, then the
+        # stream's `done` ends the response.
         time.sleep(0.8)
         store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5,
                                         "violations": []})
+        time.sleep(gap)
         store.append("run_finished", {"stop_reason": "budget"})
     threading.Thread(target=append_later, daemon=True).start()
     with client.stream("GET", "/api/runs/demo/events") as stream:
@@ -188,14 +196,19 @@ def test_the_stream_sends_a_full_frame_then_a_delta_that_reproduces_the_next_ful
         frames = _frames(stream)
     kinds = [kind for kind, _ in frames]
     assert kinds[:2] == [SSE_STATE, SSE_STATE_DELTA] and kinds[-1] == SSE_DONE, kinds
-    full, delta = frames[0][1], frames[1][1]
+    if gap:
+        assert kinds.count(SSE_STATE_DELTA) == 2, f"the finish landed in the evaluation's poll: {kinds}"
+    full = frames[0][1]
     assert "ops" not in full and "state" in full
-    assert delta["version"] == DELTA_VERSION and delta["base_seq"] == full["seq"]
-    rebuilt = apply(full, delta["ops"])
-    assert rebuilt["seq"] == delta["seq"] > full["seq"]
+    rebuilt = full
+    for kind, frame in frames[1:-1]:
+        assert kind == SSE_STATE_DELTA, kinds
+        assert frame["version"] == DELTA_VERSION and frame["base_seq"] == rebuilt["seq"]
+        before, rebuilt = rebuilt, apply(rebuilt, frame["ops"])
+        assert rebuilt["seq"] == frame["seq"] > before["seq"]
+        assert len(json.dumps(frame)) < len(json.dumps(rebuilt)), "a delta is sent only when smaller"
     assert rebuilt == client.get("/api/runs/demo/state").json()
     assert rebuilt["state"]["nodes"]["0"]["metric"] == 0.5 and rebuilt["state"]["finished"] is True
-    assert len(json.dumps(delta)) < len(json.dumps(rebuilt)), "a delta is sent only when smaller"
 
 
 def test_a_fresh_connection_always_starts_with_a_full_frame(tmp_path):
