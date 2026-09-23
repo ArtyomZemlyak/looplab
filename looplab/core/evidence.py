@@ -52,7 +52,9 @@ take the same switch and the same `fence_untrusted` (review 2026-09-22, doc 66 �
 ALREADY-ESTABLISHED block carries into the next phase's task message
 (`agents/established.py::EstablishedContext`, switched on by `established_context_from_settings`),
 and a remote MCP server's self-description in the tool schema the assistant is offered
-(`tools/mcp_tools.py::model_facing_mcp_spec`, doc 50 TO-06, switched on by `build_tools`).
+(`tools/mcp_tools.py::model_facing_mcp_spec`, doc 50 TO-06, switched on by `build_tools`). A loop's
+compaction summary — a paraphrase of results it had fenced — takes that loop's own
+`tool_result_label` (`core/context_budget.py::compact_history`).
 The Boss and the assistant predate the flag and are unconditional; nothing about them moved —
 `serve/llm_context.py` re-exports the builder and the label under the names its tests import, and
 `agents/tool_loop.py` re-exports the fence, so both spellings name the SAME objects.

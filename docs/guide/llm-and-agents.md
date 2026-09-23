@@ -1013,7 +1013,10 @@ server's self-description is prompt text too: the assistant (the only loop MCP t
 that fences every tool RESULT unconditionally) is offered each MCP tool's description with its
 invisible characters (Unicode format and control characters, newline and tab kept) removed and the
 rest inside the fence, and each parameter's description and title with its invisible characters
-removed — under the server's `evidence_envelope`; off, the server's own schema byte for byte.
+removed — under the server's `evidence_envelope`; off, the server's own schema byte for byte. And
+when a long loop's history is compacted (`agent_auto_summary`), the summary note that replaces the
+stale middle — a model's paraphrase of mostly fenced tool results — rides inside the same fence
+whenever that loop fences its results; a loop that does not keeps its historical note.
 
 ## Knowledge, skills & prompts
 
