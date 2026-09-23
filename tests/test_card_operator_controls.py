@@ -51,6 +51,12 @@ class _Srv:
     def state(self, rd: Path):
         return fold(EventStore(rd / "events.jsonl").read_all())
 
+    def event_store(self, rd: Path):
+        # The worker appends through the run's shared store (`AppState.event_store`); a fresh
+        # store per call is this stub's whole cache, and the patched `EventStore.append` below
+        # sees it by path either way.
+        return EventStore(rd / "events.jsonl")
+
 
 def test_all_four_card_controls_are_command_only_no_spawn_with_closed_payloads():
     assert CARD_CONTROLS <= CONTROL_EVENTS

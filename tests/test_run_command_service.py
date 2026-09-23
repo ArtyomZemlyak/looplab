@@ -3415,13 +3415,24 @@ def test_the_command_append_baseline_comes_from_the_incremental_index_not_a_full
             reparses.append("read_all")
             return real_read_all(self)
 
+    import looplab.serve.appstate as appstate_module
+
     monkeypatch.setattr(rc, "EventStore", _CountingStore)
+    monkeypatch.setattr(appstate_module, "EventStore", _CountingStore)
     body = _post(client, "pause").json()
     record = client.get(f"/api/runs/demo/commands/{body['id']}").json()
 
     assert record["baseline_seq"] == before, (record.get("baseline_seq"), before)
-    # Exactly ONE EventStore: the one that APPENDS the intent (its constructor scans the tail, and
-    # `append` re-reads to extend its own cache). The second store — built solely to read a last seq
-    # the observation index already knows — is what must be gone.
-    assert reparses.count("construct") == 1, reparses
+    # AT MOST ONE EventStore, and it is the one that APPENDS the intent: the run's SHARED store
+    # (`RunCommandService._event_store`, since 2026-09-23), built lazily by the first append and
+    # reused after — its constructor scans the tail once, and `append` re-reads to extend its own
+    # cache. A store built solely to read a last seq the observation index already knows is what
+    # must stay gone, and so is one built per command.
+    assert reparses.count("construct") <= 1, reparses
     assert reparses.count("read_all") <= 3, reparses
+    built = reparses.count("construct")
+    hint = _post(client, "hint", {"text": "second command"}, key="second").json()
+    client.get(f"/api/runs/demo/commands/{hint['id']}")
+    assert reparses.count("construct") == built, (
+        "a second command built another EventStore instead of appending through the run's own",
+        reparses)

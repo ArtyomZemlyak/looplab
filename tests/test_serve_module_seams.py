@@ -495,6 +495,9 @@ def test_one_patch_of_the_gpu_envelope_is_observed_on_both_sides_of_the_split(tm
         def state(self, path):
             return fold(EventStore(path / "events.jsonl").read_all())
 
+        def event_store(self, path):
+            return EventStore(path / "events.jsonl")
+
     normalized = normalize_control(_Srv(), rd, EV_CARD_RESOURCE_PINNED,
                                    {"id": "card-1", "gpus": 2, "gpu_mem_mib": 12_000})
     assert calls == [0], "precondition: intake consulted the patched probe exactly once"

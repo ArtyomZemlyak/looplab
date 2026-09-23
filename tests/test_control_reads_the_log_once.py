@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 from looplab.events import eventstore as eventstore_mod
 from looplab.events.eventstore import EventStore
 from looplab.serve.server import make_app
+from tests.factories import command_terminal, log_run_generation, post_command
 
 
 def _seed_run(tmp_path, run_id="demo", records: int = 40):
@@ -198,15 +199,25 @@ def test_a_log_we_could_not_read_refuses_instead_of_reading_as_healthy(tmp_path)
 
 
 # ---------------------------------------------------------------- one store, not one per POST
+# Driven through `POST /commands`, the path both first-party clients take. These three used the
+# legacy `/control` route, the first writer cured of a fresh store per append; the command worker
+# kept building one per command (`run_commands.py::RunCommandService._event_store` since
+# 2026-09-23), so the property they pin moved to the path that is left.
 
 
-def _post(client, run_id="demo", body=None, **kw):
-    return client.post(f"/api/runs/{run_id}/control", json=body or {"type": "pause", "data": {}}, **kw)
+def _command(client, rd, key, generation):
+    """One intent through `POST /commands`, settled. `hint` appends on any run; the generation is
+    read ONCE, before any accountant, so only the command path's own reads are counted."""
+    record = command_terminal(client, post_command(
+        client, "hint", {"text": key}, key, run_id=rd.name, generation=generation).json(),
+        run_id=rd.name)
+    assert record.get("event_seq") is not None, record
+    return record
 
 
-def test_the_control_route_appends_THROUGH_the_shared_store(tmp_path):
-    """The store is the object built to make a tail read O(new bytes); a fresh one per POST throws
-    that away before it can pay for itself.
+def test_the_command_worker_appends_THROUGH_the_shared_store(tmp_path):
+    """The store is the object built to make a tail read O(new bytes); a fresh one per command
+    throws that away before it can pay for itself.
 
     Held from BEFORE the POST on purpose: a store built after the fact would scan the log and read
     correct either way. Only an append that went through THIS object advances its `_seq` here."""
@@ -215,36 +226,37 @@ def test_the_control_route_appends_THROUGH_the_shared_store(tmp_path):
     srv = app.state.looplab
     client = TestClient(app)
 
-    shared = srv.event_store(rd)
+    shared = srv.commands._event_store(rd)
     assert shared._seq == 9
 
-    assert _post(client).status_code == 200
+    _command(client, rd, "through-shared", log_run_generation(rd))
 
-    assert srv.event_store(rd) is shared, "the run's reader must survive the request that used it"
-    assert shared._seq == 10, "the route appended through some OTHER store"
+    assert srv.commands._event_store(rd) is shared, "the run's store must survive the command"
+    assert shared._seq == 10, "the worker appended through some OTHER store"
 
 
-def test_n_control_posts_do_not_re_parse_the_log_n_times(tmp_path, monkeypatch):
-    """THE accountant. MUTATION: put `EventStore(local_rd / "events.jsonl")` back at the append and
-    each POST re-decodes the whole log — with a 40-record seed and 12 posts that is ~550 records
-    instead of the handful below, and it grows with the square of a session's length."""
+def test_n_commands_do_not_re_parse_the_log_n_times(tmp_path, monkeypatch):
+    """THE accountant. MUTATION: put `EventStore(self._events_path(rd))` back at the worker's
+    append and each command re-decodes the whole log at construction — ~550 records for a
+    40-record seed and 12 commands, instead of the handful below."""
     seed = 40
-    posts = 12
+    commands = 12
     rd = _seed_run(tmp_path, records=seed)
     app = make_app(tmp_path)
     client = TestClient(app)
-    # Warm the reader with one POST first: the FIRST construction legitimately walks the log once,
-    # and that cost is not what this measures.
-    assert _post(client).status_code == 200
+    generation = log_run_generation(rd)
+    # Warm the reader with one command first: the FIRST construction legitimately walks the log
+    # once, and that cost is not what this measures.
+    _command(client, rd, "warm", generation)
 
     books = _Accountant(monkeypatch)
-    for _ in range(posts):
-        assert _post(client).status_code == 200
+    for index in range(commands):
+        _command(client, rd, f"cmd-{index}", generation)
 
     assert books.divergence_walks == 0
     assert books.records < seed, (
-        f"{posts} further control appends re-parsed {books.records} records — more than ONE full "
-        f"scan of a {seed}-record log, so the reader is being rebuilt per request")
+        f"{commands} further commands re-parsed {books.records} records — more than ONE full "
+        f"scan of a {seed}-record log, so a reader is being rebuilt per command")
 
 
 def test_the_reused_store_still_sees_a_log_replaced_underneath_it(tmp_path):
@@ -255,8 +267,8 @@ def test_the_reused_store_still_sees_a_log_replaced_underneath_it(tmp_path):
     app = make_app(tmp_path)
     srv = app.state.looplab
     client = TestClient(app)
-    assert _post(client).status_code == 200
-    store = srv.event_store(rd)
+    _command(client, rd, "before-replay", log_run_generation(rd))
+    store = srv.commands._event_store(rd)
     assert len(store.read_all()) == 7
 
     (rd / "events.jsonl").rename(rd / "events.archived.jsonl")

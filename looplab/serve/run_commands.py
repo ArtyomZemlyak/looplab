@@ -1614,6 +1614,15 @@ class RunCommandService:
     def _events_path(self, rd: Path) -> Path:
         return self.validate_paths(rd) / "events.jsonl"
 
+    def _event_store(self, rd: Path) -> EventStore:
+        """The run's SHARED store (`appstate.py::AppState.event_store`), the one the worker appends
+        an intent through. A fresh `EventStore` per command walked the whole log at construction to
+        learn its tail seq — the N-scans-for-N-appends cost the legacy `/control` route was cured of
+        (`tests/test_control_reads_the_log_once.py`), which this path, the one both first-party
+        clients use, kept paying. Keyed by the validated path, so a case or symlink spelling of the
+        run cannot open a second cache."""
+        return self.srv.event_store(self.validate_paths(rd))
+
     def _path(self, rd: Path, command_id: str) -> Path:
         if not _COMMAND_ID_RE.fullmatch(command_id):
             raise HTTPException(404, "no such command")
@@ -2490,7 +2499,7 @@ class RunCommandService:
         Engine/domain events may advance the shared log between our read and append.  Retry those
         unrelated tail races after refolding; reject only when the exact semantic subject moved.
         """
-        store = EventStore(self._events_path(rd))
+        store = self._event_store(rd)
         baseline = -1
         # Capture the GPU free-memory envelope ONCE at admission (only for a resource pin, its sole
         # consumer) rather than re-spawning the uncached nvidia-smi query on every CAS retry: the bounded
@@ -3621,7 +3630,7 @@ class RunCommandService:
                         self._terminal(path, record, status, error=append_error)
                         return None, record
                 else:
-                    store = EventStore(self._events_path(rd))
+                    store = self._event_store(rd)
                 if event_type in {EV_APPROVAL_GRANTED, EV_SPEC_APPROVED}:
                     # Approval is valid only against the exact decision snapshot. The per-run command
                     # sequencer does not exclude the engine/CLI, so an external grant/reset can land
