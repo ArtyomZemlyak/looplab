@@ -227,6 +227,11 @@ class EngineOptions:
     model_arms: dict = field(default_factory=dict)   # doc 52 row 19: {arm: "model[@cost]"} the bandit may route a build to
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
     budget_aware: bool = False           # A5: surface remaining eval budget into the prompt
+    # Q-3 (2026-09-23): the proposal prompt states the remaining NODE budget and the plan phase
+    # (`proposal_cues._cue_node_budget`). OFF here and ON in the product surface — a divergence-table
+    # row (`tests/test_options_divergence.py`) — because it changes a PROMPT, and a prompt flag
+    # defaults off at every constructor (CLAUDE.md): a bare `Engine(...)` keeps the historical bytes.
+    node_budget_cue: bool = False
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt
     watchdog_reflection: bool = False    # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
     deep_repair: bool = False            # C3: structured failure-taxonomy repair context

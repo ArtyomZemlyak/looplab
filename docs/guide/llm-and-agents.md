@@ -901,6 +901,18 @@ External, repository, memory, prior-run, and free-form current-run text (includi
 rationales/errors/logs) is always covered by an immutable untrusted-data boundary, even when an
 operator hot-overrides the rest of the Deep Research system prompt.
 
+### What the proposal is told about its budget
+
+Three budget lines can reach a proposal prompt, one per currency, each an engine cue in
+`engine/proposal_cues.py::ProposalCuesMixin.PROPOSAL_CUES` order: eval seconds (`budget_aware` +
+`max_eval_seconds`), money (`llm_budget_usd`), and — since 2026-09-23 — the NODE budget
+(`Settings.node_budget_cue`, ON; `false` restores the historical prompt byte for byte). The first two
+are silent in the shipped config, and the node budget is the one every run ends on. The line states
+how many of the run's experiments exist, how many more at most will run (the admission's own
+`max_nodes` + `add_nodes` arithmetic, so a live budget extension moves it), and, when the run has a
+plan, where the endgame reserve begins — or that this proposal is inside it. It records no Card
+steering entry and moves no metric, champion or selection.
+
 ### The durable research record
 
 Until 2026-09-06 a Deep-Research pass left three things behind that nothing could re-check: its

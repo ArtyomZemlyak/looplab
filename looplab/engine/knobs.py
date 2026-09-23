@@ -154,6 +154,8 @@ class EngineKnobs:
     # --- proposal cues and repair
     _complexity_cue = Knob("complexity_cue")
     _budget_aware = Knob("budget_aware")
+    # Q-3: the node-budget line in the proposal prompt (`proposal_cues._cue_node_budget`).
+    _node_budget_cue = Knob("node_budget_cue", bool)
     _failure_reflection = Knob("failure_reflection")
     _watchdog_reflection = Knob("watchdog_reflection")
     _deep_repair = Knob("deep_repair")

@@ -400,6 +400,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the repair context as the engine's record (review 2026-09-22, ENG2-14), ON in
         # Settings and OFF in the bare library for the same frozen reason (a prompt flag).
         repair_context_record=settings.repair_context_record,
+        # …and the proposal prompt's node-budget line (Q-3, 2026-09-23), ON in Settings and OFF in
+        # the bare library for the same reason (a prompt flag).
+        node_budget_cue=settings.node_budget_cue,
         # …and the seven above, so the differential compares a NON-DEFAULT value on both sides.
         stage_check_tools=settings.stage_check_tools,
         llm_cost_limit=settings.llm_cost_limit,

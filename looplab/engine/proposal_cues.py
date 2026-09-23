@@ -22,6 +22,12 @@ from looplab.core.jsonutil import valid_digest_ref
 # 2a concept snapshot records the raw streak LENGTH, so the fire test lives here). Kept in sync with it.
 _LOCK_IN_STREAK = 5
 
+# What the plan's endgame spends its reserve on, per `engine/plan.py::ENDGAME_KINDS`, in the words
+# `ProposalCuesMixin._cue_node_budget` states it — so the sentence follows the plan row's own `kinds`
+# (a Strategist may switch the sweep off) instead of restating a fixed list.
+_ENDGAME_KIND_WORDS = {"merge": "an ensemble of the two best results",
+                       "sweep": "refinements of the champion"}
+
 
 class ProposalCuesMixin:
     """The engine's proposal-cue cluster. See the module docstring for the mixin convention
@@ -62,6 +68,7 @@ class ProposalCuesMixin:
         "_cue_complexity",
         "_cue_eval_budget",
         "_cue_llm_budget",
+        "_cue_node_budget",
         "_cue_experiment_time_budget",
         "_cue_gpu_contract",
         "_cue_failure_reflection",
@@ -226,6 +233,72 @@ class ProposalCuesMixin:
                 f"({frac:.0%} remaining); {stance}.")
         return hint, [{"kind": "llm_budget", "remaining_usd": rem, "total_usd": limit,
                        "stance": stance_key}]
+
+    def _cue_node_budget(self, state: RunState, parent, _r):
+        """How many experiments this run may still make, and where its plan's endgame begins.
+
+        Q-3 (the Researcher's context audit, 2026-09-23). THE BUDGET EVERY RUN ENDS ON WAS THE ONE
+        NO PROPOSAL WAS TOLD. The two budget cues above are both silent in the shipped config —
+        `_cue_eval_budget` needs `budget_aware` AND a `max_eval_seconds`, `_cue_llm_budget` an
+        `llm_budget_usd` that ships 0 — while `max_nodes` bounds every run. Rendered through the real
+        `cli._engine` + `Engine.run` over a scripted toy run, no proposal prompt said how many
+        experiments were left or that the plan had entered its endgame reserve, and the proposal for
+        the run's LAST node read exactly like the one for its fourth. The Strategist has been handed
+        `node_budget_frac` since the reserve landed; the role that spends the slots had nothing.
+
+        THE COUNTS ARE THE ADMISSION'S OWN. `limit` is `_hard_node_reservation_limit` — the operator
+        budget plus a live `add_nodes`, plus the slots the L3 accounting refunded — and `used` is the
+        folded node count, which holds each refunded discard too, so `limit - used` is the operator's
+        remaining budget exactly (`card_selection.refunded_card_budget_node_ids`). "At most", because
+        a build lane may already hold a reservation this fold does not show as a node yet, and a
+        speculative request not yet materialized is a claim on a slot as well: the number is a
+        ceiling, never a promise.
+
+        The plan sentence follows `state.plan` (`engine/plan.py`): before its `endgame_start`, how
+        many slots remain before the reserve; inside it, that this proposal is. A run with no plan
+        (`endgame_reserve_frac` 0) gets the budget sentence alone.
+
+        No Card steering entry, deliberately: `core/cards.py::CARD_STEERING_CONTEXT_FIELDS` is a
+        CLOSED vocabulary and `normalize_steering_context` drops the WHOLE snapshot on a kind it does
+        not know, so an entry here would erase every other cue's receipt on the Card.
+        """
+        if not getattr(self, "_node_budget_cue", False):
+            return "", []
+        try:
+            limit = int(self._hard_node_reservation_limit(state))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return "", []
+        used = len(getattr(state, "nodes", None) or {})
+        if limit <= 0:
+            return "", []
+        left = max(0, limit - used)
+        if left <= 1:
+            hint = (f"\nNode budget: {used} of this run's {limit} experiment(s) exist already — "
+                    "this proposal is for the run's LAST experiment slot.")
+        else:
+            hint = (f"\nNode budget: {used} of this run's {limit} experiment(s) exist already, so at "
+                    f"most {left} more will run, this one included.")
+        plan = getattr(state, "plan", None)
+        if isinstance(plan, dict):
+            try:
+                start = int(plan.get("endgame_start"))
+            except (TypeError, ValueError, OverflowError):
+                start = None
+            phases = plan.get("phases")
+            last = phases[-1] if isinstance(phases, list) and phases else {}
+            kinds = last.get("kinds") if isinstance(last, dict) else None
+            words = [_ENDGAME_KIND_WORDS[k] for k in (kinds or ())
+                     if isinstance(k, str) and k in _ENDGAME_KIND_WORDS]
+            if start is not None and 0 < start < limit and words:
+                spend = " and ".join(words)
+                if used < start:
+                    hint += (f" The run's plan reserves experiments #{start}–#{limit - 1} for its "
+                             f"endgame ({spend}), so at most {start - used} more can open a new "
+                             "direction before that reserve begins.")
+                else:
+                    hint += (f" This proposal falls inside the plan's endgame reserve (experiments "
+                             f"#{start}–#{limit - 1}), which the plan spends on {spend}.")
+        return hint, []
 
     def _cue_experiment_time_budget(self, state: RunState, parent, _r):
         # Experiment TIME-BUDGET cue (repo tasks): a training that cannot finish inside the per-experiment

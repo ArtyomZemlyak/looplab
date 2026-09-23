@@ -86,6 +86,11 @@ EXPECTED = {
     # row above's ground — it changes a PROMPT (and the failure text the triage judge and the
     # durable rows carry), so a direct `Engine(...)` keeps every one of those texts byte for byte.
     "repair_context_record": (True, False),
+    # The proposal prompt's NODE-BUDGET line (Q-3, the Researcher's context audit, 2026-09-23): ON
+    # in the product surface, OFF in the bare library on `evidence_envelope`'s ground — it changes a
+    # PROMPT, and a prompt flag defaults off at every constructor, so a direct `Engine(...)` keeps
+    # the historical proposal bytes.
+    "node_budget_cue": (True, False),
     "unified_agent": (True, False),
     # Layer 3 Card queue owns macro-action selection in the product surface (2026-08-04): the Card lane
     # is the intended selector, and it wins over `agent_drives_actions` when both are on. The bare

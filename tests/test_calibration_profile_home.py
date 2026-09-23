@@ -190,7 +190,17 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               re-set. INERT for a calibration replicate: the toy workload never fails an eval, so
 #               no repair context is ever built. Re-pinned anyway — the digest binds the COMPLETE
 #               non-variant envelope, and a PROMPT knob earns it.
-_EXPECTED_DIGEST = "sha256:f526dc14975d326d5fc4f267552588fc57b9ab220e559a6956dbae156c272945"
+#   2026-09-23  + node_budget_cue (Q-3, the Researcher's context audit: every proposal prompt states
+#               the run's remaining NODE budget and its plan phase). The 'field set changed too'
+#               branch, verified the prescribed way rather than from the count: an AST scan of
+#               `Settings`' annotated assignments against the pre-change tree reports exactly
+#               `['node_budget_cue']` added and `[]` removed. `_EXPECTED_FIELD_COUNT` goes 247 -> 248
+#               and both pins are re-set. INERT for a calibration replicate: the profile's toy
+#               backend proposes with `ToyResearcher`, which splices no hint text, so the line the
+#               knob adds to `_complexity_hint` is read by nothing. Re-pinned anyway on the rule every
+#               inert knob above was re-pinned under — the digest binds the COMPLETE non-variant
+#               envelope — and a PROMPT knob earns it, since a prompt is a contract.
+_EXPECTED_DIGEST = "sha256:53b5267a2ea0178cee464b9d4923772ea2676bc598a94aaa07ecd31c37faf687"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -670,7 +680,8 @@ _EXPECTED_DIGEST = "sha256:f526dc14975d326d5fc4f267552588fc57b9ab220e559a6956dba
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
 #   2026-09-23  + repair_context_record: 246 -> 247 — see the digest history above.
-_EXPECTED_FIELD_COUNT = 247
+#   2026-09-23  + node_budget_cue (Q-3): 247 -> 248; see the digest history above.
+_EXPECTED_FIELD_COUNT = 248
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

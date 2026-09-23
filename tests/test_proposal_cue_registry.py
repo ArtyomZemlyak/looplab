@@ -39,6 +39,11 @@ EXPECTED_ORDER = (
     # and 0 on eval seconds, while `propose`/`repropose`/`plan` saw a money figure in 0 of 7,006
     # resolved prompts and `plan_step` saw one in 72.8 % of 8,298.
     "_cue_llm_budget",
+    # PINNED 2026-09-23 (Q-3, the Researcher's context audit): the third currency, beside the other
+    # two for the reason `_cue_llm_budget` sits beside the eval-seconds cue — what the run can still
+    # afford is read before what went wrong last time. It is the only budget cue the shipped config
+    # does not silence (`budget_aware` is off, `llm_budget_usd` ships 0; `max_nodes` bounds every run).
+    "_cue_node_budget",
     "_cue_experiment_time_budget",
     "_cue_gpu_contract",
     "_cue_failure_reflection",
@@ -62,6 +67,7 @@ class _Host(ProposalCuesMixin):
         self.researcher = type("R", (), {})()
         self._complexity_cue = False
         self._budget_aware = False
+        self._node_budget_cue = False
         self.max_eval_seconds = None
         self._repo_spec = {}
         self._gpu_ids = None

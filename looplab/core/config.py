@@ -901,6 +901,24 @@ class Settings(BaseSettings):
     # reason over how much compute is left (explore broad while flush, exploit/cheapen when low).
     # No-op unless a max_eval_seconds budget is set.
     budget_aware: bool = False
+    # THE NODE BUDGET, TOLD TO THE ROLE THAT SPENDS IT (Q-3, the Researcher's context audit,
+    # 2026-09-23). The proposal prompt had two budget cues and the shipped config silences both:
+    # `budget_aware` (eval seconds) is off and needs a `max_eval_seconds` nobody sets, and the money
+    # cue needs an `llm_budget_usd` that ships 0 — while the budget every run actually ends on is
+    # `max_nodes`. Rendered through the real `cli._engine` + `Engine.run` over a scripted toy run
+    # (first node, a clear winner, two same-error failures, a novelty rejection, memo + lessons +
+    # open beliefs, the plan's endgame reserve), not one proposal prompt states how many
+    # experiments the run has left or that the plan has entered its endgame; the proposal for the
+    # run's LAST node read exactly like the one for its fourth. The Strategist has been told
+    # (`StrategyContext.node_budget_frac`) since the endgame reserve landed. ON: one line per
+    # proposal (`engine/proposal_cues.py::_cue_node_budget`) — how many of the run's experiments
+    # exist, how many more at most will run, and, when the run has a plan, where its endgame
+    # reserve begins or that this proposal is inside it. It changes a PROMPT and buys no call, so
+    # `false` reproduces the historical prompt BYTE FOR BYTE, every constructor defaults it OFF, and
+    # a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE
+    # reader, the engine knob `_node_budget_cue`. It records no Card steering entry (the Card's
+    # steering vocabulary is closed) and moves no metric, champion, selection or violation.
+    node_budget_cue: bool = True
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
     # back into the proposal prompt so the proposer reflects on and avoids repeating them. ON by
     # default: it is SELECTIVE by construction (injects only when recent failures exist — the
@@ -3429,6 +3447,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # pointable at every commit before this one; `tests/test_repair_context_record.py` holds that
     # `false` is the historical text byte for byte.
     "repair_context_record": False,
+    # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
+    # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
+    # line stating the run's remaining node budget and its plan phase, so a resumed run would change
+    # what its Researcher is told mid-log. (c) is `False`, pointable at every commit before this one;
+    # the field's comment and `tests/test_node_budget_cue.py` hold that `false` is the historical
+    # prompt, byte for byte.
+    "node_budget_cue": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,
