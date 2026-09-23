@@ -211,6 +211,39 @@ def _engine(rd, **kw):
                        n_seeds=2, max_nodes=2, **kw)
 
 
+def test_the_private_grade_runs_off_the_event_loop_and_its_seconds_are_charged(tmp_path,
+                                                                              monkeypatch):
+    """Review 2026-09-22, ENG2-15: the finish-time private grade (a grader subprocess, 5-minute
+    timeout) ran synchronously ON the event loop, and its seconds reached no budget. Driven through
+    a real run: the grade happens on a worker thread and its row's `eval_seconds` is charged."""
+    import threading
+    import time
+
+    seen: list[bool] = []
+
+    def search(competition, sub, answers_csv, hidden_ids, data_dir, *, timeout):
+        text = mlebench_split.filter_submission(Path(sub).read_text(encoding="utf-8"),
+                                                hidden_ids, keep=True)
+        return _accuracy(text, answers_csv)
+
+    def private(competition, sub, data_dir, *, timeout):
+        seen.append(threading.current_thread() is threading.main_thread())
+        time.sleep(0.05)                          # a measurable charge
+        score = _accuracy(Path(sub).read_text(encoding="utf-8"), _private_answers())
+        return score, {"competition_id": competition, "score": score}
+
+    monkeypatch.setattr(mlebench_grade, "grade_search_split_in_subprocess", search)
+    monkeypatch.setattr(mlebench_grade, "grade_in_subprocess", private)
+    rd = tmp_path / "run"
+    state = anyio.run(_engine(rd, holdout_fraction=0.5).run)
+    assert state.finished
+    assert seen == [False], f"the private grade ran on the event loop's own thread: {seen}"
+    rows = [e.data for e in EventStore(rd / "events.jsonl").read_all()
+            if e.type == "holdout_evaluated"]
+    assert len(rows) == 1 and rows[0]["eval_seconds"] >= 0.05, rows
+    assert state.eval_seconds_by_kind.get("holdout") == pytest.approx(rows[0]["eval_seconds"])
+
+
 def test_the_search_sees_the_hidden_slice_and_the_private_answers_once(tmp_path, graders):
     """THE PROTOCOL. MUTATION: grade every node on the private answers again -> the search calls
     vanish, the private calls become one per node, and the champion is a max over private draws."""

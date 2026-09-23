@@ -1684,7 +1684,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # scorer writes to `metric_provenance.host_scorer`, so "the same unseen scorer for every
         # leader" stays checkable after the fact. Absent on every other protocol and on every log
         # written before it (reader-side default, invariant #5).
-        optional=("attempt", "program_sha256", "protocol"),
+        # `eval_seconds`: what the withheld scorer or the private grade cost (review 2026-09-22,
+        # ENG2-15), charged once per (node, generation, epoch) into the `holdout` budget bucket by
+        # `replay.py::_on_holdout_evaluated`. Absent on the partition re-score and on every log
+        # written before it, which therefore charges nothing (invariant #5).
+        optional=("attempt", "eval_seconds", "program_sha256", "protocol"),
     ),
     "host_grading": PayloadContract(
         "The host-side scorer's grade over the candidate's predictions.",

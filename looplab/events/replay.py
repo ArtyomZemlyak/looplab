@@ -286,7 +286,7 @@ class _FoldCtx:
     __slots__ = (
         "best_confirmed", "best_confirmed_significant", "llm_usage_seen", "llm_usage_ids",
         "charged_terminal_generations", "charged_confirm_seeds", "charged_ablation_ids",
-        "charged_noise_seeds",
+        "charged_noise_seeds", "charged_holdout_keys",
         "pending_finish_report", "concept_subject_invalidated", "concept_mode_untrusted",
         "concept_input_capped", "concept_input_invalid", "run_base_capped",
         "run_base_invalid", "run_base_seen", "event_index",
@@ -321,6 +321,10 @@ class _FoldCtx:
         # confirm at the full profile from `confirm_seed_base`, the probe at the node's own profile
         # from 0 — and sharing the memo would refund whichever ran second.
         self.charged_noise_seeds: set[tuple[int, int, int]] = set()
+        # …and for the HOLDOUT phase's evaluator launches (review 2026-09-22, ENG2-15): the withheld
+        # scorer / the private grade, one per (node, generation, search_epoch) — the key the phase
+        # gates each launch on, so a duplicated row cannot charge twice.
+        self.charged_holdout_keys: set[tuple] = set()
         # (node_id, seq) of every `node_repaired` row already charged to the repair epoch. What
         # carries invariant #5 for that counter now that it advances rather than max-ing: a
         # duplicate or re-folded row shares its SEQ, a per-process ordinal restart does not.
@@ -2025,6 +2029,18 @@ def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     # predictions) records nothing — such a node simply can't win the holdout pick.
     nid = _coerce_node_id(d)
     n = st.nodes.get(nid) if nid is not None else None
+    # THE HOLDOUT'S OWN COMPUTE (review 2026-09-22, ENG2-15): the withheld scorer or the private
+    # grade RAN, whatever this row's measurement is worth below — so its seconds are charged BEFORE
+    # the validity checks, exactly once per (node, generation, epoch), into their own bucket. The
+    # rule the confirm and noise-floor buckets are written to: a rejected row discards the number,
+    # never the compute. Only a row that carries the key is keyed at all, so every log written
+    # before it (no `eval_seconds`) folds byte-identically (invariant #5).
+    if "eval_seconds" in d and nid is not None:
+        cost_key = (nid, _coerce_node_id({"node_id": d.get("generation")}),
+                    _coerce_node_id({"node_id": d.get("search_epoch")}))
+        if cost_key not in ctx.charged_holdout_keys:
+            ctx.charged_holdout_keys.add(cost_key)
+            _charge_eval_seconds(st, "holdout", d.get("eval_seconds"))
     if (n is None or n.status is not NodeStatus.evaluated
             or n.id in st.aborted_nodes or n.tombstoned):
         return

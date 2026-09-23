@@ -252,6 +252,40 @@ def test_the_withheld_number_overturns_the_search_ranking(tmp_path):
     assert again.model_dump(mode="json") == state.model_dump(mode="json")
 
 
+def test_the_withheld_scorer_runs_off_the_event_loop_and_its_seconds_are_charged(
+        tmp_path, monkeypatch):
+    """Review 2026-09-22, ENG2-15: `holdout_phase` ran the operator's program — up to its 30-minute
+    timeout — synchronously ON the event loop, and the seconds it took reached no budget. Driven
+    through a real run: every launch of the withheld program happens on a worker thread, and each
+    row's `eval_seconds` is charged into the run's `holdout` bucket."""
+    import threading
+    import time
+
+    from looplab.runtime import sandbox
+
+    task = _task(tmp_path)
+    program = str(Path(task.eval.holdout_scorer.command[1]))
+    real_run_argv = sandbox.run_argv
+    launches: list[bool] = []
+
+    def spy_run_argv(argv, *args, **kwargs):
+        if program in [str(a) for a in argv]:
+            launches.append(threading.current_thread() is threading.main_thread())
+            time.sleep(0.05)                       # a measurable charge
+        return real_run_argv(argv, *args, **kwargs)
+
+    monkeypatch.setattr(sandbox, "run_argv", spy_run_argv)
+    engine = _engine(tmp_path, task, _Dev())
+    state = anyio.run(engine.run)
+    assert state.finished
+    assert launches, "precondition: the withheld scorer never ran"
+    assert not any(launches), "the withheld scorer ran on the event loop's own thread"
+    rows = [e.data for e in engine.store.read_all() if e.type == "holdout_evaluated"]
+    assert all(r["eval_seconds"] >= 0.05 for r in rows), rows
+    assert state.eval_seconds_by_kind.get("holdout") == pytest.approx(
+        sum(r["eval_seconds"] for r in rows))
+
+
 def test_with_holdout_select_off_the_search_metric_still_decides(tmp_path):
     """The boundary: this slice supplies an unseen NUMBER; whether selection reads it is
     `Settings.holdout_select`, exactly as it is for a host-graded task's partition."""

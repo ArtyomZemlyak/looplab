@@ -114,6 +114,49 @@ def test_holdout_null_metric_gates_but_never_wins():
     assert st.best_node_id == 0                       # no holdout pool -> search pick stands
 
 
+# --------------------------------------------------------------------------- #
+# the holdout's OWN compute (review 2026-09-22, ENG2-15)
+# --------------------------------------------------------------------------- #
+# The withheld scorer is the operator's program (up to its 30-minute timeout) and the MLE-bench
+# private grade a grader subprocess (5 minutes); neither second reached the eval budget. A row now
+# carries `eval_seconds`, charged EXACTLY ONCE per (node, generation, search_epoch) into its own
+# `holdout` bucket — additive, so a log written before carries none and folds byte-identically.
+
+def _holdout_row(seq, node_id, seconds, **extra):
+    return _ev(seq, "holdout_evaluated", node_id=node_id, generation=0, search_epoch=0,
+               metric=0.70, gap=0.25, protocol="holdout_scorer", eval_seconds=seconds, **extra)
+
+
+def test_a_holdout_row_charges_its_eval_seconds_once_into_its_own_bucket():
+    events = _base_events() + [_holdout_row(5, 0, 12.5), _holdout_row(6, 1, 7.5),
+                               _holdout_row(7, 1, 7.5)]          # a duplicated row
+    st = fold(events)
+    assert st.eval_seconds_by_kind.get("holdout") == pytest.approx(20.0)
+    assert st.total_eval_seconds == pytest.approx(0.2 + 20.0)
+    # order-tolerant: the same rows in another order charge the same
+    shuffled = fold(_base_events() + [_holdout_row(5, 1, 7.5), _holdout_row(6, 0, 12.5),
+                                      _holdout_row(7, 1, 7.5)])
+    assert shuffled.total_eval_seconds == pytest.approx(st.total_eval_seconds)
+
+
+def test_a_legacy_holdout_row_charges_nothing_and_folds_as_before():
+    """Invariant #5: every log written before carries no `eval_seconds` on this row."""
+    legacy = _base_events() + [_ev(5, "holdout_evaluated", node_id=0, metric=0.70, gap=0.25)]
+    st = fold(legacy)
+    assert "holdout" not in st.eval_seconds_by_kind
+    assert st.total_eval_seconds == pytest.approx(0.2)
+    assert st.nodes[0].holdout_metric == 0.70
+
+
+def test_a_rejected_holdout_row_still_charges_the_seconds_it_spent():
+    """The grader RAN; a row the fold then rejects (its node withdrawn meanwhile) discards the
+    measurement, never the compute — the rule the confirm and noise-floor buckets are written to."""
+    events = _base_events() + [_ev(5, "node_tombstoned", node_ids=[0]), _holdout_row(6, 0, 3.0)]
+    st = fold(events)
+    assert st.nodes[0].holdout_metric is None
+    assert st.eval_seconds_by_kind.get("holdout") == pytest.approx(3.0)
+
+
 def test_gap_derived_from_confirmed_mean_without_holdout():
     events = [
         _ev(0, "run_started", run_id="r", task_id="t", direction="min"),

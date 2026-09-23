@@ -16,8 +16,11 @@ Layering: this module must not import the orchestrator (TYPE_CHECKING only) and 
 serve — it touches only engine.triage, events, core, runtime/adapters (lazily) and stdlib."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+import anyio
 
 from looplab.core.errors import ConfigRefusal
 from looplab.core.models import RunState
@@ -344,7 +347,17 @@ class HoldoutGrader:
         The fold then (a) surfaces the val-holdout generalization gap in the Trust panel and
         (b) under holdout_select picks the champion by the unseen signal among these leaders.
         Replay/resume-safe: gated per node on holdout_evaluated_ids; an event is emitted even
-        when the predictions file is gone (metric None) so the gate always closes."""
+        when the predictions file is gone (metric None) so the gate always closes.
+
+        THE TWO EVALUATOR LAUNCHES RUN IN A WORKER, and each row says what it cost (review
+        2026-09-22, ENG2-15). The withheld scorer is the operator's own program (its timeout defaults
+        to 30 minutes) and the MLE-bench private grade a grader subprocess (5 minutes); both ran
+        synchronously ON the event loop, freezing every other task for their duration, and neither
+        second reached the eval budget. They are awaited through `anyio.to_thread.run_sync` — each
+        touches only its node's own workdir and the engine's read-only grading state — and the row
+        carries `eval_seconds`, which the fold charges once per (node, generation, epoch) into its
+        own `holdout` bucket (`replay.py::_on_holdout_evaluated`). The partition re-score below
+        stays inline: it re-reads predictions already on disk, in-process, with no evaluator."""
         import json as _json
         g = self._e._host_grader
         scorer = self.holdout_scorer() if g is None else None
@@ -362,7 +375,10 @@ class HoldoutGrader:
                 # champion by it among these leaders. An event is emitted even when the program
                 # fails (metric None), exactly as the partition branch does, so the gate closes and
                 # a resume does not re-run a paid scorer.
-                m, program_sha256 = self._run_holdout_scorer(n, scorer)
+                started = time.monotonic()
+                m, program_sha256 = await anyio.to_thread.run_sync(
+                    self._run_holdout_scorer, n, scorer)
+                seconds = round(time.monotonic() - started, 3)
                 gap = None
                 if m is not None and n.metric is not None:
                     gap = (n.metric - m) if state.direction == "max" else (m - n.metric)
@@ -373,7 +389,8 @@ class HoldoutGrader:
                        # there is no partition it can count. `protocol` is what tells a reader
                        # which kind of holdout row this is; the count is not a claim about size.
                        "n_holdout": 0,
-                       "protocol": "holdout_scorer"}
+                       "protocol": "holdout_scorer",
+                       "eval_seconds": seconds}
                 if program_sha256:
                     row["program_sha256"] = program_sha256
                 async with self._e._write_lock:
@@ -382,14 +399,17 @@ class HoldoutGrader:
             if g.get("kind") == "mlebench":
                 # THE ONE PRIVATE GRADE (doc 52 §5.1 row 3): the search champion's public-test rows
                 # against the private answers, once, at finish — its medal report beside it.
-                m, gap = self._private_grade(n, state)
+                started = time.monotonic()
+                m, gap = await anyio.to_thread.run_sync(self._private_grade, n, state)
+                seconds = round(time.monotonic() - started, 3)
                 async with self._e._write_lock:
                     self._e.store.append(EV_HOLDOUT_EVALUATED, {
                         "node_id": nid, "generation": n.attempt,
                         "search_epoch": state.search_epoch,
                         "metric": m, "gap": gap,
                         "n_holdout": len(self._e._search_hidden_ids),
-                        "protocol": "private_grade"})
+                        "protocol": "private_grade",
+                        "eval_seconds": seconds})
                 continue
             preds = None
             # Same host confused-deputy boundary as `apply_host_grade` — this file is named by the

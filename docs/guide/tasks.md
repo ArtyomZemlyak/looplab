@@ -235,7 +235,10 @@ a stricter host scorer:
   reader over the withheld number would hand it straight back to the candidate).
 * **The receipt.** Each `holdout_evaluated` row carries `protocol: "holdout_scorer"` and the
   program's `program_sha256`, so "the same unseen scorer for every leader" is checkable after the
-  fact. A scorer that exits non-zero, times out or prints nothing readable gives **no number** — the
+  fact, and the program's own wall-clock as `eval_seconds` — charged once to the run's eval budget
+  (`max_eval_seconds`) in its own `holdout` bucket, like the confirm and noise-floor seeds. The
+  program runs in a worker thread, never on the engine's event loop (the MLE-bench private grade
+  likewise). A scorer that exits non-zero, times out or prints nothing readable gives **no number** — the
   leader simply has no unseen score. It never falls back to the search metric: that would put the
   number the search optimised into the field selection reads as unseen.
 * **What it still does not do.** It does not *enforce* that the candidate could not reach the split.
