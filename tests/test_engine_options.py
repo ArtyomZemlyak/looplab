@@ -115,7 +115,9 @@ ATTR_BY_FIELD = {
     "code_leakage_detect": "_code_leakage_detect",
     "critic_check": "_critic_check",
     "redact_output": "_redact_output",
-    "novelty_gate": "_novelty_gate",
+    # The legacy alias has no attribute of its own (review 2026-09-22, CORE-08): what it moves is
+    # the mode, forced to "algo".
+    "novelty_gate": "_novelty_mode",
     "novelty_epsilon": "_novelty_epsilon",
     "reflection_priors": "_reflection_priors",
     "comparative_lessons": "_comparative_lessons_on",
@@ -223,6 +225,17 @@ def test_the_inert_structured_claims_knob_no_longer_reaches_the_engine(tmp_path)
     pinned = Settings(cross_run_structured_claims=False)          # a pre-field snapshot's pin
     assert EngineOptions.from_settings(pinned) == EngineOptions.from_settings(Settings())
     assert not hasattr(_mk_engine(tmp_path / "r2"), "_cross_run_structured_claims")
+
+
+def test_the_legacy_novelty_gate_is_read_once_into_the_mode_and_not_relayed(tmp_path):
+    """Review 2026-09-22, CORE-08 (ENG1-03 counted it too). `novelty_gate=True` is the legacy alias
+    that forces `_novelty_mode = "algo"` at construction, and it was ALSO stored as `_novelty_gate`,
+    which nothing in the tree reads — a relay whose only reader was this file's `ATTR_BY_FIELD`
+    row. The alias still works; the row now names the attribute the knob actually moves."""
+    eng = _mk_engine(tmp_path / "r", novelty_gate=True, novelty_mode="llm")
+    assert eng._novelty_mode == "algo"
+    assert not hasattr(eng, "_novelty_gate")
+    assert ATTR_BY_FIELD["novelty_gate"] == "_novelty_mode"
 
 
 def test_task_facets_finalize_is_fresh_default_off_and_maps_explicit_opt_in():

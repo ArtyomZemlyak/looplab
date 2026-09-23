@@ -1099,6 +1099,10 @@ class Settings(BaseSettings):
     asha_rung_nodes: int = Field(default=0, ge=0)
     # A6 proxy/predictive scoring: cheaply rank a candidate's potential from early-stage signals
     # and skip a full eval for the doomed bottom fraction. 0.0 = off (no candidate skipped).
+    # `proxy_kill_fraction` IS the switch: the scorer is built only when it is > 0, because its one
+    # consumer (the pre-eval kill in `engine/evaluate.py`) runs only then. `proxy_scoring` on its own
+    # builds nothing since review 2026-09-22 (CORE-08) — it built a scorer nothing called — and it
+    # still parses, so a snapshot or `LOOPLAB_PROXY_SCORING` that carries it keeps loading.
     proxy_scoring: bool = False
     proxy_kill_fraction: float = Field(default=0.0, ge=0.0, le=0.9)
     # === Novelty / dedup ==================================================================

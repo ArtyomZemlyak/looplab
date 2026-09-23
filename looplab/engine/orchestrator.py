@@ -1306,8 +1306,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._critic_check = critic_check
         self._redact_output = redact_output
         # novelty_mode is the primary selector; a legacy novelty_gate=True forces the "algo" path.
+        # Read ONCE, here: it used to be relayed to `self._novelty_gate` as well, which nothing read
+        # (review 2026-09-22, CORE-08).
         self._novelty_mode = str(novelty_mode or "llm") if not novelty_gate else "algo"
-        self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
         # T5 semantic novelty (Phase 2): reject a proposal whose idea TEXT is a near-duplicate of
         # an existing node's — with one informed re-propose when the duplicate FAILED (the

@@ -515,6 +515,27 @@ def test_ordinary_cli_engine_keeps_large_budget_outside_rollout_scope(
     assert engine._speculation_runtime_scope_sha256 == ""
 
 
+def test_proxy_scoring_alone_builds_no_scorer_and_the_kill_fraction_builds_one(tmp_path):
+    """Review 2026-09-22, CORE-08. The proxy scorer's ONLY consumer is the pre-eval kill in
+    `engine/evaluate.py`, which runs when `proxy_kill_fraction > 0`. `proxy_scoring=True` alone
+    built a scorer nothing ever called, whose one effect was the speculation gate's "proxy_scorer
+    must be disabled". MUTATION: restore `settings.proxy_scoring or` in `_engine` -> the idle
+    engine carries a `ProxyScorer` again."""
+    import looplab.cli as cli
+    from looplab.adapters.toytask import ToyTask
+    from looplab.core.config import Settings
+    from looplab.search.proxy import ProxyScorer
+
+    idle = cli._engine(tmp_path / "idle", ToyTask(),
+                       Settings(backend="toy", proxy_scoring=True), None)
+    assert idle.proxy_scorer is None
+
+    live = cli._engine(tmp_path / "live", ToyTask(),
+                       Settings(backend="toy", proxy_kill_fraction=0.3), None)
+    assert isinstance(live.proxy_scorer, ProxyScorer)
+    assert live.proxy_scorer.kill_fraction == 0.3
+
+
 def _stale_speculation_prefix(run_dir):
     """One deliberately incomplete positive-depth prefix plus valid resume snapshots."""
     import json

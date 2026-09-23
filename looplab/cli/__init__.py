@@ -976,7 +976,11 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                      if settings.backend == "llm" else None)
     dev_factory = make_developer_factory(task, settings) if settings.backend == "llm" else None
     proxy_scorer = None
-    if settings.proxy_scoring or settings.proxy_kill_fraction > 0:
+    # Built only where it is USED (review 2026-09-22, CORE-08): its one consumer, the pre-eval kill
+    # in `engine/evaluate.py`, runs when `proxy_kill_fraction > 0`. `proxy_scoring=True` alone used
+    # to build a scorer nothing called, whose only effect was to trip the speculation gate's
+    # "proxy_scorer must be disabled". The field still parses, for snapshot compatibility.
+    if settings.proxy_kill_fraction > 0:
         from looplab.search.proxy import ProxyScorer
         proxy_scorer = ProxyScorer(kill_fraction=settings.proxy_kill_fraction)
     # Every pure-config Settings→Engine knob travels as ONE bundle (BACKLOG §4); only the built
