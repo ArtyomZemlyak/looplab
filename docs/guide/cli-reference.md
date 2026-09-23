@@ -369,7 +369,8 @@ in between, the command refuses and tells you which one to run instead.
 
 Freeze a run **without** finalizing it — no end-of-run report, lessons, or cost roll-up. A live
 engine breaks on its next loop iteration; the run stays resumable (`looplab resume`) or you can
-`finalize` it later.
+`finalize` it later. The `pause` it appends names itself as the reason (``operator stop (`looplab
+stop`)``), so the run's `stop:` line says who froze it.
 
 ```bash
 looplab stop RUN_DIR

@@ -108,6 +108,26 @@ def test_cli_stop_appends_pause(tmp_path):
     assert fold(evs).paused is True and fold(evs).finished is False
 
 
+def test_cli_stop_names_itself_as_the_reason_the_run_paused(tmp_path):
+    """E2E sweep 2026-09-23 (flow A): `looplab stop` on a live run, and the run's own exit summary
+    then read "PAUSED ... the `pause` row names no reason — nobody can say why." Somebody could: the
+    operator who typed the command. `finalize` has always named itself on its `run_abort`
+    (`reason: "finalized"`, pinned just below); `stop` wrote `{}`. The account is read back through
+    the real CLI command and the real fold, so the sentence the operator sees is what is pinned."""
+    from looplab import cli
+    from looplab.events.stop_account import stop_account
+
+    rd = _run_dir(tmp_path)
+    cli.stop(rd)
+    state = fold(EventStore(rd / "events.jsonl").read_all())
+    assert state.paused is True
+    assert state.pause_reason and "looplab stop" in state.pause_reason
+    account = stop_account(state)
+    assert account.disposition == "paused"
+    assert "nobody can say why" not in account.line
+    assert "looplab stop" in account.line
+
+
 def test_cli_finalize_appends_run_abort(tmp_path):
     from looplab import cli
     rd = _run_dir(tmp_path)

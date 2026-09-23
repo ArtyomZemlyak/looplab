@@ -1225,7 +1225,12 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     it later to wrap it up."""
     # `healthy=True`: fail closed on a mid-file corruption before appending (P0-4).
     store = _require_run_dir(run_dir, healthy=True)
-    store.append(EV_PAUSE, {})
+    # NAMED, like `finalize`'s `run_abort {reason: "finalized"}` below. The E2E sweep of 2026-09-23
+    # stopped a live run with this command and the run's own exit summary then said "the `pause` row
+    # names no reason — nobody can say why" (`events/stop_account.py`) — about a stop an operator
+    # typed. `reason` is an optional key of the `pause` contract and the fold already carries it to
+    # `RunState.pause_reason`; nothing decides on it (`classify_prior_run` is pinned not to read it).
+    store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
     typer.echo(f"stopped {run_dir} (frozen, not finalized) — `looplab resume` to continue, "
                "`looplab finalize` to wrap it up")
 
