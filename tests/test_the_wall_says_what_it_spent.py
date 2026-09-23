@@ -97,10 +97,17 @@ class _SpendingAcct:
 
 
 class _NeverEmits:
-    """A model that keeps calling a tool and never emits, and whose accountant ticks as it goes."""
+    """A model that keeps calling a tool and never emits, and whose accountant ticks as it goes.
+
+    Each call takes 0.02 s on the loop's OWN clock, which the model drives (`_run`). It used to sleep
+    0.02 s against the real one, and the verdict raced two cutoffs: the 0.05 s wall and the loop's
+    stuck detector, which counts identical calls. On Linux the wall wins on the fourth turn; a
+    Windows runner's 15.6 ms `time.monotonic` read three sleeps as under 0.05 s, the loop took one
+    more identical call, and the stuck detector cut it first ('stuck' for 'time', Windows run 55)."""
 
     def __init__(self, with_accountant=True):
         self.calls = 0
+        self.now = [1_000.0]                      # the loop's monotonic clock, advanced per call
         if with_accountant:
             self.accountant = _SpendingAcct()
 
@@ -108,8 +115,7 @@ class _NeverEmits:
         self.calls += 1
         if getattr(self, "accountant", None):
             self.accountant.spent += 0.05
-        import time as _t
-        _t.sleep(0.02)
+        self.now[0] += 0.02
         return {"role": "assistant", "content": None, "tool_calls": [
             {"id": f"c{self.calls}", "type": "function",
              "function": {"name": "look", "arguments": "{}"}}]}
@@ -132,11 +138,24 @@ _EMIT = {"type": "function", "function": {"name": "emit", "description": "emit",
 
 
 def _run(client, **kw):
+    import time
+    import types
+
+    from looplab.agents import tool_loop
     from looplab.agents.tool_loop import drive_tool_loop
+    from looplab.tools import clock as loop_clock
+
+    # The loop's wall and its `LoopClock` both read `time.monotonic()`; both read the model's clock.
+    driven = types.SimpleNamespace(**{k: getattr(time, k) for k in dir(time)
+                                      if not k.startswith("__")})
+    driven.monotonic = lambda: client.now[0]
     seen = {}
-    drive_tool_loop(client, _LookTools(), [{"role": "user", "content": "go"}], _EMIT,
-                    time_budget_s=0.05, finalize=lambda a: "done",
-                    fallback=lambda m: "fell back", on_budget=seen.update, **kw)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(tool_loop, "time", driven)
+        mp.setattr(loop_clock, "time", driven)
+        drive_tool_loop(client, _LookTools(), [{"role": "user", "content": "go"}], _EMIT,
+                        time_budget_s=0.05, finalize=lambda a: "done",
+                        fallback=lambda m: "fell back", on_budget=seen.update, **kw)
     return seen
 
 

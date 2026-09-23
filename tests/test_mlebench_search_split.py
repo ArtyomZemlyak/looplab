@@ -215,11 +215,25 @@ def test_the_private_grade_runs_off_the_event_loop_and_its_seconds_are_charged(t
                                                                               monkeypatch):
     """Review 2026-09-22, ENG2-15: the finish-time private grade (a grader subprocess, 5-minute
     timeout) ran synchronously ON the event loop, and its seconds reached no budget. Driven through
-    a real run: the grade happens on a worker thread and its row's `eval_seconds` is charged."""
+    a real run: the grade happens on a worker thread and its row's `eval_seconds` is charged.
+
+    The grade's seconds are read off a clock the grader DRIVES (CLAUDE.md: a test whose verdict
+    counts time in a wall-clock window drives the clock it asks about). It slept 0.05 s against the
+    real one, and a Windows runner's 15.6 ms `time.monotonic` measured that as 0.047 (Windows run
+    57). The driven clock also says more than the sleep did: the row charges exactly the interval
+    the grade spans, so a timer started after the grade, or stopped before it, reads 0."""
     import threading
     import time
+    import types
+
+    from looplab.engine import holdout
 
     seen: list[bool] = []
+    now = [1_000.0]
+    driven = types.SimpleNamespace(**{k: getattr(time, k) for k in dir(time)
+                                      if not k.startswith("__")})
+    driven.monotonic = lambda: now[0]
+    monkeypatch.setattr(holdout, "time", driven)
 
     def search(competition, sub, answers_csv, hidden_ids, data_dir, *, timeout):
         text = mlebench_split.filter_submission(Path(sub).read_text(encoding="utf-8"),
@@ -228,7 +242,7 @@ def test_the_private_grade_runs_off_the_event_loop_and_its_seconds_are_charged(t
 
     def private(competition, sub, data_dir, *, timeout):
         seen.append(threading.current_thread() is threading.main_thread())
-        time.sleep(0.05)                          # a measurable charge
+        now[0] += 0.05                            # a measurable charge, on the engine's own clock
         score = _accuracy(Path(sub).read_text(encoding="utf-8"), _private_answers())
         return score, {"competition_id": competition, "score": score}
 
@@ -240,7 +254,7 @@ def test_the_private_grade_runs_off_the_event_loop_and_its_seconds_are_charged(t
     assert seen == [False], f"the private grade ran on the event loop's own thread: {seen}"
     rows = [e.data for e in EventStore(rd / "events.jsonl").read_all()
             if e.type == "holdout_evaluated"]
-    assert len(rows) == 1 and rows[0]["eval_seconds"] >= 0.05, rows
+    assert len(rows) == 1 and rows[0]["eval_seconds"] == pytest.approx(0.05), rows
     assert state.eval_seconds_by_kind.get("holdout") == pytest.approx(rows[0]["eval_seconds"])
 
 

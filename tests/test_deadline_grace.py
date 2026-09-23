@@ -172,6 +172,20 @@ _SILENT_AFTER_ONE_BAR = ("import time\n"
                          "print('100%|##########| 664/664 [00:17<00:00, 38.13it/s]', flush=True)\n"
                          "time.sleep(3600)\n")
 
+# The same child, with its bar LATE: half a second after it starts. The watchdog asks both clocks
+# on one 250 ms tick (`sandbox._tee_drain`), silence FIRST, and when the stall window equals the
+# budget (`_stall_window`'s clamp) the two come due only as far apart as the bar landed after the
+# deadline clock started — ~30 ms on Linux, i.e. inside one tick. Whatever narrows that further on
+# a Windows runner (a coarse 15.6 ms timer under every tick; an output read before the deadline
+# clock is taken), the recorded outcome is the silence clock due on the deadline's own tick:
+# Windows run 58, STALLED at 3.094 s, "no output for 3s", no grace asked. That is the watchdog's
+# designed order for a child silent a whole window, not the property under test; a bar half a
+# second in keeps the silence clock that much short of the deadline on any tick.
+_SILENT_AFTER_A_LATE_BAR = ("import time\n"
+                            "time.sleep(0.5)\n"
+                            "print('100%|##########| 664/664 [00:17<00:00, 38.13it/s]', flush=True)\n"
+                            "time.sleep(3600)\n")
+
 
 def test_a_grace_granted_to_a_SILENT_child_is_actually_served(tmp_path):
     """THE PROPERTY THE ROW CLAIMS. The stall watchdog and the deadline are two clocks measuring
@@ -200,23 +214,19 @@ def test_the_durable_row_describes_what_actually_happened_to_a_silent_stage(tmp_
     later reader reconstructing where the compute went believes it. `seconds` and `deadline_grace_s`
     must be consistent with each other on the SAME row."""
     from looplab.runtime.command_eval import run_command_eval
-    (tmp_path / "quiet.py").write_text(_SILENT_AFTER_ONE_BAR, encoding="utf-8")
+    # The LATE bar (see `_SILENT_AFTER_A_LATE_BAR`): `_stall_window` clamps the silence window to
+    # the budget and the stall branch is checked BEFORE the deadline one, so a bar that lands within
+    # one tick's drift of the deadline clock's start loses the stage to the stall before the grace
+    # is asked for — what Windows runs 51, 53 and 58 recorded, at a 1 s and then a 3 s budget.
+    (tmp_path / "quiet.py").write_text(_SILENT_AFTER_A_LATE_BAR, encoding="utf-8")
     stages = [{"name": "train", "command": [sys.executable, "quiet.py"]}]
-    # A 3 s budget, not 1 s: `_stall_window` clamps the silence window to the budget, and the stall
-    # branch is checked BEFORE the deadline one — so an interpreter that has not printed its bar by
-    # the budget is killed as STALLED before the grace is ever asked for, and the row carries no
-    # `deadline_grace_s` at all. A loaded Windows runner took over a second to start the child
-    # (run 51: `KeyError: 'deadline_grace_s'`); the property under test starts after the bar.
     budget = 3.0
     res = run_command_eval([sys.executable, "quiet.py"], str(tmp_path), budget,
                            {"kind": "stdout_json", "key": "metric"}, stages=stages,
                            stall_cap=1800.0,
                            on_deadline=lambda tail: 600.0, deadline_grace_max_s=2.0)
     row = res.stages[0]
-    # THE ROW AND THE FLAGS IN THE MESSAGE: the Windows leg records no grace at all here (runs 51
-    # and 53, at a 1 s and then a 3 s budget) while the direct-`run_argv` sibling above passes there,
-    # so the cause is on the staged path and not yet established; the next failure must say which
-    # watchdog ended the stage and what the child wrote.
+    # The row and the flags in the message: a failure here must say which watchdog ended the stage.
     assert "deadline_grace_s" in row, (
         f"no grace recorded: row={row} stalled={res.stalled} timed_out={res.timed_out} "
         f"stderr tail={res.stderr[-400:]!r}")
