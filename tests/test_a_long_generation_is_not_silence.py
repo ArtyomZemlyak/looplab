@@ -108,6 +108,31 @@ def test_the_open_call_is_younger_than_the_last_completed_one():
 
 def test_a_phase_without_a_wall_prints_no_budget_clause():
     """Измерено на живой пробе: `deep_research`, `emit` и `Researcher·propose` пишут
-    `time_budget_s = 0.0` — стены нет. Печатать «0 % от 0 с» значило бы выдумать ограничение."""
-    src = (BENCH / "pulse.py").read_text(encoding="utf-8")
-    assert "if budget:" in src and "0.0 means the phase was given no wall" in src
+    `time_budget_s = 0.0` — стены нет. Печатать «0 % от 0 с» значило бы выдумать ограничение.
+
+    Read off the AST of `pulse.main` (review 2026-09-22, TST-05): the clause `against` starts empty
+    and is built only under a TRUTHY `budget`, so 0.0 prints nothing. It was `"if budget:" in src
+    and "0.0 means the phase was given no wall" in src` — and the second literal is the inline
+    comment on that `if`, which an `if True:` carrying the same comment still satisfied."""
+    import ast
+
+    from _source_scan import function_tree
+
+    def assigns_against(stmt) -> bool:
+        return isinstance(stmt, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "against" for t in stmt.targets)
+
+    for node in ast.walk(function_tree(pulse.main)):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+        for i, stmt in enumerate(body):
+            if (isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Name)
+                    and stmt.test.id == "budget" and any(assigns_against(s) for s in stmt.body)):
+                defaults = [s for s in body[:i] if assigns_against(s)]
+                assert defaults and isinstance(defaults[-1].value, ast.Constant) \
+                    and defaults[-1].value.value == "", (
+                        "the clause must start EMPTY, or a phase with no wall still prints one")
+                return
+    raise AssertionError("`pulse.main` no longer builds the budget clause under `if budget:` — "
+                         "a 0.0 budget would print an invented limit")
