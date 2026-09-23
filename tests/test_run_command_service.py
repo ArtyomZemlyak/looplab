@@ -26,6 +26,12 @@ from looplab.serve.run_commands import (  # noqa: E402
     CONTROL_SPECS, TERMINAL_STATUSES, EnginePolicy, RunCommandService,
     _process_identity, normalize_control, run_generation_token, task_file_for)
 from looplab.serve.server import make_app  # noqa: E402
+# The durable-command helpers this module used to define privately, hoisted into the suite's
+# factories so a ported `/control` site has them too (review 2026-09-22, SRV1-07). Imported back
+# under the old names: the ~100 call sites below read exactly as they did.
+from tests.factories import (  # noqa: E402
+    TERMINAL_SETTLE_TIMEOUT_S as _TERMINAL_SETTLE_TIMEOUT_S, command_terminal as _terminal,
+    http_run_generation as _generation, post_command as _post)
 
 
 def _seed(root, run_id="demo", *, paused=False, finished=False, finalizing=False,
@@ -97,12 +103,6 @@ def _client(root, driver, *, startup=0.08, timeout=0.25, observation=None):
     return TestClient(app), srv
 
 
-def _generation(client, run_id="demo"):
-    generation = client.get(f"/api/runs/{run_id}/state").json()["generation"]
-    assert isinstance(generation, str) and len(generation) == 64
-    return generation
-
-
 def _replacement_spawn(rd, *, pid=9001, task_id="replacement", capture=None):
     """A `_spawn_engine` stand-in that behaves like a real Replay child.
 
@@ -151,54 +151,11 @@ def _delete(client, run_id="demo", *, rd, op="1" * 8):
     })
 
 
-def _post(client, event_type, data=None, key="key-1", *, generation=None):
-    expected_generation = generation if generation is not None else _generation(client)
-    return client.post("/api/runs/demo/commands", headers={"Idempotency-Key": key},
-                       json={"type": event_type, "data": data or {},
-                             "expected_generation": expected_generation})
-
-
-# Wall-clock ceiling for "an accepted command reached a terminal status". Like the constants below
-# this bounds only the FAILURE case: the loop polls every 10ms and returns the instant a terminal
-# appears, so a passing test never waits. 1.0s was marginal on a loaded full-suite host — the worker
-# had observed neither the `run_finished` append nor the dead process yet, so this asserted on a
-# still-'executing' record while passing in isolation. 15s then flaked the same way twice more.
-# Size it against the thing being waited ON rather than by guesswork: the worker's own
-# `max_observation_timeout` is `max(0.30, command_timeout * 4)`, i.e. 120s for the staged-finish
-# tests, so any ceiling below that can expire while the command is still legitimately 'executing'
-# and reports a hang the system does not consider one. 60s keeps a real hang bounded well inside
-# that window while leaving 4x headroom over the 15s that kept failing.
-#
-# IF IT FLAKES AGAIN, THE ANSWER IS NOT A BIGGER NUMBER — that reflex is what took this constant
-# 1.0 -> 15 -> 60 already. Measured 2026-08-14 on the 60s ceiling:
-# `test_reload_finalize_reattaches_existing_record_without_event_or_spawn_duplication` failed a full
-# frozen-tree run at 'executing', and passed the SAME tree, same command, when nothing else was
-# running — the contended run had three mutation-tree pytest sessions, a `node --test` suite and a
-# vite build alongside it. That is the whole mechanism: this loop polls from the MAIN thread for a
-# status a background worker THREAD sets, and `time.time()` keeps counting while that thread is
-# descheduled, so the ceiling measures wall clock and the work it is waiting on measures CPU it did
-# not get. A larger ceiling buys proportionally more starvation, which is why each bump has bought
-# roughly one more incident. What would actually close it is waiting on the worker's own progress
-# rather than the clock; nobody has built that, and a 60s hang is bounded well enough that the
-# guesswork is not worth spending until this fails on an IDLE host. Rule of thumb: reproduce it with
-# the box quiet before treating it as a defect.
-_TERMINAL_SETTLE_TIMEOUT_S = 60.0
-
-
-def _terminal(client, record, timeout=_TERMINAL_SETTLE_TIMEOUT_S, run_id="demo"):
-    current = record
-    deadline = time.time() + timeout
-    while current.get("status") not in TERMINAL_STATUSES and time.time() < deadline:
-        time.sleep(0.01)
-        current = client.get(f"/api/runs/{run_id}/commands/{record['id']}").json()
-    assert current.get("status") in TERMINAL_STATUSES, current
-    return current
-
-
 # Wall-clock ceiling for "a background command worker got scheduled". The waits below poll every 5ms
 # and exit the instant the work appears, so this only bounds the FAILURE case — 1s was marginal under
 # a loaded full-suite run and flaked there while passing in isolation. Raised alongside its sibling
-# above: thread scheduling is subject to the same contention that made 15s too tight there.
+# `_TERMINAL_SETTLE_TIMEOUT_S` (now `tests/factories.py::TERMINAL_SETTLE_TIMEOUT_S`, where its
+# account moved): thread scheduling is subject to the same contention that made 15s too tight there.
 _WORKER_START_TIMEOUT_S = 60.0
 
 # `command_timeout` for a test that lets its worker RUN and only then stages the run's finish.
