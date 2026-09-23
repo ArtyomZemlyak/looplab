@@ -1016,7 +1016,7 @@ class SpeculationMixin:
 
     @staticmethod
     def _terminal_intent(state: RunState) -> bool:
-        return bool(state.paused or state.finished or state.stop_requested)
+        return state.halted
 
     def _discard_spec_result(self, result: Optional[SpecBuildResult]) -> None:
         if result is None or result.roles is None:
@@ -1325,27 +1325,20 @@ class SpeculationMixin:
                 # add_nodes extension rebuilds it — so a mid-build pause/budget crossing must NOT reach
                 # _fail_reserved_build's drop_card=True default and permanently card_auto_drop the Card
                 # (losing its hypothesis). Only real supersession drops the Card.
+                # The parent half is `orchestrator.py::parent_generations_current` — the one
+                # spelling every creation site shares (review 2026-09-22, ENG1-11: this was its last
+                # inline copy, a negated `any` over the same four clauses).
+                from looplab.engine.orchestrator import parent_generations_current
                 superseded = (
                     latest.search_epoch != result.generation
                     or node_id in latest.aborted_nodes
                     or latest_card is None
                     or latest_card.dropped_reason is not None
                     or latest_card.merged_into is not None
-                    or any(
-                        parent_id not in latest.nodes
-                        or latest.nodes[parent_id].attempt != parent_generation
-                        or latest.nodes[parent_id].tombstoned
-                        or parent_id in latest.aborted_nodes
-                        for parent_id, parent_generation in (
-                            (int(parent_id), generation)
-                            for parent_id, generation in reserved.parent_generations.items()
-                        )
-                    )
+                    or not parent_generations_current(latest, reserved.parent_generations)
                 )
                 transient = (
-                    latest.paused
-                    or latest.finished
-                    or latest.stop_requested
+                    latest.halted
                     or (
                         max_eval_seconds is not None
                         and latest.total_eval_seconds >= max_eval_seconds
@@ -1435,7 +1428,8 @@ class SpeculationMixin:
                 # circuit breaker, which is the distinction `core/models.py::DEVELOPER_STUCK_PREFIX` draws and which
                 # the crash branch below would erase.
                 # `created.attempt`, and NOT a bare `generation`: the only binding of that name in
-                # this method is a generator-expression variable a hundred lines up, which Python 3
+                # this method was a generator-expression variable a hundred lines up (the parent
+                # check, since folded into `parent_generations_current`), which Python 3
                 # scopes to the comprehension, so the name was UNBOUND here and this branch raised
                 # `NameError` instead of writing the terminal it exists to write. On the shipped
                 # default (`card_driven_selection`), a Developer session that produced no code
@@ -1646,9 +1640,7 @@ class SpeculationMixin:
         events = self.store.read_all()
         state = fold(events)
         if (
-            state.paused
-            or state.finished
-            or state.stop_requested
+            state.halted
             or self._head_request(state) is not None
             or self._speculation_depth_used(
                 state, consumed_inflight=consumed_inflight)

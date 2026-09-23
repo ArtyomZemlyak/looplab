@@ -2458,8 +2458,7 @@ class EvaluateMixin:
                     # lifecycle that raised rather than about whichever one is current.
                     _self_closed = (node is not None and node.attempt == generation
                                     and node.status is not NodeStatus.pending)
-                    if not _self_closed and not (state.paused or state.finished
-                                                 or state.stop_requested):
+                    if not _self_closed and not state.halted:
                         self.store.append(EV_PAUSE, {
                             "reason": "engine_error",
                             "detail": self._redact(
@@ -2679,7 +2678,7 @@ class EvaluateMixin:
         # evaluate blank/not-yet-rebuilt code or terminalize a superseded lifecycle.
         if (a.node is None or a.node.status is not NodeStatus.pending or a.node.tombstoned
                 or a.node.id in a.state.aborted_nodes or a.node.rerun_from is not None
-                or a.state.paused or a.state.finished or a.state.stop_requested):
+                or a.state.halted):
             return PHASE_RETURN
         # The one gate that keeps a speculative miss provably free: no unconfirmed prediction may
         # cross into the sandbox. See `_assert_speculative_selection_confirmed`.

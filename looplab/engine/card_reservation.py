@@ -1232,7 +1232,7 @@ class CardReservationMixin:
                     # would defeat the operator's stop intent. LLM accounting alone may be retried.
                     return None
                 state = _fold(events)
-                if state.paused or state.finished or state.stop_requested:
+                if state.halted:
                     return None
                 if self._node_reservation_slots_remaining(state, events=events) < 1:
                     return None
@@ -1480,7 +1480,7 @@ class CardReservationMixin:
             # append's tail CAS is the authority for the snapshot.  If another reservation or control
             # wins after this plan, the CAS loses and the next turn recomputes every derived value.
             state = _fold(events)
-            if state.paused or state.finished or state.stop_requested:
+            if state.halted:
                 return _refuse("run_stopping")
             if self._node_id_ceiling(events, state) != proposal_node_ceiling:
                 return _refuse("node_ceiling_moved")

@@ -1123,7 +1123,7 @@ def resume(
     initial_events = entry_store.read_all()
     initial = fold(initial_events)
     wait_for_handoff = bool(
-        initial.paused or initial.finished or initial.stop_requested
+        initial.halted
         or incomplete_finalize_scope(initial_events) is not None
         or initial.finalization_pending())
     # The handoff wait is DIAGNOSABLE, not silent. The old owner can be wedged — crashed while
@@ -1192,7 +1192,7 @@ def resume(
             typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
             return
         current = fold(entry_store.read_all())
-        if not (current.paused or current.finished or current.stop_requested):
+        if not current.halted:
             typer.echo(f"run {run_dir} was already resumed by the active engine")
             return
         now = time.time()

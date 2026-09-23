@@ -197,6 +197,12 @@ def test_the_speculative_stuck_branch_can_actually_run():
                 continue
             if sym.is_free():                       # a closure cell: bound in an enclosing scope
                 continue
+            # A function-local `from … import name` binds a LOCAL too — symtable flags it imported,
+            # not assigned. It is how this method reaches `orchestrator.py` without the import
+            # cycle (`parent_generations_current`, review 2026-09-22 ENG1-11). The defect this
+            # guards stays visible: a leaked comprehension variable is neither.
+            if sym.is_imported():
+                continue
             name = sym.get_name()
             if name in dir(builtins) or hasattr(spec, name):
                 continue

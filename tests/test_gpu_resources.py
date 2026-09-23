@@ -453,9 +453,11 @@ def _reset_node(attempt):
 
 
 def _reset_state(node):
+    # `halted` is `RunState.halted`, the derived flag the ADMIT fence reads (review 2026-09-22,
+    # ENG1-11); a namespace has no properties, so the stub states it — False, as the three are.
     return types.SimpleNamespace(
         nodes={0: node}, aborted_nodes=set(), paused=False, finished=False,
-        stop_requested=False, total_eval_seconds=0.0)
+        stop_requested=False, halted=False, total_eval_seconds=0.0)
 
 
 def test_parallel_eval_fails_closed_when_reset_superseded_the_reserved_generation(monkeypatch):

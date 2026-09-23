@@ -56,7 +56,7 @@ class ConfirmPhaseMixin:
     def _confirmation_node_current(self, node_id: int, generation: int) -> bool:
         state = fold(self.store.read_all())
         node = state.nodes.get(node_id)
-        return (not state.paused and not state.finished and not state.stop_requested
+        return (not state.halted
                 and node is not None and node.attempt == generation
                 and node.status is NodeStatus.evaluated and not node.tombstoned
                 and node_id not in state.aborted_nodes)
@@ -110,7 +110,7 @@ class ConfirmPhaseMixin:
     def _run_halt_intent(self) -> bool:
         """The run is already paused, finished, or stopping — do not append a redundant auto-pause."""
         state = fold(self.store.read_all())
-        return bool(state.paused or state.finished or state.stop_requested)
+        return state.halted
 
     async def _run_confirm_seed(self, nd, s: int):
         """One confirm-seed evaluation of node `nd` under seed `s`: materialize a fresh confirm
@@ -164,9 +164,7 @@ class ConfirmPhaseMixin:
                 resource_state = waited_fold[1]
                 live = resource_state.nodes.get(nd.id)
                 if (
-                    resource_state.paused
-                    or resource_state.finished
-                    or resource_state.stop_requested
+                    resource_state.halted
                     or live is None
                     or live.attempt != generation
                     or live.status is not NodeStatus.evaluated
@@ -191,9 +189,7 @@ class ConfirmPhaseMixin:
                 admitted = fold(self.store.read_all())
                 current = admitted.nodes.get(nd.id)
                 if (
-                    admitted.paused
-                    or admitted.finished
-                    or admitted.stop_requested
+                    admitted.halted
                     or current is None
                     or current.attempt != generation
                     or current.status is not NodeStatus.evaluated

@@ -563,6 +563,10 @@ def _run_terminal_gate(state) -> bool:
     Written out at three eval-dispatch sites. `getattr` defaults are kept: two of the three read a
     state the caller re-folded mid-loop, and a folded `RunState` always carries these three, so the
     defaults cannot change a live decision — they only keep a hand-built test stub from raising.
+
+    On a folded state it IS `RunState.halted` (review 2026-09-22, ENG1-11), the one spelling every
+    other gate now reads; it stays spelled out here only for those stubs, and
+    `tests/test_run_state_halted.py` pins the two to the same truth table.
     """
     return bool(
         getattr(state, "paused", False)

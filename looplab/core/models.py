@@ -2726,6 +2726,24 @@ class RunState(BaseModel):
         return (self.finished and self.last_finish_seq >= 0
                 and self.finalized_finish_seq != self.last_finish_seq)
 
+    @property
+    def halted(self) -> bool:
+        """Has the RUN stopped accepting new work — paused, finished, or a stop requested?
+
+        ONE spelling of the three-way disjunction every admission, reservation and pause gate asks
+        (review 2026-09-22, ENG1-11: `paused or finished or stop_requested` was written out at more
+        than a dozen sites beside `orchestrator.py::_run_terminal_gate`, which asks the same thing of
+        a possibly hand-built state). TRUTHINESS, exactly as those sites read it: `stop_requested`
+        is the requesting control's reason string, and an empty one does not stop the run. A plain
+        property, not a field, so no dump, snapshot or wire payload changes.
+
+        Deliberately NOT named `stopping`: `engine/speculation.py::CardSessionGates.stopping` is
+        read in the same module and means MORE — this, or an exhausted eval budget, or a pending
+        outer rebuild — so one word for both would let a reader take the narrower gate for the
+        wider one.
+        """
+        return bool(self.paused or self.finished or self.stop_requested)
+
     def best(self) -> Optional[Node]:
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None
 
