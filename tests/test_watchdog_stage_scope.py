@@ -892,7 +892,11 @@ def test_h2_the_scorer_is_identified_by_position_not_by_the_string_score(tmp_pat
     stages = [{"name": "train", "command": ["python", "train.py"]},
               {"name": scorer, "command": ["python", f"{scorer}.py"]}]
     plan = eval_log_plan(stages)
-    assert plan.roles[f"{scorer}.log"] == (scorer, LOG_ROLE_SCORE)
+    # The plan keys a log by its CASE-FOLDED basename on Windows, where `SCORE.log` and `score.log`
+    # are one file (`train_monitor._log_name_key`) -- the same spelling the H-2 backstop below reads
+    # it with. CI run 35804658308 looked `SCORE.log` up verbatim there: KeyError.
+    assert plan.roles[f"{scorer}.log".lower() if os.name == "nt" else f"{scorer}.log"] \
+        == (scorer, LOG_ROLE_SCORE)
 
     wd = _one_log_workdir(tmp_path, f"{scorer}.log", _SCORE_TAIL)
     assert active_training_log(wd, plan) is None                  # not judged, so not killable

@@ -262,7 +262,10 @@ def test_expand_subject_truth_table():
     one = {"subject_bound": True, "subjects": [{"bound": True, "path": "/w/a"}]}
     assert expand_subject(["p", SUBJECT_TOKEN], one) == (["p", "/w/a"], None)
     rel = {"subject_bound": True, "subjects": [{"bound": True, "path": "out/a.bin"}]}
-    assert expand_subject(["p", SUBJECT_TOKEN], rel, "/w") == (["p", "/w/out/a.bin"], None)
+    # The scorer gets the subject as a HOST path under the workdir — `\\w\\out\\a.bin` on Windows,
+    # which is right there (CI run 35804658308 held it to the POSIX spelling).
+    assert expand_subject(["p", SUBJECT_TOKEN], rel, "/w") == (
+        ["p", str(Path("/w") / "out/a.bin")], None)
     assert expand_subject(["p", SUBJECT_TOKEN], rel) == (["p", "out/a.bin"], None)
     assert expand_subject(["p", "x"], None) == (["p", "x"], None)
     assert "declares no" in expand_subject(["p", SUBJECT_TOKEN], None)[1]

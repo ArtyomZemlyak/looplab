@@ -83,7 +83,10 @@ def test_the_launch_hash_keeps_its_OWN_looser_contract_under_its_own_name():
     from looplab.serve import launch
 
     assert not hasattr(launch, "_canonical_json"), "the colliding name came back"
-    assert launch._lenient_json_bytes({"p": Path("/tmp/x")}) == b'{"p":"/tmp/x"}'
+    # A Path coerces through `str()`, i.e. in the HOST's spelling (`\tmp\x` on Windows, CI run
+    # 35804658308) -- right for a dedup identity computed and compared on the same host.
+    assert launch._lenient_json_bytes({"p": Path("/tmp/x")}) == (
+        b'{"p":' + json.dumps(str(Path("/tmp/x"))).encode("utf-8") + b"}")
     # ...and it does NOT pretend to be strict: a non-finite number passes through here.
     assert b"NaN" in launch._lenient_json_bytes({"m": float("nan")})
 
@@ -144,5 +147,5 @@ def test_the_two_strict_json_NORMALIZERS_stay_separate():
 
     with pytest.raises(ValueError):
         speculation_calibration._strict_json_value({"p": Path("/tmp/x")})
-    assert coverage._projection_value(Path("/tmp/x")) == "/tmp/x"
+    assert coverage._projection_value(Path("/tmp/x")) == str(Path("/tmp/x"))   # the host spelling
     assert coverage._projection_value(float("nan")) == "nan"

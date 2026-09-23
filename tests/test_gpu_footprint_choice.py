@@ -188,7 +188,9 @@ def test_a_partial_memory_inventory_says_nothing_rather_than_guessing(
     """`detect_gpu_inventory` returns `({}, {})` rather than guessing a join, and admission degrades
     to count-only there. A prompt that named one device's capacity for a pool it cannot describe
     would be the plausible-wrong-number failure the whole cue exists to stop."""
-    engine = _two_gpu_engine(tmp_path, monkeypatch, f"partial-{len(inventory)}-{inventory}")
+    # The run directory's NAME, not the inventory's repr: `{0: 143771}` carries ':', which no Windows
+    # directory name may (CI run 35804658308: WinError 267/123). Each case has its own `tmp_path`.
+    engine = _two_gpu_engine(tmp_path, monkeypatch, f"partial-{len(inventory)}")
     engine._gpu_mem = dict(inventory)
     hint = _stamp(engine, LLMResearcher(_ToolEmitClient()))
     assert "GiB" not in hint

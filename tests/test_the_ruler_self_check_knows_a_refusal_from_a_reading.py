@@ -276,7 +276,9 @@ def test_an_operator_named_cache_is_the_one_used(tmp_path, monkeypatch):
 
 def test_without_one_the_bench_cache_is_the_default(monkeypatch):
     monkeypatch.delenv("ALGOTUNE_BASELINE_CACHE_DIR", raising=False)
-    assert ruler_selfcheck.baseline_dir().endswith("algotune/.baseline_times")
+    # Compared as a path's parts, whatever its separator (CI run 35804658308 answered
+    # `...\\benchmarks\\algotune\\.baseline_times` on Windows, which is the right directory).
+    assert Path(ruler_selfcheck.baseline_dir()).parts[-2:] == ("algotune", ".baseline_times")
 
 
 def test_the_cached_median_comes_from_the_cache_actually_in_use(tmp_path, monkeypatch):
@@ -440,8 +442,12 @@ def test_the_recorded_row_names_the_probe_under_ANY_root(tmp_path, monkeypatch, 
     name = Path(found).relative_to(str(root)).parts[0]
     assert name == "n5a", f"the probe's name came out {name!r}"
 
-    # And the old rule, applied to the same path, is what produced the empty string.
-    assert found.split("/model-probes/", 1)[-1].split("/")[0] == "", (
+    # And the old rule, applied to the same path, is what produced the empty string -- applied to
+    # the path as the bench box's POSIX tools spelled it. A Windows path starts with its drive, so
+    # the literal found there would split to "C:" or to the whole path (CI run 35804658308), which
+    # is not the recorded row this documents; the drive-less POSIX spelling of the same path is.
+    posix = "/" + "/".join(Path(found).parts[1:])
+    assert posix.split("/model-probes/", 1)[-1].split("/")[0] == "", (
         "this assertion documents the defect; if it stops holding the story above is wrong")
 
 
