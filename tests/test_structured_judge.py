@@ -85,15 +85,42 @@ def test_both_verifiers_reach_the_model_through_the_shared_helper():
             f"{module.__name__} re-inlined the agentic call the helper owns")
 
 
+class _FirstSampleFails:
+    """A judge whose FIRST call raises and whose every later call answers the same verdicts."""
+
+    def __init__(self, verdicts):
+        self.verdicts = verdicts
+        self.calls = 0
+
+    def complete_tool(self, messages, json_schema):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("a malformed sample")
+        return {"verdicts": self.verdicts, "rationales": ["r"] * len(self.verdicts)}
+
+    def complete_text(self, messages):
+        return "not json"
+
+
 def test_each_verifier_keeps_its_own_failure_policy():
     """The part that must NOT be shared. `verify_memo` keeps its deterministic verdicts when the
     judge fails; `verify` drops the sample and averages the rest. Folding either into the helper
-    would flatten two deliberately different contracts into one."""
+    would flatten two deliberately different contracts into one.
+
+    `verify`'s half is DRIVEN (review 2026-09-22, TST-05): it was `"return None" in <source> and "a
+    bad sample is dropped" in <source>`, and the second literal lived only in the handler's noqa
+    comment, so a handler that re-raised kept the test green as long as the comment stayed."""
     assert "except Exception" not in inspect.getsource(judge.structured_judge), (
         "the helper must not own a failure policy; its callers already have different ones")
 
-    scorer = inspect.getsource(verifier.verify)
-    assert "return None" in scorer and "a bad sample is dropped" in scorer
+    client = _FirstSampleFails(["strong_yes", "yes"])
+    report = verifier.verify("s", "e", verifier.lesson_overgeneralization_criteria(),
+                             client=client, samples=3)
+    assert client.calls == 3, "a failed sample must not stop the samples after it"
+    assert report.method == "llm" and report.n_samples == 2, (
+        "the failed sample must be DROPPED — neither fatal nor counted")
+    assert report.per_criterion["over_generalizes"]["mean"] == 1.0
+    assert report.score == round((1.0 + 0.75) / 2, 4), "the two good samples must be averaged"
 
 
 def test_the_helper_does_not_import_agents_at_module_scope():
