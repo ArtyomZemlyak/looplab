@@ -254,3 +254,61 @@ def test_the_counterfactual_inherits_the_asymmetry_rather_than_restating_it():
     assert "citation_resolved=citation_resolved" in src
     kill_call = src[src.index("should_monitor_kill("):src.index("or should_monitor_repair")]
     assert "citation_resolved" not in kill_call
+
+
+# ------------------------------------------------------------------ WHERE the re-read runs
+def test_the_re_read_runs_in_the_worker_with_the_verdict_never_on_the_loop(tmp_path, monkeypatch):
+    """Review 2026-09-22, ENG3-13 / doc 50 EM-08. `_monitor_training` re-read the citation ON THE
+    EVENT LOOP after the worker returned: a stat of a path the MODEL named, so possibly absent, in
+    a loop that had already moved its judge's tool build into the worker because exactly that kind
+    of stat costs 105-950 ms on the mounts `runs/` lives on. Driven by identity — `anyio.run` runs
+    the loop on this test's own thread — and through to the durable row, so a re-read moved off the
+    loop cannot also have been dropped on the way.
+    MUTATION: compute it on the loop again, after `watchdog_judge_tick` returns -> the recorded
+    thread is this one."""
+    import threading
+
+    import looplab.engine.failure_diagnosis as fd
+    from looplab.events.types import EV_TRAIN_MONITOR_ALERT
+
+    from test_train_monitor import _FakeClient, _FakeDeveloper, _TRAIN_PLAN, _run_verdict_monitor
+
+    ran_on: list[int] = []
+    real = fd.evidence_citation_resolves
+
+    def recording(evidence, workdir):
+        ran_on.append(threading.get_ident())
+        return real(evidence, workdir)
+
+    monkeypatch.setattr(fd, "evidence_citation_resolves", recording)
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.py").write_text("neg_inf = torch.tensor(-1e9)\n", encoding="utf-8")
+    (wd / "train.log").write_text("loss: nan\nloss: -1.2e7\n")
+    client = _FakeClient({"status": "broken", "fault": "implementation", "confidence": 0.9,
+                          "reason": "the -1e9 mask sentinel reaches the mean",
+                          "evidence_source": "code", "evidence_locator": "train.py:1"})
+    host, _spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client), plan=_TRAIN_PLAN,
+        until=lambda h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in h.store.events))
+    rows = [d for t, d in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
+    assert rows and rows[0]["citation_resolved"] is True, rows
+    assert ran_on, "the engine never re-read the citation at all"
+    assert threading.get_ident() not in ran_on, (
+        "the citation re-read ran on the EVENT LOOP — a stat of a model-named path that the tick "
+        "should have made in the worker, with the verdict it re-reads")
+
+
+def test_the_re_read_answers_none_for_no_verdict_and_for_a_probe_that_raises(tmp_path, monkeypatch):
+    """`verdict_citation_resolved` is total: nothing to re-read and a probe that fails both answer
+    None — "cited nothing checkable" — and never end the watcher. MUTATION: drop its handler -> the
+    OSError escapes the worker and the tick is skipped with the verdict lost."""
+    import looplab.engine.failure_diagnosis as fd
+
+    assert tm.verdict_citation_resolved(None, tmp_path) is None
+
+    def raising(evidence, workdir):
+        raise OSError("the mount went away mid-stat")
+
+    monkeypatch.setattr(fd, "evidence_citation_resolves", raising)
+    assert tm.verdict_citation_resolved(_verdict(), tmp_path) is None

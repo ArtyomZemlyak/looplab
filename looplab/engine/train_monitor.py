@@ -650,6 +650,33 @@ async def append_watchdog_row(event_type: str, row: dict, engine, *, shield: boo
             engine.store.append(event_type, row)
 
 
+def verdict_citation_resolved(verdict, workdir) -> Optional[bool]:
+    """The ENGINE's re-read of the place a verdict says it read — the training monitor's one
+    post-answer filesystem touch. `failure_diagnosis.evidence_citation_resolves` performs it,
+    confined to the node workdir and refusing `..`, an absolute path and a symlink out. Three
+    answers, and the third one matters: None = it cited nothing checkable (which is also what NO
+    verdict reads as — no `evidence_source`, so nothing filesystem-shaped, and no I/O), False = it
+    cited something that is not there, True = the engine found it. Only True authenticates
+    (`citation_authenticates`).
+
+    Called INSIDE `_monitor_training`'s `_judge`, i.e. in the worker, with the verdict it re-reads
+    (review 2026-09-22, ENG3-13 / doc 50 EM-08). It ran on the event loop after the worker
+    returned: a stat of a path the MODEL named, so possibly absent, in a tick whose judge's own tool
+    build had already been moved off the loop because such a stat costs 105-950 ms on the mounts
+    `runs/` lives on (`watchdog_judge_tick`). A probe must never end the watcher, so any failure of
+    the re-read is None.
+    """
+    # Local, as it always was: `failure_diagnosis` reaches back into this module (`repair_log_tools`),
+    # and a call-time import is also what lets a test patch the re-read where it is defined.
+    from looplab.engine.failure_diagnosis import evidence_citation_resolves
+    try:
+        return evidence_citation_resolves(
+            {"source": getattr(verdict, "evidence_source", "none"),
+             "locator": getattr(verdict, "evidence_locator", "")}, workdir)
+    except Exception:  # noqa: BLE001 — a probe must never end the watcher
+        return None
+
+
 class TrainingMonitorMixin:
     """The engine's training-log monitor cluster. `self` IS the Engine (mixin convention — see
     orchestrator.py). Gated on `self._train_monitor`; started as a sibling task in `_evaluate`'s task
@@ -958,8 +985,9 @@ class TrainingMonitorMixin:
                         sp.set("confirm_digest_unchanged", True)
                     def _judge():
                         # The paid call AND everything it needs, derived in the worker with it — the
-                        # prompt's evidence and the tools; `watchdog_judge_tick` says why none of it
-                        # may run on the event loop, and why it is built PER TICK.
+                        # prompt's evidence and the tools before it, the citation re-read after it;
+                        # `watchdog_judge_tick` says why none of it may run on the event loop, and
+                        # why it is built PER TICK.
                         stage_text = monitor_stage_context(resolved, log_plan)
                         trajectory_text = trajectory_context(trajectory)
                         # The watched stage's own declared contract, and the engine's live reading of
@@ -974,10 +1002,14 @@ class TrainingMonitorMixin:
                                 and resolved.stage is not None):
                             contract_text = stage_contract_context(
                                 log_plan.declarations.get(resolved.stage), tail)
-                        return self._training_verdict(
+                        verdict = self._training_verdict(
                             tail, context, stage_text, trajectory_text,
                             monitor_tools(self, workdir, log_plan, log_snapshot),
                             contract_text=contract_text)
+                        # ...and the engine's own re-read of what the verdict CITED, here with it:
+                        # a stat of a model-named path, never made on the loop (review 2026-09-22,
+                        # ENG3-13 / doc 50 EM-08).
+                        return verdict, verdict_citation_resolved(verdict, workdir)
 
                     # Per-node backstop on LLM cost (the adaptive cadence + healthy-backoff are the primary
                     # budget control; this only bounds a pathological run whose digest keeps changing while
@@ -986,11 +1018,13 @@ class TrainingMonitorMixin:
                     # and both `finally` bounds are the protocol both watchdogs share
                     # (`watchdog_judge_tick`); this monitor's own bound on an unanswered look is
                     # `unjudged`, committed through `on_raised` when the judge RAISES.
-                    verdict, stop = await watchdog_judge_tick(
+                    answer, stop = await watchdog_judge_tick(
                         sp, cancel, _judge, llm_calls, cap=_MAX_MONITOR_LLM_CALLS,
                         on_raised=lambda: unjudged(tail, sp))
                     if stop:
                         return
+                    # No call (the cap) is no verdict and nothing cited.
+                    verdict, _citation_resolved = answer if answer is not None else (None, None)
                     if verdict is None:
                         # NO PARSEABLE ANSWER this tick — an endpoint failure, model output that failed
                         # schema validation (`unknown` is not a `TrainingVerdict.status`), or the
@@ -1075,21 +1109,15 @@ class TrainingMonitorMixin:
                         # back to its Developer, and only an implementation the judge will NOT
                         # blame reaches the gun. See `should_monitor_repair` for why the role gate
                         # that guards the kill does not guard this.
-                        # THE ENGINE GOES AND LOOKS. `evidence_citation_resolves` re-opens the
-                        # place the verdict says it read, confined to this node's workdir and
-                        # refusing `..`, an absolute path and a symlink out. Three answers, and the
-                        # third one matters: None = it cited nothing checkable, False = it cited
-                        # something that is not there, True = the engine found it. Only True
-                        # authenticates. Computed once per tick, here rather than inside the gate,
-                        # because it is a FILESYSTEM read and the gates are pure/deterministic —
-                        # `tests/test_train_monitor.py` drives them with no disk at all.
-                        from looplab.engine.failure_diagnosis import evidence_citation_resolves
-                        try:
-                            _citation_resolved = evidence_citation_resolves(
-                                {"source": getattr(verdict, "evidence_source", "none"),
-                                 "locator": getattr(verdict, "evidence_locator", "")}, workdir)
-                        except Exception:  # noqa: BLE001 — a probe must never end the watcher
-                            _citation_resolved = None
+                        # THE ENGINE GOES AND LOOKS. `_citation_resolved` is its re-read of the place
+                        # the verdict says it read (`verdict_citation_resolved`), confined to this
+                        # node's workdir and refusing `..`, an absolute path and a symlink out. Three
+                        # answers, and the third one matters: None = it cited nothing checkable, False
+                        # = it cited something that is not there, True = the engine found it. Only
+                        # True authenticates. Computed once per tick, outside the gate, because it is
+                        # a FILESYSTEM read and the gates are pure/deterministic —
+                        # `tests/test_train_monitor.py` drives them with no disk at all — and in the
+                        # WORKER with the verdict, never here on the loop (ENG3-13 / doc 50 EM-08).
                         repair_decided = kill_signal is not None and should_monitor_repair(
                             verdict, enabled=getattr(self, "_train_monitor_kill", False),
                             threshold=threshold, log_role=log_role, broken_streak=broken_streak,
