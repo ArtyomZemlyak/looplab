@@ -29,6 +29,7 @@ import orjson
 from looplab.core.atomicio import same_file_entry
 from looplab.core.models import Event, RunState
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
+from looplab.engine.run_lifecycle import launch_claim_is_fresh
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
 from looplab.events.replay import fold
 from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
@@ -321,6 +322,18 @@ class CommandObservation:
 
     def incomplete_finalize_scope(self) -> Optional[str]:
         return self._owner._incomplete_finalize_scope(self)
+
+    def launch_claim_fresh(self, now: float) -> bool:
+        """Whether a LOG-LEDGER spawner's resume claim is still in flight in this revision.
+
+        The command worker's half of the launch-in-flight handshake (review 2026-09-22, SRV1-09;
+        `engine/run_lifecycle.py`, "THE LAUNCH-IN-FLIGHT HANDSHAKE"), read off this revision's
+        CACHED fold rather than a copy of it: a worker stepping aside asks on every monitor pass,
+        and the log barely moves while a claimed child is still importing. Only the CLAIM counts,
+        never the request grace reset/delete add (`fresh_resume_launch_pending`): every log-ledger
+        spawner claims before it Popens, and a request nobody has claimed is not a process.
+        """
+        return launch_claim_is_fresh(self._owner._fold(self), now)
 
 
 class CommandObservationIndex:

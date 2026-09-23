@@ -68,6 +68,22 @@ from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STA
 # Kept under this name — its call sites read well — but DERIVED from `serve/protocol.py`, the
 # module whose docstring owns the string contracts the server, the TUI and the React UI share.
 TERMINAL_STATUSES = COMMAND_TERMINAL_STATUSES
+
+
+class _LaunchInFlight:
+    """`_spawn_under_claim`'s third outcome, carried in its `pid` slot: NO process was created,
+    because a log-ledger launch was already in flight when this worker's lease went up (review
+    2026-09-22, SRV1-09 — `engine/run_lifecycle.py`, "THE LAUNCH-IN-FLIGHT HANDSHAKE"). A sentinel
+    rather than `None`, because `None` is a real pid answer: a spawner may return no pid for a
+    process it did create."""
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "LAUNCH_IN_FLIGHT"
+
+
+LAUNCH_IN_FLIGHT = _LaunchInFlight()
+
 _RETRY_GUARDED_EVENTS = frozenset(CONTROL_EVENTS)
 _COMMAND_ID_RE = re.compile(r"^cmd_[0-9a-f]{32}$")
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -1292,8 +1308,19 @@ class RunCommandService:
         except OSError:
             pass
 
-    def spawn_inflight(self, rd: Path) -> bool:
-        """True while a Popen is unresolved/quarantined, or on the decision that observes its lock."""
+    def spawn_inflight(self, rd: Path, *, ignoring: Optional[str] = None) -> bool:
+        """True while a Popen is unresolved/quarantined, or on the decision that observes its lock.
+
+        This is the lease half of the launch-in-flight handshake that every log-ledger spawner reads
+        after appending its claim (`serve/engine_proc.py::_claim_and_spawn_resume`). `ignoring`
+        names an external owner whose OWN mirrored lease that caller must not mistake for a foreign
+        launch: the legacy resume route writes `external:legacy-resume` and then claims through the
+        same helper. Such a mirror always travels with a log claim, so the log arbitrates it.
+        """
+        if ignoring is not None:
+            row = self._load(self._spawn_claim_path(rd))
+            if isinstance(row, dict) and row.get("command_id") == f"external:{ignoring}":
+                return False
         return self._recent_spawn_claim(rd)
 
     def record_external_spawn(self, rd: Path, owner: str, pid: Optional[int]) -> None:
@@ -3237,6 +3264,9 @@ class RunCommandService:
             spawn_engine=self.spawn_engine,
             liveness=self._engine_state,
             launch_env=lambda: self.srv.settings.launch_env_for_run(rd),
+            # Another command's worker may have leased a Popen that has not reached engine.lock:
+            # its child serves this restart's request when it does (SRV1-09 handshake).
+            spawn_inflight=self.spawn_inflight,
         )
 
     def _postcondition(
@@ -3368,8 +3398,11 @@ class RunCommandService:
         return True
 
     def _spawn_under_claim(self, rd: Path, path: Path, record: dict, command_id: str,
-                           *, restarting: bool) -> tuple[bool, Optional[int]]:
+                           *, restarting: bool) -> tuple[bool, object]:
         """Lease → Popen → persist the PID. Returns ``(terminalized, pid)``; on True the caller returns.
+
+        ``pid`` is ``LAUNCH_IN_FLIGHT`` when the handshake stepped aside for a log-ledger launch and
+        no process was created; the caller then waits as it does behind another worker's lease.
 
         Write the lease *before* Popen. If the server dies after process creation but before it can
         persist the PID, another server still waits for engine.lock instead of launching a second
@@ -3384,6 +3417,21 @@ class RunCommandService:
         """
         verb = "restart" if restarting else "start"
         self._record_spawn_claim(rd, command_id, None)
+        # THE HANDSHAKE'S READ (review 2026-09-22, SRV1-09): only NOW, with this lease published,
+        # ask whether a log-ledger spawner has claimed a launch that has not reached engine.lock.
+        # Asked before the lease, a reconciler could claim and read no lease in between and both
+        # would Popen. Its child serves this command's intent once it owns the lock, so step
+        # aside: the lease comes down (it would otherwise hold off that very child's successors)
+        # and the caller keeps waiting, exactly as it does behind another worker's lease.
+        try:
+            claimed_elsewhere = self._observe(rd).launch_claim_fresh(time.time())
+        except OSError:
+            # An unobservable log is one no log-ledger spawner can claim on either
+            # (`_claim_and_spawn_resume` refuses it), so launch exactly as before the handshake.
+            claimed_elsewhere = False
+        if claimed_elsewhere:
+            self._clear_spawn_claim(rd, command_id)
+            return False, LAUNCH_IN_FLIGHT
         try:
             pid = self._spawn(rd)
         except Exception as exc:  # noqa: BLE001 - Popen/task failures become records
@@ -3636,16 +3684,21 @@ class RunCommandService:
                     return None, record
             elif spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
                 spawned_now = False
-                if self._recent_spawn_claim(rd):
+                pid = LAUNCH_IN_FLIGHT
+                if not self._recent_spawn_claim(rd):
+                    terminalized, pid = self._spawn_under_claim(
+                        rd, path, record, command_id, restarting=False)
+                    if terminalized:
+                        return None, record
+                if pid is LAUNCH_IN_FLIGHT:
+                    # Behind another worker's lease, or behind a log-ledger launch the handshake
+                    # found: either child serves this intent once it owns engine.lock, and the
+                    # monitor re-spawns if it never does.
                     record["waiting_for_spawn"] = True
                     record["deadline_at"] = max(
                         float(record["deadline_at"]), time.time() + self.startup_timeout * 2 + 1)
                     self._save(path, record)
                 else:
-                    terminalized, pid = self._spawn_under_claim(
-                        rd, path, record, command_id, restarting=False)
-                    if terminalized:
-                        return None, record
                     spawned_now = True
                     record["spawned_by_command"] = True
                     record["waiting_for_spawn"] = False
@@ -3834,22 +3887,25 @@ class RunCommandService:
                             rd, path, record, command_id, restarting=True)
                         if terminalized:
                             return
-                        record["spawned_by_command"] = True
-                        record["engine_pid"] = pid
-                        record["updated_at"] = time.time()
-                        self._save(path, record)
-                        startup_deadline = min(
-                            float(record.get("absolute_deadline_at") or time.time()),
-                            time.time() + self.startup_timeout)
-                        while time.time() < startup_deadline:
-                            self._heartbeat_execution(rd, command_id)
-                            startup_observation = self._observe(rd)
-                            if (self._postcondition(rd, record, startup_observation)
-                                    or self._engine_state(rd) is True):
-                                self._clear_spawn_claim(rd, command_id)
-                                record["spawn_claim_released"] = True
-                                break
-                            time.sleep(self.poll_interval)
+                        # LAUNCH_IN_FLIGHT: a log-ledger launch owns this moment (SRV1-09); the
+                        # next pass finds its engine, or re-spawns once its claim has expired.
+                        if pid is not LAUNCH_IN_FLIGHT:
+                            record["spawned_by_command"] = True
+                            record["engine_pid"] = pid
+                            record["updated_at"] = time.time()
+                            self._save(path, record)
+                            startup_deadline = min(
+                                float(record.get("absolute_deadline_at") or time.time()),
+                                time.time() + self.startup_timeout)
+                            while time.time() < startup_deadline:
+                                self._heartbeat_execution(rd, command_id)
+                                startup_observation = self._observe(rd)
+                                if (self._postcondition(rd, record, startup_observation)
+                                        or self._engine_state(rd) is True):
+                                    self._clear_spawn_claim(rd, command_id)
+                                    record["spawn_claim_released"] = True
+                                    break
+                                time.sleep(self.poll_interval)
 
             time.sleep(self.poll_interval)
         self._terminalize_expired(rd, path, record, command_id, spec)

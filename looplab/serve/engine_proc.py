@@ -441,12 +441,21 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                             liveness: Optional[Callable[[Path], Optional[bool]]] = None,
                             on_spawn: Optional[Callable[[Optional[int]], None]] = None,
                             before_spawn: Optional[Callable[[], Optional[dict]]] = None,
-                            launch_env: Optional[Callable[[], Any]] = None) -> bool:
+                            launch_env: Optional[Callable[[], Any]] = None,
+                            spawn_inflight: Optional[Callable[[Path], bool]]) -> bool:
     """Atomically claim one pending resume in the event log, then launch its detached CLI.
 
     The additive `resume_requested(launch_claim=True)` record is a process-wide bounded lease. It
     closes waiter/worker races before engine.lock is acquired; if the claimant dies, reconciliation
     can claim again after the normal grace window.
+
+    `spawn_inflight` is the OTHER ledger's reader — the command service's spawn lease
+    (`serve/run_commands.py::RunCommandService.spawn_inflight`) — and it is REQUIRED so that no
+    log-ledger spawner can be added without deciding whether a command worker may be launching
+    beside it (`engine/run_lifecycle.py`, "THE LAUNCH-IN-FLIGHT HANDSHAKE"). It is read only AFTER
+    this call's claim is in the log, never before: that order is what makes the handshake exclusive.
+    `None` states that no command service exists beside this caller; a raising reader answers "in
+    flight", because unreadable evidence of a launch is never permission to Popen another.
     """
     from looplab.events.eventstore import (
         EventLogCorruptionError, EventStore, EventStoreConcurrencyError)
@@ -510,6 +519,19 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                 # retain a waiter instead of assuming it will necessarily fold/serve this request.
                 should_wait = True
                 break
+            # THE HANDSHAKE'S READ (SRV1-09): our claim is in the log, so a command worker that
+            # leases after this point reads it and backs off; one that leased before is visible
+            # here. Back off in turn and keep the claim as a bounded quarantine — the worker's
+            # child serves this request when it takes engine.lock (`resume_served` covers every
+            # earlier request), and if it dies first the claim expires and the next reconcile
+            # pass, or that worker's own monitor, launches exactly one.
+            if spawn_inflight is not None:
+                try:
+                    foreign_launch = bool(spawn_inflight(rd))
+                except Exception:  # noqa: BLE001 — unreadable lease evidence is never permission to Popen
+                    foreign_launch = True
+                if foreign_launch:
+                    return False
             # Acquire the settings publication context BEFORE the engine gate. Every direct engine
             # spawn uses launch -> engine-gate order; entering UI/secret/launch while holding the gate
             # would deadlock with a settings writer waiting for a different launch to finish Popen.
@@ -554,14 +576,15 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
     if should_wait and wait_on_alive and not (cancel_event is not None and cancel_event.is_set()):
         _spawn_engine_after_exit(
             waiter_args, run_dir=rd, env=env, cancel_event=cancel_event,
-            before_spawn=before_spawn, launch_env=launch_env)
+            before_spawn=before_spawn, launch_env=launch_env, spawn_inflight=spawn_inflight)
     return False
 
 
 def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None,
                              cancel_event: Optional[threading.Event] = None,
                              before_spawn: Optional[Callable[[], Optional[dict]]] = None,
-                             launch_env: Optional[Callable[[], Any]] = None) -> bool:
+                             launch_env: Optional[Callable[[], Any]] = None,
+                             spawn_inflight: Optional[Callable[[Path], bool]]) -> bool:
     """P1-1 on-load reconciler (NO standing daemon): re-spawn the engine for a run whose durable resume
     intent was recorded but never served — either a detached spawn died before the engine ran or the
     request landed in an old engine's post-finish tail. Returns True if it re-spawned. Idempotent
@@ -602,7 +625,7 @@ def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None,
         return _claim_and_spawn_resume(
             rd, cli_args, now=now,
             cancel_event=cancel_event, wait_on_alive=True, before_spawn=before_spawn,
-            launch_env=launch_env)
+            launch_env=launch_env, spawn_inflight=spawn_inflight)
     except Exception:  # noqa: BLE001 - best-effort recovery must not break startup or the run list
         return False
 
@@ -611,7 +634,8 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
                              env: Optional[dict] = None,
                              cancel_event: Optional[threading.Event] = None,
                              before_spawn: Optional[Callable[[], Optional[dict]]] = None,
-                             launch_env: Optional[Callable[[], Any]] = None) -> bool:
+                             launch_env: Optional[Callable[[], Any]] = None,
+                             spawn_inflight: Optional[Callable[[Path], bool]]) -> bool:
     """Spawn once after the current owner exits iff a durable resume intent remains pending."""
     key = str(run_dir.resolve())
     with _resume_after_exit_lock:
@@ -680,7 +704,7 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
                 if _claim_and_spawn_resume(
                         run_dir, cli_args, env=env, cancel_event=cancel_event,
                         wait_on_alive=False, before_spawn=before_spawn,
-                        launch_env=launch_env):
+                        launch_env=launch_env, spawn_inflight=spawn_inflight):
                     return
                 # A different CLI can acquire engine.lock between our dead probe and claim. Keep
                 # this same registered waiter through that handoff rather than recursively trying to
@@ -765,12 +789,15 @@ def _log_may_hold_resume_intent(path: Path) -> bool:
 def install_resume_reconcile_hooks(
         lifecycle, root: Path, *,
         before_spawn: Optional[Callable[[Path], Optional[dict]]] = None,
-        launch_env: Optional[Callable[[Path], Any]] = None) -> threading.Event:
+        launch_env: Optional[Callable[[Path], Any]] = None,
+        spawn_inflight: Optional[Callable[[Path], bool]]) -> threading.Event:
     """Recover durable resume intents on startup, without requiring a dashboard list poll.
 
     `lifecycle` is the app's `serve/lifecycle.py::ServerLifecycle` (review 2026-09-22, SRV1-06): the
     startup scan and the timer cancellation are appended to ITS ordered steps, and the caller must
-    install this BEFORE `install_reap_hooks` — the cancellation has to precede the reaper."""
+    install this BEFORE `install_reap_hooks` — the cancellation has to precede the reaper.
+
+    `spawn_inflight` is handed to every launch this scan makes (`_claim_and_spawn_resume`)."""
     timers: list[threading.Timer] = []
     shutdown = threading.Event()
 
@@ -823,7 +850,8 @@ def install_resume_reconcile_hooks(
                 # engine still owns the run. The durable launch claim arbitrates multiple workers.
                 _spawn_engine_after_exit(
                     cli_args, run_dir=rd, cancel_event=shutdown,
-                    before_spawn=prepare_spawn, launch_env=prepare_launch)
+                    before_spawn=prepare_spawn, launch_env=prepare_launch,
+                    spawn_inflight=spawn_inflight)
                 continue
             if startup_liveness is None:
                 # Do not create one 20 Hz waiter thread per malformed/reparse/unsupported run at
@@ -843,7 +871,7 @@ def install_resume_reconcile_hooks(
                 try:
                     reconcile_pending_resume(
                         rd, now=now, cancel_event=shutdown, before_spawn=prepare_spawn,
-                        launch_env=prepare_launch)
+                        launch_env=prepare_launch, spawn_inflight=spawn_inflight)
                 except Exception:  # noqa: BLE001 - one broken run cannot abort server startup
                     pass
                 continue
@@ -855,7 +883,7 @@ def install_resume_reconcile_hooks(
                               if launch_env is not None else None)
                     reconcile_pending_resume(
                         run_dir, cancel_event=shutdown, before_spawn=prepare,
-                        launch_env=launch)
+                        launch_env=launch, spawn_inflight=spawn_inflight)
             timer = threading.Timer(delay + 0.01, _reconcile_unless_shutdown)
             timer.daemon = True
             timers.append(timer)

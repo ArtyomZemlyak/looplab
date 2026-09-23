@@ -624,7 +624,7 @@ def test_the_tail_waiter_rate_limits_its_full_log_refolds(tmp_path, monkeypatch)
     try:
         waiter = threading.Thread(
             target=lambda: ep._spawn_engine_after_exit(
-                ["resume", str(rd)], run_dir=rd, cancel_event=cancel),
+                ["resume", str(rd)], run_dir=rd, cancel_event=cancel, spawn_inflight=None),
             daemon=True)
         waiter.start()
         time.sleep(1.5)

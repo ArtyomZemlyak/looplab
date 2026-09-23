@@ -734,7 +734,11 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop).
     sweep_stale_lifecycle_locks(root)   # F22: GC orphaned per-run lifecycle lock files at startup
     resume_cancel = install_resume_reconcile_hooks(
-        lifecycle, root, launch_env=settings_store.launch_env_for_run)
+        lifecycle, root, launch_env=settings_store.launch_env_for_run,
+        # The lease half of the launch-in-flight handshake (SRV1-09), read through `srv` at CALL
+        # time: these hooks run at startup, after `srv` below exists, and `srv.commands` is a
+        # replaceable dependency, so a bound method captured here would read a stale service.
+        spawn_inflight=lambda rd: srv.commands.spawn_inflight(rd))
     # Shutdown steps run in registration order. Cancel/join resume timers + tail waiters first,
     # then reap every child that was registered before cancellation won the spawn gate.
     install_reap_hooks(lifecycle)

@@ -853,7 +853,8 @@ def build_router(srv) -> APIRouter:
                 try:
                     reconcile_pending_resume(
                         rd, cancel_event=srv.resume_cancel,
-                        launch_env=lambda: srv.settings.launch_env_for_run(rd))
+                        launch_env=lambda: srv.settings.launch_env_for_run(rd),
+                        spawn_inflight=srv.commands.spawn_inflight)
                 except Exception:  # noqa: BLE001 — recovery is best-effort; never break the run list
                     pass
             return alive

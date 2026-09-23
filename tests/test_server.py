@@ -995,20 +995,20 @@ def test_reconcile_pending_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(ep, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
     monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
 
-    assert ep.reconcile_pending_resume(rd) is False and not spawns    # no intent -> no re-spawn
+    assert ep.reconcile_pending_resume(rd, spawn_inflight=None) is False and not spawns    # no intent -> no re-spawn
     s.append("resume_requested", {})
     req_ts = fold(s.read_all()).last_resume_request_ts
-    assert ep.reconcile_pending_resume(rd, now=req_ts + 1) is False and not spawns   # within grace
-    assert ep.reconcile_pending_resume(rd, now=req_ts + 31) is True and len(spawns) == 1  # zombie -> spawn
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 1, spawn_inflight=None) is False and not spawns   # within grace
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 31, spawn_inflight=None) is True and len(spawns) == 1  # zombie -> spawn
     # backoff: the re-spawn re-recorded the intent, so a call within the NEW grace does NOT re-spawn
     new_ts = fold(EventStore(rd / "events.jsonl").read_all()).last_resume_request_ts
-    assert ep.reconcile_pending_resume(rd, now=new_ts + 1) is False and len(spawns) == 1
+    assert ep.reconcile_pending_resume(rd, now=new_ts + 1, spawn_inflight=None) is False and len(spawns) == 1
 
     monkeypatch.setattr(ep, "_engine_alive", lambda _rd: True)         # an engine IS running now
-    assert ep.reconcile_pending_resume(rd, now=req_ts + 31) is False and len(spawns) == 1
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 31, spawn_inflight=None) is False and len(spawns) == 1
     monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
     s.append("resume_served", {})                                     # engine served the intent
-    assert ep.reconcile_pending_resume(rd, now=req_ts + 100) is False and len(spawns) == 1
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 100, spawn_inflight=None) is False and len(spawns) == 1
 
     s.append("resume_requested", {})                                  # a new intent, then a bare/error finish
     s.append("run_finished", {"reason": "done"})
@@ -1016,12 +1016,12 @@ def test_reconcile_pending_resume(tmp_path, monkeypatch):
     # Sequence order alone is not proof that the writer observed the intent. Only resume_served
     # acknowledges it; a guarded/error writer may append a bare finish while unwinding.
     assert fold(s.read_all()).resume_pending()
-    assert ep.reconcile_pending_resume(rd, now=fin_ts + 100) is True and len(spawns) == 2
+    assert ep.reconcile_pending_resume(rd, now=fin_ts + 100, spawn_inflight=None) is True and len(spawns) == 2
     s.append("resume_served", {})
 
     s.append("resume_requested", {})                                  # request AFTER finish must recover
     tail_ts = fold(s.read_all()).last_resume_request_ts
-    assert ep.reconcile_pending_resume(rd, now=tail_ts + 31) is True and len(spawns) == 3
+    assert ep.reconcile_pending_resume(rd, now=tail_ts + 31, spawn_inflight=None) is True and len(spawns) == 3
 
 
 def test_resume_launch_claim_deduplicates_workers_and_new_requests(tmp_path, monkeypatch):
@@ -1041,14 +1041,14 @@ def test_resume_launch_claim_deduplicates_workers_and_new_requests(tmp_path, mon
     monkeypatch.setattr(ep, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
     args = ["resume", str(rd), "--task-file", str(rd / "task.snapshot.json")]
 
-    assert ep._claim_and_spawn_resume(rd, args) is True
+    assert ep._claim_and_spawn_resume(rd, args, spawn_inflight=None) is True
     claimed = fold(store.read_all())
     assert claimed.resume_pending() and claimed.last_resume_launch_seq > 0
-    assert ep._claim_and_spawn_resume(rd, args) is False
+    assert ep._claim_and_spawn_resume(rd, args, spawn_inflight=None) is False
     # A second request arriving before the first detached CLI takes engine.lock is covered by the
     # same in-flight launch; starting another process would only create stderr/log churn.
     store.append("resume_requested", {})
-    assert ep._claim_and_spawn_resume(rd, args) is False
+    assert ep._claim_and_spawn_resume(rd, args, spawn_inflight=None) is False
     assert len(spawns) == 1
 
 
@@ -1108,7 +1108,7 @@ def test_claim_live_flip_installs_tail_waiter(tmp_path, monkeypatch):
         lambda *a, **kw: waiters.append((a, kw)) or True)
 
     args = ["resume", str(rd), "--task-file", str(rd / "task.snapshot.json")]
-    assert ep._claim_and_spawn_resume(rd, args, wait_on_alive=True) is False
+    assert ep._claim_and_spawn_resume(rd, args, wait_on_alive=True, spawn_inflight=None) is False
     assert len(waiters) == 1 and waiters[0][1]["run_dir"] == rd
 
 
@@ -1136,7 +1136,7 @@ def test_resume_cancellation_after_claim_prevents_popen(tmp_path, monkeypatch):
     monkeypatch.setattr(ep, "_engine_alive", _cancel_after_claim)
     monkeypatch.setattr(ep, "_spawn_engine", lambda *a, **kw: spawns.append((a, kw)))
     args = ["resume", str(rd), "--task-file", str(rd / "task.snapshot.json")]
-    assert ep._claim_and_spawn_resume(rd, args, cancel_event=cancel) is False
+    assert ep._claim_and_spawn_resume(rd, args, cancel_event=cancel, spawn_inflight=None) is False
     assert not spawns
 
 

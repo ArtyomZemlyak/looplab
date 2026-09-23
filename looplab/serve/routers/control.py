@@ -505,7 +505,12 @@ def build_router(srv) -> APIRouter:
                 spawned = _claim_and_spawn_resume(
                     rd, cli_args, cancel_event=srv.resume_cancel, wait_on_alive=True,
                     spawn_engine=_spawn_engine, on_spawn=_record_spawn,
-                    launch_env=lambda: srv.settings.launch_env_for_run(rd))
+                    launch_env=lambda: srv.settings.launch_env_for_run(rd),
+                    # Not this route's own mirror above: `reject_if_active` read the lease under
+                    # this sequencer, but the after-exit waiter this may leave behind claims
+                    # later, when a command worker's lease is exactly what it must see (SRV1-09).
+                    spawn_inflight=lambda run_dir: srv.commands.spawn_inflight(
+                        run_dir, ignoring="legacy-resume"))
             except BaseException as exc:
                 if not popen_returned and not isinstance(exc, EngineSpawnOutcomeUnknown):
                     srv.commands.cancel_external_spawn(rd, "legacy-resume")

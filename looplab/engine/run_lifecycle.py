@@ -304,6 +304,33 @@ def fresh_resume_launch_pending(rd: Path, *, now: Optional[float] = None) -> boo
 # the preclaim), and what remains is the one question "is a launch in flight?" answered from the two
 # ledgers that are written — the resume claim in the log (`fresh_resume_launch_pending`) and the
 # spawn preclaim.
+#
+# THE LAUNCH-IN-FLIGHT HANDSHAKE (review 2026-09-22, SRV1-09 remainder). Two FAMILIES of spawner
+# start an engine into an existing run, and each family used to read only its own ledger:
+#   * LOG-LEDGER spawners — the startup and run-list reconcilers, their after-exit waiters, the
+#     command service's restart hand-off, the legacy resume route — append a
+#     `resume_requested(launch_claim=True)` under `run_lifecycle_lock` and then Popen;
+#   * PRECLAIM spawners — a command worker driving its intent, Replay, a fresh start — write the
+#     command service's spawn lease under the run's sequencer and then Popen.
+# Neither lock is held by the other family, so a command worker that found no lease and a dead
+# lock would Popen while a reconciler's child was still importing, and a reconciler that found no
+# fresh claim would Popen while a command worker's child was. The second `looplab resume` is not
+# harmless: on a halted run it WAITS for the singleton (`cli/run_cmds.py`, up to 600 s) for as long
+# as the run stays halted, so when the winner is FINALIZING the loser outlives it and then LIFTS the
+# finished run back into the search — the shape that note measured (a finalize holding the lock,
+# a `resume` arriving a second later, four fallback nodes run on the remaining budget). The cure
+# is Dekker's, because it needs no lock the two families share: each spawner PUBLISHES its own
+# flag and only then READS the other's, and backs off when it is up —
+#   * a command worker writes its lease, then reads the claim off its incremental observation
+#     (`serve/command_observation.py::CommandObservation.launch_claim_fresh`, asked by
+#     `serve/run_commands.py::RunCommandService._spawn_under_claim`);
+#   * a log-ledger spawner appends its claim, then reads the lease through its REQUIRED
+#     `spawn_inflight` keyword (`serve/engine_proc.py::_claim_and_spawn_resume`).
+# In every interleaving at least one of two racing spawners sees the other's flag, so at most one
+# Popens; when both back off, the claim and the lease each expire on their own clocks and the
+# command monitor and the reconciler retry. The destructive paths (reset, deletion, node delete,
+# trace clear) read BOTH ledgers already — the lease through `refuse_unless_quiescent`, the claim
+# through `fresh_resume_launch_pending` under the lifecycle lock that serializes the claimants.
 
 
 # ------------------------------------------------------- the per-run config write transaction
