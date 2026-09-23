@@ -487,6 +487,29 @@ def test_explicit_kwarg_beats_options_field(tmp_path):
     assert e3.memory_dir is None
 
 
+def test_the_launch_record_is_one_frozen_bundle_that_later_rewrites_do_not_touch(tmp_path):
+    """Review 2026-09-22, ENG1-03 step 4a. What an Engine was LAUNCHED with had no home once
+    `__init__` returned: the kwarg-over-options resolution was a closure, and 17 knob attributes are
+    rewritten after construction (a Strategist swap, a control override, a re-entry pin), so the
+    launch value survived only where nothing had overwritten it. `engine.options` is that value, once,
+    frozen — resolved exactly as `_opt` resolves (explicit kwarg > options field > default)."""
+    import pytest
+    from types import SimpleNamespace
+
+    opts = EngineOptions(timeout=99.0, max_nodes=50)
+    eng = _mk_engine(tmp_path / "a", options=opts, timeout=3.5, memory_dir=None)
+    assert eng.options == dataclasses.replace(opts, timeout=3.5, memory_dir=None)
+    assert opts.timeout == 99.0, "the caller's bundle is not the record and is never rewritten"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        eng.options.timeout = 1.0
+    eng.timeout = 7.0                        # what `_apply_strategy`/a control override does
+    assert eng.timeout == 7.0 and eng.options.timeout == 3.5
+    assert _mk_engine(tmp_path / "bare").options == EngineOptions()
+    # A duck-typed bundle still resolves field by field, as the closure did.
+    duck = SimpleNamespace(**{f.name: getattr(opts, f.name) for f in dataclasses.fields(EngineOptions)})
+    assert _mk_engine(tmp_path / "duck", options=duck, timeout=3.5).options == eng.options
+
+
 def test_speculation_depth_is_bounded_and_default_run_start_bytes_stay_legacy(tmp_path):
     off = _mk_engine(tmp_path / "spec-off")
     assert off.speculation_depth == 0

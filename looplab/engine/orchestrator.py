@@ -966,9 +966,19 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         _bad = set(knobs) - _fields
         if _bad:
             raise TypeError(f"Engine() got unexpected keyword argument(s): {sorted(_bad)}")
+        # THE LAUNCH RECORD (review 2026-09-22, ENG1-03 step 4a): every knob this Engine was asked
+        # for, resolved once — explicit kwarg > `options` field > default — into ONE frozen
+        # `EngineOptions`. It was a closure over two dicts, so the question "what was this engine
+        # LAUNCHED with?" had no answer once `__init__` returned: 17 knob attributes are rewritten
+        # after construction (a Strategist, a control override, a re-entry pin), and the launch value
+        # survived only as whatever each attribute had not been overwritten with. `self.options` is
+        # never rewritten. A duck-typed `options` still resolves field by field, as `_opt` did.
+        self.options = (dataclasses.replace(options, **knobs) if dataclasses.is_dataclass(options)
+                        else EngineOptions(**{f: knobs[f] if f in knobs else getattr(options, f)
+                                              for f in _fields}))
 
         def _opt(field: str):
-            return knobs[field] if field in knobs else getattr(options, field)
+            return getattr(self.options, field)
 
         # Layer-2 decoupling (docs/23): the CANONICAL `eval_parallel`/`llm_parallel` win over the legacy
         # `max_parallel`/`parallel_build` when set; None => fall back to the legacy field => byte-identical.
