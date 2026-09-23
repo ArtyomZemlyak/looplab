@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import ast
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
 
-from _source_scan import PKG, iter_sources, iter_trees, scan
+from _source_scan import PKG, code_text, iter_sources, iter_trees, scan
 
 TESTS = Path(__file__).resolve().parent
 
@@ -89,6 +90,87 @@ def test_iter_trees_sees_an_edit_between_two_calls(tmp_path):
     names = [n.name for n in ast.walk(second[pkg / "a.py"]) if isinstance(n, ast.FunctionDef)]
     assert names == ["renamed"], "the memo served a tree the file no longer has"
     assert second[pkg / "b.py"] is first[pkg / "b.py"]
+
+
+# --- TST-05: `code_text`, the text a positive pin may be satisfied by ----------------------------
+
+_MODULE = textwrap.dedent('''\
+    """Module docstring: MODULE_PROSE."""
+    import os
+
+    PROMPT = "say CODE_PROMPT to the model"   # TRAILING_PROSE after code
+
+
+    class Box:
+        """CLASS_PROSE in the class docstring."""
+
+        # LINE_PROSE on a comment-only line
+        def run(self):
+            """METHOD_PROSE."""
+            "BARE_PROSE: a string used as a block comment"
+            ("PAREN_PROSE"
+             "continued")
+            f"FSTRING_CODE {os.sep}"
+            call("# HASH_IN_CODE is inside a string, not a comment")
+            pass  # self._record_eval_start_boundary(chosen)
+            return (
+                "ARGUMENT_CODE"
+            )
+''')
+
+
+@pytest.mark.parametrize("literal, is_code", [
+    ("MODULE_PROSE", False),                      # module docstring
+    ("CLASS_PROSE", False),                       # class docstring
+    ("METHOD_PROSE", False),                      # function docstring
+    ("BARE_PROSE", False),                        # a bare string statement mid-body
+    ("PAREN_PROSE", False),                       # implicit concatenation in parentheses
+    ("continued", False),
+    ("TRAILING_PROSE", False),                    # a comment after code
+    ("LINE_PROSE", False),                        # a comment-only line
+    ("self._record_eval_start_boundary(chosen)", False),   # CLAUDE.md's model mutation
+    ("CODE_PROMPT", True),                        # a string literal in code IS code
+    ('PROMPT = "say', True),
+    ("# HASH_IN_CODE", True),                     # a `#` inside a string is not a comment
+    ("FSTRING_CODE", True),                       # an f-string statement is not a docstring
+    ("ARGUMENT_CODE", True),                      # a string on its own line INSIDE a call
+    ("def run(self):", True),
+    ("pass", True),
+])
+def test_code_text_keeps_code_and_drops_prose(literal, is_code):
+    """The truth table the pin budget stands on. Each row is a literal a test could pin; the budget
+    calls a pin prose-held exactly when the literal is in the source but not in `code_text` of it."""
+    assert literal in _MODULE
+    assert (literal in code_text(_MODULE)) is is_code
+
+
+def test_code_text_keeps_the_line_structure_so_a_slice_is_the_code_of_that_slice():
+    """`tests/test_pin_budget.py` tokenizes a FILE once and slices a function's lines out of it; that
+    is only sound if every line of the result is the same line of the source minus its prose."""
+    code = code_text(_MODULE)
+    assert code.count("\n") == _MODULE.count("\n")
+    for source_line, code_line in zip(_MODULE.split("\n"), code.split("\n")):
+        assert source_line.startswith(code_line.rstrip()) or not code_line.strip(), (
+            source_line, code_line)
+
+
+def test_code_text_does_not_dedent_a_method_as_inspect_returns_it():
+    """A pin that spells indentation (`"x = 1\\n        return x"`) must see the same indentation in
+    the code reading as in the full one, or it reads as prose-held when it is not."""
+    method = '    def f(self):\n        """Doc."""\n        x = 1  # why\n        return x\n'
+    assert code_text(method) == "    def f(self):\n        \n        x = 1  \n        return x\n"
+
+
+def test_a_form_feed_in_a_docstring_does_not_shift_what_is_removed():
+    """Rows are counted on `\\n` alone, as `tokenize` counts them; `str.splitlines` would also break
+    on the `\\x0c` and every span after it would land one line off."""
+    source = 'def f():\n    """page\x0cbreak"""\n    return 1  # PROSE\n'
+    assert code_text(source) == "def f():\n    \n    return 1  \n"
+
+
+def test_code_text_refuses_what_does_not_tokenize():
+    with pytest.raises(ValueError, match="cannot separate code from prose"):
+        code_text('x = """never closed\n')
 
 
 def test_a_subtree_can_be_scanned_on_its_own():

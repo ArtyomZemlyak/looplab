@@ -20,14 +20,17 @@ wiring line exists in one specific file.
 
 Also here, and about the OTHER scan kind: `called_names`/`names_read`/`function_tree`, the
 comment-proof replacement for a positive `"<literal>" in inspect.getsource(f)` pin. See the block
-comment above them and CLAUDE.md's "Testing conventions".
+comment above them and CLAUDE.md's "Testing conventions". And `code_text`, the source minus its
+comments and docstrings, which `tests/test_pin_budget.py` holds every positive pin to.
 """
 from __future__ import annotations
 
 import ast
 import inspect
+import io
 import re
 import textwrap
+import tokenize
 from pathlib import Path
 from typing import Iterator
 
@@ -176,6 +179,75 @@ def attributes_read(func) -> set[str]:
     return {dotted for dotted in (
         _dotted(node) for node in ast.walk(function_tree(func))
         if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)) if dotted}
+
+
+# ------------------------------------------------------------------ the text a pin may match
+# Review 2026-09-22, TST-05: 67 positive pins over production source were held ONLY by prose — the
+# pinned literal occurred in a comment or a docstring of the source the test read, never in its
+# code. `code_text` is what separates the two, and `tests/test_pin_budget.py` is the census that
+# holds every positive pin to it. A STRING LITERAL IN CODE IS CODE: a pinned prompt sentence or an
+# event name is a real pin, so only comments and string-only statements (docstrings, and a bare
+# string used as a block comment) are removed.
+
+_STRING_PREFIX = re.compile(r"[A-Za-z]*")
+
+
+def _is_string_statement(tokens: list) -> bool:
+    """A logical line that is nothing but string literals (wrapping parentheses allowed) — what
+    `ast` calls an `Expr(Constant(str))`. An f-string statement is NOT one (`ast` reads it as a
+    `JoinedStr`, so it is code there too); on 3.12 it is not even a STRING token."""
+    body = [t for t in tokens if not (t.type == tokenize.OP and t.string in "()")]
+    return bool(body) and all(
+        t.type == tokenize.STRING and "f" not in _STRING_PREFIX.match(t.string).group().lower()
+        for t in body)
+
+
+def code_text(source: str) -> str:
+    """*source* with every comment and every docstring removed — the text a positive pin may match.
+
+    Kept: every other character, string literals included, and the LINE STRUCTURE — a removed span
+    leaves the newlines it held, so line N of the result is line N of *source* minus its prose, and
+    a slice of a file's code text is the code text of that slice. *source* may be a whole module or
+    a function as `inspect.getsource` returns it, indentation and all: it is NOT dedented, because a
+    pin that spells indentation must see the same indentation in both readings.
+
+    Raises `ValueError` when *source* does not tokenize: a scanner must not guess which half of an
+    unreadable text is code."""
+    # Rows as `tokenize` counts them: `\n` only. `str.splitlines` also breaks on `\x0c`, `\x1c` and
+    # ` `, which a docstring may hold, and every offset after one would then be wrong.
+    starts = [0]
+    at = source.find("\n")
+    while at != -1:
+        starts.append(at + 1)
+        at = source.find("\n", at + 1)
+
+    def offset(row_col: tuple) -> int:
+        row, col = row_col
+        return starts[row - 1] + col
+
+    drop: list[tuple[int, int]] = []
+    statement: list = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type == tokenize.COMMENT:
+                drop.append((offset(tok.start), offset(tok.end)))
+            elif tok.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                if statement and _is_string_statement(statement):
+                    drop.append((offset(statement[0].start), offset(statement[-1].end)))
+                statement = []
+            elif tok.type not in (tokenize.NL, tokenize.INDENT, tokenize.DEDENT):
+                statement.append(tok)
+    except (tokenize.TokenError, SyntaxError) as exc:      # IndentationError is a SyntaxError
+        raise ValueError(f"cannot separate code from prose: {exc}") from exc
+    out: list[str] = []
+    pos = 0
+    for start, end in sorted(drop):
+        if start > pos:
+            out.append(source[pos:start])
+        out.append("\n" * source.count("\n", max(start, pos), end))
+        pos = max(pos, end)
+    out.append(source[pos:])
+    return "".join(out)
 
 
 def scan(pattern: re.Pattern | str, *, pkg: Path = PKG) -> dict[str, set[str]]:
