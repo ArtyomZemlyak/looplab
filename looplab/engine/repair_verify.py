@@ -1574,7 +1574,7 @@ def silent_broad_fallbacks(written: dict, *, before=None) -> str:
             continue
         try:
             old = before(path) if callable(before) else None
-        except Exception:  # noqa: BLE001 - an unreadable original is an absent one
+        except (OSError, ValueError, TypeError, KeyError):   # an unreadable original is an absent one
             old = None
         seen: dict = {}
         for _line, _hdr, body in _silent_broad_handlers(old or ""):

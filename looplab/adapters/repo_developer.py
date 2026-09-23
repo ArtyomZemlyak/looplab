@@ -1608,7 +1608,7 @@ class LLMRepoDeveloper:
                         + ", ".join(fp["packages"]) + ". Write against THESE versions: an API you "
                         "remember from another release may have been renamed or removed here. When "
                         "unsure, check it with pkg_info / py_api or run_probe before relying on it.\n\n")
-        except Exception:  # noqa: BLE001 - a missing block is better than a failed build
+        except (OSError, ValueError, RecursionError):   # a missing block is better than a failed build
             text = ""
         self._environment_block_text = text
         return text

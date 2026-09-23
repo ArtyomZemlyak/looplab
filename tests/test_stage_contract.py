@@ -618,8 +618,11 @@ def test_the_repair_emit_is_the_only_one_that_offers_a_rollback():
     dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
     build = dev._emit_spec()["function"]["parameters"]["properties"]
     repair = dev._repair_emit_spec()["function"]["parameters"]["properties"]
-    assert set(build) == {"summary"}
-    assert set(repair) == {"summary", "rollback_stage"}
+    # `activation_markers` (2026-09-23) is on BOTH, because a fresh build is exactly where a new
+    # switchable path is written; the rollback remains the repair's alone.
+    assert set(build) == {"summary", "activation_markers"}
+    assert set(repair) == {"summary", "activation_markers", "rollback_stage"}
+    assert "rollback_stage" not in build
     desc = repair["rollback_stage"]["description"]
     # The two things a model must know at the moment of answering, in the text it actually reads.
     assert "must have EDITED that stage's script" in desc

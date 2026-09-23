@@ -238,7 +238,13 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               exactly `['developer_parent_code']` added and `[]` removed. `_EXPECTED_FIELD_COUNT`
 #               goes 252 -> 253 and both pins are re-set. INERT for a calibration replicate (the toy
 #               backend builds no script Developer); re-pinned on the COMPLETE-envelope rule.
-_EXPECTED_DIGEST = "sha256:98d7403e418db7e53ac203214dc352e0e6f1db4759c6576cf24f50825114dcd8"
+#   2026-09-23  inline_repair_reasons gained `inert_path` (15 -> 16 FAILURE_REASONS; the default is
+#               the whole registry). A DEFAULT moved on purpose -- case (2): the field set is
+#               unchanged and `_EXPECTED_FIELD_COUNT` stays. A replicate calibrated before it is
+#               genuinely different: under it, an eval that succeeded without printing a node's
+#               declared activation marker is a repairable failure with its metric withheld, where
+#               before it was a scored node (`engine/activation.py`).
+_EXPECTED_DIGEST = "sha256:a0b8fb2baa17095adefbed14315e773e6866f05ac1685383d21ac266ce6a68ac"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is

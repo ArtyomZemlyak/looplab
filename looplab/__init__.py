@@ -38,6 +38,7 @@ _LAYOUT = {
     "_pathsafe": "core",
     "_runcache": "tools",
     "ablation": "engine",
+    "activation": "engine",
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)

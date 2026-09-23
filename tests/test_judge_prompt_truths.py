@@ -162,10 +162,13 @@ def test_the_defects_are_measured_on_the_historical_request(monkeypatch):
     """What the flag exists to end, measured on the OFF bytes rather than restated."""
     system, _, seen = _triage(monkeypatch, tools=None)
     tags = _opening_tags(system)
-    # `oom` is named although no producer can tag it, and six kinds that DO arrive are missing.
+    # `oom` is named although no producer can tag it, and six kinds that DO arrive are missing --
+    # seven since 2026-09-23, when `inert_path` joined the engine's own answers: the historical
+    # bytes could not name a kind that did not exist yet, which is the defect in its purest form.
     assert "oom" in tags and "oom" not in set(ENGINE_FINAL_REASONS) | set(DIAGNOSABLE_ENGINE_REASONS)
     assert sorted(set(_arriving()) - set(tags)) == sorted(
-        ["check_failed", "drift", "expect_failed", "no_metric", "not_learning", "setup"])
+        ["check_failed", "drift", "expect_failed", "inert_path", "no_metric", "not_learning",
+         "setup"])
     # "Two kinds are the ENGINE's own watchdogs" — while `not_learning` is a watchdog kill that
     # arrives here too, and is named nowhere in that sentence.
     watch = _WATCHDOG_SENTENCE.search(system).group(0)
