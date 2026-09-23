@@ -199,8 +199,11 @@ refusal raises `BudgetExceeded`, the same hard stop the accountant raises, throu
 so the run ends the way a tripped ceiling always has. `tests/test_containment_census.py` pins the
 funnels as a CLOSURE over the call graph (since 2026-09-22; before that it keyed on eight callee
 names and missed 38 swallowing handlers): a blind `except` whose try-block reaches a provider call
-through any function lets the stop through, bar a shrink-only `FUNNEL_BACKLOG` — four build and
-producer-lane sites awaiting a deferred-stop sink, and one reviewed false positive. The committed
+through any function lets the stop through, bar a shrink-only `FUNNEL_BACKLOG` that now holds one
+reviewed false positive and nothing else: the build and Card-producer lanes that sat there hold the
+stop to their join or park it on the run-level deferred-stop sink, and the run loop raises it once
+the evaluations already paid for have landed (`speculation.py::_raise_deferred_eval_budget_stop`;
+a Card producer's ceiling no longer marks its Card `producer_failed`). The committed
 half is fed by the durable `llm_usage` ledger and seeded from it on a resume, so the cap survives a
 restart; `looplab tokens` reconciles against that same ledger. Both default to 0 = no cap (doc 52
 row 15).

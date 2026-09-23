@@ -31,6 +31,7 @@ from tests.test_card_refill_unequal_durations import (_occupancy_engine, _termin
                                                      _three_ready_cards)
 from tests.test_card_speculation_engine import (  # noqa: F401  (imported for its autouse effect)
     _admit_unit_speculation_receipt,
+    _build_result,
     _engine,
     _start,
     _without_research,
@@ -97,12 +98,22 @@ def test_an_eval_that_crosses_the_ceiling_leaves_its_running_sibling_its_termina
 
 def test_a_held_spend_ceiling_admits_no_new_evaluation(tmp_path, monkeypatch):
     """The admission half: while a deferred stop is held, a session with admissible pending work
-    starts nothing — the stop only lets the evaluations ALREADY paid for finish."""
+    starts nothing — the stop only lets the evaluations ALREADY paid for finish.
+
+    The pending node is committed BEFORE the stop is held. It used to be built by the session itself
+    with the stop already held — which is buying new work after the ceiling, and which a held stop
+    now refuses too: the session's gates read it as a terminal intent (review 2026-09-22, the Card
+    producers' deferral, `tests/test_card_producer_ceiling.py`)."""
     engine, _producer = _engine(tmp_path / "held-stop", depth=2)
     engine._eval_parallel = 2
     _start(engine)
     _three_ready_cards(engine)
     _without_research(monkeypatch, engine)
+    head = engine._head_request(fold(engine.store.read_all()))
+    built = _build_result(engine, head)
+    engine._ensure_speculation_state()
+    engine._spec_builds[built.key] = built
+    assert engine._serve_card_builds() is True, "precondition: the head's node is committed"
     admitted: list[int] = []
 
     async def _eval(node_id, _limiter, _max_es):

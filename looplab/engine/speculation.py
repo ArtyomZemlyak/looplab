@@ -18,7 +18,8 @@ import anyio
 
 from looplab.core import tracing
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
-from looplab.core.errors import deferrable_run_stop
+from looplab.core.containment import refuse_budget_stop
+from looplab.core.errors import budget_stop_leaf, deferrable_run_stop
 from looplab.core.models import (
     Idea,
     NodeStatus,
@@ -632,10 +633,18 @@ class SpeculationMixin:
         return self._fold_current()[1]
 
     def _session_gates(self, state: RunState, session: CardSession) -> CardSessionGates:
-        """The one computation of a turn's three fold-derived stop conditions, from ONE snapshot."""
+        """The one computation of a turn's three fold-derived stop conditions, from ONE snapshot.
+
+        A RUN STOP HELD FOR THE OWNER is a terminal intent here (review 2026-09-22): a spend ceiling
+        an adopted evaluation or a Card producer parked on `_eval_budget_stop` ends the run as soon
+        as the run loop's head raises it, so no turn before that may start a producer, commit a build
+        or admit an evaluation. It closes the race between a producer parking the stop and the
+        session's next turn transferring the boundary debt, in which a head with neither a live
+        producer nor a result used to read as a dead producer's and close `producer_failed`.
+        """
 
         return CardSessionGates(
-            terminal_gate=self._terminal_intent(state),
+            terminal_gate=self._terminal_intent(state) or self._eval_budget_stop is not None,
             budget_exhausted=session.budget_exhausted(state),
             outer_rebuild=any(needs_outer_rebuild(node) for node in state.pending_nodes()),
         )
@@ -1224,6 +1233,12 @@ class SpeculationMixin:
             )
         except Exception as exc:  # noqa: BLE001 — one producer failure must become an explicit give-up result
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            # …but NOT the run's spend ceiling (review 2026-09-22, the census' `FUNNEL_BACKLOG`):
+            # as a give-up result it became `card_build_done {skipped: "producer_failed"}`, which
+            # bars this Card from speculative election for the rest of the run, and the run kept
+            # turning until some other paid call raised the stop. It leaves the worker, bare or
+            # wrapped, and `_run_isolated_producer` parks it for the run's owner to raise.
+            refuse_budget_stop(exc)
             return SpecBuildResult(
                 card_id, generation, dict(action), False, roles=roles,
                 error=producer_error_text(exc),
@@ -2046,12 +2061,31 @@ class SpeculationMixin:
 
         The wrapper returns nothing on purpose: the result is reachable only through `store`, which
         is the same durable-slot discipline the main task re-scans.
+
+        THE ONE EXCEPTION TO "a raising worker still stores a result" is the run's spend ceiling
+        (review 2026-09-22 — the last two `FUNNEL_BACKLOG` rows of the containment census: the build
+        and the raw-proposal worker, which now let it through `refuse_budget_stop`). Stored as a
+        give-up it was the Card's fault on the durable record (`producer_failed` bars the Card from
+        speculative election) while the run went on turning. So it is PARKED on the run-level
+        deferred-stop sink an adopted evaluation parks its ceiling on (`_eval_budget_stop`, first one
+        wins — the accountant's own exception, found through any wrapping), the outer boundary is
+        owed a turn, and NOTHING is stored: the session's gates read a held stop as a terminal intent
+        (`_session_gates`), so it starts no producer, commits no build and closes the open head
+        `stale` — never `producer_failed` — and the run loop's head raises the stop
+        (`_raise_deferred_eval_budget_stop`) once the adopted evaluations have landed. The release
+        and the wake-up below still run.
         """
         try:
             try:
                 result = await anyio.to_thread.run_sync(
                     worker, abandon_on_cancel=False, limiter=limiter)
             except Exception as exc:  # noqa: BLE001 — the main task must still advance the durable gate
+                stop = budget_stop_leaf(exc)
+                if stop is not None:
+                    if self._eval_budget_stop is None:
+                        self._eval_budget_stop = stop
+                    self._eval_boundary_owed = True
+                    return
                 result = on_failure(exc)
             store(result)
         finally:
@@ -2148,6 +2182,11 @@ class SpeculationMixin:
                 error="proposal rejected" if idea is None else "",
             )
         except Exception as exc:  # noqa: BLE001 — one raw proposal fault yields a consumed, non-staged result rather than tearing down the task group
+            # The run's spend ceiling is not "one raw proposal fault" (review 2026-09-22, the census'
+            # `FUNNEL_BACKLOG`): it leaves the worker and `_run_isolated_producer` parks it for the
+            # run's owner, rather than becoming a give-up the session then yields around while the
+            # run turns on. The `finally` below still discards this turn's telemetry.
+            refuse_budget_stop(exc)
             # The intents captured BEFORE the fault ride along: they are already-folded audit rows the
             # main task publishes, and dropping them loses the record of a paid proposal that ran.
             return SpecRawStageResult.failure(

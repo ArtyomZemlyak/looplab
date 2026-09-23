@@ -268,12 +268,11 @@ NOT_PROPAGATED: dict[str, tuple[str, frozenset[str]]] = {
 FUNNEL_BACKLOG: dict[str, str] = {
     # `Engine._create_node_guarded#0` (ENG1-01) and `Engine._serve_forced_requests#0` (ENG1-07)
     # left this list the same day: the guarded build and the inject lane both re-raise the stop now
-    # (8dd61cb9, fa1b1415), so the census stopped finding them.
-    "looplab/engine/speculation.py::SpeculationMixin._produce_requested_card#0":
-        "review 2026-09-22 ENG2-02: a Card producer in a task group turns the stop into a give-up "
-        "result; needs the run-level deferred-stop sink",
-    "looplab/engine/speculation.py::SpeculationMixin._prepare_raw_card_stage#0":
-        "review 2026-09-22 ENG2-02: the raw-proposal stage, same lane and same sink",
+    # (8dd61cb9, fa1b1415), so the census stopped finding them. The two Card producers
+    # (`SpeculationMixin._produce_requested_card#0`, `_prepare_raw_card_stage#0`) followed once the
+    # run-level deferred-stop sink existed: their workers let the ceiling through
+    # `refuse_budget_stop` and `_run_isolated_producer` parks it on `_eval_budget_stop` for the
+    # owner to raise (`tests/test_card_producer_ceiling.py`).
     "looplab/engine/speculation.py::SpeculationMixin._claim_requested_card_build#0":
         "FALSE POSITIVE, reviewed: `_create_node(precoded=...)` routes to `_create_precoded_node`, "
         "which this census's own closure finds unpaid; `_create_node` is paid on its other branch",
@@ -515,9 +514,10 @@ def test_every_blind_handler_around_a_paid_call_in_the_run_path_reraises_the_bud
 
 
 def test_the_funnel_backlog_only_shrinks():
-    """The number here is the backlog on 2026-09-22 and may only go DOWN; a larger list is a new
+    """The number here is the backlog as it last shrank (3 on 2026-09-22, 1 once the two Card
+    producers deferred the ceiling to the run's owner) and may only go DOWN; a larger list is a new
     swallow parked beside the old ones instead of fixed."""
-    assert len(FUNNEL_BACKLOG) <= 3, len(FUNNEL_BACKLOG)
+    assert len(FUNNEL_BACKLOG) <= 1, len(FUNNEL_BACKLOG)
 
 
 def test_every_paid_def_under_a_generic_name_is_classified():
