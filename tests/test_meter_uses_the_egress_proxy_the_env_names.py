@@ -29,6 +29,7 @@ the request — not that the source contains a particular call.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -100,6 +101,12 @@ def metered(tmp_path):
         "https_proxy": f"http://127.0.0.1:{prox.server_port}",
         "no_proxy": "",  # nothing bypasses, so the assertion is about the meter, not about no_proxy
     }
+    # The variables Windows ITSELF needs to start a child interpreter: without SYSTEMROOT a child
+    # cannot even initialise its socket layer (WinError 10106), so the meter -- a socket server --
+    # never came up on the Windows CI leg (run 35804658308, review 2026-09-22 round 2). None of them
+    # is a proxy setting, so the assertion stays about the meter. POSIX has none of them to carry.
+    env.update({key: value for key, value in os.environ.items()
+                if key.upper() in {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC", "PATHEXT"}})
     proc = subprocess.Popen(
         [sys.executable, str(PROXY), "--port", str(port), "--host", "127.0.0.1",
          "--upstream", "http://198.51.100.7:9/v1",  # TEST-NET-2, cannot answer

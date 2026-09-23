@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -79,8 +80,14 @@ def test_the_kind_tier_survives_growth_but_not_a_mode_change(tmp_path):
     lock.write_bytes(b"1234\n5678\n")                  # grew in place — still the same lock
     assert same_file_kind(lock.stat()) == before
 
-    os.chmod(lock, 0o600)                              # authority changed under the probe
-    assert same_file_kind(lock.stat()) != before
+    # Authority changed under the probe. Read-only, because that is the one mode change Windows can
+    # EXPRESS (its chmod toggles the read-only attribute): 0o600 left st_mode at 0o666 there and the
+    # tier had nothing to see (CI run 35804658308, review 2026-09-22 round 2).
+    os.chmod(lock, stat.S_IREAD)
+    try:
+        assert same_file_kind(lock.stat()) != before
+    finally:
+        os.chmod(lock, stat.S_IREAD | stat.S_IWRITE)
     # ...and the weakest tier cannot see that at all, which is why these fences could not use it.
     assert same_file_entry(lock.stat()) == same_file_entry(lock.stat())
 
@@ -217,9 +224,14 @@ def test_the_scope_probe_binds_the_run_directorys_kind_not_its_timestamps(tmp_pa
     assert probes.probe_key("demo", log_sig) == before, (
         "a child artifact invalidated every scope report on that run")
 
-    os.chmod(rd, 0o700)                                 # the container's authority changed
-    assert probes.probe_key("demo", log_sig) != before, (
-        "the probe key could not see the run directory stop being the directory it validated")
+    # The container's authority changed: read-only, the change Windows can express on a directory
+    # too (0o700 left it 0o777 there: CI run 35804658308, review 2026-09-22 round 2).
+    os.chmod(rd, stat.S_IREAD | stat.S_IEXEC)
+    try:
+        assert probes.probe_key("demo", log_sig) != before, (
+            "the probe key could not see the run directory stop being the directory it validated")
+    finally:
+        os.chmod(rd, stat.S_IRWXU)
 
 
 def test_the_knowledge_index_revision_notices_a_replaced_note(tmp_path):
@@ -284,11 +296,15 @@ def _stat_on_another_device(base: os.stat_result) -> os.stat_result:
     `st_mtime`/`st_ctime` as well as the `_ns` pair, and a shim that happened to omit one would make
     the test pass for the wrong reason.
     """
+    # `st_file_attributes` rides along where the platform has it (Windows): it is not one of the ten
+    # positional fields, and leaving it out made the copy differ from `base` in MORE than st_dev
+    # there (CI run 35804658308). A platform without the field ignores the key.
     swapped = os.stat_result(
         (base.st_mode, base.st_ino, base.st_dev + 1, base.st_nlink, base.st_uid, base.st_gid,
          base.st_size, base.st_atime, base.st_mtime, base.st_ctime),
         {"st_atime_ns": base.st_atime_ns, "st_mtime_ns": base.st_mtime_ns,
-         "st_ctime_ns": base.st_ctime_ns})
+         "st_ctime_ns": base.st_ctime_ns,
+         "st_file_attributes": getattr(base, "st_file_attributes", 0)})
     assert file_identity(swapped)[1:] == file_identity(base)[1:], "only st_dev may differ"
     assert file_identity(swapped) != file_identity(base)
     return swapped

@@ -229,7 +229,11 @@ def windows_path_rendering(monkeypatch, module) -> type:
             return super().__str__()
 
         def as_posix(self):
-            return super().__str__()
+            # What `WindowsPath.as_posix()` answers: "/" separators. On POSIX `super().__str__()`
+            # already is that; on a REAL Windows host it is the native "\\" spelling, which this
+            # double used to hand straight back -- so the test built on it failed there against the
+            # very `as_posix()` line it pins (CI run 35804658308, review 2026-09-22 round 2).
+            return super().__str__().replace(os.sep, "/")
 
     monkeypatch.setattr(module, "Path", _WindowsRenderedPath)
     return _WindowsRenderedPath

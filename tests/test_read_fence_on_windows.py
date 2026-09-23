@@ -46,7 +46,11 @@ def _fence_as_windows(monkeypatch, roots, *, cwd="C:\\work"):
     """The generated fence's namespace as a Windows interpreter would build it (probe seam, so no
     audit hook is installed): `_NT` baked True and `os`/`os.path` answering like Windows."""
     src = read_fence.render(roots, (), policy="deny", log="", run="")
-    assert src.count("_NT = False") == 1, "the template no longer bakes _NT as expected"
+    # `_NT` is baked from `os.name` at render time: False here, and ALREADY True on a real Windows
+    # host, where there is nothing to flip -- this precondition failed every case there (CI run
+    # 35804658308, review 2026-09-22 round 2) before a single assertion about the fence ran.
+    assert src.count("_NT = False") + src.count("_NT = True") == 1, (
+        "the template no longer bakes _NT as expected")
     src = src.replace("_NT = False", "_NT = True")
     fake_os = _windows_os(cwd)
     real_import = builtins.__import__

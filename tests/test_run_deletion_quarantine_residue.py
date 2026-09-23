@@ -27,10 +27,10 @@ service does with a move that did not finish.
 """
 from __future__ import annotations
 
-import contextlib
 import errno
 import os
 import shutil
+import types
 from pathlib import Path
 
 import pytest
@@ -381,7 +381,7 @@ def test_the_absorbing_quarantine_ambiguous_phase_is_untouched():
     assert "quarantine_ambiguous" in source and "does not move" in source
 
 
-def _one_directory_scans_empty(monkeypatch, name: str):
+def _one_directory_scans_empty(monkeypatch, name: str, empty: Path):
     """A directory that reports EMPTY exactly once, and really is not.
 
     The mid-walk arrival this module's own contract names: the walk sees nothing in `<name>`, marks
@@ -392,8 +392,17 @@ def _one_directory_scans_empty(monkeypatch, name: str):
     Returns the `arm` switch rather than arming itself: the interrupted-move fixture walks the tree
     with `rglob`, which goes through `os.scandir` too, so an always-on hide would be spent inside the
     move instead of inside the absorption this is about.
+
+    SCOPED to the deletion service's own `os`, and a REAL (empty) scandir iterator. It used to patch
+    the process-wide `os.scandir` with a `nullcontext([])`, which only the absorption's `with …:` form
+    accepts. On Linux nothing else could reach it — `shutil.rmtree` walks descriptors there — but on
+    Windows the quarantine purge's `rmtree` walks with `os.walk` (Python 3.12), hands scandir PATH
+    STRINGS and calls `next()` on the result: `TypeError: 'nullcontext' object is not an iterator`
+    (CI run 35804658308, review 2026-09-22 round 2), and a merely iterable double would still have
+    hidden the purge's own `__pycache__` from it.
     """
     real = os.scandir
+    empty.mkdir(exist_ok=True)
     hidden: set[str] = set()
     armed: list[bool] = [False]
 
@@ -401,10 +410,16 @@ def _one_directory_scans_empty(monkeypatch, name: str):
         resolved = str(path)
         if armed[0] and Path(resolved).name == name and resolved not in hidden:
             hidden.add(resolved)
-            return contextlib.nullcontext([])
+            return real(empty)
         return real(path)
 
-    monkeypatch.setattr(deletion_service.os, "scandir", _scandir)
+    class _DeletionServiceOs(types.ModuleType):
+        def __getattr__(self, attr):          # everything but `scandir` is the live module
+            return getattr(os, attr)
+
+    scoped = _DeletionServiceOs("os")
+    scoped.scandir = _scandir
+    monkeypatch.setattr(deletion_service, "os", scoped)
     return lambda: armed.__setitem__(0, True)
 
 
@@ -427,7 +442,7 @@ def test_a_mid_walk_arrival_keeps_the_retry_promise_it_can_actually_keep(tmp_pat
     """
     run_dir = _run(tmp_path)
     _interrupted_geesefs_move(monkeypatch)
-    arm = _one_directory_scans_empty(monkeypatch, "__pycache__")
+    arm = _one_directory_scans_empty(monkeypatch, "__pycache__", tmp_path / "scans-empty")
     client = TestClient(make_app(tmp_path))
     body = _identity(run_dir)
 
