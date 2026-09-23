@@ -58,9 +58,10 @@ def eval_deadline_env(timeout: float, *, now: Optional[float] = None) -> dict[st
 # `from looplab.runtime.sandbox import is_secret_env` (eight modules, `tests/test_secret_env_pattern.py`)
 # resolves to the SAME object, so this stays the one spelling of "withhold this from a child process".
 # It moved because the DECLARED ENVIRONMENT rule needs the same screen and its third declarer is
-# `core/config.py::Settings.eval_env`, which may not import `runtime` (the layering rule that is also
-# why `config._SECRET_ENV_NAME` — the stricter api_key_env sibling — is a duplicate rather than an
-# import). One home beats a third copy; `tests/test_secret_env_pattern.py` is still the joint.
+# `core/config.py::Settings.eval_env`, which may not import `runtime`. (`config._SECRET_ENV_NAME`,
+# the stricter api_key_env sibling, is a second pattern because it answers a stricter question,
+# not because of layering; this comment said layering until review 2026-09-22, CORE-13.) One home
+# beats a third copy; `tests/test_secret_env_pattern.py` is still the joint.
 from looplab.core.envsafe import SECRET_ENV, is_secret_env  # noqa: F401 (re-export)
 
 

@@ -6,7 +6,11 @@ openai SDK (httpx transport), whose per-read timeout reliably bounds a stalled s
 factory selects `OpenAICompatibleClient`. The openai/httpx imports are declared deps but
 GUARDED, so the offline engine + replay still import this module (via `core.config`) without
 the live LLM stack. `CostAccountant` always meters calls and enforces a hard stop only when
-its caller supplies a finite limit; shipped Settings do not expose a dollar-cap field.
+its caller supplies a finite limit. A run's limit is `run_cost_accountant(settings)`'s: the
+tighter of `llm_budget_usd` and `llm_cost_limit` (`core/llm_budget.py::run_usd_ceiling`, 0 =
+off), the same ceiling the broker's `RunBudget` reserves against at `borrow()`. This line used
+to end "shipped Settings do not expose a dollar-cap field" while both fields shipped (review
+2026-09-22, CORE-13).
 Secrets are never stored as values here — the client reads the key from config/env.
 
 The retry/error-classification, SSE-stream, and tool-call-parsing helpers live in the flat

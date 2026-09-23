@@ -1536,7 +1536,13 @@ class Node(BaseModel):
     # `FAILURE_REASONS` above; a node the engine ended carries its own word (`BENIGN_TERMINAL_REASONS`,
     # triage's `idea_rejected`). Not re-listed here: a six-name copy stood on this line while the
     # vocabulary grew past a dozen (review 2026-09-02, CO-07).
-    # Audit/observability only — lets a UI/operator see WHY runs fail across a search.
+    # NOT audit-only, which this line claimed until review 2026-09-22 (CORE-13): code DECIDES on
+    # the word. `is_unevaluated_speculative_discard` refunds a node-budget slot only on
+    # `superseded`; `events/card_ledger.py::_card_debuggable_leaf_candidate_ids` keeps
+    # `idea_rejected` / `card_dropped` out of a Card's debuggable leaves; `developer_crash` is what
+    # `engine/node_build.py::developer_crash_rank` counts toward the Developer-crash pause; and the
+    # proposal cues, novelty audit and lesson distillers put it in front of a model. A new word is
+    # a behaviour change, not a label. It is also how a UI/operator sees WHY runs fail.
     error_reason: str = ""
     # Crash-triage verdict (set by node_failed when the LLM triage ran): the agent's one-line
     # judgment of WHY the failure happened / whether the IDEA is at fault — the most expensive

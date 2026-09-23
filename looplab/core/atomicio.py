@@ -18,9 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-# fsync timeout (seconds) before we give up on it for the rest of the process. Env-overridable.
-# Parsed defensively: this module is imported transitively everywhere, so a garbage override
-# (LOOPLAB_FSYNC_TIMEOUT=abc) must degrade to the default, not crash `import looplab` at load.
+
 def file_identity(info: os.stat_result) -> tuple[int, ...]:
     """The canonical portable stat identity tuple for a `stat`/`lstat`/`fstat`.
 
@@ -91,6 +89,9 @@ def same_file_kind(info: os.stat_result) -> tuple[int, ...]:
             int(getattr(info, "st_file_attributes", 0) or 0))
 
 
+# fsync timeout (seconds) before we give up on it for the rest of the process. Env-overridable.
+# Parsed defensively: this module is imported transitively everywhere, so a garbage override
+# (LOOPLAB_FSYNC_TIMEOUT=abc) must degrade to the default, not crash `import looplab` at load.
 def _fsync_timeout() -> float:
     try:
         value = float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)

@@ -2947,12 +2947,14 @@ class Settings(BaseSettings):
         believed a second provider was in play. Both are errors here instead.
 
         The `api_key_env` rules exist for a specific reason. It must LOOK like a secret to
-        `runtime/sandbox.py::SECRET_ENV`, because that is the filter that strips the operator's keys
-        out of the environment handed to generated candidate code — a key parked in a variable named
-        `MY_HANDLE` would be invisible to it and ride straight into the sandbox. This pattern is
-        deliberately the STRICTER of the two (the sandbox has to recognize whatever already exists;
-        this names a variable the operator is about to create), and it is duplicated below rather than
-        imported because layering forbids `core` from importing `runtime`.
+        `core/envsafe.py::SECRET_ENV` (re-exported by `runtime/sandbox.py`), because that is the
+        filter that strips the operator's keys out of the environment handed to generated candidate
+        code — a key parked in a variable named `MY_HANDLE` would be invisible to it and ride
+        straight into the sandbox. This pattern is deliberately the STRICTER of the two (the sandbox
+        has to recognize whatever already exists; this names a variable the operator is about to
+        create), and that difference is why it is a second pattern. It is not layering: the screen
+        lives in `core` now, and the old reason here ("layering forbids `core` from importing
+        `runtime`") outlived its move (review 2026-09-22, CORE-13).
         `tests/test_secret_env_pattern.py` pins the two together — including the invariant that every
         name accepted here is one the sandbox strips. And a literal key inside a profile is refused
         outright: the profile map is written verbatim into config.snapshot.json and served over HTTP

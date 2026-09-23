@@ -311,6 +311,8 @@ def test_the_prose_check_can_actually_fail():
     Without this the test above passes on a broken `satisfied_only_by_prose` that always answers
     False — which is precisely how the rule spent its life as a comment.
     """
+    # "dollar-cap" survives in llm.py only inside the module docstring's QUOTE of a retired
+    # sentence (review 2026-09-22, CORE-13) — prose by construction, which is what this needs.
     llm = ROOT / "looplab/core/llm.py"
     assert satisfied_only_by_prose(llm, _text_without_markers(llm), "dollar-cap"), (
         "a literal whose only occurrences are prose must be caught")
