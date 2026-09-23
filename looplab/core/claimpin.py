@@ -124,8 +124,26 @@ CITATION = re.compile(
 LINE_CITATION = re.compile(r"(?<![\w/.-])((?:[a-z_][a-z0-9_]*/)*[a-z_][a-z0-9_]*\.py):(\d+)\b")
 
 _SKIP_DIRS = {".git", ".claude", "runs", "node_modules", "dist", "site", "__pycache__",
-              ".pytest_cache", ".mypy_cache", ".venv", "venv", "build"}
+              ".pytest_cache", ".mypy_cache", ".venv", "venv", "build",
+              # JupyterLab keeps a `<name>-checkpoint.md` copy of every file edited in it, markers
+              # included — a second declaration of every slug the original carries, so the index
+              # went red on the box that edits docs in the hub (review 2026-09-22, TST-08;
+              # `tests/_source_scan.py::EXCLUDED_DIRS` already skipped it for the source walk).
+              ".ipynb_checkpoints"}
 _TEXT_SUFFIXES = {".py", ".md", ".js", ".jsx", ".html", ".txt", ".toml", ".yml", ".yaml"}
+
+# AN AUDIT DOC IS ITS PROTOCOL BEFORE IT IS ITS RESULT (review 2026-09-22, TST-08). A
+# `docs/audit/<x>.md` is written first as the protocol a box run follows and only later carries the
+# measurement, one dated `RESULT <yyyy-mm-dd> …` line per run. So the falsifier of an item that owes
+# a measurement is `absent:RESULT 20@docs/audit/<x>.md` — open until the first dated RESULT lands —
+# and neither of the two shapes the index held:
+#   * `missing:docs/audit/<x>.md` (six items) reads the PROTOCOL's arrival as the item shipping, and
+#     the index's own instruction for a proof that stops holding is "delete the marker";
+#   * `absent:RESULT 2026-@…` (three items) can no longer fire once the first result is dated 2027.
+# `missing:` stays legal while the doc does not exist (an `absent:` proof may not point at nothing);
+# the day it is written, `predicate_holds` says to re-point, not to delete.
+AUDIT_DIR = "docs/audit/"
+AUDIT_RESULT_LITERAL = "RESULT 20"
 
 # Every token whose LINE is stripped before any predicate reads a file. Both index families are
 # here on purpose: without it an `absent:` proof is falsified by the line stating it and a
@@ -254,6 +272,12 @@ def predicate_holds(pred: str, *, root: Path, allow_absolute: bool = False) -> t
         if target is None:
             return False, why
         if target.exists():
+            if rel.startswith(AUDIT_DIR):
+                return False, (
+                    f"{rel} now EXISTS — but an audit doc is its protocol before it is its result, "
+                    "so this is not the item shipping: re-point the proof at "
+                    f"`absent:{AUDIT_RESULT_LITERAL}@{rel}` (open until a dated RESULT line lands) "
+                    "and delete the marker only once one has")
             return False, f"{rel} now EXISTS — what this claim says is absent is no longer absent"
         return True, ""
 

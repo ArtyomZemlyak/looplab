@@ -297,7 +297,9 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   (`tests/test_open_item_index.py` pins one declaration per slug); (3) `DECLINED[<slug>]` is
   PERMANENT and must carry `measured: <number>` and a doc citation; (4) every `OPEN[…]` carries its
   own falsifier, `proof:<predicate>` — `absent:<literal>@<path>`, `present:<literal>@<path>`,
-  `missing:<path>`, `line:<a>&&<b>@<path>` — which the guard RE-DERIVES from the tree. **A red
+  `missing:<path>`, `line:<a>&&<b>@<path>` — which the guard RE-DERIVES from the tree; an owed
+  MEASUREMENT is `absent:RESULT 20@docs/audit/<x>.md`, because an audit doc is its protocol before
+  its result (`core/claimpin.py::AUDIT_RESULT_LITERAL`). **A red
   `test_open_item_index` is not a product defect: the item shipped, delete the marker** (leave an
   italic closure note saying what landed). Prefer a proof over the fix's own symbol, then over the
   defect's text, then over the item's home. The guard strips every marker and `proof:` line before

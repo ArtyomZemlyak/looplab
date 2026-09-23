@@ -27,6 +27,8 @@ from pathlib import Path
 import re
 
 from looplab.core.claimpin import (
+    AUDIT_DIR,
+    AUDIT_RESULT_LITERAL,
     KINDS as _KNOWN_KINDS,
     PROOF as _PROOF_GRAMMAR,
     predicate_holds,
@@ -385,3 +387,55 @@ def test_the_frozen_manifest_cannot_hide_a_live_open_item():
             assert slug in live_slugs, (
                 f"{rel} declares OPEN/CLAIM[{slug}], which NO file the index reads declares. The "
                 "manifest may excuse a duplicate, never the only copy of an open item.")
+
+
+def test_an_audit_measurement_is_proved_by_its_result_line_not_its_year():
+    """An open item that owes a MEASUREMENT recorded in `docs/audit/` is falsified by the first
+    dated `RESULT` line there, under the ONE year-independent literal (review 2026-09-22, TST-08):
+    three proofs read `absent:RESULT 2026-@…`, which a result dated 2027 could never falsify — the
+    item would have stayed open after it closed, and nothing would have gone red to say so."""
+    bound = []
+    for path, kind, slug, window in _iter_markers():
+        proof = _PROOF.search(window) if kind == "OPEN" else None
+        for pred in (proof_predicate(proof).split("+") if proof else ()):
+            if not (pred.startswith("absent:") and f"@{AUDIT_DIR}" in pred):
+                continue
+            literal = pred[len("absent:"):].rsplit("@", 1)[0]
+            if literal.startswith("RESULT") and literal != AUDIT_RESULT_LITERAL:
+                bound.append(f"OPEN[{slug}] at {path.relative_to(ROOT)}: {pred}")
+    assert not bound, (
+        f"audit-result proofs must use `absent:{AUDIT_RESULT_LITERAL}@{AUDIT_DIR}<x>.md`, which "
+        "every dated RESULT line falsifies, whatever its year:\n  " + "\n  ".join(bound))
+
+
+def test_an_audit_doc_moves_from_protocol_to_result_without_closing_early(tmp_path):
+    """The lifecycle, driven on a tree of its own: no doc -> the `missing:` proof holds; the
+    PROTOCOL is written -> that proof stops holding and says to RE-POINT, not to delete; the
+    re-pointed proof holds through the protocol's own `RESULT <date>` template; the first dated
+    result — in any year — closes it."""
+    doc = tmp_path / AUDIT_DIR / "noise-floor.md"
+    missing, re_pointed = f"missing:{AUDIT_DIR}noise-floor.md", (
+        f"absent:{AUDIT_RESULT_LITERAL}@{AUDIT_DIR}noise-floor.md")
+    assert predicate_holds(missing, root=tmp_path) == (True, "")
+
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# Protocol\n\nOne dated line per box run (`RESULT <date>: seeds=… sem=…`).\n",
+                   encoding="utf-8")
+    holds, why = predicate_holds(missing, root=tmp_path)
+    assert holds is False and f"`{re_pointed}`" in why and "not the item shipping" in why, why
+    assert predicate_holds(re_pointed, root=tmp_path) == (True, "")
+
+    with doc.open("a", encoding="utf-8") as handle:
+        handle.write("RESULT 2027-01-04: seeds=5 sem=0.0031\n")
+    holds, why = predicate_holds(re_pointed, root=tmp_path)
+    assert holds is False and "PRESENT" in why
+
+
+def test_jupyter_checkpoint_copies_are_not_declarations(tmp_path):
+    """JupyterLab writes `<name>-checkpoint.md` beside every file edited in it — markers included —
+    and the index read each copy as a second declaration of every slug the original carries."""
+    (tmp_path / "docs" / ".ipynb_checkpoints").mkdir(parents=True)
+    (tmp_path / "docs" / "plan.md").write_text("x", encoding="utf-8")
+    (tmp_path / "docs" / ".ipynb_checkpoints" / "plan-checkpoint.md").write_text("x", encoding="utf-8")
+    assert [p.relative_to(tmp_path).as_posix() for p in _tracked_text_files(tmp_path)] == [
+        "docs/plan.md"]

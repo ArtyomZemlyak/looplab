@@ -378,7 +378,7 @@ the tree (row 3's agent-invisible split, the seed protocol and aggregator, the p
 the two official detectors, the reviewer bundle) and `docs/audit/mlebench-lite-campaign.md` holds
 the protocol and the survey's Table 10 columns; what is still open is the NUMBER, which needs GPUs,
 a model endpoint and the prepared Kaggle data on a box.
-proof:`absent:RESULT 2026-@docs/audit/mlebench-lite-campaign.md`
+proof:`absent:RESULT 20@docs/audit/mlebench-lite-campaign.md`
 
 *Closed 2026-09-06 (row 23 shipped, code parts): the marker `mlebench-campaign-has-no-seed-protocol`
 stood here. `docs/MLEBENCH.md` now states the protocol — ≥3 seeds per competition via
@@ -427,7 +427,7 @@ accuracy over the honest reference), a deterministic fingerprint stage and the t
 judge, driven by `looplab bait-materialize` / `looplab bait-audit`; the protocol and its four arms
 are in `docs/audit/developer-hack-rate.md`. Still open: the NUMBER, which needs a model behind the
 Developer on a box. Precondition of the campaign's Mislead column.
-proof:`absent:RESULT 2026-@docs/audit/developer-hack-rate.md`
+proof:`absent:RESULT 20@docs/audit/developer-hack-rate.md`
 
 *Closed 2026-09-06 (row 22, first slice shipped): the marker `leakage-scan-has-no-multi-test-detector`
 stood here. `trust/leakage.py::multi_test_scan` is the rung, folded into `code_leakage_scan` so it
@@ -603,7 +603,7 @@ NUMBER the row asked for first has not: this checkout holds one real memo, and t
 ~119 completed memos across the thirty run dirs on the bench box. The pass is offline and free
 (fold each run, `number_fidelity_report` per `research_completed`, pool the rows) — what it needs
 is the box that holds `runs/`. Columns and the dated result line are in
-`docs/audit/memo-number-fidelity.md` §4. proof:`absent:RESULT 2026-@docs/audit/memo-number-fidelity.md`
+`docs/audit/memo-number-fidelity.md` §4. proof:`absent:RESULT 20@docs/audit/memo-number-fidelity.md`
 
 *Closed 2026-09-07 (row 32 shipped): the marker `novelty-gates-never-consult-literature` stood here.
 `engine/novelty.py::literature_overlap` is the deterministic, model-free overlap between a proposal
