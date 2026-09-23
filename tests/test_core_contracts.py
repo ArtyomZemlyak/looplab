@@ -57,7 +57,10 @@ def test_the_docstring_no_longer_claims_a_monkeypatch_seam_it_does_not_provide()
     """The finding's headline. `_stream_with_idle_guard` calls `_stream_raw_socket` through
     `llm_streaming`'s own namespace, so patching `looplab.core.llm._stream_raw_socket` rebinds only
     the alias and never reaches the live call — a silent no-op, which is precisely the failure the
-    registry-guard convention exists to prevent."""
+    registry-guard convention exists to prevent.
+
+    The subject is `llm.py`'s re-export COMMENT: the false claim must stay gone and the true warning
+    must stay in its place. That the warning is TRUE is driven by the test below it."""
     source = Path(llm.__file__).read_text(encoding="utf-8")
     assert "monkeypatch them THROUGH this module" not in source, "the false claim came back"
     assert "Patch the OWNING module" in source

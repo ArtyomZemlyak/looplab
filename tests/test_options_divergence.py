@@ -207,6 +207,8 @@ def test_no_inverted_divergence():
 
 
 def test_part_iv_v_default_rationale_discloses_behavior_and_cost():
+    """The subject is the RATIONALE COMMENT on the Part IV/V defaults in `config.py`: it must say what
+    the ON default costs and changes, and must not return to the claims retracted below."""
     source = (Path(__file__).parents[1] / "looplab" / "core" / "config.py").read_text(encoding="utf-8")
     # (This used to also require a `# CODEX AGENT:` review annotation somewhere in the file. That is
     # bookkeeping about an OPEN finding, not about the rationale this test is named for, and it goes
@@ -220,6 +222,8 @@ def test_part_iv_v_default_rationale_discloses_behavior_and_cost():
 
 
 def test_curation_rationale_discloses_synchronous_finalize_latency():
+    """The subject is the curation RATIONALE COMMENTS in `config.py` and `finalize.py`: they must
+    disclose that the calls run synchronously during finalize, not claim they never block."""
     root = Path(__file__).parents[1]
     config = (root / "looplab" / "core" / "config.py").read_text(encoding="utf-8")
     finalize = (root / "looplab" / "engine" / "finalize.py").read_text(encoding="utf-8")
@@ -230,6 +234,8 @@ def test_curation_rationale_discloses_synchronous_finalize_latency():
 
 
 def test_part_iv_comments_distinguish_fold_storage_from_live_steering():
+    """The subject is the Part IV COMMENTS (and `tag_text_llm`'s docstring): they must tell what the
+    fold stores from what steers live proposals, and must not return to the retracted claims."""
     root = Path(__file__).parents[1]
     engine = root / "looplab" / "engine"
     # The concept cadence left `engine/strategy.py` in doc 25 EC-09, and these comments went with it.

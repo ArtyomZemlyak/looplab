@@ -52,7 +52,10 @@ def test_the_public_seams_all_still_resolve_through_the_facade():
 
 
 def test_the_forwarding_rule_is_written_down():
-    """The next tool_loop private must not be added by reflex."""
+    """The next tool_loop private must not be added by reflex.
+
+    The subject is the rule WRITTEN in `agent.py`'s comment — what a reader about to add the next
+    forward sees; which privates are forwarded is pinned by the parametrized tests above."""
     source = inspect.getsource(agent_mod)
     assert "NOT auto-forwarded" in source
 
@@ -66,6 +69,8 @@ def test_the_kind_only_permission_matrix_is_gone():
 
 
 def test_the_deletion_says_why_so_it_is_not_reintroduced():
+    """The subject is the COMMENT in `perm_modes` citing why `decide` was deleted; that it stays
+    deleted is `test_the_kind_only_permission_matrix_is_gone`."""
     assert "doc 25 TO-10" in inspect.getsource(perm_modes)
 
 

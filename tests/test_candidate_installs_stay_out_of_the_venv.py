@@ -50,6 +50,8 @@ def test_an_existing_pythonpath_is_kept_rather_than_dropped():
 
 
 def test_the_reason_is_recorded_where_the_next_reader_will_look():
+    """The subject is the COMMENT at the env block: it must keep the evidence this module's
+    docstring records, because that evidence is what makes the redirect read as necessary."""
     block = _env_block()
     for token in ("evaluate_results.py:266", "cutcounter", "156.4328", "PIP_TARGET"):
         assert token in block, f"the comment lost {token!r} -- this defect cost three wrong diagnoses"
