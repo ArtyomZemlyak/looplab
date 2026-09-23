@@ -7,7 +7,8 @@ These doubles reproduce exactly the rule each branch exists for, no more:
 
 * `FakeMsvcrt` — byte-range locks held per HANDLE (`msvcrt.locking`): a byte held through one open
   refuses every other open with EACCES, even in the same process — and every other handle's READ
-  of that byte (`refuses_read` / `mandatory_reads`).
+  whose REQUESTED range covers that byte (`refuses_read` / `mandatory_reads`), which for a buffered
+  `read(n)` is a whole buffer, not `n`.
 * `refuse_deleting_an_open_file` — `DeleteFileW` refuses a file any handle holds open (WinError
   32); POSIX unlinks it and lets the descriptors keep the inode.
 * `refuse_readonly_unlink` — `DeleteFileW` refuses an entry carrying FILE_ATTRIBUTE_READONLY with
@@ -48,13 +49,16 @@ class FakeMsvcrt(types.ModuleType):
     is mandatory for every other handle's READ of those bytes too (`ReadFile` fails with
     ERROR_LOCK_VIOLATION, i.e. EACCES), in this process as well: `refuses_read` answers that rule and
     `mandatory_reads` applies it to `open(...)` reads. `on_lock(fd)` runs while a lock is held, so a
-    test can read the way a concurrent reader would (review 2026-09-22 round 2, run 35804658308)."""
+    test can read the way a concurrent reader would (review 2026-09-22 round 2, run 35804658308).
+    `judged` lists every read the rule was applied to, as `(name, start, stop)`, so a test can prove
+    the read it cares about went through the rule at all."""
     LK_UNLCK, LK_LOCK, LK_NBLCK = 0, 1, 2
 
     def __init__(self, on_lock=None):
         super().__init__("msvcrt")
         self.held: dict = {}
         self.regions: dict = {}
+        self.judged: list = []
         self.on_lock = on_lock
 
     def locking(self, fd, mode, nbytes):
@@ -86,7 +90,17 @@ class FakeMsvcrt(types.ModuleType):
         return start < offset + nbytes and offset < stop
 
     def mandatory_reads(self, monkeypatch) -> list:
-        """Make `open(..., "rb")` reads obey `refuses_read`. Returns the refused paths."""
+        """Make `open(..., "rb")` reads obey `refuses_read`. Returns the refused paths.
+
+        The range judged is the one the read ASKS `ReadFile` for, because that is the range Windows
+        checks the lock against -- even past EOF: a 9-byte file read at offset 0 with a request of
+        8192 bytes is refused by a lock on byte 65. And the caller's `n` is not that request. A
+        BUFFERED handle (the default) fills its buffer, `io.DEFAULT_BUFFER_SIZE` there because
+        Windows has no `st_blksize`, so a `read(64)` asks for 8192 bytes; only `buffering=0` asks for
+        exactly `n`. `read()` is `FileIO.readall`, which asks for the rest of the file plus one byte
+        to see EOF. Judging `[tell, tell + n)` is how the GPU lease's round-2 fix passed here and
+        still said "holder unknown" on the Windows CI leg (run 35817293259, review 2026-09-22 wave
+        5, WIN-3). Only `read` is judged (a fresh buffer each time, the conservative reading)."""
         import builtins
 
         real_open = builtins.open
@@ -94,13 +108,18 @@ class FakeMsvcrt(types.ModuleType):
         double = self
 
         class _Reader:
-            def __init__(self, handle, name):
-                self._handle, self._name = handle, name
+            def __init__(self, handle, name, buffer_size):
+                self._handle, self._name, self._buffer_size = handle, name, buffer_size
 
             def read(self, n=-1):
                 start = self._handle.tell()
-                stop = (os.fstat(self._handle.fileno()).st_size
-                        if n is None or n < 0 else start + n)
+                if n is None or n < 0:
+                    stop = max(os.fstat(self._handle.fileno()).st_size, start) + 1
+                elif not self._buffer_size or n == 0:
+                    stop = start + n
+                else:
+                    stop = start + -(-n // self._buffer_size) * self._buffer_size
+                double.judged.append((self._name, start, stop))
                 if double.refuses_read(self._handle.fileno(), start, stop):
                     refused.append(self._name)
                     raise PermissionError(errno.EACCES, "Permission denied (emulated lock "
@@ -118,7 +137,14 @@ class FakeMsvcrt(types.ModuleType):
 
         def _open(file, mode="r", *args, **kwargs):
             handle = real_open(file, mode, *args, **kwargs)
-            return _Reader(handle, file) if mode == "rb" else handle
+            if mode != "rb":
+                return handle
+            buffering = args[0] if args else kwargs.get("buffering", -1)
+            # 0 is a raw FileIO; -1 (and 1, which binary mode refuses as "line buffering" and
+            # replaces with the default) is Windows' default buffer; anything else is that size.
+            buffer_size = (0 if buffering == 0 else io.DEFAULT_BUFFER_SIZE
+                           if buffering in (-1, 1) else buffering)
+            return _Reader(handle, file, buffer_size)
 
         monkeypatch.setattr(builtins, "open", _open)
         return refused

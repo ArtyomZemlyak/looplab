@@ -252,7 +252,13 @@ def test_a_blocked_peer_can_name_the_holder_where_the_lock_refuses_reads(tmp_pat
     every blocked wait therefore said "holder unknown" (CI run 35804658308, review 2026-09-22 round
     2: 'holder unknown' == 'held by pid 4432'). Driven with the module's own `os` answering "nt" and
     a byte-range `msvcrt` whose reads obey the Windows rule; exclusivity and the release are held to
-    the same double, which refuses an unlock of a byte that was not the one locked."""
+    the same double, which refuses an unlock of a byte that was not the one locked.
+
+    Moving the lock past the stamp was HALF the rule, and this test passed on the half: its double
+    judged a `read(64)` as bytes [0, 64), while Windows judges the range `ReadFile` is ASKED for
+    and a buffered reader asks for a whole 8192-byte buffer -- byte 65 included. The Windows CI leg
+    still said 'holder unknown' == 'held by pid 4592' (run 35817293259, review 2026-09-22 wave 5,
+    WIN-3). The double now judges the requested range, and the stamp read must be one it judged."""
     from looplab.engine import resources
     from looplab.engine.resources import describe_gpu_host_lease_holder
     from _windows_emulation import FakeMsvcrt
@@ -270,6 +276,8 @@ def test_a_blocked_peer_can_name_the_holder_where_the_lock_refuses_reads(tmp_pat
     assert owner._acquire_gpus(1) == [0]
     assert msvcrt.held, "precondition: the lease was taken through the Windows byte lock"
     assert describe_gpu_host_lease_holder(lease) == f"held by pid {os.getpid()}", refused
+    assert [row for row in msvcrt.judged if row[0] == lease], (
+        "the stamp read never went through the Windows read rule, so this proves nothing")
     blocked = _Pool(ids=(0, 1), lease_path=lease)
     assert blocked._acquire_gpus(1) is None                  # still exclusive
     owner._release_gpus([0])

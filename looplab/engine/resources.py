@@ -53,7 +53,9 @@ _LEASE_STAMP_BYTES = 64
 # written for -- every blocked wait said "holder unknown" (Windows CI run 35804658308, review
 # 2026-09-22 round 2). `serve/scope_report_store.py::_try_lock_scope_action_descriptor` keeps its
 # lease byte past its bounded marker for the same reason. Locking past EOF does not extend the file,
-# and POSIX `flock` locks the whole file whatever the position.
+# and POSIX `flock` locks the whole file whatever the position. What the lock is checked against is
+# the range a read ASKS for, not the bytes that exist -- so the reader must also ASK for no more than
+# the stamp; see `describe_gpu_host_lease_holder`.
 _LEASE_LOCK_BYTE = _LEASE_STAMP_BYTES + 1
 # "this has not been resolved yet", distinct from a real `None` result ("this run has no fence" /
 # "this run has no allow-list") — the difference decides whether the memo is a hit or a miss. Shared
@@ -171,9 +173,17 @@ def describe_gpu_host_lease_holder(path) -> str:
     byte it holds, which is why the stamp may never share it.  A stale or
     foreign body (a lease written by an older build, which stamped a single NUL) degrades to an
     honest "holder unknown" rather than echoing junk.
+
+    UNBUFFERED, and that is the other half of the same rule. Windows checks a byte lock against the
+    range `ReadFile` is ASKED for, even past EOF, and a buffered `read(64)` asks for a whole buffer
+    -- `io.DEFAULT_BUFFER_SIZE`, 8192 bytes, there being no `st_blksize` on Windows -- from offset 0,
+    which covers `_LEASE_LOCK_BYTE` however short the file is. So moving the lock past the stamp was
+    not enough: every blocked wait still said "holder unknown" (Windows CI run 35817293259, review
+    2026-09-22 wave 5, WIN-3). A raw read asks for exactly `_LEASE_STAMP_BYTES`, which ends before
+    the lock byte.
     """
     try:
-        with open(path, "rb") as handle:
+        with open(path, "rb", buffering=0) as handle:
             body = handle.read(_LEASE_STAMP_BYTES)
     except (OSError, ValueError):     # noqa: BLE001 -- diagnostics must not mask the real wait
         return "holder unknown"
