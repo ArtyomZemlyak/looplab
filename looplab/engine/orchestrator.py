@@ -67,7 +67,7 @@ from looplab.engine.setup_phase import SetupPhaseMixin
 from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
 from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
-                                             scored_anchor,
+                                             RESERVATION_VERDICTS, scored_anchor,
                                             discarded_proposal_receipt)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
@@ -3843,7 +3843,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # Reject a structurally impossible durable row before waiting for Node capacity. The
             # validator is pure/bounded and mirrors materialization; no Developer/LLM work occurs.
             try:
-                self._prepare_injected_node(state, req)
+                prepared = self._prepare_injected_node(state, req)
             except Exception as exc:  # noqa: BLE001 - legacy/hand-authored event rows are untrusted
                 self._append_inject_failure(
                     state,
@@ -3854,6 +3854,57 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # Unlike malformed input, temporary budget exhaustion is not a failed inject. Leave the
             # request unacknowledged so an additive budget extension can admit it exactly once.
             if await self._defer_for_node_budget(state):
+                return True
+            # RESERVE FIRST — the Card and `node_building`, on THIS main task, before the receipt
+            # (review 2026-09-22, ENG1-07). The receipt used to come first and the reservation inside
+            # the offloaded materializer, so a reservation that lost a race — a pause landing, a slot
+            # taken, the proposal-authority CAS lost — raised "could not reserve", was recorded as
+            # `materialization_failed`, and SPENT the operator's request although nothing had been
+            # paid and nothing built (driven: `injects_done` 1, zero nodes, on a pause and on a slot
+            # race). The reservation costs nothing, so it may precede the claim: a crash between the
+            # two leaves a bare `node_building` that `_recover_interrupted_builds` closes at the next
+            # entry, and the still-queued request is then served once, on a fresh id and Card.
+            #
+            # THE RULE FOR A REFUSAL, by the code `_reserve_node_build` names
+            # (`card_reservation.py::RESERVATION_REFUSALS`): a RACE leaves the request queued,
+            # because the next turn's own gate re-decides it — the loop head pauses or settles a
+            # `halted` run, `_defer_for_node_budget` waits out `no_slot`, the validator above refuses a
+            # parent that moved for good (it checks the reservation's exact build action, so a
+            # `stale_parents` cannot recur on a request it admits), and a fresh fold re-reads the
+            # anchor and re-runs the CAS. A VERDICT — the Card contract refuses the idea, or an
+            # identical Card's work is already in flight — SPENDS it with `EV_INJECT_FAILED` naming
+            # the code, since the same bytes are refused the same way every turn and retrying them
+            # would spin the forced-request queue, and with it every eval dispatch, forever. A
+            # refusal with NO code (a patched reservation) is spent too: what nobody can name,
+            # nobody can promise a later turn will change.
+            refusal: list[str] = []
+            try:
+                reservation = self._reserve_injected_node(state, prepared, refusal=refusal)
+            except (TypeError, ValueError, OverflowError) as exc:
+                # A hostile row the validator admitted and the Card writer cannot represent — the
+                # triple `_plan_native_card` itself contains. Nothing was paid and nothing reserved
+                # (the reservation's append is the last statement before it returns), so the request
+                # is spent with its diagnosis instead of crash-looping the engine on a durable queue
+                # head: the materializer's own rule, below. Anything else from this FREE half is a
+                # bug or a broken store, and surfaces exactly as it does on the serial build path.
+                self._append_inject_failure(
+                    state,
+                    error=str(exc),
+                    reason="materialization_failed",
+                )
+                return True
+            if reservation is None:
+                code = refusal[-1] if refusal else None
+                if code is None or code in RESERVATION_VERDICTS:
+                    self._append_inject_failure(
+                        state,
+                        error=(f"not materialized: the Card reservation refused the idea ({code}) "
+                               "— a verdict on the idea, not a race; re-inject a changed idea, or "
+                               "this one once identical in-flight work has finished" if code else
+                               "not materialized: the Card reservation refused the idea and named "
+                               "no reason"),
+                        reason=code or "reservation_refused",
+                    )
                 return True
             # CLAIM THE REQUEST BEFORE THE PAID PRODUCER, exactly as the fork branch above does and
             # for the same reason. `_create_injected_node` can run a Developer session (real spend)
@@ -3866,6 +3917,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # and the operator can simply re-request it. Fold-safe: `_on_inject_done` advances only
             # the inject cursor and `_on_node_created` only the node table, so the swap is
             # order-tolerant (invariant #3 — the side effect is gated on its event).
+            # Still before the PAID producer, and now after the free reservation above: the paid half
+            # stays at-most-once, and only a reservation that holds can spend the request.
             self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
             try:
                 # OFF THE LOOP THREAD, like every other build (review 2026-09-22, ENG1-07). An inject
@@ -3874,10 +3927,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # during a 0.3 s call while the ordinary builds beside it ticked 28-30 — no eval
                 # watcher, abort/reset detection, train-monitor kill or control ACK for as long as
                 # the session spends. The writes stay where invariant #1 wants them: the reservation
-                # is marshalled back here by `_reserve_on_main_task`, `node_created` is the node's
-                # own licensed worker append, and a crash pause is QUEUED and drained below.
-                # `_create_injected_node(req)` stays the one seam this branch calls (tests patch it).
-                await self._offload_build(functools.partial(self._create_injected_node, req))
+                # is made above on this task, `node_created` is the node's own licensed worker
+                # append, and a crash pause is QUEUED and drained below.
+                # `_create_injected_node(req, reservation=…)` stays the one seam this branch hands
+                # the paid half to (tests patch it).
+                await self._offload_build(functools.partial(
+                    self._create_injected_node, req, reservation=reservation))
             except BudgetExceeded:
                 # The run's stop, not a request that failed to materialize: the handler below used
                 # to record the spend ceiling as `materialization_failed` and let the run go on
@@ -6697,6 +6752,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         else:
             idea = Idea(**idea_d)
         idea = idea.model_copy(deep=True, update={"card_id": None})
+        # THE EXACT ACTION THE RESERVATION IS HANDED, checked here too (review 2026-09-22,
+        # ENG1-07). A reservation refused on its parent snapshot now leaves the request QUEUED for
+        # the next turn, which is only safe because the next turn's re-decision is THIS validator:
+        # a parent set no build action can carry (a repeated id, a bool, an operator with no kind)
+        # passed every check above and failed the snapshot on EVERY turn — a spin, where the old
+        # receipt-first order merely burned the request. Refused before the budget wait instead.
+        if self._build_parent_snapshot(state, {
+                "kind": idea.operator, "parent_ids": parents,
+                "parent_generations": parent_generations}) is None:
+            raise ValueError("the injected operator and parents cannot form one build action")
         implementation_ref = self._implementation_ref(
             code=code,
             files=req.get("files"),
@@ -6710,40 +6775,37 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             implementation_ref,
         )
 
-    @in_llm_lane("build")
-    def _create_injected_node(self, req: dict) -> None:
-        """Materialize an operator-authored experiment (`inject_node` control event) into a real
-        pending node. The operator supplies an idea (operator label, params, rationale, optional
-        theme) and optionally a parent and ready-made code. If no code is given, the Developer
-        implements the idea — so a human can describe an experiment and let the agent build it.
-        The new node enters the search as `pending`; the policy evaluates it next.
+    def _reserve_injected_node(self, state: RunState, prepared: _InjectedNodePlan, *,
+                               refusal: Optional[list] = None) -> Optional[_BuildReservation]:
+        """The FREE half of an operator inject: its native Card and `node_building`, nothing paid.
 
-        Manual injection deliberately bypasses the policy's proposal step — the human IS the
-        researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
-        is identical to an agent-authored node, so a hand-added winner can be selected as best."""
-        state = fold(self.store.read_all())
+        Split out of `_create_injected_node` (review 2026-09-22, ENG1-07) so `_serve_forced_requests`
+        can RESERVE before it spends the request's `inject_done` receipt: a reservation that lost a
+        race used to burn a request nothing had been paid for. `state` is the fold `prepared` was
+        validated against and its champion is the score anchor; `_reserve_node_build._plan` re-folds
+        under the CAS, so a parent or an anchor that moved since is refused THERE and named in
+        ``refusal`` (see `card_reservation.py::RESERVATION_REFUSALS`), never reserved stale.
+        """
         _op_anchor_id, _op_anchor_attempt = scored_anchor(state)
-        prepared = self._prepare_injected_node(state, req)
         idea = prepared.idea
-        parents = prepared.parent_ids
-        parent_generations = prepared.parent_generations
-        code = prepared.code
-        implementation_ref = prepared.implementation_ref
         # `_reserve_on_main_task`, not `_reserve_node_build` itself: `_serve_forced_requests` runs
-        # this method in an `_offload_build` worker since review 2026-09-22 (ENG1-07), and the
-        # `card_added` + `node_building` CAS is the main task's (see `_reserve_on_main_task`). A
-        # direct call on the loop thread reserves in place, exactly as before.
-        reservation = self._reserve_on_main_task(
+        # `_create_injected_node` in an `_offload_build` worker since review 2026-09-22 (ENG1-07),
+        # and the `card_added` + `node_building` CAS is the main task's (see
+        # `_reserve_on_main_task`). A direct call on the loop thread reserves in place, exactly as
+        # before. The serving branch now calls THIS on the main task, before the offload, so there it
+        # is the in-place case; a direct `_create_injected_node(req)` from a worker still marshals.
+        return self._reserve_on_main_task(
             {
                 "kind": idea.operator,
-                "parent_ids": parents,
-                "parent_generations": parent_generations,
+                "parent_ids": prepared.parent_ids,
+                "parent_generations": prepared.parent_generations,
             },
             idea,
             scored_against=_op_anchor_id,
             scored_against_attempt=_op_anchor_attempt,
             source="operator",
-            implementation_ref=implementation_ref,
+            implementation_ref=prepared.implementation_ref,
+            refusal=refusal,
             # NO ATTACH HERE, deliberately (`retry_attach` defaults off and this site keeps it off).
             # An operator `debug` injection against a failed node whose card is live would otherwise
             # attach — and an attach mints no `card_added`, so BOTH of the two receipts that make
@@ -6752,8 +6814,35 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # purpose is that folding two injections with ready-made code "would lose executable
             # work". The human IS the researcher here; their work item is their own.
         )
+
+    @in_llm_lane("build")
+    def _create_injected_node(self, req: dict, *,
+                              reservation: Optional[_BuildReservation] = None) -> None:
+        """Materialize an operator-authored experiment (`inject_node` control event) into a real
+        pending node. The operator supplies an idea (operator label, params, rationale, optional
+        theme) and optionally a parent and ready-made code. If no code is given, the Developer
+        implements the idea — so a human can describe an experiment and let the agent build it.
+        The new node enters the search as `pending`; the policy evaluates it next.
+
+        Manual injection deliberately bypasses the policy's proposal step — the human IS the
+        researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
+        is identical to an agent-authored node, so a hand-added winner can be selected as best.
+
+        ``reservation`` is the FREE half already done: `_serve_forced_requests` reserves on the main
+        task BEFORE it spends the request's receipt and hands the reservation to this, the PAID half
+        (review 2026-09-22, ENG1-07). A direct call without one prepares and reserves in place,
+        exactly as before, and raises when the reservation is refused."""
         if reservation is None:
-            raise ValueError("injected idea could not reserve one exact native Card")
+            state = fold(self.store.read_all())
+            reservation = self._reserve_injected_node(
+                state, self._prepare_injected_node(state, req))
+            if reservation is None:
+                raise ValueError("injected idea could not reserve one exact native Card")
+        # What `_prepare_injected_node` would say again, read off the COMMITTED reservation: its
+        # parents are the prepared list the snapshot kept, and the ready-made code is the request's
+        # own field. Re-preparing here from a later fold could disagree with what was reserved.
+        parents = list(reservation.parent_ids)
+        code = req.get("code")
         state = reservation.state
         node_id = reservation.node_id
         parent_generations = reservation.parent_generations

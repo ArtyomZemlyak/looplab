@@ -106,6 +106,32 @@ CARD_STAGE_REFUSALS = (
     "score_moved",           # the score snapshot of the anchor the receipt names changed
 )
 
+# WHY `_reserve_node_build` MADE NO RESERVATION — the one code its optional `refusal` out-list
+# receives (review 2026-09-22, ENG1-07). Every refusal there returned a bare `None`, which is all
+# its other four callers need: they return to the selection boundary and the next turn plans
+# again. An operator's `inject_node` cannot: its request is a durable queue head, and "try again
+# next turn" is the right answer to a race and a SPIN on a verdict — so the reservation says which.
+#
+# SPLIT BY THE ONE QUESTION A CALLER HAS: can a LATER turn answer differently for the SAME request?
+#   * RACES — the world moved under the reservation, and the next turn's own gate re-decides it:
+#     the loop head (`halted`), `_defer_for_node_budget` (`no_slot`), `_prepare_injected_node`'s
+#     re-validation (`stale_parents`), a fresh anchor from a fresh fold (`stale_anchor` — an anchor
+#     `scored_anchor` read is scorable in the fold it came from, so only a race makes it
+#     unscorable), a fresh CAS (`authority_moved`, `cas_exhausted`).
+#   * VERDICTS — on the proposal itself, the same bytes refused the same way every turn: the Card
+#     contract (`card_contract`: no bounded statement/payload), an in-flight owner of the identical
+#     action (`card_duplicate` — waiting for it would hold the forced-request queue, and with it the
+#     eval dispatch that owner needs, behind itself), a plan with no bounded action
+#     (`card_unplannable`) and a caller-named Card id this commit would not mint (`card_rebind`).
+# `tests/test_inject_reserves_before_its_receipt.py` DRIVES every code, both sets, both directions.
+RESERVATION_RACES = frozenset({
+    "authority_moved", "cas_exhausted", "halted", "no_slot", "stale_anchor", "stale_parents",
+})
+RESERVATION_VERDICTS = frozenset({
+    "card_contract", "card_duplicate", "card_rebind", "card_unplannable",
+})
+RESERVATION_REFUSALS = RESERVATION_RACES | RESERVATION_VERDICTS
+
 from looplab.search.card_selection import (META_CARD_ID, SpeculativeSelectionContext,
                                            card_action as projected_card_action,
                                            card_budget_used, card_selection_set, eligible_cards,
@@ -1194,7 +1220,7 @@ class CardReservationMixin:
                             source: str = "researcher",
                             implementation_ref: Optional[str] = None,
                             steering_context=(), cross_run_receipt=None,
-                            retry_attach: bool = False):
+                            retry_attach: bool = False, refusal: Optional[list] = None):
         """Reserve one native Card and its node-building owner under one log-tail CAS.
 
         The final Idea must already exist: the immutable statement and exact action receipt cannot be
@@ -1207,9 +1233,21 @@ class CardReservationMixin:
         opts in and what each of the four sites that do not would lose. This is the one site that can
         COMMIT an attach (the append below already writes the claim alone for ``reuse``), which is
         exactly why it must not decide FOR its callers that they wanted one.
+
+        ``refusal``, when a caller passes a list, receives exactly ONE code from
+        `RESERVATION_REFUSALS` on a ``None`` — WHY no reservation was made (review 2026-09-22,
+        ENG1-07). The return value is unchanged, so the callers that only need "no" pay nothing; the
+        operator-inject path needs the why, because it decides whether a durable request is spent.
         """
         if idea is not None and not isinstance(idea, Idea):
             idea = Idea.model_validate(idea)
+
+        def _refused(code: str) -> None:
+            # A statement of its own before each `return None`, never folded into the return: the
+            # duplicate branch's SILENCE is pinned on the text up to its `return None`.
+            if refusal is not None:
+                refusal.append(code)
+
         with self._id_lock:
             proposal_authority_seq = None
 
@@ -1230,14 +1268,18 @@ class CardReservationMixin:
                     # A control/research/lifecycle event won the CAS. The caller must return to the
                     # selection boundary; silently minting a replacement for a just-dropped orphan
                     # would defeat the operator's stop intent. LLM accounting alone may be retried.
+                    _refused("authority_moved")
                     return None
                 state = _fold(events)
                 if state.halted:
+                    _refused("halted")
                     return None
                 if self._node_reservation_slots_remaining(state, events=events) < 1:
+                    _refused("no_slot")
                     return None
                 parent_snapshot = self._build_parent_snapshot(state, action)
                 if parent_snapshot is None:
+                    _refused("stale_parents")
                     return None
                 kind, parents, parent_generations = parent_snapshot
                 node_id = self._node_id_ceiling(events, state)
@@ -1266,6 +1308,12 @@ class CardReservationMixin:
                         "reason": "proposal cannot form a bounded native Card action",
                         "action": "dropped",
                     })
+                    # `invalid` has ONE conjunct that is not about the proposal: an anchor that
+                    # stopped being scorable. Attributed by asking the planner's own first question
+                    # again, on the same state — one function, so the two answers cannot disagree.
+                    _refused("stale_anchor" if self._card_score_snapshot(
+                        state, scored_against, scored_against_attempt) is None
+                        else "card_contract")
                     return None
                 if plan.disposition == "duplicate":
                     # SILENT HERE, DELIBERATELY, and the receipt lives one pass up instead.
@@ -1280,9 +1328,11 @@ class CardReservationMixin:
                     # — lands in `orchestrator._prepare_node_idea._link`, which runs immediately
                     # after the proposal call and nowhere else. That is where the receipt is
                     # written; see it for the measurement.
+                    _refused("card_duplicate")
                     return None
                 if plan.disposition not in {"mint", "reuse", "attach"} \
                         or plan.card_id is None or plan.idea is None:
+                    _refused("card_unplannable")
                     return None
                 # A proposal-bound sidecar may already name this Card. Main-task-only minting means
                 # planner and commit must agree; never silently rebind its digest.
@@ -1302,6 +1352,7 @@ class CardReservationMixin:
                     linked_is_live = self._canonical_card_id(idea.card_id) in state.cards
                     if not (retry_attach
                             and (plan.disposition == "attach" or linked_is_live)):
+                        _refused("card_rebind")
                         return None
                 card_id = plan.card_id
                 reserved_idea = plan.idea
@@ -1332,7 +1383,7 @@ class CardReservationMixin:
                     card_id, reserved_idea)
 
             # No reservation was made, so nothing leaks; the caller returns to the selection boundary.
-            return retry_tail_cas(self.store, _plan, on_exhaust=lambda: None)
+            return retry_tail_cas(self.store, _plan, on_exhaust=lambda: _refused("cas_exhausted"))
 
     @classmethod
     def _proposal_receipt_fence(cls, state: RunState, action: dict, *, scored_against):

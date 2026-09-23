@@ -351,7 +351,10 @@ def test_budget_blocked_inject_stays_pending_until_add_nodes(tmp_path, monkeypat
     async def fake_sleep(seconds):
         sleeps.append(seconds)
 
-    monkeypatch.setattr(eng, "_create_injected_node", created.append)
+    # The paid half only: the serving branch reserves first and hands it `reservation=` (review
+    # 2026-09-22, ENG1-07), so the seam takes the keyword.
+    monkeypatch.setattr(eng, "_create_injected_node",
+                        lambda req, **_kw: created.append(req))
     monkeypatch.setattr(anyio, "sleep", fake_sleep)
 
     assert anyio.run(eng._serve_forced_requests, state) is True

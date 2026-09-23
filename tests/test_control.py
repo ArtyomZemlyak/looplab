@@ -743,7 +743,9 @@ def test_a_crash_inside_inject_materialization_never_re_buys_the_request(tmp_pat
 
     calls = []
 
-    def _die_after_the_durable_node(req):
+    # `reservation=`: the serving branch reserves on the main task BEFORE the receipt and hands the
+    # reservation to this, the paid half (review 2026-09-22, ENG1-07).
+    def _die_after_the_durable_node(req, *, reservation=None):
         calls.append(req)
         eng.store.append("node_created", {
             "node_id": 0, "parent_ids": [], "operator": "manual",
@@ -775,7 +777,7 @@ def test_an_inject_that_fails_to_materialize_still_records_why(tmp_path, monkeyp
     eng = _engine(tmp_path / "r2")
     eng.store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
     eng.store.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 1.0}}})
-    monkeypatch.setattr(eng, "_create_injected_node", lambda req: (_ for _ in ()).throw(
+    monkeypatch.setattr(eng, "_create_injected_node", lambda req, **_kw: (_ for _ in ()).throw(
         RuntimeError("materialization blew up")))
 
     state = fold(eng.store.read_all())
