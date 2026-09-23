@@ -60,6 +60,7 @@ _LAYOUT = {
     # marker says must exist before its decision may be taken, and each decides nothing itself.
     "belief_key_split": "events",  # concept-equal card groups the seed-TEXT belief key splits
     "card_ladder": "events",       # ladder depth + the undercut rule's stated trigger
+    "research_episode": "events",  # DR-01: which research questions a run settled, as a projection
     "asha_curve": "events",        # whether any run published a rung curve ASHA could halve
     "concept_authorship": "events",  # how much of each proposer's authored concept set survived the classifier
     "bundle": "engine",  # the RO-Crate reviewer bundle export (doc 52 row 23); composes events + engine, so not `events`
