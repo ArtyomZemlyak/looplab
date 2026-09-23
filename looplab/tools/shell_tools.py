@@ -137,8 +137,12 @@ class ShellTools:
                 name=name, effect="read", risk="low", idempotency="conditional",
                 concurrency_safe=False, cancellable=False, approval="never",
                 input_schema=specs[name], source="assistant.background_tasks"))
+        # `high`, the risk the GATE enforces (`perm_modes.py::_ACTION_RISK[("shell", "kill_background")]`
+        # is HIGH: it ends a process the operator started). This said `medium` — a recorded contract
+        # the enforced one contradicted (review 2026-09-22, TAT-11; doc 50 TO-10);
+        # `tests/test_tool_capability_agrees_with_the_gate.py` now holds the two together.
         rows.append(ToolCapability(
-            name="kill_background", effect="control", risk="medium",
+            name="kill_background", effect="control", risk="high",
             idempotency="idempotent", concurrency_safe=False, cancellable=False,
             approval="policy", input_schema=specs["kill_background"],
             source="assistant.shell.permission_mode"))

@@ -17,10 +17,6 @@ from typing import Callable, Optional
 MODES = ("plan", "default", "acceptEdits", "auto")
 DEFAULT_MODE = "plan"
 
-READONLY_KINDS = frozenset({"read", "git_ro"})
-MUTATING_KINDS = frozenset({
-    "write", "knowledge_write", "concept_edit", "shell", "git_mut", "create_run", "run_control", "mcp"})
-
 RISK_READ = "READ"
 RISK_REVERSIBLE = "REVERSIBLE"
 RISK_CONSEQUENTIAL = "CONSEQUENTIAL"
