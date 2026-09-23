@@ -22,6 +22,7 @@ from typing import Optional
 import typer
 
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
+from looplab.core.evidence import envelope_enabled, fence_kwargs
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                  NODE_CONCEPT_PROVENANCE_OPERATOR,
                                  NODE_CONCEPT_PROVENANCE_UNTRUSTED,
@@ -221,17 +222,21 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
         settings, client = _optional_client(
             run_dir, model, "using the offline heuristic fallback")
         if client is not None:
+            # The RUN's untrusted-evidence switch (review 2026-09-22, TAT-02): the sweep below reads
+            # the task repository and the tagger reads every node's own code, so both loops fence
+            # their tool results when it is on — `{}`, the historical calls, when it is off.
+            fence = fence_kwargs(envelope_enabled(settings))
             brief = ""
             if repo is not None and Path(repo).exists():
                 try:
                     from looplab.tools.asset_brief import asset_brief as _ab
-                    brief = _ab(str(repo), client=client, task_type=resolved_type or None)
+                    brief = _ab(str(repo), client=client, task_type=resolved_type or None, **fence)
                 except Exception as e:  # noqa: BLE001 — grounding optional
                     typer.echo(f"(asset-brief grounding skipped: {e})")
             cmap = build_concept_map(state, task_goal=getattr(state, "goal", "") or "", client=client,
                                      tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief,
                                      parser=settings.llm_parser,
-                                     prompts=_prompt_store_for(settings))
+                                     prompts=_prompt_store_for(settings), **fence)
             cmap["brief"] = brief
             return cmap
     graph = seed or skeleton_for(resolved_type, text=getattr(state, "goal", "") or "")
@@ -371,17 +376,21 @@ def concept_coverage(
         return
 
     # PRIMARY: the LLM agent builds the whole map (grows vocab, tags agentically, derives importance).
+    # Both loops below read text the model did not write — the task repository, every node's own
+    # code — so both fence their tool results under the RUN's envelope (review 2026-09-22, TAT-02).
+    fence = fence_kwargs(envelope_enabled(settings))
     brief_text = ""
     if repo is not None:
         try:
             from looplab.tools.asset_brief import asset_brief as _asset_brief
-            brief_text = _asset_brief(str(repo), client=client, task_type=resolved_type or None)
+            brief_text = _asset_brief(str(repo), client=client, task_type=resolved_type or None,
+                                      **fence)
         except Exception as e:  # noqa: BLE001 — grounding is optional; derive from task+coverage alone
             typer.echo(f"(asset-brief grounding skipped: {e})")
     cmap = build_concept_map(state, task_goal=state.goal or "", client=client,
                              tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief_text,
                              parser=settings.llm_parser, max_workers=jobs,
-                             prompts=_prompt_store_for(settings))
+                             prompts=_prompt_store_for(settings), **fence)
     typer.echo(concept_report(state, cmap["graph"], cmap["tags"]))
     typer.echo(f"\n  (built by the LLM agent — mode={cmap['mode']}, "
                f"{len(cmap['graph'].concepts())} concepts grown)")
@@ -420,12 +429,16 @@ def asset_brief_cmd(
         typer.echo(f"no such repo: {repo}")
         raise typer.Exit(2)
     client = None
+    fence: dict = {}
     if llm:
         # asset-brief sweeps a repo, not a run directory, so there is no config snapshot to resolve
         # here: `run_dir=None` starts from ambient settings with the explicit --model override on top.
         _settings, client = _optional_client(
             None, model, "using the offline scan", unavailable="--llm unavailable")
-    typer.echo(asset_brief(repo, client=client, task_type=task_type))
+        # The agentic sweep reads files somebody else wrote: fenced when the envelope is on
+        # (review 2026-09-22, TAT-02). The offline scan has no model, so nothing to fence.
+        fence = fence_kwargs(envelope_enabled(_settings))
+    typer.echo(asset_brief(repo, client=client, task_type=task_type, **fence))
 
 
 @app.command(name="lock-in")

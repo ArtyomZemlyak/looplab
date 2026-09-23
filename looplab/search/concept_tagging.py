@@ -232,7 +232,8 @@ def tag_nodes_heuristic(state: RunState, graph: ConceptGraph) -> dict[int, froze
 def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str = "tool_call",
                   grow: bool = True, tools=None, known_tags=None,
                   max_workers: int = 8,
-                  producer_modes: Optional[dict[int, str]] = None) -> dict[int, frozenset[str]]:
+                  producer_modes: Optional[dict[int, str]] = None,
+                  tool_result_label: str = "") -> dict[int, frozenset[str]]:
     """The PRIMARY (intelligent) tagger: ask the LLM to assign each experiment a SET of concept ids from
     the vocabulary — the §21.11 "multi-label tagging by deepseek" — proposing new ones when `grow` and
     GROWING the graph so it works on ANY task, not a hardcoded vocabulary. When read-only run `tools` are
@@ -250,7 +251,11 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
 
     When supplied, `producer_modes` receives the actual producer for each freshly-tagged node. It is
     intentionally sparse for reused nodes: no producer ran in this invocation. A failed or schema-invalid
-    response records `offline-heuristic`; a validated response records `llm`/`agentic`, including `[]`."""
+    response records `offline-heuristic`; a validated response records `llm`/`agentic`, including `[]`.
+
+    `tool_result_label` is the untrusted-evidence FENCE on what `tools` return — each node's own code
+    and logs (`core/evidence.py`; review 2026-09-22, TAT-02). The toolset is the caller's, so the fence
+    is too: forwarded only when non-empty, so the default is the historical call byte for byte."""
     from pydantic import BaseModel, Field, field_validator
 
     from looplab.core.parse import parse_structured
@@ -340,7 +345,9 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                 from looplab.agents.agent import agentic_struct
                 out = agentic_struct(client, tools, msgs, TagOut, parser=parser,
                                      loop_opts={"max_turns": 8},
-                                     fallback=lambda m: parse_structured(client, m, TagOut, parser))
+                                     fallback=lambda m: parse_structured(client, m, TagOut, parser),
+                                     **({"tool_result_label": tool_result_label}
+                                        if tool_result_label else {}))
             else:
                 out = parse_structured(client, msgs, TagOut, parser)
             return n.id, list(out.concept_ids)

@@ -387,3 +387,126 @@ def test_the_cli_genesis_call_passes_the_one_settings_reader():
     for call in calls:
         value = {kw.arg: kw.value for kw in call.keywords}.get("evidence_envelope")
         assert isinstance(value, ast.Call) and getattr(value.func, "id", "") == "envelope_enabled"
+
+
+# ------------------------------------------------------------------ 3. the CLI diagnostics and the rankers
+
+class _Scripted(_Reader):
+    """`_Reader` over SEVERAL loops in sequence — a prior-art sweep, then a tagging pass — each
+    `(tool, tool_args, emit_name, emit_args)`, collecting every tool message any loop sent. The
+    structured side calls a concept build also makes (consolidation, importance) are answered empty,
+    which each of them degrades on by design."""
+
+    def __init__(self, *loops):
+        self.turns = []
+        for tool, tool_args, emit_name, emit_args in loops:
+            n = len(self.turns)
+            self.turns += [[_call(f"t{n}", tool, tool_args)], [_call(f"e{n}", emit_name, emit_args)]]
+        self.tool_messages: list[str] = []
+        self._seen: list[dict] = []        # held, so no message's identity can be reused
+
+    def chat(self, messages, tools=None, tool_choice="auto", **_kw):
+        for m in messages:
+            if m.get("role") == "tool" and not any(m is s for s in self._seen):
+                self._seen.append(m)
+                self.tool_messages.append(m["content"])
+        return {"content": "", "tool_calls": self.turns.pop(0) if self.turns else []}
+
+    def complete_tool(self, messages, schema):
+        return {}
+
+    def complete_text(self, messages):
+        return ""
+
+
+@SNAPSHOT_CASES
+@pytest.mark.parametrize("command", ["concept-coverage", "lock-in"])
+def test_the_concept_diagnostics_fence_the_node_code_their_tagger_reads(tmp_path, monkeypatch,
+                                                                        command, envelope):
+    """`looplab concept-coverage` and every command built on `_concept_map_for` (`lock-in`,
+    `board-dedup`, …) tag the run AGENTICALLY by default — the tagger reads each node's own code
+    through `readonly_run_tools` — and they resolve the RUN's snapshot, so a pre-field run keeps its
+    historical request. `build_concept_map` and `tag_nodes_llm` only FORWARD the toolset, so they
+    forward the label the same way."""
+    from typer.testing import CliRunner
+
+    import looplab.cli.concept_cmds as concept_cmds
+    from looplab.cli import app
+
+    rd = _seed_payload_run(tmp_path, "run", envelope=envelope)
+    model = _Scripted(("read_code", {"node_id": 0}, "emit", {"concept_ids": ["loss/contrastive"]}))
+    monkeypatch.setattr(concept_cmds, "_make_llm_client", lambda settings: model)
+    result = CliRunner().invoke(app, [command, str(rd)])
+    assert result.exit_code == 0, result.output
+    assert model.tool_messages == [_served_expected(rd, envelope)]
+
+
+@pytest.mark.parametrize("envelope", [True, False], ids=["on", "off"])
+def test_the_prior_art_sweep_fences_the_repository_files_it_reads(tmp_path, monkeypatch, envelope):
+    """`looplab asset-brief --llm` (and the `--repo` grounding of the concept commands) sweeps a task
+    repository with `RepoScoutTools` — result tables, READMEs and configs someone else wrote. It has
+    no run, so the switch is the ambient Settings, through the one reader."""
+    from typer.testing import CliRunner
+
+    import looplab.cli.concept_cmds as concept_cmds
+    from looplab.cli import app
+    from looplab.tools.reposcout import RepoScoutTools
+
+    if not envelope:
+        monkeypatch.setenv("LOOPLAB_EVIDENCE_ENVELOPE", "false")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    readme = repo / "README.md"
+    readme.write_text(PAYLOAD + "\n", encoding="utf-8")
+    raw = RepoScoutTools(roots=[str(repo)], default_root=str(repo)).execute(
+        "read_file", {"path": str(readme)})
+    assert f"END {EVIDENCE_LABEL}" in raw
+    model = _Scripted(("read_file", {"path": str(readme)}, "answer", {"text": "best known: 0.9"}))
+    monkeypatch.setattr(concept_cmds, "_make_llm_client", lambda settings: model)
+    result = CliRunner().invoke(app, ["asset-brief", str(repo), "--llm"])
+    assert result.exit_code == 0, result.output
+    assert "best known: 0.9" in result.output
+    assert model.tool_messages == [fence_untrusted(raw, EVIDENCE_LABEL) if envelope else raw]
+
+
+@pytest.mark.parametrize("envelope", [True, False], ids=["on", "off"])
+def test_the_foresight_ranker_fences_the_run_it_reads_before_it_ranks(envelope):
+    """The predict-before-execute panel ranks the Researcher's candidate ideas agentically, reading
+    the run's experiments first (`RunTools`). Driven through the CLI's own builder
+    (`_wrap_with_foresight_panel`), so the Settings -> panel -> `rank_agentic` chain is the product's."""
+    from looplab.cli import _wrap_with_foresight_panel
+    from looplab.core.config import Settings
+    from looplab.search.foresight import ForesightPanelResearcher
+    from looplab.tools.run_tools import readonly_run_tools
+
+    assert ForesightPanelResearcher(object(), client=object()).evidence_envelope is False
+    state = _run_state()
+    model = _Reader("emit", {"order": [1, 0], "confidence": 0.7, "reason": "x=3 first"})
+    base = type("Base", (), {"client": model, "bounds": None, "parser": None, "prompts": None})()
+    panel = _wrap_with_foresight_panel(base, Settings(evidence_envelope=envelope),
+                                       readonly_run_tools(state))
+    order, _confidence, _reason = panel._rank("REPORT", ["idea A", "idea B"], goal="g",
+                                              direction="min")
+    assert order[0] == 1
+    assert model.tool_messages == [_expected(state, envelope)]
+
+
+def test_the_verifier_forwards_the_fence_to_a_toolset_it_is_handed():
+    """`trust/verifier.py::verify` passes its CALLER's toolset to `structured_judge`. No production
+    caller hands it one today — its four callers grade scalar summaries — so it is a forwarder, not
+    a site: the first caller that hands it run tools becomes the site. It carries the label the way
+    `structured_judge` does, and without one it makes the historical call."""
+    from looplab.tools.run_tools import readonly_run_tools
+    from looplab.trust.verifier import selection_criteria, verify
+
+    state = _run_state()
+
+    def _verify(**kw):
+        model = _Reader("emit", {"verdicts": ["yes"], "rationales": ["read it"]})
+        report = verify("claim", "evidence", selection_criteria(), client=model, samples=1,
+                        tools=readonly_run_tools(state), **kw)
+        assert report.n_samples == 1
+        return model.tool_messages
+
+    assert _verify(tool_result_label=EVIDENCE_LABEL) == [_expected(state, True)]
+    assert _verify() == [_expected(state, False)]

@@ -248,8 +248,10 @@ def test_asset_brief_llm_uses_ambient_settings_without_a_run_dir(tmp_path, monke
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setattr(concept_cmds, "_make_llm_client", lambda settings: object())
+    # `**_kw`: with the ambient envelope ON the command also hands the sweep its evidence fence
+    # (review 2026-09-22, TAT-02; driven in tests/test_evidence_consumer_fences.py).
     monkeypatch.setattr(asset_brief_module, "asset_brief",
-                        lambda repo, client=None, task_type=None: "brief-ok")
+                        lambda repo, client=None, task_type=None, **_kw: "brief-ok")
     result = runner.invoke(app, ["asset-brief", str(repo), "--llm"])
     assert result.exit_code == 0, result.output
     assert "brief-ok" in result.output

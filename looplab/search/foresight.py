@@ -178,13 +178,18 @@ def _rank_user_msg(
 
 
 def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = "", direction: str = "min",
-                 parser: str = "tool_call", prompts=None, max_turns: int = 4, kind: str = "idea"
-                 ) -> Optional[tuple[list[int], float, str]]:
+                 parser: str = "tool_call", prompts=None, max_turns: int = 4, kind: str = "idea",
+                 tool_result_label: str = "") -> Optional[tuple[list[int], float, str]]:
     """AGENTIC variant of `rank`: the world-model runs a TOOL-USING loop (`drive_tool_loop`) so it can
     PULL specific evidence — actual experiment results, data facts — via `tools` before committing to
     an order, instead of reasoning only from a pre-baked report. Emits the same `_Ranking`; returns
     the same `(order, confidence, reason)`. Falls back to the single-call `rank` when there are no
-    tools, and on ANY loop error (advisory — never raises)."""
+    tools, and on ANY loop error (advisory — never raises).
+
+    `tool_result_label` fences what `tools` return — the candidates' own code and trials, the task's
+    data (`core/evidence.py`; review 2026-09-22, TAT-02). The toolset is the caller's and so is the
+    label; "" (the default, and the loop's own) fences nothing, so the historical request is sent
+    byte for byte."""
     if client is None or len(items) < 2:
         return None
     if tools is None:
@@ -215,7 +220,11 @@ def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = ""
         drive_tool_loop(client, tools, msgs, emit_spec, max_turns=max_turns,
                         finalize=_finalize, fallback=lambda _m: None,
                         nudge_prompt="Now call `emit` with the order.",
-                        stuck_prompt="Stop ({reason}). Call `emit` with the order now.")
+                        stuck_prompt="Stop ({reason}). Call `emit` with the order now.",
+                        # A KEYWORD, not a conditional `**` spread: this call names `max_turns`
+                        # beside it, and a spread next to a loop option is the shape
+                        # `tests/test_loop_options.py` refuses. "" is the loop's own default.
+                        tool_result_label=tool_result_label)
         got = _sanitize_ranking(box.get("out"), len(items))
         return got if got is not None else rank(client, report, items, goal=goal, direction=direction,
                                                 parser=parser, prompts=prompts, kind=kind)
@@ -348,10 +357,15 @@ class ForesightPanelResearcher(WrapsResearcher):
     pass-through. Replay-safe: the chosen idea is recorded in `node_created`; replay never re-ranks.
     """
 
+    # A CLASS default, not only an instance one: this panel is a `__getattr__` proxy, so a bare
+    # `__new__`-built instance that never ran `__init__` would otherwise answer this name from the
+    # WRAPPED role — a different object's switch. OFF here is the historical ranker call.
+    evidence_envelope = False
+
     def __init__(self, base, k: int = 2, *, client=None, bounds=None,
                  parser: Optional[str] = None, prompts=None, tools=None,
                  min_confidence: float = 0.0, verify_score: bool = False,
-                 verify_samples: int = 3):
+                 verify_samples: int = 3, evidence_envelope: bool = False):
         self.base = base
         self.k = max(1, k)
         # §1 confidence gate: below this predicted confidence the K->1 pick is NOT acted on (fall back
@@ -376,6 +390,10 @@ class ForesightPanelResearcher(WrapsResearcher):
         # When `tools` is wired, ranking runs in AGENTIC mode (a drive_tool_loop that can pull actual
         # experiment/data evidence before deciding); else it's the one-shot predictor. Optional.
         self.tools = tools
+        # The untrusted-evidence FENCE on those tools' results (`core/evidence.py`; review
+        # 2026-09-22, TAT-02): they return the candidates' own code and trials. OFF at the
+        # constructor like every prompt flag; the CLI's panel builder fills it from the Settings.
+        self.evidence_envelope = bool(evidence_envelope)
         self.last_foresight: Optional[dict] = None       # telemetry: last idea ranking + confidence
         self.last_hyp_priority: Optional[dict] = None     # telemetry: last board prioritization
         self._board_attempt_cursor = 0
@@ -402,8 +420,10 @@ class ForesightPanelResearcher(WrapsResearcher):
         with cm:
             self._last_rank_ids = tracing.current_ids() if tr is not None else (None, None)
             if self.tools is not None:
+                from looplab.core.evidence import fence_kwargs
                 return rank_agentic(self.client, self.tools, report, items, goal=goal, direction=direction,
-                                    parser=self.parser, prompts=self.prompts, kind=rank_kind)
+                                    parser=self.parser, prompts=self.prompts, kind=rank_kind,
+                                    **fence_kwargs(self.evidence_envelope))
             return rank(self.client, report, items, goal=goal, direction=direction,
                         parser=self.parser, prompts=self.prompts, kind=rank_kind)
 

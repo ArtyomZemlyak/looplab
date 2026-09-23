@@ -708,12 +708,16 @@ def _wrap_with_foresight_panel(researcher, settings, ftools):
     sixth in only one of them, and a drift there would silently change unified-vs-plain behaviour
     with nothing to catch it (doc 25 CT-15).
     """
+    from looplab.core.evidence import envelope_enabled
     from looplab.search.foresight import ForesightPanelResearcher
     return ForesightPanelResearcher(
         researcher, k=settings.foresight_panel, tools=ftools,
         min_confidence=getattr(settings, "foresight_min_confidence", 0.0),
         verify_score=getattr(settings, "foresight_verify", False),
-        verify_samples=getattr(settings, "foresight_verify_samples", 3))
+        verify_samples=getattr(settings, "foresight_verify_samples", 3),
+        # The agentic ranker's run tools return the candidates' own code: fenced when the run's
+        # envelope is on (review 2026-09-22, TAT-02), through the ONE Settings reader.
+        evidence_envelope=envelope_enabled(settings))
 
 
 def _apply_speculation_calibration_profile(settings: Settings) -> None:

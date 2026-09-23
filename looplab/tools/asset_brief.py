@@ -542,13 +542,17 @@ _ASSET_SYSTEM = (
 # cannot have.
 def agentic_asset_brief(repo_root, *, client=None,
                         loop_opts: Optional[dict] = None, task_type: Optional[str] = None,
-                        seed_scan: bool = True) -> str:
+                        seed_scan: bool = True, tool_result_label: str = "") -> str:
     """The PRIMARY D1 brief: an LLM agent explores the task repo with read-only tools (RepoScoutTools)
     and writes a grounded prior-art & available-assets brief — the agentic realisation of §21.2 (and the
     §21.10 meta-lesson: ground the proposer, don't hardcode the domain). Degrades to the deterministic
     `scan_assets`/`format_brief` when no `client` is wired (offline) or the agentic step yields nothing,
     so the offline suite and no-LLM runs still get a brief. `seed_scan` primes the agent with the cheap
-    heuristic scan as a starting point to verify/expand (never as the final answer)."""
+    heuristic scan as a starting point to verify/expand (never as the final answer).
+
+    `tool_result_label` fences what the scout returns — a repository's READMEs, result tables and
+    configs, which somebody else wrote (`core/evidence.py`; review 2026-09-22, TAT-02). The CLI's
+    callers pass it from `envelope_enabled(settings)`; empty (the default) is the historical call."""
     if client is None:
         return format_brief(scan_assets(repo_root, task_type=task_type))
     from looplab.agents.agent import agentic_text
@@ -567,16 +571,20 @@ def agentic_asset_brief(repo_root, *, client=None,
     msgs = [{"role": "system", "content": _ASSET_SYSTEM}, {"role": "user", "content": user}]
     out = agentic_text(client, tools, msgs, loop_opts=loop_opts or {"max_turns": 20},
                        answer_desc="the prior-art & available-assets brief",
-                       fallback=lambda m: fallback)
+                       fallback=lambda m: fallback,
+                       **({"tool_result_label": tool_result_label} if tool_result_label else {}))
     return (out or "").strip() or fallback
 
 
-def asset_brief(repo_root, *, client=None, task_type: Optional[str] = None, **kwargs) -> str:
+def asset_brief(repo_root, *, client=None, task_type: Optional[str] = None,
+                tool_result_label: str = "", **kwargs) -> str:
     """Convenience: return the prior-art brief for `repo_root`. Uses the agentic path when a `client` is
-    given (the primary, grounded route), else the deterministic offline scan."""
+    given (the primary, grounded route), else the deterministic offline scan. `tool_result_label` is
+    the agentic path's evidence fence (see `agentic_asset_brief`); the offline scan has no model."""
     if client is not None:
         return agentic_asset_brief(repo_root, client=client, task_type=task_type,
-                                   loop_opts=kwargs.get("loop_opts"))
+                                   loop_opts=kwargs.get("loop_opts"),
+                                   tool_result_label=tool_result_label)
     scan_kwargs = {k: v for k, v in kwargs.items()
                    if k in ("max_files", "max_read_files", "max_bytes", "lexicon")}
     return format_brief(scan_assets(repo_root, task_type=task_type, **scan_kwargs))

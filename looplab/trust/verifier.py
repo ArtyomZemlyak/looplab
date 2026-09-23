@@ -220,7 +220,8 @@ def _prompt(subject: str, evidence: str, criteria: list[Criterion]) -> list[dict
 
 
 def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=None,
-           samples: int = 3, parser: str = "tool_call", tools=None) -> VerdictReport:
+           samples: int = 3, parser: str = "tool_call", tools=None,
+           tool_result_label: str = "") -> VerdictReport:
     """Grounded + repeated + criteria-decomposed advisory scoring. Returns a `VerdictReport`.
 
     subject   - the claim/lesson/direction under judgment.
@@ -230,6 +231,10 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
     samples   - repeated evaluations; the score is their mean (the sampling-based §12 expectation).
     tools     - optional read-only run tools; when given, the judge READS the run before grading
                 (agentic, mirrors verify_memo). None -> plain structured parse.
+    tool_result_label - the untrusted-evidence fence on what `tools` return (`core/evidence.py`;
+                review 2026-09-22, TAT-02), forwarded to `structured_judge` only when non-empty.
+                No production caller hands this function a toolset today, so none passes it; the
+                caller that first does is a new tool-loop site, and must say how it is fenced.
 
     Best-effort: a sample that fails to parse is dropped; if NONE parse the report is `method="llm"`
     with `n_samples=0` and `score=None`. Never raises on a model/endpoint failure."""
@@ -255,7 +260,9 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
             # Grounded/agentic when tools are supplied, plain parse otherwise — the SAME
             # judge-call contract `verify_memo` uses, now written once (doc 25 CT-09).
             from looplab.trust.judge import structured_judge
-            return structured_judge(client, msgs, _Verdicts, parser=parser, tools=tools)
+            return structured_judge(client, msgs, _Verdicts, parser=parser, tools=tools,
+                                    **({"tool_result_label": tool_result_label}
+                                       if tool_result_label else {}))
         # THE HARD BUDGET STOP PROPAGATES, IT DOES NOT DEGRADE TO A VERDICT — the same sentence
         # `crash_repair.py` writes at its two judge calls and `memo_verify.py` at its one. It has to
         # come FIRST because `BudgetExceeded` subclasses `Exception`: swallowed here, a tripped

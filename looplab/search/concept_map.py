@@ -263,7 +263,7 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
 def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tools=None,
                       seed_graph: Optional[ConceptGraph] = None, asset_brief: str = "",
                       parser: str = "tool_call", known_tags=None, known_renames=None,
-                      max_workers: int = 8, prompts=None) -> dict:
+                      max_workers: int = 8, prompts=None, tool_result_label: str = "") -> dict:
     """THE primary D5 primitive: an LLM agent BUILDS the concept map for a run end-to-end — it GROWS the
     concept vocabulary from the actual experiments (`tag_nodes_llm`, agentic when read-only run `tools` are
     passed, so it reads each node's real code/logs), computes the pure coverage, and DERIVES the
@@ -277,7 +277,10 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
     `{graph, tags, raw_tags, raw_tag_modes, coverage, important_uncovered, mode}`. Impure (LLM) on the
     primary path; the coverage it returns is pure and fold-safe. In the live engine the built
     tags/graph/importance are recorded as events
-    and read deterministically by `fold` (Phase 1/2 wiring) — this primitive is the producer, not the writer."""
+    and read deterministically by `fold` (Phase 1/2 wiring) — this primitive is the producer, not the writer.
+
+    `tool_result_label`: the untrusted-evidence fence on what the caller's `tools` return, forwarded
+    to the tagger (review 2026-09-22, TAT-02) — absent when empty, so the default call is historical."""
     graph = seed_graph if seed_graph is not None else ConceptGraph(
         task_type=getattr(state, "task_id", "") or "")
     if client is None:
@@ -292,7 +295,9 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
     raw_tag_modes: dict[int, str] = {}
     raw = concept_tagging.tag_nodes_llm(state, graph, client, parser=parser, tools=tools,
                                         grow=True, known_tags=known_tags,
-                                        max_workers=max_workers, producer_modes=raw_tag_modes)
+                                        max_workers=max_workers, producer_modes=raw_tag_modes,
+                                        **({"tool_result_label": tool_result_label}
+                                           if tool_result_label else {}))
     # CONSOLIDATE the freely-grown vocabulary before measuring, so synonym fragmentation
     # (`augmentation` vs `data-augmentation`) doesn't split the concentration signal (§21.11 follow-up).
     graph, tags, renamed = consolidate_concepts(
