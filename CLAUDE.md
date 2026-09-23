@@ -274,6 +274,9 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   tier 3 proves a call is in the TEXT, not that it executes (dead branches, nested defs and
   decorators are invisible to it). NEGATIVE pins stay substrings on purpose: what must not come
   back is the TEXT. Re-verify by MUTATING a throwaway copy of the tree, never the real one.
+  `tests/test_pin_budget.py` re-evaluates every positive pin over `_source_scan.code_text` (comments
+  and docstrings removed): one only prose satisfies is red, unless its own test's docstring names the
+  prose as the subject and a shrink-only `DOCUMENTATION_PINS` row quotes that sentence.
 - **The host GPU-pool lease is ONE file per OS user** (`/tmp/looplab-gpu-pool-<uid>.lock`,
   `engine/resources.py`), exclusive ACROSS PROCESSES on purpose, so a GPU-owning run waits for
   every co-hosted one — it logs the lease path and the holding PID at WARNING. An UNSPECIFIED
@@ -319,7 +322,8 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   GPU on purpose). Rule 2: everything else carries `CLAIM[<slug>] … decided:<predicate>`,
   evaluated by `looplab/core/claimpin.py` with the same predicates as the open-item index plus
   `line:<a>&&<b>@<path>`; a red `test_claim_pins` means the SENTENCE IS FALSE. `<mod>.py::<symbol>`
-  citations are re-derived by `citation_defects()`; a `<mod>.py:NNN` citation is REFUSED. Run
+  citations are re-derived by `citation_defects()`, and a bare `tests/<file>.py` must name a file
+  that exists; a `<mod>.py:NNN` citation is REFUSED. Run
   `python -m looplab.core.claimpin <task.json>` on a task GOAL before submitting a run, and **do
   not put ANSWERS in a goal** — the objective, the constraints and the MEASURED limits with their
   source, never a configuration copied from a benchmark table.
