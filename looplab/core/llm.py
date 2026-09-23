@@ -50,7 +50,7 @@ from looplab.core.llm_budget import DEFAULT_COST_KNOB, run_usd_ceiling
 # `from looplab.core.llm import LLMError / BudgetExceeded`. The definitions live in
 # `looplab.core.errors` so `parse` can import them without importing this module.
 from looplab.core.errors import (  # noqa: F401
-    BudgetExceeded, LLMCancelled, LLMCredentialError, LLMError, credential_cause)
+    BudgetExceeded, ConfigRefusal, LLMCancelled, LLMCredentialError, LLMError, credential_cause)
 # Safe top-level import (no cycle): parse imports only from looplab.core.errors now.
 from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # Split siblings (docs/15 §P5.2): retry/backoff + error classification (`llm_transient`), the
@@ -67,9 +67,10 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # affected and fails if a new one appears without this note being true of it.
 from looplab.core.llm_transient import (  # noqa: F401
     BACKOFF_CAP_S, LLM_FAILURE_CAUSES, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff,
-    _err_body, _inband_stream_error, _is_reasoning_reject, _is_stream_options_reject,
-    _is_throttle_403, _retry_after_of, _retry_after_seconds, _sdk_transient, cancel_check_scope,
-    classify_llm_failure, raise_if_cancelled, request_cancelled, sleep_or_cancel)
+    _err_body, _inband_stream_error, _is_constrained_decoding_reject, _is_reasoning_reject,
+    _is_stream_options_reject, _is_throttle_403, _retry_after_of, _retry_after_seconds,
+    _sdk_transient, cancel_check_scope, classify_llm_failure, raise_if_cancelled,
+    request_cancelled, sleep_or_cancel)
 from looplab.core.llm_streaming import (  # noqa: F401
     _chunk_has_content, _shutdown_pool_sockets, _sse_is_done, _sse_is_error, _stream_raw_socket,
     _stream_with_idle_guard, defer_inband_error)
@@ -981,6 +982,54 @@ class OpenAICompatibleClient:
         """The model this request goes to: the routed arm's when one is in scope, else the client's."""
         return _MODEL_OVERRIDE.get() or self.model
 
+    # The reasoning state PER MODEL (review 2026-09-22, CORE-06; see `__init__`). Read through
+    # `getattr` with defaults because tests build this class with `__new__` and hand-set attributes.
+    def _reasoning_for_call(self, model: Optional[str] = None) -> dict:
+        """The reasoning toggle for THIS request's model: `self.reasoning` for the client's own
+        model (the historical bytes), `reasoning_body` of the overriding model otherwise.
+
+        `reasoning_body` refuses a depth set in two places, and whether they clash is a function of
+        the MODEL — a per-role client for that model is refused at construction. An arm reaching
+        the same model through the override is refused at its first request instead, before it is
+        sent, with the model named: the same refusal, surfaced at the earliest point that knows the
+        model."""
+        model = model or self._model_for_call()
+        rule = getattr(self, "_reasoning_rule", None)
+        if model == self.model or rule is None:
+            return self.reasoning or {}
+        memo = getattr(self, "_model_reasoning", None)
+        if memo is None:
+            memo = self._model_reasoning = {}
+        shaped = memo.get(model)
+        if shaped is None:
+            try:
+                shaped = rule(model)
+            except ConfigRefusal as exc:
+                raise ConfigRefusal(
+                    f"model {model!r} (reached through a model override): {exc}") from exc
+            memo[model] = shaped
+        return shaped
+
+    def _reasoning_ok_for(self, model: Optional[str] = None) -> bool:
+        """Has THIS model not (yet) rejected its reasoning toggle? `_reasoning_ok` for the client's
+        own model; the per-model rejection set for any model reached through an override."""
+        model = model or self._model_for_call()
+        if model == self.model:
+            return self._reasoning_ok
+        return model not in (getattr(self, "_reasoning_rejected", None) or ())
+
+    def _drop_reasoning_for(self, model: Optional[str] = None) -> None:
+        """Remember that `model` rejected its reasoning toggle: its later requests drop it, and no
+        other model's do."""
+        model = model or self._model_for_call()
+        if model == self.model:
+            self._reasoning_ok = False
+            return
+        rejected = getattr(self, "_reasoning_rejected", None)
+        if rejected is None:
+            rejected = self._reasoning_rejected = set()
+        rejected.add(model)
+
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "ollama", temperature: float = 0.7,
                  timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
@@ -989,7 +1038,8 @@ class OpenAICompatibleClient:
                  header_timeout: Optional[float] = None, trust_env: bool = False,
                  max_retries: int = 8, wall_timeout: Optional[float] = None,
                  retry_after_cap: Optional[float] = None,
-                 stream_stall_fallback: bool = True):
+                 stream_stall_fallback: bool = True,
+                 reasoning_rule: Optional[Callable[[str], dict]] = None):
         # The live transport needs the openai SDK + httpx. They are declared deps, but the module
         # import is guarded (offline/replay import-safety), so fail with a clear, actionable message
         # here rather than an opaque `NoneType has no attribute 'OpenAI'` if someone stripped them.
@@ -1053,8 +1103,21 @@ class OpenAICompatibleClient:
         # Flips to False permanently for this client the first time the endpoint rejects our reasoning
         # toggle with a 400 (e.g. litellm UnsupportedParamsError for reasoning_effort on glm-5.1), so
         # the request is retried without it and the model works. Deepseek keeps its reasoning; glm-5.1
-        # silently drops it. Per-client (per-model), detected once and cached.
+        # silently drops it. Detected once and cached — for the client's OWN model (`self.model`).
         self._reasoning_ok = True
+        # KEYED BY MODEL, not by client (review 2026-09-22, CORE-06). `model_override` sends ONE
+        # request to another model on this endpoint (a model arm), and the two flags above are facts
+        # about `self.model`: the arm got the client model's reasoning SHAPE (`style="auto"` picks it
+        # from the model name — a qwen arm behind a non-qwen client was sent `reasoning_effort`), and
+        # one arm's 400 switched reasoning off for EVERY model this client serves. `reasoning_rule`
+        # is `make_llm_client`'s `reasoning_body` bound to the run's settings, so an overridden model
+        # gets ITS shape (`_reasoning_for_call`, memoized per model); a model whose toggle was
+        # rejected is remembered by name (`_drop_reasoning_for`). None (a client built from a bare
+        # `reasoning` dict) keeps the historical behaviour: that dict for every model. The client's
+        # own model always reads `self.reasoning` / `self._reasoning_ok`, byte for byte.
+        self._reasoning_rule = reasoning_rule
+        self._model_reasoning: dict[str, dict] = {}
+        self._reasoning_rejected: set[str] = set()
         # Same shape as `_reasoning_ok`, for the OPTIONAL `stream_options: {"include_usage": true}`
         # capability: flips off permanently for this client the first time the endpoint 400s naming
         # that field, so streaming keeps working (without provider-reported usage) instead of the
@@ -1169,8 +1232,11 @@ class OpenAICompatibleClient:
         if payload.get("response_format"):
             kwargs["response_format"] = payload["response_format"]
         extra: dict = {}
-        if self.reasoning and self._reasoning_ok:     # provider reasoning toggle (non-standard params)
-            extra.update(self.reasoning)
+        # Provider reasoning toggle (non-standard params), shaped and degraded for the model THIS
+        # request goes to — `payload["model"]` is `_model_for_call()` (review 2026-09-22, CORE-06).
+        reasoning = self._reasoning_for_call(payload["model"])
+        if reasoning and self._reasoning_ok_for(payload["model"]):
+            extra.update(reasoning)
         if payload.get("guided_json"):                # vLLM constrained-decoding extra
             extra["guided_json"] = payload["guided_json"]
         if extra:
@@ -1611,17 +1677,25 @@ class OpenAICompatibleClient:
             raise LLMError(f"LLM request to {self.base_url} rejected `stream_options` on the "
                            f"final attempt; it is now disabled for this client so a retry "
                            f"will succeed: {exc}") from exc
-        if self.reasoning and self._reasoning_ok and _is_reasoning_reject(_err_body(exc)):
-            self._reasoning_ok = False   # permanent for this client: the NEXT request drops the param
+        # PER MODEL (review 2026-09-22, CORE-06): the request that 400'd went to `_model_for_call()`
+        # (same context as the payload), so only THAT model forgets its toggle. And a body naming a
+        # constrained-decoding field (`guided_json` / `response_format`) is about that field — it
+        # matched the generic reasoning keys too, and switched reasoning off for good while the retry
+        # re-sent the field the endpoint had named. It falls through to the plain bad request below.
+        model = self._model_for_call()
+        body = _err_body(exc)
+        if (self._reasoning_for_call(model) and self._reasoning_ok_for(model)
+                and _is_reasoning_reject(body) and not _is_constrained_decoding_reject(body)):
+            self._drop_reasoning_for(model)   # permanent for this MODEL: its next request drops it
             if attempt < self._max_retries:
                 return False             # a remaining attempt re-issues with reasoning dropped
-            # On the LAST attempt the loop can't retry — but `_reasoning_ok` is now False, so the
+            # On the LAST attempt the loop can't retry — but the toggle is now dropped, so the
             # caller's retry/fallback WILL succeed. Surface a CLEAR reason instead of falling
             # through to the generic, misleading "no response after retries" (every sibling retry
             # branch guards on attempt<_max_retries; this one silently did not).
             raise LLMError(f"LLM request to {self.base_url} rejected the reasoning param on the "
-                           f"final attempt; reasoning is now disabled for this client so a retry "
-                           f"will succeed: {exc}") from exc
+                           f"final attempt; reasoning is now disabled for model {model!r} so a "
+                           f"retry will succeed: {exc}") from exc
         raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
 
     def _policy_auth(self, exc, attempt: int, use_stream: bool) -> bool:
@@ -1986,8 +2060,9 @@ class OpenAICompatibleClient:
 
     def _model_params(self) -> dict:
         """The generation's model_parameters (Langfuse generation metadata): sampling temperature +
-        any provider reasoning toggle, so the trace shows HOW the model was called."""
-        return {"temperature": self.temperature, **(self.reasoning or {})}
+        any provider reasoning toggle, so the trace shows HOW the model was called — the toggle of
+        the model this call goes to (CORE-06), which is the client's own unless an arm routed it."""
+        return {"temperature": self.temperature, **(self._reasoning_for_call() or {})}
 
     def _text_payload(self, messages: list[dict], max_tokens: Optional[int]) -> dict:
         if (max_tokens is not None
@@ -2065,8 +2140,10 @@ class OpenAICompatibleClient:
                                     "temperature": self.temperature, "stream": True}
                     if self._stream_options_ok:      # optional capability — see `_sdk_chat`
                         kwargs["stream_options"] = {"include_usage": True}
-                    if self.reasoning and self._reasoning_ok:
-                        kwargs["extra_body"] = dict(self.reasoning)
+                    # Per MODEL, like `_sdk_chat` (review 2026-09-22, CORE-06).
+                    _reasoning = self._reasoning_for_call(kwargs["model"])
+                    if _reasoning and self._reasoning_ok_for(kwargs["model"]):
+                        kwargs["extra_body"] = dict(_reasoning)
                     try:
                         # Capture usage BEFORE yielding a co-located delta: if a consumer closes or
                         # cancels while suspended at that yield, the finally block still charges it.
@@ -2148,9 +2225,11 @@ class OpenAICompatibleClient:
                                 and _is_stream_options_reject(_err_body(e))):
                             self._stream_options_ok = False   # see `_sdk_chat`; checked before reasoning
                             continue             # retry the stream once without the usage option
-                        if (self.reasoning and self._reasoning_ok and not pieces and _attempt == 0
+                        if (self._reasoning_for_call(kwargs["model"])
+                                and self._reasoning_ok_for(kwargs["model"])
+                                and not pieces and _attempt == 0
                                 and _is_reasoning_reject(_err_body(e))):
-                            self._reasoning_ok = False
+                            self._drop_reasoning_for(kwargs["model"])
                             continue             # retry the stream once without the reasoning toggle
                         if not pieces:           # any other bad request -> blocking fallback
                             yield from _fallback_to_blocking()
@@ -3133,10 +3212,16 @@ def make_llm_client(settings, *, model: str | None = None,
     key = bound_api_key_for(
         settings, endpoint, api_key=api_key, api_key_base_url=api_key_base_url)
     mdl = model or settings.llm_model
+    reasoning_mode = getattr(settings, "llm_reasoning", "")
+    reasoning_style = getattr(settings, "llm_reasoning_style", "auto")
+    reasoning_extra = getattr(settings, "llm_reasoning_extra", None)
     reasoning = ({} if disable_reasoning else
-                 reasoning_body(mdl, getattr(settings, "llm_reasoning", ""),
-                                getattr(settings, "llm_reasoning_style", "auto"),
-                                getattr(settings, "llm_reasoning_extra", None)))
+                 reasoning_body(mdl, reasoning_mode, reasoning_style, reasoning_extra))
+
+    def reasoning_rule(other_model: str) -> dict:
+        # The SAME rule for a model reached through `model_override` (review 2026-09-22, CORE-06):
+        # the client's own `reasoning` above is this, applied to `mdl`.
+        return reasoning_body(other_model, reasoning_mode, reasoning_style, reasoning_extra)
     # `timeout` lets a caller bound a UI-side probe (e.g. the health check) well under a proxy's
     # gateway timeout; omitted -> the run-wide `llm_timeout` setting (idle/stall limit, default 180s).
     extra = {"timeout": timeout if timeout is not None
@@ -3156,6 +3241,8 @@ def make_llm_client(settings, *, model: str | None = None,
         accountant=run_cost_accountant(settings),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
+        # None when reasoning is disabled for this client (a probe): no model gets a toggle then.
+        reasoning_rule=None if disable_reasoning else reasoning_rule,
         stream=(getattr(settings, "llm_stream", True) if stream is None else stream),
         # Does a stalled stream retry without SSE and eventually stop streaming for good (the
         # historical client), or retry as a stream? Per endpoint, so it rides the run's Settings.

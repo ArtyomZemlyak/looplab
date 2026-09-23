@@ -80,6 +80,21 @@ def _is_stream_options_reject(err_body: str) -> bool:
     return "stream_options" in (err_body or "") or "stream options" in (err_body or "")
 
 
+def _is_constrained_decoding_reject(err_body: str) -> bool:
+    """True when a 400 body NAMES a constrained-decoding field — `guided_json` (the vLLM extra) or
+    `response_format` (the OpenAI-standard one), the pair `complete_tool` sends under
+    `Settings.llm_guided_json`.
+
+    Checked BEFORE `_is_reasoning_reject` for the reason `_is_stream_options_reject` is: that
+    predicate's generic keys ("unrecognized", "does not support parameters", "extra_forbidden") also
+    match these bodies — "Unrecognized request argument supplied: guided_json", litellm's
+    "does not support parameters: ['response_format']" — and the reasoning branch then switched the
+    toggle off for good AND re-sent the field the endpoint had actually named (review 2026-09-22,
+    CORE-06). A body naming one of these is about that field: a plain bad request."""
+    body = err_body or ""
+    return any(key in body for key in ("guided_json", "guided json", "response_format"))
+
+
 def _is_throttle_403(err_body: str) -> bool:
     """True when a 403 body looks like a RATE-LIMIT / burst security throttle (retryable with backoff),
     NOT a hard 'forbidden' (bad key / plan / route, which must fail fast). A hosted gateway (OpenRouter)

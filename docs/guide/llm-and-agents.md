@@ -239,6 +239,16 @@ reasons before proposing/repairing). The model's thinking is captured either way
 `llm_reasoning_extra` is a raw escape hatch merged into the body. To get a *separate*
 `reasoning_content` field from SGLang/vLLM, the server also needs `--reasoning-parser qwen3`.
 
+**The shape and the fallback are per MODEL (2026-09-23).** `auto` picks the shape from the model
+name, and a request a model arm (`model_arms`) routes to another model on the same endpoint now
+gets the shape of *that* model, not the client's. When an endpoint 400s on the reasoning param the
+client drops it and retries — for that model only: before, one arm's rejection switched reasoning
+off for every model the client served, and a 400 naming `guided_json` / `response_format` (see
+constrained decoding below) was mistaken for a reasoning rejection and switched it off too. A
+reasoning setting that contradicts itself only for an arm's model (the depth set both by
+`llm_reasoning` and in `llm_reasoning_extra`) is refused at that arm's first request, naming the
+model, as a per-role client for that model is refused when it is built (review 2026-09-22, CORE-06).
+
 ## Constrained decoding
 
 `LOOPLAB_LLM_GUIDED_JSON=1` drives structured calls with the endpoint's `guided_json` /
