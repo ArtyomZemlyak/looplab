@@ -646,8 +646,9 @@ def _interrupted_stream_is_salvageable(*, produced_content: bool, produced_tool_
 _BARREN_CUT_USAGE_ATTR = "_looplab_barren_cut_usage"
 
 
-def _stamp_barren_cut_usage(exc: BaseException, usage: Optional[dict]) -> bool:
-    """Carry the usage a cut-and-barren stream reported out with the exception that ends it.
+def _stamp_barren_cut_usage(exc: BaseException, usage: Optional[dict], *,
+                            produced: bool = False) -> bool:
+    """Carry the usage a cut stream reported out with the exception that ends it.
 
     The productive cut is billed by `_post` off the body `_accumulate_stream` returns; the barren
     one re-raises, and until this stamp the `usage` frame `defer_inband_error` had reordered past
@@ -661,14 +662,26 @@ def _stamp_barren_cut_usage(exc: BaseException, usage: Optional[dict]) -> bool:
     exact shape through that rule; this keeps the two streaming paths on ONE rule rather than one
     and a half. Only usage with something in it is stamped -- an empty frame is no evidence of a
     call, and `_bill_barren_cut` must not mint a `calls` row for it. Returns whether it stamped.
+
+    `produced` IS THAT RULE'S OTHER ROW (review 2026-09-22, CORE-01 part 3): "once content was
+    yielded, a close/cancel still records the call it made". A stream that forwarded output and
+    then broke WITHOUT being salvaged -- a transport reset or an idle-guard kill after content,
+    which `_policy_connection` retries rather than keeps, or a caller's cancel mid-generation -- is
+    a generation the provider ran and billed, and its usage frame, the last thing on the wire,
+    almost never arrives. Driven through the real SDK (content, then `httpx.ReadError`): the call
+    meter counted 2 requests and the ledger 1, so the paid attempt was billed nowhere. The output
+    is the evidence, so such an attempt is stamped with whatever usage it did report -- usually
+    none -- and reaches the ledger as a CALL, UNPRICED unless a price arrived (`cost_is_reported`:
+    unpriced is not free, and no amount or token count is invented for it).
     """
-    if not usage:
-        return False
-    normalized = _normalize_usage(usage)
-    if not (normalized["total_tokens"] or normalized["cost"]):
-        return False
+    if not produced:
+        if not usage:
+            return False
+        normalized = _normalize_usage(usage)
+        if not (normalized["total_tokens"] or normalized["cost"]):
+            return False
     try:
-        setattr(exc, _BARREN_CUT_USAGE_ATTR, dict(usage))
+        setattr(exc, _BARREN_CUT_USAGE_ATTR, dict(usage or {}))
     except Exception:  # noqa: BLE001 -- an exception type refusing attributes still propagates
         return False
     return True
@@ -1200,6 +1213,14 @@ class OpenAICompatibleClient:
                 _stream = self._bounded_create(kwargs, header_join, counted=True)
                 try:
                     return self._accumulate_stream(_stream, self.timeout, self.header_timeout)
+                except LLMCancelled as exc:
+                    # A cancel mid-generation carries the stamp of what the provider already ran
+                    # (`_accumulate_stream`). `_post` bills the stamps its ONE catch sees, before
+                    # the retry policy; a cancel is not retried and escapes that catch, so it is
+                    # billed HERE, where the stream is owned — or the discarded answer is spend no
+                    # ledger holds (review 2026-09-22, CORE-01 part 3).
+                    self._bill_barren_cut(exc)
+                    raise
                 finally:
                     # Own-and-close, like `complete_text_stream` (see its note there). The watchdog
                     # kill closes the response itself, but every OTHER exit — the raw-httpx-error
@@ -1377,9 +1398,19 @@ class OpenAICompatibleClient:
                 # only place a cancel can save a long answer's remaining tokens. Raising (rather than
                 # returning the partial deltas) on purpose — a half-accumulated tool call is not an
                 # answer, and `_post` would treat an empty one as a keepalive stall and RETRY it.
+                # DISCARDED IS NOT FREE (review 2026-09-22, CORE-01 part 3): whatever the provider
+                # generated before the cancel is billed, so it rides out on the exception like a
+                # cut's usage does, and `_sdk_chat` charges it — `_post`'s one catch never sees a
+                # cancel, which is not retried.
                 if request_cancelled():
-                    raise LLMCancelled("the LLM stream was cancelled by the caller mid-generation; "
-                                       "the connection was closed and the answer discarded")
+                    cancelled = LLMCancelled(
+                        "the LLM stream was cancelled by the caller mid-generation; the connection "
+                        "was closed and the answer discarded")
+                    _stamp_barren_cut_usage(
+                        cancelled, usage, produced=_interrupted_stream_is_salvageable(
+                            produced_content=bool(content), produced_tool_calls=bool(tcs),
+                            produced_reasoning=bool(reasoning)))
+                    raise cancelled
                 if getattr(ev, "usage", None):
                     # Same tolerant extractor `complete_text_stream` uses: a provider (or a test mock)
                     # whose final chunk carries `usage` as a PLAIN DICT has no `.model_dump()`, and the
@@ -1420,18 +1451,21 @@ class OpenAICompatibleClient:
             # guard fired, the APITimeoutError is a fact about the socket arriving after the fact
             # about the call. Reading the class alone would send a 220k-token cut generation to
             # `_policy_connection` and re-buy thirty minutes of it.
-            if not ((_inband_stream_error(exc) or "held" in inband)
-                    and _interrupted_stream_is_salvageable(
-                        produced_content=bool(content), produced_tool_calls=bool(tcs),
-                        produced_reasoning=bool(reasoning))):
-                # The BARREN cut. Nothing to return, so the usage this loop already captured — the
-                # frame `defer_inband_error` reordered past the error precisely so it could be
-                # read — would die with the exception and the call would reach the ledger as
-                # neither spend nor a CALL. It rides out on the exception instead; `_post` bills
-                # it (`_bill_barren_cut`) before `_retry_or_raise` decides anything, so the
-                # ceiling sees this attempt before a retry re-spends. See
-                # `_stamp_barren_cut_usage` for the driven shape.
-                _stamp_barren_cut_usage(exc, usage)
+            produced = _interrupted_stream_is_salvageable(
+                produced_content=bool(content), produced_tool_calls=bool(tcs),
+                produced_reasoning=bool(reasoning))
+            if not ((_inband_stream_error(exc) or "held" in inband) and produced):
+                # The cut that is NOT salvaged: the BARREN one, or a reset / idle-guard kill that
+                # `_policy_connection` retries even though it had forwarded output. Nothing to
+                # return, so the usage this loop already captured — the frame
+                # `defer_inband_error` reordered past the error precisely so it could be read —
+                # would die with the exception and the call would reach the ledger as neither
+                # spend nor a CALL. It rides out on the exception instead, with `produced` as the
+                # evidence when no usage arrived (review 2026-09-22, CORE-01 part 3: a reset after
+                # content was metered as a request and billed nowhere); `_post` bills it
+                # (`_bill_barren_cut`) before `_retry_or_raise` decides anything, so the ceiling
+                # sees this attempt before a retry re-spends. See `_stamp_barren_cut_usage`.
+                _stamp_barren_cut_usage(exc, usage, produced=produced)
                 raise
             truncated = True
         if truncated:
@@ -1750,6 +1784,12 @@ class OpenAICompatibleClient:
         non-retryable path, so a bill placed after it would be skipped exactly when the call was
         the run's last. The stamp is consumed so the same attempt can never be billed twice through
         a re-raised or chained exception.
+
+        A STAMP IS THE EVIDENCE, decided once where it is minted (`_stamp_barren_cut_usage`): usage
+        the stream reported, or output it forwarded before breaking (review 2026-09-22, CORE-01
+        part 3). So every stamp bills one call, and an empty one bills it UNPRICED rather than not
+        at all -- re-testing the usage here was a second spelling of that decision, and it is the
+        one that dropped the productive reset from the ledger.
         """
         usage = getattr(exc, _BARREN_CUT_USAGE_ATTR, None)
         if usage is None:
@@ -1759,9 +1799,8 @@ class OpenAICompatibleClient:
         except Exception:  # noqa: BLE001 -- billing does not depend on the stamp being removable
             pass
         normalized = _normalize_usage(usage)
-        if normalized["total_tokens"] or normalized["cost"]:
-            self.accountant.add(normalized["cost"], usage=normalized)
-            self._last_usage = normalized
+        self.accountant.add(normalized["cost"], usage=normalized)
+        self._last_usage = normalized
 
     def _want_stream(self, stalled_prev: bool) -> bool:
         """Does THIS attempt go out streamed? The merge of two answers to the same measurement.

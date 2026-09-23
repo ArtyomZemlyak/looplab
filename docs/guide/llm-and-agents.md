@@ -516,6 +516,14 @@ cost, because a shorter answer and a missing price are both invisible from the c
 mid-think has spent everything on its chain of thought and has not begun its answer, which is the
 normal shape of a cut here rather than a corner.
 
+**A connection that drops after content arrived is a different failure, billed the same way.** A
+transport reset or an idle-guard kill carries no in-band report, so nothing is salvaged and the
+attempt is retried — but the provider already generated what arrived. Since 2026-09-23 that attempt
+reaches the ledger as one call **before** the retry is decided (unpriced unless a usage frame made
+it through, never an invented amount), so the call meter and the ledger count the same requests and
+a run at its ceiling stops instead of buying the retry; a caller's cancel mid-generation is recorded
+the same way (review 2026-09-22, CORE-01).
+
 The same circuit-breaker covers a provider that stops working **mid-run**, during an *inline repair*
 rather than a build. A failed repair *call* is not a repair, in any of the four ways the call can
 fail to produce one: the Developer returns the in-band `(developer error: …)` sentinel, the call

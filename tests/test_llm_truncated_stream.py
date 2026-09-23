@@ -862,3 +862,148 @@ def test_the_frame_classifier_table(data, is_error, is_done):
     sse = _FakeSSE(data)
     assert llm_streaming._sse_is_error(sse) is is_error
     assert llm_streaming._sse_is_done(sse) is is_done
+
+
+# --------------------------------------------------------------------------------------------
+# 2c. The PRODUCTIVE cut that is RETRIED (review 2026-09-22, CORE-01 part 3). Section 2b billed a
+#     cut that reported usage; a TRANSPORT reset after content has arrived reports none (the usage
+#     frame is the last thing on the wire), and is not salvaged — `_policy_connection` retries it
+#     off SSE. The attempt forwarded output, so the provider billed it; the ledger admitted only the
+#     rescue. Driven through the real SDK: `ProviderCallMeter` counted 2 requests, the accountant 1.
+# --------------------------------------------------------------------------------------------
+
+class _ResetMidContent(httpx.SyncByteStream):
+    """A 200 SSE body that forwards content and then loses the connection — a reset, not a frame."""
+
+    def __init__(self, on_second=None):
+        self.on_second = on_second
+
+    def __iter__(self):
+        yield _sse(_delta(content="half an ans"))
+        if self.on_second is not None:
+            self.on_second()
+        yield _sse(_delta(content="wer that was already generated"))
+        raise httpx.ReadError("Connection reset by peer")
+
+
+class _ResetTransport(_Transport):
+    """Streams reset mid-content; the blocking rescue answers, PRICED, so the two are told apart."""
+
+    def __init__(self, on_second=None):
+        super().__init__(b"")
+        self.on_second = on_second
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        self.requests.append(payload)
+        if payload.get("stream"):
+            return httpx.Response(200, stream=_ResetMidContent(self.on_second),
+                                  headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={
+            "id": "1", "object": "chat.completion", "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "rescued"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
+                      "cost": 0.002}})
+
+
+def test_a_reset_after_content_reaches_the_ledger_as_one_UNPRICED_call(no_sleep):
+    """The meter and the ledger must count the same requests. MUTATION: stop stamping the
+    productive cut in `_accumulate_stream` -> `calls == 1` while the meter says 2."""
+    from looplab.core.llm_broker import ProviderCallMeter, provider_call_meter
+
+    transport = _ResetTransport()
+    client = _client(transport, max_retries=2)
+    meter = ProviderCallMeter()
+    with provider_call_meter(meter):
+        assert client.complete_text([{"role": "user", "content": "go"}]) == "rescued"
+
+    assert transport.streamed == [True, False], "the rescue itself must be the same retry as before"
+    assert meter.calls == 2
+    assert client.accountant.calls == meter.calls, (
+        "the reset attempt forwarded content — a call the provider billed — and reached no ledger")
+    assert client.accountant.priced_calls == 1, "the cut must stay UNPRICED: no usage frame arrived"
+    assert client.accountant.spent == pytest.approx(0.002), "an amount was invented for the cut"
+    assert client.accountant.total_tokens == 2, "tokens were invented for the cut"
+
+
+def test_the_reset_attempt_pushes_its_own_delta_at_the_durable_ledger(no_sleep):
+    """`spent` alone is not the durable ledger. The engine's sink drops an all-zero delta
+    (`engine/costs.py::_has_value`); the cut's delta must survive it as a CALL."""
+    from looplab.engine.costs import _has_value, sanitize_usage_delta
+
+    deltas: list[dict] = []
+    client = _client(_ResetTransport(), max_retries=2)
+    client.accountant.set_sink(deltas.append)
+
+    client.complete_text([{"role": "user", "content": "go"}])
+
+    assert len(deltas) == 2, "only the rescue reached the durable ledger"
+    cut = sanitize_usage_delta(deltas[0])
+    assert _has_value(cut), "the engine sink would drop the cut's row"
+    assert cut["calls"] == 1 and cut["priced_calls"] == 0 and cut["cost"] == 0.0
+
+
+def test_a_reset_after_content_over_the_ceiling_stops_INSTEAD_of_retrying(no_sleep):
+    """Money before policy, as for the priced barren cut: the ceiling a spent accountant holds
+    refuses the retry the connection policy was about to grant, so the re-spend is never sent."""
+    transport = _ResetTransport()
+    accountant = CostAccountant(limit=0.01)
+    accountant.spent = 0.01          # the run already stands at its ceiling (seeded, as on a resume)
+    client = _client(transport, max_retries=3, accountant=accountant)
+
+    with pytest.raises(BudgetExceeded):
+        client.complete_text([{"role": "user", "content": "go"}])
+    assert transport.streamed == [True], "the ceiling was reached and a retry was still bought"
+
+
+def test_a_stall_that_produced_nothing_still_mints_no_call(no_sleep):
+    """The bound on the rule: output is the evidence. A reset BEFORE any content is the barren
+    case, and an unpriced barren cut mints no call (`test_an_UNPRICED_barren_cut_...`)."""
+    class _Barren(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b": keepalive\n\n"
+            raise httpx.ReadError("Connection reset by peer")
+
+    class _T(_ResetTransport):
+        def __call__(self, request):
+            payload = json.loads(request.content)
+            if payload.get("stream"):
+                self.requests.append(payload)
+                return httpx.Response(200, stream=_Barren(),
+                                      headers={"Content-Type": "text/event-stream"})
+            return super().__call__(request)
+
+    client = _client(_T(), max_retries=2)
+    assert client.complete_text([{"role": "user", "content": "go"}]) == "rescued"
+    assert client.accountant.calls == 1
+
+
+def test_a_cancel_after_content_is_billed_once_and_never_retried(no_sleep):
+    """The same money rule `complete_text_stream` states for a consumer cancel
+    (`_stream_envelope_is_billable`: once content was yielded, the call it made is recorded):
+    the blocking accumulator raised `LLMCancelled` mid-stream and billed nothing. MUTATION: drop
+    the bill in `_sdk_chat` -> `calls == 0` for a call whose content the provider generated."""
+    from looplab.core.llm import LLMCancelled, cancel_check_scope
+
+    flag = {"cancel": False}
+    transport = _ResetTransport(on_second=lambda: flag.update(cancel=True))
+    client = _client(transport, max_retries=2)
+    with cancel_check_scope(lambda: flag["cancel"]):
+        with pytest.raises(LLMCancelled):
+            client.complete_text([{"role": "user", "content": "go"}])
+
+    assert transport.streamed == [True], "a cancelled call was re-asked"
+    assert client.accountant.calls == 1 and client.accountant.priced_calls == 0
+
+
+def test_the_productive_stamp_is_consumed_like_the_barren_one():
+    """One attempt, one bill, whichever evidence minted the stamp."""
+    exc = openai.APIConnectionError(message="reset", request=_REQ)
+    assert llm._stamp_barren_cut_usage(exc, {}, produced=True)
+    client = _client(_Transport(b""))
+
+    client._bill_barren_cut(exc)
+    client._bill_barren_cut(exc)
+
+    assert client.accountant.calls == 1 and client.accountant.priced_calls == 0
